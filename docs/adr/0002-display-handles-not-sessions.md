@@ -1,0 +1,3 @@
+# Agent Displays are addressed by explicit handles
+
+`create_display` returns a display handle that every later tool call passes back. We do not bind a display to the MCP connection or process, even though Claude Code runs one stdio process per session and that binding would need no extra argument. The 2026-07-28 MCP spec removed protocol-level sessions and recommends exactly this handle pattern, and Codex identifies its session only in per-call `_meta`, so process binding would work for one client and not the other. Process exit still ends the session's display as a backstop, and a repeated `create_display` from the same client session ID returns the existing handle.

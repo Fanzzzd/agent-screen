@@ -1,0 +1,9 @@
+{
+  "name": "@sidescreen/menubar",
+  "private": true,
+  "scripts": {
+    "build": "scripts/bundle.sh release",
+    "dev": "scripts/run.sh",
+    "typecheck": "swift build"
+  }
+}

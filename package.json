@@ -1,0 +1,12 @@
+{
+  "name": "sidescreen",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter @sidescreen/menubar dev",
+    "build": "bun run --filter '*' build"
+  }
+}

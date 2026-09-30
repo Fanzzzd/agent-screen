@@ -1,0 +1,20 @@
+{
+  "name": "@sidescreen/mcp",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "sidescreen-mcp": "./src/main.ts"
+  },
+  "scripts": {
+    "dev": "bun src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "^4.0.0-rc.118",
+    "effect": "^4.0.0-rc.118"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
