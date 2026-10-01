@@ -52,6 +52,8 @@ enum WindowMover {
     /// The AX element of a window, matched by CGWindowID.
     static func element(for target: WindowTarget) -> AXUIElement? {
         let app = AXUIElementCreateApplication(target.pid)
+        // A busy or modal app would otherwise hold each call for 6 s.
+        AXUIElementSetMessagingTimeout(app, 1)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement]

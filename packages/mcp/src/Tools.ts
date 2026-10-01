@@ -246,7 +246,8 @@ const getWindowState = define({
   title: "See one window",
   description: [
     "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
-    "brackets that act_on_element takes. Numbers are valid until the next get_window_state for that window."
+    "brackets that act_on_element takes. Each new state of a window renumbers its elements, so always use the",
+    "numbers from the latest get_window_state or act_on_element result."
   ].join(" "),
   parameters: Schema.Struct({ display_id: DisplayId, window_id: WindowId }),
   readOnly: true,
