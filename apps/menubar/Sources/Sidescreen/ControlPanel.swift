@@ -259,6 +259,8 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             header.subtitle = size
         }
         screen.setOutline(display.awaitsUser ? .systemOrange : nil)
+        // The user's own hand needs no marker while they operate.
+        screen.showPointer(display.takeover ? nil : display.pointer)
     }
 
     // MARK: Layout

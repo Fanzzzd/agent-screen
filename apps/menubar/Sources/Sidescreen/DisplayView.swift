@@ -6,6 +6,8 @@ class DisplayView: NSView {
     /// Drawn over the frame, never into the display, so agent screenshots
     /// do not contain it.
     private let outlineLayer = CALayer()
+    private let pointerLayer = PointerLayer()
+    private var pointer: AgentPointer?
 
     var displaySize = DisplayManager.defaultSize {
         didSet { needsLayout = true }
@@ -28,6 +30,20 @@ class DisplayView: NSView {
         outlineLayer.cornerCurve = .continuous
         outlineLayer.actions = ["bounds": NSNull(), "position": NSNull()]
         layer?.addSublayer(outlineLayer)
+        layer?.addSublayer(pointerLayer)
+    }
+
+    /// Show the Agent Pointer, or hide it with nil.
+    func showPointer(_ pointer: AgentPointer?) {
+        self.pointer = pointer
+        updatePointer()
+    }
+
+    private func updatePointer() {
+        let rect = contentRect
+        // Full size in the Viewer, smaller on thumbnails.
+        let scale = min(max(rect.width / max(displaySize.width, 1) * 1.6, 0.55), 1)
+        pointerLayer.update(pointer, displaySize: displaySize, in: rect, scale: scale)
     }
 
     /// A colored ring around the frame, or none.
@@ -48,6 +64,10 @@ class DisplayView: NSView {
         screenLayer.frame = contentRect
         outlineLayer.frame = contentRect
         outlineLayer.cornerRadius = cornerRadius
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        updatePointer()
+        CATransaction.commit()
     }
 
     /// Where the display image sits inside the view.

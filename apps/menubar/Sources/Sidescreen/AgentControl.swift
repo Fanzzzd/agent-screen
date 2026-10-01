@@ -41,21 +41,26 @@ final class AgentControl {
         case "screenshot": return try await screenshot(p)
         case "click":
             let (display, point) = try target(p)
+            showPointer(display, at: point, click: true)
             await forwarders.forwarder(for: display.id).click(
                 at: point, button: try button(p), count: p.int("count") ?? 1, flags: try modifiers(p))
             return [:]
         case "move":
             let (display, point) = try target(p)
+            showPointer(display, at: point, click: false)
             forwarders.forwarder(for: display.id).mouseMoved(to: point, flags: [])
             return [:]
         case "drag":
             let display = try inputDisplay(p)
             let from = try global(display, x: p.require("fromX"), y: p.require("fromY"))
             let to = try global(display, x: p.require("toX"), y: p.require("toY"))
+            showPointer(display, at: from, click: true)
+            defer { showPointer(display, at: to, click: false) }
             await forwarders.forwarder(for: display.id).drag(from: from, to: to, flags: try modifiers(p))
             return [:]
         case "scroll":
             let (display, point) = try target(p)
+            showPointer(display, at: point, click: false)
             forwarders.forwarder(for: display.id).scroll(
                 at: point, deltaX: p.double("deltaX") ?? 0, deltaY: p.double("deltaY") ?? 0,
                 continuous: false, phase: 0, momentumPhase: 0, flags: try modifiers(p))
@@ -188,10 +193,15 @@ final class AgentControl {
     /// apps without focusing them; clicks go through the input forwarder at
     /// the element's center.
     private func act(_ action: String, on element: AXUIElement, value: String?, display: VirtualDisplay) async throws {
-        func perform(_ name: String) -> Bool { AXUIElementPerformAction(element, name as CFString) == .success }
+        let center = WindowState.frame(of: element).map { CGPoint(x: $0.midX, y: $0.midY) }
+        func perform(_ name: String) -> Bool {
+            if let center, display.bounds.contains(center) { showPointer(display, at: center, click: true) }
+            return AXUIElementPerformAction(element, name as CFString) == .success
+        }
         func click(_ button: CGMouseButton, count: Int) async throws {
             guard let frame = WindowState.frame(of: element), display.bounds.contains(CGPoint(x: frame.midX, y: frame.midY))
             else { throw ControlError.failed("the element has no visible frame on the display") }
+            showPointer(display, at: CGPoint(x: frame.midX, y: frame.midY), click: true)
             await forwarders.forwarder(for: display.id).click(
                 at: CGPoint(x: frame.midX, y: frame.midY), button: button, count: count, flags: [])
         }
@@ -215,6 +225,12 @@ final class AgentControl {
         default:
             throw ControlError.invalid("unknown action \(action)")
         }
+    }
+
+    /// Show the Agent Pointer at a global point.
+    private func showPointer(_ display: VirtualDisplay, at global: CGPoint, click: Bool) {
+        let bounds = display.bounds
+        displays.point(display, at: CGPoint(x: global.x - bounds.minX, y: global.y - bounds.minY), click: click)
     }
 
     // MARK: Parameters

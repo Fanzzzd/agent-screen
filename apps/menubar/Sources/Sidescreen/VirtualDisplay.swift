@@ -43,6 +43,8 @@ final class VirtualDisplay {
     fileprivate(set) var takeover = false
     /// The reason of an open Help Request.
     fileprivate(set) var helpRequest: String?
+    /// Where the Agent Session last pointed, in display points.
+    fileprivate(set) var pointer: AgentPointer?
     fileprivate var waiters: [UUID: CheckedContinuation<ControlWait, Never>] = [:]
 
     /// The agent has to wait for the user before it carries on.
@@ -154,6 +156,7 @@ final class DisplayManager {
         display.markEnded()
         display.takeover = false
         display.helpRequest = nil
+        display.pointer = nil
         resumeWaiters(of: display, with: .ended)
         notify()
         notifyState(display)
@@ -165,7 +168,7 @@ final class DisplayManager {
 
     // MARK: Control
 
-    /// Fires when Takeover or a Help Request changes on a display.
+    /// Fires when Takeover, a Help Request or the Agent Pointer changes.
     func observeState(_ handler: @escaping (VirtualDisplay) -> Void) {
         stateObservers.append(handler)
     }
@@ -198,6 +201,12 @@ final class DisplayManager {
         notifyState(display)
     }
 
+    func point(_ display: VirtualDisplay, at point: CGPoint, click: Bool) {
+        let seq = (display.pointer?.seq ?? 0) + 1
+        display.pointer = AgentPointer(point: point, click: click, seq: seq)
+        notifyState(display)
+    }
+
     /// Suspend until the user hands the display back, the display ends, or
     /// the timeout passes.
     func waitForControl(_ display: VirtualDisplay, timeout: Duration) async -> ControlWait {
@@ -222,6 +231,15 @@ final class DisplayManager {
 
 enum ControlWait: String {
     case returned, timedOut, ended
+}
+
+/// Where the Agent Session last pointed or clicked, in display points.
+/// `seq` grows with every action, so a view can tell a new click from one
+/// it already animated.
+struct AgentPointer: Equatable {
+    let point: CGPoint
+    let click: Bool
+    let seq: Int
 }
 
 /// How a window came onto an Agent Display. Decides what dismissal does with

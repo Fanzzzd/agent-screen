@@ -208,6 +208,7 @@ private final class PreviewTile: NSView {
         thumbnail.setOutline(display.awaitsUser ? .systemOrange : nil, width: 2)
         // An Ended Display stays for review, dimmed.
         thumbnail.alphaValue = display.ended ? 0.5 : 1
+        thumbnail.showPointer(display.takeover ? nil : display.pointer)
         lift()
     }
 
