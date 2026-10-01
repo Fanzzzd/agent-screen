@@ -65,4 +65,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
+    /// A normal quit tidies up as dismissal would, without asking: each
+    /// window follows its Disposition. A crash leaves the windows to macOS.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let plans = displays.displays.map(Dismissal.plan(for:))
+        guard plans.contains(where: { !$0.isEmpty }) else { return .terminateNow }
+        Task {
+            for items in plans { await Dismissal.execute(items) }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 }

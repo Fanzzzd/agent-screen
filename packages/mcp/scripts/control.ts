@@ -62,10 +62,16 @@ await debug("debugTakeover", { displayId: display_id, active: false })
 const helped = await help
 check("request_help returns when the Takeover ends", helped.structuredContent?.control === "agent")
 
+const unknown = await client.call("set_disposition", { display_id, window_id: 1, disposition: "keep" })
+check("set_disposition rejects a window not on the display", unknown.isError === true)
+
 await debug("debugTakeover", { displayId: display_id, active: true })
 setTimeout(() => client.call("end_display", { display_id }), 500)
 const ended = await client.call("wait_for_control", { display_id, timeout_seconds: 10 })
 check("wait_for_control returns when the display ends", ended.structuredContent?.control === "none")
+
+const afterEnd = await client.call("set_disposition", { display_id, window_id: 1, disposition: "close" })
+check("an Ended Display refuses the agent", afterEnd.content[0].text.startsWith("ended"))
 
 client.close()
 process.exit(failures === 0 ? 0 : 1)

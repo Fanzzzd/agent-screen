@@ -20,6 +20,7 @@ interface Spec<S extends Parameters> {
   readonly parameters: S
   readonly readOnly?: boolean
   readonly destructive?: boolean
+  readonly idempotent?: boolean
   readonly run: (
     params: S["Type"],
     context: McpSchema.McpRequestContext["Service"]
@@ -78,8 +79,10 @@ const createDisplay = define({
 const endDisplay = define({
   name: "end_display",
   title: "End Agent Display",
-  description:
-    "Finish with the display. It stays visible to the user for review but accepts no more input. Its display_id stops working.",
+  description: [
+    "Finish with the display. It stays visible to the user for review but accepts no more input, and its",
+    "display_id stops working. Give each window a set_disposition first: the user dismisses the display later."
+  ].join(" "),
   parameters: Schema.Struct({ display_id: DisplayId }),
   destructive: true,
   run: Effect.fnUntraced(function*({ display_id }) {
@@ -150,7 +153,11 @@ const requestHelp = define({
 const listWindows = define({
   name: "list_windows",
   title: "List windows on the display",
-  description: "List app windows on the display, front to back, with ids and bounds in screenshot pixels.",
+  description: [
+    "List app windows on the display, front to back, with ids and bounds in screenshot pixels. origin says how",
+    "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
+    "set_disposition verdict or null."
+  ].join(" "),
   parameters: Schema.Struct({ display_id: DisplayId }),
   readOnly: true,
   run: Effect.fnUntraced(function*({ display_id }) {
@@ -170,6 +177,33 @@ const placeWindow = define({
   run: Effect.fnUntraced(function*({ display_id, window_id }) {
     yield* (yield* Sidescreen).call("placeWindow", { displayId: display_id, windowId: window_id })
     return { placed: true }
+  })
+})
+
+const setDisposition = define({
+  name: "set_disposition",
+  title: "Keep or close a window when the display goes",
+  description: [
+    "Say what should happen to one of your windows when the user dismisses this display: keep it for the user",
+    "to review (a result page, a filled form) or close it (scratch windows). Set it as soon as you know and",
+    "change it any time; your session may end without warning. The user has the final say. Windows the user",
+    "handed over always go back to them, whatever you choose."
+  ].join(" "),
+  parameters: Schema.Struct({
+    display_id: DisplayId,
+    window_id: Schema.Int.annotate({ description: "A window on the display, from list_windows." }),
+    disposition: Schema.Literals(["keep", "close"])
+  }),
+  idempotent: true,
+  run: Effect.fnUntraced(function*({ display_id, window_id, disposition }) {
+    const reply = yield* (yield* Sidescreen).call("setDisposition", {
+      displayId: display_id,
+      windowId: window_id,
+      disposition
+    })
+    return reply.handedOver
+      ? { disposition, note: "The user handed this window over; it returns to them regardless." }
+      : { disposition }
   })
 })
 
@@ -332,6 +366,7 @@ const register = <S extends Parameters>(spec: Spec<S>) =>
           title: spec.title,
           readOnlyHint: spec.readOnly ?? false,
           destructiveHint: spec.destructive ?? false,
+          idempotentHint: spec.idempotent ?? false,
           openWorldHint: false
         }
       }),
@@ -358,5 +393,6 @@ export const layer = Layer.effectDiscard(Effect.all([
   register(requestHelp),
   register(listWindows),
   register(placeWindow),
-  register(launchApp)
+  register(launchApp),
+  register(setDisposition)
 ]))

@@ -23,5 +23,6 @@ let package = Package(
                 .linkedFramework("QuartzCore"),
             ]
         ),
+        .testTarget(name: "SidescreenTests", dependencies: ["Sidescreen"]),
     ]
 )

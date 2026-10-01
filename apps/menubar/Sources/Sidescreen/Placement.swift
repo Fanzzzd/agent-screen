@@ -59,7 +59,20 @@ struct AeroSpace {
         guard let workspace = try await visibleWorkspace(onMonitor: monitor) else {
             throw CommandError(description: "no visible workspace on monitor \(monitor)")
         }
+        try await moveWindow(windowID, toWorkspace: workspace)
+    }
+
+    func moveWindow(_ windowID: CGWindowID, toWorkspace workspace: String) async throws {
         _ = try await run(["move-node-to-workspace", "--window-id", String(windowID), workspace])
+    }
+
+    /// The workspace a window belongs to.
+    func workspace(of windowID: CGWindowID) async throws -> String? {
+        try await run(["list-windows", "--all", "--format", "%{window-id}|%{workspace}"])
+            .split(separator: "\n").compactMap { line -> String? in
+                let parts = line.split(separator: "|", maxSplits: 1).map(String.init)
+                return parts.count == 2 && parts[0] == String(windowID) ? parts[1] : nil
+            }.first
     }
 
     func monitorID(named name: String) async throws -> String? {

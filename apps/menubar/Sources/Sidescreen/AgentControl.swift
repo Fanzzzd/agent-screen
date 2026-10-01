@@ -74,12 +74,29 @@ final class AgentControl {
             return [:]
         case "listWindows":
             let display = try display(p, live: false)
-            return ["windows": WindowCatalog.windows(on: display).map(\.json)]
+            return ["windows": WindowCatalog.windows(on: display).map { window in
+                var json = window.json
+                let record = display.records[window.target.windowID]
+                json["origin"] = record?.origin.rawValue ?? "unknown"
+                json["disposition"] = record?.disposition?.rawValue ?? NSNull()
+                return json
+            }]
+        case "setDisposition":
+            let display = try display(p)
+            guard let windowID = p.int("windowId"),
+                  let window = WindowCatalog.windows(on: display).first(where: { $0.target.windowID == windowID })
+            else { throw ControlError.notFound("no window with that id on display \(display.id)") }
+            guard let disposition = p.string("disposition").flatMap(Disposition.init(rawValue:)) else {
+                throw ControlError.invalid("disposition must be keep or close")
+            }
+            display.setDisposition(disposition, of: window.target)
+            let handedOver = display.records[window.target.windowID]?.origin == .handedOver
+            return ["handedOver": handedOver]
         case "placeWindow":
             let display = try inputDisplay(p)
             guard let windowID = p.int("windowId"), let window = WindowCatalog.window(CGWindowID(windowID))
             else { throw ControlError.notFound("no window with that id") }
-            display.claim(window.target.windowID)
+            display.claim(window.target, origin: .placed)
             do { try await Placement.place(window.target, onto: display.id) } catch {
                 throw ControlError.failed("could not move the window: \(error)")
             }
@@ -345,7 +362,7 @@ enum AppLauncher {
     @MainActor
     static func settle(_ target: WindowTarget, onto display: VirtualDisplay) async throws -> WindowCatalog.Window {
         var lastError: Error?
-        display.claim(target.windowID)
+        display.claim(target, origin: .launched)
         for _ in 0..<12 {
             do { try await Placement.place(target, onto: display.id) } catch { lastError = error }
             try await Task.sleep(for: .milliseconds(200))

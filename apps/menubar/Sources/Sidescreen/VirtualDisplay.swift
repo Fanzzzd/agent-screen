@@ -34,9 +34,10 @@ final class VirtualDisplay {
         return "\(owner.client) · \(owner.title)"
     }
 
-    /// Windows Sidescreen put on this display. Anything else found here got
-    /// here by accident, for example through a window manager.
-    private(set) var windows: Set<CGWindowID> = []
+    /// Windows Sidescreen put on this display, by id. Anything else found
+    /// here got here by accident, for example through a window manager.
+    private(set) var records: [CGWindowID: WindowRecord] = [:]
+    var windows: Set<CGWindowID> { Set(records.keys) }
 
     /// The user is operating the display in the Viewer; agent input is refused.
     fileprivate(set) var takeover = false
@@ -49,7 +50,22 @@ final class VirtualDisplay {
 
     func markEnded() { ended = true }
 
-    func claim(_ windowID: CGWindowID) { windows.insert(windowID) }
+    /// Record a window Sidescreen put here. A Handover stays a Handover even
+    /// if the agent places the same window again.
+    func claim(_ target: WindowTarget, origin: WindowOrigin, home: WindowHome? = nil) {
+        if records[target.windowID]?.origin == .handedOver { return }
+        records[target.windowID] = WindowRecord(target: target, origin: origin, disposition: nil, home: home)
+    }
+
+    func forget(_ windowID: CGWindowID) { records.removeValue(forKey: windowID) }
+
+    /// The Agent Session's verdict on a window. It can change its mind any time.
+    func setDisposition(_ disposition: Disposition, of target: WindowTarget) {
+        if records[target.windowID] == nil {
+            records[target.windowID] = WindowRecord(target: target, origin: .found, disposition: nil, home: nil)
+        }
+        records[target.windowID]?.disposition = disposition
+    }
 
     init?(name: String, size: CGSize, serial: UInt32, owner: DisplayOwner?) {
         let descriptor = CGVirtualDisplayDescriptor()
@@ -206,6 +222,38 @@ final class DisplayManager {
 
 enum ControlWait: String {
     case returned, timedOut, ended
+}
+
+/// How a window came onto an Agent Display. Decides what dismissal does with
+/// it when the agent left no Disposition.
+enum WindowOrigin: String {
+    /// Opened by the Agent Session through launch_app.
+    case launched
+    /// An existing window the Agent Session placed.
+    case placed
+    /// A Handover from the user.
+    case handedOver
+    /// Already on the display when the agent gave it a Disposition.
+    case found
+}
+
+enum Disposition: String {
+    case keep, close
+}
+
+/// Where a handed-over window lived before, so it can go back there.
+struct WindowHome {
+    /// CG global frame.
+    let frame: CGRect
+    /// The AeroSpace workspace, when AeroSpace manages the window.
+    let workspace: String?
+}
+
+struct WindowRecord {
+    let target: WindowTarget
+    let origin: WindowOrigin
+    var disposition: Disposition?
+    let home: WindowHome?
 }
 
 enum DisplayArrangement {

@@ -49,6 +49,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         control.onCloseRequest = { [weak self] in self?.closePanel() }
         control.onPullWindow = { [weak self] in self?.pullFrontmostWindow() }
         control.onSendWindowBack = { [weak self] in self?.sendWindowBack() }
+        control.onDismiss = { [weak self] display in self?.dismiss(display) }
 
         displays.observe { [weak self] in
             guard let self, self.preview.isShown, let anchor = self.iconRect else { return }
@@ -163,9 +164,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Dismiss a display after the user confirms what happens to its windows.
+    func dismiss(_ display: VirtualDisplay) {
+        preview.hide(animated: false)
+        guard let items = Dismissal.confirm(Dismissal.plan(for: display), for: display) else { return }
+        displays.end(display)
+        if control.display === display, control.isVisible { closePanel() }
+        Task {
+            await Dismissal.execute(items)
+            remove(display)
+        }
+    }
+
     private func remove(_ display: VirtualDisplay) {
         if control.display === display, control.isVisible { closePanel() }
         hub.drop(display.id)
+        forwarders.drop(display.id)
         displays.remove(display)
     }
 
@@ -174,7 +188,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         Task {
             do {
                 let window = try WindowMover.frontmostWindow()
-                display.claim(window.windowID)
+                display.claim(window, origin: .handedOver)
                 try await Placement.place(window, onto: display.id)
             } catch {
                 NSSound.beep()
@@ -185,12 +199,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func sendWindowBack() {
         guard let display = control.display, let target = forwarders.forwarder(for: display.id).focusedTarget
         else { return NSSound.beep() }
+        let record = display.records[target.windowID]
+        display.forget(target.windowID)
         Task {
-            do {
-                try await Placement.place(target, onto: CGMainDisplayID())
-            } catch {
-                NSSound.beep()
-            }
+            await Dismissal.giveBack(Dismissal.Item(target: target, app: "", title: "", fate: .giveBack,
+                                                    locked: true, home: record?.home))
         }
     }
 
@@ -217,7 +230,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 entry.target = self
                 entry.representedObject = NSNumber(value: display.id)
             }
-            menu.addItem(withTitle: "移除虚拟屏", action: nil, keyEquivalent: "").submenu = removeMenu
+            menu.addItem(withTitle: "关闭显示器", action: nil, keyEquivalent: "").submenu = removeMenu
         }
         menu.addItem(.separator())
         if !aerospace.conflicts.isEmpty {
@@ -265,6 +278,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let id = (sender.representedObject as? NSNumber)?.uint32Value,
               let display = displays.display(withID: id)
         else { return }
-        remove(display)
+        dismiss(display)
     }
 }

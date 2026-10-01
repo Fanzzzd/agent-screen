@@ -23,17 +23,43 @@ enum WindowMover {
 
     /// Move a specific window onto `bounds`.
     static func move(_ target: WindowTarget, into bounds: CGRect) throws(Failure) {
+        guard let window = element(for: target) else { throw .noWindow }
+        try place(window, into: bounds)
+    }
+
+    /// Press the window's close button. The app may still keep it open, for
+    /// example to ask about unsaved changes.
+    static func close(_ target: WindowTarget) throws(Failure) {
+        guard let window = element(for: target) else { throw .noWindow }
+        guard let button = copy(window, kAXCloseButtonAttribute),
+              AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
+        else { throw .rejected }
+    }
+
+    /// Put a window back at an exact CG global frame.
+    static func setFrame(_ target: WindowTarget, to frame: CGRect) throws(Failure) {
+        guard let window = element(for: target) else { throw .noWindow }
+        var origin = frame.origin
+        var size = frame.size
+        guard let position = AXValueCreate(.cgPoint, &origin),
+              AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position) == .success
+        else { throw .rejected }
+        if let sizeValue = AXValueCreate(.cgSize, &size) {
+            AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
+        }
+    }
+
+    /// The AX element of a window, matched by CGWindowID.
+    static func element(for target: WindowTarget) -> AXUIElement? {
         let app = AXUIElementCreateApplication(target.pid)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement]
-        else { throw .noWindow }
-        let match = windows.first { window in
+        else { return nil }
+        return windows.first { window in
             var windowID: CGWindowID = 0
             return SSAXWindowID(window, &windowID) && windowID == target.windowID
         }
-        guard let match else { throw .noWindow }
-        try place(match, into: bounds)
     }
 
     /// Fit the window inside `bounds` (CG global coordinates) with a margin.

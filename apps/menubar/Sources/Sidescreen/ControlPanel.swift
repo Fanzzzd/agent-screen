@@ -15,6 +15,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     var onPullWindow: (() -> Void)?
     var onSendWindowBack: (() -> Void)?
     var onCloseRequest: (() -> Void)?
+    var onDismiss: ((VirtualDisplay) -> Void)?
 
     private let hub: StreamHub
     private let forwarders: ForwarderPool
@@ -49,6 +50,10 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         header.onPull = { [weak self] in self?.onPullWindow?() }
         header.onSendBack = { [weak self] in self?.onSendWindowBack?() }
         header.onClose = { [weak self] in self?.onCloseRequest?() }
+        header.onDismiss = { [weak self] in
+            guard let self, let display = self.display else { return }
+            self.onDismiss?(display)
+        }
         header.onStepIn = { [weak self] in
             guard let self, let display = self.display else { return }
             self.displays.beginTakeover(display)
@@ -303,6 +308,7 @@ private final class HeaderView: NSView {
     var onPull: (() -> Void)?
     var onSendBack: (() -> Void)?
     var onClose: (() -> Void)?
+    var onDismiss: (() -> Void)?
     var onHandBack: (() -> Void)?
     var onStepIn: (() -> Void)?
 
@@ -337,6 +343,9 @@ private final class HeaderView: NSView {
         },
         SymbolButton(symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把选中的窗口送回主屏") { [weak self] in
             self?.onSendBack?()
+        },
+        SymbolButton(symbol: "rectangle.badge.xmark", tooltip: "关闭这块显示器") { [weak self] in
+            self?.onDismiss?()
         },
         SymbolButton(symbol: "xmark", tooltip: "收起") { [weak self] in self?.onClose?() },
     ])

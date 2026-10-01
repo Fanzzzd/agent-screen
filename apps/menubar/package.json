@@ -4,6 +4,7 @@
   "scripts": {
     "build": "scripts/bundle.sh release",
     "dev": "scripts/run.sh",
-    "typecheck": "swift build"
+    "typecheck": "swift build",
+    "test": "swift test"
   }
 }

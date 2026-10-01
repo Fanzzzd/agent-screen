@@ -195,7 +195,9 @@ private final class PreviewTile: NSView {
     /// Label and outline follow the display's control state.
     func refresh() {
         guard let display else { return }
-        if let reason = display.helpRequest, !display.takeover {
+        if display.ended {
+            label.stringValue = "已结束 · \(display.label)"
+        } else if let reason = display.helpRequest, !display.takeover {
             label.stringValue = "需要帮忙：\(reason)"
         } else if display.takeover {
             label.stringValue = "你在操作 · \(display.label)"
@@ -204,6 +206,8 @@ private final class PreviewTile: NSView {
         }
         toolTip = display.helpRequest.map { "\(display.label)\n需要帮忙：\($0)" } ?? display.label
         thumbnail.setOutline(display.awaitsUser ? .systemOrange : nil, width: 2)
+        // An Ended Display stays for review, dimmed.
+        thumbnail.alphaValue = display.ended ? 0.5 : 1
         lift()
     }
 
