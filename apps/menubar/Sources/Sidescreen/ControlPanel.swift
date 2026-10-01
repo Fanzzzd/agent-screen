@@ -374,6 +374,8 @@ private final class HeaderView: NSView {
             case .help, .takeover: NSColor.systemOrange.cgColor
             case .ended: NSColor.tertiaryLabelColor.cgColor
             }
+            // Asking for help or paused for the user is what to read first.
+            subtitleLabel.textColor = mode == .help || mode == .takeover ? .systemOrange : .secondaryLabelColor
             handBack.isHidden = mode != .takeover
             stepIn.isHidden = mode != .help
             dismissPill.isHidden = mode != .ended
@@ -409,7 +411,7 @@ private final class HeaderView: NSView {
     private let subtitleLabel = NSTextField(labelWithString: "")
     private lazy var buttons = NSStackView(views: [
         pullButton, sendBackButton, dismissButton,
-        SymbolButton(symbol: "xmark", tooltip: "收起") { [weak self] in self?.onClose?() },
+        SymbolButton(symbol: "chevron.up", tooltip: "收起到菜单栏") { [weak self] in self?.onClose?() },
     ])
 
     override init(frame: NSRect) {
@@ -419,8 +421,8 @@ private final class HeaderView: NSView {
         dot.layer?.cornerRadius = 3.5
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = .labelColor
-        subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        subtitleLabel.textColor = .tertiaryLabelColor
+        subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        subtitleLabel.textColor = .secondaryLabelColor
         buttons.spacing = 2
         handBack.isHidden = true
         stepIn.isHidden = true

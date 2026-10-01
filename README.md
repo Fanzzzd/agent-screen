@@ -61,6 +61,8 @@ bun packages/mcp/scripts/control.ts         # Takeover and Help Request, needs a
 bun packages/mcp/scripts/smoke.ts           # end to end with Calculator
 ```
 
+Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, collapse, dismiss) and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+
 ## Known limits
 
 - Private APIs only. This cannot ship on the App Store and may break on a future macOS.

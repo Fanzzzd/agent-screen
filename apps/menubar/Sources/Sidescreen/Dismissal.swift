@@ -19,16 +19,23 @@ enum Dismissal {
         /// A Handover: the user's own window, never closed.
         let locked: Bool
         let home: WindowHome?
+        /// Why the default is what it is, shown under the window's name.
+        var reason = ""
+
+        /// "Safari · Flights", or just the app when the title adds nothing.
+        var name: String { title.isEmpty || title == app ? app : "\(app) · \(title)" }
     }
 
     static func plan(for display: VirtualDisplay) -> [Item] {
         let launchedApps = Set(display.records.values.filter { $0.origin == .launched }.map(\.target.pid))
         return WindowCatalog.windows(on: display).map { window in
             let record = display.records[window.target.windowID]
+            let ofLaunchedApp = launchedApps.contains(window.target.pid)
             return Item(target: window.target, app: window.app, title: window.title,
-                        fate: fate(origin: record?.origin, disposition: record?.disposition,
-                                   ofLaunchedApp: launchedApps.contains(window.target.pid)),
-                        locked: record?.origin == .handedOver, home: record?.home)
+                        fate: fate(origin: record?.origin, disposition: record?.disposition, ofLaunchedApp: ofLaunchedApp),
+                        locked: record?.origin == .handedOver, home: record?.home,
+                        reason: reason(origin: record?.origin, disposition: record?.disposition,
+                                       ofLaunchedApp: ofLaunchedApp))
         }
     }
 
@@ -44,6 +51,17 @@ enum Dismissal {
         // A further window of an app the agent launched is the agent's;
         // anything else may be the user's.
         case (nil, nil): ofLaunchedApp ? .close : .giveBack
+        }
+    }
+
+    private static func reason(origin: WindowOrigin?, disposition: Disposition?, ofLaunchedApp: Bool) -> String {
+        switch (origin, disposition) {
+        case (.handedOver, _): "你交给 agent 的窗口"
+        case (_, .keep): "agent 建议保留"
+        case (_, .close): "agent 建议关掉"
+        case (.launched, nil): "agent 打开的，没给意见"
+        case (.placed, nil), (.found, nil): "agent 移进来的，没给意见"
+        case (nil, nil): ofLaunchedApp ? "agent 打开的 app 的窗口" : "不是 agent 放进来的"
         }
     }
 
@@ -68,15 +86,22 @@ enum Dismissal {
             rows.alignment = .leading
             rows.spacing = 8
             for item in items {
-                let name = NSTextField(labelWithString: item.title.isEmpty ? item.app : "\(item.app) · \(item.title)")
+                let name = NSTextField(labelWithString: item.name)
                 name.lineBreakMode = .byTruncatingTail
-                name.widthAnchor.constraint(equalToConstant: 230).isActive = true
+                let why = NSTextField(labelWithString: item.reason)
+                why.font = .systemFont(ofSize: 12)
+                why.textColor = .secondaryLabelColor
+                let label = NSStackView(views: [name, why])
+                label.orientation = .vertical
+                label.alignment = .leading
+                label.spacing = 1
+                label.widthAnchor.constraint(equalToConstant: 230).isActive = true
                 let choice = NSSegmentedControl(labels: ["还给你", "关掉"], trackingMode: .selectOne, target: nil, action: nil)
                 choice.selectedSegment = item.fate == .giveBack ? 0 : 1
                 choice.isEnabled = !item.locked
                 if item.locked { choice.toolTip = "这是你交给 agent 的窗口，一定还给你" }
                 choices.append(choice)
-                let row = NSStackView(views: [name, choice])
+                let row = NSStackView(views: [label, choice])
                 row.spacing = 12
                 rows.addArrangedSubview(row)
             }
@@ -84,8 +109,12 @@ enum Dismissal {
             alert.accessoryView = rows
         }
 
+        // The alert needs us frontmost; give focus back to the user's app after.
+        let previous = NSWorkspace.shared.frontmostApplication
         NSApp.activate()
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let response = alert.runModal()
+        if let previous, previous.processIdentifier != getpid() { previous.activate() }
+        guard response == .alertFirstButtonReturn else { return nil }
         return zip(items, choices.isEmpty ? [] : choices).map { item, choice in
             var item = item
             if !item.locked { item.fate = choice.selectedSegment == 0 ? .giveBack : .close }

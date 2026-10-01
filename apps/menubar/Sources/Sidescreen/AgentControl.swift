@@ -146,6 +146,15 @@ final class AgentControl {
             if p.raw["active"] as? Bool == true { displays.beginTakeover(display) } else { displays.endTakeover(display) }
             return [:]
         // Test hook: opens the Viewer and reports its window number for screencapture -l.
+        // Test hook: the user hands a window over, as the pull button does.
+        case "debugHandover":
+            let display = try display(p)
+            guard let id = p.int("windowId"), let window = WindowCatalog.window(CGWindowID(id)) else {
+                throw ControlError.notFound("no window with that id")
+            }
+            try await Handover.perform(window.target, from: nil, onto: display)
+            let home = display.records[window.target.windowID]?.home
+            return ["workspace": home?.workspace ?? NSNull(), "x": home.map { Int($0.frame.minX) } ?? NSNull()]
         // Test hook: shows a surface (viewer, peek, collapse, hide) and lists
         // our visible windows for screencapture -l.
         case "debugShow":

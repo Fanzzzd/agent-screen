@@ -20,6 +20,7 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/Sidescreen" "$app/Contents/MacOS/Sidescreen"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 identity="${SIDESCREEN_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
