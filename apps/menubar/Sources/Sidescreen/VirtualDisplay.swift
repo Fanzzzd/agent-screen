@@ -40,7 +40,12 @@ final class VirtualDisplay {
 
     /// The user is operating the display in the Viewer; agent input is refused.
     fileprivate(set) var takeover = false
+    /// The reason of an open Help Request.
+    fileprivate(set) var helpRequest: String?
     fileprivate var waiters: [UUID: CheckedContinuation<ControlWait, Never>] = [:]
+
+    /// The agent has to wait for the user before it carries on.
+    var awaitsUser: Bool { takeover || helpRequest != nil }
 
     func markEnded() { ended = true }
 
@@ -132,6 +137,7 @@ final class DisplayManager {
         guard !display.ended else { return }
         display.markEnded()
         display.takeover = false
+        display.helpRequest = nil
         resumeWaiters(of: display, with: .ended)
         notify()
         notifyState(display)
@@ -143,7 +149,7 @@ final class DisplayManager {
 
     // MARK: Control
 
-    /// Fires when Takeover changes on a display.
+    /// Fires when Takeover or a Help Request changes on a display.
     func observeState(_ handler: @escaping (VirtualDisplay) -> Void) {
         stateObservers.append(handler)
     }
@@ -161,10 +167,18 @@ final class DisplayManager {
         notifyState(display)
     }
 
+    /// Hand the display back. This also ends a Help Request.
     func endTakeover(_ display: VirtualDisplay) {
         guard display.takeover else { return }
         display.takeover = false
+        display.helpRequest = nil
         resumeWaiters(of: display, with: .returned)
+        notifyState(display)
+    }
+
+    func requestHelp(_ display: VirtualDisplay, reason: String) {
+        guard display.owner != nil, !display.ended else { return }
+        display.helpRequest = reason
         notifyState(display)
     }
 
@@ -172,7 +186,7 @@ final class DisplayManager {
     /// the timeout passes.
     func waitForControl(_ display: VirtualDisplay, timeout: Duration) async -> ControlWait {
         if display.ended { return .ended }
-        if !display.takeover { return .returned }
+        if !display.awaitsUser { return .returned }
         let id = UUID()
         return await withCheckedContinuation { continuation in
             display.waiters[id] = continuation

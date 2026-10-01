@@ -51,6 +51,17 @@ check("wait_for_control returns on hand-back", returned.structuredContent?.contr
 const immediate = await client.call("wait_for_control", { display_id })
 check("wait_for_control returns at once with control", immediate.structuredContent?.control === "agent")
 
+// A Help Request holds the agent until the user takes over and hands back.
+const help = client.call("request_help", { display_id, reason: "Sign in to the test site", timeout_seconds: 10 })
+await Bun.sleep(500)
+const stillWaiting = await client.call("wait_for_control", { display_id, timeout_seconds: 1 })
+check("Help Request holds the agent before any Takeover", stillWaiting.structuredContent?.control === "user")
+await debug("debugTakeover", { displayId: display_id, active: true })
+await Bun.sleep(300)
+await debug("debugTakeover", { displayId: display_id, active: false })
+const helped = await help
+check("request_help returns when the Takeover ends", helped.structuredContent?.control === "agent")
+
 await debug("debugTakeover", { displayId: display_id, active: true })
 setTimeout(() => client.call("end_display", { display_id }), 500)
 const ended = await client.call("wait_for_control", { display_id, timeout_seconds: 10 })

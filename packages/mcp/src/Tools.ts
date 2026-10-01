@@ -123,6 +123,28 @@ const waitForControl = define({
   })
 })
 
+const requestHelp = define({
+  name: "request_help",
+  title: "Ask the user to step in",
+  description: [
+    "Ask the user to take over your display for something you cannot do, such as a login, a captcha or a",
+    "two-factor code. The user gets a system notification with your reason. The call then waits like",
+    "wait_for_control until the user has stepped in and handed the display back, or until the timeout.",
+    "On a timeout the request stays open; call wait_for_control to keep waiting."
+  ].join(" "),
+  parameters: Schema.Struct({
+    display_id: DisplayId,
+    reason: Schema.String.annotate({ description: "What you need the user to do, in one short sentence." }),
+    timeout_seconds: Schema.optional(Timeout)
+  }),
+  run: Effect.fnUntraced(function*({ display_id, reason, timeout_seconds }) {
+    const sidescreen = yield* Sidescreen
+    yield* sidescreen.call("requestHelp", { displayId: display_id, reason })
+    const reply = yield* sidescreen.call("waitForControl", { displayId: display_id, timeoutSeconds: timeout_seconds })
+    return describeWait(reply.outcome)
+  })
+})
+
 // MARK: Windows
 
 const listWindows = define({
@@ -333,6 +355,7 @@ export const layer = Layer.effectDiscard(Effect.all([
   register(endDisplay),
   register(computer),
   register(waitForControl),
+  register(requestHelp),
   register(listWindows),
   register(placeWindow),
   register(launchApp)

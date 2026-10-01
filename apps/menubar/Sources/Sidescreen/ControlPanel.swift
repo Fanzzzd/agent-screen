@@ -49,6 +49,11 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         header.onPull = { [weak self] in self?.onPullWindow?() }
         header.onSendBack = { [weak self] in self?.onSendWindowBack?() }
         header.onClose = { [weak self] in self?.onCloseRequest?() }
+        header.onStepIn = { [weak self] in
+            guard let self, let display = self.display else { return }
+            self.displays.beginTakeover(display)
+            self.panel.makeFirstResponder(self.screen)
+        }
         header.onHandBack = { [weak self] in
             guard let self, let display = self.display else { return }
             self.displays.endTakeover(display)
@@ -240,12 +245,15 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             header.subtitle = "已结束 · \(size)"
         } else if display.takeover {
             header.mode = .takeover
-            header.subtitle = "你在操作，agent 暂停"
+            header.subtitle = display.helpRequest.map { "你在操作 · 求助：\($0)" } ?? "你在操作，agent 暂停"
+        } else if let reason = display.helpRequest {
+            header.mode = .help
+            header.subtitle = "需要你帮忙：\(reason)"
         } else {
             header.mode = display.owner == nil ? .idle : .agent
             header.subtitle = size
         }
-        screen.setOutline(display.takeover ? .systemOrange : nil)
+        screen.setOutline(display.awaitsUser ? .systemOrange : nil)
     }
 
     // MARK: Layout
@@ -290,12 +298,13 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
 /// Title strip. Dragging it moves the panel.
 private final class HeaderView: NSView {
-    enum Mode { case idle, agent, takeover, ended }
+    enum Mode { case idle, agent, help, takeover, ended }
 
     var onPull: (() -> Void)?
     var onSendBack: (() -> Void)?
     var onClose: (() -> Void)?
     var onHandBack: (() -> Void)?
+    var onStepIn: (() -> Void)?
 
     var title = "" { didSet { titleLabel.stringValue = title; needsLayout = true } }
     var subtitle = "" { didSet { subtitleLabel.stringValue = subtitle; needsLayout = true } }
@@ -303,14 +312,18 @@ private final class HeaderView: NSView {
         didSet {
             dot.layer?.backgroundColor = switch mode {
             case .idle, .agent: NSColor.systemGreen.cgColor
-            case .takeover: NSColor.systemOrange.cgColor
+            case .help, .takeover: NSColor.systemOrange.cgColor
             case .ended: NSColor.tertiaryLabelColor.cgColor
             }
             handBack.isHidden = mode != .takeover
+            stepIn.isHidden = mode != .help
             needsLayout = true
         }
     }
 
+    private lazy var stepIn = PillButton(title: "接手", tint: .systemOrange) { [weak self] in
+        self?.onStepIn?()
+    }
     private lazy var handBack = PillButton(title: "交还控制", tint: .systemOrange) { [weak self] in
         self?.onHandBack?()
     }
@@ -339,7 +352,9 @@ private final class HeaderView: NSView {
         subtitleLabel.textColor = .tertiaryLabelColor
         buttons.spacing = 2
         handBack.isHidden = true
-        [dot, titleLabel, subtitleLabel, handBack, buttons].forEach(addSubview)
+        stepIn.isHidden = true
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        [dot, titleLabel, subtitleLabel, stepIn, handBack, buttons].forEach(addSubview)
     }
 
     @available(*, unavailable)
@@ -357,9 +372,13 @@ private final class HeaderView: NSView {
         let size = buttons.fittingSize
         buttons.frame = CGRect(x: bounds.maxX - size.width - 10, y: midY - size.height / 2,
                                width: size.width, height: size.height)
-        let pill = handBack.fittingSize
-        handBack.frame = CGRect(x: buttons.frame.minX - pill.width - 8, y: midY - pill.height / 2,
-                                width: pill.width, height: pill.height)
+        var trailing = buttons.frame.minX - 8
+        for pill in [handBack, stepIn] where !pill.isHidden {
+            let size = pill.fittingSize
+            pill.frame = CGRect(x: trailing - size.width, y: midY - size.height / 2, width: size.width, height: size.height)
+            trailing = pill.frame.minX - 8
+        }
+        subtitleLabel.frame.size.width = max(0, min(subtitleLabel.frame.width, trailing - subtitleLabel.frame.minX))
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

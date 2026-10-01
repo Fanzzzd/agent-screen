@@ -89,6 +89,13 @@ final class AgentControl {
             guard let app = p.string("app") else { throw ControlError.invalid("app is required") }
             let window = try await AppLauncher.launch(app, onto: display)
             return window.map { ["window": $0.json] } ?? [:]
+        case "requestHelp":
+            let display = try display(p)
+            guard let reason = p.string("reason"), !reason.isEmpty else {
+                throw ControlError.invalid("reason is required")
+            }
+            displays.requestHelp(display, reason: reason)
+            return [:]
         case "waitForControl":
             let display = try display(p, live: false)
             let seconds = min(max(p.double("timeoutSeconds") ?? 100, 1), 600)

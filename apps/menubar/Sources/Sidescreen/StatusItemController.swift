@@ -54,6 +54,26 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             guard let self, self.preview.isShown, let anchor = self.iconRect else { return }
             self.preview.show(below: anchor)
         }
+        displays.observeState { [weak self] _ in self?.updateIcon() }
+    }
+
+    /// A raised hand while any Help Request is open.
+    private func updateIcon() {
+        guard let button = item.button else { return }
+        let asking = displays.displays.contains { $0.helpRequest != nil }
+        let symbol = asking ? "hand.raised.fill" : "rectangle.on.rectangle"
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Sidescreen")
+        button.image?.isTemplate = true
+        button.contentTintColor = asking ? .systemOrange : nil
+    }
+
+    /// Open a display that asked for help and take it over, as the user
+    /// clicked the notification to do exactly that.
+    func openForHelp(_ displayID: CGDirectDisplayID) {
+        guard let display = displays.display(withID: displayID) else { return }
+        preview.hide(animated: false)
+        openPanel(display, from: morphAnchor)
+        displays.beginTakeover(display)
     }
 
     /// The icon's frame on screen, or nil when the icon is not visible.

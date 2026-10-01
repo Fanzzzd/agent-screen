@@ -39,6 +39,9 @@ final class PreviewPanelController {
             guard let self, self.isShown else { return nil }
             return self.panel.convertToScreen(self.card.frame)
         }
+        displays.observeState { [weak self] display in
+            self?.tiles.first { $0.display === display }?.refresh()
+        }
     }
 
     func show(below anchor: CGRect) {
@@ -117,7 +120,10 @@ final class PreviewPanelController {
 
     private func rebuildTiles() {
         let wanted = displays.displays.map(\.id)
-        if tiles.compactMap({ $0.display?.id }) == wanted, tiles.last?.display == nil, !tiles.isEmpty { return }
+        if tiles.compactMap({ $0.display?.id }) == wanted, tiles.last?.display == nil, !tiles.isEmpty {
+            tiles.forEach { $0.refresh() }
+            return
+        }
 
         tiles.forEach { $0.removeFromSuperview() }
         let height = tileWidth / (DisplayManager.defaultSize.width / DisplayManager.defaultSize.height)
@@ -168,7 +174,6 @@ private final class PreviewTile: NSView {
         thumbnail.cornerRadius = 9
         if let display {
             thumbnail.displaySize = display.size
-            label.stringValue = display.label
         } else {
             label.stringValue = "新建虚拟屏"
             thumbnail.screenLayer.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
@@ -180,9 +185,26 @@ private final class PreviewTile: NSView {
         label.font = .systemFont(ofSize: 11, weight: .medium)
         label.textColor = .secondaryLabelColor
         label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
         addSubview(thumbnail)
         addSubview(label)
         thumbnail.screenLayer.borderColor = NSColor.controlAccentColor.cgColor
+        refresh()
+    }
+
+    /// Label and outline follow the display's control state.
+    func refresh() {
+        guard let display else { return }
+        if let reason = display.helpRequest, !display.takeover {
+            label.stringValue = "需要帮忙：\(reason)"
+        } else if display.takeover {
+            label.stringValue = "你在操作 · \(display.label)"
+        } else {
+            label.stringValue = display.label
+        }
+        toolTip = display.helpRequest.map { "\(display.label)\n需要帮忙：\($0)" } ?? display.label
+        thumbnail.setOutline(display.awaitsUser ? .systemOrange : nil, width: 2)
+        lift()
     }
 
     @available(*, unavailable)
@@ -215,7 +237,8 @@ private final class PreviewTile: NSView {
     /// Hover and "currently open" both show as a ring. A scale lift would
     /// need a layer transform, which live IOSurface frames ignore.
     private func lift() {
-        label.textColor = hovering ? .labelColor : .secondaryLabelColor
+        let attention = display?.awaitsUser == true
+        label.textColor = attention ? .systemOrange : (hovering ? .labelColor : .secondaryLabelColor)
         updateRing()
     }
 

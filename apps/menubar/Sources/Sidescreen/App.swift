@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var control: ControlServer?
     private var status: StatusItemController?
     private var aerospace: AeroSpaceGuard?
+    private var notifier: HelpNotifier?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMissing()
@@ -34,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.aerospace = aerospace
         status = StatusItemController(displays: displays, hub: hub, forwarders: forwarders,
                                       preview: preview, control: viewer, aerospace: aerospace)
+
+        let notifier = HelpNotifier(displays: displays)
+        notifier.onOpen = { [weak self] id in self?.status?.openForHelp(id) }
+        self.notifier = notifier
 
         let agents = AgentControl(displays: displays, forwarders: forwarders)
         let server = ControlServer(
