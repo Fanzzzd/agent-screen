@@ -9,7 +9,13 @@ final class PreviewPanelController {
     var onHoverChange: ((Bool) -> Void)?
 
     private(set) var isShown = false
-    var activeDisplayID: CGDirectDisplayID? { didSet { tiles.forEach { $0.isActive = $0.display?.id == activeDisplayID } } }
+    var onDismiss: ((VirtualDisplay) -> Void)?
+    var activeDisplayID: CGDirectDisplayID? { didSet { tiles.forEach(markActive) } }
+
+    /// Only a display tile can be the one open in the Viewer.
+    private func markActive(_ tile: PreviewTile) {
+        tile.isActive = tile.display != nil && tile.display?.id == activeDisplayID
+    }
 
     private let hub: StreamHub
     private let displays: DisplayManager
@@ -38,6 +44,13 @@ final class PreviewPanelController {
         panel.hitRect = { [weak self] in
             guard let self, self.isShown else { return nil }
             return self.panel.convertToScreen(self.card.frame)
+        }
+        // Tiles hold their displays; drop them when one goes away while
+        // Peek is hidden, so macOS can free it.
+        displays.observe { [weak self] in
+            guard let self, !self.isShown else { return }
+            self.tiles.forEach { $0.removeFromSuperview() }
+            self.tiles = []
         }
         displays.observeState { [weak self] display in
             self?.tiles.first { $0.display === display }?.refresh()
@@ -135,6 +148,7 @@ final class PreviewPanelController {
                 let rect = tile.window?.convertToScreen(tile.thumbnail.convert(tile.thumbnail.contentRect, to: nil))
                 self.onSelect?(display, rect ?? .zero)
             }
+            tile.onDismiss = { [weak self] in self?.onDismiss?(display) }
             return tile
         }
         let add = PreviewTile(display: nil)
@@ -142,7 +156,7 @@ final class PreviewPanelController {
         tiles.append(add)
         for tile in tiles {
             tile.frame.size = CGSize(width: tileWidth, height: height)
-            tile.isActive = tile.display?.id == activeDisplayID
+            markActive(tile)
             content.addSubview(tile)
         }
     }
@@ -156,15 +170,27 @@ final class PreviewPanelController {
 
 /// One thumbnail, or the "new display" tile when `display` is nil.
 private final class PreviewTile: NSView {
-    static let labelHeight: CGFloat = 24
+    static let labelHeight: CGFloat = 38
 
     let display: VirtualDisplay?
     let thumbnail = DisplayView()
     var onClick: (() -> Void)?
+    var onDismiss: (() -> Void)?
     var isActive = false { didSet { updateRing() } }
 
     private let label = NSTextField(labelWithString: "")
+    /// Control state under the title: a Help Request, Takeover, or ended.
+    private let status = NSTextField(labelWithString: "")
     private let plus = NSImageView()
+    private lazy var close: NSButton = {
+        let button = FirstMouseButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "关闭显示器")!
+            .withSymbolConfiguration(.init(pointSize: 17, weight: .regular).applying(.init(paletteColors: [.white, NSColor.black.withAlphaComponent(0.55)])))!,
+            target: self, action: #selector(dismissTapped))
+        button.isBordered = false
+        button.toolTip = "关闭显示器"
+        button.isHidden = true
+        return button
+    }()
     private var hovering = false { didSet { lift() } }
 
     init(display: VirtualDisplay?) {
@@ -186,8 +212,13 @@ private final class PreviewTile: NSView {
         label.textColor = .secondaryLabelColor
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
+        status.font = .systemFont(ofSize: 10.5, weight: .regular)
+        status.alignment = .center
+        status.lineBreakMode = .byTruncatingTail
         addSubview(thumbnail)
         addSubview(label)
+        addSubview(status)
+        if display != nil { addSubview(close) }
         thumbnail.screenLayer.borderColor = NSColor.controlAccentColor.cgColor
         refresh()
     }
@@ -195,15 +226,20 @@ private final class PreviewTile: NSView {
     /// Label and outline follow the display's control state.
     func refresh() {
         guard let display else { return }
+        label.stringValue = display.label
         if display.ended {
-            label.stringValue = "已结束 · \(display.label)"
-        } else if let reason = display.helpRequest, !display.takeover {
-            label.stringValue = "需要帮忙：\(reason)"
+            status.stringValue = "已结束"
+            status.textColor = .tertiaryLabelColor
         } else if display.takeover {
-            label.stringValue = "你在操作 · \(display.label)"
+            status.stringValue = "你在操作"
+            status.textColor = .systemOrange
+        } else if let reason = display.helpRequest {
+            status.stringValue = "求助：\(reason)"
+            status.textColor = .systemOrange
         } else {
-            label.stringValue = display.label
+            status.stringValue = ""
         }
+        needsLayout = true
         toolTip = display.helpRequest.map { "\(display.label)\n需要帮忙：\($0)" } ?? display.label
         thumbnail.setOutline(display.awaitsUser ? .systemOrange : nil, width: 2)
         // An Ended Display stays for review, dimmed.
@@ -218,8 +254,15 @@ private final class PreviewTile: NSView {
     override func layout() {
         super.layout()
         thumbnail.frame = CGRect(x: 0, y: Self.labelHeight, width: bounds.width, height: bounds.height - Self.labelHeight)
-        label.frame = CGRect(x: 0, y: 4, width: bounds.width, height: 16)
+        if status.stringValue.isEmpty {
+            label.frame = CGRect(x: 0, y: 11, width: bounds.width, height: 16)
+            status.frame = .zero
+        } else {
+            label.frame = CGRect(x: 0, y: 18, width: bounds.width, height: 16)
+            status.frame = CGRect(x: 0, y: 3, width: bounds.width, height: 14)
+        }
         plus.frame = thumbnail.bounds
+        close.frame = CGRect(x: thumbnail.frame.maxX - 26, y: thumbnail.frame.maxY - 26, width: 22, height: 22)
     }
 
     override func updateTrackingAreas() {
@@ -233,6 +276,8 @@ private final class PreviewTile: NSView {
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    @objc private func dismissTapped() { onDismiss?() }
+
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
@@ -242,8 +287,8 @@ private final class PreviewTile: NSView {
     /// Hover and "currently open" both show as a ring. A scale lift would
     /// need a layer transform, which live IOSurface frames ignore.
     private func lift() {
-        let attention = display?.awaitsUser == true
-        label.textColor = attention ? .systemOrange : (hovering ? .labelColor : .secondaryLabelColor)
+        label.textColor = hovering ? .labelColor : .secondaryLabelColor
+        close.isHidden = !hovering
         updateRing()
     }
 
@@ -274,4 +319,9 @@ private final class HoverView: NSView {
     override func mouseEntered(with event: NSEvent) { onChange?(true) }
     override func mouseExited(with event: NSEvent) { onChange?(false) }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Takes the click that also brings its non-key panel forward.
+private final class FirstMouseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

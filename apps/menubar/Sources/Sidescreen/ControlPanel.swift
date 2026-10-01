@@ -37,6 +37,9 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     private var restingRect: CGRect?
     /// Bumped on every transition so stale completion blocks do nothing.
     private var generation = 0
+    /// The display is being dismissed: let go of it once the panel is closed,
+    /// so macOS can free the virtual display.
+    private var releaseOnClose = false
 
     init(hub: StreamHub, forwarders: ForwarderPool, displays: DisplayManager) {
         self.hub = hub
@@ -92,6 +95,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     // MARK: Transitions
 
     func open(_ display: VirtualDisplay, from source: CGRect) {
+        releaseOnClose = false
         if isVisible {
             if self.display !== display { show(display, crossfade: true) }
             return
@@ -166,6 +170,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             layer.removeAllAnimations()
             self.proxy.screenLayer.contents = nil
             if let display = self.display { self.hub.detach(self.screen.screenLayer, from: display.id) }
+            if self.releaseOnClose { self.finishRelease() }
         }
         let morph = Motion.spring("transform", from: NSValue(caTransform3D: fromTransform),
                                   to: NSValue(caTransform3D: collapsed), duration: 0.34, bounce: 0)
@@ -239,6 +244,22 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             screen.screenLayer.add(transition, forKey: "swap")
         }
         hub.attach(screen.screenLayer, to: display.id, fps: 60)
+    }
+
+    /// Let go of a display that is going away.
+    func release(_ display: VirtualDisplay) {
+        guard self.display === display else { return }
+        releaseOnClose = true
+        if state == .closed { finishRelease() }
+    }
+
+    private func finishRelease() {
+        releaseOnClose = false
+        display = nil
+        screen.displayID = nil
+        screen.forwarder = nil
+        screen.showPointer(nil)
+        screen.screenLayer.contents = nil
     }
 
     // MARK: Handover
@@ -355,10 +376,27 @@ private final class HeaderView: NSView {
             }
             handBack.isHidden = mode != .takeover
             stepIn.isHidden = mode != .help
+            dismissPill.isHidden = mode != .ended
+            // An Ended Display takes no Handover; closing it is what's left.
+            pullButton.isHidden = mode == .ended
+            sendBackButton.isHidden = mode == .ended
+            dismissButton.isHidden = mode == .ended
             needsLayout = true
         }
     }
 
+    private lazy var dismissPill = PillButton(title: "关闭显示器", tint: .controlAccentColor) { [weak self] in
+        self?.onDismiss?()
+    }
+    private lazy var pullButton = SymbolButton(
+        symbol: "arrow.down.right.and.arrow.up.left.rectangle", tooltip: "把前台窗口交给 agent"
+    ) { [weak self] in self?.onPull?() }
+    private lazy var sendBackButton = SymbolButton(
+        symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把选中的窗口还给你"
+    ) { [weak self] in self?.onSendBack?() }
+    private lazy var dismissButton = SymbolButton(symbol: "rectangle.badge.xmark", tooltip: "关闭这块显示器") { [weak self] in
+        self?.onDismiss?()
+    }
     private lazy var stepIn = PillButton(title: "接手", tint: .systemOrange) { [weak self] in
         self?.onStepIn?()
     }
@@ -370,15 +408,7 @@ private final class HeaderView: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(labelWithString: "")
     private lazy var buttons = NSStackView(views: [
-        SymbolButton(symbol: "arrow.down.right.and.arrow.up.left.rectangle", tooltip: "把前台窗口拉进这块屏") { [weak self] in
-            self?.onPull?()
-        },
-        SymbolButton(symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把选中的窗口送回主屏") { [weak self] in
-            self?.onSendBack?()
-        },
-        SymbolButton(symbol: "rectangle.badge.xmark", tooltip: "关闭这块显示器") { [weak self] in
-            self?.onDismiss?()
-        },
+        pullButton, sendBackButton, dismissButton,
         SymbolButton(symbol: "xmark", tooltip: "收起") { [weak self] in self?.onClose?() },
     ])
 
@@ -394,8 +424,9 @@ private final class HeaderView: NSView {
         buttons.spacing = 2
         handBack.isHidden = true
         stepIn.isHidden = true
+        dismissPill.isHidden = true
         subtitleLabel.lineBreakMode = .byTruncatingTail
-        [dot, titleLabel, subtitleLabel, stepIn, handBack, buttons].forEach(addSubview)
+        [dot, titleLabel, subtitleLabel, stepIn, handBack, dismissPill, buttons].forEach(addSubview)
     }
 
     @available(*, unavailable)
@@ -414,7 +445,7 @@ private final class HeaderView: NSView {
         buttons.frame = CGRect(x: bounds.maxX - size.width - 10, y: midY - size.height / 2,
                                width: size.width, height: size.height)
         var trailing = buttons.frame.minX - 8
-        for pill in [handBack, stepIn] where !pill.isHidden {
+        for pill in [handBack, stepIn, dismissPill] where !pill.isHidden {
             let size = pill.fittingSize
             pill.frame = CGRect(x: trailing - size.width, y: midY - size.height / 2, width: size.width, height: size.height)
             trailing = pill.frame.minX - 8

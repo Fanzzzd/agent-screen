@@ -146,11 +146,16 @@ final class AgentControl {
             if p.raw["active"] as? Bool == true { displays.beginTakeover(display) } else { displays.endTakeover(display) }
             return [:]
         // Test hook: opens the Viewer and reports its window number for screencapture -l.
-        case "debugViewer":
-            let display = try display(p, live: false)
-            NotificationCenter.default.post(name: .debugOpenViewer, object: NSNumber(value: display.id))
+        // Test hook: shows a surface (viewer, peek, collapse, hide) and lists
+        // our visible windows for screencapture -l.
+        case "debugShow":
+            let surface = p.string("surface") ?? "viewer"
+            let id = p.int("displayId") ?? 0
+            NotificationCenter.default.post(name: .debugShow, object: "\(surface):\(id)")
             try await Task.sleep(for: .milliseconds(900))
-            return ["windowNumber": NSApp.windows.first { $0.isVisible && $0.canBecomeKey }?.windowNumber ?? 0]
+            return ["windows": NSApp.windows.filter(\.isVisible).map {
+                ["number": $0.windowNumber, "level": $0.level.rawValue, "keyable": $0.canBecomeKey]
+            }]
         #endif
         default:
             throw ControlError.invalid("unknown method \(method)")
@@ -469,6 +474,6 @@ enum AppLauncher {
 
 #if DEBUG
 extension Notification.Name {
-    static let debugOpenViewer = Notification.Name("SidescreenDebugOpenViewer")
+    static let debugShow = Notification.Name("SidescreenDebugShow")
 }
 #endif

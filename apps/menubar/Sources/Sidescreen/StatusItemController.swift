@@ -45,6 +45,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             self?.openPanel(display, from: rect)
         }
         preview.onCreate = { [weak self] in self?.createDisplay() }
+        preview.onDismiss = { [weak self] display in self?.dismiss(display) }
 
         control.onCloseRequest = { [weak self] in self?.closePanel() }
         control.onPullWindow = { [weak self] in self?.pullFrontmostWindow() }
@@ -75,11 +76,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         dragWatcher.start()
         #if DEBUG
-        NotificationCenter.default.addObserver(forName: .debugOpenViewer, object: nil, queue: .main) { [weak self] note in
-            guard let id = (note.object as? NSNumber)?.uint32Value else { return }
+        NotificationCenter.default.addObserver(forName: .debugShow, object: nil, queue: .main) { [weak self] note in
+            guard let parts = (note.object as? String)?.split(separator: ":"), parts.count == 2 else { return }
+            let surface = String(parts[0])
+            let id = CGDirectDisplayID(parts[1]) ?? 0
             MainActor.assumeIsolated {
-                guard let self, let display = self.displays.display(withID: id) else { return }
-                self.openPanel(display, from: self.morphAnchor)
+                guard let self else { return }
+                switch surface {
+                case "peek": self.preview.show(below: self.iconRect ?? self.morphAnchor)
+                case "hide": self.preview.hide()
+                case "collapse": self.closePanel()
+                case "dismiss": if let display = self.displays.display(withID: id) { self.dismiss(display) }
+                default:
+                    if let display = self.displays.display(withID: id) { self.openPanel(display, from: self.morphAnchor) }
+                }
             }
         }
         #endif
@@ -166,8 +176,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         preview.hide()
         if control.isVisible {
             closePanel()
-        } else if let display = control.display ?? displays.displays.first ?? displays.create() {
+        } else if let display = control.display ?? displays.displays.first {
             openPanel(display, from: morphAnchor)
+        } else if let anchor = iconRect {
+            // Nothing to open yet: show Peek, which offers a new display.
+            preview.show(below: anchor)
         }
     }
 
@@ -207,6 +220,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func remove(_ display: VirtualDisplay) {
         if control.display === display, control.isVisible { closePanel() }
+        control.release(display)
         hub.drop(display.id)
         forwarders.drop(display.id)
         displays.remove(display)
