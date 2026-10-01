@@ -3,6 +3,9 @@ import AppKit
 /// Shows a live display frame, aspect-fit, with rounded corners.
 class DisplayView: NSView {
     let screenLayer = CALayer()
+    /// Drawn over the frame, never into the display, so agent screenshots
+    /// do not contain it.
+    private let outlineLayer = CALayer()
 
     var displaySize = DisplayManager.defaultSize {
         didSet { needsLayout = true }
@@ -22,6 +25,19 @@ class DisplayView: NSView {
         screenLayer.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
         screenLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
         layer?.addSublayer(screenLayer)
+        outlineLayer.cornerCurve = .continuous
+        outlineLayer.actions = ["bounds": NSNull(), "position": NSNull()]
+        layer?.addSublayer(outlineLayer)
+    }
+
+    /// A colored ring around the frame, or none.
+    func setOutline(_ color: NSColor?, width: CGFloat = 2.5) {
+        let animation = CABasicAnimation(keyPath: "borderWidth")
+        animation.fromValue = outlineLayer.presentation()?.borderWidth ?? outlineLayer.borderWidth
+        animation.duration = 0.2
+        if let color { outlineLayer.borderColor = color.cgColor }
+        outlineLayer.borderWidth = color == nil ? 0 : width
+        outlineLayer.add(animation, forKey: "outline")
     }
 
     @available(*, unavailable)
@@ -30,6 +46,8 @@ class DisplayView: NSView {
     override func layout() {
         super.layout()
         screenLayer.frame = contentRect
+        outlineLayer.frame = contentRect
+        outlineLayer.cornerRadius = cornerRadius
     }
 
     /// Where the display image sits inside the view.
@@ -47,6 +65,8 @@ class DisplayView: NSView {
 final class InteractiveDisplayView: DisplayView {
     var displayID: CGDirectDisplayID?
     var forwarder: InputForwarder?
+    /// Fires before each click, scroll or key press the user sends.
+    var onUserInput: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -99,6 +119,7 @@ final class InteractiveDisplayView: DisplayView {
         window?.makeKey()
         window?.makeFirstResponder(self)
         guard let point = remotePoint(event) else { return }
+        onUserInput?()
         forwarder?.mouseDown(at: point, button: button, clickCount: event.clickCount, flags: flags(event))
     }
 
@@ -123,6 +144,7 @@ final class InteractiveDisplayView: DisplayView {
 
     override func scrollWheel(with event: NSEvent) {
         guard let point = remotePoint(event, clamp: true) else { return }
+        onUserInput?()
         let continuous = event.hasPreciseScrollingDeltas
         forwarder?.scroll(
             at: point,
@@ -156,6 +178,7 @@ final class InteractiveDisplayView: DisplayView {
     // MARK: Keyboard
 
     override func keyDown(with event: NSEvent) {
+        onUserInput?()
         forwarder?.key(code: event.keyCode, down: true, flags: flags(event))
     }
 
@@ -171,6 +194,7 @@ final class InteractiveDisplayView: DisplayView {
     /// AppKit rarely sends keyUp for them, so send the release right away.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self, event.type == .keyDown else { return false }
+        onUserInput?()
         forwarder?.key(code: event.keyCode, down: true, flags: flags(event))
         forwarder?.key(code: event.keyCode, down: false, flags: flags(event))
         return true

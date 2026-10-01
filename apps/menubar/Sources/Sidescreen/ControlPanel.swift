@@ -18,6 +18,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     private let hub: StreamHub
     private let forwarders: ForwarderPool
+    private let displays: DisplayManager
     private let panel = FloatingPanel(level: .floating, keyable: true)
     private let card: NSView
     private let header = HeaderView()
@@ -36,9 +37,10 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     /// Bumped on every transition so stale completion blocks do nothing.
     private var generation = 0
 
-    init(hub: StreamHub, forwarders: ForwarderPool) {
+    init(hub: StreamHub, forwarders: ForwarderPool, displays: DisplayManager) {
         self.hub = hub
         self.forwarders = forwarders
+        self.displays = displays
         let (card, content) = Glass.card(cornerRadius: cornerRadius)
         self.card = card
         super.init()
@@ -47,6 +49,19 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         header.onPull = { [weak self] in self?.onPullWindow?() }
         header.onSendBack = { [weak self] in self?.onSendWindowBack?() }
         header.onClose = { [weak self] in self?.onCloseRequest?() }
+        header.onHandBack = { [weak self] in
+            guard let self, let display = self.display else { return }
+            self.displays.endTakeover(display)
+        }
+        // The user's first input takes the display over from its agent.
+        screen.onUserInput = { [weak self] in
+            guard let self, let display = self.display else { return }
+            self.displays.beginTakeover(display)
+        }
+        displays.observeState { [weak self] display in
+            guard let self, display === self.display else { return }
+            self.refreshState()
+        }
 
         content.addSubview(header)
         content.addSubview(screen)
@@ -116,6 +131,8 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     func close(to destination: CGRect) {
         guard isVisible else { return }
+        // Collapsing the Viewer hands the display back.
+        if let display { displays.endTakeover(display) }
         // Interrupting an open continues from the proxy's current pose.
         let current = state == .opening ? proxy.view.layer?.presentation() : nil
         let restingOnScreen = panel.convertToScreen(card.frame)
@@ -195,13 +212,16 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     /// Point the panel at a display: stream, title, input routing.
     private func show(_ display: VirtualDisplay, crossfade: Bool) {
-        if let old = self.display, old !== display { hub.detach(screen.screenLayer, from: old.id) }
+        if let old = self.display, old !== display {
+            hub.detach(screen.screenLayer, from: old.id)
+            displays.endTakeover(old)
+        }
         self.display = display
         screen.displayID = display.id
         screen.forwarder = forwarders.forwarder(for: display.id)
         screen.displaySize = display.size
         header.title = display.label
-        header.subtitle = "\(Int(display.size.width)) × \(Int(display.size.height))"
+        refreshState()
         if crossfade {
             let transition = CATransition()
             transition.type = .fade
@@ -209,6 +229,23 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             screen.screenLayer.add(transition, forKey: "swap")
         }
         hub.attach(screen.screenLayer, to: display.id, fps: 60)
+    }
+
+    /// Header and outline follow the display's control state.
+    private func refreshState() {
+        guard let display else { return }
+        let size = "\(Int(display.size.width)) × \(Int(display.size.height))"
+        if display.ended {
+            header.mode = .ended
+            header.subtitle = "已结束 · \(size)"
+        } else if display.takeover {
+            header.mode = .takeover
+            header.subtitle = "你在操作，agent 暂停"
+        } else {
+            header.mode = display.owner == nil ? .idle : .agent
+            header.subtitle = size
+        }
+        screen.setOutline(display.takeover ? .systemOrange : nil)
     }
 
     // MARK: Layout
@@ -253,12 +290,30 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
 /// Title strip. Dragging it moves the panel.
 private final class HeaderView: NSView {
+    enum Mode { case idle, agent, takeover, ended }
+
     var onPull: (() -> Void)?
     var onSendBack: (() -> Void)?
     var onClose: (() -> Void)?
+    var onHandBack: (() -> Void)?
 
-    var title = "" { didSet { titleLabel.stringValue = title } }
-    var subtitle = "" { didSet { subtitleLabel.stringValue = subtitle } }
+    var title = "" { didSet { titleLabel.stringValue = title; needsLayout = true } }
+    var subtitle = "" { didSet { subtitleLabel.stringValue = subtitle; needsLayout = true } }
+    var mode = Mode.idle {
+        didSet {
+            dot.layer?.backgroundColor = switch mode {
+            case .idle, .agent: NSColor.systemGreen.cgColor
+            case .takeover: NSColor.systemOrange.cgColor
+            case .ended: NSColor.tertiaryLabelColor.cgColor
+            }
+            handBack.isHidden = mode != .takeover
+            needsLayout = true
+        }
+    }
+
+    private lazy var handBack = PillButton(title: "交还控制", tint: .systemOrange) { [weak self] in
+        self?.onHandBack?()
+    }
 
     private let dot = NSView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -283,7 +338,8 @@ private final class HeaderView: NSView {
         subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         subtitleLabel.textColor = .tertiaryLabelColor
         buttons.spacing = 2
-        [dot, titleLabel, subtitleLabel, buttons].forEach(addSubview)
+        handBack.isHidden = true
+        [dot, titleLabel, subtitleLabel, handBack, buttons].forEach(addSubview)
     }
 
     @available(*, unavailable)
@@ -301,6 +357,9 @@ private final class HeaderView: NSView {
         let size = buttons.fittingSize
         buttons.frame = CGRect(x: bounds.maxX - size.width - 10, y: midY - size.height / 2,
                                width: size.width, height: size.height)
+        let pill = handBack.fittingSize
+        handBack.frame = CGRect(x: buttons.frame.minX - pill.width - 8, y: midY - pill.height / 2,
+                                width: pill.width, height: pill.height)
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

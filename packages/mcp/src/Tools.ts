@@ -88,6 +88,41 @@ const endDisplay = define({
   })
 })
 
+// MARK: Control
+
+const Timeout = Schema.Int.annotate({
+  description: "Seconds to wait before giving up. Default 100, at most 600."
+})
+
+const describeWait = (outcome: unknown) => {
+  switch (outcome) {
+    case "returned":
+      return { control: "agent", note: "You have control. Take a screenshot before you continue." }
+    case "timedOut":
+      return { control: "user", note: "The user is still operating the display. Wait again or do something else." }
+    default:
+      return { control: "none", note: "The display has ended." }
+  }
+}
+
+const waitForControl = define({
+  name: "wait_for_control",
+  title: "Wait for the user to hand the display back",
+  description: [
+    "Block until the user stops operating your display (a Takeover) and hands it back, or until the timeout.",
+    "Call it after any tool fails with a takeover error. Returns at once if you already have control."
+  ].join(" "),
+  parameters: Schema.Struct({ display_id: DisplayId, timeout_seconds: Schema.optional(Timeout) }),
+  readOnly: true,
+  run: Effect.fnUntraced(function*({ display_id, timeout_seconds }) {
+    const reply = yield* (yield* Sidescreen).call("waitForControl", {
+      displayId: display_id,
+      timeoutSeconds: timeout_seconds
+    })
+    return describeWait(reply.outcome)
+  })
+})
+
 // MARK: Windows
 
 const listWindows = define({
@@ -155,7 +190,8 @@ const computer = define({
     "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
     "screenshot pixels and coordinates are the same space. Every action except wait returns a fresh screenshot.",
     "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\". Click actions accept held",
-    "modifiers in text, e.g. \"shift\". Fails with a takeover error while the user is operating the display."
+    "modifiers in text, e.g. \"shift\". Fails with a takeover error while the user is operating the display;",
+    "then call wait_for_control."
   ].join(" "),
   parameters: Schema.Struct({
     display_id: DisplayId,
@@ -296,6 +332,7 @@ export const layer = Layer.effectDiscard(Effect.all([
   register(createDisplay),
   register(endDisplay),
   register(computer),
+  register(waitForControl),
   register(listWindows),
   register(placeWindow),
   register(launchApp)

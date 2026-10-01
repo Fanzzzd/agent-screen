@@ -173,3 +173,34 @@ final class SymbolButton: NSButton {
         }
     }
 }
+
+/// A small tinted text button for the one action that matters right now.
+final class PillButton: NSButton {
+    private let handler: () -> Void
+
+    init(title: String, tint: NSColor, action: @escaping () -> Void) {
+        self.handler = action
+        super.init(frame: .zero)
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: tint,
+        ])
+        isBordered = false
+        wantsLayer = true
+        layer?.backgroundColor = tint.withAlphaComponent(0.16).cgColor
+        layer?.cornerRadius = 11
+        layer?.cornerCurve = .continuous
+        target = self
+        self.action = #selector(fire)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var fittingSize: NSSize {
+        let text = attributedTitle.size()
+        return NSSize(width: ceil(text.width) + 22, height: 22)
+    }
+
+    @objc private func fire() { handler() }
+}

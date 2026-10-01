@@ -48,7 +48,7 @@ final class AgentControl {
             forwarders.forwarder(for: display.id).mouseMoved(to: point, flags: [])
             return [:]
         case "drag":
-            let display = try display(p)
+            let display = try inputDisplay(p)
             let from = try global(display, x: p.require("fromX"), y: p.require("fromY"))
             let to = try global(display, x: p.require("toX"), y: p.require("toY"))
             await forwarders.forwarder(for: display.id).drag(from: from, to: to, flags: try modifiers(p))
@@ -60,12 +60,12 @@ final class AgentControl {
                 continuous: false, phase: 0, momentumPhase: 0, flags: try modifiers(p))
             return [:]
         case "type":
-            let display = try display(p)
+            let display = try inputDisplay(p)
             guard let text = p.string("text") else { throw ControlError.invalid("text is required") }
             await forwarders.forwarder(for: display.id).typeText(text, within: display.bounds)
             return [:]
         case "key":
-            let display = try display(p)
+            let display = try inputDisplay(p)
             guard let keys = p.string("keys") else { throw ControlError.invalid("keys is required") }
             let chord: KeyChord
             do { chord = try KeyChord.parse(keys) } catch { throw ControlError.invalid(error.description) }
@@ -76,7 +76,7 @@ final class AgentControl {
             let display = try display(p, live: false)
             return ["windows": WindowCatalog.windows(on: display).map(\.json)]
         case "placeWindow":
-            let display = try display(p)
+            let display = try inputDisplay(p)
             guard let windowID = p.int("windowId"), let window = WindowCatalog.window(CGWindowID(windowID))
             else { throw ControlError.notFound("no window with that id") }
             display.claim(window.target.windowID)
@@ -85,10 +85,22 @@ final class AgentControl {
             }
             return [:]
         case "launchApp":
-            let display = try display(p)
+            let display = try inputDisplay(p)
             guard let app = p.string("app") else { throw ControlError.invalid("app is required") }
             let window = try await AppLauncher.launch(app, onto: display)
             return window.map { ["window": $0.json] } ?? [:]
+        case "waitForControl":
+            let display = try display(p, live: false)
+            let seconds = min(max(p.double("timeoutSeconds") ?? 100, 1), 600)
+            let outcome = await displays.waitForControl(display, timeout: .seconds(seconds))
+            return ["outcome": outcome.rawValue]
+        #if DEBUG
+        // Test hook: stands in for the user's input in the Viewer.
+        case "debugTakeover":
+            let display = try display(p, live: false)
+            if p.raw["active"] as? Bool == true { displays.beginTakeover(display) } else { displays.endTakeover(display) }
+            return [:]
+        #endif
         default:
             throw ControlError.invalid("unknown method \(method)")
         }
@@ -143,8 +155,18 @@ final class AgentControl {
         return display
     }
 
-    private func target(_ p: Params) throws -> (VirtualDisplay, CGPoint) {
+    /// A display the Agent Session may send input to right now.
+    private func inputDisplay(_ p: Params) throws -> VirtualDisplay {
         let display = try display(p)
+        if display.takeover {
+            throw ControlError.takeover(
+                "the user is operating display \(display.id). Call wait_for_control to wait until they hand it back.")
+        }
+        return display
+    }
+
+    private func target(_ p: Params) throws -> (VirtualDisplay, CGPoint) {
+        let display = try inputDisplay(p)
         return (display, try global(display, x: p.require("x"), y: p.require("y")))
     }
 

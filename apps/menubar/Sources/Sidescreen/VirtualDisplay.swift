@@ -38,6 +38,10 @@ final class VirtualDisplay {
     /// here by accident, for example through a window manager.
     private(set) var windows: Set<CGWindowID> = []
 
+    /// The user is operating the display in the Viewer; agent input is refused.
+    fileprivate(set) var takeover = false
+    fileprivate var waiters: [UUID: CheckedContinuation<ControlWait, Never>] = [:]
+
     func markEnded() { ended = true }
 
     func claim(_ windowID: CGWindowID) { windows.insert(windowID) }
@@ -127,12 +131,67 @@ final class DisplayManager {
     func end(_ display: VirtualDisplay) {
         guard !display.ended else { return }
         display.markEnded()
+        display.takeover = false
+        resumeWaiters(of: display, with: .ended)
         notify()
+        notifyState(display)
     }
 
     private func notify() {
         observers.forEach { $0() }
     }
+
+    // MARK: Control
+
+    /// Fires when Takeover changes on a display.
+    func observeState(_ handler: @escaping (VirtualDisplay) -> Void) {
+        stateObservers.append(handler)
+    }
+
+    private var stateObservers: [(VirtualDisplay) -> Void] = []
+
+    private func notifyState(_ display: VirtualDisplay) {
+        stateObservers.forEach { $0(display) }
+    }
+
+    /// Only a live Agent Display has an Agent Session to refuse.
+    func beginTakeover(_ display: VirtualDisplay) {
+        guard display.owner != nil, !display.ended, !display.takeover else { return }
+        display.takeover = true
+        notifyState(display)
+    }
+
+    func endTakeover(_ display: VirtualDisplay) {
+        guard display.takeover else { return }
+        display.takeover = false
+        resumeWaiters(of: display, with: .returned)
+        notifyState(display)
+    }
+
+    /// Suspend until the user hands the display back, the display ends, or
+    /// the timeout passes.
+    func waitForControl(_ display: VirtualDisplay, timeout: Duration) async -> ControlWait {
+        if display.ended { return .ended }
+        if !display.takeover { return .returned }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            display.waiters[id] = continuation
+            Task { @MainActor in
+                try? await Task.sleep(for: timeout)
+                display.waiters.removeValue(forKey: id)?.resume(returning: .timedOut)
+            }
+        }
+    }
+
+    private func resumeWaiters(of display: VirtualDisplay, with outcome: ControlWait) {
+        let waiters = display.waiters.values
+        display.waiters.removeAll()
+        waiters.forEach { $0.resume(returning: outcome) }
+    }
+}
+
+enum ControlWait: String {
+    case returned, timedOut, ended
 }
 
 enum DisplayArrangement {

@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Permissions.requestMissing()
 
         let preview = PreviewPanelController(hub: hub, displays: displays)
-        let viewer = ControlPanelController(hub: hub, forwarders: forwarders)
+        let viewer = ControlPanelController(hub: hub, forwarders: forwarders, displays: displays)
         let aerospace = AeroSpaceGuard(displays: displays)
         self.aerospace = aerospace
         status = StatusItemController(displays: displays, hub: hub, forwarders: forwarders,
