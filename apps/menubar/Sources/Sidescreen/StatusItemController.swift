@@ -56,7 +56,27 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             self.preview.show(below: anchor)
         }
         displays.observeState { [weak self] _ in self?.updateIcon() }
+
+        dragWatcher.dropRect = { [weak control] in control?.dropRect }
+        dragWatcher.onHover = { [weak control] inside in control?.showDropTarget(inside) }
+        dragWatcher.onDrop = { [weak self] target, frame in
+            guard let self, let display = self.control.display else { return }
+            Task {
+                // Let the window manager finish its own drop handling first.
+                try? await Task.sleep(for: .milliseconds(150))
+                do {
+                    try await Handover.perform(target, from: frame, onto: display)
+                    self.control.flashAccepted()
+                } catch {
+                    NSLog("Sidescreen: handover failed: \(error)")
+                    NSSound.beep()
+                }
+            }
+        }
+        dragWatcher.start()
     }
+
+    private let dragWatcher = DragHandoverWatcher()
 
     /// A raised hand while any Help Request is open.
     private func updateIcon() {
@@ -187,9 +207,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let display = control.display ?? displays.displays.first else { return }
         Task {
             do {
-                let window = try WindowMover.frontmostWindow()
-                display.claim(window, origin: .handedOver)
-                try await Placement.place(window, onto: display.id)
+                try await Handover.perform(try WindowMover.frontmostWindow(), from: nil, onto: display)
             } catch {
                 NSSound.beep()
             }

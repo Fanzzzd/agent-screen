@@ -241,6 +241,36 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         hub.attach(screen.screenLayer, to: display.id, fps: 60)
     }
 
+    // MARK: Handover
+
+    /// Where a dragged window can be dropped: the open card of a display
+    /// that is not over.
+    var dropRect: CGRect? {
+        guard state == .open, let display, !display.ended else { return nil }
+        return panel.convertToScreen(card.frame)
+    }
+
+    private var dropHighlighted = false
+
+    /// Outline the screen while a dragged window hovers over the card.
+    func showDropTarget(_ on: Bool) {
+        dropHighlighted = on
+        if on {
+            screen.setOutline(.controlAccentColor, width: 4)
+            header.subtitle = "松手把窗口交给 agent"
+        } else {
+            refreshState()
+        }
+    }
+
+    /// A brief accent ring once a Handover landed.
+    func flashAccepted() {
+        screen.setOutline(.controlAccentColor, width: 4)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            MainActor.assumeIsolated { if !self.dropHighlighted { self.refreshState() } }
+        }
+    }
+
     /// Header and outline follow the display's control state.
     private func refreshState() {
         guard let display else { return }
