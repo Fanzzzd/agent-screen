@@ -145,6 +145,12 @@ final class AgentControl {
             let display = try display(p, live: false)
             if p.raw["active"] as? Bool == true { displays.beginTakeover(display) } else { displays.endTakeover(display) }
             return [:]
+        // Test hook: opens the Viewer and reports its window number for screencapture -l.
+        case "debugViewer":
+            let display = try display(p, live: false)
+            NotificationCenter.default.post(name: .debugOpenViewer, object: NSNumber(value: display.id))
+            try await Task.sleep(for: .milliseconds(900))
+            return ["windowNumber": NSApp.windows.first { $0.isVisible && $0.canBecomeKey }?.windowNumber ?? 0]
         #endif
         default:
             throw ControlError.invalid("unknown method \(method)")
@@ -460,3 +466,9 @@ enum AppLauncher {
             .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 }
+
+#if DEBUG
+extension Notification.Name {
+    static let debugOpenViewer = Notification.Name("SidescreenDebugOpenViewer")
+}
+#endif

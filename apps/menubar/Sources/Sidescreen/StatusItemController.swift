@@ -74,6 +74,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
         dragWatcher.start()
+        #if DEBUG
+        NotificationCenter.default.addObserver(forName: .debugOpenViewer, object: nil, queue: .main) { [weak self] note in
+            guard let id = (note.object as? NSNumber)?.uint32Value else { return }
+            MainActor.assumeIsolated {
+                guard let self, let display = self.displays.display(withID: id) else { return }
+                self.openPanel(display, from: self.morphAnchor)
+            }
+        }
+        #endif
     }
 
     private let dragWatcher = DragHandoverWatcher()
