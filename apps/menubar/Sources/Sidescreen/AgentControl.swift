@@ -25,6 +25,7 @@ final class ForwarderPool {
 final class AgentControl {
     private let displays: DisplayManager
     private let forwarders: ForwarderPool
+    private let windowState = WindowState()
 
     init(displays: DisplayManager, forwarders: ForwarderPool) {
         self.displays = displays
@@ -101,6 +102,21 @@ final class AgentControl {
                 throw ControlError.failed("could not move the window: \(error)")
             }
             return [:]
+        case "windowState":
+            let display = try display(p, live: false)
+            let window = try window(p, on: display)
+            let snapshot = try windowState.snapshot(window.target)
+            let shot = try await WindowState.capture(window.target, size: window.bounds.size)
+            return ["window": window.json, "tree": snapshot.tree, "elements": snapshot.count,
+                    "truncated": snapshot.truncated, "data": shot.data.base64EncodedString(),
+                    "mimeType": shot.mimeType, "width": shot.width, "height": shot.height]
+        case "elementAction":
+            let display = try inputDisplay(p)
+            let window = try window(p, on: display)
+            guard let index = p.int("element") else { throw ControlError.invalid("element is required") }
+            let element = try windowState.element(index, in: window.target.windowID)
+            try await act(p.string("action") ?? "press", on: element, value: p.string("value"), display: display)
+            return [:]
         case "launchApp":
             let display = try inputDisplay(p)
             guard let app = p.string("app") else { throw ControlError.invalid("app is required") }
@@ -168,7 +184,48 @@ final class AgentControl {
                 "width": shot.width, "height": shot.height]
     }
 
+    /// One action on an accessibility element. AX actions reach background
+    /// apps without focusing them; clicks go through the input forwarder at
+    /// the element's center.
+    private func act(_ action: String, on element: AXUIElement, value: String?, display: VirtualDisplay) async throws {
+        func perform(_ name: String) -> Bool { AXUIElementPerformAction(element, name as CFString) == .success }
+        func click(_ button: CGMouseButton, count: Int) async throws {
+            guard let frame = WindowState.frame(of: element), display.bounds.contains(CGPoint(x: frame.midX, y: frame.midY))
+            else { throw ControlError.failed("the element has no visible frame on the display") }
+            await forwarders.forwarder(for: display.id).click(
+                at: CGPoint(x: frame.midX, y: frame.midY), button: button, count: count, flags: [])
+        }
+        switch action {
+        case "press":
+            if !perform(kAXPressAction) { try await click(.left, count: 1) }
+        case "click": try await click(.left, count: 1)
+        case "double_click": try await click(.left, count: 2)
+        case "right_click": try await click(.right, count: 1)
+        case "show_menu":
+            if !perform(kAXShowMenuAction) { try await click(.right, count: 1) }
+        case "focus":
+            guard AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+            else { throw ControlError.failed("the element cannot take focus") }
+        case "set_value":
+            guard let value else { throw ControlError.invalid("value is required for set_value") }
+            guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success
+            else { throw ControlError.failed("the element's value cannot be set; focus it and type instead") }
+        case "scroll_into_view":
+            guard perform("AXScrollToVisible") else { throw ControlError.failed("the element cannot scroll into view") }
+        default:
+            throw ControlError.invalid("unknown action \(action)")
+        }
+    }
+
     // MARK: Parameters
+
+    private func window(_ p: Params, on display: VirtualDisplay) throws -> WindowCatalog.Window {
+        guard let id = p.int("windowId") else { throw ControlError.invalid("windowId is required") }
+        guard let window = WindowCatalog.windows(on: display).first(where: { $0.target.windowID == id }) else {
+            throw ControlError.notFound("no window \(id) on display \(display.id); see list_windows")
+        }
+        return window
+    }
 
     private func display(_ p: Params, live: Bool = true) throws -> VirtualDisplay {
         guard let id = p.int("displayId") else { throw ControlError.invalid("displayId is required") }
@@ -263,6 +320,10 @@ enum Screenshot {
         config.showsCursor = false
         let image = try await SCScreenshotManager.captureImage(
             contentFilter: SCContentFilter(display: target, excludingWindows: []), configuration: config)
+        return try encode(image, format: format)
+    }
+
+    static func encode(_ image: CGImage, format: Format) throws -> Shot {
         let rep = NSBitmapImageRep(cgImage: image)
         let data: Data? = switch format {
         case .png: rep.representation(using: .png, properties: [:])

@@ -222,6 +222,67 @@ const launchApp = define({
   })
 })
 
+// MARK: Per window
+
+const WindowId = Schema.Int.annotate({ description: "A window on your display, from list_windows or launch_app." })
+
+/** Window state as tool content: the tree as text, then the window image. */
+const windowState = (displayId: number, windowId: number) =>
+  Effect.gen(function*() {
+    const state = yield* (yield* Sidescreen).call("windowState", { displayId, windowId })
+    const header = [
+      `Window ${windowId}: ${JSON.stringify(state.window)}`,
+      `${state.elements} elements${state.truncated ? " (truncated)" : ""}. Coordinates are window points from its`,
+      `top-left corner, the same space as the ${state.width}×${state.height} image.`
+    ].join(" ")
+    return [
+      text(`${header}\n\n${state.tree}`),
+      { type: "image", data: Uint8Array.from(Buffer.from(String(state.data), "base64")), mimeType: String(state.mimeType) }
+    ] satisfies Array<Content>
+  })
+
+const getWindowState = define({
+  name: "get_window_state",
+  title: "See one window",
+  description: [
+    "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
+    "brackets that act_on_element takes. Numbers are valid until the next get_window_state for that window."
+  ].join(" "),
+  parameters: Schema.Struct({ display_id: DisplayId, window_id: WindowId }),
+  readOnly: true,
+  run: ({ display_id, window_id }) => windowState(display_id, window_id)
+})
+
+const actOnElement = define({
+  name: "act_on_element",
+  title: "Act on a window element",
+  description: [
+    "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
+    "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
+    "double_click and right_click send a real click at the element's center. press falls back to a click when",
+    "the element has no press action. Fails with a takeover error while the user operates the display."
+  ].join(" "),
+  parameters: Schema.Struct({
+    display_id: DisplayId,
+    window_id: WindowId,
+    element: Schema.Int.annotate({ description: "The bracketed number from get_window_state." }),
+    action: Schema.Literals(["press", "click", "double_click", "right_click", "show_menu", "focus", "set_value",
+      "scroll_into_view"]),
+    value: Schema.optional(Schema.String.annotate({ description: "Text for set_value." }))
+  }),
+  run: Effect.fnUntraced(function*({ display_id, window_id, element, action, value }) {
+    yield* (yield* Sidescreen).call("elementAction", {
+      displayId: display_id,
+      windowId: window_id,
+      element,
+      action,
+      value
+    })
+    yield* Effect.sleep("350 millis")
+    return yield* windowState(display_id, window_id)
+  })
+})
+
 // MARK: Computer
 
 const Action = Schema.Literals([
@@ -394,5 +455,7 @@ export const layer = Layer.effectDiscard(Effect.all([
   register(listWindows),
   register(placeWindow),
   register(launchApp),
-  register(setDisposition)
+  register(setDisposition),
+  register(getWindowState),
+  register(actOnElement)
 ]))

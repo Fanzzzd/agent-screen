@@ -62,6 +62,9 @@ await debug("debugTakeover", { displayId: display_id, active: false })
 const helped = await help
 check("request_help returns when the Takeover ends", helped.structuredContent?.control === "agent")
 
+const noWindow = await client.call("get_window_state", { display_id, window_id: 1 })
+check("get_window_state rejects a window not on the display", noWindow.content[0].text.startsWith("not_found"))
+
 const unknown = await client.call("set_disposition", { display_id, window_id: 1, disposition: "keep" })
 check("set_disposition rejects a window not on the display", unknown.isError === true)
 
