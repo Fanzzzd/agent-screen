@@ -107,7 +107,19 @@ struct AeroSpace {
         _ = try await run(["workspace", workspace])
     }
 
+    /// Run the CLI off the main thread. AeroSpace answers by querying every
+    /// app's windows over AX, ours included, so blocking the main thread on
+    /// the CLI deadlocks until AX times out. A stuck CLI is killed after 5 s.
     private func run(_ arguments: [String]) async throws -> String {
+        let executable = self.executable
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result { try Self.runBlocking(executable, arguments) })
+            }
+        }
+    }
+
+    private static func runBlocking(_ executable: URL, _ arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -116,8 +128,15 @@ struct AeroSpace {
         process.standardOutput = output
         process.standardError = errors
         try process.run()
-        let data = await Task.detached { output.fileHandleForReading.readDataToEndOfFile() }.value
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: watchdog)
+        // Returns once the CLI exits or the watchdog kills it.
+        let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        watchdog.cancel()
+        if process.terminationReason == .uncaughtSignal {
+            throw CommandError(description: "aerospace \(arguments.first ?? "") timed out")
+        }
         guard process.terminationStatus == 0 else {
             let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw CommandError(description: message.trimmingCharacters(in: .whitespacesAndNewlines))
