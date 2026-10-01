@@ -1,6 +1,22 @@
 /** Minimal MCP client over stdio for the test scripts. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { writeFileSync } from "node:fs"
+import * as net from "node:net"
+import { socketPath } from "../src/Sidescreen.ts"
+
+/** Wait up to 10 s for a freshly started app to listen on its socket. */
+const waitForApp = async () => {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const up = await new Promise<boolean>((resolve) => {
+      const socket = net.createConnection(socketPath)
+      socket.once("connect", () => (socket.end(), resolve(true)))
+      socket.once("error", () => resolve(false))
+    })
+    if (up) return
+    await Bun.sleep(200)
+  }
+  throw new Error("the Sidescreen app is not listening on its control socket")
+}
 
 export class McpClient {
   private buffer = ""
@@ -24,6 +40,7 @@ export class McpClient {
 
   /** Spawn the server and run the 2025-06-18 handshake. */
   static async start(env: Record<string, string>) {
+    await waitForApp()
     const server = spawn("bun", ["src/main.ts"], {
       cwd: new URL("..", import.meta.url).pathname,
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/tmp/smoke", ...env },
