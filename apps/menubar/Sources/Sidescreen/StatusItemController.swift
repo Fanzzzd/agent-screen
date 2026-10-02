@@ -131,19 +131,28 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         displays.beginTakeover(display)
     }
 
+    /// The user's own screens. Our panels never go on an Agent Display,
+    /// where the Viewer would mirror itself.
+    private var userScreens: [NSScreen] {
+        NSScreen.screens.filter { screen in !displays.displays.contains { $0.id == screen.displayID } }
+    }
+
     /// The icon's frame on screen, or nil when the icon is not visible.
-    /// Menu bar managers such as Ice park hidden items far off-screen.
+    /// Menu bar managers such as Ice park hidden items far off-screen, and
+    /// while an app on an Agent Display is frontmost, macOS draws the icon
+    /// in that display's menu bar.
     private var iconRect: CGRect? {
         guard let button = item.button, let window = button.window else { return nil }
         let rect = window.convertToScreen(button.convert(button.bounds, to: nil))
-        return NSScreen.screens.contains { $0.frame.intersects(rect) } ? rect : nil
+        return userScreens.contains { $0.frame.intersects(rect) } ? rect : nil
     }
 
     /// Where the panel grows from and shrinks back to: the icon, or the
-    /// top center of the main screen when the icon is hidden.
+    /// top center of the user's screen under the pointer.
     private var morphAnchor: CGRect {
         if let iconRect { return iconRect }
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let screens = userScreens
+        let screen = screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? screens.first ?? NSScreen.screens[0]
         return CGRect(x: screen.frame.midX - 12, y: screen.visibleFrame.maxY - 24, width: 24, height: 24)
     }
 
