@@ -66,7 +66,7 @@ Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, click, hide, col
 ## Known limits
 
 - Private APIs only. This cannot ship on the App Store and may break on a future macOS.
-- The virtual display's own menu bar and status items do not take clicks from the panel.
+- The menu bar strip in the Viewer mirrors your own front app. A click on it opens the menus of the app in front on the Agent Display instead; status items there take no clicks.
 - The first click on a window only activates it, the same as a real click on an inactive window.
 - Clicks on an empty part of a display reach nothing. Passing them to Finder's desktop would trigger "click wallpaper to reveal desktop" and slide every window on every display aside.
 - `launch_app` on a running single-window app (Calculator) gets no new window. Quit it first or use `place_window`.

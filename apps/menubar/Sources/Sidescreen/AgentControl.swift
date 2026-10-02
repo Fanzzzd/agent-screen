@@ -140,6 +140,12 @@ final class AgentControl {
             let outcome = await displays.waitForControl(display, timeout: .seconds(seconds))
             return ["outcome": outcome.rawValue]
         #if DEBUG
+        // Test hook: the menu a Viewer click on the display's menu bar opens.
+        case "debugMenuBar":
+            guard let menu = MenuBarProxy.menu(for: try display(p, live: false)) else { return ["menu": NSNull()] }
+            return ["menu": menu.title, "items": menu.items.map { item in
+                [item.title] + (item.submenu?.items.map { $0.isSeparatorItem ? "-" : $0.title } ?? [])
+            }]
         // Test hook: stands in for the user's input in the Viewer.
         case "debugTakeover":
             let display = try display(p, live: false)

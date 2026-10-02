@@ -82,6 +82,13 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
             guard let self, display === self.display else { return }
             self.refreshState()
         }
+        screen.onMenuBarClick = { [weak self] point, local in
+            guard let self, let display = self.display,
+                  point.y - display.bounds.minY < MenuBarProxy.height(of: display)
+            else { return false }
+            MenuBarProxy.menu(for: display)?.popUp(positioning: nil, at: local, in: self.screen)
+            return true
+        }
 
         content.addSubview(header)
         content.addSubview(screen)

@@ -85,6 +85,9 @@ class DisplayView: NSView {
 final class InteractiveDisplayView: DisplayView {
     var displayID: CGDirectDisplayID?
     var forwarder: InputForwarder?
+    /// Offered each left click first, with the remote point and the point in
+    /// this view. Returns true when it handled the click.
+    var onMenuBarClick: ((CGPoint, NSPoint) -> Bool)?
     /// Fires before each click, scroll or key press the user sends.
     var onUserInput: (() -> Void)?
 
@@ -140,6 +143,7 @@ final class InteractiveDisplayView: DisplayView {
         window?.makeFirstResponder(self)
         guard let point = remotePoint(event) else { return }
         onUserInput?()
+        if button == .left, onMenuBarClick?(point, convert(event.locationInWindow, from: nil)) == true { return }
         forwarder?.mouseDown(at: point, button: button, clickCount: event.clickCount, flags: flags(event))
     }
 

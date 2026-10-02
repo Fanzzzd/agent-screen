@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var status: StatusItemController?
     private var aerospace: AeroSpaceGuard?
     private var notifier: HelpNotifier?
+    private var cursorGuard: CursorGuard?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMissing()
@@ -33,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let viewer = ControlPanelController(hub: hub, forwarders: forwarders, displays: displays)
         let aerospace = AeroSpaceGuard(displays: displays)
         self.aerospace = aerospace
+        cursorGuard = CursorGuard(displays: displays)
         status = StatusItemController(displays: displays, hub: hub, forwarders: forwarders,
                                       preview: preview, control: viewer, aerospace: aerospace)
 
