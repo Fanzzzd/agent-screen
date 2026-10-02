@@ -54,7 +54,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// which Chromium-class targets require for keyboard events on macOS 15+.
 bool SSPostEventToPid(pid_t pid, CGEventRef event, bool authenticate);
 
-/// CGEventSetWindowLocation with a global (top-left origin) point.
+/// CGEventSetWindowLocation. Top-left origin; AppKit reads it relative to
+/// the target window when routing scrolls.
 bool SSEventSetWindowLocation(CGEventRef event, CGPoint point);
 
 /// SLEventSetIntegerValueField with a raw field index.

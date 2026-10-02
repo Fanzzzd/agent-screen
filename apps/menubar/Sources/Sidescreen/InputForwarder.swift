@@ -78,10 +78,10 @@ final class InputForwarder: @unchecked Sendable {
     func scroll(at point: CGPoint, deltaX: CGFloat, deltaY: CGFloat, continuous: Bool,
                 phase: Int64, momentumPhase: Int64, flags: CGEventFlags) {
         queue.async { [self] in
-            guard let target = window(at: point, fresh: false),
+            guard let window = windowInfo(at: point, fresh: false),
                   let event = CGEvent(scrollWheelEvent2Source: source, units: continuous ? .pixel : .line,
-                                      wheelCount: 2, wheel1: Int32(deltaY.rounded()),
-                                      wheel2: Int32(deltaX.rounded()), wheel3: 0)
+                                      wheelCount: 2, wheel1: Self.wheelSteps(deltaY),
+                                      wheel2: Self.wheelSteps(deltaX), wheel3: 0)
             else { return }
             event.location = point
             event.flags = flags
@@ -92,9 +92,17 @@ final class InputForwarder: @unchecked Sendable {
                 event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: Double(deltaY))
                 event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: Double(deltaX))
             }
-            stampRouting(event, at: point, to: target)
-            deliver(event, to: target.pid, authenticate: false)
+            stampRouting(event, at: point, to: window.target)
+            // AppKit routes a scroll by its location in the window, and drops
+            // it when that point misses: give it relative to the window.
+            SSEventSetWindowLocation(event, CGPoint(x: point.x - window.bounds.minX, y: point.y - window.bounds.minY))
+            deliver(event, to: window.target.pid, authenticate: false)
         }
+    }
+
+    /// Whole wheel steps, at least one for any movement.
+    private static func wheelSteps(_ delta: CGFloat) -> Int32 {
+        delta == 0 ? 0 : Int32(delta < 0 ? min(delta.rounded(), -1) : max(delta.rounded(), 1))
     }
 
     // MARK: Agent input
@@ -251,6 +259,10 @@ final class InputForwarder: @unchecked Sendable {
     /// Topmost window at a global CG point. Moves and scrolls reuse a list up
     /// to 100 ms old; clicks always query WindowServer.
     private func window(at point: CGPoint, fresh: Bool) -> WindowTarget? {
+        windowInfo(at: point, fresh: fresh)?.target
+    }
+
+    private func windowInfo(at point: CGPoint, fresh: Bool) -> WindowInfo? {
         let now = CFAbsoluteTimeGetCurrent()
         let list: [WindowInfo]
         if !fresh, let cache = windowCache, now - cache.time < 0.1 {
@@ -259,7 +271,7 @@ final class InputForwarder: @unchecked Sendable {
             list = Self.onScreenWindows()
             windowCache = (list, now)
         }
-        return list.first { $0.bounds.contains(point) }?.target
+        return list.first { $0.bounds.contains(point) }
     }
 
     private static func onScreenWindows() -> [WindowInfo] {
