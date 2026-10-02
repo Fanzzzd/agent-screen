@@ -269,6 +269,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     #if DEBUG
     func debugAnswerDismiss(_ confirmed: Bool) { sheet?.answer(confirmed) }
+
     #endif
 
     /// Let go of a display that is going away.
@@ -446,13 +447,10 @@ private final class HeaderView: NSView {
     private lazy var dismissPill = PillButton(title: "关闭显示器", tint: .controlAccentColor) { [weak self] in
         self?.onDismiss?()
     }
-    private lazy var pullButton = SymbolButton(
-        symbol: "arrow.down.right.and.arrow.up.left.rectangle", tooltip: "把你最前面的窗口交给 agent"
-    ) { [weak self] in self?.onPull?() }
-    private lazy var sendBackButton = SymbolButton(
-        symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把 agent 屏上选中的窗口还给你"
-    ) { [weak self] in self?.onSendBack?() }
-    private lazy var dismissButton = SymbolButton(symbol: "rectangle.badge.xmark", tooltip: "关闭这块显示器") { [weak self] in
+    // Spelled out: no symbol says "your frontmost window" or "give back".
+    private lazy var pullButton = GhostButton(title: "拉入前台窗口") { [weak self] in self?.onPull?() }
+    private lazy var sendBackButton = GhostButton(title: "还回窗口") { [weak self] in self?.onSendBack?() }
+    private lazy var dismissButton = SymbolButton(symbol: "xmark", tooltip: "关闭这块显示器") { [weak self] in
         self?.onDismiss?()
     }
     private lazy var stepIn = PillButton(title: "接手", tint: .systemOrange) { [weak self] in
@@ -480,6 +478,7 @@ private final class HeaderView: NSView {
         subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         subtitleLabel.textColor = .secondaryLabelColor
         buttons.spacing = 2
+        buttons.setCustomSpacing(10, after: sendBackButton)
         handBack.isHidden = true
         stepIn.isHidden = true
         dismissPill.isHidden = true

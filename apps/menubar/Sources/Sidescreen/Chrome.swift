@@ -189,6 +189,58 @@ final class SymbolButton: NSButton {
     }
 }
 
+/// Plain text button with the same hover plate as SymbolButton, for actions
+/// a symbol cannot name.
+final class GhostButton: NSButton {
+    private let handler: () -> Void
+    private let label: String
+    private var hovering = false { didSet { updateAppearance() } }
+
+    init(title: String, action: @escaping () -> Void) {
+        self.handler = action
+        self.label = title
+        super.init(frame: .zero)
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.cornerCurve = .continuous
+        target = self
+        self.action = #selector(fire)
+        updateAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: ceil(attributedTitle.size().width) + 18, height: 26)
+    }
+
+    @objc private func fire() { handler() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    private func updateAppearance() {
+        attributedTitle = NSAttributedString(string: label, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: hovering ? NSColor.labelColor : NSColor.secondaryLabelColor,
+        ])
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.allowsImplicitAnimation = true
+            layer?.backgroundColor = hovering ? NSColor.labelColor.withAlphaComponent(0.1).cgColor : .clear
+        }
+    }
+}
+
 /// A small tinted text button for the one action that matters right now.
 final class PillButton: NSButton {
     private let handler: () -> Void
