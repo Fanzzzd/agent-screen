@@ -1,7 +1,7 @@
 import AppKit
 
 /// The Dismissal question, laid over the Viewer's screen: what happens to
-/// each window, then cancel or close. Esc cancels, Return confirms.
+/// each window, then cancel or close. Esc cancels, ⌘Return confirms.
 final class DismissSheet: NSView {
     /// The adjusted plan, or nil when the user cancels.
     var onAnswer: (([Dismissal.Item]?) -> Void)?
@@ -9,6 +9,8 @@ final class DismissSheet: NSView {
     private var items: [Dismissal.Item]
     private let box: NSView
     private var choices: [Int: NSSegmentedControl] = [:]
+    private var confirm: ActionButton!
+    private var live = false
 
     init(items: [Dismissal.Item], display: VirtualDisplay, live: Bool) {
         self.items = items
@@ -24,9 +26,10 @@ final class DismissSheet: NSView {
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         var lines: [NSView] = [title]
         if live {
-            lines.append(Self.note("agent 还在用这块显示器，关闭后它的操作会失败。", color: .systemOrange))
+            lines.append(Self.note("\(display.agentName) 仍在使用这块显示器，关闭后它将无法继续操作。",
+                                   color: .systemOrange))
         }
-        lines.append(Self.note(items.isEmpty ? "上面没有窗口。" : "每个窗口按 agent 的意见处理，可以逐个改。",
+        lines.append(Self.note(items.isEmpty ? "这块显示器上没有窗口。" : "选择这些窗口的去向。",
                                color: .secondaryLabelColor))
 
         let stack = NSStackView(views: lines)
@@ -37,15 +40,11 @@ final class DismissSheet: NSView {
             stack.setCustomSpacing(14, after: lines.last!)
             stack.addArrangedSubview(rows())
         }
-        let cancel = PillButton(title: "取消", tint: .secondaryLabelColor) { [weak self] in self?.answer(false) }
-        let close = PillButton(title: "关闭显示器", tint: .systemRed) { [weak self] in self?.answer(true) }
-        let buttons = NSStackView(views: [NSView(), cancel, close])
+        let cancel = ActionButton(title: "取消") { [weak self] _ in self?.answer(false) }
+        confirm = ActionButton(title: "关闭显示器") { [weak self] _ in self?.answer(true) }
+        self.live = live
+        let buttons = NSStackView(views: [NSView(), cancel, confirm])
         buttons.spacing = 8
-        for button in [cancel, close] {
-            button.widthAnchor.constraint(equalToConstant: button.fittingSize.width + 10).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 26).isActive = true
-            button.layer?.cornerRadius = 13
-        }
         stack.addArrangedSubview(buttons)
         stack.setCustomSpacing(18, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
         buttons.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
@@ -64,6 +63,14 @@ final class DismissSheet: NSView {
             box.centerYAnchor.constraint(equalTo: centerYAnchor),
             box.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor, constant: -24),
         ])
+        updateConfirm()
+    }
+
+    /// Red only when something is lost: a window closes, or the agent is
+    /// cut off.
+    @objc private func updateConfirm() {
+        let closesWindow = choices.values.contains { $0.selectedSegment == 1 }
+        confirm.setProminent(closesWindow || live ? .systemRed : .controlAccentColor)
     }
 
     @available(*, unavailable)
@@ -100,13 +107,13 @@ final class DismissSheet: NSView {
             let fate: NSView
             if item.locked {
                 // The user's own window always comes back; nothing to choose.
-                let fixed = NSTextField(labelWithString: "一定还给你")
+                let fixed = NSTextField(labelWithString: "取回原位置")
                 fixed.font = .systemFont(ofSize: 12)
                 fixed.textColor = .secondaryLabelColor
                 fate = fixed
             } else {
-                let choice = NSSegmentedControl(labels: ["还给你", "关掉"], trackingMode: .selectOne,
-                                                target: nil, action: nil)
+                let choice = NSSegmentedControl(labels: ["取回", "关闭窗口"], trackingMode: .selectOne,
+                                                target: self, action: #selector(updateConfirm))
                 choice.controlSize = .small
                 choice.selectedSegment = item.fate == .giveBack ? 0 : 1
                 choices[index] = choice
@@ -156,13 +163,14 @@ final class DismissSheet: NSView {
         })
     }
 
-    /// Esc and Return answer; everything else stays here instead of
+    /// Esc and ⌘Return answer; everything else stays here instead of
     /// reaching the display underneath.
     override var acceptsFirstResponder: Bool { true }
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 53: answer(false)
-        case 36, 76: answer(true)
+        // Return alone could close windows by accident; ⌘Return confirms.
+        case 36, 76 where event.modifierFlags.contains(.command): answer(true)
         default: break
         }
     }

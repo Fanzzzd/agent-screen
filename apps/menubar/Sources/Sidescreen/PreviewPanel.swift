@@ -135,13 +135,18 @@ final class PreviewPanelController {
     // MARK: Tiles
 
     private var cardSize: CGSize {
-        let count = CGFloat(tiles.count)
+        let width = tiles.map(\.frame.width).reduce(0, +) + CGFloat(max(tiles.count - 1, 0)) * spacing
         let height = tiles.map(\.frame.height).max() ?? 0
-        return CGSize(width: padding * 2 + count * tileWidth + (count - 1) * spacing, height: padding * 2 + height)
+        return CGSize(width: padding * 2 + width, height: padding * 2 + height)
+    }
+
+    /// Displays in use first, then the ones waiting for review.
+    private var ordered: [VirtualDisplay] {
+        displays.displays.filter { !$0.ended } + displays.displays.filter(\.ended)
     }
 
     private func rebuildTiles() {
-        let wanted = displays.displays.map(\.id)
+        let wanted = ordered.map(\.id)
         if tiles.compactMap({ $0.display?.id }) == wanted, tiles.last?.display == nil, !tiles.isEmpty {
             tiles.forEach { $0.refresh() }
             return
@@ -150,7 +155,7 @@ final class PreviewPanelController {
         tiles.forEach { $0.removeFromSuperview() }
         let height = tileWidth / (DisplayManager.defaultSize.width / DisplayManager.defaultSize.height)
             + PreviewTile.labelHeight
-        tiles = displays.displays.map { display in
+        tiles = ordered.map { display in
             let tile = PreviewTile(display: display)
             tile.onClick = { [weak self, weak tile] in
                 guard let self, let tile, let display = tile.display else { return }
@@ -164,15 +169,19 @@ final class PreviewPanelController {
         add.onClick = { [weak self] in self?.onCreate?() }
         tiles.append(add)
         for tile in tiles {
-            tile.frame.size = CGSize(width: tileWidth, height: height)
+            // With displays around, adding one is a narrow "+" at the end.
+            let narrow = tile.display == nil && tiles.count > 1
+            tile.frame.size = CGSize(width: narrow ? 44 : tileWidth, height: height)
             markActive(tile)
             content.addSubview(tile)
         }
     }
 
     private func layOutTiles() {
-        for (index, tile) in tiles.enumerated() {
-            tile.frame.origin = CGPoint(x: padding + CGFloat(index) * (tileWidth + spacing), y: padding)
+        var x = padding
+        for tile in tiles {
+            tile.frame.origin = CGPoint(x: x, y: padding)
+            x += tile.frame.width + spacing
         }
     }
 }
@@ -209,9 +218,9 @@ private final class PreviewTile: NSView {
         if let display {
             thumbnail.displaySize = display.size
         } else {
-            label.stringValue = "新建虚拟屏"
+            label.stringValue = "新建显示器"
             thumbnail.screenLayer.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
-            plus.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新建虚拟屏")?
+            plus.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新建显示器")?
                 .withSymbolConfiguration(.init(pointSize: 20, weight: .regular))
             plus.contentTintColor = .secondaryLabelColor
             thumbnail.addSubview(plus)
@@ -231,28 +240,15 @@ private final class PreviewTile: NSView {
         refresh()
     }
 
-    /// Label and outline follow the display's control state.
+    /// Title and status line follow the display's state.
     func refresh() {
         guard let display else { return }
         label.stringValue = display.label
-        if display.ended {
-            status.stringValue = "已结束"
-            status.textColor = .tertiaryLabelColor
-        } else if display.takeover {
-            status.stringValue = "你在操作"
-            status.textColor = .systemOrange
-        } else if let reason = display.helpRequest {
-            status.stringValue = "求助：\(reason)"
-            status.textColor = .systemOrange
-        } else {
-            status.stringValue = ""
-        }
+        let state = DisplayStatus(display, windowCount: WindowCatalog.windows(on: display).count)
+        status.attributedStringValue = state.attributed(state.short, size: 10.5, alignment: .center)
         needsLayout = true
-        toolTip = display.helpRequest.map { "\(display.label)\n需要帮忙：\($0)" } ?? display.label
-        thumbnail.setOutline(display.awaitsUser ? .systemOrange : nil, width: 2)
-        // An Ended Display stays for review, dimmed.
-        thumbnail.alphaValue = display.ended ? 0.5 : 1
-        thumbnail.showPointer(display.takeover ? nil : display.pointer)
+        toolTip = "\(display.label)\n\(state.long)"
+        thumbnail.showPointer(display.takeover || display.ended ? nil : display.pointer)
         lift()
     }
 
@@ -262,7 +258,11 @@ private final class PreviewTile: NSView {
     override func layout() {
         super.layout()
         thumbnail.frame = CGRect(x: 0, y: Self.labelHeight, width: bounds.width, height: bounds.height - Self.labelHeight)
-        if status.stringValue.isEmpty {
+        if display == nil, bounds.width < 60 {
+            // The narrow "+": no caption, the symbol says it.
+            label.frame = .zero
+            status.frame = .zero
+        } else if status.stringValue.isEmpty {
             label.frame = CGRect(x: 0, y: 11, width: bounds.width, height: 16)
             status.frame = .zero
         } else {
@@ -280,8 +280,16 @@ private final class PreviewTile: NSView {
                                        owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        if display == nil, bounds.width < 60 { HoverHint.show("新建显示器", for: self) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        HoverHint.hide()
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     @objc private func dismissTapped() {

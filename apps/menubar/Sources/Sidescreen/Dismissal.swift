@@ -35,7 +35,7 @@ enum Dismissal {
                         fate: fate(origin: record?.origin, disposition: record?.disposition, ofLaunchedApp: ofLaunchedApp),
                         locked: record?.origin == .handedOver, home: record?.home,
                         reason: reason(origin: record?.origin, disposition: record?.disposition,
-                                       ofLaunchedApp: ofLaunchedApp))
+                                       ofLaunchedApp: ofLaunchedApp, agent: display.agentName))
         }
     }
 
@@ -54,14 +54,15 @@ enum Dismissal {
         }
     }
 
-    private static func reason(origin: WindowOrigin?, disposition: Disposition?, ofLaunchedApp: Bool) -> String {
+    private static func reason(origin: WindowOrigin?, disposition: Disposition?, ofLaunchedApp: Bool,
+                               agent: String) -> String {
         switch (origin, disposition) {
-        case (.handedOver, _): "你交给 agent 的窗口"
-        case (_, .keep): "agent 建议保留"
-        case (_, .close): "agent 建议关掉"
-        case (.launched, nil): "agent 打开的，没给意见"
-        case (.placed, nil), (.found, nil): "agent 移进来的，没给意见"
-        case (nil, nil): ofLaunchedApp ? "agent 打开的 app 的窗口" : "不是 agent 放进来的"
+        case (.handedOver, _): "你交出的窗口"
+        case (_, .keep): "\(agent) 建议保留"
+        case (_, .close): "\(agent) 建议关闭"
+        case (.launched, nil): "\(agent) 打开的，未指定去向"
+        case (.placed, nil), (.found, nil): "\(agent) 移进来的，未指定去向"
+        case (nil, nil): ofLaunchedApp ? "\(agent) 打开的 app 的窗口" : "不是 \(agent) 放进来的"
         }
     }
 

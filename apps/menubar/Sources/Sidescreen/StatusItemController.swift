@@ -58,15 +58,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         preview.onDismiss = { [weak self] display in self?.dismiss(display) }
 
         control.onCloseRequest = { [weak self] in self?.closePanel() }
-        control.onPullWindow = { [weak self] in self?.pullFrontmostWindow() }
-        control.onSendWindowBack = { [weak self] in self?.sendWindowBack() }
         control.onDismiss = { [weak self] display in self?.dismiss(display) }
 
         displays.observe { [weak self] in
             guard let self, self.preview.isShown else { return }
             self.preview.show(below: self.iconRect ?? self.morphAnchor)
         }
-        displays.observeState { [weak self] _ in self?.updateIcon() }
+        displays.observeState { [weak self] display in
+            self?.updateIcon()
+            guard display.ended else { return }
+            // Give windows the agent closed on its way out a moment to go.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                MainActor.assumeIsolated { self?.sweepEnded() }
+            }
+        }
 
         dragWatcher.dropRect = { [weak control] in control?.dropRect }
         dragWatcher.onHover = { [weak control] inside in control?.showDropTarget(inside) }
@@ -100,6 +105,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 case "create": self.createDisplay()
                 case "hint": self.control.debugHint(Int(id))
                 case "answer": self.control.debugAnswerDismiss(id != 0)
+                case "focus": self.control.debugFocus()
                 case "dismiss": if let display = self.displays.display(withID: id) { self.dismiss(display) }
                 default:
                     if let display = self.displays.display(withID: id) { self.openPanel(display, from: self.morphAnchor) }
@@ -181,6 +187,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 guard let self else { return }
                 if wantsPreview, let anchor = self.iconRect {
                     self.preview.activeDisplayID = self.control.isVisible ? self.control.display?.id : nil
+                    self.sweepEnded()
                     self.preview.show(below: anchor)
                 } else if !wantsPreview {
                     self.preview.hide()
@@ -207,6 +214,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         } else {
             peekLatched = true
             preview.activeDisplayID = control.isVisible ? control.display?.id : nil
+            sweepEnded()
             preview.show(below: iconRect ?? morphAnchor)
         }
     }
@@ -289,7 +297,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func dismissNow(_ display: VirtualDisplay, items: [Dismissal.Item]) {
-        displays.end(display)
+        displays.end(display, reason: .finished)
         Task {
             await Dismissal.execute(items)
             remove(display)
@@ -313,25 +321,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         displays.remove(display)
     }
 
-    private func pullFrontmostWindow() {
-        guard let display = control.display ?? displays.displays.first else { return }
-        Task {
-            do {
-                try await Handover.perform(try WindowMover.frontmostWindow(), from: nil, onto: display)
-            } catch {
-                NSSound.beep()
-            }
-        }
-    }
-
-    private func sendWindowBack() {
-        guard let display = control.display, let target = forwarders.forwarder(for: display.id).focusedTarget
-        else { return NSSound.beep() }
-        let record = display.records[target.windowID]
-        display.forget(target.windowID)
-        Task {
-            await Dismissal.giveBack(Dismissal.Item(target: target, app: "", title: "", fate: .giveBack,
-                                                    locked: true, home: record?.home))
+    /// An ended display with no windows has nothing to review: it goes.
+    private func sweepEnded() {
+        for display in displays.displays where display.ended && WindowCatalog.windows(on: display).isEmpty {
+            remove(display)
         }
     }
 
@@ -349,17 +342,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func showMenu() {
         let menu = NSMenu()
         menu.delegate = self
-        menu.addItem(withTitle: "新建虚拟屏", action: #selector(menuCreate), keyEquivalent: "n").target = self
-        if !displays.displays.isEmpty {
-            menu.addItem(withTitle: "把前台窗口拉进虚拟屏", action: #selector(menuPull), keyEquivalent: "").target = self
-            let removeMenu = NSMenu()
-            for display in displays.displays {
-                let entry = removeMenu.addItem(withTitle: display.label, action: #selector(menuRemove(_:)), keyEquivalent: "")
-                entry.target = self
-                entry.representedObject = NSNumber(value: display.id)
-            }
-            menu.addItem(withTitle: "关闭显示器", action: nil, keyEquivalent: "").submenu = removeMenu
-        }
+        menu.addItem(withTitle: "新建显示器", action: #selector(menuCreate), keyEquivalent: "n").target = self
         menu.addItem(.separator())
         if !aerospace.conflicts.isEmpty {
             for conflict in aerospace.conflicts {
@@ -399,13 +382,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func menuCreate() { createDisplay() }
-    @objc private func menuPull() { pullFrontmostWindow() }
     @objc private func menuPermissions() { Permissions.requestMissing() }
 
-    @objc private func menuRemove(_ sender: NSMenuItem) {
-        guard let id = (sender.representedObject as? NSNumber)?.uint32Value,
-              let display = displays.display(withID: id)
-        else { return }
-        dismiss(display)
-    }
 }

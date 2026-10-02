@@ -5,16 +5,16 @@ Sidescreen gives each AI agent session its own virtual display on the user's Mac
 ## Language
 
 **Agent Display**:
-A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen, and outlives the session until the user dismisses it.
+A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen. When the session stops using it, it closes by itself if no window is left on it, and otherwise becomes a Review Display. The user can also create one from Peek; it then has no Agent Session.
 _Avoid_: Sidescreen (the app's name), virtual screen, screen, bay
 
 **Display Label**:
 How the user tells Agent Displays apart: the client's name plus a task title the agent gives when creating the display, or the project folder when it gives none.
 _Avoid_: display name, title
 
-**Ended Display**:
-An Agent Display whose Agent Session has finished. It keeps its windows for the user to review and accepts no agent input.
-_Avoid_: orphaned display, dead display
+**Review Display** (待查看显示器):
+An Agent Display whose Agent Session stopped using it, by `end_display` or a closed connection, while windows remain on it. It accepts no agent input and waits for the user to decide where its windows go. It says nothing about whether the task succeeded.
+_Avoid_: Ended Display, finished display, orphaned display, dead display
 
 **Agent Session**:
 One run of one agent (a Claude Code or Codex conversation, for example) connected to Sidescreen. It has at most one Agent Display, and many sessions never get one.
@@ -25,11 +25,11 @@ The floating panel that shows one Agent Display live and lets the user operate i
 _Avoid_: control panel, popup, window
 
 **Peek**:
-The strip of live thumbnails of every Agent Display that appears when the user hovers the menu bar icon.
+The strip of live thumbnails of every Agent Display that appears when the user hovers the menu bar icon, and stays up after a click on it. Displays in use come first, Review Displays after them.
 _Avoid_: preview, hover panel
 
 **Takeover**:
-A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer.
+A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It ends only when the user hands control back; collapsing the Viewer or switching displays keeps it.
 _Avoid_: pause, lock, manual mode
 
 **Help Request**:

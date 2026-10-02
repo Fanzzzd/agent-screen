@@ -80,8 +80,8 @@ const endDisplay = define({
   name: "end_display",
   title: "End Agent Display",
   description: [
-    "Finish with the display. It stays visible to the user for review but accepts no more input, and its",
-    "display_id stops working. Give each window a set_disposition first: the user dismisses the display later."
+    "Finish with the display. It accepts no more input and its display_id stops working. If windows remain,",
+    "it waits for the user to review them; give each a set_disposition first. An empty display closes."
   ].join(" "),
   parameters: Schema.Struct({ display_id: DisplayId }),
   destructive: true,

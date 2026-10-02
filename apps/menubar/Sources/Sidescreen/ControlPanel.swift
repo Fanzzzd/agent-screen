@@ -18,8 +18,6 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     var isVisible: Bool { state == .opening || state == .open }
 
-    var onPullWindow: (() -> Void)?
-    var onSendWindowBack: (() -> Void)?
     var onCloseRequest: (() -> Void)?
     var onDismiss: ((VirtualDisplay) -> Void)?
 
@@ -35,7 +33,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     /// Room around the card for its shadow.
     private let margin: CGFloat = 56
     private let cornerRadius: CGFloat = 22
-    private let headerHeight: CGFloat = 40
+    private let headerHeight: CGFloat = 52
     private let inset: CGFloat = 8
 
     /// Where the card rests, in screen coordinates. Survives close/open so
@@ -57,21 +55,23 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         super.init()
 
         screen.cornerRadius = 13
-        header.onPull = { [weak self] in self?.onPullWindow?() }
-        header.onSendBack = { [weak self] in self?.onSendWindowBack?() }
         header.onClose = { [weak self] in self?.onCloseRequest?() }
-        header.onDismiss = { [weak self] in
+        header.onPrimary = { [weak self] in
             guard let self, let display = self.display else { return }
-            self.onDismiss?(display)
+            if display.ended {
+                self.onDismiss?(display)
+            } else if display.takeover {
+                self.displays.endTakeover(display)
+            } else {
+                self.displays.beginTakeover(display)
+                self.panel.makeKey()
+                self.panel.makeFirstResponder(self.screen)
+            }
         }
-        header.onStepIn = { [weak self] in
+        header.onWindows = { [weak self] anchor in
             guard let self, let display = self.display else { return }
-            self.displays.beginTakeover(display)
-            self.panel.makeFirstResponder(self.screen)
-        }
-        header.onHandBack = { [weak self] in
-            guard let self, let display = self.display else { return }
-            self.displays.endTakeover(display)
+            let menu = self.windowMenu(for: display)
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
         }
         // The user's first input takes the display over from its agent.
         screen.onUserInput = { [weak self] in
@@ -135,9 +135,9 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         generation += 1
         let token = generation
         state = .opening
+        // Watching only: the keyboard stays with the user's app until they
+        // click into the display.
         panel.orderFrontRegardless()
-        panel.makeKey()
-        panel.makeFirstResponder(screen)
 
         let layer = beginMorph()
         let collapsed = Motion.collapse(proxy.view.frame, into: panel.convertFromScreen(source))
@@ -160,8 +160,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     func close(to destination: CGRect) {
         guard isVisible else { return }
         sheet?.onAnswer?(nil)
-        // Collapsing the Viewer hands the display back.
-        if let display { displays.endTakeover(display) }
+        // Collapsing keeps a Takeover: only 让 … 继续 hands the display back.
         // Interrupting an open continues from the proxy's current pose.
         let current = state == .opening ? proxy.view.layer?.presentation() : nil
         let restingOnScreen = panel.convertToScreen(card.frame)
@@ -245,7 +244,6 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         if let old = self.display, old !== display {
             sheet?.onAnswer?(nil)
             hub.detach(screen.screenLayer, from: old.id)
-            displays.endTakeover(old)
         }
         self.display = display
         screen.displayID = display.id
@@ -265,8 +263,8 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     #if DEBUG
     /// Show the hover hint of the n-th header button, for screenshot checks.
     func debugHint(_ index: Int) {
-        func buttons(in view: NSView) -> [SymbolButton] {
-            view.subviews.flatMap { ($0 as? SymbolButton).map { [$0] } ?? buttons(in: $0) }
+        func buttons(in view: NSView) -> [ActionButton] {
+            view.subviews.flatMap { ($0 as? ActionButton).map { [$0] } ?? buttons(in: $0) }
         }
         let all = buttons(in: header).filter { !$0.isHidden }
         guard all.indices.contains(index) else { return }
@@ -276,6 +274,12 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     #if DEBUG
     func debugAnswerDismiss(_ confirmed: Bool) { sheet?.answer(confirmed) }
+
+    /// Make the panel key and report whether AppKit agrees.
+    func debugFocus() {
+        panel.makeKey()
+        NSLog("Sidescreen focus: keyWindow is panel = \(NSApp.keyWindow === panel)")
+    }
 
     #endif
 
@@ -341,7 +345,10 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         dropHighlighted = on
         if on {
             screen.setOutline(.controlAccentColor, width: 4)
-            header.subtitle = "松手把窗口交给 agent"
+            let agent = display?.agentName ?? "agent"
+            header.status = NSAttributedString(string: "松手把窗口交给 \(agent)", attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.controlAccentColor,
+            ])
         } else {
             refreshState()
         }
@@ -355,26 +362,89 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Header and outline follow the display's control state.
+    /// The header follows the display's state.
     private func refreshState() {
         guard let display else { return }
-        let size = "\(Int(display.size.width)) × \(Int(display.size.height))"
-        if display.ended {
-            header.mode = .ended
-            header.subtitle = "已结束 · \(size)"
-        } else if display.takeover {
-            header.mode = .takeover
-            header.subtitle = display.helpRequest.map { "你在操作 · 求助：\($0)" } ?? "你在操作，agent 暂停"
-        } else if let reason = display.helpRequest {
-            header.mode = .help
-            header.subtitle = "需要你帮忙：\(reason)"
-        } else {
-            header.mode = display.owner == nil ? .idle : .agent
-            header.subtitle = size
+        let count = WindowCatalog.windows(on: display).count
+        let state = DisplayStatus(display, windowCount: count)
+        header.status = state.attributed(state.long, size: 12)
+        header.windowCount = count
+        header.primary = switch state.kind {
+        case .manual: .none
+        case .agent: .stepIn(urgent: false)
+        case .help: .stepIn(urgent: true)
+        case .takeover: .handBack(agent: display.agentName)
+        case .review, .disconnected: .review
         }
-        screen.setOutline(display.awaitsUser ? .systemOrange : nil)
+        if !dropHighlighted { screen.setOutline(nil) }
         // The user's own hand needs no marker while they operate.
-        screen.showPointer(display.takeover ? nil : display.pointer)
+        screen.showPointer(display.takeover || display.ended ? nil : display.pointer)
+    }
+
+    /// 窗口 menu: hand one of the user's windows over, take one back, or
+    /// close the display.
+    private func windowMenu(for display: VirtualDisplay) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let agent = display.agentName
+        let handTitle = display.owner == nil ? "放到这块显示器上" : "交给 \(agent)"
+        let hand = NSMenuItem(title: handTitle, action: nil, keyEquivalent: "")
+        let handMenu = NSMenu()
+        let agentScreens = displays.displays.map(\.bounds)
+        for entry in WindowCatalog.all() where !agentScreens.contains(where: { $0.intersects(entry.global) }) {
+            let window = entry.window
+            handMenu.addItem(ActionMenuItem(title: Self.name(window), image: Self.icon(window.target.pid)) { [weak self] in
+                Task {
+                    do {
+                        try await Handover.perform(window.target, from: nil, onto: display)
+                        self?.flashAccepted()
+                    } catch {
+                        NSSound.beep()
+                    }
+                }
+            })
+        }
+        if handMenu.items.isEmpty { handMenu.addItem(withTitle: "你的桌面上没有窗口", action: nil, keyEquivalent: "").isEnabled = false }
+        hand.submenu = handMenu
+        hand.isEnabled = !display.ended
+        menu.addItem(hand)
+
+        let back = NSMenuItem(title: "取回窗口", action: nil, keyEquivalent: "")
+        let backMenu = NSMenu()
+        for window in WindowCatalog.windows(on: display) {
+            backMenu.addItem(ActionMenuItem(title: Self.name(window), image: Self.icon(window.target.pid)) { [weak self] in
+                self?.takeBack(window.target, from: display)
+            })
+        }
+        if backMenu.items.isEmpty { backMenu.addItem(withTitle: "这块显示器上没有窗口", action: nil, keyEquivalent: "").isEnabled = false }
+        back.submenu = backMenu
+        menu.addItem(back)
+
+        menu.addItem(.separator())
+        menu.addItem(ActionMenuItem(title: "关闭显示器…") { [weak self] in self?.onDismiss?(display) })
+        return menu
+    }
+
+    /// Return one window to the user: its old place for a Handover, the
+    /// main display otherwise.
+    private func takeBack(_ target: WindowTarget, from display: VirtualDisplay) {
+        let home = display.records[target.windowID]?.home
+        display.forget(target.windowID)
+        Task {
+            await Dismissal.giveBack(Dismissal.Item(target: target, app: "", title: "", fate: .giveBack,
+                                                    locked: true, home: home))
+            self.refreshState()
+        }
+    }
+
+    private static func name(_ window: WindowCatalog.Window) -> String {
+        window.title.isEmpty || window.title == window.app ? window.app : "\(window.app) — \(window.title)"
+    }
+
+    private static func icon(_ pid: pid_t) -> NSImage? {
+        guard let icon = NSRunningApplication(processIdentifier: pid)?.icon?.copy() as? NSImage else { return nil }
+        icon.size = NSSize(width: 16, height: 16)
+        return icon
     }
 
     // MARK: Layout
@@ -418,103 +488,81 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     }
 }
 
-/// Title strip. Dragging it moves the panel.
+/// Title strip: Display Label and status on the left, the action that
+/// matters now, the window menu and collapse on the right. Dragging it
+/// moves the panel.
 private final class HeaderView: NSView {
-    enum Mode { case idle, agent, help, takeover, ended }
+    enum Primary: Equatable { case none, stepIn(urgent: Bool), handBack(agent: String), review }
 
-    var onPull: (() -> Void)?
-    var onSendBack: (() -> Void)?
+    var onPrimary: (() -> Void)?
+    /// Open the window menu under the given button.
+    var onWindows: ((NSView) -> Void)?
     var onClose: (() -> Void)?
-    var onDismiss: (() -> Void)?
-    var onHandBack: (() -> Void)?
-    var onStepIn: (() -> Void)?
 
     var title = "" { didSet { titleLabel.stringValue = title; needsLayout = true } }
-    var subtitle = "" { didSet { subtitleLabel.stringValue = subtitle; needsLayout = true } }
-    var mode = Mode.idle {
-        didSet {
-            dot.layer?.backgroundColor = switch mode {
-            case .idle, .agent: NSColor.systemGreen.cgColor
-            case .help, .takeover: NSColor.systemOrange.cgColor
-            case .ended: NSColor.tertiaryLabelColor.cgColor
-            }
-            // Asking for help or paused for the user is what to read first.
-            subtitleLabel.textColor = mode == .help || mode == .takeover ? .systemOrange : .secondaryLabelColor
-            handBack.isHidden = mode != .takeover
-            stepIn.isHidden = mode != .help
-            dismissPill.isHidden = mode != .ended
-            // An Ended Display takes no Handover; closing it is what's left.
-            pullButton.isHidden = mode == .ended
-            sendBackButton.isHidden = mode == .ended
-            dismissButton.isHidden = mode == .ended
-            needsLayout = true
-        }
+    var status = NSAttributedString() { didSet { statusLabel.attributedStringValue = status; needsLayout = true } }
+    var primary = Primary.none { didSet { if primary != oldValue { updatePrimary() } } }
+    var windowCount = 0 {
+        didSet { windowsButton.set(title: "窗口 \(windowCount)", symbol: "macwindow.on.rectangle"); needsLayout = true }
     }
 
-    private lazy var dismissPill = PillButton(title: "关闭显示器", tint: .controlAccentColor) { [weak self] in
-        self?.onDismiss?()
-    }
-    // Spelled out: no symbol says "your frontmost window" or "give back".
-    private lazy var pullButton = GhostButton(title: "拉入前台窗口") { [weak self] in self?.onPull?() }
-    private lazy var sendBackButton = GhostButton(title: "还回窗口") { [weak self] in self?.onSendBack?() }
-    private lazy var dismissButton = SymbolButton(symbol: "xmark", tooltip: "关闭这块显示器") { [weak self] in
-        self?.onDismiss?()
-    }
-    private lazy var stepIn = PillButton(title: "接手", tint: .systemOrange) { [weak self] in
-        self?.onStepIn?()
-    }
-    private lazy var handBack = PillButton(title: "交还控制", tint: .systemOrange) { [weak self] in
-        self?.onHandBack?()
-    }
-
-    private let dot = NSView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let subtitleLabel = NSTextField(labelWithString: "")
-    private lazy var buttons = NSStackView(views: [
-        pullButton, sendBackButton, dismissButton,
-        SymbolButton(symbol: "chevron.up", tooltip: "收起到菜单栏") { [weak self] in self?.onClose?() },
-    ])
+    private let statusLabel = NSTextField(labelWithString: "")
+    private lazy var primaryButton = ActionButton(title: "") { [weak self] _ in self?.onPrimary?() }
+    private lazy var windowsButton = ActionButton(title: "窗口 0", symbol: "macwindow.on.rectangle") { [weak self] button in
+        self?.onWindows?(button)
+    }
+    private lazy var closeButton = ActionButton(title: "", symbol: "chevron.up", hint: "收起到菜单栏") { [weak self] _ in
+        self?.onClose?()
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        dot.wantsLayer = true
-        dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
-        dot.layer?.cornerRadius = 3.5
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = .labelColor
-        subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        subtitleLabel.textColor = .secondaryLabelColor
-        buttons.spacing = 2
-        buttons.setCustomSpacing(10, after: sendBackButton)
-        handBack.isHidden = true
-        stepIn.isHidden = true
-        dismissPill.isHidden = true
-        subtitleLabel.lineBreakMode = .byTruncatingTail
-        [dot, titleLabel, subtitleLabel, stepIn, handBack, dismissPill, buttons].forEach(addSubview)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        primaryButton.isHidden = true
+        [titleLabel, statusLabel, primaryButton, windowsButton, closeButton].forEach(addSubview)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    private func updatePrimary() {
+        switch primary {
+        case .none:
+            primaryButton.isHidden = true
+        case let .stepIn(urgent):
+            primaryButton.set(title: "接手操作", symbol: urgent ? "hand.raised.fill" : nil)
+            primaryButton.setProminent(urgent ? .systemOrange : nil)
+            primaryButton.isHidden = false
+        case let .handBack(agent):
+            primaryButton.set(title: "让 \(agent) 继续", symbol: "play.fill")
+            primaryButton.setProminent(.controlAccentColor)
+            primaryButton.isHidden = false
+        case .review:
+            primaryButton.set(title: "处理窗口…", symbol: nil)
+            primaryButton.setProminent(.controlAccentColor)
+            primaryButton.isHidden = false
+        }
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
-        let midY = bounds.midY
-        dot.frame = CGRect(x: 18, y: midY - 3.5, width: 7, height: 7)
-        titleLabel.sizeToFit()
-        titleLabel.frame.origin = CGPoint(x: dot.frame.maxX + 9, y: midY - titleLabel.frame.height / 2)
-        subtitleLabel.sizeToFit()
-        subtitleLabel.frame.origin = CGPoint(x: titleLabel.frame.maxX + 8,
-                                             y: midY - subtitleLabel.frame.height / 2)
-        let size = buttons.fittingSize
-        buttons.frame = CGRect(x: bounds.maxX - size.width - 10, y: midY - size.height / 2,
-                               width: size.width, height: size.height)
-        var trailing = buttons.frame.minX - 8
-        for pill in [handBack, stepIn, dismissPill] where !pill.isHidden {
-            let size = pill.fittingSize
-            pill.frame = CGRect(x: trailing - size.width, y: midY - size.height / 2, width: size.width, height: size.height)
-            trailing = pill.frame.minX - 8
+        let inset: CGFloat = 16
+        var trailing = bounds.maxX - 12
+        for button in [closeButton, windowsButton, primaryButton] where !button.isHidden {
+            let size = button.intrinsicContentSize
+            let width = button === closeButton ? size.height : size.width
+            button.frame = CGRect(x: trailing - width, y: bounds.midY - size.height / 2, width: width, height: size.height)
+            trailing = button.frame.minX - 8
         }
-        subtitleLabel.frame.size.width = max(0, min(subtitleLabel.frame.width, trailing - subtitleLabel.frame.minX))
+        let textWidth = max(0, trailing - 8 - inset)
+        titleLabel.frame = CGRect(x: inset, y: bounds.midY + 1, width: textWidth, height: 17)
+        statusLabel.frame = CGRect(x: inset, y: bounds.midY - 17, width: textWidth, height: 16)
     }
 
     override var mouseDownCanMoveWindow: Bool { false }

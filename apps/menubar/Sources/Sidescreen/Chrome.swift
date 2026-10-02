@@ -127,37 +127,106 @@ enum Glass {
     }
 }
 
-/// Borderless SF Symbol button with a soft hover plate.
-final class SymbolButton: NSButton {
+/// A Liquid Glass capsule button: an NSGlassEffectView, tinted for the
+/// primary action. NSButton's own glass bezel is not used because AppKit
+/// draws buttons of an inactive app grey and untinted, and Sidescreen never
+/// becomes the active app. Glass views render the same either way.
+/// Icon-only buttons explain themselves through HoverHint.
+final class ActionButton: NSControl {
+    private let handler: (ActionButton) -> Void
+    private let hint: String?
+    private let surface: NSView
+    private let content: NSView
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private var tint: NSColor?
     private var hovering = false { didSet { updateAppearance() } }
+    private var pressed = false { didSet { updateAppearance() } }
+    private static let height: CGFloat = 28
 
-    init(symbol: String, tooltip: String, action: @escaping () -> Void) {
+    init(title: String, symbol: String? = nil, hint: String? = nil, action: @escaping (ActionButton) -> Void) {
         self.handler = action
-        self.hint = tooltip
-        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        isBordered = false
-        imagePosition = .imageOnly
-        target = self
-        self.action = #selector(fire)
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.cornerCurve = .continuous
-        updateAppearance()
+        self.hint = hint
+        (surface, content) = Glass.make(cornerRadius: Self.height / 2)
+        super.init(frame: .zero)
+        surface.frame = bounds
+        surface.autoresizingMask = [.width, .height]
+        addSubview(surface)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        icon.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+        content.addSubview(icon)
+        content.addSubview(label)
+        set(title: title, symbol: symbol)
+        setAccessibilityRole(.button)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    private let handler: () -> Void
-    /// Shown by HoverHint, since system tooltips never appear on our
-    /// non-activating panels.
-    private let hint: String
+    func set(title: String, symbol: String?) {
+        label.stringValue = title
+        label.isHidden = title.isEmpty
+        icon.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: hint ?? title) }
+        icon.isHidden = icon.image == nil
+        setAccessibilityLabel(hint ?? title)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        updateAppearance()
+    }
 
-    @objc private func fire() {
+    /// The one action that matters right now, glass tinted with `tint`.
+    func setProminent(_ tint: NSColor?) {
+        self.tint = tint
+        updateAppearance()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        if label.isHidden { return NSSize(width: Self.height, height: Self.height) }
+        let text = ceil(label.intrinsicContentSize.width)
+        return NSSize(width: text + (icon.isHidden ? 0 : 18) + 28, height: Self.height)
+    }
+
+    override func layout() {
+        super.layout()
+        let iconSize: CGFloat = 16
+        let text = label.isHidden ? 0 : ceil(label.intrinsicContentSize.width)
+        let total = text + (icon.isHidden ? 0 : iconSize) + (icon.isHidden || label.isHidden ? 0 : 4)
+        var x = (bounds.width - total) / 2
+        if !icon.isHidden {
+            icon.frame = CGRect(x: x, y: (bounds.height - iconSize) / 2, width: iconSize, height: iconSize)
+            x += iconSize + 4
+        }
+        let height = label.intrinsicContentSize.height
+        label.frame = CGRect(x: x, y: (bounds.height - height) / 2, width: text, height: height)
+    }
+
+    private func updateAppearance() {
+        if #available(macOS 26.0, *), let glass = surface as? NSGlassEffectView {
+            glass.tintColor = tint
+        }
+        // Glass tint alone barely shows on a dark card; fill the content too.
+        content.wantsLayer = true
+        content.layer?.cornerRadius = Self.height / 2
+        content.layer?.backgroundColor = tint?.withAlphaComponent(hovering ? 1 : 0.88).cgColor
+        let foreground: NSColor = tint == nil ? .labelColor : .white
+        label.textColor = foreground
+        icon.contentTintColor = foreground
+        alphaValue = pressed ? 0.7 : 1
+        surface.alphaValue = hovering || tint != nil ? 1 : 0.85
+    }
+
+    override func mouseDown(with event: NSEvent) { pressed = true }
+
+    override func mouseDragged(with event: NSEvent) {
+        pressed = bounds.contains(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        pressed = false
+        guard inside else { return }
         HoverHint.hide()
-        handler()
+        handler(self)
     }
 
     override func updateTrackingAreas() {
@@ -172,102 +241,35 @@ final class SymbolButton: NSButton {
         showHint()
     }
 
-    func showHint() { HoverHint.show(hint, for: self) }
-
     override func mouseExited(with event: NSEvent) {
         hovering = false
         HoverHint.hide()
     }
 
-    private func updateAppearance() {
-        contentTintColor = hovering ? .labelColor : .secondaryLabelColor
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.allowsImplicitAnimation = true
-            layer?.backgroundColor = hovering ? NSColor.labelColor.withAlphaComponent(0.1).cgColor : .clear
-        }
+    func showHint() {
+        if let hint { HoverHint.show(hint, for: self) }
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func accessibilityPerformPress() -> Bool {
+        handler(self)
+        return true
     }
 }
 
-/// Plain text button with the same hover plate as SymbolButton, for actions
-/// a symbol cannot name.
-final class GhostButton: NSButton {
+/// A menu item that runs a closure.
+final class ActionMenuItem: NSMenuItem {
     private let handler: () -> Void
-    private let label: String
-    private var hovering = false { didSet { updateAppearance() } }
 
-    init(title: String, action: @escaping () -> Void) {
+    init(title: String, image: NSImage? = nil, action: @escaping () -> Void) {
         self.handler = action
-        self.label = title
-        super.init(frame: .zero)
-        isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.cornerCurve = .continuous
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
         target = self
-        self.action = #selector(fire)
-        updateAppearance()
+        self.image = image
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: ceil(attributedTitle.size().width) + 18, height: 26)
-    }
-
-    @objc private func fire() { handler() }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
-
-    private func updateAppearance() {
-        attributedTitle = NSAttributedString(string: label, attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: hovering ? NSColor.labelColor : NSColor.secondaryLabelColor,
-        ])
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.allowsImplicitAnimation = true
-            layer?.backgroundColor = hovering ? NSColor.labelColor.withAlphaComponent(0.1).cgColor : .clear
-        }
-    }
-}
-
-/// A small tinted text button for the one action that matters right now.
-final class PillButton: NSButton {
-    private let handler: () -> Void
-
-    init(title: String, tint: NSColor, action: @escaping () -> Void) {
-        self.handler = action
-        super.init(frame: .zero)
-        attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: tint,
-        ])
-        isBordered = false
-        wantsLayer = true
-        layer?.backgroundColor = tint.withAlphaComponent(0.16).cgColor
-        layer?.cornerRadius = 11
-        layer?.cornerCurve = .continuous
-        target = self
-        self.action = #selector(fire)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var fittingSize: NSSize {
-        let text = attributedTitle.size()
-        return NSSize(width: ceil(text.width) + 22, height: 22)
-    }
+    required init(coder: NSCoder) { fatalError() }
 
     @objc private func fire() { handler() }
 }

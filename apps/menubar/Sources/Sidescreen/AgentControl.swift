@@ -36,7 +36,7 @@ final class AgentControl {
         switch method {
         case "createDisplay": return try createDisplay(connection: connection, p)
         case "endDisplay":
-            displays.end(try display(p, live: false))
+            displays.end(try display(p, live: false), reason: .finished)
             return [:]
         case "screenshot": return try await screenshot(p)
         case "click":
@@ -180,7 +180,7 @@ final class AgentControl {
     /// The control connection closed: its Agent Session is over.
     func connectionClosed(_ connection: Int) {
         for display in displays.displays where display.owner?.connectionID == connection {
-            displays.end(display)
+            displays.end(display, reason: .disconnected)
         }
     }
 
@@ -272,6 +272,7 @@ final class AgentControl {
     private func display(_ p: Params, live: Bool = true) throws -> VirtualDisplay {
         guard let id = p.int("displayId") else { throw ControlError.invalid("displayId is required") }
         guard let display = displays.display(withID: CGDirectDisplayID(id)) else {
+            if displays.retired.contains(CGDirectDisplayID(id)) { throw ControlError.ended("display \(id) has ended") }
             throw ControlError.notFound("display \(id) does not exist; call create_display again")
         }
         if live, display.ended { throw ControlError.ended("display \(id) has ended") }
@@ -416,10 +417,24 @@ enum WindowCatalog {
     @MainActor
     static func windows(on display: VirtualDisplay) -> [Window] {
         let area = display.bounds
-        return all().filter { area.contains(CGPoint(x: $0.global.midX, y: $0.global.midY)) }.map {
+        let others = activeDisplays().filter { $0 != display.id }.map(CGDisplayBounds)
+        // A window counts if it touches the display and its center is on no
+        // other display. A window hanging off the bottom edge still counts,
+        // so dismissing the display does not strand it off-screen.
+        return all().filter { entry in
+            let center = CGPoint(x: entry.global.midX, y: entry.global.midY)
+            return entry.global.intersects(area) && (area.contains(center) || !others.contains { $0.contains(center) })
+        }.map {
             Window(target: $0.window.target, app: $0.window.app, title: $0.window.title,
                    bounds: $0.global.offsetBy(dx: -area.minX, dy: -area.minY))
         }
+    }
+
+    private static func activeDisplays() -> [CGDirectDisplayID] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(32, &ids, &count)
+        return Array(ids.prefix(Int(count)))
     }
 
     static func window(_ id: CGWindowID) -> Window? {

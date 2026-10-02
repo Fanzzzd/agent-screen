@@ -2,6 +2,8 @@ import AppKit
 import SidescreenPrivate
 
 /// The Agent Session an Agent Display belongs to.
+enum EndReason { case finished, disconnected }
+
 struct DisplayOwner: Equatable {
     /// Stable per client session: Claude Code's session ID, Codex's
     /// `session_id` from request metadata, or the MCP process as a fallback.
@@ -11,7 +13,7 @@ struct DisplayOwner: Equatable {
     /// Task title the agent gave, or the project folder name.
     let title: String
     /// The control connection that created the display. When it closes, the
-    /// display becomes an Ended Display.
+    /// display stops taking input (ADR 0004).
     let connectionID: Int
 }
 
@@ -24,8 +26,10 @@ final class VirtualDisplay {
     let size: CGSize
     /// Nil for displays the user created from the menu.
     let owner: DisplayOwner?
-    /// Set once the owning Agent Session is gone.
+    /// Set once the owning Agent Session stopped using the display.
     private(set) var ended = false
+    /// Why it ended: the agent called end_display, or its connection closed.
+    private(set) var endReason: EndReason?
     private let handle: CGVirtualDisplay
 
     /// Display Label: "Claude Code · Book flights".
@@ -50,7 +54,13 @@ final class VirtualDisplay {
     /// The agent has to wait for the user before it carries on.
     var awaitsUser: Bool { takeover || helpRequest != nil }
 
-    func markEnded() { ended = true }
+    func markEnded(_ reason: EndReason) {
+        ended = true
+        endReason = reason
+    }
+
+    /// The client's name for copy: "Codex", "Claude Code".
+    var agentName: String { owner?.client ?? "agent" }
 
     /// Record a window Sidescreen put here. A Handover stays a Handover even
     /// if the agent places the same window again.
@@ -138,6 +148,7 @@ final class DisplayManager {
     }
 
     func remove(_ display: VirtualDisplay) {
+        if display.ended { retired.insert(display.id) }
         displays.removeAll { $0 === display }
         notify()
     }
@@ -151,9 +162,13 @@ final class DisplayManager {
         displays.first { $0.owner?.sessionKey == sessionKey && !$0.ended }
     }
 
-    func end(_ display: VirtualDisplay) {
+    /// Ended displays that are gone. The agent still gets "ended", not
+    /// "does not exist", for them.
+    private(set) var retired: Set<CGDirectDisplayID> = []
+
+    func end(_ display: VirtualDisplay, reason: EndReason) {
         guard !display.ended else { return }
-        display.markEnded()
+        display.markEnded(reason)
         display.takeover = false
         display.helpRequest = nil
         display.pointer = nil

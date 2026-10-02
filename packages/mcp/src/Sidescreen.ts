@@ -17,7 +17,7 @@ export const socketPath = path.join(os.homedir(), "Library/Application Support/S
  *
  * The connection opens on the first call and stays open for the life of this
  * process. The app treats its closing as the end of the Agent Session, so the
- * session's display becomes an Ended Display when the MCP server exits.
+ * session's display stops taking input when the MCP server exits.
  */
 export class Sidescreen extends Context.Service<Sidescreen, {
   readonly call: (
