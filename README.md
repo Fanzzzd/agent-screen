@@ -68,6 +68,7 @@ Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, collapse, dismis
 - Private APIs only. This cannot ship on the App Store and may break on a future macOS.
 - The virtual display's own menu bar and status items do not take clicks from the panel.
 - The first click on a window only activates it, the same as a real click on an inactive window.
+- Clicks on an empty part of a display reach nothing. Passing them to Finder's desktop would trigger "click wallpaper to reveal desktop" and slide every window on every display aside.
 - `launch_app` on a running single-window app (Calculator) gets no new window. Quit it first or use `place_window`.
 - A window that refuses to close on dismissal, such as an Open panel or one with unsaved changes, is left to macOS, which moves it to the main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.

@@ -263,9 +263,12 @@ final class InputForwarder: @unchecked Sendable {
     }
 
     private static func onScreenWindows() -> [WindowInfo] {
-        // Desktop elements stay in: Finder's desktop window takes clicks on
-        // an empty display. Only the wallpaper itself is skipped below.
-        guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+        // The desktop is left out on purpose. A click on Finder's desktop
+        // window counts as a wallpaper click, and with "click wallpaper to
+        // reveal desktop" on (the default since macOS 14) it slides every
+        // window on every display aside, the user's included. A click on an
+        // empty part of an Agent Display therefore reaches nothing.
+        guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
                 as? [[String: Any]]
         else { return [] }
         let me = getpid()
@@ -273,6 +276,8 @@ final class InputForwarder: @unchecked Sendable {
             guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid != me,
                   let windowID = info[kCGWindowNumber as String] as? CGWindowID,
                   let layer = info[kCGWindowLayer as String] as? Int,
+                  // Anything below normal windows is desktop.
+                  layer >= 0,
                   // Skip the menu bar and status items that sit on every display.
                   layer != Int(CGWindowLevelForKey(.mainMenuWindow)),
                   layer != Int(CGWindowLevelForKey(.statusWindow)),
