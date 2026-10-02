@@ -18,6 +18,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// A new display reconfigures the screens, and AppKit then reports
     /// fresh hover events for the icon. Ignore them for a moment.
     private var hoverQuietUntil = Date.distantPast
+    /// A click opened Peek: it stays until the next click on the icon, a
+    /// click elsewhere, or a tile is chosen, whatever the pointer does.
+    private var peekLatched = false {
+        didSet { peekLatched ? watchOutsideClicks() : stopWatchingOutsideClicks() }
+    }
+    private var outsideClickMonitors: [Any] = []
 
     init(displays: DisplayManager, hub: StreamHub, forwarders: ForwarderPool,
          preview: PreviewPanelController, control: ControlPanelController, aerospace: AeroSpaceGuard) {
@@ -44,6 +50,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             self?.hoverChanged()
         }
         preview.onSelect = { [weak self] display, rect in
+            self?.peekLatched = false
             self?.preview.hide()
             self?.openPanel(display, from: rect)
         }
@@ -87,6 +94,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 guard let self else { return }
                 switch surface {
                 case "peek": self.preview.show(below: self.iconRect ?? self.morphAnchor)
+                case "click": self.clicked()
                 case "hide": self.preview.hide()
                 case "collapse": self.closePanel()
                 case "create": self.createDisplay()
@@ -117,6 +125,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// clicked the notification to do exactly that.
     func openForHelp(_ displayID: CGDirectDisplayID) {
         guard let display = displays.display(withID: displayID) else { return }
+        peekLatched = false
         preview.hide(animated: false)
         openPanel(display, from: morphAnchor)
         displays.beginTakeover(display)
@@ -154,7 +163,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// pointer can travel from the icon down into the preview.
     private func hoverChanged() {
         hoverTimer?.invalidate()
-        guard Date() >= hoverQuietUntil else { return }
+        guard Date() >= hoverQuietUntil, !peekLatched else { return }
         let wantsPreview = hoveringIcon || hoveringPreview
         guard wantsPreview != preview.isShown else { return }
         let delay = wantsPreview ? 0.12 : 0.28
@@ -176,19 +185,53 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func clicked() {
         hoverTimer?.invalidate()
         if NSApp.currentEvent?.type == .rightMouseUp {
+            peekLatched = false
             preview.hide(animated: false)
             showMenu()
             return
         }
-        preview.hide()
-        if control.isVisible {
-            closePanel()
-        } else if let display = control.display ?? displays.displays.first {
-            openPanel(display, from: morphAnchor)
-        } else if let anchor = iconRect {
-            // Nothing to open yet: show Peek, which offers a new display.
-            preview.show(below: anchor)
+        // The icon toggles Peek. A hover may already have shown it; the
+        // click then keeps it up.
+        if peekLatched {
+            peekLatched = false
+            preview.hide()
+        } else {
+            peekLatched = true
+            preview.activeDisplayID = control.isVisible ? control.display?.id : nil
+            preview.show(below: iconRect ?? morphAnchor)
         }
+    }
+
+    private func watchOutsideClicks() {
+        guard outsideClickMonitors.isEmpty else { return }
+        let kinds: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown]
+        let check: @Sendable () -> Void = { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.closeLatchedPeekIfOutside() }
+            }
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: kinds, handler: { _ in check() }) {
+            outsideClickMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: kinds, handler: { event in
+            check()
+            return event
+        }) {
+            outsideClickMonitors.append(local)
+        }
+    }
+
+    private func stopWatchingOutsideClicks() {
+        outsideClickMonitors.forEach(NSEvent.removeMonitor)
+        outsideClickMonitors.removeAll()
+    }
+
+    /// A click on the icon is handled by `clicked`; one on Peek by its tiles.
+    private func closeLatchedPeekIfOutside() {
+        let point = NSEvent.mouseLocation
+        guard peekLatched, !preview.cardFrame.contains(point), iconRect?.contains(point) != true else { return }
+        peekLatched = false
+        hoverChanged()
     }
 
     private func openPanel(_ display: VirtualDisplay, from rect: CGRect) {

@@ -1,6 +1,6 @@
 # Sidescreen
 
-A menu bar app that gives AI agents their own virtual displays on macOS. Hover the menu bar icon to see live thumbnails of every virtual display. Click to open a floating panel where you can operate that display without your real cursor leaving your screen.
+A menu bar app that gives AI agents their own virtual displays on macOS. Hover the menu bar icon to see live thumbnails of every virtual display, or click it to keep them up until you click elsewhere. Click a thumbnail to open a floating panel where you can operate that display without your real cursor leaving your screen.
 
 ## Layout
 
@@ -61,7 +61,7 @@ bun packages/mcp/scripts/control.ts         # Takeover and Help Request, needs a
 bun packages/mcp/scripts/smoke.ts           # end to end with Calculator
 ```
 
-Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, hide, collapse, create, dismiss, answer, hint) and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, click, hide, collapse, create, dismiss, answer, hint) and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Known limits
 

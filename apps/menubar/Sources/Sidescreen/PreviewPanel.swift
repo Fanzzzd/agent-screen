@@ -63,6 +63,9 @@ final class PreviewPanelController {
         }
     }
 
+    /// The card on screen.
+    var cardFrame: CGRect { panel.convertToScreen(card.frame) }
+
     func show(below anchor: CGRect) {
         rebuildTiles()
         let size = cardSize
