@@ -8,7 +8,13 @@ final class PreviewPanelController {
     /// Fires when the pointer enters or leaves the preview card.
     var onHoverChange: ((Bool) -> Void)?
 
-    private(set) var isShown = false
+    private(set) var isShown = false {
+        didSet {
+            #if DEBUG
+            if isShown != oldValue { NSLog("Sidescreen peek: \(isShown ? "shown" : "hidden")") }
+            #endif
+        }
+    }
     var onDismiss: ((VirtualDisplay) -> Void)?
     var activeDisplayID: CGDirectDisplayID? { didSet { tiles.forEach(markActive) } }
 

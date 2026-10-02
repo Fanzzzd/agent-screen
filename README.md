@@ -51,7 +51,7 @@ Development switches:
 - **Help Request.** `request_help` sends a notification and shows the reason in Peek and the Viewer. Clicking the notification opens the display in Takeover.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
 - **Handover.** Drag one of your windows onto the Viewer, or use the pull button. When the display is dismissed, the window returns to where it was.
-- **Dismissal.** Closing a display lists its windows with the agent's Disposition preselected, and you can change any of them. Quitting Sidescreen applies the same plan without asking.
+- **Dismissal.** Closing a display asks on the Viewer: it lists the windows with the agent's Disposition preselected, and you can change any of them. An empty display nobody uses closes without asking. Adding or closing a display keeps Peek and the Viewer open; the Viewer moves to the next display. Quitting Sidescreen applies the same plan without asking.
 
 ## Test
 
@@ -61,7 +61,7 @@ bun packages/mcp/scripts/control.ts         # Takeover and Help Request, needs a
 bun packages/mcp/scripts/smoke.ts           # end to end with Calculator
 ```
 
-Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, collapse, dismiss) and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, hide, collapse, create, dismiss, answer, hint) and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Known limits
 

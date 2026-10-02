@@ -15,6 +15,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var hoveringIcon = false
     private var hoveringPreview = false
     private var hoverTimer: Timer?
+    /// A new display reconfigures the screens, and AppKit then reports
+    /// fresh hover events for the icon. Ignore them for a moment.
+    private var hoverQuietUntil = Date.distantPast
 
     init(displays: DisplayManager, hub: StreamHub, forwarders: ForwarderPool,
          preview: PreviewPanelController, control: ControlPanelController, aerospace: AeroSpaceGuard) {
@@ -53,8 +56,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         control.onDismiss = { [weak self] display in self?.dismiss(display) }
 
         displays.observe { [weak self] in
-            guard let self, self.preview.isShown, let anchor = self.iconRect else { return }
-            self.preview.show(below: anchor)
+            guard let self, self.preview.isShown else { return }
+            self.preview.show(below: self.iconRect ?? self.morphAnchor)
         }
         displays.observeState { [weak self] _ in self?.updateIcon() }
 
@@ -86,7 +89,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 case "peek": self.preview.show(below: self.iconRect ?? self.morphAnchor)
                 case "hide": self.preview.hide()
                 case "collapse": self.closePanel()
+                case "create": self.createDisplay()
                 case "hint": self.control.debugHint(Int(id))
+                case "answer": self.control.debugAnswerDismiss(id != 0)
                 case "dismiss": if let display = self.displays.display(withID: id) { self.dismiss(display) }
                 default:
                     if let display = self.displays.display(withID: id) { self.openPanel(display, from: self.morphAnchor) }
@@ -149,6 +154,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// pointer can travel from the icon down into the preview.
     private func hoverChanged() {
         hoverTimer?.invalidate()
+        guard Date() >= hoverQuietUntil else { return }
         let wantsPreview = hoveringIcon || hoveringPreview
         guard wantsPreview != preview.isShown else { return }
         let delay = wantsPreview ? 0.12 : 0.28
@@ -196,31 +202,59 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func createDisplay() {
+        settleHoverAfterReconfiguration()
         guard let display = displays.create() else {
             NSSound.beep()
             return
         }
-        preview.hide()
-        // Give WindowServer a beat to finish bringing the display up.
+        // Peek stays up and grows a tile; the Viewer opens on the new
+        // display, or switches to it when already open.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            MainActor.assumeIsolated { self.openPanel(display, from: self.morphAnchor) }
+            MainActor.assumeIsolated { self.openPanel(display, from: self.iconRect ?? self.morphAnchor) }
+        }
+    }
+
+    /// Once the screens settle, follow the pointer again.
+    private func settleHoverAfterReconfiguration() {
+        hoverTimer?.invalidate()
+        hoverQuietUntil = Date().addingTimeInterval(1.2)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) {
+            MainActor.assumeIsolated { self.hoverChanged() }
         }
     }
 
     /// Dismiss a display after the user confirms what happens to its windows.
+    /// The question appears on the Viewer, so Peek and the Viewer stay up.
     func dismiss(_ display: VirtualDisplay) {
-        preview.hide(animated: false)
-        guard let items = Dismissal.confirm(Dismissal.plan(for: display), for: display) else { return }
+        let plan = Dismissal.plan(for: display)
+        guard Dismissal.needsConfirmation(plan, for: display) else { return dismissNow(display, items: plan) }
+        let live = Dismissal.isLive(display)
+        openPanel(display, from: iconRect ?? morphAnchor)
+        control.askDismiss(plan, live: live) { [weak self] items in
+            guard let self, let items else { return }
+            self.dismissNow(display, items: items)
+        }
+    }
+
+    private func dismissNow(_ display: VirtualDisplay, items: [Dismissal.Item]) {
         displays.end(display)
-        if control.display === display, control.isVisible { closePanel() }
         Task {
             await Dismissal.execute(items)
             remove(display)
         }
     }
 
+    /// The Viewer moves on to another display, and collapses only when
+    /// this was the last one.
     private func remove(_ display: VirtualDisplay) {
-        if control.display === display, control.isVisible { closePanel() }
+        if control.display === display, control.isVisible {
+            if let next = displays.displays.first(where: { $0 !== display }) {
+                openPanel(next, from: iconRect ?? morphAnchor)
+            } else {
+                closePanel()
+            }
+        }
+        settleHoverAfterReconfiguration()
         control.release(display)
         hub.drop(display.id)
         forwarders.drop(display.id)

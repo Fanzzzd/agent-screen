@@ -65,62 +65,13 @@ enum Dismissal {
         }
     }
 
-    /// Show the plan and let the user adjust it. Nil when they cancel.
-    static func confirm(_ items: [Item], for display: VirtualDisplay) -> [Item]? {
-        let live = display.owner != nil && !display.ended
-        if items.isEmpty && !live { return items }
-
-        let alert = NSAlert()
-        alert.messageText = "关闭「\(display.label)」？"
-        var notes: [String] = []
-        if live { notes.append("agent 还在用这块显示器，关闭后它的操作会失败。") }
-        notes.append(items.isEmpty ? "上面没有窗口。" : "按 agent 的意见处理每个窗口，你可以逐个改。你交给 agent 的窗口一定还给你。")
-        alert.informativeText = notes.joined(separator: "\n")
-        alert.addButton(withTitle: "关闭显示器")
-        alert.addButton(withTitle: "取消")
-
-        var choices: [NSSegmentedControl] = []
-        if !items.isEmpty {
-            let rows = NSStackView()
-            rows.orientation = .vertical
-            rows.alignment = .leading
-            rows.spacing = 8
-            for item in items {
-                let name = NSTextField(labelWithString: item.name)
-                name.lineBreakMode = .byTruncatingTail
-                let why = NSTextField(labelWithString: item.reason)
-                why.font = .systemFont(ofSize: 12)
-                why.textColor = .secondaryLabelColor
-                let label = NSStackView(views: [name, why])
-                label.orientation = .vertical
-                label.alignment = .leading
-                label.spacing = 1
-                label.widthAnchor.constraint(equalToConstant: 230).isActive = true
-                let choice = NSSegmentedControl(labels: ["还给你", "关掉"], trackingMode: .selectOne, target: nil, action: nil)
-                choice.selectedSegment = item.fate == .giveBack ? 0 : 1
-                choice.isEnabled = !item.locked
-                if item.locked { choice.toolTip = "这是你交给 agent 的窗口，一定还给你" }
-                choices.append(choice)
-                let row = NSStackView(views: [label, choice])
-                row.spacing = 12
-                rows.addArrangedSubview(row)
-            }
-            rows.frame.size = rows.fittingSize
-            alert.accessoryView = rows
-        }
-
-        // The alert needs us frontmost; give focus back to the user's app after.
-        let previous = NSWorkspace.shared.frontmostApplication
-        NSApp.activate()
-        let response = alert.runModal()
-        if let previous, previous.processIdentifier != getpid() { previous.activate() }
-        guard response == .alertFirstButtonReturn else { return nil }
-        return zip(items, choices.isEmpty ? [] : choices).map { item, choice in
-            var item = item
-            if !item.locked { item.fate = choice.selectedSegment == 0 ? .giveBack : .close }
-            return item
-        }
+    /// Whether to ask before dismissing. An empty display nobody uses
+    /// just goes.
+    static func needsConfirmation(_ items: [Item], for display: VirtualDisplay) -> Bool {
+        !items.isEmpty || isLive(display)
     }
+
+    static func isLive(_ display: VirtualDisplay) -> Bool { display.owner != nil && !display.ended }
 
     /// Close and return windows. Returns the windows that refused to close,
     /// for example because they ask about unsaved changes.

@@ -7,7 +7,13 @@ import AppKit
 final class ControlPanelController: NSObject, NSWindowDelegate {
     enum State { case closed, opening, open, closing }
 
-    private(set) var state = State.closed
+    private(set) var state = State.closed {
+        didSet {
+            #if DEBUG
+            if state != oldValue { NSLog("Sidescreen viewer: \(oldValue) -> \(state)") }
+            #endif
+        }
+    }
     private(set) var display: VirtualDisplay?
 
     var isVisible: Bool { state == .opening || state == .open }
@@ -40,6 +46,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     /// The display is being dismissed: let go of it once the panel is closed,
     /// so macOS can free the virtual display.
     private var releaseOnClose = false
+    private var sheet: DismissSheet?
 
     init(hub: StreamHub, forwarders: ForwarderPool, displays: DisplayManager) {
         self.hub = hub
@@ -145,6 +152,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
 
     func close(to destination: CGRect) {
         guard isVisible else { return }
+        sheet?.onAnswer?(nil)
         // Collapsing the Viewer hands the display back.
         if let display { displays.endTakeover(display) }
         // Interrupting an open continues from the proxy's current pose.
@@ -228,6 +236,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     /// Point the panel at a display: stream, title, input routing.
     private func show(_ display: VirtualDisplay, crossfade: Bool) {
         if let old = self.display, old !== display {
+            sheet?.onAnswer?(nil)
             hub.detach(screen.screenLayer, from: old.id)
             displays.endTakeover(old)
         }
@@ -258,6 +267,10 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
     }
     #endif
 
+    #if DEBUG
+    func debugAnswerDismiss(_ confirmed: Bool) { sheet?.answer(confirmed) }
+    #endif
+
     /// Let go of a display that is going away.
     func release(_ display: VirtualDisplay) {
         guard self.display === display else { return }
@@ -272,6 +285,36 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         screen.forwarder = nil
         screen.showPointer(nil)
         screen.screenLayer.contents = nil
+    }
+
+    // MARK: Dismissal
+
+    /// Ask on the open panel what happens to the display's windows.
+    /// `answer` gets the adjusted plan, or nil when the user cancels or the
+    /// panel moves on.
+    func askDismiss(_ items: [Dismissal.Item], live: Bool, answer: @escaping ([Dismissal.Item]?) -> Void) {
+        guard let display, sheet == nil else { return }
+        let sheet = DismissSheet(items: items, display: display, live: live)
+        sheet.onAnswer = { [weak self] result in
+            guard let self, let sheet = self.sheet else { return }
+            self.sheet = nil
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                sheet.animator().alphaValue = 0
+            }, completionHandler: { sheet.removeFromSuperview() })
+            if self.panel.firstResponder === sheet { self.panel.makeFirstResponder(self.screen) }
+            answer(result)
+        }
+        self.sheet = sheet
+        sheet.frame = screen.frame
+        sheet.alphaValue = 0
+        screen.superview?.addSubview(sheet, positioned: .above, relativeTo: screen)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            sheet.animator().alphaValue = 1
+        }
+        panel.makeKey()
+        panel.makeFirstResponder(sheet)
     }
 
     // MARK: Handover
@@ -342,6 +385,7 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         header.frame = CGRect(x: 0, y: content.height - headerHeight, width: content.width, height: headerHeight)
         screen.frame = CGRect(x: inset, y: inset, width: content.width - inset * 2,
                               height: content.height - headerHeight - inset)
+        sheet?.frame = screen.frame
         CATransaction.commit()
         panel.displayIfNeeded()
     }
