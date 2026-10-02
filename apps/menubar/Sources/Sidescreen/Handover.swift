@@ -50,6 +50,7 @@ final class DragHandoverWatcher {
             candidate = nil
             guard dropRect?() != nil, let hit = Self.window(at: ScreenSpace.toCG(NSEvent.mouseLocation)) else { return }
             candidate = hit
+            log("down on window \(hit.target.windowID) at \(NSEvent.mouseLocation)")
         case .leftMouseDragged:
             guard candidate != nil else { return }
             let now = CFAbsoluteTimeGetCurrent()
@@ -61,11 +62,19 @@ final class DragHandoverWatcher {
                 candidate = nil
                 setHovering(false)
             }
-            guard let candidate, isOverDropRect(), isDragging() else { return }
+            guard let candidate else { return }
+            log("up at \(NSEvent.mouseLocation), over Viewer \(isOverDropRect()), dragged \(isDragging())")
+            guard isOverDropRect(), isDragging() else { return }
             onDrop?(candidate.target, candidate.frame)
         default:
             break
         }
+    }
+
+    private func log(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        NSLog("Sidescreen handover: \(message())")
+        #endif
     }
 
     private func setHovering(_ value: Bool) {

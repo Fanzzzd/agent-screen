@@ -86,6 +86,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 case "peek": self.preview.show(below: self.iconRect ?? self.morphAnchor)
                 case "hide": self.preview.hide()
                 case "collapse": self.closePanel()
+                case "hint": self.control.debugHint(Int(id))
                 case "dismiss": if let display = self.displays.display(withID: id) { self.dismiss(display) }
                 default:
                     if let display = self.displays.display(withID: id) { self.openPanel(display, from: self.morphAnchor) }

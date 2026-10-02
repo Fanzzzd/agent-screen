@@ -246,6 +246,18 @@ final class ControlPanelController: NSObject, NSWindowDelegate {
         hub.attach(screen.screenLayer, to: display.id, fps: 60)
     }
 
+    #if DEBUG
+    /// Show the hover hint of the n-th header button, for screenshot checks.
+    func debugHint(_ index: Int) {
+        func buttons(in view: NSView) -> [SymbolButton] {
+            view.subviews.flatMap { ($0 as? SymbolButton).map { [$0] } ?? buttons(in: $0) }
+        }
+        let all = buttons(in: header).filter { !$0.isHidden }
+        guard all.indices.contains(index) else { return }
+        all[index].showHint()
+    }
+    #endif
+
     /// Let go of a display that is going away.
     func release(_ display: VirtualDisplay) {
         guard self.display === display else { return }
@@ -391,10 +403,10 @@ private final class HeaderView: NSView {
         self?.onDismiss?()
     }
     private lazy var pullButton = SymbolButton(
-        symbol: "arrow.down.right.and.arrow.up.left.rectangle", tooltip: "把前台窗口交给 agent"
+        symbol: "arrow.down.right.and.arrow.up.left.rectangle", tooltip: "把你最前面的窗口交给 agent"
     ) { [weak self] in self?.onPull?() }
     private lazy var sendBackButton = SymbolButton(
-        symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把选中的窗口还给你"
+        symbol: "rectangle.portrait.and.arrow.forward", tooltip: "把 agent 屏上选中的窗口还给你"
     ) { [weak self] in self?.onSendBack?() }
     private lazy var dismissButton = SymbolButton(symbol: "rectangle.badge.xmark", tooltip: "关闭这块显示器") { [weak self] in
         self?.onDismiss?()

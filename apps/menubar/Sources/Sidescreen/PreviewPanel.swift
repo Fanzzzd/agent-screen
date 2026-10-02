@@ -187,7 +187,6 @@ private final class PreviewTile: NSView {
             .withSymbolConfiguration(.init(pointSize: 17, weight: .regular).applying(.init(paletteColors: [.white, NSColor.black.withAlphaComponent(0.55)])))!,
             target: self, action: #selector(dismissTapped))
         button.isBordered = false
-        button.toolTip = "关闭显示器"
         button.isHidden = true
         return button
     }()
@@ -276,7 +275,10 @@ private final class PreviewTile: NSView {
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    @objc private func dismissTapped() { onDismiss?() }
+    @objc private func dismissTapped() {
+        HoverHint.hide()
+        onDismiss?()
+    }
 
     override func mouseDown(with event: NSEvent) {}
 
@@ -324,4 +326,17 @@ private final class HoverView: NSView {
 /// Takes the click that also brings its non-key panel forward.
 private final class FirstMouseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if let text = image?.accessibilityDescription { HoverHint.show(text, for: self) }
+    }
+
+    override func mouseExited(with event: NSEvent) { HoverHint.hide() }
 }

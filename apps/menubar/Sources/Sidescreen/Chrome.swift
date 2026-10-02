@@ -133,10 +133,10 @@ final class SymbolButton: NSButton {
 
     init(symbol: String, tooltip: String, action: @escaping () -> Void) {
         self.handler = action
+        self.hint = tooltip
         super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
-        toolTip = tooltip
         isBordered = false
         imagePosition = .imageOnly
         target = self
@@ -151,8 +151,14 @@ final class SymbolButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     private let handler: () -> Void
+    /// Shown by HoverHint, since system tooltips never appear on our
+    /// non-activating panels.
+    private let hint: String
 
-    @objc private func fire() { handler() }
+    @objc private func fire() {
+        HoverHint.hide()
+        handler()
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -161,8 +167,17 @@ final class SymbolButton: NSButton {
                                        owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        showHint()
+    }
+
+    func showHint() { HoverHint.show(hint, for: self) }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        HoverHint.hide()
+    }
 
     private func updateAppearance() {
         contentTintColor = hovering ? .labelColor : .secondaryLabelColor
@@ -203,4 +218,75 @@ final class PillButton: NSButton {
     }
 
     @objc private func fire() { handler() }
+}
+
+/// A small label under a hovered control. AppKit only shows tooltips for the
+/// active app, and our panels never activate it.
+@MainActor
+enum HoverHint {
+    private static let bubble = HintBubble()
+    private static var pending: DispatchWorkItem?
+
+    static func show(_ text: String, for control: NSView) {
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak control] in
+            MainActor.assumeIsolated {
+                guard let control, let content = control.window?.contentView else { return }
+                bubble.present(text, under: control, in: content)
+            }
+        }
+        pending = work
+        // Short enough to feel immediate, long enough to skip passing pointers.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    static func hide() {
+        pending?.cancel()
+        pending = nil
+        bubble.removeFromSuperview()
+    }
+}
+
+private final class HintBubble: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.85).cgColor
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .white
+        addSubview(label)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Centered under the control, kept inside the window; above it when
+    /// there is no room below.
+    func present(_ text: String, under control: NSView, in content: NSView) {
+        label.stringValue = text
+        label.sizeToFit()
+        let size = CGSize(width: label.frame.width + 16, height: label.frame.height + 8)
+        let anchor = control.convert(control.bounds, to: content)
+        var origin = CGPoint(x: anchor.midX - size.width / 2, y: anchor.minY - 6 - size.height)
+        // Stay on the card that holds the control, not the shadow margin.
+        var card: NSView = control
+        while let parent = card.superview, parent !== content { card = parent }
+        let area = card.frame.insetBy(dx: 8, dy: 4)
+        if origin.y < area.minY { origin.y = anchor.maxY + 6 }
+        origin.x = min(max(origin.x, area.minX), area.maxX - size.width)
+        frame = CGRect(origin: origin, size: size).integral
+        label.frame.origin = CGPoint(x: 8, y: 4)
+        content.addSubview(self, positioned: .above, relativeTo: nil)
+        alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            animator().alphaValue = 1
+        }
+    }
 }
