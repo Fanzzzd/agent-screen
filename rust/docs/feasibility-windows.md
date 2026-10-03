@@ -91,3 +91,38 @@ borrow-foreground model before investing in the driver.
 - https://devblogs.microsoft.com/oldnewthing/20050530-11/?p=35513
 - https://support.microsoft.com/en-us/windows/ai/ai-features/experimental-agentic-features
 - https://github.com/zed-industries/zed/blob/main/crates/gpui_windows/src/window.rs
+
+## Second pass: open paths for background input (2026-10-03)
+
+Windows has no per-process injection like `SLEventPostToPid`. The two
+approaches that work give each agent its own input target, either a session or a renderer.
+
+1. **Chrome DevTools Protocol for Chromium and Electron.** On Windows,
+   `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent` go through
+   `RenderWidgetHost` even in headed mode. They do not move the system cursor,
+   need no foreground, and produce `isTrusted` events. This covers Chrome, Edge,
+   VS Code, Slack, Discord and Teams, launched with `--remote-debugging-port`.
+2. **A separate session (Agent Workspace).** Each session has its own input
+   desktop and cursor, so plain `SendInput` is safe there. Agent Workspace
+   reached Windows Insiders in Nov 2025. Detect it and prefer it when present.
+3. **UI Automation** for native Win32, WPF and WinUI apps.
+4. **Synthetic pointer injection** (`InjectSyntheticPointerInput`) does not
+   move the mouse cursor. It still targets the input desktop by
+   coordinate, so it only helps inside an isolated session.
+
+Rejected:
+- `AttachThreadInput` + `SetKeyboardState`: KB 2581582 says modifier state breaks.
+- Posting `WM_*` to Chromium's render HWND: Chromium hit-tests and drops the messages.
+- RDP Wrapper: it breaks the EULA, is fragile, and AV flags it.
+- Hidden desktops with `PrintWindow` capture: GPU windows come back black, and
+  security tools flag the pattern.
+
+Virtual display for an MVP: Amyuni `usbmmidd` ships signed, so it avoids our own
+signing pipeline, but its redistribution license needs checking. Production should
+use our own attestation-signed IddCx driver (a SudoVDA fork).
+
+Sources: https://support.microsoft.com/en-us/help/2581582,
+https://codereview.chromium.org/159713012/,
+https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-injectsyntheticpointerinput,
+https://chromium.googlesource.com/chromium/src/+/2ea4cd09beb47ca62bb96133aeb66494de766db2/remoting/host/win/session_input_injector.cc,
+https://support.microsoft.com/windows/experimental-agentic-features-a25ede8a-e4c2-4841-85a8-44839191dfb3
