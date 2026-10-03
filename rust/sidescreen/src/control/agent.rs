@@ -177,17 +177,22 @@ pub async fn handle(
         "windowState" => {
             let id = display(&core, &p, false, cx)?;
             let window = window_on(id, &p)?;
-            let snapshot = ax::snapshot(window.target).ok_or_else(|| {
-                ControlError::not_found(
-                    "the window has no accessibility element; is Accessibility granted?",
-                )
-            })?;
+            let target = window.target;
+            // Walking a tree takes a round trip per element.
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { ax::snapshot(target) })
+                .await
+                .ok_or_else(|| {
+                    ControlError::not_found(
+                        "the window has no accessibility element; is Accessibility granted?",
+                    )
+                })?;
             let count = snapshot.elements.len();
             core.update(cx, |c, _| {
                 c.elements
                     .insert((id, window.target.window_id), snapshot.elements)
             });
-            let target = window.target;
             let size = (window.bounds.width, window.bounds.height);
             let shot = cx
                 .background_executor()
@@ -408,14 +413,26 @@ async fn act(
     cx: &mut AsyncApp,
 ) -> Result<(), ControlError> {
     let bounds = cg::display_bounds(id);
-    let center = ax::frame(element)
-        .map(|f| f.mid())
-        .filter(|c| bounds.contains(*c));
-    let perform = |name: &str, cx: &mut AsyncApp| {
+    // Each AX call blocks until the app answers, up to the 1 s timeout,
+    // and an action that opens a modal holds it all that time.
+    let off_main = async |cx: &mut AsyncApp, work: Box<dyn FnOnce(&ax::Element) -> bool + Send>| {
+        let element = ax::Sendable(element.clone());
+        cx.background_executor()
+            .spawn(async move { work(element.get()) })
+            .await
+    };
+    let frame = {
+        let element = ax::Sendable(element.clone());
+        cx.background_executor()
+            .spawn(async move { ax::frame(element.get()) })
+            .await
+    };
+    let center = frame.map(|f| f.mid()).filter(|c| bounds.contains(*c));
+    let perform = async |name: &'static str, cx: &mut AsyncApp| {
         if let Some(c) = center {
             show_pointer(core, id, c, true, cx);
         }
-        ax::perform(element, name)
+        off_main(cx, Box::new(move |e| ax::perform(e, name))).await
     };
     let click = async |button: Button, count: i64, cx: &mut AsyncApp| -> Result<(), ControlError> {
         let c = center.ok_or_else(|| {
@@ -428,7 +445,7 @@ async fn act(
     };
     match action {
         "press" => {
-            if !perform("AXPress", cx) {
+            if !perform("AXPress", cx).await {
                 click(Button::Left, 1, cx).await?;
             }
         }
@@ -436,34 +453,44 @@ async fn act(
         "double_click" => click(Button::Left, 2, cx).await?,
         "right_click" => click(Button::Right, 1, cx).await?,
         "show_menu" => {
-            if !perform("AXShowMenu", cx) {
+            if !perform("AXShowMenu", cx).await {
                 click(Button::Right, 1, cx).await?;
             }
         }
         "focus" => {
-            if !ax::set_attribute(
-                element,
-                "AXFocused",
-                objc2_core_foundation::CFBoolean::new(true),
-            ) {
+            let focused = off_main(
+                cx,
+                Box::new(|e| {
+                    ax::set_attribute(e, "AXFocused", objc2_core_foundation::CFBoolean::new(true))
+                }),
+            )
+            .await;
+            if !focused {
                 return Err(ControlError::failed("the element cannot take focus"));
             }
         }
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
-            if !ax::set_attribute(
-                element,
-                "AXValue",
-                &objc2_core_foundation::CFString::from_str(&value),
-            ) {
+            let set = off_main(
+                cx,
+                Box::new(move |e| {
+                    ax::set_attribute(
+                        e,
+                        "AXValue",
+                        &objc2_core_foundation::CFString::from_str(&value),
+                    )
+                }),
+            )
+            .await;
+            if !set {
                 return Err(ControlError::failed(
                     "the element's value cannot be set; focus it and type instead",
                 ));
             }
         }
         "scroll_into_view" => {
-            if !perform("AXScrollToVisible", cx) {
+            if !perform("AXScrollToVisible", cx).await {
                 return Err(ControlError::failed("the element cannot scroll into view"));
             }
         }

@@ -63,6 +63,7 @@ fn main() {
             if !mac::ax::is_trusted() {
                 mac::ax::request_trust();
             }
+            mac::ax::set_global_timeout();
             let core = cx.new(|_| core::Core::new());
             if let Err(error) = ui::shell::start(core.clone(), cx) {
                 eprintln!("Sidescreen: UI failed: {error}");

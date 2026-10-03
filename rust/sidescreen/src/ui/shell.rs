@@ -1134,12 +1134,20 @@ impl Shell {
     }
 
     /// A click on the menu bar strip of the display image.
-    pub fn menu_bar(&mut self, id: DisplayId, _cx: &mut Context<Self>) {
-        // An app without menus: the click just does nothing.
-        if let Some(menu) = menubar::menu(id) {
-            let (x, y) = native::mouse_location();
-            menu.pop_up_at(x, y);
-        }
+    pub fn menu_bar(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        // The menu opens where the click was, once its items are read.
+        let (x, y) = native::mouse_location();
+        cx.spawn(async move |_, cx| {
+            let menus = cx
+                .background_executor()
+                .spawn(async move { menubar::read(id) })
+                .await;
+            // An app without menus: the click just does nothing.
+            if let Some(menus) = menus {
+                menubar::build(menus).pop_up_at(x, y);
+            }
+        })
+        .detach();
     }
 
     fn menu(&mut self, action: MenuAction, cx: &mut Context<Self>) {
@@ -1198,7 +1206,12 @@ impl Shell {
                 cx,
             ),
             MenuAction::Dismiss { display } => self.dismiss(display, cx),
-            MenuAction::PressProxy { index } => menubar::press(index),
+            MenuAction::PressProxy { index } => {
+                if let Some(element) = menubar::chosen(index) {
+                    cx.background_spawn(async move { element.perform("AXPress") })
+                        .detach();
+                }
+            }
         }
     }
 

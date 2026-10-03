@@ -10,6 +10,23 @@ use std::ptr::NonNull;
 
 pub type Element = CFRetained<AXUIElement>;
 
+/// An element that can move to another thread: the AX API may be called
+/// from any thread, and its calls block on the target app, so they belong
+/// off the main thread.
+pub struct Sendable(pub Element);
+unsafe impl Send for Sendable {}
+
+impl Sendable {
+    /// The element. A method, so a closure captures the whole Sendable.
+    pub fn get(&self) -> &Element {
+        &self.0
+    }
+
+    pub fn perform(&self, action: &str) -> bool {
+        perform(&self.0, action)
+    }
+}
+
 unsafe extern "C" {
     /// _AXUIElementGetWindow, through the shim: the CGWindowID behind an AX window.
     fn SSAXWindowID(element: &AXUIElement, out: *mut u32) -> bool;
@@ -26,6 +43,12 @@ pub fn request_trust() {
     let options =
         CFDictionary::<CFString, CFBoolean>::from_slices(&[&*key], &[CFBoolean::new(true)]);
     unsafe { objc2_application_services::AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
+}
+
+/// Wait at most 1 s for any app to answer, not the default 6 s. Set on
+/// the system-wide element, the timeout applies to every element.
+pub fn set_global_timeout() {
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 }
 
 /// An app's root element. A busy or modal app would otherwise hold each call
@@ -220,6 +243,8 @@ pub struct Snapshot {
     pub elements: Vec<Element>,
     pub truncated: bool,
 }
+// See Sendable.
+unsafe impl Send for Snapshot {}
 
 pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
     let window = window_element(target)?;
@@ -236,6 +261,7 @@ pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
         lines: Vec::new(),
         elements: Vec::new(),
         truncated: false,
+        visited: 0,
     };
     walker.visit(&window, 0);
     Some(Snapshot {
@@ -253,9 +279,11 @@ struct TreeWalker {
     lines: Vec<String>,
     elements: Vec<Element>,
     truncated: bool,
+    visited: usize,
 }
 
 const MAX_ELEMENTS: usize = 400;
+const MAX_VISITS: usize = 3000;
 const MAX_DEPTH: usize = 40;
 const NAMES: [&str; 10] = [
     "AXRole",
@@ -284,7 +312,10 @@ impl TreeWalker {
         if depth > MAX_DEPTH {
             return;
         }
-        if self.elements.len() >= MAX_ELEMENTS {
+        // Unlabelled containers are not numbered but still cost a round
+        // trip each; a web page has thousands.
+        self.visited += 1;
+        if self.elements.len() >= MAX_ELEMENTS || self.visited > MAX_VISITS {
             self.truncated = true;
             return;
         }
