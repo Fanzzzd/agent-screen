@@ -769,6 +769,10 @@ impl Shell {
             // Watching only: the keyboard stays with the user's app until
             // they click into the display.
             let from = from.unwrap_or_else(|| self.anchor());
+            log::debug!(
+                "viewer opens at {frame:?} from {from:?}, resting {:?}",
+                self.resting
+            );
             native::set_alpha(&window, 0.0);
             native::set_frame(&window, fit_into(frame, from));
             native::order_front(&window);
