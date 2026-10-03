@@ -1036,12 +1036,18 @@ impl Shell {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
             MenuAction::GrantPermissions => {
-                if !objc2_core_graphics::CGPreflightScreenCaptureAccess() {
-                    objc2_core_graphics::CGRequestScreenCaptureAccess();
-                }
-                if !ax::is_trusted() {
-                    ax::request_trust();
-                }
+                // The launch already asked once, and macOS shows each
+                // prompt only once, so open the pane in System Settings.
+                let pane = if !objc2_core_graphics::CGPreflightScreenCaptureAccess() {
+                    "Privacy_ScreenCapture"
+                } else {
+                    "Privacy_Accessibility"
+                };
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg(format!(
+                        "x-apple.systempreferences:com.apple.preference.security?{pane}"
+                    ))
+                    .spawn();
             }
             MenuAction::OpenAeroSpaceConfig => {
                 let home = std::env::var("HOME").unwrap_or_default();
