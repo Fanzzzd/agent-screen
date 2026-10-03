@@ -15,6 +15,8 @@ struct Stream {
     capture: Option<Arc<Capture>>,
     /// A capture is starting on a background thread.
     starting: bool,
+    /// Failed starts in a row.
+    failures: u32,
     /// What `running` says, for reconfigurations on other threads.
     target: Arc<std::sync::Mutex<(i32, (u32, u32))>>,
     latest: Arc<Latest>,
@@ -79,6 +81,7 @@ impl Streams {
         let stream = self.streams.entry(id).or_insert_with(|| Stream {
             capture: None,
             starting: false,
+            failures: 0,
             target: Default::default(),
             latest: Arc::new(Latest::default()),
             running: (0, (0, 0)),
@@ -150,6 +153,7 @@ impl Streams {
                 match (stream, result) {
                     (Some(stream), Ok(capture)) => {
                         stream.starting = false;
+                        stream.failures = 0;
                         let capture = Arc::new(capture);
                         let running = stream.running;
                         if running.0 == 0 {
@@ -166,13 +170,21 @@ impl Streams {
                         }
                     }
                     (Some(stream), Err(error)) => {
-                        log::warn!("capture for display {id} failed: {error}");
+                        if stream.failures == 0 {
+                            log::warn!("capture for display {id} failed: {error}");
+                        } else {
+                            log::debug!("capture for display {id} failed again: {error}");
+                        }
                         stream.starting = false;
-                        // A just-created display can take a moment to show up.
+                        // A just-created display can take a moment to show
+                        // up; without Screen Recording it never does, so the
+                        // wait doubles up to 30 s.
+                        let wait = std::time::Duration::from_millis(500)
+                            .saturating_mul(1 << stream.failures.min(6))
+                            .min(std::time::Duration::from_secs(30));
+                        stream.failures += 1;
                         cx.spawn(async move |this, cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(500))
-                                .await;
+                            cx.background_executor().timer(wait).await;
                             let _ = this.update(cx, |streams, cx| {
                                 let retry = streams.streams.get(&id).is_some_and(|s| {
                                     s.running.0 > 0 && s.capture.is_none() && !s.starting
