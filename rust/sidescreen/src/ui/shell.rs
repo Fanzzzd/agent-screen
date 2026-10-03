@@ -24,7 +24,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Run `f` on the shell once the current update is done. Views call this
@@ -117,6 +117,8 @@ pub struct Shell {
 
     known: HashSet<DisplayId>,
     drag: Option<Drag>,
+    /// Where the left button went down, until the first drag event.
+    drag_from: Option<(f64, f64)>,
     drop_hover: bool,
     /// AeroSpace workspaces pinned to a monitor number an Agent Display took.
     conflicts: Vec<(String, String)>,
@@ -237,6 +239,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             resting: None,
             known: HashSet::new(),
             drag: None,
+            drag_from: None,
             drop_hover: false,
             conflicts: Vec::new(),
             guard_generation: 0,
@@ -490,8 +493,10 @@ impl Shell {
             if self.peek_shown {
                 self.show_peek(cx);
             }
+            // The once-a-second recount covers windows moving; agent
+            // clicks and moves notify far more often.
+            self.refresh_counts(cx);
         }
-        self.refresh_counts(cx);
     }
 
     /// Window counts for the status lines.
@@ -499,11 +504,8 @@ impl Shell {
         if !self.peek_shown && !self.viewer_open {
             return;
         }
-        let counts: HashMap<DisplayId, usize> = self
-            .known
-            .iter()
-            .map(|&id| (id, windows::on_display(id).len()))
-            .collect();
+        let ids: Vec<DisplayId> = self.known.iter().copied().collect();
+        let counts = windows::counts(&ids);
         let viewer_count = self
             .viewer_display
             .and_then(|id| counts.get(&id).copied())
@@ -1376,14 +1378,17 @@ impl Shell {
     }
 
     // Title-bar drags belong to WindowServer and the dragged app, so the
-    // watcher only observes: the window under the pointer at mouse-down is
-    // the candidate, and it counts as dragged once its frame has moved.
+    // watcher only observes: the window under the mouse-down point is the
+    // candidate, and it counts as dragged once its frame has moved. The
+    // window list is read at the first drag event, not on every click.
 
     fn drag_began(&mut self, at: (f64, f64)) {
         self.drag = None;
-        if !self.viewer_open {
-            return;
-        }
+        self.drag_from = self.viewer_open.then_some(at);
+    }
+
+    /// Find the window the drag started on.
+    fn drag_candidate(&mut self, at: (f64, f64)) {
         let point = (at.0, native::primary_height() - at.1);
         let agent: Vec<Rect> = self
             .known
@@ -1414,6 +1419,9 @@ impl Shell {
     }
 
     fn drag_moved(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
+        if let Some(from) = self.drag_from.take() {
+            self.drag_candidate(from);
+        }
         let Some(drag) = &mut self.drag else { return };
         if drag.last_check.elapsed() < Duration::from_millis(50) {
             return;
@@ -1424,6 +1432,7 @@ impl Shell {
     }
 
     fn drag_ended(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
+        self.drag_from = None;
         let over = self.drop_rect(cx).is_some_and(|r| contains(r, at));
         let dropped = over && self.dragging();
         let drag = self.drag.take();

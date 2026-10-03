@@ -46,20 +46,43 @@ pub fn all() -> Vec<Window> {
 /// touches the display and its center is on no other display. A window
 /// hanging off the bottom edge still counts, so dismissing the display does
 /// not strand it off-screen.
-pub fn on_display(display: DisplayId) -> Vec<Window> {
-    let area = cg::display_bounds(display);
-    let others: Vec<Rect> = cg::active_displays()
+/// Whether a window with `bounds` is on the display covering `area`: it
+/// overlaps it, and no other display holds its center instead.
+fn belongs(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
+    let center = bounds.mid();
+    bounds.intersects(area) && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
+}
+
+fn other_displays(display: DisplayId) -> Vec<Rect> {
+    cg::active_displays()
         .into_iter()
         .filter(|&d| d != display)
         .map(cg::display_bounds)
-        .collect();
+        .collect()
+}
+
+/// How many windows each display has, from one window list.
+pub fn counts(displays: &[DisplayId]) -> std::collections::HashMap<DisplayId, usize> {
+    let windows = all();
+    displays
+        .iter()
+        .map(|&id| {
+            let (area, others) = (cg::display_bounds(id), other_displays(id));
+            let n = windows
+                .iter()
+                .filter(|w| belongs(&w.bounds, &area, &others))
+                .count();
+            (id, n)
+        })
+        .collect()
+}
+
+pub fn on_display(display: DisplayId) -> Vec<Window> {
+    let area = cg::display_bounds(display);
+    let others = other_displays(display);
     all()
         .into_iter()
-        .filter(|w| {
-            let center = w.bounds.mid();
-            w.bounds.intersects(&area)
-                && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
-        })
+        .filter(|w| belongs(&w.bounds, &area, &others))
         .map(|w| Window {
             bounds: w.bounds.offset(-area.x, -area.y),
             ..w
