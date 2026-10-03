@@ -7,7 +7,7 @@ use crate::mac::input::Forwarder;
 use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use gpui::Context;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 pub struct Core {
@@ -17,6 +17,9 @@ pub struct Core {
     /// The last accessibility snapshot of each window, by display, so
     /// element numbers refer to it. Dropped with the display.
     pub elements: HashMap<(DisplayId, WindowId), Vec<ax::Element>>,
+    /// Connections that have closed. A request from one can still be queued
+    /// behind its close, and must not create a display nobody owns.
+    pub closed: HashSet<u64>,
 }
 
 impl Core {
@@ -25,6 +28,7 @@ impl Core {
             displays: Displays::default(),
             forwarders: HashMap::new(),
             elements: HashMap::new(),
+            closed: HashSet::new(),
         }
     }
 
@@ -68,6 +72,7 @@ impl Core {
     }
 
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
+        self.closed.insert(connection);
         if !self.displays.connection_closed(connection).is_empty() {
             cx.notify();
             schedule_sweep(cx);

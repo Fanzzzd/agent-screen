@@ -326,6 +326,9 @@ fn create_display(
         .string("sessionKey")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ControlError::invalid("sessionKey is required"))?;
+    if core.read_with(cx, |c, _| c.closed.contains(&connection)) {
+        return Err(ControlError::failed("the connection closed"));
+    }
     if let Some(existing) = core.read_with(cx, |c, _| {
         c.displays
             .for_session(&session_key)
