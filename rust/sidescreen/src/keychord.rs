@@ -51,17 +51,14 @@ impl KeyChord {
                 _ => return Err(ParseError::UnknownKey((*name).into())),
             }
         }
-        if let Some(code) = key_code(&key.to_lowercase()) {
-            return Ok(KeyChord { code, modifiers });
-        }
         // Uppercase single letters imply Shift, as in xdotool.
         let mut chars = key.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
-            && let Some(code) = key_code(&c.to_lowercase().to_string())
+            && c.is_uppercase()
         {
-            if c.is_uppercase() {
-                modifiers.shift = true;
-            }
+            modifiers.shift = true;
+        }
+        if let Some(code) = key_code(&key.to_lowercase()) {
             return Ok(KeyChord { code, modifiers });
         }
         Err(ParseError::UnknownKey((*key).into()))
