@@ -2,7 +2,7 @@
  * End-to-end smoke test: acts as an MCP client over stdio against the real
  * menu bar app. Run with the app open:
  *
- *     bun scripts/smoke.ts [app]
+ *     bun rust/tests/mcp/smoke.ts [app]
  *
  * Saves each screenshot to /tmp/sidescreen-smoke-N.jpg.
  */

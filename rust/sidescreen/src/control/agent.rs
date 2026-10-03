@@ -524,6 +524,24 @@ async fn launch(
             return settle(core, fresh.target, id, cx).await.map(Some);
         }
     }
+    // A slow launch can open its window after we stop waiting. Keep watching
+    // so it does not stay on the user's screen.
+    let core = core.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for _ in 0..200 {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            if let Some(late) = windows::all()
+                .into_iter()
+                .find(|w| w.target.pid == pid && !before.contains(&w.target.window_id))
+            {
+                let _ = settle(&core, late.target, id, cx).await;
+                return;
+            }
+        }
+    })
+    .detach();
     Ok(None)
 }
 

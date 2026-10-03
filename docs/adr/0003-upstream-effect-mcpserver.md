@@ -1,3 +1,5 @@
 # The MCP server runs on upstream Effect v4's McpServer
 
+Superseded by [ADR 0005](0005-rust-app-and-mcp.md).
+
 `packages/mcp` uses `McpServer` from Effect v4 (`effect@4.0.0`) rather than the official TypeScript SDK. We adopted it at release candidate 118, after it merged a 2026-07-28 protocol adapter in September 2026 (Effect-TS/effect#7265), so it speaks the current spec while keeping the whole server in one Effect program. We planned to fork Effect and upgrade its MCP support ourselves; upstream finished that first, so we depend on upstream directly and send fixes there as pull requests. If a bug blocks us before a fix is released, a temporary fork is acceptable.

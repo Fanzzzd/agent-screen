@@ -493,7 +493,7 @@ pub async fn run(
             Ok(Output::Object(match reply.get("window") {
                 Some(window) if !window.is_null() => json!({ "window": window }),
                 _ => {
-                    json!({ "window": null, "note": "The app opened but no new window appeared." })
+                    json!({ "window": null, "note": "The app opened but no new window appeared yet. A window it opens in the next 30 s moves onto the display; call list_windows to check. A running single-window app opens none: use place_window instead." })
                 }
             }))
         }

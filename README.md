@@ -5,34 +5,39 @@ A menu bar app that gives AI agents their own virtual displays on macOS. Hover t
 ## Layout
 
 ```
-apps/menubar/     Swift menu bar app (SwiftPM, macOS 15+, Liquid Glass on macOS 26)
-packages/mcp/     MCP server for agents (Effect v4)
-docs/             ADRs and the AGENTS.md convention
+rust/sidescreen/      the app in Rust: GPUI UI, control socket, `Sidescreen mcp`
+rust/sidescreen-mcp/  the MCP server (rmcp), built into the app binary
+rust/tests/mcp/       end-to-end scripts that act as an MCP client
+rust/docs/            Linux and Windows feasibility notes
+apps/menubar/         the Swift app the Rust one replaces (SwiftPM, macOS 15+)
+docs/                 ADRs and the AGENTS.md convention
 ```
+
+The Rust app has reached parity with the Swift app on macOS; see [ADR 0005](docs/adr/0005-rust-app-and-mcp.md). Both use the bundle id `dev.sidescreen.menubar` and the same control socket, so run one at a time.
 
 ## Develop
 
 ```sh
-bun run dev                          # build, sign, restart the app
-apps/menubar/scripts/bundle.sh       # build .build/Sidescreen.app only
+rust/sidescreen/scripts/bundle.sh [release]   # build rust/target/Sidescreen.app
+bun run dev                                   # Swift: build, sign, restart the app
 ```
 
-The bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
+The Rust toolchain is pinned in `rust/rust-toolchain.toml`. Each bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
 
-Development switches:
+Development switches for the Rust app:
 
-- `SIDESCREEN_DEMO=panel` or `preview` opens the UI 1.5 s after launch.
-- `Sidescreen --probe displays | pull <id> | click <x> <y> | type <text>` drives the input path from a terminal without the UI.
+- `SIDESCREEN_DEBUG=1` enables the debug control methods in a release build, for measuring.
+- `SIDESCREEN_APPEARANCE=light` or `dark` forces the app's appearance in debug builds, for screenshots.
 
 ## How it works
 
 - **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is HiDPI, 1440 × 900 points by default. The app parks it diagonally off the bottom-right corner of your physical screens so the real cursor rarely wanders onto it.
-- **Live frames** come from ScreenCaptureKit. `StreamHub` runs one stream per display at the highest frame rate any viewer asks for: 60 fps for the open panel, 12 for thumbnails, and a 1 fps floor.
+- **Live frames** come from ScreenCaptureKit as 420f pixel buffers that GPUI draws without a copy. One stream per display runs at the highest frame rate and size any view asks for: 60 fps at full size for the Viewer, 12 fps at 416 px wide for thumbnails.
 - **Input** in the panel goes to the target process through SkyLight's `SLEventPostToPid`, stamped with window-routing fields, plus a focus-without-raise handshake. The recipe is ported from [trycua/cua](https://github.com/trycua/cua) (MIT). Your cursor stays put and your frontmost app keeps its place.
 
 ## Agent tools
 
-`packages/mcp` is an MCP server over stdio. Register it with your client, for example `claude mcp add sidescreen -- bun /path/to/sidescreen/packages/mcp/src/main.ts`.
+`Sidescreen mcp` is an MCP server over stdio. Register it with your client, for example `claude mcp add sidescreen -- /path/to/Sidescreen.app/Contents/MacOS/Sidescreen mcp`. It works with either app.
 
 | Tool | What it does |
 | --- | --- |
@@ -58,12 +63,14 @@ Development switches:
 ## Test
 
 ```sh
-bun run --filter @sidescreen/menubar test   # unit tests
-bun packages/mcp/scripts/control.ts         # Takeover and Help Request, needs a debug build running
-bun packages/mcp/scripts/smoke.ts           # end to end with Calculator
+cd rust && cargo test                 # unit tests
+bun rust/tests/mcp/control.ts         # Takeover and Help Request, needs a debug build running
+bun rust/tests/mcp/smoke.ts           # end to end with Calculator
 ```
 
-Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, click, hide, collapse, create, dismiss, answer, hint, focus), `debugMenuBar` and `debugHandover` on the control socket, so scripts can drive the UI without a real click. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+The scripts start `rust/target/Sidescreen.app/Contents/MacOS/Sidescreen mcp`; `SIDESCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke.ts`: it marks the window to keep, and quitting the app would hand it back to your screen.
+
+Debug builds accept `debugTakeover` and `debugShow` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, menu, hide, select, viewer, collapse, create, dismiss, answer, primary, windows, help, focus or quit, and a `displayId` where one applies. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Known limits
 
@@ -74,4 +81,5 @@ Debug builds accept `debugTakeover`, `debugShow` (viewer, peek, click, hide, col
 - `launch_app` on a running single-window app (Calculator) gets no new window. Quit it first or use `place_window`.
 - A window that refuses to close on dismissal, such as an Open panel or one with unsaved changes, is left to macOS, which moves it to the main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
-- IOSurface-backed layers ignore ancestor transforms. The open and close morph therefore animates a still-frame proxy and swaps in the live view when it lands.
+- GPUI redraws the Viewer on every frame: 5.0% CPU with the Viewer open on a 60 fps display, against 2.0% for the Swift app.
+- With the menu bar icon hidden, for example by a menu bar manager or behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.

@@ -2,8 +2,7 @@
   "name": "sidescreen",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/*"
   ],
   "scripts": {
     "dev": "bun run --filter @sidescreen/menubar dev",

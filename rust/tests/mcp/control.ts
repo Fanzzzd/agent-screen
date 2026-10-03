@@ -2,11 +2,10 @@
  * Control-state test against the running debug app: Takeover refusal and
  * wait_for_control. Needs no Screen Recording or Accessibility grant.
  *
- *     bun scripts/control.ts
+ *     bun rust/tests/mcp/control.ts
  */
 import * as net from "node:net"
-import { socketPath } from "../src/Sidescreen.ts"
-import { McpClient } from "./client.ts"
+import { McpClient, socketPath } from "./client.ts"
 
 /** A second control connection standing in for the user's Viewer. */
 const debug = (method: string, params: Record<string, unknown>) =>
