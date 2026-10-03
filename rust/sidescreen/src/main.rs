@@ -15,7 +15,31 @@ use control::server::{self, Event};
 use futures::StreamExt;
 use gpui::{ActivationPolicy, App, AppContext, AsyncApp};
 
+/// Warnings always, debug lines in debug builds, to stderr.
+struct Logger;
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level()
+            <= if cfg!(debug_assertions) {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            }
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) && record.target().starts_with("Sidescreen") {
+            eprintln!("Sidescreen {}: {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 fn main() {
+    log::set_logger(&Logger).ok();
+    log::set_max_level(log::LevelFilter::Debug);
     let platform = gpui_platform::current_platform(false);
     // An accessory from launch: no Dock icon, never activated by starting.
     platform.set_activation_policy(ActivationPolicy::Accessory);

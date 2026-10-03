@@ -9,5 +9,6 @@ pub mod display;
 pub mod input;
 pub mod menubar;
 pub mod native;
+pub mod notify;
 pub mod screenshot;
 pub mod windows;

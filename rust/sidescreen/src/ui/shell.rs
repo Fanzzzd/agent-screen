@@ -11,7 +11,7 @@ use crate::dismissal::{self, Item};
 use crate::mac::aerospace::AeroSpace;
 use crate::mac::input::Forwarder;
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
-use crate::mac::{app, ax, cg, menubar, windows};
+use crate::mac::{app, ax, cg, menubar, notify, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -165,6 +165,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
     native::watch_keys();
+    notify::install();
 
     let streams = Streams::new(cx);
     let shell = cx.new(|cx| {
@@ -285,6 +286,7 @@ impl Shell {
             Native::LeftDragged { x, y } => self.drag_moved((x, y), cx),
             Native::LeftUp { x, y } => self.drag_ended((x, y), cx),
             Native::Menu(action) => self.menu(action, cx),
+            Native::HelpClicked { display } => self.open_for_help(display, cx),
             Native::Key {
                 code,
                 down,
@@ -327,7 +329,17 @@ impl Shell {
             self.asking = asking;
             self.icon.set_asking(asking);
         }
+        for display in &core.displays.list {
+            let reason = display
+                .help_request
+                .as_deref()
+                .filter(|_| display.is_live());
+            notify::update(display.id, &display.label(), reason);
+        }
         let gone: Vec<DisplayId> = self.known.difference(&ids).copied().collect();
+        for id in &gone {
+            notify::update(*id, "", None);
+        }
         let added = ids.difference(&self.known).count() > 0;
         self.known = ids.clone();
         for id in &gone {

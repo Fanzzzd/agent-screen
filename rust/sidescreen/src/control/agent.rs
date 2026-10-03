@@ -278,7 +278,7 @@ pub async fn handle(
             Ok(json!({ "outcome": outcome.as_str() }))
         }
         // Test hook: stands in for the user's input in the Viewer.
-        "debugTakeover" if cfg!(debug_assertions) => {
+        "debugTakeover" if debug_methods() => {
             let id = display(&core, &p, false, cx)?;
             let active = p.0.get("active") == Some(&Value::Bool(true));
             core.update(cx, |c, cx| {
@@ -293,7 +293,7 @@ pub async fn handle(
             });
             Ok(json!({}))
         }
-        "debugShow" if cfg!(debug_assertions) => {
+        "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
@@ -687,4 +687,10 @@ impl Args<'_> {
         self.number(key)
             .ok_or_else(|| ControlError::invalid(format!("{key} is required")))
     }
+}
+
+/// Test hooks: in debug builds, or with SIDESCREEN_DEBUG=1 for measuring a
+/// release build.
+fn debug_methods() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("SIDESCREEN_DEBUG").is_some_and(|v| v == "1")
 }

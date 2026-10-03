@@ -58,6 +58,10 @@ pub enum Native {
         down: bool,
         modifiers: Modifiers,
     },
+    /// The user clicked the help notification of a display.
+    HelpClicked {
+        display: u32,
+    },
     FlagsChanged {
         code: u16,
         modifiers: Modifiers,
