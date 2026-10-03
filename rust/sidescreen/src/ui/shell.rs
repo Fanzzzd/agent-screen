@@ -23,6 +23,7 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,11 @@ pub fn tell(
     cx.defer(move |cx| {
         let _ = shell.update(cx, f);
     });
+}
+
+thread_local! {
+    /// Windows already went back before quitting.
+    static TIDIED: Cell<bool> = const { Cell::new(false) };
 }
 
 thread_local! {
@@ -285,7 +291,34 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     // would, without asking: each window follows its Disposition. A crash
     // leaves the windows to macOS.
     {
+        // Before the app exits, every display's windows go where Dismissal
+        // sends them, as if each display were closed. It runs on its own
+        // thread: the AeroSpace CLI it calls queries this app over AX.
+        let (core, app) = (core.clone(), cx.to_async());
+        native::intercept_terminate(mtm, move || {
+            let plans: Vec<Item> = app.update(|cx| {
+                core.read(cx)
+                    .displays
+                    .list
+                    .iter()
+                    .flat_map(dismissal::plan)
+                    .collect()
+            });
+            TIDIED.with(|t| t.set(true));
+            if plans.is_empty() {
+                return false;
+            }
+            let main = main_screen_name();
+            std::thread::spawn(move || {
+                dismissal::execute(&plans, main.as_deref());
+                native::reply_terminate();
+            });
+            true
+        });
+    }
+    {
         let core = core.clone();
+        // A fallback for a quit that skipped applicationShouldTerminate.
         cx.on_app_quit(move |cx| {
             let plans: Vec<Item> = core
                 .read(cx)
@@ -294,7 +327,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                 .iter()
                 .flat_map(dismissal::plan)
                 .collect();
-            if !plans.is_empty() {
+            if !plans.is_empty() && !TIDIED.with(Cell::get) {
                 dismissal::execute(&plans, main_screen_name().as_deref());
             }
             async {}

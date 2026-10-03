@@ -512,6 +512,75 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
     }
 }
 
+thread_local! {
+    /// Asked when the app should terminate: true holds the quit until
+    /// `reply_terminate`.
+    static ON_TERMINATE: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Answer the app delegate's `applicationShouldTerminate:` with `hold`:
+/// true makes the quit wait for `reply_terminate`.
+///
+/// GPUI sends `terminate:` from a main-queue block, and the quit waits in a
+/// nested run loop inside it, so no GPUI task runs until it is answered.
+/// `hold` therefore does its work right away or on its own thread.
+pub fn intercept_terminate(mtm: objc2::MainThreadMarker, hold: impl Fn() -> bool + 'static) {
+    use objc2::ffi::object_setClass;
+    use objc2::runtime::{AnyClass, ClassBuilder, Sel};
+    extern "C-unwind" fn should_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) -> usize {
+        let later = ON_TERMINATE.with(|f| f.borrow().as_ref().is_some_and(|hold| hold()));
+        // NSTerminateLater or NSTerminateNow
+        if later { 2 } else { 1 }
+    }
+    ON_TERMINATE.with(|f| *f.borrow_mut() = Some(Box::new(hold)));
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let Some(delegate) = app.delegate() else {
+        return;
+    };
+    let delegate: &AnyObject = delegate.as_ref();
+    let base = delegate.class();
+    let name = format!("SidescreenQuitting{}", base.name().to_string_lossy());
+    let name = std::ffi::CString::new(name).expect("class name");
+    let class = AnyClass::get(&name).or_else(|| {
+        let mut builder = ClassBuilder::new(&name, base)?;
+        unsafe {
+            builder.add_method(
+                sel!(applicationShouldTerminate:),
+                should_terminate as extern "C-unwind" fn(_, _, _) -> _,
+            );
+        }
+        Some(builder.register())
+    });
+    if let Some(class) = class {
+        unsafe {
+            object_setClass(
+                (delegate as *const AnyObject).cast_mut().cast(),
+                (class as *const AnyClass).cast(),
+            )
+        };
+    }
+}
+
+/// Let a held quit go ahead. Callable from any thread: the reply goes
+/// through the main run loop, which the waiting quit keeps running.
+pub fn reply_terminate() {
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopCommonModes};
+    let Some(main) = CFRunLoop::main() else {
+        return;
+    };
+    let block = RcBlock::new(|| {
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            objc2_app_kit::NSApplication::sharedApplication(mtm)
+                .replyToApplicationShouldTerminate(true);
+        }
+    });
+    unsafe {
+        main.perform_block(kCFRunLoopCommonModes.map(|m| m.as_ref()), Some(&block));
+    }
+    main.wake_up();
+}
+
 pub const LEVEL_FLOATING: isize = 3;
 pub const LEVEL_POP_UP_MENU: isize = 101;
 
