@@ -4,7 +4,7 @@
 use super::pointer;
 use super::shell::{Shell, tell};
 use super::status::{Kind, Status};
-use super::stream::Streams;
+use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::dismissal::Item;
@@ -56,8 +56,8 @@ impl Viewer {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&core, |_, _, cx| cx.notify()).detach();
-        cx.observe(&streams, |viewer: &mut Viewer, _, cx| {
-            if viewer.display.is_some() {
+        cx.subscribe(&streams, |viewer: &mut Viewer, _, frame: &NewFrame, cx| {
+            if viewer.display == Some(frame.0) {
                 cx.notify();
             }
         })

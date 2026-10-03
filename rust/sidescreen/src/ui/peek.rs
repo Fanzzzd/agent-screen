@@ -3,7 +3,7 @@
 use super::pointer;
 use super::shell::{Shell, tell};
 use super::status::Status;
-use super::stream::Streams;
+use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::model::DisplayId;
@@ -42,7 +42,7 @@ impl Peek {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&core, |_, _, cx| cx.notify()).detach();
-        cx.observe(&streams, |peek: &mut Peek, _, cx| {
+        cx.subscribe(&streams, |peek: &mut Peek, _, _: &NewFrame, cx| {
             if peek.shown {
                 cx.notify();
             }

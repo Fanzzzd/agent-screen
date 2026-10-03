@@ -7,7 +7,7 @@ use crate::model::DisplayId;
 use core_video::pixel_buffer::CVPixelBuffer;
 use futures::StreamExt;
 use futures::channel::mpsc;
-use gpui::{App, AppContext, AsyncApp, Context, Entity};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, EventEmitter};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,11 +20,16 @@ struct Stream {
     wants: HashMap<&'static str, (i32, (u32, u32))>,
 }
 
+/// A display has a new frame.
+pub struct NewFrame(pub DisplayId);
+
 pub struct Streams {
     streams: HashMap<DisplayId, Stream>,
     frames: HashMap<DisplayId, CVPixelBuffer>,
     wake: mpsc::UnboundedSender<DisplayId>,
 }
+
+impl EventEmitter<NewFrame> for Streams {}
 
 impl Streams {
     pub fn new(cx: &mut App) -> Entity<Streams> {
@@ -42,7 +47,7 @@ impl Streams {
                 this.update(cx, |streams, cx| {
                     if let Some(frame) = streams.streams.get(&id).and_then(|s| s.latest.take()) {
                         streams.frames.insert(id, frame);
-                        cx.notify();
+                        cx.emit(NewFrame(id));
                     }
                 });
             }
