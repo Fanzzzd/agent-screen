@@ -14,7 +14,9 @@ pub struct Core {
     pub displays: Displays<VirtualDisplay>,
     forwarders: HashMap<DisplayId, Forwarder>,
     /// Elements from the latest snapshot of each window, by their number.
-    pub elements: HashMap<WindowId, Vec<ax::Element>>,
+    /// The last accessibility snapshot of each window, by display, so
+    /// element numbers refer to it. Dropped with the display.
+    pub elements: HashMap<(DisplayId, WindowId), Vec<ax::Element>>,
 }
 
 impl Core {
@@ -74,11 +76,9 @@ impl Core {
 
     /// Drop a display: macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        if let Some(display) = self.displays.remove(id) {
+        if self.displays.remove(id).is_some() {
             self.forwarders.remove(&id);
-            for window in display.records.keys() {
-                self.elements.remove(window);
-            }
+            self.elements.retain(|(display, _), _| *display != id);
             cx.notify();
         }
     }

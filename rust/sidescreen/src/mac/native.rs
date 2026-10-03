@@ -310,9 +310,10 @@ impl Menu {
         unsafe {
             item.setTarget(Some(&target));
             item.setAction(Some(sel!(chosen:)));
+            // NSMenuItem holds its target weakly; its represented object
+            // keeps the target alive exactly as long as the item.
+            item.setRepresentedObject(Some(&target));
         }
-        // NSMenuItem holds its target weakly.
-        keep(Retained::into_super(Retained::into_super(target)));
         item
     }
 

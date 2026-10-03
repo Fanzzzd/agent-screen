@@ -185,7 +185,7 @@ pub async fn handle(
             let count = snapshot.elements.len();
             core.update(cx, |c, _| {
                 c.elements
-                    .insert(window.target.window_id, snapshot.elements)
+                    .insert((id, window.target.window_id), snapshot.elements)
             });
             let target = window.target;
             let size = (window.bounds.width, window.bounds.height);
@@ -208,7 +208,7 @@ pub async fn handle(
                 .int("element")
                 .ok_or_else(|| ControlError::invalid("element is required"))?;
             let element = core.read_with(cx, |c, _| {
-                let list = c.elements.get(&window.target.window_id);
+                let list = c.elements.get(&(id, window.target.window_id));
                 list.map(|l| l.get(index as usize).cloned())
             });
             let element = match element {

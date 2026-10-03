@@ -211,10 +211,14 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 let code = event.keyCode();
                 native::send(Native::ScreenTouched { display });
                 forwarder.key(code, true, flags(event));
-                // Command shortcuts often never report their release.
+                // Command shortcuts often never report their release, so
+                // send it now and skip the real one if it comes.
                 if flags(event).contains(CGEventFlags::MaskCommand) {
                     forwarder.key(code, false, flags(event));
                     s.sent_up.insert(code);
+                } else {
+                    // A plain press: its release is a real one.
+                    s.sent_up.remove(&code);
                 }
                 true
             }
