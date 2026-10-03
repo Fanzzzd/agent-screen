@@ -16,7 +16,10 @@ pub struct Session {
 /// variable. Codex sends it with every tool call in `_meta`. Anything else is
 /// keyed by this process, which lives exactly as long as the client keeps us.
 pub fn identify(meta: &Map<String, Value>, client_name: Option<&str>) -> Session {
-    if let Some(claude) = std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty()) {
+    if let Some(claude) = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         let dir = std::env::var("CLAUDE_PROJECT_DIR").ok();
         return Session {
             key: format!("claude-code:{claude}"),
@@ -62,7 +65,9 @@ fn folder(dir: Option<&str>) -> String {
         Some(dir) => Path::new(dir).to_path_buf(),
         None => std::env::current_dir().unwrap_or_default(),
     };
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn pretty_client_name(name: Option<&str>) -> String {
@@ -82,7 +87,8 @@ mod tests {
     #[test]
     fn codex_metadata_as_text_or_object() {
         let as_text = json!({ "x-codex-turn-metadata": "{\"session_id\":\"abc\",\"workspaces\":[\"/w/proj\"]}" });
-        let as_object = json!({ "x-codex-turn-metadata": { "session_id": "abc", "workspaces": ["/w/proj"] } });
+        let as_object =
+            json!({ "x-codex-turn-metadata": { "session_id": "abc", "workspaces": ["/w/proj"] } });
         for meta in [as_text, as_object] {
             let turn = codex_turn(meta.as_object().unwrap()).unwrap();
             assert_eq!(turn["session_id"], "abc");

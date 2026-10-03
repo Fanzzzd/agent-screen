@@ -33,8 +33,10 @@ struct Sidescreen {
 impl ServerHandler for Sidescreen {
     fn get_info(&self) -> InitializeResult {
         let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
-        info.server_info = serde_json::from_value(json!({ "name": "sidescreen", "version": env!("CARGO_PKG_VERSION") }))
-            .expect("implementation info");
+        info.server_info = serde_json::from_value(
+            json!({ "name": "sidescreen", "version": env!("CARGO_PKG_VERSION") }),
+        )
+        .expect("implementation info");
         info.instructions = Some(INSTRUCTIONS.join(" "));
         info
     }
@@ -52,8 +54,15 @@ impl ServerHandler for Sidescreen {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let meta = request.meta.as_ref().map(|m| m.0.0.clone()).unwrap_or_else(|| context.meta.0.0.clone());
-        let client = context.peer.peer_info().map(|info| info.client_info.name.clone());
+        let meta = request
+            .meta
+            .as_ref()
+            .map(|m| m.0.0.clone())
+            .unwrap_or_else(|| context.meta.0.0.clone());
+        let client = context
+            .peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone());
         let session = session::identify(&meta, client.as_deref());
         let args = request.arguments.unwrap_or_default();
 
@@ -78,7 +87,9 @@ fn from_json<T: serde::de::DeserializeOwned>(value: Value) -> T {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // stdout carries the protocol; anything else goes to stderr.
-    let service = Sidescreen::default().serve(rmcp::transport::stdio()).await?;
+    let service = Sidescreen::default()
+        .serve(rmcp::transport::stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }

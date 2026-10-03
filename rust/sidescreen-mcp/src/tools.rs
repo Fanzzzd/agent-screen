@@ -57,8 +57,16 @@ struct Hints {
     idempotent: bool,
 }
 
-const PLAIN: Hints = Hints { read_only: false, destructive: false, idempotent: false };
-const READ_ONLY: Hints = Hints { read_only: true, destructive: false, idempotent: false };
+const PLAIN: Hints = Hints {
+    read_only: false,
+    destructive: false,
+    idempotent: false,
+};
+const READ_ONLY: Hints = Hints {
+    read_only: true,
+    destructive: false,
+    idempotent: false,
+};
 
 fn tool(name: &str, title: &str, description: &[&str], input: Value, hints: Hints) -> Value {
     json!({
@@ -105,7 +113,10 @@ pub fn definitions() -> Vec<Value> {
                 "it waits for the user to review them; give each a set_disposition first. An empty display closes.",
             ],
             object(json!({ "display_id": display_id() }), &["display_id"]),
-            Hints { destructive: true, ..PLAIN },
+            Hints {
+                destructive: true,
+                ..PLAIN
+            },
         ),
         tool(
             "computer",
@@ -142,7 +153,10 @@ pub fn definitions() -> Vec<Value> {
                 "Block until the user stops operating your display (a Takeover) and hands it back, or until the timeout.",
                 "Call it after any tool fails with a takeover error. Returns at once if you already have control.",
             ],
-            object(json!({ "display_id": display_id(), "timeout_seconds": timeout() }), &["display_id"]),
+            object(
+                json!({ "display_id": display_id(), "timeout_seconds": timeout() }),
+                &["display_id"],
+            ),
             READ_ONLY,
         ),
         tool(
@@ -178,7 +192,9 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "place_window",
             "Place a window on the display",
-            &["Move an existing app window onto the display. Get window ids from list_windows (pass another display's id) or from launch_app."],
+            &[
+                "Move an existing app window onto the display. Get window ids from list_windows (pass another display's id) or from launch_app.",
+            ],
             object(
                 json!({
                     "display_id": display_id(),
@@ -191,7 +207,9 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "launch_app",
             "Launch an app on the display",
-            &["Open an app in the background and put its new window on the display. If the app is already running, a new window is opened for you instead of taking the user's."],
+            &[
+                "Open an app in the background and put its new window on the display. If the app is already running, a new window is opened for you instead of taking the user's.",
+            ],
             object(
                 json!({
                     "display_id": display_id(),
@@ -218,7 +236,10 @@ pub fn definitions() -> Vec<Value> {
                 }),
                 &["display_id", "window_id", "disposition"],
             ),
-            Hints { idempotent: true, ..PLAIN },
+            Hints {
+                idempotent: true,
+                ..PLAIN
+            },
         ),
         tool(
             "get_window_state",
@@ -228,7 +249,10 @@ pub fn definitions() -> Vec<Value> {
                 "brackets that act_on_element takes. Each new state of a window renumbers its elements, so always use the",
                 "numbers from the latest get_window_state or act_on_element result.",
             ],
-            object(json!({ "display_id": display_id(), "window_id": window_id() }), &["display_id", "window_id"]),
+            object(
+                json!({ "display_id": display_id(), "window_id": window_id() }),
+                &["display_id", "window_id"],
+            ),
             READ_ONLY,
         ),
         tool(
@@ -269,14 +293,20 @@ impl Args<'_> {
             None | Some(Value::Null) => Ok(None),
             Some(value) => value
                 .as_i64()
-                .or_else(|| value.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|f| f.fract() == 0.0)
+                        .map(|f| f as i64)
+                })
                 .map(Some)
                 .ok_or_else(|| ControlError::invalid(format!("{key} must be an integer"))),
         }
     }
 
     fn require_int(&self, key: &str) -> Result<i64, ControlError> {
-        self.int(key)?.ok_or_else(|| ControlError::invalid(format!("{key} is required")))
+        self.int(key)?
+            .ok_or_else(|| ControlError::invalid(format!("{key} is required")))
     }
 
     fn number(&self, key: &str) -> Result<Option<f64>, ControlError> {
@@ -303,7 +333,10 @@ impl Args<'_> {
         if let Some(v) = &value
             && !allowed.contains(&v.as_str())
         {
-            return Err(ControlError::invalid(format!("{key} must be one of {}", allowed.join(", "))));
+            return Err(ControlError::invalid(format!(
+                "{key} must be one of {}",
+                allowed.join(", ")
+            )));
         }
         Ok(value)
     }
@@ -312,9 +345,14 @@ impl Args<'_> {
         match self.0.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::Array(items)) if items.len() == 2 => {
-                match (items[0].as_f64().filter(|f| f.is_finite()), items[1].as_f64().filter(|f| f.is_finite())) {
+                match (
+                    items[0].as_f64().filter(|f| f.is_finite()),
+                    items[1].as_f64().filter(|f| f.is_finite()),
+                ) {
                     (Some(x), Some(y)) => Ok(Some((x, y))),
-                    _ => Err(ControlError::invalid(format!("{key} must be [x, y] numbers"))),
+                    _ => Err(ControlError::invalid(format!(
+                        "{key} must be [x, y] numbers"
+                    ))),
                 }
             }
             Some(_) => Err(ControlError::invalid(format!("{key} must be [x, y]"))),
@@ -336,7 +374,12 @@ fn require_text(value: Option<String>, action: &str) -> Result<String, ControlEr
 
 const SETTLE: Duration = Duration::from_millis(350);
 
-pub async fn run(name: &str, args: &Object, session: &Session, control: &Control) -> Result<Output, ControlError> {
+pub async fn run(
+    name: &str,
+    args: &Object,
+    session: &Session,
+    control: &Control,
+) -> Result<Output, ControlError> {
     let a = Args(args);
     match name {
         "create_display" => {
@@ -361,7 +404,12 @@ pub async fn run(name: &str, args: &Object, session: &Session, control: &Control
             })))
         }
         "end_display" => {
-            control.call("endDisplay", json!({ "displayId": a.require_int("display_id")? })).await?;
+            control
+                .call(
+                    "endDisplay",
+                    json!({ "displayId": a.require_int("display_id")? }),
+                )
+                .await?;
             Ok(Output::Object(json!({ "ended": true })))
         }
         "wait_for_control" => {
@@ -375,15 +423,30 @@ pub async fn run(name: &str, args: &Object, session: &Session, control: &Control
         }
         "request_help" => {
             let display = a.require_int("display_id")?;
-            let reason = a.string("reason")?.ok_or_else(|| ControlError::invalid("reason is required"))?;
-            control.call("requestHelp", json!({ "displayId": display, "reason": reason })).await?;
+            let reason = a
+                .string("reason")?
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            control
+                .call(
+                    "requestHelp",
+                    json!({ "displayId": display, "reason": reason }),
+                )
+                .await?;
             let reply = control
-                .call("waitForControl", json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }))
+                .call(
+                    "waitForControl",
+                    json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+                )
                 .await?;
             Ok(Output::Object(describe_wait(&reply)))
         }
         "list_windows" => {
-            let reply = control.call("listWindows", json!({ "displayId": a.require_int("display_id")? })).await?;
+            let reply = control
+                .call(
+                    "listWindows",
+                    json!({ "displayId": a.require_int("display_id")? }),
+                )
+                .await?;
             Ok(Output::Object(Value::Object(reply)))
         }
         "place_window" => {
@@ -409,32 +472,54 @@ pub async fn run(name: &str, args: &Object, session: &Session, control: &Control
                     }),
                 )
                 .await?;
-            Ok(Output::Object(if reply.get("handedOver") == Some(&Value::Bool(true)) {
-                json!({ "disposition": disposition, "note": "The user handed this window over; it returns to them regardless." })
-            } else {
-                json!({ "disposition": disposition })
-            }))
+            Ok(Output::Object(
+                if reply.get("handedOver") == Some(&Value::Bool(true)) {
+                    json!({ "disposition": disposition, "note": "The user handed this window over; it returns to them regardless." })
+                } else {
+                    json!({ "disposition": disposition })
+                },
+            ))
         }
         "launch_app" => {
-            let app = a.string("app")?.ok_or_else(|| ControlError::invalid("app is required"))?;
+            let app = a
+                .string("app")?
+                .ok_or_else(|| ControlError::invalid("app is required"))?;
             let reply = control
-                .call("launchApp", json!({ "displayId": a.require_int("display_id")?, "app": app }))
+                .call(
+                    "launchApp",
+                    json!({ "displayId": a.require_int("display_id")?, "app": app }),
+                )
                 .await?;
             Ok(Output::Object(match reply.get("window") {
                 Some(window) if !window.is_null() => json!({ "window": window }),
-                _ => json!({ "window": null, "note": "The app opened but no new window appeared." }),
+                _ => {
+                    json!({ "window": null, "note": "The app opened but no new window appeared." })
+                }
             }))
         }
-        "get_window_state" => {
-            window_state(control, a.require_int("display_id")?, a.require_int("window_id")?).await.map(Output::Content)
-        }
+        "get_window_state" => window_state(
+            control,
+            a.require_int("display_id")?,
+            a.require_int("window_id")?,
+        )
+        .await
+        .map(Output::Content),
         "act_on_element" => {
             let display = a.require_int("display_id")?;
             let window = a.require_int("window_id")?;
             let action = a
                 .one_of(
                     "action",
-                    &["press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "scroll_into_view"],
+                    &[
+                        "press",
+                        "click",
+                        "double_click",
+                        "right_click",
+                        "show_menu",
+                        "focus",
+                        "set_value",
+                        "scroll_into_view",
+                    ],
                 )?
                 .ok_or_else(|| ControlError::invalid("action is required"))?;
             control
@@ -450,7 +535,9 @@ pub async fn run(name: &str, args: &Object, session: &Session, control: &Control
                 )
                 .await?;
             tokio::time::sleep(SETTLE).await;
-            window_state(control, display, window).await.map(Output::Content)
+            window_state(control, display, window)
+                .await
+                .map(Output::Content)
         }
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
@@ -459,18 +546,35 @@ pub async fn run(name: &str, args: &Object, session: &Session, control: &Control
 
 fn describe_wait(reply: &Object) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
-        Some("returned") => json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." }),
-        Some("timedOut") => json!({ "control": "user", "note": "The user is still operating the display. Wait again or do something else." }),
+        Some("returned") => {
+            json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
+        }
+        Some("timedOut") => {
+            json!({ "control": "user", "note": "The user is still operating the display. Wait again or do something else." })
+        }
         _ => json!({ "control": "none", "note": "The display has ended." }),
     }
 }
 
 /// Window state as tool content: the tree as text, then the window image.
-async fn window_state(control: &Control, display: i64, window: i64) -> Result<Vec<Value>, ControlError> {
-    let state = control.call("windowState", json!({ "displayId": display, "windowId": window })).await?;
+async fn window_state(
+    control: &Control,
+    display: i64,
+    window: i64,
+) -> Result<Vec<Value>, ControlError> {
+    let state = control
+        .call(
+            "windowState",
+            json!({ "displayId": display, "windowId": window }),
+        )
+        .await?;
     let get = |key: &str| state.get(key).cloned().unwrap_or(Value::Null);
     let elements = get("elements");
-    let truncated = if get("truncated") == Value::Bool(true) { " (truncated)" } else { "" };
+    let truncated = if get("truncated") == Value::Bool(true) {
+        " (truncated)"
+    } else {
+        ""
+    };
     let header = format!(
         "Window {window}: {} {} elements{truncated}. Coordinates are window points from its top-left corner, the same space as the {}×{} image.",
         get("window"),
@@ -478,8 +582,14 @@ async fn window_state(control: &Control, display: i64, window: i64) -> Result<Ve
         get("width"),
         get("height")
     );
-    let tree = state.get("tree").and_then(Value::as_str).unwrap_or_default();
-    Ok(vec![text(format!("{header}\n\n{tree}")), image(&get("data"), &get("mimeType"))])
+    let tree = state
+        .get("tree")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Ok(vec![
+        text(format!("{header}\n\n{tree}")),
+        image(&get("data"), &get("mimeType")),
+    ])
 }
 
 async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, ControlError> {
@@ -488,8 +598,18 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         .one_of(
             "action",
             &[
-                "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click", "mouse_move",
-                "left_click_drag", "scroll", "type", "key", "wait",
+                "screenshot",
+                "left_click",
+                "right_click",
+                "middle_click",
+                "double_click",
+                "triple_click",
+                "mouse_move",
+                "left_click_drag",
+                "scroll",
+                "type",
+                "key",
+                "wait",
             ],
         )?
         .ok_or_else(|| ControlError::invalid("action is required"))?;
@@ -526,10 +646,13 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         }
         "mouse_move" => {
             let (x, y) = require_coordinate(coordinate, &action)?;
-            control.call("move", json!({ "displayId": display, "x": x, "y": y })).await?;
+            control
+                .call("move", json!({ "displayId": display, "x": x, "y": y }))
+                .await?;
         }
         "left_click_drag" => {
-            let (from_x, from_y) = require_coordinate(a.coordinate("start_coordinate")?, "left_click_drag start")?;
+            let (from_x, from_y) =
+                require_coordinate(a.coordinate("start_coordinate")?, "left_click_drag start")?;
             let (to_x, to_y) = require_coordinate(coordinate, &action)?;
             control
                 .call(
@@ -550,14 +673,27 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 _ => (amount, 0.0),
             };
             control
-                .call("scroll", json!({ "displayId": display, "x": x, "y": y, "deltaX": dx, "deltaY": dy }))
+                .call(
+                    "scroll",
+                    json!({ "displayId": display, "x": x, "y": y, "deltaX": dx, "deltaY": dy }),
+                )
                 .await?;
         }
         "type" => {
-            control.call("type", json!({ "displayId": display, "text": require_text(text_arg, "type")? })).await?;
+            control
+                .call(
+                    "type",
+                    json!({ "displayId": display, "text": require_text(text_arg, "type")? }),
+                )
+                .await?;
         }
         "key" => {
-            control.call("key", json!({ "displayId": display, "keys": require_text(text_arg, "key")? })).await?;
+            control
+                .call(
+                    "key",
+                    json!({ "displayId": display, "keys": require_text(text_arg, "key")? }),
+                )
+                .await?;
         }
         _ => {
             // wait
@@ -571,10 +707,16 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
     if action != "screenshot" {
         tokio::time::sleep(SETTLE).await;
     }
-    let shot = control.call("screenshot", json!({ "displayId": display })).await?;
+    let shot = control
+        .call("screenshot", json!({ "displayId": display }))
+        .await?;
     let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
     Ok(vec![
-        text(format!("{}×{} screenshot of display {display}.", get("width"), get("height"))),
+        text(format!(
+            "{}×{} screenshot of display {display}.",
+            get("width"),
+            get("height")
+        )),
         image(&get("data"), &get("mimeType")),
     ])
 }
@@ -596,8 +738,14 @@ mod tests {
     fn argument_errors_name_the_field() {
         let args = json!({ "display_id": "one", "coordinate": [1, "x"] });
         let a = Args(args.as_object().unwrap());
-        assert_eq!(a.require_int("display_id").unwrap_err().message, "display_id must be an integer");
+        assert_eq!(
+            a.require_int("display_id").unwrap_err().message,
+            "display_id must be an integer"
+        );
         assert!(a.coordinate("coordinate").is_err());
-        assert_eq!(a.require_int("window_id").unwrap_err().message, "window_id is required");
+        assert_eq!(
+            a.require_int("window_id").unwrap_err().message,
+            "window_id is required"
+        );
     }
 }

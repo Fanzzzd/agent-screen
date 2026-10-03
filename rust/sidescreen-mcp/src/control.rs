@@ -31,7 +31,10 @@ pub struct ControlError {
 
 impl ControlError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into() }
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -46,7 +49,9 @@ impl std::fmt::Display for ControlError {
 }
 
 pub fn socket_path() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join("Library/Application Support/Sidescreen/control.sock")
 }
 
@@ -77,7 +82,8 @@ impl Control {
             connection.pending.lock().unwrap().remove(&id);
             return Err(closed(&error.to_string()));
         }
-        rx.await.unwrap_or_else(|_| Err(closed("the connection dropped")))
+        rx.await
+            .unwrap_or_else(|_| Err(closed("the connection dropped")))
     }
 
     async fn open(&self) -> Result<Arc<Connection>, ControlError> {
@@ -92,10 +98,19 @@ impl Control {
             )
         })?;
         let (reader, writer) = stream.into_split();
-        let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> = Default::default();
+        let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> =
+            Default::default();
         let open = Arc::new(AtomicBool::new(true));
-        tokio::spawn(receive(BufReader::new(reader), pending.clone(), open.clone()));
-        let connection = Arc::new(Connection { writer: Mutex::new(writer), pending, open });
+        tokio::spawn(receive(
+            BufReader::new(reader),
+            pending.clone(),
+            open.clone(),
+        ));
+        let connection = Arc::new(Connection {
+            writer: Mutex::new(writer),
+            pending,
+            open,
+        });
         *slot = Some(connection.clone());
         Ok(connection)
     }
@@ -113,13 +128,25 @@ async fn receive(
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let Ok(reply) = serde_json::from_str::<Value>(line.trim_end()) else { continue };
-        let Some(id) = reply.get("id").and_then(Value::as_u64) else { continue };
-        let Some(settle) = pending.lock().unwrap().remove(&id) else { continue };
+        let Ok(reply) = serde_json::from_str::<Value>(line.trim_end()) else {
+            continue;
+        };
+        let Some(id) = reply.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(settle) = pending.lock().unwrap().remove(&id) else {
+            continue;
+        };
         let outcome = match (reply.get("result"), reply.get("error")) {
             (_, Some(error)) => Err(ControlError::new(
-                error.get("code").and_then(Value::as_str).unwrap_or("failed"),
-                error.get("message").and_then(Value::as_str).unwrap_or_default(),
+                error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed"),
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
             )),
             (Some(Value::Object(result)), None) => Ok(result.clone()),
             _ => Ok(Object::new()),
