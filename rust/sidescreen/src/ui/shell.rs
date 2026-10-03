@@ -9,9 +9,8 @@ use super::viewer::{Sheet, Viewer};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
 use crate::mac::aerospace::AeroSpace;
-use crate::mac::input::Forwarder;
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
-use crate::mac::{app, ax, cg, menubar, notify, windows};
+use crate::mac::{app, ax, cg, menubar, notify, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -99,7 +98,10 @@ pub struct Shell {
 
     viewer_display: Option<DisplayId>,
     /// The input queue of the display in the Viewer.
-    forwarder: Option<Forwarder>,
+    /// When the Viewer's open animation lands.
+    viewer_settled_at: Instant,
+    /// Displays known to have ended, to notice one ending.
+    ended: HashSet<DisplayId>,
     viewer_open: bool,
     viewer_generation: u64,
     /// Where the card rests, so it comes back where the user dragged it.
@@ -183,7 +185,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::set_sender(events);
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
-    native::watch_keys();
+    native::watch_screens();
+    viewer_input::install();
     notify::install();
     native::debug_appearance();
 
@@ -205,7 +208,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             peek_generation: 0,
             settle_until: None,
             viewer_display: None,
-            forwarder: None,
+            viewer_settled_at: Instant::now(),
+            ended: HashSet::new(),
             viewer_open: false,
             viewer_generation: 0,
             resting: None,
@@ -240,6 +244,11 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .expect("Viewer window");
     native::style_panel(&peek_ns, native::LEVEL_POP_UP_MENU);
     native::style_panel(&viewer_ns, native::LEVEL_FLOATING);
+    // Peek never takes the keyboard from the user's app; neither panel
+    // becomes the main window.
+    native::set_keyable(&peek_ns, false);
+    native::set_keyable(&viewer_ns, true);
+    viewer_input::attach(&viewer_ns);
     shell.update(cx, |shell, _| {
         shell.peek = Some((peek, peek_ns));
         shell.viewer = Some((viewer, viewer_ns));
@@ -335,31 +344,10 @@ impl Shell {
             Native::LeftUp { x, y } => self.drag_ended((x, y), cx),
             Native::Menu(action) => self.menu(action, cx),
             Native::HelpClicked { display } => self.open_for_help(display, cx),
-            Native::Key {
-                code,
-                down,
-                modifiers,
-            } => {
-                let Some(id) = self.viewer_display else {
-                    return;
-                };
-                if down {
-                    self.user_input(id, cx);
-                }
-                if let Some(forwarder) = self.forwarder() {
-                    forwarder.key(code, down, modifiers);
-                }
-            }
-            Native::FlagsChanged { code, modifiers } => {
-                if let Some(forwarder) = self.forwarder() {
-                    forwarder.flags_changed(code, modifiers);
-                }
-            }
+            Native::ScreenTouched { display } => self.user_input(display, cx),
+            Native::MenuBarClick { display } => self.menu_bar(display, cx),
+            Native::ScreensChanged => self.schedule_guard(cx),
         }
-    }
-
-    fn forwarder(&self) -> Option<Forwarder> {
-        self.viewer_display.and(self.forwarder.clone())
     }
 
     // MARK: Following the displays
@@ -389,6 +377,16 @@ impl Shell {
             notify::update(*id, "", None);
         }
         let added = ids.difference(&self.known).count() > 0;
+        let ended: HashSet<DisplayId> = core
+            .displays
+            .list
+            .iter()
+            .filter(|d| d.is_ended())
+            .map(|d| d.id)
+            .collect();
+        // A display that ends is a display change too for AeroSpace.
+        let newly_ended = ended.difference(&self.ended).count() > 0;
+        self.ended = ended;
         self.known = ids.clone();
         for id in &gone {
             self.streams.update(cx, |s, _| s.drop_display(*id));
@@ -399,12 +397,14 @@ impl Shell {
         {
             // The Viewer moves on to the next display, or collapses.
             self.viewer_display = None;
-            self.forwarder = None;
             let next = peek::ordered(self.core.read(cx)).first().copied();
             match next {
                 Some(next) if self.viewer_open => self.open_viewer(next, cx),
                 _ => self.close_viewer(cx),
             }
+        }
+        if newly_ended {
+            self.schedule_guard(cx);
         }
         if !gone.is_empty() || added {
             self.schedule_guard(cx);
@@ -725,19 +725,17 @@ impl Shell {
         }
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
         self.viewer_display = Some(id);
-        self.forwarder = Some(forwarder.clone());
         let count = windows::on_display(id).len();
         let _ = viewer.update(cx, |viewer, _, cx| {
             if viewer.sheet.as_ref().is_some_and(|s| s.display != id) {
                 viewer.sheet = None;
             }
             viewer.display = Some(id);
-            viewer.forwarder = Some(forwarder);
             viewer.count = count;
             viewer.drop_target = false;
             cx.notify();
         });
-        native::forward_keys(None);
+        viewer_input::show(Some((id, forwarder)));
 
         let Some((_, visible)) = self.host_screen() else {
             return;
@@ -745,7 +743,7 @@ impl Shell {
         let (w, h) = Viewer::card_size(size, (visible.size.width, visible.size.height));
         if self.viewer_open {
             // Switching displays: the card stays where the user dragged it.
-            self.resting = Some(native::frame(&window));
+            self.remember_resting(&window);
         }
         let frame = match self.resting {
             // Keep the top edge and center where the user left the card.
@@ -780,6 +778,9 @@ impl Shell {
             native::animate_alpha(&window, 1.0, 0.16, native::Curve::Settle);
         }
         self.viewer_open = true;
+        // Until the open animation lands, the window's frame is in flight.
+        self.resting = Some(frame);
+        self.viewer_settled_at = Instant::now() + Duration::from_millis(400);
         self.streams
             .update(cx, |s, cx| s.want(id, "viewer", 60, pixels(size), cx));
         if let Some((peek, _)) = &self.peek {
@@ -796,7 +797,6 @@ impl Shell {
         let Some((viewer, window)) = self.viewer.clone() else {
             return;
         };
-        native::forward_keys(None);
         let _ = viewer.update(cx, |viewer, _, cx| {
             viewer.sheet = None;
             cx.notify();
@@ -810,8 +810,9 @@ impl Shell {
         if !self.viewer_open {
             return;
         }
+        self.remember_resting(&window);
         self.viewer_open = false;
-        self.resting = Some(native::frame(&window));
+        viewer_input::show(None);
         if let Some(id) = self.viewer_display {
             self.streams
                 .update(cx, |s, cx| s.want(id, "viewer", 0, (0, 0), cx));
@@ -829,17 +830,19 @@ impl Shell {
         });
     }
 
-    /// The screen got a click (`true`) or something else in the Viewer did.
-    pub fn screen_keys(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some((viewer, window)) = self.viewer.clone() else {
-            return;
-        };
-        let sheet = viewer.read(cx).is_ok_and(|v| v.sheet.is_some());
-        if on && !sheet {
-            native::make_key(&window);
-            native::forward_keys(Some(&window));
-        } else {
-            native::forward_keys(None);
+    /// Where the card rests: the live frame once the open animation has
+    /// landed, which follows the user's drags. Mid-animation the frame is
+    /// in flight, so the target stays.
+    fn remember_resting(&mut self, window: &NSWindow) {
+        if self.viewer_open && Instant::now() >= self.viewer_settled_at {
+            self.resting = Some(native::frame(window));
+        }
+    }
+
+    /// Give the Viewer the keyboard, as a click on the display would.
+    fn take_keyboard(&self) {
+        if let Some((_, window)) = &self.viewer {
+            native::make_key(window);
         }
     }
 
@@ -871,10 +874,9 @@ impl Shell {
                     cx.notify();
                 }
             });
-            native::forward_keys(None);
         } else {
             self.user_input(id, cx);
-            self.screen_keys(true, cx);
+            self.take_keyboard();
         }
     }
 
@@ -910,7 +912,7 @@ impl Shell {
                 };
                 let _ = viewer.update(cx, |viewer, _, cx| viewer.answer(id != 0, cx));
             }
-            "focus" => self.screen_keys(true, cx),
+            "focus" => self.take_keyboard(),
             "viewer" => self.open_viewer(id, cx),
             "select" => self.select(id, cx),
             "quit" => self.quit(cx),
@@ -1023,12 +1025,10 @@ impl Shell {
 
     /// A click on the menu bar strip of the display image.
     pub fn menu_bar(&mut self, id: DisplayId, _cx: &mut Context<Self>) {
-        match menubar::menu(id) {
-            Some(menu) => {
-                let (x, y) = native::mouse_location();
-                menu.pop_up_at(x, y);
-            }
-            None => beep(),
+        // An app without menus: the click just does nothing.
+        if let Some(menu) = menubar::menu(id) {
+            let (x, y) = native::mouse_location();
+            menu.pop_up_at(x, y);
         }
     }
 
@@ -1107,9 +1107,7 @@ impl Shell {
             live: display.is_live(),
         };
         // The question appears on the Viewer; Peek stays up.
-
         self.open_viewer(id, cx);
-        native::forward_keys(None);
         let Some((viewer, window)) = self.viewer.clone() else {
             return;
         };
@@ -1306,7 +1304,11 @@ impl Shell {
         let drag = self.drag.take();
         self.set_drop_hover(false, cx);
         if let (true, Some(drag), Some(id)) = (dropped, drag, self.viewer_display) {
-            self.hand_over(drag.target, Some(drag.frame), id, cx);
+            // Let the window manager finish its own drop handling first, or
+            // it re-tiles the window after we move it.
+            self.after(Duration::from_millis(150), cx, move |shell, cx| {
+                shell.hand_over(drag.target, Some(drag.frame), id, cx)
+            });
         }
     }
 

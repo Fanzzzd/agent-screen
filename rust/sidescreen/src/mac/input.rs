@@ -137,22 +137,24 @@ impl Forwarder {
         rx.await.ok()
     }
 
-    // MARK: Live input from the Viewer, one event at a time.
+    // MARK: Live input from the Viewer, one event at a time. Flags are the
+    // NSEvent's own modifier flags, whose bits match CGEventFlags, so Caps
+    // Lock and the left/right device bits survive.
 
-    pub fn mouse_down(&self, at: (f64, f64), button: Button, clicks: i64, m: Modifiers) {
-        self.send(move |w| w.mouse_down(at, button, clicks, flags(m)));
+    pub fn mouse_down(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
+        self.send(move |w| w.mouse_down(at, button, clicks, flags));
     }
 
-    pub fn mouse_dragged(&self, to: (f64, f64), button: Button, m: Modifiers) {
-        self.send(move |w| w.mouse_dragged(to, button, flags(m)));
+    pub fn mouse_dragged(&self, to: (f64, f64), button: Button, flags: CGEventFlags) {
+        self.send(move |w| w.mouse_dragged(to, button, flags));
     }
 
-    pub fn mouse_up(&self, at: (f64, f64), button: Button, clicks: i64, m: Modifiers) {
-        self.send(move |w| w.mouse_up(at, button, clicks, flags(m)));
+    pub fn mouse_up(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
+        self.send(move |w| w.mouse_up(at, button, clicks, flags));
     }
 
-    pub fn mouse_moved(&self, to: (f64, f64)) {
-        self.send(move |w| w.mouse_moved(to));
+    pub fn mouse_moved(&self, to: (f64, f64), flags: CGEventFlags) {
+        self.send(move |w| w.mouse_moved(to, flags));
     }
 
     pub fn scroll(
@@ -162,17 +164,17 @@ impl Forwarder {
         continuous: bool,
         phase: i64,
         momentum: i64,
-        m: Modifiers,
+        flags: CGEventFlags,
     ) {
-        self.send(move |w| w.scroll(at, delta, continuous, phase, momentum, flags(m)));
+        self.send(move |w| w.scroll(at, delta, continuous, phase, momentum, flags));
     }
 
-    pub fn key(&self, code: u16, down: bool, m: Modifiers) {
-        self.send(move |w| w.key(code, down, flags(m)));
+    pub fn key(&self, code: u16, down: bool, flags: CGEventFlags) {
+        self.send(move |w| w.key(code, down, flags));
     }
 
-    pub fn flags_changed(&self, code: u16, m: Modifiers) {
-        self.send(move |w| w.flags_changed(code, flags(m)));
+    pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
+        self.send(move |w| w.flags_changed(code, flags));
     }
 
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
@@ -212,7 +214,8 @@ impl Forwarder {
     }
 
     pub async fn move_to(&self, to: (f64, f64)) {
-        self.run(move |w| w.mouse_moved(to)).await;
+        self.run(move |w| w.mouse_moved(to, CGEventFlags::empty()))
+            .await;
     }
 
     pub async fn wheel(&self, at: (f64, f64), delta: (f64, f64), m: Modifiers) {
@@ -331,7 +334,7 @@ impl Worker {
         self.post(button.up(), at, g.target, button, clicks, g.group, flags);
     }
 
-    fn mouse_moved(&mut self, to: (f64, f64)) {
+    fn mouse_moved(&mut self, to: (f64, f64), flags: CGEventFlags) {
         if self.gesture.is_some() {
             return;
         }
@@ -345,7 +348,7 @@ impl Worker {
             Button::Left,
             0,
             0,
-            CGEventFlags::empty(),
+            flags,
         );
     }
 

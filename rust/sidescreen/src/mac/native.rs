@@ -6,7 +6,6 @@
 //! the main dispatch queue, so their nested run loop never runs inside a
 //! GPUI update.
 
-use crate::keychord::Modifiers;
 use block2::RcBlock;
 use futures::channel::mpsc::UnboundedSender;
 use objc2::rc::Retained;
@@ -19,8 +18,7 @@ use objc2_app_kit::{
     NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -52,20 +50,20 @@ pub enum Native {
     },
     /// A menu item was chosen.
     Menu(MenuAction),
-    /// A key went down or up in the Viewer while its screen has the keyboard.
-    Key {
-        code: u16,
-        down: bool,
-        modifiers: Modifiers,
+    /// The user clicked, scrolled or typed on the Viewer's display image.
+    ScreenTouched {
+        display: u32,
+    },
+    /// A left click on the menu bar strip of the display image.
+    MenuBarClick {
+        display: u32,
     },
     /// The user clicked the help notification of a display.
     HelpClicked {
         display: u32,
     },
-    FlagsChanged {
-        code: u16,
-        modifiers: Modifiers,
-    },
+    /// Screens were added, removed or rearranged.
+    ScreensChanged,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +106,10 @@ pub fn send(event: Native) {
             let _ = sender.unbounded_send(event);
         }
     });
+}
+
+pub fn keep_monitor(object: Retained<AnyObject>) {
+    keep(object);
 }
 
 fn keep(object: Retained<AnyObject>) {
@@ -465,6 +467,49 @@ pub fn style_panel(window: &NSWindow, level: isize) {
     );
 }
 
+/// Whether a GPUI window may become key. GPUI's panel class says yes to
+/// key and main for every window, so each window gets a subclass of its
+/// own class that answers for it. Never main, either way.
+pub fn set_keyable(window: &NSWindow, keyable: bool) {
+    use objc2::ffi::object_setClass;
+    use objc2::runtime::{AnyClass, Bool, ClassBuilder, Sel};
+    extern "C-unwind" fn yes(_: &AnyObject, _: Sel) -> Bool {
+        Bool::YES
+    }
+    extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    let base = window.class();
+    let name = format!(
+        "Sidescreen{}{}",
+        if keyable { "Keyable" } else { "Unkeyable" },
+        base.name().to_string_lossy()
+    );
+    let name = std::ffi::CString::new(name).expect("class name");
+    let class = AnyClass::get(&name).or_else(|| {
+        let mut builder = ClassBuilder::new(&name, base)?;
+        unsafe {
+            builder.add_method(
+                sel!(canBecomeKeyWindow),
+                if keyable { yes } else { no } as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(canBecomeMainWindow),
+                no as extern "C-unwind" fn(_, _) -> _,
+            );
+        }
+        Some(builder.register())
+    });
+    if let Some(class) = class {
+        unsafe {
+            object_setClass(
+                (window as *const NSWindow).cast_mut().cast(),
+                (class as *const AnyClass).cast(),
+            )
+        };
+    }
+}
+
 pub const LEVEL_FLOATING: isize = 3;
 pub const LEVEL_POP_UP_MENU: isize = 101;
 
@@ -587,86 +632,6 @@ pub fn menu_bar_height(display: u32) -> f64 {
     24.0
 }
 
-// MARK: Keyboard for the Viewer
-
-thread_local! {
-    /// The Viewer window whose keys go to the Agent Display, while its
-    /// screen has the keyboard.
-    static KEY_WINDOW: Cell<usize> = const { Cell::new(0) };
-    /// Keys sent with Command, whose release AppKit may never report.
-    static SENT_UP: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
-}
-
-/// Forward keys pressed in `window` to the display, or stop with None.
-pub fn forward_keys(window: Option<&NSWindow>) {
-    KEY_WINDOW.with(|k| k.set(window.map_or(0, |w| w as *const NSWindow as usize)));
-}
-
-pub fn modifiers(flags: NSEventModifierFlags) -> Modifiers {
-    Modifiers {
-        control: flags.contains(NSEventModifierFlags::Control),
-        shift: flags.contains(NSEventModifierFlags::Shift),
-        alt: flags.contains(NSEventModifierFlags::Option),
-        command: flags.contains(NSEventModifierFlags::Command),
-        function: flags.contains(NSEventModifierFlags::Function),
-    }
-}
-
-/// Take key events for the Viewer before AppKit and GPUI see them: the
-/// display gets the real key codes, and Command shortcuts never reach our
-/// own menu.
-pub fn watch_keys() {
-    let mask = NSEventMask::KeyDown | NSEventMask::KeyUp | NSEventMask::FlagsChanged;
-    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
-        let e = unsafe { event.as_ref() };
-        let target = KEY_WINDOW.with(Cell::get);
-        let window = e.window(MainThreadMarker::new().expect("main thread"));
-        let mine = target != 0
-            && window
-                .as_deref()
-                .is_some_and(|w| w as *const NSWindow as usize == target);
-        if !mine {
-            return event.as_ptr();
-        }
-        let code = e.keyCode();
-        let m = modifiers(e.modifierFlags());
-        match e.r#type() {
-            NSEventType::KeyDown => {
-                send(Native::Key {
-                    code,
-                    down: true,
-                    modifiers: m,
-                });
-                if m.command {
-                    send(Native::Key {
-                        code,
-                        down: false,
-                        modifiers: m,
-                    });
-                    SENT_UP.with(|s| s.borrow_mut().insert(code));
-                }
-            }
-            NSEventType::KeyUp => {
-                if !SENT_UP.with(|s| s.borrow_mut().remove(&code)) {
-                    send(Native::Key {
-                        code,
-                        down: false,
-                        modifiers: m,
-                    });
-                }
-            }
-            NSEventType::FlagsChanged => send(Native::FlagsChanged { code, modifiers: m }),
-            _ => return event.as_ptr(),
-        }
-        std::ptr::null_mut()
-    });
-    if let Some(monitor) =
-        unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
-    {
-        keep(monitor);
-    }
-}
-
 /// Force light or dark for screenshots in debug builds:
 /// SIDESCREEN_APPEARANCE=light|dark. The system setting stays untouched.
 pub fn debug_appearance() {
@@ -683,4 +648,21 @@ pub fn debug_appearance() {
     };
     let appearance = objc2_app_kit::NSAppearance::appearanceNamed(&NSString::from_str(name));
     NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
+}
+
+/// Report screens being added, removed or rearranged.
+pub fn watch_screens() {
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let block =
+        RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| send(Native::ScreensChanged));
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSApplicationDidChangeScreenParametersNotification),
+            None,
+            Some(&objc2_foundation::NSOperationQueue::mainQueue()),
+            &block,
+        )
+    };
+    let observer: Retained<AnyObject> = observer.into();
+    keep(observer);
 }

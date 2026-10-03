@@ -11,4 +11,7 @@ pub mod menubar;
 pub mod native;
 pub mod notify;
 pub mod screenshot;
+pub mod viewer_input;
 pub mod windows;
+
+pub use native::menu_bar_height as menubar_height;

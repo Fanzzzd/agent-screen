@@ -27,6 +27,7 @@ pub fn menu(display: DisplayId) -> Option<Menu> {
     let menu = Menu::new(&window.app);
     menu.disabled(&window.app);
     ITEMS.with(|items| items.borrow_mut().clear());
+    let mut titles = 0;
     // The first title is the Apple menu, which belongs to the system.
     for item in ax::elements_attribute(&bar, "AXChildren")
         .into_iter()
@@ -42,8 +43,9 @@ pub fn menu(display: DisplayId) -> Option<Menu> {
         let content = Menu::new(&title);
         fill(&content, &submenu);
         menu.submenu(&title, content);
+        titles += 1;
     }
-    Some(menu)
+    (titles > 0).then_some(menu)
 }
 
 fn fill(menu: &Menu, ax_menu: &Element) {

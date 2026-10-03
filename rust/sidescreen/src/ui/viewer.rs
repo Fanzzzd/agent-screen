@@ -8,19 +8,14 @@ use super::stream::Streams;
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::dismissal::Item;
-use crate::keychord;
-use crate::mac::input::{Button, Forwarder};
-use crate::mac::{cg, native};
+use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Entity, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement, Pixels, Render, Role, ScrollDelta, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, TouchPhase, WeakEntity, Window, canvas, div, point,
+    App, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, ObjectFit, ParentElement, Pixels, Render, Role, SharedString,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, canvas, div, point,
     prelude::FluentBuilder, px, size, surface, svg,
 };
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::Instant;
 
 pub const HEADER: f32 = 52.;
@@ -43,7 +38,6 @@ pub struct Viewer {
     core: Entity<Core>,
     streams: Entity<Streams>,
     pub display: Option<DisplayId>,
-    pub forwarder: Option<Forwarder>,
     /// Windows on the display, refreshed by the shell.
     pub count: usize,
     pub sheet: Option<Sheet>,
@@ -52,7 +46,6 @@ pub struct Viewer {
     /// A Handover just landed: a brief accent ring.
     pub flash_until: Option<Instant>,
     pub focus: FocusHandle,
-    pressed: Rc<Cell<Option<Button>>>,
 }
 
 impl Viewer {
@@ -74,13 +67,11 @@ impl Viewer {
             core,
             streams,
             display: None,
-            forwarder: None,
             count: 0,
             sheet: None,
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
-            pressed: Rc::new(Cell::new(None)),
         }
     }
 
@@ -333,47 +324,6 @@ fn content_rect(bounds: Bounds<Pixels>, display: (f64, f64)) -> Bounds<Pixels> {
     )
 }
 
-fn modifiers(m: gpui::Modifiers) -> keychord::Modifiers {
-    keychord::Modifiers {
-        control: m.control,
-        shift: m.shift,
-        alt: m.alt,
-        command: m.platform,
-        function: m.function,
-    }
-}
-
-fn button_of(button: MouseButton) -> Option<Button> {
-    match button {
-        MouseButton::Left => Some(Button::Left),
-        MouseButton::Right => Some(Button::Right),
-        MouseButton::Middle => Some(Button::Middle),
-        _ => None,
-    }
-}
-
-/// A point in the window to global CG coordinates on the display, or None
-/// outside the image unless `clamp`.
-fn remote(
-    position: gpui::Point<Pixels>,
-    content: Bounds<Pixels>,
-    id: DisplayId,
-    clamp: bool,
-) -> Option<(f64, f64)> {
-    let mut nx =
-        f32::from(position.x - content.origin.x) as f64 / f32::from(content.size.width) as f64;
-    let mut ny =
-        f32::from(position.y - content.origin.y) as f64 / f32::from(content.size.height) as f64;
-    if clamp {
-        nx = nx.clamp(0.0, 1.0);
-        ny = ny.clamp(0.0, 1.0);
-    } else if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
-        return None;
-    }
-    let b = cg::display_bounds(id);
-    Some((b.x + nx * (b.width - 1.0), b.y + ny * (b.height - 1.0)))
-}
-
 impl Viewer {
     fn screen(
         &self,
@@ -391,122 +341,15 @@ impl Viewer {
                 .into_any_element(),
             None => div().size_full().into_any_element(),
         };
-        let forwarder = self.forwarder.clone();
-        let shell = self.shell.clone();
-        let pressed = self.pressed.clone();
+        // The native input monitor needs to know where the image is.
         let blocked = self.sheet.is_some();
         let input = canvas(
             |_, _, _| {},
-            move |bounds, _, window: &mut Window, _| {
-                let content = content_rect(bounds, size);
-                let Some(forwarder) = forwarder.clone() else {
-                    return;
-                };
-                {
-                    let (forwarder, shell, pressed) =
-                        (forwarder.clone(), shell.clone(), pressed.clone());
-                    window.on_mouse_event(move |e: &MouseDownEvent, phase, _, cx| {
-                        if phase != DispatchPhase::Bubble {
-                            return;
-                        }
-                        let inside = !blocked && content.contains(&e.position);
-                        let shell2 = shell.clone();
-                        tell(&shell2, cx, move |shell, cx| shell.screen_keys(inside, cx));
-                        if !inside {
-                            return;
-                        }
-                        let (Some(button), Some(at)) =
-                            (button_of(e.button), remote(e.position, content, id, false))
-                        else {
-                            return;
-                        };
-                        // The user's first input takes the display over from its agent.
-                        tell(&shell, cx, move |shell, cx| shell.user_input(id, cx));
-                        if button == Button::Left
-                            && at.1 - cg::display_bounds(id).y < native::menu_bar_height(id)
-                        {
-                            tell(&shell, cx, move |shell, cx| shell.menu_bar(id, cx));
-                            return;
-                        }
-                        pressed.set(Some(button));
-                        forwarder.mouse_down(
-                            at,
-                            button,
-                            e.click_count as i64,
-                            modifiers(e.modifiers),
-                        );
-                    });
-                }
-                {
-                    let (forwarder, pressed) = (forwarder.clone(), pressed.clone());
-                    window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, _| {
-                        if phase != DispatchPhase::Bubble || blocked {
-                            return;
-                        }
-                        match pressed.get() {
-                            Some(button) => {
-                                if let Some(at) = remote(e.position, content, id, true) {
-                                    forwarder.mouse_dragged(at, button, modifiers(e.modifiers));
-                                }
-                            }
-                            None => {
-                                if let Some(at) = remote(e.position, content, id, false) {
-                                    forwarder.mouse_moved(at);
-                                }
-                            }
-                        }
-                    });
-                }
-                {
-                    let (forwarder, pressed) = (forwarder.clone(), pressed.clone());
-                    window.on_mouse_event(move |e: &MouseUpEvent, phase, _, _| {
-                        if phase != DispatchPhase::Bubble {
-                            return;
-                        }
-                        let Some(button) = pressed.get() else { return };
-                        if button_of(e.button) != Some(button) {
-                            return;
-                        }
-                        pressed.set(None);
-                        if let Some(at) = remote(e.position, content, id, true) {
-                            forwarder.mouse_up(
-                                at,
-                                button,
-                                e.click_count as i64,
-                                modifiers(e.modifiers),
-                            );
-                        }
-                    });
-                }
-                {
-                    let (forwarder, shell) = (forwarder.clone(), shell.clone());
-                    window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
-                        if phase != DispatchPhase::Bubble
-                            || blocked
-                            || !content.contains(&e.position)
-                        {
-                            return;
-                        }
-                        let Some(at) = remote(e.position, content, id, true) else {
-                            return;
-                        };
-                        tell(&shell, cx, move |shell, cx| shell.user_input(id, cx));
-                        let (delta, continuous) = match e.delta {
-                            ScrollDelta::Pixels(p) => {
-                                ((f32::from(p.x) as f64, f32::from(p.y) as f64), true)
-                            }
-                            ScrollDelta::Lines(l) => ((l.x as f64, l.y as f64), false),
-                        };
-                        let phase = match (continuous, e.touch_phase) {
-                            (false, _) => 0,
-                            (true, TouchPhase::Started) => 1,
-                            (true, TouchPhase::Moved) => 2,
-                            (true, TouchPhase::Ended) => 4,
-                            (true, _) => 8,
-                        };
-                        forwarder.scroll(at, delta, continuous, phase, 0, modifiers(e.modifiers));
-                    });
-                }
+            move |bounds, _, _: &mut Window, _| {
+                let c = content_rect(bounds, size);
+                let rect = [c.origin.x, c.origin.y, c.size.width, c.size.height]
+                    .map(|v| f32::from(v) as f64);
+                viewer_input::layout(Some(rect), blocked);
             },
         )
         .absolute()
