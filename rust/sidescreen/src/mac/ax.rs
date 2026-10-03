@@ -168,6 +168,11 @@ impl std::fmt::Display for MoveError {
 
 /// Fit the window inside `bounds` with a 40 pt margin, centered.
 pub fn move_into(target: WindowTarget, bounds: Rect) -> Result<(), MoveError> {
+    // A removed display has empty bounds; the window would land in a
+    // corner of the main screen.
+    if bounds.width <= 80.0 || bounds.height <= 80.0 {
+        return Err(MoveError::Rejected);
+    }
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
     let area = bounds.inset(40.0, 40.0);
     let size = attribute(&window, "AXSize")

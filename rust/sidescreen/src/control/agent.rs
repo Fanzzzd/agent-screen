@@ -539,6 +539,10 @@ async fn launch(
                 let _ = settle(&core, late.target, id, cx).await;
                 return;
             }
+            // Ended or removed meanwhile: the window stays where it opened.
+            if !takes_windows(&core, id, cx) {
+                return;
+            }
         }
     })
     .detach();
@@ -553,9 +557,16 @@ async fn settle(
     id: DisplayId,
     cx: &mut AsyncApp,
 ) -> Result<windows::Window, ControlError> {
+    let ended = || ControlError::ended(format!("display {id} has ended"));
+    if !takes_windows(core, id, cx) {
+        return Err(ended());
+    }
     claim(core, id, target, Origin::Launched, cx);
     let mut last_error = None;
     for _ in 0..12 {
+        if !takes_windows(core, id, cx) {
+            return Err(ended());
+        }
         if let Err(e) = place(target, id, cx).await {
             last_error = Some(e);
         }
@@ -573,6 +584,11 @@ async fn settle(
         "the window opened but could not be placed on the display{}",
         last_error.map(|e| format!(": {e}")).unwrap_or_default()
     )))
+}
+
+/// The display still exists and has not ended, so windows may go onto it.
+fn takes_windows(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| !d.is_ended()))
 }
 
 // MARK: Parameters
