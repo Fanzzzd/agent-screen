@@ -8,14 +8,12 @@
 //! process. The app treats its closing as the end of the Agent Session, so the
 //! session's display stops taking input when the MCP server exits.
 
+use crate::endpoint::{self, Reader, Writer};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::{Mutex, oneshot};
 
 pub type Object = Map<String, Value>;
@@ -48,17 +46,10 @@ impl std::fmt::Display for ControlError {
     }
 }
 
-pub fn socket_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join("Library/Application Support/Sidescreen/control.sock")
-}
-
 type Reply = Result<Object, ControlError>;
 
 struct Connection {
-    writer: Mutex<OwnedWriteHalf>,
+    writer: Mutex<Writer>,
     pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>>,
     open: Arc<AtomicBool>,
 }
@@ -91,13 +82,12 @@ impl Control {
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
             return Ok(connection.clone());
         }
-        let stream = UnixStream::connect(socket_path()).await.map_err(|error| {
+        let (reader, writer) = endpoint::connect().await.map_err(|error| {
             ControlError::new(
                 "unavailable",
                 format!("The Sidescreen app is not running ({error}). Ask the user to start it."),
             )
         })?;
-        let (reader, writer) = stream.into_split();
         let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> =
             Default::default();
         let open = Arc::new(AtomicBool::new(true));
@@ -117,7 +107,7 @@ impl Control {
 }
 
 async fn receive(
-    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    mut reader: BufReader<Reader>,
     pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>>,
     open: Arc<AtomicBool>,
 ) {

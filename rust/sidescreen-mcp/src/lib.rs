@@ -2,6 +2,7 @@
 //! stdio; it serves the tools and forwards them to the menu bar app.
 
 mod control;
+pub mod endpoint;
 mod session;
 mod tools;
 

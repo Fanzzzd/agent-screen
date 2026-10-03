@@ -72,13 +72,12 @@ pub enum Event {
 }
 
 pub fn socket_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let base = home.join("Library/Application Support/Sidescreen");
-    let _ = std::fs::create_dir_all(&base);
-    let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
-    base.join("control.sock")
+    let path = sidescreen_mcp::endpoint::socket_path();
+    if let Some(base) = path.parent() {
+        let _ = std::fs::create_dir_all(base);
+        let _ = std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700));
+    }
+    path
 }
 
 /// Start listening. Events arrive on the returned receiver.
