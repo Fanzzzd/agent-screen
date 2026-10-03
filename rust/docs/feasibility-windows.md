@@ -123,3 +123,29 @@ https://codereview.chromium.org/159713012/,
 https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-injectsyntheticpointerinput,
 https://chromium.googlesource.com/chromium/src/+/2ea4cd09beb47ca62bb96133aeb66494de766db2/remoting/host/win/session_input_injector.cc,
 https://support.microsoft.com/windows/experimental-agentic-features-a25ede8a-e4c2-4841-85a8-44839191dfb3
+
+## Open-source building blocks (checked 2026-10-03)
+
+| Area | Choice | License | Why |
+| --- | --- | --- | --- |
+| Virtual display driver | Fork of [SudoVDA](https://github.com/SudoMaker/SudoVDA) | MIT / CC0 | The only open driver that adds and removes single monitors by IOCTL, keyed by a GUID per monitor. Inactive since 2025-04, so we would own the fork and sign it. |
+| Driver reference | [Microsoft IndirectDisplay sample](https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay) | MS-PL | The base every IddCx driver derives from. This is the lowest supported layer: write our own IddCx driver if the fork gets in the way. |
+| Driver in Rust (reading) | [virtual-display-rs](https://github.com/MolotovCherry/virtual-display-rs) | MIT | Shows an IddCx driver structured in Rust. Stale since 2024. |
+| Signing model | [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) via SignPath Foundation | MIT | Shows how an open-source driver gets signed for free. Its whole-driver reload on count changes does not fit our per-agent displays. |
+| Display topology | [libdisplaydevice](https://github.com/LizardByte/libdisplaydevice) | MIT | A C++ wrapper over the CCD API (`SetDisplayConfig`) for placing a monitor without disturbing the user's layout. |
+| Capture | [windows-capture](https://github.com/NiiightmareXD/windows-capture) | MIT | A Rust wrapper over Windows.Graphics.Capture; monitor capture works on IddCx monitors. |
+| Semantic input | [uiautomation-rs](https://github.com/leexgone/uiautomation-rs), or UIA through [windows-rs](https://github.com/microsoft/windows-rs) | Apache-2.0 / MIT | Invoke, Value, Toggle and Scroll patterns act without the cursor. |
+| Chromium and Electron input | [chromiumoxide](https://github.com/mattsse/chromiumoxide) | Apache-2.0 / MIT | CDP `Input.dispatch*`: no system cursor, no foreground needed. |
+| Tray | [tray-icon](https://github.com/tauri-apps/tray-icon) | Apache-2.0 / MIT | Shell_NotifyIcon. |
+
+Studied for design only: Sunshine and Apollo (GPL-3.0) for capture and the
+virtual display lifecycle; Apollo creates a SudoVDA display per stream, the
+closest match to our per-agent model. RustDesk (AGPL-3.0) is the closest Rust
+codebase. We do not copy code from any of them.
+
+None of these streaming stacks solves background input. They all inject as the
+real user. The supported OS-level answer is a separate session, and Microsoft is building that as
+Agent Workspace. Track it through https://developer.microsoft.com/windows/agentic.
+Until third parties can use it, input is UIA first, CDP second, `PostMessage`
+for classic Win32 controls, and otherwise a visible mode where the agent borrows
+the cursor with the user's consent.
