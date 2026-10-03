@@ -110,12 +110,9 @@ approaches that work give each agent its own input target, either a session or a
    move the mouse cursor. It still targets the input desktop by
    coordinate, so it only helps inside an isolated session.
 
-Rejected:
-- `AttachThreadInput` + `SetKeyboardState`: KB 2581582 says modifier state breaks.
-- Posting `WM_*` to Chromium's render HWND: Chromium hit-tests and drops the messages.
-- RDP Wrapper: it breaks the EULA, is fragile, and AV flags it.
-- Hidden desktops with `PrintWindow` capture: GPU windows come back black, and
-  security tools flag the pattern.
+Ground rule: only documented, supported Windows APIs and components whose
+licenses allow redistribution. Anything that patches system files, breaks a
+license, or works like an attack technique is out.
 
 Virtual display for an MVP: Amyuni `usbmmidd` ships signed, so it avoids our own
 signing pipeline, but its redistribution license needs checking. Production should
