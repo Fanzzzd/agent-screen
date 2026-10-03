@@ -486,17 +486,52 @@ pub fn make_key(window: &NSWindow) {
     window.makeKeyWindow();
 }
 
-/// Slide `window` to `frame` and fade it to `alpha` over `seconds`.
+/// How an animation moves.
+#[derive(Clone, Copy)]
+pub enum Curve {
+    /// Fast start, long soft landing: things arriving.
+    Settle,
+    /// Slow start: things leaving.
+    EaseIn,
+}
+
+/// Move `window` to `frame` and fade it to `alpha` over `seconds`.
 pub fn animate(window: &NSWindow, frame: NSRect, alpha: f64, seconds: f64) {
-    let window: Retained<NSWindow> = window.retain();
+    animate_frame(window, frame, seconds, Curve::Settle);
+    animate_alpha(window, alpha, seconds, Curve::Settle);
+}
+
+fn run_animation(seconds: f64, curve: Curve, change: impl Fn() + 'static) {
+    use objc2_quartz_core::{CAMediaTimingFunction, kCAMediaTimingFunctionEaseIn};
     let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
         let context = unsafe { context.as_ref() };
         context.setDuration(seconds);
-        let animator: Retained<NSWindow> = unsafe { msg_send![&window, animator] };
-        animator.setFrame_display(frame, true);
-        animator.setAlphaValue(alpha);
+        let timing = match curve {
+            Curve::Settle => CAMediaTimingFunction::functionWithControlPoints(0.16, 1.0, 0.3, 1.0),
+            Curve::EaseIn => {
+                CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseIn })
+            }
+        };
+        context.setTimingFunction(Some(&timing));
+        change();
     });
     NSAnimationContext::runAnimationGroup(&changes);
+}
+
+pub fn animate_frame(window: &NSWindow, frame: NSRect, seconds: f64, curve: Curve) {
+    let window: Retained<NSWindow> = window.retain();
+    run_animation(seconds, curve, move || {
+        let animator: Retained<NSWindow> = unsafe { msg_send![&window, animator] };
+        animator.setFrame_display(frame, true);
+    });
+}
+
+pub fn animate_alpha(window: &NSWindow, alpha: f64, seconds: f64, curve: Curve) {
+    let window: Retained<NSWindow> = window.retain();
+    run_animation(seconds, curve, move || {
+        let animator: Retained<NSWindow> = unsafe { msg_send![&window, animator] };
+        animator.setAlphaValue(alpha);
+    });
 }
 
 pub fn set_alpha(window: &NSWindow, alpha: f64) {
@@ -630,4 +665,22 @@ pub fn watch_keys() {
     {
         keep(monitor);
     }
+}
+
+/// Force light or dark for screenshots in debug builds:
+/// SIDESCREEN_APPEARANCE=light|dark. The system setting stays untouched.
+pub fn debug_appearance() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let name = match std::env::var("SIDESCREEN_APPEARANCE").as_deref() {
+        Ok("light") => "NSAppearanceNameAqua",
+        Ok("dark") => "NSAppearanceNameDarkAqua",
+        _ => return,
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let appearance = objc2_app_kit::NSAppearance::appearanceNamed(&NSString::from_str(name));
+    NSApplication::sharedApplication(mtm).setAppearance(appearance.as_deref());
 }

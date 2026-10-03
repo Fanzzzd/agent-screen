@@ -36,6 +36,7 @@ objc2-application-services = "0.3"
 objc2-image-io = "0.3"
 libc = "0.2"
 objc2-user-notifications = "0.3"
+objc2-quartz-core = "0.3"
 
 [build-dependencies]
 cc = "1"

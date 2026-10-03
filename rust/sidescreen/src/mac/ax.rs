@@ -206,17 +206,6 @@ pub fn close(target: WindowTarget) -> Result<(), MoveError> {
     }
 }
 
-/// The focused window of an app.
-pub fn focused_window(pid: i32) -> Option<WindowTarget> {
-    let app = application(pid);
-    let window = element_attribute(&app, "AXFocusedWindow")
-        .or_else(|| element_attribute(&app, "AXMainWindow"))?;
-    Some(WindowTarget {
-        pid,
-        window_id: window_id(&window)?,
-    })
-}
-
 // MARK: Element trees
 
 /// A window as an agent that works per window sees it: numbered elements it

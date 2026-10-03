@@ -11,22 +11,6 @@ pub fn is_running(bundle_id: &str) -> bool {
         .is_empty()
 }
 
-/// The frontmost app's pid, unless it is us.
-pub fn frontmost_other_pid() -> Option<i32> {
-    let pid = NSWorkspace::sharedWorkspace()
-        .frontmostApplication()?
-        .processIdentifier();
-    (pid != std::process::id() as i32).then_some(pid)
-}
-
-pub fn frontmost_name() -> String {
-    NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .and_then(|app| app.localizedName())
-        .map(|name| name.to_string())
-        .unwrap_or_default()
-}
-
 /// The pid of a running app at `bundle`, if any.
 pub fn running_pid(bundle: &Path) -> Option<i32> {
     let apps = NSWorkspace::sharedWorkspace().runningApplications();

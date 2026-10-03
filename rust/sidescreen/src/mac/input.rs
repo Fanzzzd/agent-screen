@@ -260,10 +260,6 @@ impl Forwarder {
         .await;
     }
 
-    /// The window that most recently received a click.
-    pub async fn focused(&self) -> Option<WindowTarget> {
-        self.run(|w| w.focused).await.flatten()
-    }
 }
 
 struct Gesture {

@@ -14,11 +14,10 @@ use std::sync::Arc;
 struct Stream {
     capture: Option<Capture>,
     latest: Arc<Latest>,
-    fps: i32,
-    /// Frame rates wanted, by subscriber key.
-    wants: HashMap<&'static str, i32>,
-    /// Pixel size the capture runs at.
-    pixels: (u32, u32),
+    /// Frame rate and pixel size the capture runs at.
+    running: (i32, (u32, u32)),
+    /// Frame rate and pixel size wanted, by subscriber.
+    wants: HashMap<&'static str, (i32, (u32, u32))>,
 }
 
 pub struct Streams {
@@ -57,7 +56,9 @@ impl Streams {
         self.frames.get(&id).cloned()
     }
 
-    /// `who` wants frames of `id` at `fps`; 0 stops wanting them.
+    /// `who` wants frames of `id` at `fps` and `pixels`; 0 fps stops
+    /// wanting them. The capture runs at the highest rate and the largest
+    /// size anyone wants: a thumbnail alone needs a fraction of the pixels.
     pub fn want(
         &mut self,
         id: DisplayId,
@@ -69,51 +70,55 @@ impl Streams {
         let stream = self.streams.entry(id).or_insert_with(|| Stream {
             capture: None,
             latest: Arc::new(Latest::default()),
-            fps: 0,
+            running: (0, (0, 0)),
             wants: HashMap::new(),
-            pixels,
         });
         if fps > 0 {
-            stream.wants.insert(who, fps);
+            stream.wants.insert(who, (fps, pixels));
         } else {
             stream.wants.remove(who);
         }
-        stream.pixels = pixels;
-        let wanted = stream.wants.values().copied().max().unwrap_or(0);
-        if wanted == stream.fps {
+        let wanted = stream
+            .wants
+            .values()
+            .fold((0, (0, 0)), |(f, (w, h)), &(fps, (pw, ph))| {
+                (f.max(fps), (w.max(pw), h.max(ph)))
+            });
+        if wanted == stream.running {
             return;
         }
         // Stopping and starting a stream are synchronous; a restart at the
         // new rate takes a few milliseconds.
         stream.capture = None;
-        stream.fps = wanted;
-        if wanted > 0 {
-            let wake = self.wake.clone();
-            match Capture::start(id, pixels, wanted, stream.latest.clone(), move || {
-                let _ = wake.unbounded_send(id);
-            }) {
-                Ok(capture) => stream.capture = Some(capture),
-                Err(error) => {
-                    log::warn!("capture for display {id} failed: {error}");
-                    stream.fps = 0;
-                    // A just-created display can take a moment to show up.
-                    let who_fps = (who, fps);
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(500))
-                            .await;
-                        let _ = this.update(cx, |streams, cx| {
-                            if streams
-                                .streams
-                                .get(&id)
-                                .is_some_and(|s| s.wants.get(who_fps.0) == Some(&who_fps.1))
-                            {
-                                streams.want(id, who_fps.0, who_fps.1, pixels, cx);
-                            }
-                        });
-                    })
-                    .detach();
-                }
+        stream.running = wanted;
+        let (fps, pixels) = wanted;
+        if fps == 0 {
+            return;
+        }
+        let wake = self.wake.clone();
+        match Capture::start(id, pixels, fps, stream.latest.clone(), move || {
+            let _ = wake.unbounded_send(id);
+        }) {
+            Ok(capture) => stream.capture = Some(capture),
+            Err(error) => {
+                log::warn!("capture for display {id} failed: {error}");
+                stream.running = (0, (0, 0));
+                // A just-created display can take a moment to show up.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    let _ = this.update(cx, |streams, cx| {
+                        let still = streams
+                            .streams
+                            .get(&id)
+                            .is_some_and(|s| s.wants.get(who) == Some(&(fps, pixels)));
+                        if still {
+                            streams.want(id, who, fps, pixels, cx);
+                        }
+                    });
+                })
+                .detach();
             }
         }
     }

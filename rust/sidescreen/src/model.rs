@@ -214,6 +214,8 @@ pub struct Display<H> {
     pub help_request: Option<String>,
     pub pointer: Option<AgentPointer>,
     waiters: Vec<oneshot::Sender<ControlWait>>,
+    /// The platform display. Only held: dropping it removes the display.
+    #[allow(dead_code)]
     pub handle: H,
 }
 

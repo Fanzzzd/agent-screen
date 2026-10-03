@@ -114,6 +114,12 @@ pub struct Shell {
     asking: bool,
 }
 
+/// Pixel size a thumbnail needs: twice its width in points, for Retina.
+fn thumbnail_pixels(display: (f64, f64)) -> (u32, u32) {
+    let width = peek::TILE_WIDTH as f64 * 2.0;
+    (width as u32, (width * display.1 / display.0) as u32)
+}
+
 /// Pixel size a display is captured at.
 fn pixels(display: (f64, f64)) -> (u32, u32) {
     ((display.0 * 2.0) as u32, (display.1 * 2.0) as u32)
@@ -135,6 +141,19 @@ fn intersects(a: NSRect, b: NSRect) -> bool {
         && b.origin.x < a.origin.x + a.size.width
         && a.origin.y < b.origin.y + b.size.height
         && b.origin.y < a.origin.y + a.size.height
+}
+
+/// `card` scaled down to fit inside `target`, centered on it: where a
+/// morph starts or ends.
+fn fit_into(card: NSRect, target: NSRect) -> NSRect {
+    let scale = (target.size.width / card.size.width).min(target.size.height / card.size.height);
+    let (w, h) = (card.size.width * scale, card.size.height * scale);
+    rect(
+        target.origin.x + (target.size.width - w) / 2.0,
+        target.origin.y + (target.size.height - h) / 2.0,
+        w,
+        h,
+    )
 }
 
 fn offset(r: NSRect, dy: f64) -> NSRect {
@@ -166,6 +185,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::watch_mouse();
     native::watch_keys();
     notify::install();
+    native::debug_appearance();
 
     let streams = Streams::new(cx);
     let shell = cx.new(|cx| {
@@ -262,7 +282,10 @@ impl Shell {
                 self.over_icon = over;
                 self.hover_changed(cx);
             }
-            Native::IconClicked { right: true } => self.status_menu(),
+            Native::IconClicked { right: true } => {
+                self.hide_peek(cx);
+                self.status_menu();
+            }
             Native::IconClicked { right: false } => {
                 if self.peek_shown && self.latched {
                     self.hide_peek(cx);
@@ -272,14 +295,19 @@ impl Shell {
                 }
             }
             Native::MouseDown { x, y } => {
-                // A click anywhere else closes a latched Peek.
+                // A click anywhere else unlatches Peek; hover decides the rest.
                 let on_icon = self.icon.frame().is_some_and(|f| contains(f, (x, y)));
                 let on_card = self
                     .peek
                     .as_ref()
                     .is_some_and(|(_, w)| contains(native::frame(w), (x, y)));
-                if self.peek_shown && !on_icon && !on_card {
-                    self.hide_peek(cx);
+                if self.latched && !on_icon && !on_card {
+                    self.latched = false;
+                    if self.over_icon || self.over_card {
+                        self.hover_changed(cx);
+                    } else {
+                        self.hide_peek(cx);
+                    }
                 }
             }
             Native::LeftDown { x, y } => self.drag_began((x, y)),
@@ -360,6 +388,8 @@ impl Shell {
         }
         if !gone.is_empty() || added {
             self.schedule_guard(cx);
+            // Screens just changed under the pointer; let them settle.
+            self.settle_hover(cx);
             if self.peek_shown {
                 self.show_peek(cx);
             }
@@ -405,17 +435,20 @@ impl Shell {
     fn hover_changed(&mut self, cx: &mut Context<Self>) {
         self.hover_generation += 1;
         let generation = self.hover_generation;
+        if self.latched || self.settle_until.is_some_and(|t| t > Instant::now()) {
+            return;
+        }
         let over = self.over_icon || self.over_card;
         if over && !self.peek_shown {
-            if self.settle_until.is_some_and(|t| t > Instant::now()) {
-                return;
-            }
             self.after(Duration::from_millis(120), cx, move |shell, cx| {
-                if shell.hover_generation == generation && (shell.over_icon || shell.over_card) {
+                let still =
+                    shell.hover_generation == generation && (shell.over_icon || shell.over_card);
+                // Hover only means something on a visible icon.
+                if still && shell.icon_rect().is_some() {
                     shell.show_peek(cx);
                 }
             });
-        } else if !over && self.peek_shown && !self.latched {
+        } else if !over && self.peek_shown {
             self.after(Duration::from_millis(280), cx, move |shell, cx| {
                 if shell.hover_generation == generation
                     && !shell.over_icon
@@ -426,6 +459,15 @@ impl Shell {
                 }
             });
         }
+    }
+
+    /// Displays appearing or going move screens under the pointer. Ignore
+    /// hover for a moment, then follow the pointer again.
+    fn settle_hover(&mut self, cx: &mut Context<Self>) {
+        self.settle_until = Some(Instant::now() + Duration::from_millis(1200));
+        self.after(Duration::from_millis(1250), cx, |shell, cx| {
+            shell.hover_changed(cx)
+        });
     }
 
     pub fn card_hover(&mut self, over: bool, cx: &mut Context<Self>) {
@@ -539,8 +581,9 @@ impl Shell {
                 .displays
                 .get(*id)
                 .map_or(DEFAULT_SIZE, |d| (d.width, d.height));
-            self.streams
-                .update(cx, |s, cx| s.want(*id, "peek", 12, pixels(size), cx));
+            self.streams.update(cx, |s, cx| {
+                s.want(*id, "peek", 12, thumbnail_pixels(size), cx)
+            });
         }
         self.peek_generation += 1;
         if self.peek_shown {
@@ -587,8 +630,26 @@ impl Shell {
 
     /// A tile was clicked.
     pub fn select(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        let from = self.tile_rect(id, cx);
         self.hide_peek(cx);
-        self.open_viewer(id, cx);
+        self.open_viewer_from(id, from, cx);
+    }
+
+    /// The thumbnail of a display in Peek, in Cocoa coordinates.
+    fn tile_rect(&self, id: DisplayId, cx: &App) -> Option<NSRect> {
+        let (_, window) = self.peek.as_ref().filter(|_| self.peek_shown)?;
+        let index = peek::ordered(self.core.read(cx))
+            .iter()
+            .position(|&d| d == id)?;
+        let card = native::frame(window);
+        let step = (peek::TILE_WIDTH + peek::SPACING) as f64;
+        let top = card.origin.y + card.size.height - peek::PADDING as f64;
+        Some(rect(
+            card.origin.x + peek::PADDING as f64 + index as f64 * step,
+            top - peek::THUMB_HEIGHT as f64,
+            peek::TILE_WIDTH as f64,
+            peek::THUMB_HEIGHT as f64,
+        ))
     }
 
     pub fn create_display(&mut self, cx: &mut Context<Self>) {
@@ -599,8 +660,8 @@ impl Shell {
             beep();
             return;
         };
-        self.settle_until = Some(Instant::now() + Duration::from_millis(1200));
-        self.hide_peek(cx);
+        // Peek stays up and grows a tile; the Viewer opens on the new
+        // display, or switches to it when already open.
         self.after(Duration::from_millis(500), cx, move |shell, cx| {
             shell.open_viewer(id, cx)
         });
@@ -609,6 +670,17 @@ impl Shell {
     // MARK: Viewer
 
     pub fn open_viewer(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        self.open_viewer_from(id, None, cx);
+    }
+
+    /// Open the Viewer on a display. It grows out of `from`, or out of the
+    /// menu bar icon.
+    pub fn open_viewer_from(
+        &mut self,
+        id: DisplayId,
+        from: Option<NSRect>,
+        cx: &mut Context<Self>,
+    ) {
         let Some((viewer, window)) = self.viewer.clone() else {
             return;
         };
@@ -672,10 +744,12 @@ impl Shell {
         } else {
             // Watching only: the keyboard stays with the user's app until
             // they click into the display.
+            let from = from.unwrap_or_else(|| self.anchor());
             native::set_alpha(&window, 0.0);
-            native::set_frame(&window, offset(frame, 8.0));
+            native::set_frame(&window, fit_into(frame, from));
             native::order_front(&window);
-            native::animate(&window, frame, 1.0, 0.2);
+            native::animate_frame(&window, frame, 0.38, native::Curve::Settle);
+            native::animate_alpha(&window, 1.0, 0.16, native::Curve::Settle);
         }
         self.viewer_open = true;
         self.streams
@@ -716,8 +790,11 @@ impl Shell {
         }
         self.viewer_generation += 1;
         let generation = self.viewer_generation;
-        native::animate(&window, offset(native::frame(&window), 8.0), 0.0, 0.16);
-        self.after(Duration::from_millis(180), cx, move |shell, _| {
+        // It shrinks back into the menu bar icon, fading on the way.
+        let into = fit_into(native::frame(&window), self.anchor());
+        native::animate_frame(&window, into, 0.3, native::Curve::Settle);
+        native::animate_alpha(&window, 0.0, 0.26, native::Curve::EaseIn);
+        self.after(Duration::from_millis(320), cx, move |shell, _| {
             if shell.viewer_generation == generation {
                 native::order_out(&window);
             }
@@ -807,6 +884,7 @@ impl Shell {
             }
             "focus" => self.screen_keys(true, cx),
             "viewer" => self.open_viewer(id, cx),
+            "select" => self.select(id, cx),
             other => return Err(format!("unknown surface {other}")),
         }
         Ok(())
@@ -999,7 +1077,8 @@ impl Shell {
             items,
             live: display.is_live(),
         };
-        self.hide_peek(cx);
+        // The question appears on the Viewer; Peek stays up.
+
         self.open_viewer(id, cx);
         native::forward_keys(None);
         let Some((viewer, window)) = self.viewer.clone() else {
