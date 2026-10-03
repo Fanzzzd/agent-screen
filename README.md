@@ -81,5 +81,5 @@ Debug builds accept `debugTakeover` and `debugShow` on the control socket, so sc
 - `launch_app` on a running single-window app (Calculator) gets no new window. Quit it first or use `place_window`.
 - A window that refuses to close on dismissal, such as an Open panel or one with unsaved changes, is left to macOS, which moves it to the main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
-- GPUI redraws the Viewer on every frame: 5.0% CPU with the Viewer open on a 60 fps display, against 2.0% for the Swift app.
+- GPUI redraws the Viewer on every new frame: a release build uses 3.3% CPU with the Viewer open on a 60 fps display, against 1.6% for the Swift app. Debug builds use about twice that, mostly in layout.
 - With the menu bar icon hidden, for example by a menu bar manager or behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.

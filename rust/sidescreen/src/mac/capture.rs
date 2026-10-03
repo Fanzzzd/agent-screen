@@ -3,6 +3,7 @@
 
 use core_foundation::base::TCFType;
 use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferRef};
+use screencapturekit::cm::{CMSampleBufferSCExt, SCFrameStatus};
 use screencapturekit::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,7 +61,11 @@ impl Capture {
         let mut stream = SCStream::new(&filter, &config)?;
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
-                if kind != SCStreamOutputType::Screen {
+                // Idle frames repeat the last image: the display did not
+                // change, so there is nothing to draw.
+                if kind != SCStreamOutputType::Screen
+                    || sample.frame_status() != Some(SCFrameStatus::Complete)
+                {
                     return;
                 }
                 let raw = sample.image_buffer_ptr_borrowed();
