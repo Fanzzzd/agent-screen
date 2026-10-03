@@ -7,5 +7,7 @@ pub mod capture;
 pub mod cg;
 pub mod display;
 pub mod input;
+pub mod menubar;
+pub mod native;
 pub mod screenshot;
 pub mod windows;

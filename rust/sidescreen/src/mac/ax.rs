@@ -234,7 +234,7 @@ pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
     set_attribute(
         &application(target.pid),
         "AXManualAccessibility",
-        &CFBoolean::new(true),
+        CFBoolean::new(true),
     );
     let origin = frame(&window).map_or((0.0, 0.0), |f| (f.x, f.y));
     let mut walker = TreeWalker {

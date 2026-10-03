@@ -293,6 +293,19 @@ pub async fn handle(
             });
             Ok(json!({}))
         }
+        "debugShow" if cfg!(debug_assertions) => {
+            let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            shell
+                .update(cx, |shell, cx| shell.debug_show(&surface, id, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .map_err(ControlError::invalid)?;
+            cx.background_executor()
+                .timer(Duration::from_millis(900))
+                .await;
+            Ok(json!({}))
+        }
         other => Err(ControlError::invalid(format!("unknown method {other}"))),
     };
     result.map(|value| match value {
@@ -428,7 +441,7 @@ async fn act(
             if !ax::set_attribute(
                 element,
                 "AXFocused",
-                &objc2_core_foundation::CFBoolean::new(true),
+                objc2_core_foundation::CFBoolean::new(true),
             ) {
                 return Err(ControlError::failed("the element cannot take focus"));
             }

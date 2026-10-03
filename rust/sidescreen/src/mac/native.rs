@@ -1,0 +1,629 @@
+//! AppKit pieces GPUI has no API for: the menu bar icon, native menus and
+//! global mouse monitors.
+//!
+//! Native callbacks never touch GPUI state directly. They send `Native`
+//! events down a channel, and a GPUI task handles them. Menus pop up from
+//! the main dispatch queue, so their nested run loop never runs inside a
+//! GPUI update.
+
+use crate::keychord::Modifiers;
+use block2::RcBlock;
+use futures::channel::mpsc::UnboundedSender;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSAnimationContext, NSApplication, NSColor, NSControlStateValueOn, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSImage, NSMenu, NSMenuItem, NSRunningApplication,
+    NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowCollectionBehavior,
+};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+
+/// Things that happened on the native side.
+#[derive(Debug, Clone)]
+pub enum Native {
+    /// A click on the menu bar icon; `right` for a right click.
+    IconClicked {
+        right: bool,
+    },
+    /// The pointer entered or left the menu bar icon.
+    IconHover(bool),
+    /// A mouse button went down anywhere, in Cocoa screen coordinates.
+    MouseDown {
+        x: f64,
+        y: f64,
+    },
+    LeftDown {
+        x: f64,
+        y: f64,
+    },
+    LeftDragged {
+        x: f64,
+        y: f64,
+    },
+    LeftUp {
+        x: f64,
+        y: f64,
+    },
+    /// A menu item was chosen.
+    Menu(MenuAction),
+    /// A key went down or up in the Viewer while its screen has the keyboard.
+    Key {
+        code: u16,
+        down: bool,
+        modifiers: Modifiers,
+    },
+    FlagsChanged {
+        code: u16,
+        modifiers: Modifiers,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuAction {
+    CreateDisplay,
+    GrantPermissions,
+    OpenAeroSpaceConfig,
+    Quit,
+    HandOver {
+        display: u32,
+        pid: i32,
+        window: u32,
+    },
+    TakeBack {
+        display: u32,
+        pid: i32,
+        window: u32,
+    },
+    Dismiss {
+        display: u32,
+    },
+    /// Press an accessibility element kept by the menu bar proxy.
+    PressProxy {
+        index: usize,
+    },
+}
+
+thread_local! {
+    static EVENTS: RefCell<Option<UnboundedSender<Native>>> = const { RefCell::new(None) };
+    static KEEP: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn set_sender(sender: UnboundedSender<Native>) {
+    EVENTS.with(|e| *e.borrow_mut() = Some(sender));
+}
+
+pub fn send(event: Native) {
+    EVENTS.with(|e| {
+        if let Some(sender) = e.borrow().as_ref() {
+            let _ = sender.unbounded_send(event);
+        }
+    });
+}
+
+fn keep(object: Retained<AnyObject>) {
+    KEEP.with(|k| k.borrow_mut().push(object));
+}
+
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+/// Run `f` on the main queue, after the current event is handled.
+pub fn main_async(f: impl FnOnce() + 'static) {
+    extern "C" fn trampoline(context: *mut c_void) {
+        let f = unsafe { Box::from_raw(context as *mut Box<dyn FnOnce()>) };
+        f();
+    }
+    let boxed: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
+    unsafe {
+        dispatch_async_f(
+            &raw const _dispatch_main_q,
+            Box::into_raw(boxed).cast(),
+            trampoline,
+        )
+    };
+}
+
+// MARK: Menu bar icon
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SidescreenIconTarget"]
+    struct IconTarget;
+
+    impl IconTarget {
+        #[unsafe(method(clicked:))]
+        fn clicked(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            let right = NSApplication::sharedApplication(mtm)
+                .currentEvent()
+                .is_some_and(|e| e.r#type() == NSEventType::RightMouseUp);
+            send(Native::IconClicked { right });
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            send(Native::IconHover(true));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            send(Native::IconHover(false));
+        }
+    }
+);
+
+pub struct StatusIcon {
+    item: Retained<NSStatusItem>,
+}
+
+impl StatusIcon {
+    pub fn install(mtm: MainThreadMarker) -> StatusIcon {
+        let item = NSStatusBar::systemStatusBar().statusItemWithLength(-2.0); // NSSquareStatusItemLength
+        let target: Retained<IconTarget> = unsafe { msg_send![IconTarget::alloc(mtm), init] };
+        if let Some(button) = item.button(mtm) {
+            unsafe {
+                button.setTarget(Some(&target));
+                button.setAction(Some(sel!(clicked:)));
+                let _: isize = msg_send![&button, sendActionOn: (NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp).0];
+            }
+            let options = NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::ActiveAlways
+                | NSTrackingAreaOptions::InVisibleRect;
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    <NSTrackingArea as objc2::AnyThread>::alloc(),
+                    NSRect::ZERO,
+                    options,
+                    Some(&target),
+                    None,
+                )
+            };
+            button.addTrackingArea(&area);
+        }
+        keep(Retained::into_super(Retained::into_super(target)));
+        let icon = StatusIcon { item };
+        icon.set_asking(false);
+        icon
+    }
+
+    /// A raised hand while any Help Request is open.
+    pub fn set_asking(&self, asking: bool) {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let Some(button) = self.item.button(mtm) else {
+            return;
+        };
+        let symbol = if asking {
+            "hand.raised.fill"
+        } else {
+            "rectangle.on.rectangle"
+        };
+        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(symbol),
+            Some(&NSString::from_str("Sidescreen")),
+        );
+        if let Some(image) = image {
+            image.setTemplate(true);
+            button.setImage(Some(&image));
+        }
+        let tint = asking.then(NSColor::systemOrangeColor);
+        button.setContentTintColor(tint.as_deref());
+    }
+
+    /// The icon's frame in Cocoa screen coordinates.
+    pub fn frame(&self) -> Option<NSRect> {
+        let mtm = MainThreadMarker::new()?;
+        let button = self.item.button(mtm)?;
+        let window = button.window()?;
+        let in_window = button.convertRect_toView(button.bounds(), None);
+        Some(window.convertRectToScreen(in_window))
+    }
+
+    /// Show a menu from the icon, the way a status item menu appears.
+    pub fn pop_up(&self, menu: Retained<NSMenu>) {
+        let item = self.item.clone();
+        main_async(move || {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            item.setMenu(Some(&menu));
+            if let Some(button) = item.button(mtm) {
+                unsafe { button.performClick(None) };
+            }
+            item.setMenu(None);
+        });
+    }
+}
+
+// MARK: Menus
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SidescreenMenuTarget"]
+    #[ivars = MenuAction]
+    struct MenuTarget;
+
+    impl MenuTarget {
+        #[unsafe(method(chosen:))]
+        fn chosen(&self, _sender: &AnyObject) {
+            send(Native::Menu(self.ivars().clone()));
+        }
+    }
+);
+
+impl MenuTarget {
+    fn new(action: MenuAction, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(action);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+pub struct Menu {
+    menu: Retained<NSMenu>,
+    mtm: MainThreadMarker,
+}
+
+impl Menu {
+    pub fn new(title: &str) -> Menu {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        menu.setAutoenablesItems(false);
+        Menu { menu, mtm }
+    }
+
+    fn item(&self, title: &str) -> Retained<NSMenuItem> {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(self.mtm),
+                &NSString::from_str(title),
+                None,
+                &NSString::new(),
+            )
+        };
+        self.menu.addItem(&item);
+        item
+    }
+
+    /// An item that sends `action` when chosen.
+    pub fn action(&self, title: &str, action: MenuAction) -> Retained<NSMenuItem> {
+        let item = self.item(title);
+        let target = MenuTarget::new(action, self.mtm);
+        unsafe {
+            item.setTarget(Some(&target));
+            item.setAction(Some(sel!(chosen:)));
+        }
+        // NSMenuItem holds its target weakly.
+        keep(Retained::into_super(Retained::into_super(target)));
+        item
+    }
+
+    pub fn disabled(&self, title: &str) -> Retained<NSMenuItem> {
+        let item = self.item(title);
+        item.setEnabled(false);
+        item
+    }
+
+    pub fn submenu(&self, title: &str, submenu: Menu) -> Retained<NSMenuItem> {
+        let item = self.item(title);
+        item.setSubmenu(Some(&submenu.menu));
+        item
+    }
+
+    pub fn separator(&self) {
+        self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.menu.numberOfItems() == 0
+    }
+
+    pub fn into_native(self) -> Retained<NSMenu> {
+        self.menu
+    }
+
+    /// Pop the menu up with its top-left corner at a Cocoa screen point.
+    pub fn pop_up_at(self, x: f64, y: f64) {
+        let menu = self.menu;
+        main_async(move || {
+            menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), None);
+        });
+    }
+}
+
+/// Set an item's key equivalent, as AX menus describe it.
+pub fn set_key_equivalent(
+    item: &NSMenuItem,
+    key: &str,
+    command: bool,
+    shift: bool,
+    option: bool,
+    control: bool,
+) {
+    item.setKeyEquivalent(&NSString::from_str(&key.to_lowercase()));
+    let mut mask = NSEventModifierFlags::empty();
+    if command {
+        mask |= NSEventModifierFlags::Command;
+    }
+    if shift {
+        mask |= NSEventModifierFlags::Shift;
+    }
+    if option {
+        mask |= NSEventModifierFlags::Option;
+    }
+    if control {
+        mask |= NSEventModifierFlags::Control;
+    }
+    item.setKeyEquivalentModifierMask(mask);
+}
+
+pub fn set_checked(item: &NSMenuItem) {
+    item.setState(NSControlStateValueOn);
+}
+
+/// An app's icon at menu size.
+pub fn set_app_icon(item: &NSMenuItem, pid: i32) {
+    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return;
+    };
+    let Some(icon) = app.icon() else { return };
+    let icon: Retained<NSImage> = unsafe { msg_send![&icon, copy] };
+    icon.setSize(NSSize::new(16.0, 16.0));
+    item.setImage(Some(&icon));
+}
+
+// MARK: Mouse monitors
+
+/// Report every mouse down anywhere, and left-button drags, for Peek's
+/// outside clicks and for window Handover by drag.
+pub fn watch_mouse() {
+    let mask = NSEventMask::LeftMouseDown
+        | NSEventMask::RightMouseDown
+        | NSEventMask::LeftMouseDragged
+        | NSEventMask::LeftMouseUp;
+    let report = |event: &NSEvent| {
+        let at = NSEvent::mouseLocation();
+        let (x, y) = (at.x, at.y);
+        match event.r#type() {
+            NSEventType::LeftMouseDown => {
+                send(Native::MouseDown { x, y });
+                send(Native::LeftDown { x, y });
+            }
+            NSEventType::RightMouseDown => send(Native::MouseDown { x, y }),
+            NSEventType::LeftMouseDragged => send(Native::LeftDragged { x, y }),
+            NSEventType::LeftMouseUp => send(Native::LeftUp { x, y }),
+            _ => {}
+        }
+    };
+    let global = RcBlock::new(move |event: NonNull<NSEvent>| report(unsafe { event.as_ref() }));
+    if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global) {
+        keep(monitor);
+    }
+    let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        report(unsafe { event.as_ref() });
+        event.as_ptr()
+    });
+    if let Some(monitor) =
+        unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local) }
+    {
+        keep(monitor);
+    }
+}
+
+/// The pointer, in Cocoa screen coordinates.
+pub fn mouse_location() -> (f64, f64) {
+    let at = NSEvent::mouseLocation();
+    (at.x, at.y)
+}
+
+/// Height of the primary screen: the pivot between Cocoa (bottom-left) and
+/// CoreGraphics (top-left) global coordinates.
+pub fn primary_height() -> f64 {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    objc2_app_kit::NSScreen::screens(mtm)
+        .firstObject()
+        .map_or(0.0, |s| s.frame().size.height)
+}
+
+// MARK: Windows
+
+/// The AppKit window behind a GPUI window.
+pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    let view: &NSView = unsafe { appkit.ns_view.cast().as_ref() };
+    view.window()
+}
+
+/// A panel above other apps' windows, on every Space, with a system shadow
+/// that follows the rounded card.
+pub fn style_panel(window: &NSWindow, level: isize) {
+    window.setLevel(level);
+    window.setHasShadow(true);
+    window.setHidesOnDeactivate(false);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+}
+
+pub const LEVEL_FLOATING: isize = 3;
+pub const LEVEL_POP_UP_MENU: isize = 101;
+
+pub fn set_frame(window: &NSWindow, frame: NSRect) {
+    window.setFrame_display(frame, true);
+    window.invalidateShadow();
+}
+
+/// Show without taking the keyboard from the user's app.
+pub fn order_front(window: &NSWindow) {
+    window.orderFrontRegardless();
+}
+
+pub fn order_out(window: &NSWindow) {
+    window.orderOut(None);
+}
+
+pub fn make_key(window: &NSWindow) {
+    window.makeKeyWindow();
+}
+
+/// Slide `window` to `frame` and fade it to `alpha` over `seconds`.
+pub fn animate(window: &NSWindow, frame: NSRect, alpha: f64, seconds: f64) {
+    let window: Retained<NSWindow> = window.retain();
+    let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+        let context = unsafe { context.as_ref() };
+        context.setDuration(seconds);
+        let animator: Retained<NSWindow> = unsafe { msg_send![&window, animator] };
+        animator.setFrame_display(frame, true);
+        animator.setAlphaValue(alpha);
+    });
+    NSAnimationContext::runAnimationGroup(&changes);
+}
+
+pub fn set_alpha(window: &NSWindow, alpha: f64) {
+    window.setAlphaValue(alpha);
+}
+
+pub fn frame(window: &NSWindow) -> NSRect {
+    window.frame()
+}
+
+/// Every screen: display id, frame and visible frame, Cocoa coordinates.
+pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    objc2_app_kit::NSScreen::screens(mtm)
+        .iter()
+        .filter_map(|screen| {
+            let number = screen
+                .deviceDescription()
+                .objectForKey(&NSString::from_str("NSScreenNumber"))?;
+            let number = number.downcast::<objc2_foundation::NSNumber>().ok()?;
+            Some((
+                number.unsignedIntValue(),
+                screen.frame(),
+                screen.visibleFrame(),
+            ))
+        })
+        .collect()
+}
+
+/// Height of the menu bar on a display, in points.
+pub fn menu_bar_height(display: u32) -> f64 {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return 24.0;
+    };
+    for screen in objc2_app_kit::NSScreen::screens(mtm).iter() {
+        let number = screen
+            .deviceDescription()
+            .objectForKey(&NSString::from_str("NSScreenNumber"));
+        let Some(number) = number.and_then(|n| n.downcast::<objc2_foundation::NSNumber>().ok())
+        else {
+            continue;
+        };
+        if number.unsignedIntValue() == display {
+            let frame = screen.frame();
+            let visible = screen.visibleFrame();
+            let bar =
+                (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height);
+            return bar.max(24.0);
+        }
+    }
+    24.0
+}
+
+// MARK: Keyboard for the Viewer
+
+thread_local! {
+    /// The Viewer window whose keys go to the Agent Display, while its
+    /// screen has the keyboard.
+    static KEY_WINDOW: Cell<usize> = const { Cell::new(0) };
+    /// Keys sent with Command, whose release AppKit may never report.
+    static SENT_UP: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+}
+
+/// Forward keys pressed in `window` to the display, or stop with None.
+pub fn forward_keys(window: Option<&NSWindow>) {
+    KEY_WINDOW.with(|k| k.set(window.map_or(0, |w| w as *const NSWindow as usize)));
+}
+
+pub fn modifiers(flags: NSEventModifierFlags) -> Modifiers {
+    Modifiers {
+        control: flags.contains(NSEventModifierFlags::Control),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        command: flags.contains(NSEventModifierFlags::Command),
+        function: flags.contains(NSEventModifierFlags::Function),
+    }
+}
+
+/// Take key events for the Viewer before AppKit and GPUI see them: the
+/// display gets the real key codes, and Command shortcuts never reach our
+/// own menu.
+pub fn watch_keys() {
+    let mask = NSEventMask::KeyDown | NSEventMask::KeyUp | NSEventMask::FlagsChanged;
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let e = unsafe { event.as_ref() };
+        let target = KEY_WINDOW.with(Cell::get);
+        let window = e.window(MainThreadMarker::new().expect("main thread"));
+        let mine = target != 0
+            && window
+                .as_deref()
+                .is_some_and(|w| w as *const NSWindow as usize == target);
+        if !mine {
+            return event.as_ptr();
+        }
+        let code = e.keyCode();
+        let m = modifiers(e.modifierFlags());
+        match e.r#type() {
+            NSEventType::KeyDown => {
+                send(Native::Key {
+                    code,
+                    down: true,
+                    modifiers: m,
+                });
+                if m.command {
+                    send(Native::Key {
+                        code,
+                        down: false,
+                        modifiers: m,
+                    });
+                    SENT_UP.with(|s| s.borrow_mut().insert(code));
+                }
+            }
+            NSEventType::KeyUp => {
+                if !SENT_UP.with(|s| s.borrow_mut().remove(&code)) {
+                    send(Native::Key {
+                        code,
+                        down: false,
+                        modifiers: m,
+                    });
+                }
+            }
+            NSEventType::FlagsChanged => send(Native::FlagsChanged { code, modifiers: m }),
+            _ => return event.as_ptr(),
+        }
+        std::ptr::null_mut()
+    });
+    if let Some(monitor) =
+        unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
+    {
+        keep(monitor);
+    }
+}

@@ -4,10 +4,12 @@
 
 mod control;
 mod core;
+mod dismissal;
 mod keychord;
 #[cfg(target_os = "macos")]
 mod mac;
 mod model;
+mod ui;
 
 use control::server::{self, Event};
 use futures::StreamExt;
@@ -17,42 +19,49 @@ fn main() {
     let platform = gpui_platform::current_platform(false);
     // An accessory from launch: no Dock icon, never activated by starting.
     platform.set_activation_policy(ActivationPolicy::Accessory);
-    gpui::Application::with_platform(platform).run(|cx: &mut App| {
-        if !mac::ax::is_trusted() {
-            mac::ax::request_trust();
-        }
-        let core = cx.new(|_| core::Core::new());
-        match server::start() {
-            Ok(mut events) => {
-                let core = core.clone();
-                cx.spawn(async move |cx: &mut AsyncApp| {
-                    while let Some(event) = events.next().await {
-                        match event {
-                            Event::Request {
-                                connection,
-                                method,
-                                params,
-                                reply,
-                            } => {
-                                let core = core.clone();
-                                cx.spawn(async move |cx: &mut AsyncApp| {
-                                    let result = control::agent::handle(
-                                        core, connection, &method, params, cx,
-                                    )
-                                    .await;
-                                    let _ = reply.send(result);
-                                })
-                                .detach();
-                            }
-                            Event::Closed { connection } => {
-                                core.update(cx, |core, cx| core.connection_closed(connection, cx));
+    gpui::Application::with_platform(platform)
+        .with_assets(ui::theme::Assets)
+        .run(|cx: &mut App| {
+            if !mac::ax::is_trusted() {
+                mac::ax::request_trust();
+            }
+            let core = cx.new(|_| core::Core::new());
+            if let Err(error) = ui::shell::start(core.clone(), cx) {
+                eprintln!("Sidescreen: UI failed: {error}");
+            }
+            match server::start() {
+                Ok(mut events) => {
+                    let core = core.clone();
+                    cx.spawn(async move |cx: &mut AsyncApp| {
+                        while let Some(event) = events.next().await {
+                            match event {
+                                Event::Request {
+                                    connection,
+                                    method,
+                                    params,
+                                    reply,
+                                } => {
+                                    let core = core.clone();
+                                    cx.spawn(async move |cx: &mut AsyncApp| {
+                                        let result = control::agent::handle(
+                                            core, connection, &method, params, cx,
+                                        )
+                                        .await;
+                                        let _ = reply.send(result);
+                                    })
+                                    .detach();
+                                }
+                                Event::Closed { connection } => {
+                                    core.update(cx, |core, cx| {
+                                        core.connection_closed(connection, cx)
+                                    });
+                                }
                             }
                         }
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+                }
+                Err(error) => eprintln!("Sidescreen: control socket failed: {error}"),
             }
-            Err(error) => eprintln!("Sidescreen: control socket failed: {error}"),
-        }
-    });
+        });
 }

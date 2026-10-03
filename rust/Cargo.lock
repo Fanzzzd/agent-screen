@@ -4881,6 +4881,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "block2 0.6.2",
  "cc",
  "core-foundation 0.10.0",
  "core-video",
@@ -4897,6 +4898,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-image-io",
+ "raw-window-handle",
  "screencapturekit 11.0.0",
  "serde_json",
  "tokio",
