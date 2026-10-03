@@ -158,6 +158,17 @@ fn fit_into(card: NSRect, target: NSRect) -> NSRect {
     )
 }
 
+/// `card` moved into `screen` as far as it fits. A card taller than the
+/// screen keeps its header, at the top, in view.
+fn keep_inside(card: NSRect, screen: NSRect) -> NSRect {
+    let (w, h) = (card.size.width, card.size.height);
+    let right = screen.origin.x + screen.size.width;
+    let top = screen.origin.y + screen.size.height;
+    let x = card.origin.x.min(right - w).max(screen.origin.x);
+    let y = card.origin.y.max(screen.origin.y).min(top - h);
+    rect(x, y, w, h)
+}
+
 fn offset(r: NSRect, dy: f64) -> NSRect {
     rect(r.origin.x, r.origin.y + dy, r.size.width, r.size.height)
 }
@@ -745,14 +756,26 @@ impl Shell {
             // Switching displays: the card stays where the user dragged it.
             self.remember_resting(&window);
         }
-        let frame = match self.resting {
-            // Keep the top edge and center where the user left the card.
-            Some(r) => rect(
+        // Keep the top edge and center where the user left the card, as
+        // long as a screen of theirs is still there.
+        let resting = self.resting.and_then(|r| {
+            let card = rect(
                 r.origin.x + r.size.width / 2.0 - w / 2.0,
                 r.origin.y + r.size.height - h,
                 w,
                 h,
-            ),
+            );
+            let center = (
+                r.origin.x + r.size.width / 2.0,
+                r.origin.y + r.size.height / 2.0,
+            );
+            self.user_screens()
+                .into_iter()
+                .find(|(frame, _)| contains(*frame, center))
+                .map(|(_, visible)| keep_inside(card, visible))
+        });
+        let frame = match resting {
+            Some(frame) => frame,
             None => rect(
                 (visible.origin.x + (visible.size.width - w) / 2.0).round(),
                 (visible.origin.y + (visible.size.height - h) / 2.0).round(),
@@ -1462,4 +1485,41 @@ fn cursor_guard(core: Entity<Core>, cx: &mut App) {
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn same(a: NSRect, b: NSRect) -> bool {
+        (a.origin.x, a.origin.y, a.size.width, a.size.height)
+            == (b.origin.x, b.origin.y, b.size.width, b.size.height)
+    }
+
+    #[test]
+    fn a_card_inside_the_screen_stays_put() {
+        let screen = rect(0.0, 0.0, 1440.0, 875.0);
+        let card = rect(100.0, 100.0, 800.0, 500.0);
+        assert!(same(keep_inside(card, screen), card));
+    }
+
+    #[test]
+    fn a_card_past_an_edge_moves_back_in() {
+        let screen = rect(0.0, 0.0, 1440.0, 875.0);
+        let card = rect(1000.0, 600.0, 800.0, 500.0);
+        assert!(same(
+            keep_inside(card, screen),
+            rect(640.0, 375.0, 800.0, 500.0)
+        ));
+    }
+
+    #[test]
+    fn a_card_taller_than_the_screen_keeps_its_header_in_view() {
+        let screen = rect(0.0, 0.0, 1440.0, 875.0);
+        let card = rect(100.0, -300.0, 800.0, 1000.0);
+        assert!(same(
+            keep_inside(card, screen),
+            rect(100.0, -125.0, 800.0, 1000.0)
+        ));
+    }
 }
