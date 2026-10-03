@@ -97,3 +97,57 @@ impl Status {
             .child(div().min_w_0().truncate().child(text.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DEFAULT_SIZE, Displays, Owner};
+
+    fn display(owner: bool) -> Displays<()> {
+        let mut d = Displays::default();
+        let owner = owner.then(|| Owner {
+            session_key: "s".into(),
+            client: "Codex".into(),
+            title: "订机票".into(),
+            connection: 1,
+        });
+        d.add(7, "Sidescreen 1".into(), DEFAULT_SIZE, owner, ());
+        d
+    }
+
+    fn status(d: &Displays<()>, windows: usize) -> Status {
+        Status::of(
+            d.get(7).unwrap(),
+            windows,
+            &super::super::theme::palette(true),
+        )
+    }
+
+    #[test]
+    fn copy_follows_the_display_state() {
+        let manual = display(false);
+        assert_eq!(status(&manual, 0).short, "你新建的");
+
+        let mut d = display(true);
+        assert_eq!(status(&d, 0).long, "由 Codex 控制");
+
+        d.request_help(7, "输入验证码".into());
+        let help = status(&d, 0);
+        assert_eq!(
+            (help.kind, help.short.as_str()),
+            (Kind::Help, "需要帮助：输入验证码")
+        );
+
+        // A Takeover outranks the Help Request it answers.
+        d.begin_takeover(7);
+        assert_eq!(status(&d, 0).long, "你在操作，Codex 在等你交还");
+
+        d.end_takeover(7);
+        d.end(7, EndReason::Finished);
+        assert_eq!(status(&d, 2).short, "待查看 · 2 个窗口");
+
+        let mut lost = display(true);
+        lost.end(7, EndReason::Disconnected);
+        assert_eq!(status(&lost, 1).long, "Codex 的连接中断了，窗口还在这里");
+    }
+}
