@@ -55,6 +55,11 @@ fn main() {
     gpui::Application::with_platform(platform)
         .with_assets(ui::theme::Assets)
         .run(|cx: &mut App| {
+            // Screen Recording feeds the pictures; Accessibility lets us post
+            // input to other apps and move their windows.
+            if !objc2_core_graphics::CGPreflightScreenCaptureAccess() {
+                objc2_core_graphics::CGRequestScreenCaptureAccess();
+            }
             if !mac::ax::is_trusted() {
                 mac::ax::request_trust();
             }

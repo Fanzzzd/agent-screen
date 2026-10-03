@@ -259,7 +259,6 @@ impl Forwarder {
         })
         .await;
     }
-
 }
 
 struct Gesture {

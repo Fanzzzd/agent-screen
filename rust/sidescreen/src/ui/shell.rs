@@ -256,6 +256,26 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         }
     })
     .detach();
+    // A normal quit, the menu's or a logout's, tidies up as Dismissal
+    // would, without asking: each window follows its Disposition. A crash
+    // leaves the windows to macOS.
+    {
+        let core = core.clone();
+        cx.on_app_quit(move |cx| {
+            let plans: Vec<Item> = core
+                .read(cx)
+                .displays
+                .list
+                .iter()
+                .flat_map(dismissal::plan)
+                .collect();
+            if !plans.is_empty() {
+                dismissal::execute(&plans, main_screen_name().as_deref());
+            }
+            async {}
+        })
+        .detach();
+    }
     cursor_guard(core, cx);
     // Windows come and go without telling us; recount once a second while
     // Peek or the Viewer shows the counts.
@@ -723,6 +743,10 @@ impl Shell {
             return;
         };
         let (w, h) = Viewer::card_size(size, (visible.size.width, visible.size.height));
+        if self.viewer_open {
+            // Switching displays: the card stays where the user dragged it.
+            self.resting = Some(native::frame(&window));
+        }
         let frame = match self.resting {
             // Keep the top edge and center where the user left the card.
             Some(r) => rect(
@@ -885,6 +909,7 @@ impl Shell {
             "focus" => self.screen_keys(true, cx),
             "viewer" => self.open_viewer(id, cx),
             "select" => self.select(id, cx),
+            "quit" => self.quit(cx),
             other => return Err(format!("unknown surface {other}")),
         }
         Ok(())
@@ -1143,26 +1168,9 @@ impl Shell {
         .detach();
     }
 
-    /// Quit: return or close every window first, as Dismissal would.
+    /// Quit. The tidy-up runs in the quit hook, so logout gets it too.
     fn quit(&mut self, cx: &mut Context<Self>) {
-        let plans: Vec<Item> = {
-            let core = self.core.read(cx);
-            core.displays
-                .list
-                .iter()
-                .flat_map(dismissal::plan)
-                .collect()
-        };
-        let main_name = main_screen_name();
-        cx.spawn(async move |_, cx| {
-            if !plans.is_empty() {
-                cx.background_executor()
-                    .spawn(async move { dismissal::execute(&plans, main_name.as_deref()) })
-                    .await;
-            }
-            cx.update(|cx| cx.quit());
-        })
-        .detach();
+        cx.quit();
     }
 
     // MARK: Handover
