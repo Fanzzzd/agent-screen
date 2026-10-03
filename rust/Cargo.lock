@@ -4902,6 +4902,7 @@ dependencies = [
  "raw-window-handle",
  "screencapturekit 11.0.0",
  "serde_json",
+ "sidescreen-mcp",
  "tokio",
 ]
 

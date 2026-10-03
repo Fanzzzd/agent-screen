@@ -41,8 +41,9 @@ export class McpClient {
   /** Spawn the server and run the 2025-06-18 handshake. */
   static async start(env: Record<string, string>) {
     await waitForApp()
-    // SIDESCREEN_MCP=<binary> runs another server build, e.g. the Rust one.
-    const [command, ...args] = process.env.SIDESCREEN_MCP ? [process.env.SIDESCREEN_MCP] : ["bun", "src/main.ts"]
+    // SIDESCREEN_MCP="<binary> [args]" runs another server build, e.g. the Rust
+    // app as `Sidescreen.app/Contents/MacOS/Sidescreen mcp`.
+    const [command, ...args] = process.env.SIDESCREEN_MCP ? process.env.SIDESCREEN_MCP.split(" ") : ["bun", "src/main.ts"]
     const server = spawn(command, args, {
       cwd: new URL("..", import.meta.url).pathname,
       env: { ...process.env, CLAUDE_PROJECT_DIR: "/tmp/smoke", ...env },

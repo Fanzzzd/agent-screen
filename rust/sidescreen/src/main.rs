@@ -38,6 +38,15 @@ impl log::Log for Logger {
 }
 
 fn main() {
+    // `Sidescreen mcp`: the MCP server a client starts over stdio. It only
+    // talks to the running app through the control socket.
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        if let Err(error) = sidescreen_mcp::run() {
+            eprintln!("Sidescreen mcp: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
     let platform = gpui_platform::current_platform(false);

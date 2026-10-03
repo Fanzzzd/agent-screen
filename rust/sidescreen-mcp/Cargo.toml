@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Sidescreen's MCP server: tools for Agent Sessions, served over stdio, talking to the app's control socket."
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "sidescreen-mcp"
 path = "src/main.rs"
