@@ -39,9 +39,13 @@ impl Peek {
         shell: WeakEntity<Shell>,
         core: Entity<Core>,
         streams: Entity<Streams>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&core, |_, _, cx| cx.notify()).detach();
+        // Light and dark switch while the panel is up.
+        cx.observe_window_appearance(window, |_, _, cx| cx.notify())
+            .detach();
         cx.subscribe(&streams, |peek: &mut Peek, _, _: &NewFrame, cx| {
             if peek.shown {
                 cx.notify();
@@ -156,7 +160,11 @@ fn tile(
         .id(gpui::ElementId::Integer(id as u64))
         .group(group.clone())
         .role(Role::Button)
-        .aria_label(format!("{label}，{}", status.short))
+        .aria_label(format!("{label}，{}", status.long))
+        .tooltip({
+            let text = format!("{label}\n{}", status.long);
+            move |_, cx| super::shell::hint(text.clone(), cx)
+        })
         .w(px(TILE_WIDTH))
         .flex()
         .flex_col()
@@ -193,6 +201,7 @@ fn tile(
                         .role(Role::Button)
                         .aria_label("关闭显示器")
                         .tooltip(|_, cx| super::shell::hint("关闭显示器", cx))
+                        .tooltip_show_delay(super::shell::HINT_DELAY)
                         .absolute()
                         .top(px(4.))
                         .right(px(4.))
@@ -255,6 +264,7 @@ fn add_tile(narrow: bool, theme: &Theme, shell: &WeakEntity<Shell>) -> impl Into
         .aria_label("新建显示器")
         .when(narrow, |d| {
             d.tooltip(|_, cx| super::shell::hint("新建显示器", cx))
+                .tooltip_show_delay(super::shell::HINT_DELAY)
         })
         .w(px(width))
         .flex()

@@ -29,6 +29,7 @@ impl Latest {
 
 pub struct Capture {
     stream: SCStream,
+    turn: Mutex<()>,
 }
 
 impl Capture {
@@ -51,14 +52,7 @@ impl Capture {
             .with_display(&display)
             .with_excluding_windows(&[])
             .build()?;
-        let config = SCStreamConfiguration::new()
-            .with_width(pixels.0)
-            .with_height(pixels.1)
-            .with_pixel_format(PixelFormat::YCbCr_420f)
-            .with_minimum_frame_interval(&CMTime::new(1, fps))
-            .with_shows_cursor(false)
-            .with_queue_depth(6);
-        let mut stream = SCStream::new(&filter, &config)?;
+        let mut stream = SCStream::new(&filter, &configuration(pixels, fps))?;
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
                 // Idle frames repeat the last image: the display did not
@@ -81,8 +75,34 @@ impl Capture {
             SCStreamOutputType::Screen,
         )?;
         stream.start_capture()?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            turn: Mutex::new(()),
+        })
     }
+
+    /// Change the rate and size to `target` without restarting the
+    /// stream. Calls run one at a time and read `target` when their turn
+    /// comes, so the last one leaves the newest rate in place.
+    pub fn reconfigure(&self, target: &Mutex<(i32, (u32, u32))>) -> anyhow::Result<()> {
+        let _turn = self.turn.lock().unwrap();
+        let (fps, pixels) = *target.lock().unwrap();
+        if fps > 0 {
+            self.stream
+                .update_configuration(&configuration(pixels, fps))?;
+        }
+        Ok(())
+    }
+}
+
+fn configuration(pixels: (u32, u32), fps: i32) -> SCStreamConfiguration {
+    SCStreamConfiguration::new()
+        .with_width(pixels.0)
+        .with_height(pixels.1)
+        .with_pixel_format(PixelFormat::YCbCr_420f)
+        .with_minimum_frame_interval(&CMTime::new(1, fps))
+        .with_shows_cursor(false)
+        .with_queue_depth(6)
 }
 
 impl Drop for Capture {

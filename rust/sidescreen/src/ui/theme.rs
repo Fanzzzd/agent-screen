@@ -5,6 +5,7 @@ use gpui::{
     Window, WindowAppearance, canvas, point, px, rgb, rgba,
 };
 use std::borrow::Cow;
+use std::cell::Cell;
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -61,11 +62,27 @@ pub fn palette(dark: bool) -> Theme {
     }
 }
 
+thread_local! {
+    /// The user's accent color for light and dark, when the system has one.
+    static ACCENT: Cell<Option<(Hsla, Hsla)>> = const { Cell::new(None) };
+}
+
+/// Follow the user's accent color, given as sRGB for light and dark.
+pub fn set_accent(accent: Option<([f32; 3], [f32; 3])>) {
+    let hsla = |[r, g, b]: [f32; 3]| Hsla::from(gpui::Rgba { r, g, b, a: 1.0 });
+    ACCENT.with(|a| a.set(accent.map(|(light, dark)| (hsla(light), hsla(dark)))));
+}
+
 pub fn theme(window: &Window) -> Theme {
-    palette(matches!(
+    let dark = matches!(
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
-    ))
+    );
+    let mut theme = palette(dark);
+    if let Some((light, night)) = ACCENT.with(Cell::get) {
+        theme.accent = if dark { night } else { light };
+    }
+    theme
 }
 
 /// Icons, compiled in.

@@ -1,8 +1,10 @@
 //! Client for the menu bar app's control socket: newline-delimited JSON.
 //!
-//!     → {"id": 1, "method": "createDisplay", "params": {...}}
-//!     ← {"id": 1, "result": {...}}
-//!     ← {"id": 1, "error": {"code": "not_found", "message": "..."}}
+//! ```text
+//! → {"id": 1, "method": "createDisplay", "params": {...}}
+//! ← {"id": 1, "result": {...}}
+//! ← {"id": 1, "error": {"code": "not_found", "message": "..."}}
+//! ```
 //!
 //! The connection opens on the first call and stays open for the life of this
 //! process. The app treats its closing as the end of the Agent Session, so the

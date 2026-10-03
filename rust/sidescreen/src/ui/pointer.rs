@@ -16,6 +16,10 @@ const GLIDE: Duration = Duration::from_millis(320);
 const RIPPLE_DELAY: Duration = Duration::from_millis(180);
 const RIPPLE: Duration = Duration::from_millis(500);
 
+/// The arrow fades in when an agent's pointer appears and out when it
+/// goes, as on a Takeover or at the end.
+const FADE: Duration = Duration::from_millis(200);
+
 /// Where the arrow is heading, in display points. Shared by every view of
 /// a display so Peek and the Viewer agree.
 struct Glide {
@@ -24,6 +28,26 @@ struct Glide {
     to: (f64, f64),
     start: Instant,
     click: bool,
+    /// Fading toward visible, from `fade_from` opacity at `fade_start`.
+    shown: bool,
+    fade_from: f32,
+    fade_start: Instant,
+}
+
+impl Glide {
+    fn opacity(&self, now: Instant) -> f32 {
+        let t = ((now - self.fade_start).as_secs_f32() / FADE.as_secs_f32()).min(1.0);
+        let to = if self.shown { 1.0 } else { 0.0 };
+        self.fade_from + (to - self.fade_from) * t
+    }
+
+    fn fade(&mut self, shown: bool, now: Instant) {
+        if self.shown != shown {
+            self.fade_from = self.opacity(now);
+            self.fade_start = now;
+            self.shown = shown;
+        }
+    }
 }
 
 thread_local! {
@@ -34,32 +58,59 @@ fn ease_out(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Position now, and whether anything is still moving.
-fn advance(display: DisplayId, pointer: AgentPointer) -> ((f64, f64), Option<f64>, bool) {
+/// The arrow now: position, ripple progress, opacity, and whether anything
+/// is still changing. None once it has faded out.
+struct Frame {
+    at: (f64, f64),
+    ripple: Option<f64>,
+    opacity: f32,
+    changing: bool,
+}
+
+fn advance(display: DisplayId, pointer: Option<AgentPointer>) -> Option<Frame> {
     GLIDES.with(|glides| {
         let mut glides = glides.borrow_mut();
         let now = Instant::now();
-        let target = (pointer.x, pointer.y);
-        let glide = glides.entry(display).or_insert(Glide {
-            seq: pointer.seq,
-            from: target,
-            to: target,
-            start: now - GLIDE - RIPPLE,
-            click: false,
-        });
-        if glide.seq != pointer.seq {
-            let t = ease_out((now - glide.start).as_secs_f64() / GLIDE.as_secs_f64()).min(1.0);
-            let here = (
-                glide.from.0 + (glide.to.0 - glide.from.0) * t,
-                glide.from.1 + (glide.to.1 - glide.from.1) * t,
-            );
-            *glide = Glide {
-                seq: pointer.seq,
-                from: here,
-                to: target,
-                start: now,
-                click: pointer.click,
-            };
+        let glide = match pointer {
+            Some(pointer) => {
+                let target = (pointer.x, pointer.y);
+                let glide = glides.entry(display).or_insert(Glide {
+                    seq: pointer.seq,
+                    from: target,
+                    to: target,
+                    start: now - GLIDE - RIPPLE,
+                    click: false,
+                    shown: true,
+                    fade_from: 0.0,
+                    fade_start: now,
+                });
+                glide.fade(true, now);
+                if glide.seq != pointer.seq {
+                    let t =
+                        ease_out((now - glide.start).as_secs_f64() / GLIDE.as_secs_f64()).min(1.0);
+                    let here = (
+                        glide.from.0 + (glide.to.0 - glide.from.0) * t,
+                        glide.from.1 + (glide.to.1 - glide.from.1) * t,
+                    );
+                    glide.seq = pointer.seq;
+                    glide.from = here;
+                    glide.to = target;
+                    glide.start = now;
+                    glide.click = pointer.click;
+                }
+                glide
+            }
+            // Gone: fade out where it last was.
+            None => {
+                let glide = glides.get_mut(&display)?;
+                glide.fade(false, now);
+                glide
+            }
+        };
+        let opacity = glide.opacity(now);
+        let fading = now - glide.fade_start < FADE;
+        if opacity <= 0.0 && !fading {
+            return None;
         }
         let elapsed = now - glide.start;
         let t = ease_out((elapsed.as_secs_f64() / GLIDE.as_secs_f64()).min(1.0));
@@ -70,7 +121,12 @@ fn advance(display: DisplayId, pointer: AgentPointer) -> ((f64, f64), Option<f64
         let ripple = (glide.click && elapsed >= RIPPLE_DELAY && elapsed < RIPPLE_DELAY + RIPPLE)
             .then(|| (elapsed - RIPPLE_DELAY).as_secs_f64() / RIPPLE.as_secs_f64());
         let moving = elapsed < RIPPLE_DELAY + RIPPLE;
-        (at, ripple, moving)
+        Some(Frame {
+            at,
+            ripple,
+            opacity,
+            changing: moving || fading,
+        })
     })
 }
 
@@ -88,7 +144,9 @@ pub fn layer(
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window: &mut Window, _: &mut App| {
-            let Some(pointer) = pointer else { return };
+            let Some(frame) = advance(display, pointer) else {
+                return;
+            };
             // The image is aspect-fit inside the layer.
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             let fit = (w / size.0 as f32).min(h / size.1 as f32);
@@ -99,7 +157,7 @@ pub fn layer(
                 ),
                 gpui::size(px(size.0 as f32 * fit), px(size.1 as f32 * fit)),
             );
-            let (at, ripple, moving) = advance(display, pointer);
+            let at = frame.at;
             let width = f32::from(bounds.size.width) as f64;
             let tip = point(
                 bounds.origin.x + px((at.0 / size.0 * width) as f32),
@@ -107,11 +165,11 @@ pub fn layer(
             );
             // Full size in the Viewer, smaller on thumbnails.
             let scale = (width / size.0 * 1.6).clamp(0.55, 1.0) as f32;
-            if let Some(progress) = ripple {
-                draw_ripple(window, tip, scale, progress as f32, accent);
+            if let Some(progress) = frame.ripple {
+                draw_ripple(window, tip, scale, progress as f32, accent, frame.opacity);
             }
-            draw_arrow(window, tip, scale, accent);
-            if moving {
+            draw_arrow(window, tip, scale, accent, frame.opacity);
+            if frame.changing {
                 window.request_animation_frame();
             }
         },
@@ -123,7 +181,7 @@ pub fn layer(
 }
 
 /// The arrow, tip at `tip`, in the shape of the system cursor.
-fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, accent: Hsla) {
+fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, accent: Hsla, opacity: f32) {
     // Outline points with the tip at (0, 0), y down.
     const SHAPE: [(f32, f32); 7] = [
         (0., 0.),
@@ -151,29 +209,37 @@ fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, accent: Hsla)
     }
     shadow.close();
     if let Ok(path) = shadow.build() {
-        window.paint_path(path, gpui::black().opacity(0.3));
+        window.paint_path(path, gpui::black().opacity(0.3 * opacity));
     }
     let mut fill = PathBuilder::fill();
     outline(&mut fill);
     if let Ok(path) = fill.build() {
-        window.paint_path(path, accent);
+        window.paint_path(path, accent.opacity(opacity));
     }
     let mut stroke = PathBuilder::stroke(px(1.5 * scale));
     outline(&mut stroke);
     if let Ok(path) = stroke.build() {
-        window.paint_path(path, gpui::white());
+        window.paint_path(path, gpui::white().opacity(opacity));
     }
 }
 
 /// A ring that spreads from the tip.
-fn draw_ripple(window: &mut Window, tip: Point<Pixels>, scale: f32, progress: f32, accent: Hsla) {
+fn draw_ripple(
+    window: &mut Window,
+    tip: Point<Pixels>,
+    scale: f32,
+    progress: f32,
+    accent: Hsla,
+    opacity: f32,
+) {
     let eased = 1.0 - (1.0 - progress).powi(2);
     let radius = 17.0 * scale * (0.2 + 0.8 * eased);
-    let alpha = if progress < 0.4 {
-        1.0
-    } else {
-        1.0 - (progress - 0.4) / 0.6
-    };
+    let alpha = opacity
+        * if progress < 0.4 {
+            1.0
+        } else {
+            1.0 - (progress - 0.4) / 0.6
+        };
     let circle = |builder: &mut PathBuilder| {
         let r = px(radius);
         builder.move_to(point(tip.x + r, tip.y));

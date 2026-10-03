@@ -68,7 +68,10 @@ impl Render for Hint {
     }
 }
 
-pub fn hint(text: &'static str, cx: &mut App) -> AnyView {
+/// How long the pointer rests on a control before its hint shows.
+pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+pub fn hint(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
     cx.new(|_| Hint(text.into())).into()
 }
 
@@ -97,7 +100,6 @@ pub struct Shell {
     settle_until: Option<Instant>,
 
     viewer_display: Option<DisplayId>,
-    /// The input queue of the display in the Viewer.
     /// When the Viewer's open animation lands.
     viewer_settled_at: Instant,
     /// Displays known to have ended, to notice one ending.
@@ -197,6 +199,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
     native::watch_screens();
+    native::watch_colors();
+    let accent = native::accent();
+    super::theme::set_accent(accent);
     viewer_input::install();
     notify::install();
     native::debug_appearance();
@@ -237,14 +242,14 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
 
     let peek = {
         let (weak, core, streams) = (weak.clone(), core.clone(), streams.clone());
-        cx.open_window(panel_options(), move |_, cx| {
-            cx.new(|cx| Peek::new(weak, core, streams, cx))
+        cx.open_window(panel_options(), move |window, cx| {
+            cx.new(|cx| Peek::new(weak, core, streams, window, cx))
         })?
     };
     let viewer = {
         let (weak, core, streams) = (weak.clone(), core.clone(), streams.clone());
-        cx.open_window(panel_options(), move |_, cx| {
-            cx.new(|cx| Viewer::new(weak, core, streams, cx))
+        cx.open_window(panel_options(), move |window, cx| {
+            cx.new(|cx| Viewer::new(weak, core, streams, window, cx))
         })?
     };
     let peek_ns = peek
@@ -358,12 +363,26 @@ impl Shell {
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::MenuBarClick { display } => self.menu_bar(display, cx),
             Native::ScreensChanged => self.schedule_guard(cx),
+            Native::ColorsChanged => {
+                super::theme::set_accent(native::accent());
+                self.repaint(cx);
+            }
         }
     }
 
     // MARK: Following the displays
 
     /// The displays changed: refresh what shows them.
+    /// Redraw both panels, as after a system color change.
+    fn repaint(&self, cx: &mut Context<Self>) {
+        if let Some((peek, _)) = &self.peek {
+            let _ = peek.update(cx, |_, _, cx| cx.notify());
+        }
+        if let Some((viewer, _)) = &self.viewer {
+            let _ = viewer.update(cx, |_, _, cx| cx.notify());
+        }
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
@@ -387,7 +406,14 @@ impl Shell {
         for id in &gone {
             notify::update(*id, "", None);
         }
-        let added = ids.difference(&self.known).count() > 0;
+        let new: Vec<(DisplayId, (f64, f64))> = core
+            .displays
+            .list
+            .iter()
+            .filter(|d| !self.known.contains(&d.id))
+            .map(|d| (d.id, (d.width, d.height)))
+            .collect();
+        let added = !new.is_empty();
         let ended: HashSet<DisplayId> = core
             .displays
             .list
@@ -399,8 +425,15 @@ impl Shell {
         let newly_ended = ended.difference(&self.ended).count() > 0;
         self.ended = ended;
         self.known = ids.clone();
+        // Every display keeps a 1 fps thumbnail stream, so Peek and the
+        // Viewer open on a frame at most a second old.
+        for (id, size) in new {
+            self.streams.update(cx, |s, cx| {
+                s.want(id, "warm", 1, thumbnail_pixels(size), cx)
+            });
+        }
         for id in &gone {
-            self.streams.update(cx, |s, _| s.drop_display(*id));
+            self.streams.update(cx, |s, cx| s.drop_display(*id, cx));
             pointer::forget(*id);
         }
         if let Some(id) = self.viewer_display
@@ -927,7 +960,7 @@ impl Shell {
             "create" => self.create_display(cx),
             "dismiss" => self.dismiss(id, cx),
             "primary" => self.primary(id, cx),
-            "windows" => self.windows_menu(id, cx),
+            "windows" => self.windows_menu(id, None, cx),
             "help" => self.open_for_help(id, cx),
             "answer" => {
                 let Some((viewer, _)) = self.viewer.clone() else {
@@ -986,7 +1019,14 @@ impl Shell {
 
     /// 窗口 menu: hand one of the user's windows over, take one back, or
     /// close the display.
-    pub fn windows_menu(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+    /// `button` is where the 窗口 button is in the Viewer; the menu drops
+    /// from its bottom-left corner, or from the pointer without one.
+    pub fn windows_menu(
+        &mut self,
+        id: DisplayId,
+        button: Option<gpui::Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let core = self.core.read(cx);
         let Some(display) = core.displays.get(id) else {
             return;
@@ -1042,8 +1082,20 @@ impl Shell {
         menu.submenu("取回窗口", back);
         menu.separator();
         menu.action("关闭显示器…", MenuAction::Dismiss { display: id });
-        let (x, y) = native::mouse_location();
-        menu.pop_up_at(x - 12.0, y - 14.0);
+        let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
+            let frame = native::frame(window);
+            (
+                frame.origin.x + f64::from(f32::from(b.origin.x)),
+                frame.origin.y + frame.size.height
+                    - f64::from(f32::from(b.origin.y + b.size.height))
+                    - 4.0,
+            )
+        });
+        let (x, y) = at.unwrap_or_else(|| {
+            let (x, y) = native::mouse_location();
+            (x - 12.0, y - 14.0)
+        });
+        menu.pop_up_at(x, y);
     }
 
     /// A click on the menu bar strip of the display image.
@@ -1120,6 +1172,17 @@ impl Shell {
     /// Close a display: ask on the Viewer what happens to its windows,
     /// unless there is nothing to ask.
     pub fn dismiss(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        // Asked again while the question is up: keep the user's choices.
+        let asking = self.viewer.as_ref().is_some_and(|(viewer, _)| {
+            viewer
+                .read(cx)
+                .is_ok_and(|v| v.sheet.as_ref().is_some_and(|s| s.display == id))
+        });
+        if asking {
+            self.open_viewer(id, cx);
+            self.take_keyboard();
+            return;
+        }
         let core = self.core.read(cx);
         let Some(display) = core.displays.get(id) else {
             return;

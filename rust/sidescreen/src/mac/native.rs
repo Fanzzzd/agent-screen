@@ -64,6 +64,8 @@ pub enum Native {
     },
     /// Screens were added, removed or rearranged.
     ScreensChanged,
+    /// The accent color or another system color changed.
+    ColorsChanged,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -651,6 +653,50 @@ pub fn debug_appearance() {
 }
 
 /// Report screens being added, removed or rearranged.
+pub fn watch_colors() {
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let block =
+        RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| send(Native::ColorsChanged));
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSSystemColorsDidChangeNotification),
+            None,
+            Some(&objc2_foundation::NSOperationQueue::mainQueue()),
+            &block,
+        )
+    };
+    let observer: Retained<AnyObject> = observer.into();
+    keep(observer);
+}
+
+/// The user's accent color as sRGB, for light and for dark.
+pub fn accent() -> Option<([f32; 3], [f32; 3])> {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSColorSpace,
+    };
+    let resolve = |name| -> Option<[f32; 3]> {
+        let appearance = NSAppearance::appearanceNamed(name)?;
+        let rgb = std::cell::Cell::new(None);
+        let block = RcBlock::new(|| {
+            let color =
+                NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace());
+            rgb.set(color.map(|c| {
+                [
+                    c.redComponent() as f32,
+                    c.greenComponent() as f32,
+                    c.blueComponent() as f32,
+                ]
+            }));
+        });
+        appearance.performAsCurrentDrawingAppearance(&block);
+        rgb.get()
+    };
+    Some((
+        resolve(unsafe { NSAppearanceNameAqua })?,
+        resolve(unsafe { NSAppearanceNameDarkAqua })?,
+    ))
+}
+
 pub fn watch_screens() {
     let center = objc2_foundation::NSNotificationCenter::defaultCenter();
     let block =

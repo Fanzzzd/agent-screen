@@ -12,7 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 struct Stream {
-    capture: Option<Capture>,
+    capture: Option<Arc<Capture>>,
+    /// A capture is starting on a background thread.
+    starting: bool,
+    /// What `running` says, for reconfigurations on other threads.
+    target: Arc<std::sync::Mutex<(i32, (u32, u32))>>,
     latest: Arc<Latest>,
     /// Frame rate and pixel size the capture runs at.
     running: (i32, (u32, u32)),
@@ -74,6 +78,8 @@ impl Streams {
     ) {
         let stream = self.streams.entry(id).or_insert_with(|| Stream {
             capture: None,
+            starting: false,
+            target: Default::default(),
             latest: Arc::new(Latest::default()),
             running: (0, (0, 0)),
             wants: HashMap::new(),
@@ -92,44 +98,107 @@ impl Streams {
         if wanted == stream.running {
             return;
         }
-        // Stopping and starting a stream are synchronous; a restart at the
-        // new rate takes a few milliseconds.
-        stream.capture = None;
         stream.running = wanted;
-        let (fps, pixels) = wanted;
+        *stream.target.lock().unwrap() = wanted;
+        let fps = wanted.0;
+        // Starting, stopping and reconfiguring a stream each block for
+        // 100 ms or more, so they run off the main thread.
         if fps == 0 {
-            return;
-        }
-        let wake = self.wake.clone();
-        match Capture::start(id, pixels, fps, stream.latest.clone(), move || {
-            let _ = wake.unbounded_send(id);
-        }) {
-            Ok(capture) => stream.capture = Some(capture),
-            Err(error) => {
-                log::warn!("capture for display {id} failed: {error}");
-                stream.running = (0, (0, 0));
-                // A just-created display can take a moment to show up.
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
-                        .await;
-                    let _ = this.update(cx, |streams, cx| {
-                        let still = streams
-                            .streams
-                            .get(&id)
-                            .is_some_and(|s| s.wants.get(who) == Some(&(fps, pixels)));
-                        if still {
-                            streams.want(id, who, fps, pixels, cx);
-                        }
-                    });
-                })
-                .detach();
+            if let Some(capture) = stream.capture.take() {
+                cx.background_spawn(async move { drop(capture) }).detach();
             }
+        } else if let Some(capture) = stream.capture.clone() {
+            let target = stream.target.clone();
+            cx.background_spawn(async move {
+                if let Err(error) = capture.reconfigure(&target) {
+                    log::warn!("capture for display {id} kept its old rate: {error}");
+                }
+            })
+            .detach();
+        } else if !stream.starting {
+            self.start(id, cx);
         }
     }
 
-    pub fn drop_display(&mut self, id: DisplayId) {
-        self.streams.remove(&id);
+    /// Start capturing at the rate the stream should run at. When the
+    /// start lands, the stream may want another rate, or none.
+    fn start(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        let Some(stream) = self.streams.get_mut(&id) else {
+            return;
+        };
+        stream.starting = true;
+        let (fps, pixels) = stream.running;
+        let latest = stream.latest.clone();
+        let wake = self.wake.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let started = std::time::Instant::now();
+                    let result = Capture::start(id, pixels, fps, latest, move || {
+                        let _ = wake.unbounded_send(id);
+                    });
+                    log::debug!(
+                        "capture of display {id} at {fps} fps, {pixels:?}: {:?}",
+                        started.elapsed()
+                    );
+                    result
+                })
+                .await;
+            let _ = this.update(cx, |streams, cx| {
+                let stream = streams.streams.get_mut(&id);
+                match (stream, result) {
+                    (Some(stream), Ok(capture)) => {
+                        stream.starting = false;
+                        let capture = Arc::new(capture);
+                        let running = stream.running;
+                        if running.0 == 0 {
+                            cx.background_spawn(async move { drop(capture) }).detach();
+                            return;
+                        }
+                        stream.capture = Some(capture.clone());
+                        if running != (fps, pixels) {
+                            let target = stream.target.clone();
+                            cx.background_spawn(async move {
+                                let _ = capture.reconfigure(&target);
+                            })
+                            .detach();
+                        }
+                    }
+                    (Some(stream), Err(error)) => {
+                        log::warn!("capture for display {id} failed: {error}");
+                        stream.starting = false;
+                        // A just-created display can take a moment to show up.
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(500))
+                                .await;
+                            let _ = this.update(cx, |streams, cx| {
+                                let retry = streams.streams.get(&id).is_some_and(|s| {
+                                    s.running.0 > 0 && s.capture.is_none() && !s.starting
+                                });
+                                if retry {
+                                    streams.start(id, cx);
+                                }
+                            });
+                        })
+                        .detach();
+                    }
+                    // The display went away meanwhile.
+                    (None, Ok(capture)) => {
+                        cx.background_spawn(async move { drop(capture) }).detach();
+                    }
+                    (None, Err(_)) => {}
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn drop_display(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        if let Some(capture) = self.streams.remove(&id).and_then(|s| s.capture) {
+            cx.background_spawn(async move { drop(capture) }).detach();
+        }
         self.frames.remove(&id);
     }
 }

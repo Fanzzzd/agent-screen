@@ -16,6 +16,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, WeakEntity, Window, canvas, div, point,
     prelude::FluentBuilder, px, size, surface, svg,
 };
+use std::cell::Cell;
 use std::time::Instant;
 
 pub const HEADER: f32 = 52.;
@@ -31,6 +32,11 @@ pub struct Sheet {
     pub items: Vec<Item>,
     /// An Agent Session still uses the display.
     pub live: bool,
+}
+
+thread_local! {
+    /// The 窗口 button's bounds in the window, from the last paint.
+    static WINDOWS_BUTTON: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
 }
 
 pub struct Viewer {
@@ -53,9 +59,13 @@ impl Viewer {
         shell: WeakEntity<Shell>,
         core: Entity<Core>,
         streams: Entity<Streams>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&core, |_, _, cx| cx.notify()).detach();
+        // Light and dark switch while the panel is up.
+        cx.observe_window_appearance(window, |_, _, cx| cx.notify())
+            .detach();
         cx.subscribe(&streams, |viewer: &mut Viewer, _, frame: &NewFrame, cx| {
             if viewer.display == Some(frame.0) {
                 cx.notify();
@@ -227,18 +237,35 @@ fn header(
                 tell(&primary_shell, cx, move |shell, cx| shell.primary(id, cx))
             }))
         })
-        .child(button(
-            "windows",
-            format!("窗口 {count}"),
-            Some("icons/windows.svg"),
-            None,
-            theme,
-            move |cx| {
-                tell(&windows_shell, cx, move |shell, cx| {
-                    shell.windows_menu(id, cx)
-                })
-            },
-        ))
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .child(button(
+                    "windows",
+                    format!("窗口 {count}"),
+                    Some("icons/windows.svg"),
+                    None,
+                    theme,
+                    move |cx| {
+                        let below = WINDOWS_BUTTON.with(Cell::get);
+                        tell(&windows_shell, cx, move |shell, cx| {
+                            shell.windows_menu(id, below, cx)
+                        })
+                    },
+                ))
+                // Where the button is, so its menu drops from it.
+                .child(
+                    canvas(
+                        |bounds, _, _| WINDOWS_BUTTON.with(|b| b.set(Some(bounds))),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+        )
         .child(icon_button(
             "collapse",
             "icons/chevron-up.svg",
@@ -297,6 +324,7 @@ fn icon_button(
         .role(Role::Button)
         .aria_label(hint)
         .tooltip(move |_, cx| super::shell::hint(hint, cx))
+        .tooltip_show_delay(super::shell::HINT_DELAY)
         .flex_none()
         .size(px(28.))
         .flex()
