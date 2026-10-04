@@ -261,6 +261,28 @@ pub async fn handle(
                 Some(Some(element)) => element,
             };
             let action = p.string("action").unwrap_or_else(|| "press".into());
+            // A menu bar title lists its items rather than opening a menu
+            // on the user's own menu bar.
+            if matches!(action.as_str(), "press" | "click" | "show_menu") {
+                let first = core.read_with(cx, |c, _| {
+                    c.elements
+                        .get(&(id, window.target.window_id))
+                        .map_or(0, Vec::len)
+                });
+                let item = ax::Sendable(element.clone());
+                let menu = cx
+                    .background_executor()
+                    .spawn(async move { ax::menu_items(item.get(), first) })
+                    .await;
+                if let Some(menu) = menu {
+                    core.update(cx, |c, _| {
+                        if let Some(list) = c.elements.get_mut(&(id, window.target.window_id)) {
+                            list.extend(menu.elements);
+                        }
+                    });
+                    return Ok(json!({ "menu": menu.tree }).as_object().cloned().unwrap_or_default());
+                }
+            }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.

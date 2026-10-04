@@ -262,7 +262,8 @@ pub fn definitions() -> Vec<Value> {
                 "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
                 "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
-                "the element has no press action. Fails with a takeover error while the user operates the display.",
+                "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
+                "Fails with a takeover error while the user operates the display.",
             ],
             object(
                 json!({
@@ -520,7 +521,7 @@ pub async fn run(
                     ],
                 )?
                 .ok_or_else(|| ControlError::invalid("action is required"))?;
-            control
+            let reply = control
                 .call(
                     "elementAction",
                     json!({
@@ -532,6 +533,11 @@ pub async fn run(
                     }),
                 )
                 .await?;
+            if let Some(menu) = reply.get("menu").and_then(Value::as_str) {
+                return Ok(Output::Content(vec![text(format!(
+                    "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"
+                ))]));
+            }
             // The window state shows the action's result once the display
             // stops changing.
             control

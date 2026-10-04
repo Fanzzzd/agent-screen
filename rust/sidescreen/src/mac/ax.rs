@@ -281,11 +281,119 @@ pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
         visited: 0,
     };
     walker.visit(&window, 0);
+    // The menu bar the agent's display shows belongs to the user's front
+    // app, so list this app's menu titles here; pressing one lists its items.
+    let titles = element_attribute(&application(target.pid), "AXMenuBar")
+        .map(|bar| elements_attribute(&bar, "AXChildren"))
+        .unwrap_or_default();
+    // The first title is the Apple menu.
+    for (n, item) in titles.into_iter().skip(1).enumerate() {
+        let Some(title) = string_attribute(&item, "AXTitle").filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        if n == 0 {
+            walker.lines.push("Menu bar (press a title to list its items):".into());
+        }
+        walker
+            .lines
+            .push(format!("[{}] menubaritem \"{title}\"", walker.elements.len()));
+        walker.elements.push(item);
+    }
     Some(Snapshot {
         tree: walker.lines.join("\n"),
         elements: walker.elements,
         truncated: walker.truncated,
     })
+}
+
+/// The items of a menu bar title, numbered from `first`, or None when
+/// `item` is not a menu bar title. Reading items leaves the menu closed;
+/// AXPress on an item chooses it without opening anything.
+pub fn menu_items(item: &AXUIElement, first: usize) -> Option<Snapshot> {
+    if string_attribute(item, "AXRole")? != "AXMenuBarItem" {
+        return None;
+    }
+    let menu = elements_attribute(item, "AXChildren").into_iter().next()?;
+    let mut snapshot = Snapshot {
+        tree: String::new(),
+        elements: Vec::new(),
+        truncated: false,
+    };
+    let mut lines = Vec::new();
+    list_menu(&menu, 0, first, &mut lines, &mut snapshot.elements);
+    snapshot.tree = lines.join("\n");
+    Some(snapshot)
+}
+
+fn list_menu(
+    menu: &AXUIElement,
+    depth: usize,
+    first: usize,
+    lines: &mut Vec<String>,
+    elements: &mut Vec<Element>,
+) {
+    let indent = "  ".repeat(depth);
+    for element in elements_attribute(menu, "AXChildren") {
+        let Some(title) = string_attribute(&element, "AXTitle").filter(|t| !t.is_empty()) else {
+            continue; // a separator
+        };
+        if let Some(sub) = elements_attribute(&element, "AXChildren").first() {
+            if depth < 2 {
+                lines.push(format!("{indent}\"{title}\" submenu:"));
+                list_menu(sub, depth + 1, first, lines, elements);
+            }
+            continue;
+        }
+        let mut line = format!("{indent}[{}] menuitem \"{title}\"", first + elements.len());
+        if let Some(key) = shortcut(&element) {
+            line += &format!(" key=\"{key}\"");
+        }
+        let flag = |name: &str| {
+            attribute(&element, name).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        };
+        if flag("AXEnabled") == Some(false) {
+            line += " disabled";
+        }
+        if string_attribute(&element, "AXMenuItemMarkChar").is_some_and(|m| !m.is_empty()) {
+            line += " checked";
+        }
+        lines.push(line);
+        elements.push(element);
+    }
+}
+
+/// A menu item's key equivalent in the computer tool's key syntax, such as
+/// "cmd+shift+n". AXMenuItemCmdModifiers: bit 3 means no Command; bits 0-2
+/// add Shift, Option and Control.
+fn shortcut(element: &AXUIElement) -> Option<String> {
+    let key = string_attribute(element, "AXMenuItemCmdChar")?;
+    let key = key.trim();
+    if key.chars().count() != 1 || !key.chars().all(|c| c.is_ascii_graphic()) {
+        return None;
+    }
+    let mods = attribute(element, "AXMenuItemCmdModifiers")
+        .and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()))
+        .unwrap_or(0);
+    // Higher bits, such as Fn for Enter Full Screen, have no key name here.
+    if mods & !0xF != 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if mods & 4 != 0 {
+        parts.push("ctrl");
+    }
+    if mods & 2 != 0 {
+        parts.push("alt");
+    }
+    if mods & 1 != 0 {
+        parts.push("shift");
+    }
+    if mods & 8 == 0 {
+        parts.push("cmd");
+    }
+    let key = key.to_lowercase();
+    parts.push(&key);
+    Some(parts.join("+"))
 }
 
 /// Depth-first walk that numbers every element worth naming. Unlabelled
