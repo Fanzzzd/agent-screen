@@ -42,14 +42,22 @@ impl KeyChord {
         let (key, mods) = parts.split_last().ok_or(ParseError::Empty)?;
         let mut modifiers = Modifiers::default();
         for name in mods {
-            match name.to_lowercase().as_str() {
-                "ctrl" | "control" => modifiers.control = true,
-                "shift" => modifiers.shift = true,
-                "alt" | "option" | "opt" => modifiers.alt = true,
-                "cmd" | "command" | "super" | "meta" => modifiers.command = true,
-                "fn" => modifiers.function = true,
-                _ => return Err(ParseError::UnknownKey((*name).into())),
+            match modifier(name) {
+                Some((set, _)) => set(&mut modifiers),
+                None => return Err(ParseError::UnknownKey((*name).into())),
             }
+        }
+        // A modifier on its own is a key too, e.g. "shift" or "Control_L".
+        if let Some((_, code)) = modifier(key) {
+            return Ok(KeyChord { code, modifiers });
+        }
+        // "plus" is Shift and the = key on US ANSI.
+        if key.eq_ignore_ascii_case("plus") {
+            modifiers.shift = true;
+            return Ok(KeyChord {
+                code: 24,
+                modifiers,
+            });
         }
         // Uppercase single letters imply Shift, as in xdotool.
         let mut chars = key.chars();
@@ -64,6 +72,19 @@ impl KeyChord {
         Err(ParseError::UnknownKey((*key).into()))
     }
 
+    /// Chords separated by spaces, pressed in order, as in xdotool's
+    /// "ctrl+a BackSpace".
+    pub fn parse_sequence(text: &str) -> Result<Vec<KeyChord>, ParseError> {
+        let chords = text
+            .split_whitespace()
+            .map(KeyChord::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        if chords.is_empty() {
+            return Err(ParseError::Empty);
+        }
+        Ok(chords)
+    }
+
     /// Modifier names only, as click actions take them: ["shift", "cmd"].
     pub fn parse_modifiers(names: &[String]) -> Result<Modifiers, ParseError> {
         if names.is_empty() {
@@ -73,8 +94,30 @@ impl KeyChord {
     }
 }
 
+/// A modifier name, with xdotool's left/right variants: how it sets
+/// Modifiers, and its own key code.
+type SetModifier = fn(&mut Modifiers);
+
+fn modifier(name: &str) -> Option<(SetModifier, u16)> {
+    let name = name.to_lowercase();
+    let base = name
+        .strip_suffix("_l")
+        .or_else(|| name.strip_suffix("_r"))
+        .unwrap_or(&name);
+    Some(match base {
+        "ctrl" | "control" => (|m: &mut Modifiers| m.control = true, 59),
+        "shift" => (|m: &mut Modifiers| m.shift = true, 56),
+        "alt" | "option" | "opt" => (|m: &mut Modifiers| m.alt = true, 58),
+        "cmd" | "command" | "super" | "meta" => (|m: &mut Modifiers| m.command = true, 55),
+        "fn" => (|m: &mut Modifiers| m.function = true, 63),
+        _ => return None,
+    })
+}
+
 fn key_code(name: &str) -> Option<u16> {
-    const FUNCTION_KEYS: [u16; 12] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111];
+    const FUNCTION_KEYS: [u16; 20] = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90,
+    ];
     if let Some(n) = name.strip_prefix('f').and_then(|n| n.parse::<usize>().ok()) {
         return FUNCTION_KEYS.get(n.checked_sub(1)?).copied();
     }
@@ -141,6 +184,8 @@ fn key_code(name: &str) -> Option<u16> {
         "end" => 119,
         "page_up" | "pageup" | "prior" => 116,
         "page_down" | "pagedown" | "next" => 121,
+        "insert" | "help" => 114,
+        "caps_lock" | "capslock" => 57,
         _ => return None,
     })
 }
@@ -148,6 +193,20 @@ fn key_code(name: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xdotool_names_models_emit() {
+        let c = KeyChord::parse("Control_L+a").unwrap();
+        assert!(c.modifiers.control && c.code == 0);
+        let plus = KeyChord::parse("cmd+plus").unwrap();
+        assert!(plus.modifiers.command && plus.modifiers.shift && plus.code == 24);
+        assert_eq!(KeyChord::parse("shift").unwrap().code, 56);
+        assert_eq!(KeyChord::parse("F13").unwrap().code, 105);
+        assert_eq!(KeyChord::parse("Insert").unwrap().code, 114);
+        let seq = KeyChord::parse_sequence("ctrl+a BackSpace").unwrap();
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[1].code, 51);
+    }
 
     #[test]
     fn chords() {
@@ -163,8 +222,8 @@ mod tests {
         );
         assert_eq!(KeyChord::parse("+"), Err(ParseError::Empty));
         assert_eq!(
-            KeyChord::parse("f13"),
-            Err(ParseError::UnknownKey("f13".into()))
+            KeyChord::parse("f21"),
+            Err(ParseError::UnknownKey("f21".into()))
         );
     }
 }

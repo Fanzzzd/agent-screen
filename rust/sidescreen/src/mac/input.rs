@@ -225,16 +225,32 @@ impl Forwarder {
 
     /// Type text as Unicode, independent of the keyboard layout. One
     /// character per event: many apps read only the first character of a
-    /// key event, so batching drops text.
-    pub async fn type_text(&self, text: String, within: Rect) {
+    /// key event, so batching drops text. Newlines and tabs are the Return
+    /// and Tab keys, so they submit and move between fields. The events
+    /// carry no modifiers, whatever the user holds down meanwhile. False
+    /// when no window on the display can take the text.
+    pub async fn type_text(&self, text: String, within: Rect) -> bool {
         self.run(move |w| {
             w.focus_something(within);
-            let Some(target) = w.focused else { return };
+            let Some(target) = w.focused else {
+                return false;
+            };
             for character in text.chars() {
+                let code = match character {
+                    '\n' | '\r' => Some(36),
+                    '\t' => Some(48),
+                    _ => None,
+                };
                 let mut units = [0u16; 2];
                 let units = character.encode_utf16(&mut units);
                 for down in [true, false] {
-                    if let Some(event) = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down) {
+                    let Some(event) =
+                        CGEvent::new_keyboard_event(w.source.as_deref(), code.unwrap_or(0), down)
+                    else {
+                        continue;
+                    };
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    if code.is_none() {
                         unsafe {
                             CGEvent::keyboard_set_unicode_string(
                                 Some(&event),
@@ -242,25 +258,38 @@ impl Forwarder {
                                 units.as_ptr(),
                             )
                         };
-                        deliver(&event, target.pid, true);
                     }
+                    deliver(&event, target.pid, true);
                 }
                 thread::sleep(Duration::from_millis(4));
             }
+            true
         })
-        .await;
+        .await
+        .unwrap_or(false)
     }
 
-    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) {
+    /// Send keys to `target` from now on, as a click on it would.
+    pub async fn focus(&self, target: WindowTarget) {
+        self.run(move |w| w.focus(target)).await;
+    }
+
+    /// False when no window on the display can take the keys.
+    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> bool {
         self.run(move |w| {
             w.focus_something(within);
+            if w.focused.is_none() {
+                return false;
+            }
             for _ in 0..count.max(1) {
                 w.key(chord.code, true, flags(chord.modifiers));
                 thread::sleep(Duration::from_millis(20));
                 w.key(chord.code, false, flags(chord.modifiers));
             }
+            true
         })
-        .await;
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -303,20 +332,25 @@ impl Worker {
         (self.seed % (i32::MAX as u64 - 1)) as i64 + 1
     }
 
+    /// Make `target` the window keys go to, without raising it.
+    fn focus(&mut self, target: WindowTarget) {
+        if self.focused != Some(target) {
+            // Let AppKit in the target update its key-window routing before
+            // events arrive (cua uses the same 50 ms settle).
+            if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
+                thread::sleep(Duration::from_millis(50));
+            }
+            self.focused = Some(target);
+        }
+    }
+
     fn mouse_down(&mut self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
         let Some(hit) = self.hit(at, true) else {
             log::info!("input: no window at {at:?}");
             return;
         };
         let target = hit.target;
-        if self.focused != Some(target) {
-            // Let AppKit in the target update its key-window routing before
-            // the click stream arrives (cua uses the same 50 ms settle).
-            if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
-                thread::sleep(Duration::from_millis(50));
-            }
-            self.focused = Some(target);
-        }
+        self.focus(target);
         let group = self.next_group();
         self.gesture = Some(Gesture { target, group });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
@@ -443,10 +477,7 @@ impl Worker {
             return;
         }
         if let Some(top) = list.iter().find(|h| within.contains(h.bounds.mid())) {
-            if unsafe { SSFocusWithoutRaise(top.target.pid, top.target.window_id) } {
-                thread::sleep(Duration::from_millis(50));
-            }
-            self.focused = Some(top.target);
+            self.focus(top.target);
         }
     }
 

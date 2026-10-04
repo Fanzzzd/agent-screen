@@ -313,9 +313,20 @@ impl<H> Default for Displays<H> {
     }
 }
 
-/// Computer-use models downscale screenshots to about 1280 px wide, so a
-/// larger default only blurs text in what the agent sees.
-pub const DEFAULT_SIZE: (f64, f64) = (1440.0, 900.0);
+/// Claude scales down any image over 1568 px on its long edge or about
+/// 1.15 megapixels, and then reads coordinates in the smaller image. The
+/// default display fits that budget, so screenshot pixels are points.
+pub const DEFAULT_SIZE: (f64, f64) = (1280.0, 800.0);
+
+/// Screenshot pixels per display point: 1 within the image budget, less for
+/// a larger display, so the agent's coordinates and its image agree.
+pub fn shot_scale((width, height): (f64, f64)) -> f64 {
+    const LONG_EDGE: f64 = 1568.0;
+    const PIXELS: f64 = 1_150_000.0;
+    (LONG_EDGE / width.max(height))
+        .min((PIXELS / (width * height)).sqrt())
+        .min(1.0)
+}
 
 impl<H> Displays<H> {
     /// The serial for the next display, and its name.
@@ -528,6 +539,13 @@ pub fn fate_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshots_fit_the_image_budget() {
+        assert_eq!(shot_scale(DEFAULT_SIZE), 1.0);
+        let s = shot_scale((2560.0, 1600.0));
+        assert!(s < 1.0 && 2560.0 * s <= 1568.0 && 2560.0 * 1600.0 * s * s <= 1_150_000.0);
+    }
 
     fn owner(connection: u64) -> Option<Owner> {
         Some(Owner {

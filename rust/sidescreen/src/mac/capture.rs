@@ -14,6 +14,56 @@ use std::sync::{Arc, Mutex};
 pub struct Latest {
     frame: Mutex<Option<Frame>>,
     pub delivered: AtomicU64,
+    /// Frames that changed the picture visibly below the menu bar. An
+    /// animated wallpaper drifts a little everywhere and a menu bar clock
+    /// ticks; neither counts, so the number stops once the UI is still.
+    pub changes: AtomicU64,
+    /// Luma samples of the previous frame, for the comparison.
+    samples: Mutex<Vec<u8>>,
+}
+
+/// Samples per row and column of the comparison grid.
+const GRID: (usize, usize) = (160, 100);
+/// A sample changed visibly when its luma moved by more than this.
+const LEVELS: u8 = 24;
+/// The picture changed when at least this many samples did.
+const SAMPLES: usize = 3;
+
+/// Luma on a coarse grid below the top `skip` rows. Locks the buffer.
+fn luma_grid(buffer: &CVPixelBuffer, skip: f64) -> Vec<u8> {
+    const READ_ONLY: u64 = 1;
+    if buffer.lock_base_address(READ_ONLY) != 0 {
+        return Vec::new();
+    }
+    let (width, height) = (buffer.get_width_of_plane(0), buffer.get_height_of_plane(0));
+    let row_bytes = buffer.get_bytes_per_row_of_plane(0);
+    let base = unsafe { buffer.get_base_address_of_plane(0) } as *const u8;
+    let top = ((height as f64) * skip) as usize;
+    let mut out = Vec::with_capacity(GRID.0 * GRID.1);
+    if !base.is_null() && width > 0 && height > top {
+        for gy in 0..GRID.1 {
+            let y = top + (height - top - 1) * gy / (GRID.1 - 1);
+            for gx in 0..GRID.0 {
+                let x = (width - 1) * gx / (GRID.0 - 1);
+                out.push(unsafe { *base.add(y * row_bytes + x) });
+            }
+        }
+    }
+    buffer.unlock_base_address(READ_ONLY);
+    out
+}
+
+/// Whether `now` differs visibly from `before`.
+fn changed(before: &[u8], now: &[u8]) -> bool {
+    if before.len() != now.len() {
+        return true;
+    }
+    before
+        .iter()
+        .zip(now)
+        .filter(|(a, b)| a.abs_diff(**b) > LEVELS)
+        .nth(SAMPLES - 1)
+        .is_some()
 }
 
 pub struct Frame(pub CVPixelBuffer);
@@ -42,6 +92,9 @@ impl Capture {
         latest: Arc<Latest>,
         on_frame: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
+        // The menu bar strip, about 24 to 38 pt, is left out of the change
+        // count: it shows the user's own menus and clock.
+        let skip = 40.0 / super::cg::display_bounds(display_id).height.max(1.0);
         let content = SCShareableContent::get()?;
         let display = content
             .displays()
@@ -68,6 +121,14 @@ impl Capture {
                 }
                 // Retain: the sample buffer goes away after this callback.
                 let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw as CVPixelBufferRef) };
+                let now = luma_grid(&buffer, skip);
+                {
+                    let mut before = latest.samples.lock().unwrap();
+                    if changed(&before, &now) {
+                        latest.changes.fetch_add(1, Ordering::Relaxed);
+                    }
+                    *before = now;
+                }
                 *latest.frame.lock().unwrap() = Some(Frame(buffer));
                 latest.delivered.fetch_add(1, Ordering::Relaxed);
                 on_frame();
@@ -108,5 +169,29 @@ fn configuration(pixels: (u32, u32), fps: i32) -> SCStreamConfiguration {
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.stream.stop_capture();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drift_everywhere_is_not_a_change() {
+        let before = vec![100u8; GRID.0 * GRID.1];
+        let now: Vec<u8> = before.iter().map(|v| v + 10).collect();
+        assert!(!changed(&before, &now));
+    }
+
+    #[test]
+    fn a_few_samples_changing_a_lot_is_a_change() {
+        let before = vec![100u8; GRID.0 * GRID.1];
+        let mut now = before.clone();
+        for v in now.iter_mut().take(SAMPLES) {
+            *v = 200;
+        }
+        assert!(changed(&before, &now));
+        now[SAMPLES - 1] = 100;
+        assert!(!changed(&before, &now));
     }
 }

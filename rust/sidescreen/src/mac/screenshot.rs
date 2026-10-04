@@ -7,7 +7,9 @@ use objc2::runtime::AnyObject;
 use objc2_foundation::{NSDictionary, NSMutableData, NSNumber, NSString};
 use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::{CGImage, SCScreenshotManager};
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -22,27 +24,48 @@ pub struct Shot {
     pub height: usize,
 }
 
-/// Blocking: call off the main thread.
-pub fn display(id: DisplayId, size: (f64, f64), format: Format) -> Result<Shot, String> {
+/// Displays looked up before. Listing shareable content costs tens of
+/// milliseconds, more than the capture itself.
+static DISPLAYS: Mutex<Option<HashMap<DisplayId, Arc<SCDisplay>>>> = Mutex::new(None);
+
+fn lookup(id: DisplayId, fresh: bool) -> Result<Arc<SCDisplay>, String> {
+    let mut cache = DISPLAYS.lock().unwrap();
+    let map = cache.get_or_insert_with(HashMap::new);
+    if !fresh && let Some(display) = map.get(&id) {
+        return Ok(display.clone());
+    }
     let content = SCShareableContent::create()
         .with_on_screen_windows_only(true)
         .get()
         .map_err(|e| format!("could not list displays: {e}"))?;
-    let target = content
-        .displays()
-        .into_iter()
-        .find(|d| d.display_id() == id)
-        .ok_or("display is not capturable yet; retry in a moment")?;
-    let filter = SCContentFilter::create()
-        .with_display(&target)
-        .with_excluding_windows(&[])
-        .build()
-        .map_err(|e| e.to_string())?;
-    let config = SCStreamConfiguration::new()
-        .with_width(size.0 as u32)
-        .with_height(size.1 as u32)
-        .with_shows_cursor(false);
-    let image = SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())?;
+    map.clear();
+    for display in content.displays() {
+        map.insert(display.display_id(), Arc::new(display));
+    }
+    map.get(&id)
+        .cloned()
+        .ok_or_else(|| "display is not capturable yet; retry in a moment".into())
+}
+
+/// Blocking: call off the main thread.
+pub fn display(id: DisplayId, size: (f64, f64), format: Format) -> Result<Shot, String> {
+    let capture = |target: &SCDisplay| -> Result<CGImage, String> {
+        let filter = SCContentFilter::create()
+            .with_display(target)
+            .with_excluding_windows(&[])
+            .build()
+            .map_err(|e| e.to_string())?;
+        let config = SCStreamConfiguration::new()
+            .with_width(size.0 as u32)
+            .with_height(size.1 as u32)
+            .with_shows_cursor(false);
+        SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())
+    };
+    // A cached display can go stale when displays change; list them again.
+    let image = match capture(&*lookup(id, false)?) {
+        Ok(image) => image,
+        Err(_) => capture(&*lookup(id, true)?)?,
+    };
     encode(&image, format)
 }
 

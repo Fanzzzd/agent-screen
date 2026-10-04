@@ -29,6 +29,16 @@ struct Stream {
 /// A display has a new frame.
 pub struct NewFrame(pub DisplayId);
 
+thread_local! {
+    static GLOBAL: std::cell::RefCell<Option<gpui::WeakEntity<Streams>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The app's streams, for the control socket's settle wait.
+pub fn global() -> Option<Entity<Streams>> {
+    GLOBAL.with(|g| g.borrow().as_ref().and_then(|w| w.upgrade()))
+}
+
 pub struct Streams {
     streams: HashMap<DisplayId, Stream>,
     frames: HashMap<DisplayId, CVPixelBuffer>,
@@ -46,6 +56,7 @@ impl Streams {
             wake,
         });
         let weak = entity.downgrade();
+        GLOBAL.with(|g| *g.borrow_mut() = Some(weak.clone()));
         // Frames arrive on ScreenCaptureKit's queue; hand the newest to views.
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(id) = woken.next().await {
@@ -60,6 +71,14 @@ impl Streams {
         })
         .detach();
         entity
+    }
+
+    /// Frames that showed a change on a display so far: idle frames do not
+    /// count, so the number stops while the display is still.
+    pub fn changes(&self, id: DisplayId) -> Option<u64> {
+        self.streams
+            .get(&id)
+            .map(|s| s.latest.changes.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The newest frame of a display.

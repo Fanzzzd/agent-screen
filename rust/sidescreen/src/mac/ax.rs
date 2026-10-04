@@ -109,6 +109,23 @@ pub fn perform(element: &AXUIElement, action: &str) -> bool {
     unsafe { element.perform_action(&action) == AXError::Success }
 }
 
+/// Perform an action, and say whether the element took it. An action that
+/// opens a modal often outlasts the messaging timeout and reports
+/// CannotComplete although it ran, so only an unsupported action counts as
+/// not taken: a fallback click then cannot press twice.
+pub fn try_action(element: &AXUIElement, action: &str) -> bool {
+    let action = CFString::from_str(action);
+    let error = unsafe { element.perform_action(&action) };
+    !matches!(
+        error,
+        AXError::ActionUnsupported
+            | AXError::AttributeUnsupported
+            | AXError::IllegalArgument
+            | AXError::InvalidUIElement
+            | AXError::NoValue
+    )
+}
+
 pub fn window_id(element: &AXUIElement) -> Option<u32> {
     let mut id = 0u32;
     unsafe { SSAXWindowID(element, &mut id) }.then_some(id)

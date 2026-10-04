@@ -9,6 +9,7 @@ use crate::mac::screenshot::{self, Format};
 use crate::mac::{app, ax, cg, windows};
 use crate::model::{
     DEFAULT_SIZE, DisplayId, Disposition, EndReason, Origin, Owner, Rect, Wait, WindowTarget,
+    shot_scale,
 };
 use base64::Engine;
 use futures::FutureExt;
@@ -34,6 +35,14 @@ pub async fn handle(
             core.update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
             Ok(json!({}))
         }
+        "settle" => {
+            let id = display(&core, &p, false, cx)?;
+            let size = core
+                .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+                .unwrap_or(DEFAULT_SIZE);
+            wait_until_still(id, size, cx).await;
+            Ok(json!({}))
+        }
         "screenshot" => {
             let id = display(&core, &p, false, cx)?;
             let size = core
@@ -44,12 +53,21 @@ pub async fn handle(
             } else {
                 Format::Jpeg
             };
+            if p.0.get("settle") == Some(&Value::Bool(true)) {
+                wait_until_still(id, size, cx).await;
+            }
+            // Within the image budget the agent reads coordinates in, and
+            // `global` maps them back with the same scale.
+            let scale = shot_scale(size);
+            let pixels = ((size.0 * scale).round(), (size.1 * scale).round());
             let shot = cx
                 .background_executor()
-                .spawn(async move { screenshot::display(id, size, format) })
+                .spawn(async move { screenshot::display(id, pixels, format) })
                 .await
                 .map_err(ControlError::failed)?;
-            Ok(shot_json(&shot))
+            let mut result = shot_json(&shot);
+            result["scale"] = json!(scale);
+            Ok(result)
         }
         "click" => {
             let (id, point) = target(&core, &p, cx)?;
@@ -102,7 +120,9 @@ pub async fn handle(
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            forwarder.type_text(text, cg::display_bounds(id)).await;
+            if !forwarder.type_text(text, cg::display_bounds(id)).await {
+                return Err(no_keyboard_target());
+            }
             Ok(json!({}))
         }
         "key" => {
@@ -110,11 +130,15 @@ pub async fn handle(
             let keys = p
                 .string("keys")
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
-            let chord = KeyChord::parse(&keys).map_err(|e| ControlError::invalid(e.to_string()))?;
+            let chords = KeyChord::parse_sequence(&keys)
+                .map_err(|e| ControlError::invalid(e.to_string()))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            forwarder
-                .press(chord, p.int("repeat").unwrap_or(1), cg::display_bounds(id))
-                .await;
+            let repeat = p.int("repeat").unwrap_or(1);
+            for chord in chords {
+                if !forwarder.press(chord, repeat, cg::display_bounds(id)).await {
+                    return Err(no_keyboard_target());
+                }
+            }
             Ok(json!({}))
         }
         "listWindows" => {
@@ -229,15 +253,14 @@ pub async fn handle(
                 }
                 Some(Some(element)) => element,
             };
-            act(
-                &core,
-                id,
-                &p.string("action").unwrap_or_else(|| "press".into()),
-                &element,
-                p.string("value"),
-                cx,
-            )
-            .await?;
+            let action = p.string("action").unwrap_or_else(|| "press".into());
+            act(&core, id, &action, &element, p.string("value"), cx).await?;
+            // Typing after focusing a field, or pressing in a window, goes
+            // to that window, as it would after a click there.
+            if matches!(action.as_str(), "focus" | "set_value" | "press") {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                forwarder.focus(window.target).await;
+            }
             Ok(json!({}))
         }
         "launchApp" => {
@@ -432,7 +455,7 @@ async fn act(
         if let Some(c) = center {
             show_pointer(core, id, c, true, cx);
         }
-        off_main(cx, Box::new(move |e| ax::perform(e, name))).await
+        off_main(cx, Box::new(move |e| ax::try_action(e, name))).await
     };
     let click = async |button: Button, count: i64, cx: &mut AsyncApp| -> Result<(), ControlError> {
         let c = center.ok_or_else(|| {
@@ -607,6 +630,9 @@ async fn settle(
             .into_iter()
             .find(|w| w.target == target)
         {
+            // The new app's window takes the keys, not the last one clicked.
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            forwarder.focus(target).await;
             return Ok(placed);
         }
     }
@@ -614,6 +640,64 @@ async fn settle(
         "the window opened but could not be placed on the display{}",
         last_error.map(|e| format!(": {e}")).unwrap_or_default()
     )))
+}
+
+/// Wait until the display stops changing after an action, so the
+/// screenshot shows its result: no new frame for 120 ms, at most 1.5 s.
+/// While agents act, the display streams at 30 fps at thumbnail size, and
+/// ScreenCaptureKit only delivers a frame when something changed.
+async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+    use std::time::Instant;
+    let Some(streams) = crate::ui::stream::global() else {
+        cx.background_executor()
+            .timer(Duration::from_millis(350))
+            .await;
+        return;
+    };
+    let pixels = (416, (416.0 * size.1 / size.0) as u32);
+    streams.update(cx, |s, cx| s.want(id, "agent", 30, pixels, cx));
+    let start = Instant::now();
+    let mut last = streams.read_with(cx, |s, _| s.changes(id));
+    let mut quiet_since = start;
+    while start.elapsed() < Duration::from_millis(1500) {
+        cx.background_executor()
+            .timer(Duration::from_millis(30))
+            .await;
+        let now = streams.read_with(cx, |s, _| s.changes(id));
+        if now != last {
+            last = now;
+            quiet_since = Instant::now();
+        } else if quiet_since.elapsed() >= Duration::from_millis(120)
+            && start.elapsed() >= Duration::from_millis(150)
+        {
+            break;
+        }
+    }
+    // Keep the fast stream for a moment: the next action usually follows.
+    let wanted = Instant::now();
+    AGENT_ACTIVE.with(|a| a.borrow_mut().insert(id, wanted));
+    let streams = streams.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.background_executor().timer(Duration::from_secs(5)).await;
+        let latest = AGENT_ACTIVE.with(|a| a.borrow().get(&id).copied());
+        if latest == Some(wanted) {
+            AGENT_ACTIVE.with(|a| a.borrow_mut().remove(&id));
+            let _ = streams.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+        }
+    })
+    .detach();
+}
+
+thread_local! {
+    /// When each display last settled after an action.
+    static AGENT_ACTIVE: std::cell::RefCell<std::collections::HashMap<DisplayId, std::time::Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn no_keyboard_target() -> ControlError {
+    ControlError::not_found(
+        "no window on the display can take keyboard input; launch an app or click a field first",
+    )
 }
 
 /// The display still exists and has not ended, so windows may go onto it.
@@ -670,7 +754,8 @@ fn target(
     Ok((id, global(core, id, p.require("x")?, p.require("y")?, cx)?))
 }
 
-/// Display point → global point.
+/// Screenshot pixel → global point. Agents aim in the screenshot, which is
+/// scaled down for displays over the image budget.
 fn global(
     core: &Entity<Core>,
     id: DisplayId,
@@ -678,17 +763,19 @@ fn global(
     y: f64,
     cx: &mut AsyncApp,
 ) -> Result<(f64, f64), ControlError> {
-    let (w, h) = core
+    let size = core
         .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
         .unwrap_or(DEFAULT_SIZE);
+    let scale = shot_scale(size);
+    let (w, h) = ((size.0 * scale).round(), (size.1 * scale).round());
     if !(0.0..=w).contains(&x) || !(0.0..=h).contains(&y) {
         return Err(ControlError::invalid(format!(
-            "({}, {}) is outside the {}×{} display",
+            "({}, {}) is outside the {}×{} screenshot",
             x as i64, y as i64, w as i64, h as i64
         )));
     }
     let bounds: Rect = cg::display_bounds(id);
-    Ok((bounds.x + x, bounds.y + y))
+    Ok((bounds.x + x / scale, bounds.y + y / scale))
 }
 
 /// Show the Agent Pointer at a global point; returns the display's input queue.

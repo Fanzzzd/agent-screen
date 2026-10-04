@@ -98,8 +98,8 @@ pub fn definitions() -> Vec<Value> {
             object(
                 json!({
                     "title": { "type": "string", "description": "Short task title shown to the user, e.g. \"Book flights\"." },
-                    "width": { "type": "integer", "description": "Width in points. Default 1440." },
-                    "height": { "type": "integer", "description": "Height in points. Default 900." }
+                    "width": { "type": "integer", "description": "Width in points. Default 1280. Screenshots of wider displays are scaled down to fit the model's image limit." },
+                    "height": { "type": "integer", "description": "Height in points. Default 800." }
                 }),
                 &[],
             ),
@@ -372,8 +372,6 @@ fn require_text(value: Option<String>, action: &str) -> Result<String, ControlEr
 
 // MARK: Handlers
 
-const SETTLE: Duration = Duration::from_millis(350);
-
 pub async fn run(
     name: &str,
     args: &Object,
@@ -534,7 +532,11 @@ pub async fn run(
                     }),
                 )
                 .await?;
-            tokio::time::sleep(SETTLE).await;
+            // The window state shows the action's result once the display
+            // stops changing.
+            control
+                .call("settle", json!({ "displayId": display }))
+                .await?;
             window_state(control, display, window)
                 .await
                 .map(Output::Content)
@@ -703,12 +705,14 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         }
     }
 
-    // Let the UI settle so the screenshot shows the result of the action.
-    if action != "screenshot" {
-        tokio::time::sleep(SETTLE).await;
-    }
+    // After an action the app waits until the display stops changing, so
+    // the screenshot shows the result: no fixed delay, up to 1.5 s.
+    let settle = action != "screenshot";
     let shot = control
-        .call("screenshot", json!({ "displayId": display }))
+        .call(
+            "screenshot",
+            json!({ "displayId": display, "settle": settle }),
+        )
         .await?;
     let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
     Ok(vec![
