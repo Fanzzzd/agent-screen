@@ -77,7 +77,43 @@ UI. The nested engine does not depend on the desktop.
 4. **GNOME host UI (day 6).** Test the `ksni` tray, and check whether a GPUI
    window takes focus when it appears.
 
-## Crates
+## Spike results (2026-10-04, Docker on Apple silicon)
+
+`rust/spike-linux` runs two headless sway compositors for one user and one
+`$HOME` in a Debian trixie container (aarch64, pixman renderer, no GPU). One
+stands in for the user's desktop, the other for an Agent Display with its own
+D-Bus session. Each app starts on the user's compositor first, then again on
+the agent's. Run it with `docker build -t sidescreen-spike-linux rust/spike-linux`
+and `docker run --rm --shm-size 1g sidescreen-spike-linux`.
+
+**App isolation, step 1.** The second launch, with the agent's own D-Bus, landed as follows.
+
+| App | Second launch | With its own profile | With its own `HOME` |
+|---|---|---|---|
+| foot (Wayland) | Agent | n/a | n/a |
+| xterm (Xwayland) | Agent | n/a | n/a |
+| GNOME Text Editor (GTK4) | Agent | n/a | n/a |
+| KWrite (Qt6) | Agent | n/a | Agent |
+| Firefox ESR | Refused: "Close Firefox" dialog on the agent | Agent (`--profile`) | Agent |
+| Chromium | Handed to the user's instance: new window on the user's compositor | Agent (`--user-data-dir`) | Agent |
+
+The private D-Bus is enough for GTK and Qt apps, whose single-instance checks go through
+the session bus. Browsers lock their profile directory, so they need
+their own profile. A separate `HOME` for every agent app fixes all six, at the cost
+of the user's settings and logins inside agent apps. The step is a go: launch agent apps
+with a private D-Bus and their own `HOME`, and offer per-app profiles where
+an agent needs the user's settings.
+
+**Input, step 3.** `wtype` (virtual keyboard) and `wlrctl` (virtual pointer)
+typed into a terminal on the agent's compositor. Keyboard focus on the user's
+compositor stayed on the same window.
+
+**AT-SPI, step 3.** The accessibility registry on the agent's D-Bus listed only
+the agent's Text Editor, not the user's copy.
+
+**Not covered yet.** Capture frame rate into a GPUI Viewer (step 2), the GNOME host
+UI (step 4), Electron and VS Code, and GPU renderers.
+
 
 ashpd 0.13, pipewire 0.10, reis 0.7 (libei), zbus 5.19, atspi 0.30,
 ksni 0.3.6, smithay-client-toolkit 0.21, wayland-protocols-wlr 0.3, x11rb 0.14.
