@@ -1218,8 +1218,15 @@ impl Shell {
             .ok()
             .and_then(|v| Some((v.menu_bar.clone()?, viewer::title_at(x)?)))
             .filter(|_| self.viewer_display == Some(id));
-        // A click beside the titles does nothing, as on a real menu bar.
+        // A click beside the titles opens nothing; the strip flashes red so
+        // it doesn't look broken.
         let Some((bar, (index, bounds))) = hit else {
+            if self.viewer_display == Some(id) {
+                let _ = viewer.update(cx, |viewer, _, cx| {
+                    viewer.refused += 1;
+                    cx.notify();
+                });
+            }
             return;
         };
         let frame = native::frame(&window);

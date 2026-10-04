@@ -81,6 +81,9 @@ pub struct Viewer {
     pub landed: u64,
     /// Counts switches between displays, so each switch crossfades.
     pub switches: u64,
+    /// Counts clicks on the menu bar strip that reached no menu, so each
+    /// one flashes the strip red.
+    pub refused: u64,
     /// A dragged window hovers over the card.
     pub drop_target: bool,
     /// A Handover just landed: a brief accent ring.
@@ -118,6 +121,7 @@ impl Viewer {
             morphing: false,
             landed: 0,
             switches: 0,
+            refused: 0,
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
@@ -485,10 +489,16 @@ impl Viewer {
             .child(theme::round_corners(SCREEN_RADIUS, theme.card))
             // The capture leaves out the user's menu bar; the agent app's
             // own menus go in its place, where a click opens them.
-            .when_some(
-                self.menu_bar.clone().zip(IMAGE.with(Cell::get)),
-                |d, (bar, image)| d.child(menu_strip(bar, image, id, size, theme)),
-            )
+            .when_some(IMAGE.with(Cell::get), |d, image| {
+                d.child(menu_strip(
+                    self.menu_bar.clone(),
+                    image,
+                    id,
+                    size,
+                    self.refused,
+                    theme,
+                ))
+            })
             .child(pointer::layer(id, pointer, size, theme.accent))
             .when_some(outline, |d, (color, width)| {
                 d.child(
@@ -800,13 +810,19 @@ mod tests {
 /// The display's front app menu bar, laid over the image's menu bar strip
 /// at the strip's own size. Clicks on it reach the shell through the native
 /// input monitor, which looks titles up with `title_at`.
+/// The strip where macOS draws the user's menu bar, left out of the
+/// picture. With an agent app in front it holds that app's menus; without,
+/// it stays clear and turns red under the pointer, since nothing there can
+/// be clicked. A click that reaches no menu flashes it red.
 fn menu_strip(
-    bar: crate::mac::menubar::Bar,
+    bar: Option<crate::mac::menubar::Bar>,
     (left, top, width): (f32, f32, f32),
     id: DisplayId,
     size: (f64, f64),
+    refused: u64,
     theme: &Theme,
 ) -> impl IntoElement {
+    let empty = bar.is_none();
     let scale = width / size.0 as f32;
     let height = crate::mac::menubar_height(id) as f32 * scale;
     let font = (13.0 * scale).max(8.0);
@@ -819,6 +835,7 @@ fn menu_strip(
             .items_center()
             .px(px(7.0 * scale))
             .rounded(px(4.0 * scale))
+            .cursor(gpui::CursorStyle::Arrow)
             .hover(|s| s.bg(theme.control_hover))
             .when(bold, |d| d.font_weight(gpui::FontWeight::BOLD))
             .child(text)
@@ -856,15 +873,48 @@ fn menu_strip(
         .items_center()
         .pl(px(left + 6.0 * scale))
         .pr(px(6.0 * scale))
-        .bg(theme.menu_strip)
+        .group("menu-strip")
+        .cursor(gpui::CursorStyle::OperationNotAllowed)
+        .when(!empty, |d| d.bg(theme.menu_strip))
+        .when(empty, |d| d.hover(|s| s.bg(theme.red.opacity(0.22))))
         .text_size(px(font))
         .text_color(theme.label)
         .overflow_hidden()
         // The first menu is the app's own, named in bold as on a Mac.
         .children(
-            bar.titles
+            bar.map(|b| b.titles)
+                .unwrap_or_default()
                 .into_iter()
                 .enumerate()
                 .map(|(i, t)| title(i, t, i == 0)),
         )
+        .when(empty, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(font.max(11.)))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(gpui::white())
+                    .opacity(0.)
+                    .group_hover("menu-strip", |s| s.opacity(1.))
+                    .child("这里没有可用的菜单：屏幕上还没有 app"),
+            )
+        })
+        .when(refused > 0, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.red.opacity(0.45))
+                    .with_animation(
+                        gpui::ElementId::NamedInteger("menu-refused".into(), refused),
+                        Animation::new(std::time::Duration::from_millis(600)),
+                        |flash, t| flash.opacity(1. - t),
+                    ),
+            )
+        })
 }
