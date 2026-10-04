@@ -81,6 +81,17 @@ impl Streams {
             .map(|s| s.latest.changes.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// Leave out of every running capture the status items that appeared
+    /// since it started. Lists shareable content off the main thread.
+    pub fn refresh_filters(&self, cx: &mut Context<Self>) {
+        for (&id, stream) in &self.streams {
+            if let Some(capture) = stream.capture.clone() {
+                cx.background_spawn(async move { capture.refresh_filter(id) })
+                    .detach();
+            }
+        }
+    }
+
     /// The newest frame of a display.
     pub fn frame(&self, id: DisplayId) -> Option<CVPixelBuffer> {
         self.frames.get(&id).cloned()

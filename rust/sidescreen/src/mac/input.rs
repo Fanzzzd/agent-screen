@@ -425,7 +425,15 @@ impl Worker {
         // A button an agent left held is released before anyone presses
         // again, such as the user taking over.
         if let Some(g) = self.gesture.take_if(|g| g.agent) {
-            self.post(Button::Left.up(), at, g.target, Button::Left, 1, g.group, flags);
+            self.post(
+                Button::Left.up(),
+                at,
+                g.target,
+                Button::Left,
+                1,
+                g.group,
+                flags,
+            );
         }
         let Some(hit) = self.hit(at, true) else {
             log::info!("input: no window at {at:?}");

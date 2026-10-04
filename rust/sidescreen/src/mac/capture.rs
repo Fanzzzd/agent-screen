@@ -108,16 +108,7 @@ impl Capture {
         // The menu bar strip, about 24 to 38 pt, is left out of the change
         // count: it shows the user's own menus and clock.
         let skip = 40.0 / super::cg::display_bounds(display_id).height.max(1.0);
-        let content = SCShareableContent::get()?;
-        let display = content
-            .displays()
-            .into_iter()
-            .find(|d| d.display_id() == display_id)
-            .ok_or_else(|| anyhow::anyhow!("display {display_id} is not shareable"))?;
-        let filter = SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build()?;
+        let filter = super::screenshot::filter(display_id, true).map_err(anyhow::Error::msg)?;
         let mut stream = SCStream::new(&filter, &configuration(pixels, fps))?;
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
@@ -166,6 +157,19 @@ impl Capture {
                 .update_configuration(&configuration(pixels, fps))?;
         }
         Ok(())
+    }
+}
+
+impl Capture {
+    /// Leave out status items that appeared since the stream started.
+    /// Blocking.
+    pub fn refresh_filter(&self, display_id: u32) {
+        let _turn = self.turn.lock().unwrap();
+        if let Ok(filter) = super::screenshot::filter(display_id, false)
+            && let Err(error) = self.stream.update_content_filter(&filter)
+        {
+            log::debug!("capture filter of display {display_id} stays: {error}");
+        }
     }
 }
 

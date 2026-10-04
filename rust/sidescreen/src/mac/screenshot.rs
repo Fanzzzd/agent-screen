@@ -7,9 +7,9 @@ use objc2::runtime::AnyObject;
 use objc2_foundation::{NSDictionary, NSMutableData, NSNumber, NSString};
 use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::{CGImage, SCScreenshotManager};
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -24,139 +24,92 @@ pub struct Shot {
     pub height: usize,
 }
 
-/// Displays looked up before. Listing shareable content costs tens of
-/// milliseconds, more than the capture itself.
-static DISPLAYS: Mutex<Option<HashMap<DisplayId, Arc<SCDisplay>>>> = Mutex::new(None);
+/// Shareable content listed before, and when. Listing costs tens of
+/// milliseconds, more than a capture; status items come and go rarely.
+static CONTENT: Mutex<Option<(Arc<SCShareableContent>, Instant)>> = Mutex::new(None);
+const CONTENT_AGE: Duration = Duration::from_secs(2);
 
-fn lookup(id: DisplayId, fresh: bool) -> Result<Arc<SCDisplay>, String> {
-    let mut cache = DISPLAYS.lock().unwrap();
-    let map = cache.get_or_insert_with(HashMap::new);
-    if !fresh && let Some(display) = map.get(&id) {
-        return Ok(display.clone());
+fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
+    let mut cache = CONTENT.lock().unwrap();
+    if !fresh
+        && let Some((content, at)) = &*cache
+        && at.elapsed() < CONTENT_AGE
+    {
+        return Ok(content.clone());
     }
-    let content = SCShareableContent::create()
-        .with_on_screen_windows_only(true)
-        .get()
-        .map_err(|e| format!("could not list displays: {e}"))?;
-    map.clear();
-    for display in content.displays() {
-        map.insert(display.display_id(), Arc::new(display));
-    }
-    map.get(&id)
-        .cloned()
-        .ok_or_else(|| "display is not capturable yet; retry in a moment".into())
+    let content = Arc::new(
+        SCShareableContent::create()
+            .with_on_screen_windows_only(true)
+            .get()
+            .map_err(|e| format!("could not list displays: {e}"))?,
+    );
+    *cache = Some((content.clone(), Instant::now()));
+    Ok(content)
+}
+
+/// What a display shows, without the menu bar macOS draws on it: that bar,
+/// its clock and status items belong to the user's front app, not to the
+/// agent. Its strip shows the wallpaper instead. Blocking.
+pub fn filter(id: DisplayId, fresh: bool) -> Result<SCContentFilter, String> {
+    let content = content(fresh)?;
+    let display = content
+        .displays()
+        .into_iter()
+        .find(|d| d.display_id() == id)
+        .ok_or("display is not capturable yet; retry in a moment")?;
+    let area = super::cg::display_bounds(id);
+    // The bar is one Window Server window at level 24, the status items
+    // level-25 windows and the recording indicator a dot far above, all
+    // within the top 40 pt. Full-screen windows at those levels, such as
+    // the screenshot tool's, stay.
+    let bar: Vec<SCWindow> = content
+        .windows()
+        .into_iter()
+        .filter(|w| {
+            let f = w.frame();
+            w.window_layer() >= 24
+                && f.size.height <= 40.0
+                && f.origin.y >= area.y - 1.0
+                && f.origin.y < area.y + 40.0
+                && f.origin.x < area.max_x()
+                && f.origin.x + f.size.width > area.x
+        })
+        .collect();
+    let refs: Vec<&SCWindow> = bar.iter().collect();
+    SCContentFilter::create()
+        .with_display(&display)
+        .with_excluding_windows(&refs)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 /// Blocking: call off the main thread. `source` limits the capture to a
-/// display-local rect in points, for a zoomed view. `cover` is the height,
-/// in image pixels, of the strip at the top to paint over: macOS draws the
-/// user's own menu bar there, on every display.
+/// display-local rect in points, for a zoomed view.
 pub fn display(
     id: DisplayId,
     size: (f64, f64),
     format: Format,
-    cover: f64,
     source: Option<crate::model::Rect>,
 ) -> Result<Shot, String> {
-    let capture = |target: &SCDisplay| -> Result<CGImage, String> {
-        let filter = SCContentFilter::create()
-            .with_display(target)
-            .with_excluding_windows(&[])
-            .build()
-            .map_err(|e| e.to_string())?;
+    let capture = |fresh: bool| -> Result<CGImage, String> {
+        let filter = filter(id, fresh)?;
         let mut config = SCStreamConfiguration::new()
             .with_width(size.0 as u32)
             .with_height(size.1 as u32)
             .with_shows_cursor(false);
         if let Some(r) = source {
-            config.set_source_rect(screencapturekit::cg::CGRect::new(r.x, r.y, r.width, r.height));
+            config.set_source_rect(screencapturekit::cg::CGRect::new(
+                r.x, r.y, r.width, r.height,
+            ));
         }
         SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())
     };
-    // A cached display can go stale when displays change; list them again.
-    let image = match capture(&*lookup(id, false)?) {
+    // Cached content can go stale when displays change; list it again.
+    let image = match capture(false) {
         Ok(image) => image,
-        Err(_) => capture(&*lookup(id, true)?)?,
+        Err(_) => capture(true)?,
     };
-    if cover <= 0.0 {
-        return encode(&image, format);
-    }
-    let covered = cover_top(image.as_ptr().cast(), image.width(), image.height(), cover);
-    // Never send the user's menu bar to the agent uncovered.
-    if covered.is_null() {
-        return Err("could not prepare the screenshot".into());
-    }
-    let shot = encode_raw(covered, image.width(), image.height(), format);
-    unsafe { CFRelease(covered) };
-    shot
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGColorSpaceCreateDeviceRGB() -> *const c_void;
-    fn CGColorSpaceRelease(space: *const c_void);
-    fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: *const c_void,
-        bitmap_info: u32,
-    ) -> *mut c_void;
-    fn CGBitmapContextCreateImage(context: *mut c_void) -> *const c_void;
-    fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: *const c_void);
-    fn CGContextSetRGBFillColor(context: *mut c_void, r: f64, g: f64, b: f64, a: f64);
-    fn CGContextFillRect(context: *mut c_void, rect: CGRect);
-    fn CGContextRelease(context: *mut c_void);
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-/// A copy of `image` with its top `rows` pixels painted flat grey, or null.
-fn cover_top(image: *const c_void, width: usize, height: usize, rows: f64) -> *const c_void {
-    // kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little: BGRX.
-    const BGRX: u32 = 6 | (2 << 12);
-    unsafe {
-        let space = CGColorSpaceCreateDeviceRGB();
-        let context = CGBitmapContextCreate(std::ptr::null_mut(), width, height, 8, 0, space, BGRX);
-        CGColorSpaceRelease(space);
-        if context.is_null() {
-            return std::ptr::null();
-        }
-        let (w, h) = (width as f64, height as f64);
-        CGContextDrawImage(
-            context,
-            CGRect {
-                x: 0.0,
-                y: 0.0,
-                width: w,
-                height: h,
-            },
-            image,
-        );
-        CGContextSetRGBFillColor(context, 0.9, 0.9, 0.9, 1.0);
-        // CoreGraphics counts y from the bottom.
-        CGContextFillRect(
-            context,
-            CGRect {
-                x: 0.0,
-                y: h - rows,
-                width: w,
-                height: rows,
-            },
-        );
-        let covered = CGBitmapContextCreateImage(context);
-        CGContextRelease(context);
-        covered
-    }
+    encode(&image, format)
 }
 
 /// One window without what lies above or below it. Blocking.

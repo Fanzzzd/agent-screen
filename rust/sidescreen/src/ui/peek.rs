@@ -277,19 +277,6 @@ fn tile(
                         .overflow_hidden()
                         .bg(theme.screen_empty)
                         .child(picture)
-                        // The user's own menu bar, which macOS draws on
-                        // every display, stays covered here as in the Viewer.
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .w_full()
-                                .h(px(
-                                    crate::mac::menubar_height(id) as f32 * fit.0 / size.0 as f32
-                                ))
-                                .bg(theme.menu_strip),
-                        )
                         .child(theme::round_corners(9., theme.card))
                         .child(pointer::layer(id, pointer, size, theme.accent))
                         // Hover and "currently open" both show as a ring.

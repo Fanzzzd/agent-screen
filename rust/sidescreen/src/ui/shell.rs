@@ -353,6 +353,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                     shell.refresh_counts(cx);
                     // The front app on the display can change any time.
                     shell.refresh_menu_bar(cx);
+                    if shell.peek_shown || shell.viewer_open {
+                        shell.streams.update(cx, |s, cx| s.refresh_filters(cx));
+                    }
                 })
                 .is_err()
             {

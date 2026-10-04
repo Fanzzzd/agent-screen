@@ -60,7 +60,6 @@ pub async fn handle(
             // `global` maps them back with the same scale.
             let scale = shot_scale(size);
             let pixels = ((size.0 * scale).round(), (size.1 * scale).round());
-            let bar = crate::mac::menubar_height(id);
             // A zoom: a region of the screenshot, in its pixels, captured
             // at up to twice the display's points for detail.
             let region = match p.0.get("region").and_then(Value::as_array) {
@@ -76,22 +75,25 @@ pub async fn handle(
                             w as i64, h as i64
                         )));
                     }
-                    Some(Rect::new(x0 / scale, y0 / scale, (x1 - x0) / scale, (y1 - y0) / scale))
+                    Some(Rect::new(
+                        x0 / scale,
+                        y0 / scale,
+                        (x1 - x0) / scale,
+                        (y1 - y0) / scale,
+                    ))
                 }
                 None => None,
             };
-            let (pixels, cover) = match region {
+            let pixels = match region {
                 Some(r) => {
                     let zoom = (2.0f64).min(1568.0 / r.width.max(r.height));
-                    let pixels = ((r.width * zoom).round(), (r.height * zoom).round());
-                    (pixels, (bar - r.y).max(0.0) * zoom)
+                    ((r.width * zoom).round(), (r.height * zoom).round())
                 }
-                // Pixels per point of the display, times the bar's points.
-                None => (pixels, bar * pixels.0 / size.0),
+                None => pixels,
             };
             let shot = cx
                 .background_executor()
-                .spawn(async move { screenshot::display(id, pixels, format, cover, region) })
+                .spawn(async move { screenshot::display(id, pixels, format, region) })
                 .await
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
@@ -100,6 +102,7 @@ pub async fn handle(
         }
         "click" => {
             let (id, point) = target(&core, &p, cx)?;
+            outside_menu_bar(id, point)?;
             let button = Button::parse(p.string("button").as_deref().unwrap_or("left"))
                 .ok_or_else(|| {
                     ControlError::invalid(format!(
@@ -137,6 +140,7 @@ pub async fn handle(
             let id = input_display(&core, &p, cx)?;
             let from = global(&core, id, p.require("fromX")?, p.require("fromY")?, cx)?;
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
+            outside_menu_bar(id, from)?;
             let modifiers = modifiers(&p)?;
             // A drag on a title bar moves the window, which posted events
             // can't do.
@@ -181,6 +185,9 @@ pub async fn handle(
                     })?
                 }
             };
+            if down {
+                outside_menu_bar(id, point)?;
+            }
             let grabbed = GRAB.with(|g| g.borrow_mut().remove(&id));
             if down && let Some(grab) = title_bar_at(id, point, cx).await {
                 show_pointer(&core, id, point, true, cx);
@@ -701,7 +708,11 @@ fn open_target(text: &str) -> Result<String, ControlError> {
         };
     }
     let scheme = text.split_once(':').map(|(s, _)| s);
-    if scheme.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))) {
+    if scheme.is_some_and(|s| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    }) {
         Ok(text.to_string())
     } else {
         Err(ControlError::invalid(
@@ -747,7 +758,9 @@ async fn launch(
     // front window, which may be the user's: it gets a new window first,
     // below, and the URL after.
     let is_url = target.is_some_and(|t| !t.starts_with('/'));
-    let first = (!was_running || !is_url).then(|| target.map(String::from)).flatten();
+    let first = (!was_running || !is_url)
+        .then(|| target.map(String::from))
+        .flatten();
     if !open_in_background(path.clone(), first, cx).await {
         return Err(ControlError::failed(format!("could not open {name}")));
     }
@@ -782,7 +795,10 @@ async fn launch(
             let placed = settle(core, fresh.target, id, cx).await?;
             // The new window is the app's front one now, where it opens the
             // URL or file.
-            if was_running && is_url && let Some(target) = target {
+            if was_running
+                && is_url
+                && let Some(target) = target
+            {
                 open_in_background(path.clone(), Some(target.to_string()), cx).await;
             }
             return Ok(Some(placed));
@@ -796,10 +812,9 @@ async fn launch(
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            if let Some(late) = windows::all()
-                .into_iter()
-                .find(|w| w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id))
-            {
+            if let Some(late) = windows::all().into_iter().find(|w| {
+                w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id)
+            }) {
                 let _ = settle(&core, late.target, id, cx).await;
                 return;
             }
@@ -1148,6 +1163,19 @@ fn global(
     }
     let bounds: Rect = cg::display_bounds(id);
     Ok((bounds.x + x / scale, bounds.y + y / scale))
+}
+
+/// The strip at the top of the display holds the user's menu bar, left out
+/// of screenshots: a click there would reach the user's front app. Main
+/// thread.
+fn outside_menu_bar(id: DisplayId, (_, y): (f64, f64)) -> Result<(), ControlError> {
+    if y - cg::display_bounds(id).y < crate::mac::menubar_height(id) {
+        return Err(ControlError::invalid(
+            "that is the menu bar strip at the top, which belongs to the user's app, not yours; \
+             press a menubaritem from get_window_state to use your app's menus",
+        ));
+    }
+    Ok(())
 }
 
 /// Show the Agent Pointer at a global point; returns the display's input queue.

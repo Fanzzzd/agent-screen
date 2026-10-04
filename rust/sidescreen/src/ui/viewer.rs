@@ -483,11 +483,12 @@ impl Viewer {
             .bg(theme.screen_empty)
             .child(picture)
             .child(theme::round_corners(SCREEN_RADIUS, theme.card))
-            // Without an agent app in front the strip would show the
-            // user's own menu bar and status items; it stays empty then.
-            .when_some(IMAGE.with(Cell::get), |d, image| {
-                d.child(menu_strip(self.menu_bar.clone(), image, id, size, theme))
-            })
+            // The capture leaves out the user's menu bar; the agent app's
+            // own menus go in its place, where a click opens them.
+            .when_some(
+                self.menu_bar.clone().zip(IMAGE.with(Cell::get)),
+                |d, (bar, image)| d.child(menu_strip(bar, image, id, size, theme)),
+            )
             .child(pointer::layer(id, pointer, size, theme.accent))
             .when_some(outline, |d, (color, width)| {
                 d.child(
@@ -800,7 +801,7 @@ mod tests {
 /// at the strip's own size. Clicks on it reach the shell through the native
 /// input monitor, which looks titles up with `title_at`.
 fn menu_strip(
-    bar: Option<crate::mac::menubar::Bar>,
+    bar: crate::mac::menubar::Bar,
     (left, top, width): (f32, f32, f32),
     id: DisplayId,
     size: (f64, f64),
@@ -861,8 +862,7 @@ fn menu_strip(
         .overflow_hidden()
         // The first menu is the app's own, named in bold as on a Mac.
         .children(
-            bar.map(|b| b.titles)
-                .unwrap_or_default()
+            bar.titles
                 .into_iter()
                 .enumerate()
                 .map(|(i, t)| title(i, t, i == 0)),
