@@ -887,13 +887,20 @@ impl Shell {
             native::set_alpha(&window, 0.0);
             native::set_frame(&window, fit_into(frame, from));
             native::order_front(&window);
-            native::animate_frame(&window, frame, 0.38, native::Curve::Settle);
+            native::animate_frame(&window, frame, 0.45, native::Curve::Spring);
             native::animate_alpha(&window, 1.0, 0.16, native::Curve::Settle);
+            self.set_morphing(true, cx);
+            let generation = self.viewer_generation;
+            self.after(Duration::from_millis(450), cx, move |shell, cx| {
+                if shell.viewer_generation == generation {
+                    shell.set_morphing(false, cx);
+                }
+            });
         }
         self.viewer_open = true;
         // Until the open animation lands, the window's frame is in flight.
         self.resting = Some(frame);
-        self.viewer_settled_at = Instant::now() + Duration::from_millis(400);
+        self.viewer_settled_at = Instant::now() + Duration::from_millis(460);
         self.streams
             .update(cx, |s, cx| s.want(id, "viewer", 60, pixels(size), cx));
         self.refresh_menu_bar(cx);
@@ -934,14 +941,35 @@ impl Shell {
         self.viewer_generation += 1;
         let generation = self.viewer_generation;
         // It shrinks back into the menu bar icon, fading on the way.
+        // The fade waits 140 ms, so the card is seen shrinking first.
         let into = fit_into(native::frame(&window), self.anchor());
-        native::animate_frame(&window, into, 0.3, native::Curve::Settle);
-        native::animate_alpha(&window, 0.0, 0.26, native::Curve::EaseIn);
+        self.set_morphing(true, cx);
+        native::animate_frame(&window, into, 0.34, native::Curve::Settle);
+        let fading = window.clone();
+        self.after(Duration::from_millis(140), cx, move |shell, _| {
+            if shell.viewer_generation == generation {
+                native::animate_alpha(&fading, 0.0, 0.16, native::Curve::EaseIn);
+            }
+        });
         self.after(Duration::from_millis(320), cx, move |shell, _| {
             if shell.viewer_generation == generation {
                 native::order_out(&window);
             }
         });
+    }
+
+    fn set_morphing(&self, morphing: bool, cx: &mut Context<Self>) {
+        if let Some((viewer, _)) = &self.viewer {
+            let _ = viewer.update(cx, |viewer, _, cx| {
+                if viewer.morphing != morphing {
+                    viewer.morphing = morphing;
+                    if !morphing {
+                        viewer.landed += 1;
+                    }
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// Where the card rests: the live frame once the open animation has

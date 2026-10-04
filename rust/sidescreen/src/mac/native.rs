@@ -612,6 +612,8 @@ pub enum Curve {
     Settle,
     /// Slow start: things leaving.
     EaseIn,
+    /// Overshoots a little before landing: the Viewer opening.
+    Spring,
 }
 
 /// Move `window` to `frame` and fade it to `alpha` over `seconds`.
@@ -627,6 +629,7 @@ fn run_animation(seconds: f64, curve: Curve, change: impl Fn() + 'static) {
         context.setDuration(seconds);
         let timing = match curve {
             Curve::Settle => CAMediaTimingFunction::functionWithControlPoints(0.16, 1.0, 0.3, 1.0),
+            Curve::Spring => CAMediaTimingFunction::functionWithControlPoints(0.34, 1.4, 0.64, 1.0),
             Curve::EaseIn => {
                 CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseIn })
             }

@@ -23,6 +23,8 @@ pub const HEADER: f32 = 52.;
 pub const INSET: f32 = 8.;
 pub const RADIUS: f32 = 22.;
 const SCREEN_RADIUS: f32 = 13.;
+/// The header fades in after the card lands.
+const HEADER_IN: std::time::Duration = std::time::Duration::from_millis(120);
 /// The Dismissal sheet fades in, and out once answered.
 const SHEET_IN: std::time::Duration = std::time::Duration::from_millis(160);
 pub const SHEET_OUT: std::time::Duration = std::time::Duration::from_millis(120);
@@ -72,6 +74,11 @@ pub struct Viewer {
     pub sheet: Option<Sheet>,
     /// An answered sheet, fading out.
     pub leaving: Option<Sheet>,
+    /// The card is growing out of or shrinking into the menu bar; its
+    /// header would crowd a small card, so it hides until the card lands.
+    pub morphing: bool,
+    /// Counts landings, so the header fades in once per landing.
+    pub landed: u64,
     /// A dragged window hovers over the card.
     pub drop_target: bool,
     /// A Handover just landed: a brief accent ring.
@@ -106,6 +113,8 @@ impl Viewer {
             count: 0,
             sheet: None,
             leaving: None,
+            morphing: false,
+            landed: 0,
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
@@ -195,7 +204,14 @@ impl Render for Viewer {
             .border_1()
             .border_color(theme.card_border)
             .rounded(px(RADIUS))
-            .child(header)
+            .child({
+                let morphing = self.morphing;
+                div().flex_none().child(header).with_animation(
+                    gpui::ElementId::NamedInteger("header-in".into(), self.landed),
+                    Animation::new(HEADER_IN),
+                    move |header, t| header.opacity(if morphing { 0. } else { t }),
+                )
+            })
             .child(
                 div()
                     .relative()
@@ -819,14 +835,18 @@ fn menu_strip(
             )
     };
     div()
+        // Full width: in the first frame of a resize the image position is
+        // the last paint's, and a strip only as wide as that would let the
+        // user's menu bar show at the edge.
         .absolute()
-        .left(px(left))
+        .left_0()
         .top(px(top))
-        .w(px(width))
+        .w_full()
         .h(px(height))
         .flex()
         .items_center()
-        .px(px(6.0 * scale))
+        .pl(px(left + 6.0 * scale))
+        .pr(px(6.0 * scale))
         .bg(theme.menu_strip)
         .text_size(px(font))
         .text_color(theme.label)
