@@ -319,11 +319,14 @@ pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
             continue;
         };
         if n == 0 {
-            walker.lines.push("Menu bar (press a title to list its items):".into());
+            walker
+                .lines
+                .push("Menu bar (press a title to list its items):".into());
         }
-        walker
-            .lines
-            .push(format!("[{}] menubaritem \"{title}\"", walker.elements.len()));
+        walker.lines.push(format!(
+            "[{}] menubaritem \"{title}\"",
+            walker.elements.len()
+        ));
         walker.elements.push(item);
     }
     Some(Snapshot {
@@ -376,7 +379,8 @@ fn list_menu(
             line += &format!(" key=\"{key}\"");
         }
         let flag = |name: &str| {
-            attribute(&element, name).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            attribute(&element, name)
+                .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
         };
         if flag("AXEnabled") == Some(false) {
             line += " disabled";

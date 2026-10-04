@@ -22,6 +22,8 @@ pub struct Theme {
     pub red: Hsla,
     /// Behind a display image that has no frame yet.
     pub screen_empty: Hsla,
+    /// Covers the user's menu bar on an Agent Display's picture.
+    pub menu_strip: Hsla,
     /// The dimmed layer under a sheet.
     pub scrim: Hsla,
     pub sheet: Hsla,
@@ -41,6 +43,7 @@ pub fn palette(dark: bool) -> Theme {
             orange: rgb(0xff9f0a).into(),
             red: rgb(0xff453a).into(),
             screen_empty: rgba(0x00000059).into(),
+            menu_strip: rgb(0x323236).into(),
             scrim: rgba(0x00000073).into(),
             sheet: rgba(0x2c2c2ef8).into(),
         }
@@ -55,7 +58,9 @@ pub fn palette(dark: bool) -> Theme {
             accent: rgb(0x007aff).into(),
             orange: rgb(0xff9500).into(),
             red: rgb(0xff3b30).into(),
-            screen_empty: rgba(0x0000000f).into(),
+            // Darker than the + tile, so an empty screen never reads as one.
+            screen_empty: rgba(0x00000059).into(),
+            menu_strip: rgb(0xe8e8ed).into(),
             scrim: rgba(0x00000059).into(),
             sheet: rgba(0xfbfbfdf8).into(),
         }

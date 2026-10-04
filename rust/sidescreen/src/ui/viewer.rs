@@ -392,7 +392,7 @@ impl Viewer {
                 .object_fit(ObjectFit::Contain)
                 .size_full()
                 .into_any_element(),
-            None => div().size_full().into_any_element(),
+            None => super::peek::waiting(13.).into_any_element(),
         };
         // The native input monitor needs to know where the image is.
         let blocked = self.sheet.is_some();
@@ -769,7 +769,7 @@ fn menu_strip(
         .flex()
         .items_center()
         .px(px(6.0 * scale))
-        .bg(theme.card)
+        .bg(theme.menu_strip)
         .text_size(px(font))
         .text_color(theme.label)
         .overflow_hidden()

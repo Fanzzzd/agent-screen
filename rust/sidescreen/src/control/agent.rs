@@ -116,7 +116,9 @@ pub async fn handle(
             if let Some(grab) = title_bar_at(from, cx).await {
                 show_pointer(&core, id, to, false, cx);
                 if !grab.drag_to(to, cx).await {
-                    return Err(ControlError::failed("the app would not let its window move"));
+                    return Err(ControlError::failed(
+                        "the app would not let its window move",
+                    ));
                 }
                 return reply(json!({ "movedWindow": true }));
             }
@@ -141,7 +143,10 @@ pub async fn handle(
                 _ => {
                     let bounds = cg::display_bounds(id);
                     core.read_with(cx, |c, _| {
-                        c.displays.get(id).and_then(|d| d.pointer).map(|p| (p.x, p.y))
+                        c.displays
+                            .get(id)
+                            .and_then(|d| d.pointer)
+                            .map(|p| (p.x, p.y))
                     })
                     .map(|(x, y)| (bounds.x + x, bounds.y + y))
                     .ok_or_else(|| {
@@ -233,7 +238,8 @@ pub async fn handle(
                 .string("keys")
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
             let chord = KeyChord::parse(&keys).map_err(|e| ControlError::invalid(e.to_string()))?;
-            let held = Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
+            let held =
+                Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             if !forwarder.hold(chord, held, cg::display_bounds(id)).await {
                 return Err(no_keyboard_target());
@@ -997,7 +1003,10 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
             }
         });
         if let Err(e) = settle(core, target, id, cx).await {
-            log::info!("could not bring an opened window to display {id}: {}", e.message);
+            log::info!(
+                "could not bring an opened window to display {id}: {}",
+                e.message
+            );
         }
     }
 }

@@ -166,8 +166,13 @@ fn tile(
             .object_fit(ObjectFit::Contain)
             .size_full()
             .into_any_element(),
-        None => div().size_full().into_any_element(),
+        None => waiting(10.5).into_any_element(),
     };
+    // The thumbnail takes the display's shape inside the tile's box, so a
+    // portrait display gets round corners and a ring of its own size.
+    let thumb = thumb_height(width);
+    let fit = (width / size.0 as f32).min(thumb / size.1 as f32);
+    let fit = (size.0 as f32 * fit, size.1 as f32 * fit);
     let select = shell.clone();
     let dismiss = shell.clone();
     let ring = if active {
@@ -192,68 +197,89 @@ fn tile(
         .on_click(move |_, _, cx| tell(&select, cx, move |shell, cx| shell.select(id, cx)))
         .child(
             div()
-                .relative()
                 .w_full()
-                .h(px(thumb_height(width)))
-                .rounded(px(9.))
-                .overflow_hidden()
-                .bg(theme.screen_empty)
-                .child(picture)
-                .child(theme::round_corners(9., theme.card))
-                .child(pointer::layer(id, pointer, size, theme.accent))
-                // Hover and "currently open" both show as a ring.
+                .h(px(thumb))
+                .flex()
+                .items_center()
+                .justify_center()
                 .child(
                     div()
-                        .absolute()
-                        .inset_0()
+                        .relative()
+                        .w(px(fit.0))
+                        .h(px(fit.1))
                         .rounded(px(9.))
-                        .border(px(if active { 2. } else { 0. }))
-                        .border_color(ring)
-                        .when(!active, |ring| {
-                            ring.group_hover(group.clone(), |s| {
-                                s.border(px(1.5)).border_color(theme.label.opacity(0.55))
-                            })
-                        }),
-                )
-                .child(
-                    div()
-                        .id(gpui::ElementId::Name(format!("close-{id}").into()))
-                        .role(Role::Button)
-                        .aria_label("关闭显示器")
-                        .tooltip(|_, cx| super::shell::hint("关闭显示器", cx))
-                        .tooltip_show_delay(super::shell::HINT_DELAY)
-                        // A 17 pt disc in a 22 pt hit area.
-                        .absolute()
-                        .top(px(4.))
-                        .right(px(4.))
-                        .size(px(22.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(0.)
-                        .group_hover(group.clone(), |s| s.opacity(1.))
-                        .group(format!("close-{id}"))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            tell(&dismiss, cx, move |shell, cx| shell.dismiss(id, cx));
-                        })
+                        .overflow_hidden()
+                        .bg(theme.screen_empty)
+                        .child(picture)
+                        // The user's own menu bar, which macOS draws on
+                        // every display, stays covered here as in the Viewer.
                         .child(
                             div()
-                                .size(px(17.))
-                                .rounded_full()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(
+                                    crate::mac::menubar_height(id) as f32 * fit.0 / size.0 as f32
+                                ))
+                                .bg(theme.menu_strip),
+                        )
+                        .child(theme::round_corners(9., theme.card))
+                        .child(pointer::layer(id, pointer, size, theme.accent))
+                        // Hover and "currently open" both show as a ring.
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(9.))
+                                .border(px(if active { 2. } else { 0. }))
+                                .border_color(ring)
+                                .when(!active, |ring| {
+                                    ring.group_hover(group.clone(), |s| {
+                                        s.border(px(1.5)).border_color(theme.label.opacity(0.55))
+                                    })
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("close-{id}").into()))
+                                .role(Role::Button)
+                                .aria_label("关闭显示器")
+                                .tooltip(|_, cx| super::shell::hint("关闭显示器", cx))
+                                .tooltip_show_delay(super::shell::HINT_DELAY)
+                                // A 17 pt disc in a 22 pt hit area.
+                                .absolute()
+                                .top(px(4.))
+                                .right(px(4.))
+                                .size(px(22.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(gpui::black().opacity(0.55))
-                                .group_hover(format!("close-{id}"), |s| {
-                                    s.bg(gpui::black().opacity(0.75))
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .group(format!("close-{id}"))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    tell(&dismiss, cx, move |shell, cx| shell.dismiss(id, cx));
                                 })
                                 .child(
-                                    svg()
-                                        .path("icons/close.svg")
-                                        .size(px(9.))
-                                        .text_color(gpui::white()),
+                                    div()
+                                        .size(px(17.))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(gpui::black().opacity(0.55))
+                                        .group_hover(format!("close-{id}"), |s| {
+                                            s.bg(gpui::black().opacity(0.75))
+                                        })
+                                        .child(
+                                            svg()
+                                                .path("icons/close.svg")
+                                                .size(px(9.))
+                                                .text_color(gpui::white()),
+                                        ),
                                 ),
                         ),
                 ),
@@ -362,4 +388,16 @@ mod tests {
         let (_, _, tile) = Peek::size(30, 1424.0);
         assert_eq!(tile, MIN_TILE);
     }
+}
+
+/// What a screen shows before its first frame arrives.
+pub fn waiting(size: f32) -> gpui::Div {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(size))
+        .text_color(gpui::white().opacity(0.7))
+        .child("等待画面…")
 }

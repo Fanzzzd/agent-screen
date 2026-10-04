@@ -120,24 +120,33 @@ fn cover_top(image: *const c_void, width: usize, height: usize, rows: f64) -> *c
     const BGRX: u32 = 6 | (2 << 12);
     unsafe {
         let space = CGColorSpaceCreateDeviceRGB();
-        let context = CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            width,
-            height,
-            8,
-            0,
-            space,
-            BGRX,
-        );
+        let context = CGBitmapContextCreate(std::ptr::null_mut(), width, height, 8, 0, space, BGRX);
         CGColorSpaceRelease(space);
         if context.is_null() {
             return std::ptr::null();
         }
         let (w, h) = (width as f64, height as f64);
-        CGContextDrawImage(context, CGRect { x: 0.0, y: 0.0, width: w, height: h }, image);
+        CGContextDrawImage(
+            context,
+            CGRect {
+                x: 0.0,
+                y: 0.0,
+                width: w,
+                height: h,
+            },
+            image,
+        );
         CGContextSetRGBFillColor(context, 0.9, 0.9, 0.9, 1.0);
         // CoreGraphics counts y from the bottom.
-        CGContextFillRect(context, CGRect { x: 0.0, y: h - rows, width: w, height: rows });
+        CGContextFillRect(
+            context,
+            CGRect {
+                x: 0.0,
+                y: h - rows,
+                width: w,
+                height: rows,
+            },
+        );
         let covered = CGBitmapContextCreateImage(context);
         CGContextRelease(context);
         covered

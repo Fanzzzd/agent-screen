@@ -718,7 +718,14 @@ impl Shell {
         let Some((_, window)) = self.peek.clone() else {
             return;
         };
-        native::animate(&window, offset(native::frame(&window), 6.0), 0.0, 0.14);
+        // Leaving: a slow start, unlike the arrival's soft landing.
+        native::animate_frame(
+            &window,
+            offset(native::frame(&window), 6.0),
+            0.14,
+            native::Curve::EaseIn,
+        );
+        native::animate_alpha(&window, 0.0, 0.14, native::Curve::EaseIn);
         self.after(Duration::from_millis(160), cx, move |shell, cx| {
             if shell.peek_generation != generation {
                 return;
