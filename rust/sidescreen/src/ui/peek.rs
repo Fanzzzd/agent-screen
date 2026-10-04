@@ -184,10 +184,11 @@ fn tile(
             let text = format!("{label}\n{}", status.long);
             move |_, cx| super::shell::hint(text.clone(), cx)
         })
+        .tooltip_show_delay(super::shell::TILE_HINT_DELAY)
         .w(px(width))
         .flex()
         .flex_col()
-        .cursor_pointer()
+        .active(|s| s.opacity(0.7))
         .on_click(move |_, _, cx| tell(&select, cx, move |shell, cx| shell.select(id, cx)))
         .child(
             div()
@@ -221,27 +222,39 @@ fn tile(
                         .aria_label("关闭显示器")
                         .tooltip(|_, cx| super::shell::hint("关闭显示器", cx))
                         .tooltip_show_delay(super::shell::HINT_DELAY)
+                        // A 17 pt disc in a 22 pt hit area.
                         .absolute()
                         .top(px(4.))
                         .right(px(4.))
-                        .size(px(20.))
-                        .rounded_full()
+                        .size(px(22.))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(gpui::black().opacity(0.55))
                         .opacity(0.)
                         .group_hover(group.clone(), |s| s.opacity(1.))
+                        .group(format!("close-{id}"))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             tell(&dismiss, cx, move |shell, cx| shell.dismiss(id, cx));
                         })
                         .child(
-                            svg()
-                                .path("icons/close.svg")
-                                .size(px(11.))
-                                .text_color(gpui::white()),
+                            div()
+                                .size(px(17.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui::black().opacity(0.55))
+                                .group_hover(format!("close-{id}"), |s| {
+                                    s.bg(gpui::black().opacity(0.75))
+                                })
+                                .child(
+                                    svg()
+                                        .path("icons/close.svg")
+                                        .size(px(9.))
+                                        .text_color(gpui::white()),
+                                ),
                         ),
                 ),
         )
@@ -275,7 +288,7 @@ fn tile(
 
 fn add_tile(narrow: bool, tile: f32, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
     let shell = shell.clone();
-    let width = if narrow { NARROW } else { TILE_WIDTH };
+    let width = if narrow { NARROW } else { tile };
     div()
         .id("add")
         .group("add")
@@ -288,7 +301,7 @@ fn add_tile(narrow: bool, tile: f32, theme: &Theme, shell: &WeakEntity<Shell>) -
         .w(px(width))
         .flex()
         .flex_col()
-        .cursor_pointer()
+        .active(|s| s.opacity(0.7))
         .on_click(move |_, _, cx| tell(&shell, cx, |shell, cx| shell.create_display(cx)))
         .child(
             div()

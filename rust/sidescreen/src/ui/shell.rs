@@ -59,23 +59,26 @@ pub fn current() -> Option<WeakEntity<Shell>> {
 struct Hint(SharedString);
 
 impl Render for Hint {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let theme = super::theme::theme(window);
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // The same dark bubble in light and dark mode, like a macOS tooltip
+        // over media.
         div()
             .px(px(8.))
             .py(px(4.))
             .rounded(px(6.))
-            .bg(theme.sheet)
-            .border_1()
-            .border_color(theme.card_border)
-            .text_size(px(11.5))
-            .text_color(theme.label)
+            .bg(gpui::black().opacity(0.85))
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(gpui::white())
             .child(self.0.clone())
     }
 }
 
 /// How long the pointer rests on a control before its hint shows.
 pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Hints over thumbnails wait longer, so scanning the tiles shows none.
+pub const TILE_HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
 
 pub fn hint(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
     cx.new(|_| Hint(text.into())).into()

@@ -238,7 +238,7 @@ fn header(
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_w(px(120.))
                 .flex()
                 .flex_col()
                 .gap(px(1.))
@@ -304,8 +304,9 @@ fn button(
     theme: &Theme,
     action: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
+    // Tinted buttons rest a little faded and light up on hover.
     let (bg, hover, fg) = match prominent {
-        Some(color) => (color, color.opacity(0.85), gpui::white()),
+        Some(color) => (color.opacity(0.88), color, gpui::white()),
         None => (theme.control, theme.control_hover, theme.label),
     };
     div()
@@ -313,23 +314,26 @@ fn button(
         .role(Role::Button)
         .aria_label(SharedString::from(title.clone()))
         .flex_none()
+        // A long agent name truncates instead of squeezing the title.
+        .max_w(px(220.))
         .h(px(28.))
-        .px(px(12.))
+        .px(px(14.))
         .flex()
         .items_center()
-        .gap(px(5.))
+        .gap(px(4.))
         .rounded_full()
         .bg(bg)
         .hover(move |s| s.bg(hover))
-        .text_size(px(12.5))
-        .font_weight(gpui::FontWeight::MEDIUM)
+        .active(|s| s.opacity(0.7))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| action(cx))
         .when_some(icon, |d, path| {
-            d.child(svg().path(path).size(px(13.)).text_color(fg))
+            d.child(svg().path(path).flex_none().size(px(13.)).text_color(fg))
         })
-        .child(title)
+        .child(div().min_w_0().truncate().child(title))
 }
 
 fn icon_button(
@@ -353,6 +357,7 @@ fn icon_button(
         .rounded_full()
         .bg(theme.control)
         .hover(|s| s.bg(theme.control_hover))
+        .active(|s| s.opacity(0.7))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| action(cx))
         .child(svg().path(icon).size(px(14.)).text_color(theme.label))
@@ -423,10 +428,11 @@ impl Viewer {
             .bg(theme.screen_empty)
             .child(picture)
             .child(theme::round_corners(SCREEN_RADIUS, theme.card))
-            .when_some(
-                self.menu_bar.clone().zip(IMAGE.with(Cell::get)),
-                |d, (bar, image)| d.child(menu_strip(bar, image, id, size, theme)),
-            )
+            // Without an agent app in front the strip would show the
+            // user's own menu bar and status items; it stays empty then.
+            .when_some(IMAGE.with(Cell::get), |d, image| {
+                d.child(menu_strip(self.menu_bar.clone(), image, id, size, theme))
+            })
             .child(pointer::layer(id, pointer, size, theme.accent))
             .when_some(outline, |d, (color, width)| {
                 d.child(
@@ -615,9 +621,9 @@ fn sheet_button(
     color: Option<Hsla>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let (bg, fg) = match color {
-        Some(c) => (c, gpui::white()),
-        None => (theme.control, theme.label),
+    let (bg, hover, fg) = match color {
+        Some(c) => (c.opacity(0.88), c, gpui::white()),
+        None => (theme.control, theme.control_hover, theme.label),
     };
     div()
         .id(id)
@@ -629,9 +635,10 @@ fn sheet_button(
         .items_center()
         .rounded_full()
         .bg(bg)
-        .hover(move |s| s.opacity(0.85))
-        .text_size(px(12.5))
-        .font_weight(gpui::FontWeight::MEDIUM)
+        .hover(move |s| s.bg(hover))
+        .active(|s| s.opacity(0.7))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
         .child(title)
 }
@@ -711,7 +718,7 @@ mod tests {
 /// at the strip's own size. Clicks on it reach the shell through the native
 /// input monitor, which looks titles up with `title_at`.
 fn menu_strip(
-    bar: crate::mac::menubar::Bar,
+    bar: Option<crate::mac::menubar::Bar>,
     (left, top, width): (f32, f32, f32),
     id: DisplayId,
     size: (f64, f64),
@@ -768,7 +775,8 @@ fn menu_strip(
         .overflow_hidden()
         // The first menu is the app's own, named in bold as on a Mac.
         .children(
-            bar.titles
+            bar.map(|b| b.titles)
+                .unwrap_or_default()
                 .into_iter()
                 .enumerate()
                 .map(|(i, t)| title(i, t, i == 0)),

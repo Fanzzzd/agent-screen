@@ -60,9 +60,11 @@ pub async fn handle(
             // `global` maps them back with the same scale.
             let scale = shot_scale(size);
             let pixels = ((size.0 * scale).round(), (size.1 * scale).round());
+            // Pixels per point of the display, times the bar's points.
+            let cover = crate::mac::menubar_height(id) * pixels.0 / size.0;
             let shot = cx
                 .background_executor()
-                .spawn(async move { screenshot::display(id, pixels, format) })
+                .spawn(async move { screenshot::display(id, pixels, format, cover) })
                 .await
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
