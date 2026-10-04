@@ -107,6 +107,21 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
         .collect()
 }
 
+/// Move document windows that grew past the display's edges, such as
+/// Calculator switching to Scientific, back inside. True when one moved.
+pub fn keep_inside(display: DisplayId) -> bool {
+    let area = cg::display_bounds(display);
+    let local = Rect::new(0.0, 0.0, area.width, area.height);
+    let mut moved = false;
+    for window in on_display(display).into_iter().filter(|w| w.layer == 0) {
+        let kept = window.bounds.kept_inside(&local);
+        if kept != window.bounds {
+            moved |= ax::set_frame(window.target, kept.offset(area.x, area.y)).is_ok();
+        }
+    }
+    moved
+}
+
 pub fn find(window_id: u32) -> Option<Window> {
     all().into_iter().find(|w| w.target.window_id == window_id)
 }

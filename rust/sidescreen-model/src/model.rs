@@ -55,6 +55,18 @@ impl Rect {
             self.height - 2.0 * dy,
         )
     }
+    /// The nearest frame inside `area`: shifted back over the edges it
+    /// crosses, and shrunk only where it is larger than `area`.
+    pub fn kept_inside(&self, area: &Rect) -> Rect {
+        let width = self.width.min(area.width);
+        let height = self.height.min(area.height);
+        Rect::new(
+            self.x.min(area.max_x() - width).max(area.x),
+            self.y.min(area.max_y() - height).max(area.y),
+            width,
+            height,
+        )
+    }
     pub fn union(&self, other: &Rect) -> Rect {
         let x = self.x.min(other.x);
         let y = self.y.min(other.y);
@@ -538,6 +550,20 @@ pub fn fate_reason(
 
 #[cfg(test)]
 mod tests {
+    use super::Rect;
+
+    #[test]
+    fn kept_inside_moves_back_and_shrinks_only_when_needed() {
+        let area = Rect::new(0.0, 0.0, 1280.0, 800.0);
+        let inside = Rect::new(100.0, 100.0, 300.0, 200.0);
+        assert_eq!(inside.kept_inside(&area), inside);
+        // Calculator widening to Scientific past the right edge.
+        let wide = Rect::new(797.0, 392.0, 674.0, 408.0);
+        assert_eq!(wide.kept_inside(&area), Rect::new(606.0, 392.0, 674.0, 408.0));
+        let huge = Rect::new(-50.0, 10.0, 2000.0, 900.0);
+        assert_eq!(huge.kept_inside(&area), area);
+    }
+
     use super::*;
 
     #[test]

@@ -40,7 +40,7 @@ pub async fn handle(
             let size = core
                 .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
                 .unwrap_or(DEFAULT_SIZE);
-            wait_until_still(id, size, cx).await;
+            settle_display(id, size, cx).await;
             Ok(json!({}))
         }
         "screenshot" => {
@@ -54,7 +54,7 @@ pub async fn handle(
                 Format::Jpeg
             };
             if p.0.get("settle") == Some(&Value::Bool(true)) {
-                wait_until_still(id, size, cx).await;
+                settle_display(id, size, cx).await;
             }
             // Within the image budget the agent reads coordinates in, and
             // `global` maps them back with the same scale.
@@ -669,6 +669,32 @@ async fn settle(
         "the window opened but could not be placed on the display{}",
         last_error.map(|e| format!(": {e}")).unwrap_or_default()
     )))
+}
+
+/// Wait for the display to stop changing after an action, then bring back
+/// any window the action grew past the display's edges.
+async fn settle_display(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+    wait_until_still(id, size, cx).await;
+    let moved = cx
+        .background_executor()
+        .spawn(async move { windows::keep_inside(id) })
+        .await;
+    if moved {
+        wait_until_still(id, size, cx).await;
+    }
+    // Some apps resize after the display looked still: Calculator takes
+    // over 300 ms to switch to Scientific. Look again a little later.
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for wait in [400, 800] {
+            cx.background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            cx.background_executor()
+                .spawn(async move { windows::keep_inside(id) })
+                .await;
+        }
+    })
+    .detach();
 }
 
 /// Wait until the display stops changing after an action, so the
