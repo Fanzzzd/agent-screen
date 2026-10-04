@@ -422,7 +422,8 @@ pub async fn handle(
             let name = p
                 .string("app")
                 .ok_or_else(|| ControlError::invalid("app is required"))?;
-            let window = launch(&core, id, &name, cx).await?;
+            let target = p.string("open").map(|t| open_target(&t)).transpose()?;
+            let window = launch(&core, id, &name, target.as_deref(), cx).await?;
             Ok(window.map_or(json!({}), |w| json!({ "window": w.json() })))
         }
         "requestHelp" => {
@@ -682,10 +683,54 @@ async fn act(
 }
 
 /// Open an app in the background and place its new window on a display.
+/// A URL with a scheme, or an existing file; `~/` means the home folder.
+fn open_target(text: &str) -> Result<String, ControlError> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        return open_target(&format!("{home}/{rest}"));
+    }
+    if text.starts_with('/') {
+        return if std::path::Path::new(text).exists() {
+            Ok(text.to_string())
+        } else {
+            Err(ControlError::not_found(format!("no file at {text}")))
+        };
+    }
+    let scheme = text.split_once(':').map(|(s, _)| s);
+    if scheme.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))) {
+        Ok(text.to_string())
+    } else {
+        Err(ControlError::invalid(
+            "open takes a URL such as https://example.com or an absolute file path",
+        ))
+    }
+}
+
+/// `open -g`: without activating, like OpenConfiguration.activates = false.
+async fn open_in_background(
+    app: std::path::PathBuf,
+    target: Option<String>,
+    cx: &mut AsyncApp,
+) -> bool {
+    cx.background_executor()
+        .spawn(async move {
+            let mut open = std::process::Command::new("/usr/bin/open");
+            open.arg("-g");
+            match target {
+                Some(target) => open.arg("-a").arg(&app).arg(target),
+                None => open.arg(&app),
+            };
+            open.status().is_ok_and(|s| s.success())
+        })
+        .await
+}
+
 async fn launch(
     core: &Entity<Core>,
     id: DisplayId,
     name: &str,
+    target: Option<&str>,
     cx: &mut AsyncApp,
 ) -> Result<Option<windows::Window>, ControlError> {
     let path = app::resolve(name)
@@ -694,18 +739,13 @@ async fn launch(
         windows::all().iter().map(|w| w.target.window_id).collect();
     let was_running = app::running_pid(&path).is_some();
 
-    // `open -g` launches without activating, like OpenConfiguration.activates = false.
-    let launch_path = path.clone();
-    let opened = cx
-        .background_executor()
-        .spawn(async move {
-            std::process::Command::new("/usr/bin/open")
-                .arg("-g")
-                .arg(&launch_path)
-                .status()
-        })
-        .await;
-    if !opened.is_ok_and(|s| s.success()) {
+    // A starting app opens the URL or file in its first window. A running
+    // one opens a file in a window of its own, but a URL as a tab of its
+    // front window, which may be the user's: it gets a new window first,
+    // below, and the URL after.
+    let is_url = target.is_some_and(|t| !t.starts_with('/'));
+    let first = (!was_running || !is_url).then(|| target.map(String::from)).flatten();
+    if !open_in_background(path.clone(), first, cx).await {
         return Err(ControlError::failed(format!("could not open {name}")));
     }
     let mut pid = None;
@@ -721,7 +761,10 @@ async fn launch(
     let pid = pid.ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
 
     // A running app opens no window on launch; ask it for a new one.
-    if was_running && let Ok(chord) = KeyChord::parse("cmd+n") {
+    if was_running
+        && (target.is_none() || is_url)
+        && let Ok(chord) = KeyChord::parse("cmd+n")
+    {
         crate::mac::input::post_key_to_pid(pid, chord);
     }
 
@@ -733,7 +776,13 @@ async fn launch(
             .into_iter()
             .find(|w| w.target.pid == pid && !before.contains(&w.target.window_id))
         {
-            return settle(core, fresh.target, id, cx).await.map(Some);
+            let placed = settle(core, fresh.target, id, cx).await?;
+            // The new window is the app's front one now, where it opens the
+            // URL or file.
+            if was_running && is_url && let Some(target) = target {
+                open_in_background(path.clone(), Some(target.to_string()), cx).await;
+            }
+            return Ok(Some(placed));
         }
     }
     // A slow launch can open its window after we stop waiting. Keep watching

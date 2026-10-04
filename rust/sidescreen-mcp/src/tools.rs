@@ -222,11 +222,13 @@ pub fn definitions() -> Vec<Value> {
             "Launch an app on the display",
             &[
                 "Open an app in the background and put its new window on the display. If the app is already running, a new window is opened for you instead of taking the user's.",
+                "With open, the app opens that URL or file in the window.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
-                    "app": { "type": "string", "description": "App name (\"Safari\") or bundle id (\"com.apple.Safari\")." }
+                    "app": { "type": "string", "description": "App name (\"Safari\") or bundle id (\"com.apple.Safari\")." },
+                    "open": { "type": "string", "description": "A URL (https://…) or an absolute file path to open in the app." }
                 }),
                 &["display_id", "app"],
             ),
@@ -499,7 +501,7 @@ pub async fn run(
             let reply = control
                 .call(
                     "launchApp",
-                    json!({ "displayId": a.require_int("display_id")?, "app": app }),
+                    json!({ "displayId": a.require_int("display_id")?, "app": app, "open": a.string("open")? }),
                 )
                 .await?;
             Ok(Output::Object(match reply.get("window") {
