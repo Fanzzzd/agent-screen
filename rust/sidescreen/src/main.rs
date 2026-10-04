@@ -5,11 +5,12 @@
 mod control;
 mod core;
 mod dismissal;
-mod keychord;
 #[cfg(target_os = "macos")]
 mod mac;
-mod model;
 mod ui;
+
+// The domain rules live in their own crate, which builds on every platform.
+use sidescreen_model::{keychord, model};
 
 use control::server::{self, Event};
 use futures::StreamExt;

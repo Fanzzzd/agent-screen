@@ -14,6 +14,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08db386fbf86f7e95bfe6cb09" }
 gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08db386fbf86f7e95bfe6cb09", features = ["runtime_shaders", "font-kit"] }
 futures = "0.3"
+sidescreen-model = { path = "../sidescreen-model" }
 serde_json = "1"
 anyhow = "1"
 base64 = "0.22"
