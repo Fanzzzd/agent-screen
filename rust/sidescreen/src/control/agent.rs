@@ -140,7 +140,7 @@ pub async fn handle(
             let modifiers = modifiers(&p)?;
             // A drag on a title bar moves the window, which posted events
             // can't do.
-            if let Some(grab) = title_bar_at(from, cx).await {
+            if let Some(grab) = title_bar_at(id, from, cx).await {
                 show_pointer(&core, id, to, false, cx);
                 if !grab.drag_to(to, cx).await {
                     return Err(ControlError::failed(
@@ -182,7 +182,7 @@ pub async fn handle(
                 }
             };
             let grabbed = GRAB.with(|g| g.borrow_mut().remove(&id));
-            if down && let Some(grab) = title_bar_at(point, cx).await {
+            if down && let Some(grab) = title_bar_at(id, point, cx).await {
                 show_pointer(&core, id, point, true, cx);
                 let window = grab.target.window_id;
                 GRAB.with(|g| g.borrow_mut().insert(id, grab));
@@ -268,9 +268,12 @@ pub async fn handle(
             let held =
                 Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            if !forwarder.hold(chord, held, cg::display_bounds(id)).await {
+            let within = cg::display_bounds(id);
+            if !forwarder.chord(chord, true, within).await {
                 return Err(no_keyboard_target());
             }
+            cx.background_executor().timer(held).await;
+            forwarder.chord(chord, false, within).await;
             Ok(json!({}))
         }
         "listWindows" => {
@@ -774,7 +777,7 @@ async fn launch(
             .await;
         if let Some(fresh) = windows::all()
             .into_iter()
-            .find(|w| w.target.pid == pid && !before.contains(&w.target.window_id))
+            .find(|w| w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id))
         {
             let placed = settle(core, fresh.target, id, cx).await?;
             // The new window is the app's front one now, where it opens the
@@ -795,7 +798,7 @@ async fn launch(
                 .await;
             if let Some(late) = windows::all()
                 .into_iter()
-                .find(|w| w.target.pid == pid && !before.contains(&w.target.window_id))
+                .find(|w| w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id))
             {
                 let _ = settle(&core, late.target, id, cx).await;
                 return;
@@ -807,6 +810,13 @@ async fn launch(
         }
     })
     .detach();
+    // The URL waits for the new window, which never came: opening it now
+    // would add a tab to whatever window the user has in front.
+    if was_running && is_url {
+        return Err(ControlError::failed(format!(
+            "{name} opened no new window, so the URL was not opened; call list_windows, then open it in a window on your display"
+        )));
+    }
     Ok(None)
 }
 
@@ -981,7 +991,7 @@ fn input_display(
     }
     // Remember the windows before the action, so the settle after it can
     // tell which windows the action opened.
-    let before = cg::on_screen_ids();
+    let before = cg::all_ids();
     BEFORE.with(|b| b.borrow_mut().insert(id, (before, Instant::now())));
     Ok(id)
 }
@@ -993,27 +1003,41 @@ struct Grab {
     target: WindowTarget,
     frame: Rect,
     from: (f64, f64),
+    /// The display's global bounds: the window stays inside them.
+    area: Rect,
 }
 
 impl Grab {
     /// Move the window as far as the pointer moved from the press.
     async fn drag_to(self, to: (f64, f64), cx: &mut AsyncApp) -> bool {
-        let frame = self.frame.offset(to.0 - self.from.0, to.1 - self.from.1);
+        let frame = self
+            .frame
+            .offset(to.0 - self.from.0, to.1 - self.from.1)
+            .kept_inside(&self.area);
         cx.background_executor()
             .spawn(async move { ax::set_frame(self.target, frame).is_ok() })
             .await
     }
 }
 
-/// The window whose title bar is at a global point, held there.
-async fn title_bar_at(at: (f64, f64), cx: &mut AsyncApp) -> Option<Grab> {
+/// The window on display `id` whose title bar is at a global point, held
+/// there. A user window that only overhangs the display is never taken.
+async fn title_bar_at(id: DisplayId, at: (f64, f64), cx: &mut AsyncApp) -> Option<Grab> {
     cx.background_executor()
         .spawn(async move {
-            let window = windows::all().into_iter().find(|w| w.bounds.contains(at))?;
+            let area = cg::display_bounds(id);
+            let window = windows::on_display(id)
+                .into_iter()
+                .map(|w| windows::Window {
+                    bounds: w.bounds.offset(area.x, area.y),
+                    ..w
+                })
+                .find(|w| w.bounds.contains(at))?;
             ax::on_title_bar(window.target, window.bounds, at).then_some(Grab {
                 target: window.target,
                 frame: window.bounds,
                 from: at,
+                area,
             })
         })
         .await
@@ -1044,6 +1068,11 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     if cg::on_screen_ids().is_subset(&before) {
         return;
     }
+    // The app the user works in is theirs: a window it opens now, such as
+    // their own cmd+N, stays with them.
+    let active = objc2_app_kit::NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier());
     let agent_areas: Vec<Rect> = core.read_with(cx, |c, _| {
         c.displays
             .list
@@ -1063,6 +1092,7 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
                 .into_iter()
                 .filter(|w| {
                     pids.contains(&w.target.pid)
+                        && Some(w.target.pid) != active
                         && !before.contains(&w.target.window_id)
                         && w.layer == 0
                         && !agent_areas.iter().any(|a| a.contains(w.bounds.mid()))

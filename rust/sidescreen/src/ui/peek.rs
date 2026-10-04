@@ -45,6 +45,8 @@ pub struct Peek {
     pub focus: FocusHandle,
     /// The tile the arrow keys reached; the + tile is the last index.
     pub focused: Option<usize>,
+    /// Opened by a click, so the keyboard drives it.
+    pub keys: bool,
 }
 
 impl Peek {
@@ -75,16 +77,24 @@ impl Peek {
             tile: TILE_WIDTH,
             focus: cx.focus_handle(),
             focused: None,
+            keys: false,
         }
     }
 
     /// ←/→ move between tiles, Return opens one, 1-9 jump to a display,
     /// ⌘N adds one and Esc closes Peek.
     fn key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        // Hidden, or shown again by hover before it left: the keys aren't
+        // meant for it.
+        if !self.keys {
+            return;
+        }
         let ids = ordered(self.core.read(cx));
         let count = ids.len() + 1;
+        // A display may have gone since the arrows moved.
         let current = self
             .focused
+            .filter(|&i| i < count)
             .or_else(|| self.active.and_then(|a| ids.iter().position(|&id| id == a)));
         let keys = &event.keystroke;
         let shell = self.shell.clone();

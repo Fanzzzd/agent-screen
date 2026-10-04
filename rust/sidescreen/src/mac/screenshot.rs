@@ -82,8 +82,9 @@ pub fn display(
         return encode(&image, format);
     }
     let covered = cover_top(image.as_ptr().cast(), image.width(), image.height(), cover);
+    // Never send the user's menu bar to the agent uncovered.
     if covered.is_null() {
-        return encode(&image, format);
+        return Err("could not prepare the screenshot".into());
     }
     let shot = encode_raw(covered, image.width(), image.height(), format);
     unsafe { CFRelease(covered) };

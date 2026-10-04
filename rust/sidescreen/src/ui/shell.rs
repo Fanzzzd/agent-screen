@@ -387,6 +387,7 @@ impl Shell {
                         native::make_key(&window);
                         let _ = peek.update(cx, |peek, window, cx| {
                             peek.focused = None;
+                            peek.keys = true;
                             window.focus(&peek.focus, cx);
                             cx.notify();
                         });
@@ -719,6 +720,12 @@ impl Shell {
     }
 
     pub fn hide_peek(&mut self, cx: &mut Context<Self>) {
+        if let Some((peek, _)) = &self.peek {
+            let _ = peek.update(cx, |peek, _, _| {
+                peek.keys = false;
+                peek.focused = None;
+            });
+        }
         self.latched = false;
         if !self.peek_shown {
             return;
@@ -887,6 +894,8 @@ impl Shell {
         self.viewer_generation += 1;
         if self.viewer_open {
             native::set_frame(&window, frame);
+            // A switch can cut an open morph short, whose timer then bails.
+            self.set_morphing(false, cx);
         } else {
             // Watching only: the keyboard stays with the user's app until
             // they click into the display.

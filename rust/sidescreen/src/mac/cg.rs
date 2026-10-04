@@ -29,14 +29,24 @@ pub fn active_displays() -> Vec<DisplayId> {
     ids[..count as usize].to_vec()
 }
 
+/// Ids of every window, hidden, minimized and on other Spaces included,
+/// so one that only comes back into view isn't taken for new.
+pub fn all_ids() -> std::collections::HashSet<u32> {
+    window_ids(CGWindowListOption::OptionAll)
+}
+
 /// Ids of the on-screen windows, without their descriptions: a fraction of
 /// the cost of `on_screen_windows`, for telling new windows from old.
 pub fn on_screen_ids() -> std::collections::HashSet<u32> {
+    window_ids(CGWindowListOption::OptionOnScreenOnly)
+}
+
+fn window_ids(option: CGWindowListOption) -> std::collections::HashSet<u32> {
     unsafe extern "C" {
         fn CFArrayGetCount(array: &CFArray) -> isize;
         fn CFArrayGetValueAtIndex(array: &CFArray, index: isize) -> *const std::ffi::c_void;
     }
-    let Some(list) = CGWindowListCreate(CGWindowListOption::OptionOnScreenOnly, 0) else {
+    let Some(list) = CGWindowListCreate(option, 0) else {
         return Default::default();
     };
     // The array holds the CGWindowIDs themselves, not CFNumbers.

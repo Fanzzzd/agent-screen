@@ -111,6 +111,9 @@ impl Streams {
         } else {
             stream.wants.remove(who);
         }
+        if who == "agent" {
+            stream.latest.count_changes(fps > 0);
+        }
         let wanted = stream
             .wants
             .values()

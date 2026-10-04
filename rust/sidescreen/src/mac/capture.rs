@@ -20,6 +20,19 @@ pub struct Latest {
     pub changes: AtomicU64,
     /// Luma samples of the previous frame, for the comparison.
     samples: Mutex<Vec<u8>>,
+    /// Count changes: only while an agent waits for the display to settle.
+    /// Sampling locks each frame's IOSurface for the CPU, the largest cost
+    /// of showing a 60 fps display in the Viewer.
+    counting: std::sync::atomic::AtomicBool,
+}
+
+impl Latest {
+    pub fn count_changes(&self, on: bool) {
+        self.counting.store(on, Ordering::Relaxed);
+        if !on {
+            self.samples.lock().unwrap().clear();
+        }
+    }
 }
 
 /// Samples per row and column of the comparison grid.
@@ -121,8 +134,8 @@ impl Capture {
                 }
                 // Retain: the sample buffer goes away after this callback.
                 let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw as CVPixelBufferRef) };
-                let now = luma_grid(&buffer, skip);
-                {
+                if latest.counting.load(Ordering::Relaxed) {
+                    let now = luma_grid(&buffer, skip);
                     let mut before = latest.samples.lock().unwrap();
                     if changed(&before, &now) {
                         latest.changes.fetch_add(1, Ordering::Relaxed);

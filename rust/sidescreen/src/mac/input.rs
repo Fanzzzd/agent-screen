@@ -194,8 +194,12 @@ impl Forwarder {
             let count = count.max(1);
             let mut hit = None;
             for index in 1..=count {
-                hit = w.mouse_down(at, button, index, flags(m));
-                hit?;
+                // A double click on Close takes the window away after the
+                // first click; the first hit is the answer.
+                let Some(down) = w.mouse_down(at, button, index, flags(m)) else {
+                    break;
+                };
+                hit.get_or_insert(down);
                 thread::sleep(Duration::from_millis(30));
                 w.mouse_up(at, button, index, flags(m));
                 if index < count {
@@ -240,7 +244,11 @@ impl Forwarder {
     pub async fn button(&self, at: (f64, f64), down: bool, m: Modifiers) -> Option<WindowTarget> {
         self.run(move |w| {
             if down {
-                w.mouse_down(at, Button::Left, 1, flags(m))
+                let hit = w.mouse_down(at, Button::Left, 1, flags(m));
+                if let Some(g) = &mut w.gesture {
+                    g.agent = true;
+                }
+                hit
             } else {
                 let target = w.gesture.as_ref().map(|g| g.target);
                 w.mouse_up(at, Button::Left, 1, flags(m));
@@ -251,9 +259,16 @@ impl Forwarder {
         .flatten()
     }
 
+    /// The agent moves the pointer: a drag while it holds the button down.
     pub async fn move_to(&self, to: (f64, f64)) {
-        self.run(move |w| w.mouse_moved(to, CGEventFlags::empty()))
-            .await;
+        self.run(move |w| {
+            if w.gesture.as_ref().is_some_and(|g| g.agent) {
+                w.mouse_dragged(to, Button::Left, CGEventFlags::empty());
+            } else {
+                w.mouse_moved(to, CGEventFlags::empty());
+            }
+        })
+        .await;
     }
 
     pub async fn wheel(&self, at: (f64, f64), delta: (f64, f64), m: Modifiers) {
@@ -312,17 +327,16 @@ impl Forwarder {
         self.run(move |w| w.focus(target)).await;
     }
 
-    /// Hold a key chord down for `held`, for apps that act on held keys.
-    /// False when no window on the display can take the keys.
-    pub async fn hold(&self, chord: KeyChord, held: Duration, within: Rect) -> bool {
+    /// Press or release a key chord, for apps that act on held keys. The
+    /// caller waits between the two off the worker, so other input on the
+    /// display isn't held up. False when nothing can take the keys.
+    pub async fn chord(&self, chord: KeyChord, down: bool, within: Rect) -> bool {
         self.run(move |w| {
             w.focus_something(within);
             if w.focused.is_none() {
                 return false;
             }
-            w.key(chord.code, true, flags(chord.modifiers));
-            thread::sleep(held);
-            w.key(chord.code, false, flags(chord.modifiers));
+            w.key(chord.code, down, flags(chord.modifiers));
             true
         })
         .await
@@ -351,6 +365,8 @@ impl Forwarder {
 struct Gesture {
     target: WindowTarget,
     group: i64,
+    /// Pressed by an agent's left_mouse_down, which holds it across calls.
+    agent: bool,
 }
 
 struct Worker {
@@ -406,6 +422,11 @@ impl Worker {
         clicks: i64,
         flags: CGEventFlags,
     ) -> Option<WindowTarget> {
+        // A button an agent left held is released before anyone presses
+        // again, such as the user taking over.
+        if let Some(g) = self.gesture.take_if(|g| g.agent) {
+            self.post(Button::Left.up(), at, g.target, Button::Left, 1, g.group, flags);
+        }
         let Some(hit) = self.hit(at, true) else {
             log::info!("input: no window at {at:?}");
             return None;
@@ -413,7 +434,11 @@ impl Worker {
         let target = hit.target;
         self.focus(target);
         let group = self.next_group();
-        self.gesture = Some(Gesture { target, group });
+        self.gesture = Some(Gesture {
+            target,
+            group,
+            agent: false,
+        });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
         Some(target)
@@ -431,10 +456,7 @@ impl Worker {
     }
 
     fn mouse_moved(&mut self, to: (f64, f64), flags: CGEventFlags) {
-        // Between an agent's left_mouse_down and left_mouse_up a move is a
-        // drag. The Viewer sends its own dragged events and no moves then.
         if self.gesture.is_some() {
-            self.mouse_dragged(to, Button::Left, flags);
             return;
         }
         let Some(hit) = self.hit(to, false) else {
