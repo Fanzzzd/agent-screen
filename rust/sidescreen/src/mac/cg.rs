@@ -6,7 +6,7 @@ use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFArray, CGRect};
 use objc2_core_graphics::{
     CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID, CGWindowListCopyWindowInfo,
-    CGWindowListOption,
+    CGWindowListCreate, CGWindowListOption,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
@@ -27,6 +27,23 @@ pub fn active_displays() -> Vec<DisplayId> {
     let mut count = 0u32;
     unsafe { CGGetActiveDisplayList(32, ids.as_mut_ptr(), &mut count) };
     ids[..count as usize].to_vec()
+}
+
+/// Ids of the on-screen windows, without their descriptions: a fraction of
+/// the cost of `on_screen_windows`, for telling new windows from old.
+pub fn on_screen_ids() -> std::collections::HashSet<u32> {
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: &CFArray) -> isize;
+        fn CFArrayGetValueAtIndex(array: &CFArray, index: isize) -> *const std::ffi::c_void;
+    }
+    let Some(list) = CGWindowListCreate(CGWindowListOption::OptionOnScreenOnly, 0) else {
+        return Default::default();
+    };
+    // The array holds the CGWindowIDs themselves, not CFNumbers.
+    let count = unsafe { CFArrayGetCount(&list) };
+    (0..count)
+        .map(|i| unsafe { CFArrayGetValueAtIndex(&list, i) } as usize as u32)
+        .collect()
 }
 
 /// One entry of WindowServer's on-screen window list.

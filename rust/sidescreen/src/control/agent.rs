@@ -16,7 +16,7 @@ use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
 use objc2::MainThreadMarker;
 use serde_json::{Map, Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Params = Map<String, Value>;
 
@@ -40,7 +40,7 @@ pub async fn handle(
             let size = core
                 .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
                 .unwrap_or(DEFAULT_SIZE);
-            settle_display(id, size, cx).await;
+            settle_display(&core, id, size, cx).await;
             Ok(json!({}))
         }
         "screenshot" => {
@@ -54,7 +54,7 @@ pub async fn handle(
                 Format::Jpeg
             };
             if p.0.get("settle") == Some(&Value::Bool(true)) {
-                settle_display(id, size, cx).await;
+                settle_display(&core, id, size, cx).await;
             }
             // Within the image budget the agent reads coordinates in, and
             // `global` maps them back with the same scale.
@@ -105,9 +105,60 @@ pub async fn handle(
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
             let modifiers = modifiers(&p)?;
             let forwarder = show_pointer(&core, id, from, true, cx);
-            forwarder.drag(from, to, modifiers).await;
+            let dragged = forwarder.drag(from, to, modifiers).await;
             show_pointer(&core, id, to, false, cx);
+            if !dragged {
+                return Err(ControlError::not_found(format!(
+                    "nothing at ({}, {}) to drag",
+                    p.number("fromX").unwrap_or(0.0) as i64,
+                    p.number("fromY").unwrap_or(0.0) as i64
+                )));
+            }
             Ok(json!({}))
+        }
+        "mouseDown" | "mouseUp" => {
+            let down = method == "mouseDown";
+            let id = input_display(&core, &p, cx)?;
+            // Without a point the button acts where the Agent Pointer is.
+            let point = match (p.number("x"), p.number("y")) {
+                (Some(x), Some(y)) => global(&core, id, x, y, cx)?,
+                _ => {
+                    let bounds = cg::display_bounds(id);
+                    core.read_with(cx, |c, _| {
+                        c.displays.get(id).and_then(|d| d.pointer).map(|p| (p.x, p.y))
+                    })
+                    .map(|(x, y)| (bounds.x + x, bounds.y + y))
+                    .ok_or_else(|| {
+                        ControlError::invalid("no pointer position yet; give a coordinate")
+                    })?
+                }
+            };
+            let modifiers = modifiers(&p)?;
+            let hit = show_pointer(&core, id, point, down, cx)
+                .button(point, down, modifiers)
+                .await;
+            match hit {
+                Some(window) => Ok(json!({ "windowId": window.window_id })),
+                None if down => Err(ControlError::not_found(
+                    "nothing under the pointer to press on",
+                )),
+                None => Err(ControlError::invalid("the left button is not down")),
+            }
+        }
+        "cursorPosition" => {
+            let id = display(&core, &p, false, cx)?;
+            let (size, pointer) = core.read_with(cx, |c, _| {
+                let d = c.displays.get(id);
+                (
+                    d.map(|d| (d.width, d.height)).unwrap_or(DEFAULT_SIZE),
+                    d.and_then(|d| d.pointer).map(|p| (p.x, p.y)),
+                )
+            });
+            let scale = shot_scale(size);
+            Ok(match pointer {
+                Some((x, y)) => json!({ "x": (x * scale).round(), "y": (y * scale).round() }),
+                None => json!({}),
+            })
         }
         "scroll" => {
             let (id, point) = target(&core, &p, cx)?;
@@ -145,6 +196,19 @@ pub async fn handle(
                 if !forwarder.press(chord, repeat, cg::display_bounds(id)).await {
                     return Err(no_keyboard_target());
                 }
+            }
+            Ok(json!({}))
+        }
+        "holdKey" => {
+            let id = input_display(&core, &p, cx)?;
+            let keys = p
+                .string("keys")
+                .ok_or_else(|| ControlError::invalid("keys is required"))?;
+            let chord = KeyChord::parse(&keys).map_err(|e| ControlError::invalid(e.to_string()))?;
+            let held = Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            if !forwarder.hold(chord, held, cg::display_bounds(id)).await {
+                return Err(no_keyboard_target());
             }
             Ok(json!({}))
         }
@@ -673,8 +737,9 @@ async fn settle(
 
 /// Wait for the display to stop changing after an action, then bring back
 /// any window the action grew past the display's edges.
-async fn settle_display(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+async fn settle_display(core: &Entity<Core>, id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     wait_until_still(id, size, cx).await;
+    adopt_opened(core, id, cx).await;
     let moved = cx
         .background_executor()
         .spawn(async move { windows::keep_inside(id) })
@@ -684,11 +749,13 @@ async fn settle_display(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     }
     // Some apps resize after the display looked still: Calculator takes
     // over 300 ms to switch to Scientific. Look again a little later.
+    let core = core.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         for wait in [400, 800] {
             cx.background_executor()
                 .timer(Duration::from_millis(wait))
                 .await;
+            adopt_opened(&core, id, cx).await;
             cx.background_executor()
                 .spawn(async move { windows::keep_inside(id) })
                 .await;
@@ -797,7 +864,74 @@ fn input_display(
             "the user is operating display {id}. Call wait_for_control to wait until they hand it back."
         )));
     }
+    // Remember the windows before the action, so the settle after it can
+    // tell which windows the action opened.
+    let before = cg::on_screen_ids();
+    BEFORE.with(|b| b.borrow_mut().insert(id, (before, Instant::now())));
     Ok(id)
+}
+
+thread_local! {
+    /// Window ids before each display's latest agent action.
+    static BEFORE: std::cell::RefCell<std::collections::HashMap<DisplayId, (std::collections::HashSet<u32>, Instant)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Windows the latest action opened in an app that has windows on the
+/// display, such as TextEdit's new document after New Document, open where
+/// the app chooses: the user's screen. Bring them to the display. Windows on
+/// any Agent Display, the user's apps and older windows stay where they are.
+async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
+    let Some(before) = BEFORE.with(|b| {
+        b.borrow()
+            .get(&id)
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(10))
+            .map(|(ids, _)| ids.clone())
+    }) else {
+        return;
+    };
+    // Most actions open nothing; the id list is cheap to compare.
+    if cg::on_screen_ids().is_subset(&before) {
+        return;
+    }
+    let agent_areas: Vec<Rect> = core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .filter(|d| !d.is_ended())
+            .map(|d| cg::display_bounds(d.id))
+            .collect()
+    });
+    let opened = cx
+        .background_executor()
+        .spawn(async move {
+            let pids: std::collections::HashSet<i32> = windows::on_display(id)
+                .iter()
+                .map(|w| w.target.pid)
+                .collect();
+            windows::all()
+                .into_iter()
+                .filter(|w| {
+                    pids.contains(&w.target.pid)
+                        && !before.contains(&w.target.window_id)
+                        && w.layer == 0
+                        && !agent_areas.iter().any(|a| a.contains(w.bounds.mid()))
+                })
+                .map(|w| w.target)
+                .collect::<Vec<_>>()
+        })
+        .await;
+    for target in opened {
+        // Seen once is enough: a window that won't move isn't retried.
+        BEFORE.with(|b| {
+            if let Some((ids, _)) = b.borrow_mut().get_mut(&id) {
+                ids.insert(target.window_id);
+            }
+        });
+        if let Err(e) = settle(core, target, id, cx).await {
+            log::info!("could not bring an opened window to display {id}: {}", e.message);
+        }
+    }
 }
 
 fn target(

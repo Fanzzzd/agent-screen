@@ -124,23 +124,26 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
                 "screenshot pixels and coordinates are the same space. Every action except wait returns a fresh screenshot.",
-                "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\". Click actions accept held",
-                "modifiers in text, e.g. \"shift\". Fails with a takeover error while the user is operating the display;",
-                "then call wait_for_control.",
+                "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
+                "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
+                "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
+                "coordinate they act at the pointer. cursor_position returns the pointer without a screenshot. Fails with",
+                "a takeover error while the user is operating the display; then call wait_for_control.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
                     "action": { "type": "string", "enum": [
                         "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click",
-                        "mouse_move", "left_click_drag", "scroll", "type", "key", "wait"
+                        "mouse_move", "left_click_drag", "left_mouse_down", "left_mouse_up", "scroll", "type", "key",
+                        "hold_key", "cursor_position", "wait"
                     ] },
                     "coordinate": coordinate(),
                     "start_coordinate": coordinate(),
                     "text": { "type": "string" },
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
-                    "duration": { "type": "number", "description": "Seconds, for wait." }
+                    "duration": { "type": "number", "description": "Seconds, for wait and hold_key." }
                 }),
                 &["display_id", "action"],
             ),
@@ -632,9 +635,13 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 "triple_click",
                 "mouse_move",
                 "left_click_drag",
+                "left_mouse_down",
+                "left_mouse_up",
                 "scroll",
                 "type",
                 "key",
+                "hold_key",
+                "cursor_position",
                 "wait",
             ],
         )?
@@ -683,9 +690,39 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             control
                 .call(
                     "drag",
-                    json!({ "displayId": display, "fromX": from_x, "fromY": from_y, "toX": to_x, "toY": to_y }),
+                    json!({ "displayId": display, "fromX": from_x, "fromY": from_y, "toX": to_x, "toY": to_y, "modifiers": modifiers }),
                 )
                 .await?;
+        }
+        "left_mouse_down" | "left_mouse_up" => {
+            let method = if action == "left_mouse_down" { "mouseDown" } else { "mouseUp" };
+            let mut params = json!({ "displayId": display, "modifiers": modifiers });
+            if let Some((x, y)) = coordinate {
+                params["x"] = json!(x);
+                params["y"] = json!(y);
+            }
+            control.call(method, params).await?;
+        }
+        "hold_key" => {
+            control
+                .call(
+                    "holdKey",
+                    json!({
+                        "displayId": display,
+                        "keys": require_text(text_arg, "hold_key")?,
+                        "seconds": a.number("duration")?.unwrap_or(1.0)
+                    }),
+                )
+                .await?;
+        }
+        "cursor_position" => {
+            let at = control
+                .call("cursorPosition", json!({ "displayId": display }))
+                .await?;
+            return Ok(vec![text(match (at.get("x"), at.get("y")) {
+                (Some(x), Some(y)) => format!("The pointer is at ({x}, {y}) in screenshot pixels."),
+                _ => "No pointer yet: nothing has clicked or moved on this display.".into(),
+            })]);
         }
         "scroll" => {
             let (x, y) = require_coordinate(coordinate, &action)?;
@@ -701,7 +738,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             control
                 .call(
                     "scroll",
-                    json!({ "displayId": display, "x": x, "y": y, "deltaX": dx, "deltaY": dy }),
+                    json!({ "displayId": display, "x": x, "y": y, "deltaX": dx, "deltaY": dy, "modifiers": modifiers }),
                 )
                 .await?;
         }

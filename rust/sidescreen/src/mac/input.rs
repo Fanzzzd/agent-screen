@@ -208,22 +208,47 @@ impl Forwarder {
         .flatten()
     }
 
-    pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) {
+    /// A press-move-release that apps take as a drag: a hold before moving,
+    /// so the press doesn't read as a click, small steps, and a pause at the
+    /// end so drop targets see the pointer arrive before the release.
+    pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> bool {
         self.run(move |w| {
-            w.mouse_down(from, Button::Left, 1, flags(m));
-            const STEPS: i32 = 12;
+            if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(100));
+            const STEPS: i32 = 20;
             for step in 1..=STEPS {
                 let t = step as f64 / STEPS as f64;
-                thread::sleep(Duration::from_millis(12));
                 w.mouse_dragged(
                     (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
                     Button::Left,
                     flags(m),
                 );
+                thread::sleep(Duration::from_millis(16));
             }
+            thread::sleep(Duration::from_millis(100));
             w.mouse_up(to, Button::Left, 1, flags(m));
+            true
         })
-        .await;
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Half a click, for drags an agent drives step by step. The window hit
+    /// by the press, or None when there is nothing under the point.
+    pub async fn button(&self, at: (f64, f64), down: bool, m: Modifiers) -> Option<WindowTarget> {
+        self.run(move |w| {
+            if down {
+                w.mouse_down(at, Button::Left, 1, flags(m))
+            } else {
+                let target = w.gesture.as_ref().map(|g| g.target);
+                w.mouse_up(at, Button::Left, 1, flags(m));
+                target
+            }
+        })
+        .await
+        .flatten()
     }
 
     pub async fn move_to(&self, to: (f64, f64)) {
@@ -285,6 +310,23 @@ impl Forwarder {
     /// Send keys to `target` from now on, as a click on it would.
     pub async fn focus(&self, target: WindowTarget) {
         self.run(move |w| w.focus(target)).await;
+    }
+
+    /// Hold a key chord down for `held`, for apps that act on held keys.
+    /// False when no window on the display can take the keys.
+    pub async fn hold(&self, chord: KeyChord, held: Duration, within: Rect) -> bool {
+        self.run(move |w| {
+            w.focus_something(within);
+            if w.focused.is_none() {
+                return false;
+            }
+            w.key(chord.code, true, flags(chord.modifiers));
+            thread::sleep(held);
+            w.key(chord.code, false, flags(chord.modifiers));
+            true
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// False when no window on the display can take the keys.
@@ -389,7 +431,10 @@ impl Worker {
     }
 
     fn mouse_moved(&mut self, to: (f64, f64), flags: CGEventFlags) {
+        // Between an agent's left_mouse_down and left_mouse_up a move is a
+        // drag. The Viewer sends its own dragged events and no moves then.
         if self.gesture.is_some() {
+            self.mouse_dragged(to, Button::Left, flags);
             return;
         }
         let Some(hit) = self.hit(to, false) else {

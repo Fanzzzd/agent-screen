@@ -113,7 +113,8 @@ pub enum EndReason {
 /// it when the agent left no Disposition.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Origin {
-    /// Opened by the Agent Session through launch_app.
+    /// Opened by the Agent Session: through launch_app, or by an action in
+    /// one of its apps, such as New Document.
     Launched,
     /// An existing window the Agent Session placed.
     Placed,
