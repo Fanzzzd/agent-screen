@@ -94,6 +94,11 @@ pub async fn handle(
         }
         "move" => {
             let (id, point) = target(&core, &p, cx)?;
+            if let Some(grab) = GRAB.with(|g| g.borrow().get(&id).copied()) {
+                show_pointer(&core, id, point, false, cx);
+                grab.drag_to(point, cx).await;
+                return reply(json!({}));
+            }
             show_pointer(&core, id, point, false, cx)
                 .move_to(point)
                 .await;
@@ -104,6 +109,15 @@ pub async fn handle(
             let from = global(&core, id, p.require("fromX")?, p.require("fromY")?, cx)?;
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
             let modifiers = modifiers(&p)?;
+            // A drag on a title bar moves the window, which posted events
+            // can't do.
+            if let Some(grab) = title_bar_at(from, cx).await {
+                show_pointer(&core, id, to, false, cx);
+                if !grab.drag_to(to, cx).await {
+                    return Err(ControlError::failed("the app would not let its window move"));
+                }
+                return reply(json!({ "movedWindow": true }));
+            }
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
             show_pointer(&core, id, to, false, cx);
@@ -133,6 +147,18 @@ pub async fn handle(
                     })?
                 }
             };
+            let grabbed = GRAB.with(|g| g.borrow_mut().remove(&id));
+            if down && let Some(grab) = title_bar_at(point, cx).await {
+                show_pointer(&core, id, point, true, cx);
+                let window = grab.target.window_id;
+                GRAB.with(|g| g.borrow_mut().insert(id, grab));
+                return reply(json!({ "windowId": window }));
+            }
+            if !down && let Some(grab) = grabbed {
+                show_pointer(&core, id, point, false, cx);
+                grab.drag_to(point, cx).await;
+                return reply(json!({ "windowId": grab.target.window_id }));
+            }
             let modifiers = modifiers(&p)?;
             let hit = show_pointer(&core, id, point, down, cx)
                 .button(point, down, modifiers)
@@ -344,7 +370,7 @@ pub async fn handle(
                             list.extend(menu.elements);
                         }
                     });
-                    return Ok(json!({ "menu": menu.tree }).as_object().cloned().unwrap_or_default());
+                    return reply(json!({ "menu": menu.tree }));
                 }
             }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
@@ -429,7 +455,12 @@ pub async fn handle(
         }
         other => Err(ControlError::invalid(format!("unknown method {other}"))),
     };
-    result.map(|value| match value {
+    result.and_then(reply)
+}
+
+/// A method's result as a reply; `return reply(...)` leaves a method early.
+fn reply(value: Value) -> Reply {
+    Ok(match value {
         Value::Object(map) => map,
         _ => Map::new(),
     })
@@ -871,7 +902,42 @@ fn input_display(
     Ok(id)
 }
 
+/// A window an agent holds by its title bar, between left_mouse_down and
+/// left_mouse_up.
+#[derive(Clone, Copy)]
+struct Grab {
+    target: WindowTarget,
+    frame: Rect,
+    from: (f64, f64),
+}
+
+impl Grab {
+    /// Move the window as far as the pointer moved from the press.
+    async fn drag_to(self, to: (f64, f64), cx: &mut AsyncApp) -> bool {
+        let frame = self.frame.offset(to.0 - self.from.0, to.1 - self.from.1);
+        cx.background_executor()
+            .spawn(async move { ax::set_frame(self.target, frame).is_ok() })
+            .await
+    }
+}
+
+/// The window whose title bar is at a global point, held there.
+async fn title_bar_at(at: (f64, f64), cx: &mut AsyncApp) -> Option<Grab> {
+    cx.background_executor()
+        .spawn(async move {
+            let window = windows::all().into_iter().find(|w| w.bounds.contains(at))?;
+            ax::on_title_bar(window.target, window.bounds, at).then_some(Grab {
+                target: window.target,
+                frame: window.bounds,
+                from: at,
+            })
+        })
+        .await
+}
+
 thread_local! {
+    static GRAB: std::cell::RefCell<std::collections::HashMap<DisplayId, Grab>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
     /// Window ids before each display's latest agent action.
     static BEFORE: std::cell::RefCell<std::collections::HashMap<DisplayId, (std::collections::HashSet<u32>, Instant)>> =
         std::cell::RefCell::new(std::collections::HashMap::new());

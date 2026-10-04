@@ -191,6 +191,33 @@ pub fn window_element(target: WindowTarget) -> Option<Element> {
         .find(|w| window_id(w) == Some(target.window_id))
 }
 
+/// Whether a global point is on the title bar or toolbar background of a
+/// window, where a drag moves the window. WindowServer moves windows for
+/// real mouse drags only, so agent drags there move it through here.
+pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
+    // Unified toolbars are up to 52 pt tall.
+    if at.1 - bounds.y > 52.0 {
+        return false;
+    }
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(target.pid).copy_element_at_position(
+            at.0 as f32,
+            at.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+        return false;
+    };
+    let element = unsafe { CFRetained::from_raw(raw) };
+    error == AXError::Success
+        && matches!(
+            string_attribute(&element, "AXRole").as_deref(),
+            Some("AXWindow" | "AXToolbar")
+        )
+}
+
 #[derive(Debug)]
 pub enum MoveError {
     NoWindow,
