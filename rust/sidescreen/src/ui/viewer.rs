@@ -79,6 +79,8 @@ pub struct Viewer {
     pub morphing: bool,
     /// Counts landings, so the header fades in once per landing.
     pub landed: u64,
+    /// Counts switches between displays, so each switch crossfades.
+    pub switches: u64,
     /// A dragged window hovers over the card.
     pub drop_target: bool,
     /// A Handover just landed: a brief accent ring.
@@ -115,6 +117,7 @@ impl Viewer {
             leaving: None,
             morphing: false,
             landed: 0,
+            switches: 0,
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
@@ -218,7 +221,12 @@ impl Render for Viewer {
                     .flex_1()
                     .px(px(INSET))
                     .pb(px(INSET))
-                    .child(screen)
+                    // Switching displays crossfades instead of swapping.
+                    .child(div().size_full().child(screen).with_animation(
+                        gpui::ElementId::NamedInteger("screen-in".into(), self.switches),
+                        Animation::new(std::time::Duration::from_millis(200)),
+                        |screen, t| screen.opacity(t),
+                    ))
                     .when_some(self.sheet.as_ref(), |d, sheet| {
                         d.child(self.sheet_view(sheet, &theme, cx).with_animation(
                             "sheet-in",

@@ -839,6 +839,7 @@ impl Shell {
                 viewer.sheet = None;
             }
             if viewer.display != Some(id) {
+                viewer.switches += 1;
                 viewer.menu_bar = None;
             }
             viewer.display = Some(id);
