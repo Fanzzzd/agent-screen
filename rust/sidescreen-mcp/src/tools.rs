@@ -129,7 +129,8 @@ pub fn definitions() -> Vec<Value> {
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
-                "coordinate they act at the pointer. cursor_position returns the pointer without a screenshot. Fails with",
+                "coordinate they act at the pointer. cursor_position returns the pointer without a screenshot. zoom",
+                "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Fails with",
                 "a takeover error while the user is operating the display; then call wait_for_control.",
             ],
             object(
@@ -138,10 +139,17 @@ pub fn definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": [
                         "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click",
                         "mouse_move", "left_click_drag", "left_mouse_down", "left_mouse_up", "scroll", "type", "key",
-                        "hold_key", "cursor_position", "wait"
+                        "hold_key", "cursor_position", "zoom", "wait"
                     ] },
                     "coordinate": coordinate(),
                     "start_coordinate": coordinate(),
+                    "region": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 4,
+                        "maxItems": 4,
+                        "description": "[x0, y0, x1, y1] in screenshot pixels, for zoom."
+                    },
                     "text": { "type": "string" },
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
@@ -644,6 +652,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 "key",
                 "hold_key",
                 "cursor_position",
+                "zoom",
                 "wait",
             ],
         )?
@@ -716,6 +725,25 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                     }),
                 )
                 .await?;
+        }
+        "zoom" => {
+            let region = a
+                .0
+                .get("region")
+                .cloned()
+                .ok_or_else(|| ControlError::invalid("region is required for zoom"))?;
+            let shot = control
+                .call("screenshot", json!({ "displayId": display, "region": region }))
+                .await?;
+            let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
+            return Ok(vec![
+                text(format!(
+                    "{}×{} zoom of region {region} on display {display}. Its pixels are not screen coordinates.",
+                    get("width"),
+                    get("height")
+                )),
+                image(&get("data"), &get("mimeType")),
+            ]);
         }
         "cursor_position" => {
             let at = control

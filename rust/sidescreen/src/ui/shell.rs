@@ -381,6 +381,16 @@ impl Shell {
                 } else {
                     self.latched = true;
                     self.show_peek(cx);
+                    // Opened on purpose: the keyboard can drive it. Peek is a
+                    // non-activating panel, so the user's app stays active.
+                    if let Some((peek, window)) = self.peek.clone() {
+                        native::make_key(&window);
+                        let _ = peek.update(cx, |peek, window, cx| {
+                            peek.focused = None;
+                            window.focus(&peek.focus, cx);
+                            cx.notify();
+                        });
+                    }
                 }
             }
             Native::MouseDown { x, y } => {
@@ -708,7 +718,7 @@ impl Shell {
         self.refresh_counts(cx);
     }
 
-    fn hide_peek(&mut self, cx: &mut Context<Self>) {
+    pub fn hide_peek(&mut self, cx: &mut Context<Self>) {
         self.latched = false;
         if !self.peek_shown {
             return;

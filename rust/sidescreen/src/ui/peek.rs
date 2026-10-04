@@ -8,9 +8,9 @@ use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::model::DisplayId;
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
-    Render, Role, StatefulInteractiveElement, Styled, WeakEntity, Window, div,
-    prelude::FluentBuilder, px, surface, svg,
+    Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    div, prelude::FluentBuilder, px, surface, svg,
 };
 use std::collections::HashMap;
 
@@ -41,6 +41,10 @@ pub struct Peek {
     pub counts: HashMap<DisplayId, usize>,
     /// Tile width: TILE_WIDTH unless that many tiles would not fit.
     pub tile: f32,
+    /// A Peek opened by a click takes the keyboard.
+    pub focus: FocusHandle,
+    /// The tile the arrow keys reached; the + tile is the last index.
+    pub focused: Option<usize>,
 }
 
 impl Peek {
@@ -69,7 +73,43 @@ impl Peek {
             active: None,
             counts: HashMap::new(),
             tile: TILE_WIDTH,
+            focus: cx.focus_handle(),
+            focused: None,
         }
+    }
+
+    /// ←/→ move between tiles, Return opens one, 1-9 jump to a display,
+    /// ⌘N adds one and Esc closes Peek.
+    fn key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ids = ordered(self.core.read(cx));
+        let count = ids.len() + 1;
+        let current = self
+            .focused
+            .or_else(|| self.active.and_then(|a| ids.iter().position(|&id| id == a)));
+        let keys = &event.keystroke;
+        let shell = self.shell.clone();
+        let open = move |index: usize, cx: &mut Context<Self>| match ids.get(index) {
+            Some(&id) => tell(&shell, cx, move |shell, cx| shell.select(id, cx)),
+            None => tell(&shell, cx, |shell, cx| shell.create_display(cx)),
+        };
+        let displays = count - 1;
+        match keys.key.as_str() {
+            "left" => self.focused = Some(current.map_or(0, |i| (i + count - 1) % count)),
+            "right" => self.focused = Some(current.map_or(0, |i| (i + 1) % count)),
+            "enter" => {
+                if let Some(index) = current {
+                    open(index, cx);
+                }
+            }
+            "escape" => tell(&self.shell, cx, |shell, cx| shell.hide_peek(cx)),
+            "n" if keys.modifiers.platform => open(displays, cx),
+            digit if !keys.modifiers.modified() => match digit.parse::<usize>() {
+                Ok(n) if (1..=9).contains(&n) && n <= displays => open(n - 1, cx),
+                _ => return,
+            },
+            _ => return,
+        }
+        cx.notify();
     }
 
     /// Card size and tile width for `displays` tiles plus the "+", no
@@ -102,7 +142,7 @@ impl Render for Peek {
         let streams = self.streams.read(cx);
         let ids = ordered(core);
         let mut tiles = Vec::new();
-        for id in &ids {
+        for (index, id) in ids.iter().enumerate() {
             let Some(display) = core.displays.get(*id) else {
                 continue;
             };
@@ -119,6 +159,7 @@ impl Render for Peek {
                 pointer,
                 (display.width, display.height),
                 self.active == Some(*id),
+                self.focused == Some(index),
                 self.tile,
                 &theme,
                 &self.shell,
@@ -126,8 +167,11 @@ impl Render for Peek {
         }
         let narrow = !ids.is_empty();
         let shell = self.shell.clone();
+        let add_focused = self.focused == Some(ids.len());
         div()
             .id("peek")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|peek: &mut Peek, e: &KeyDownEvent, _, cx| peek.key(e, cx)))
             .role(Role::Group)
             .aria_label("Sidescreen")
             .size_full()
@@ -143,7 +187,13 @@ impl Render for Peek {
                 tell(&shell, cx, move |shell, cx| shell.card_hover(hovered, cx));
             })
             .children(tiles)
-            .child(add_tile(narrow, self.tile, &theme, &self.shell))
+            .child(add_tile(
+                narrow,
+                self.tile,
+                add_focused,
+                &theme,
+                &self.shell,
+            ))
     }
 }
 
@@ -156,6 +206,7 @@ fn tile(
     pointer: Option<crate::model::AgentPointer>,
     size: (f64, f64),
     active: bool,
+    focused: bool,
     width: f32,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
@@ -175,11 +226,16 @@ fn tile(
     let fit = (size.0 as f32 * fit, size.1 as f32 * fit);
     let select = shell.clone();
     let dismiss = shell.clone();
+    // Open in the Viewer: a full ring. Reached with the arrow keys: a
+    // fainter one.
     let ring = if active {
         theme.accent
+    } else if focused {
+        theme.accent.opacity(0.6)
     } else {
         gpui::transparent_black()
     };
+    let ringed = active || focused;
     div()
         .id(gpui::ElementId::Integer(id as u64))
         .group(group.clone())
@@ -232,9 +288,9 @@ fn tile(
                                 .absolute()
                                 .inset_0()
                                 .rounded(px(9.))
-                                .border(px(if active { 2. } else { 0. }))
+                                .border(px(if ringed { 2. } else { 0. }))
                                 .border_color(ring)
-                                .when(!active, |ring| {
+                                .when(!ringed, |ring| {
                                     ring.group_hover(group.clone(), |s| {
                                         s.border(px(1.5)).border_color(theme.label.opacity(0.55))
                                     })
@@ -312,7 +368,13 @@ fn tile(
         )
 }
 
-fn add_tile(narrow: bool, tile: f32, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
+fn add_tile(
+    narrow: bool,
+    tile: f32,
+    focused: bool,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> impl IntoElement {
     let shell = shell.clone();
     let width = if narrow { NARROW } else { tile };
     div()
@@ -335,7 +397,8 @@ fn add_tile(narrow: bool, tile: f32, theme: &Theme, shell: &WeakEntity<Shell>) -
                 .h(px(thumb_height(tile)))
                 .rounded(px(9.))
                 .bg(theme.label.opacity(0.06))
-                .border(px(0.))
+                .border(px(if focused { 2. } else { 0. }))
+                .border_color(theme.accent.opacity(0.6))
                 .group_hover("add", |s| {
                     s.border(px(1.5)).border_color(theme.label.opacity(0.55))
                 })

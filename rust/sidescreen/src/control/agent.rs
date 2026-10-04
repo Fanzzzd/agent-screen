@@ -60,11 +60,38 @@ pub async fn handle(
             // `global` maps them back with the same scale.
             let scale = shot_scale(size);
             let pixels = ((size.0 * scale).round(), (size.1 * scale).round());
-            // Pixels per point of the display, times the bar's points.
-            let cover = crate::mac::menubar_height(id) * pixels.0 / size.0;
+            let bar = crate::mac::menubar_height(id);
+            // A zoom: a region of the screenshot, in its pixels, captured
+            // at up to twice the display's points for detail.
+            let region = match p.0.get("region").and_then(Value::as_array) {
+                Some(r) => {
+                    let n: Vec<f64> = r.iter().filter_map(Value::as_f64).collect();
+                    let [x0, y0, x1, y1] = n[..] else {
+                        return Err(ControlError::invalid("region is [x0, y0, x1, y1]"));
+                    };
+                    let (w, h) = (size.0 * scale, size.1 * scale);
+                    if !(0.0 <= x0 && x0 < x1 && x1 <= w && 0.0 <= y0 && y0 < y1 && y1 <= h) {
+                        return Err(ControlError::invalid(format!(
+                            "region must lie within the {}×{} screenshot, x0 < x1 and y0 < y1",
+                            w as i64, h as i64
+                        )));
+                    }
+                    Some(Rect::new(x0 / scale, y0 / scale, (x1 - x0) / scale, (y1 - y0) / scale))
+                }
+                None => None,
+            };
+            let (pixels, cover) = match region {
+                Some(r) => {
+                    let zoom = (2.0f64).min(1568.0 / r.width.max(r.height));
+                    let pixels = ((r.width * zoom).round(), (r.height * zoom).round());
+                    (pixels, (bar - r.y).max(0.0) * zoom)
+                }
+                // Pixels per point of the display, times the bar's points.
+                None => (pixels, bar * pixels.0 / size.0),
+            };
             let shot = cx
                 .background_executor()
-                .spawn(async move { screenshot::display(id, pixels, format, cover) })
+                .spawn(async move { screenshot::display(id, pixels, format, cover, region) })
                 .await
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);

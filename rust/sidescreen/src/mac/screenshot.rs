@@ -47,14 +47,16 @@ fn lookup(id: DisplayId, fresh: bool) -> Result<Arc<SCDisplay>, String> {
         .ok_or_else(|| "display is not capturable yet; retry in a moment".into())
 }
 
-/// Blocking: call off the main thread. `cover` is the height, in image
-/// pixels, of the strip at the top to paint over: macOS draws the user's
-/// own menu bar there, on every display.
+/// Blocking: call off the main thread. `source` limits the capture to a
+/// display-local rect in points, for a zoomed view. `cover` is the height,
+/// in image pixels, of the strip at the top to paint over: macOS draws the
+/// user's own menu bar there, on every display.
 pub fn display(
     id: DisplayId,
     size: (f64, f64),
     format: Format,
     cover: f64,
+    source: Option<crate::model::Rect>,
 ) -> Result<Shot, String> {
     let capture = |target: &SCDisplay| -> Result<CGImage, String> {
         let filter = SCContentFilter::create()
@@ -62,10 +64,13 @@ pub fn display(
             .with_excluding_windows(&[])
             .build()
             .map_err(|e| e.to_string())?;
-        let config = SCStreamConfiguration::new()
+        let mut config = SCStreamConfiguration::new()
             .with_width(size.0 as u32)
             .with_height(size.1 as u32)
             .with_shows_cursor(false);
+        if let Some(r) = source {
+            config.set_source_rect(screencapturekit::cg::CGRect::new(r.x, r.y, r.width, r.height));
+        }
         SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())
     };
     // A cached display can go stale when displays change; list them again.
