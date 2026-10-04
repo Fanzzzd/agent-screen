@@ -11,9 +11,9 @@ use crate::dismissal::Item;
 use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ObjectFit, ParentElement, Pixels, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, WeakEntity, Window, canvas, div, point,
+    Animation, AnimationExt, App, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ObjectFit, ParentElement, Pixels, Render, Role,
+    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window, canvas, div, point,
     prelude::FluentBuilder, px, size, surface, svg,
 };
 use std::cell::Cell;
@@ -23,8 +23,12 @@ pub const HEADER: f32 = 52.;
 pub const INSET: f32 = 8.;
 pub const RADIUS: f32 = 22.;
 const SCREEN_RADIUS: f32 = 13.;
+/// The Dismissal sheet fades in, and out once answered.
+const SHEET_IN: std::time::Duration = std::time::Duration::from_millis(160);
+pub const SHEET_OUT: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// The Dismissal question, laid over the screen.
+#[derive(Clone)]
 pub struct Sheet {
     pub display: DisplayId,
     pub label: String,
@@ -66,6 +70,8 @@ pub struct Viewer {
     /// Windows on the display, refreshed by the shell.
     pub count: usize,
     pub sheet: Option<Sheet>,
+    /// An answered sheet, fading out.
+    pub leaving: Option<Sheet>,
     /// A dragged window hovers over the card.
     pub drop_target: bool,
     /// A Handover just landed: a brief accent ring.
@@ -99,6 +105,7 @@ impl Viewer {
             menu_bar: None,
             count: 0,
             sheet: None,
+            leaving: None,
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
@@ -151,6 +158,17 @@ impl Render for Viewer {
                 .truncate()
                 .child(format!("松手把窗口交给 {agent}"))
                 .into_any_element()
+        } else if status.kind == Kind::Help {
+            // The reason is the one line the user must read; one line
+            // can't hold a long one, so it shows in full on hover.
+            let reason = status.long.clone();
+            div()
+                .id("status")
+                .min_w_0()
+                .tooltip(move |_, cx| super::shell::hint(reason.clone(), cx))
+                .tooltip_show_delay(super::shell::HINT_DELAY)
+                .child(status.line(&status.long, 12.))
+                .into_any_element()
         } else {
             status.line(&status.long, 12.).into_any_element()
         };
@@ -186,7 +204,20 @@ impl Render for Viewer {
                     .pb(px(INSET))
                     .child(screen)
                     .when_some(self.sheet.as_ref(), |d, sheet| {
-                        d.child(self.sheet_view(sheet, &theme, cx))
+                        d.child(self.sheet_view(sheet, &theme, cx).with_animation(
+                            "sheet-in",
+                            Animation::new(SHEET_IN).with_easing(gpui::ease_out_quint()),
+                            |sheet, t| sheet.opacity(t),
+                        ))
+                    })
+                    .when(self.sheet.is_none(), |d| {
+                        d.when_some(self.leaving.as_ref(), |d, sheet| {
+                            d.child(self.sheet_view(sheet, &theme, cx).with_animation(
+                                "sheet-out",
+                                Animation::new(SHEET_OUT).with_easing(gpui::quadratic),
+                                |sheet, t| sheet.opacity(1. - t),
+                            ))
+                        })
                     }),
             )
             .into_any_element()
@@ -447,7 +478,12 @@ impl Viewer {
             .child(input)
     }
 
-    fn sheet_view(&self, sheet: &Sheet, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sheet_view(
+        &self,
+        sheet: &Sheet,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let closes_window = sheet.items.iter().any(|i| i.fate == Fate::Close);
         let confirm_color = if closes_window || sheet.live {
             theme.red
@@ -586,10 +622,18 @@ impl Viewer {
                             .flex()
                             .justify_end()
                             .gap(px(8.))
-                            .child(sheet_button("cancel", "取消", None, theme).on_click(cancel))
                             .child(
-                                sheet_button("confirm", "关闭显示器", Some(confirm_color), theme)
-                                    .on_click(confirm),
+                                sheet_button("cancel", "取消", "esc", None, theme).on_click(cancel),
+                            )
+                            .child(
+                                sheet_button(
+                                    "confirm",
+                                    "关闭显示器",
+                                    "⌘↩",
+                                    Some(confirm_color),
+                                    theme,
+                                )
+                                .on_click(confirm),
                             ),
                     ),
             )
@@ -618,6 +662,7 @@ fn note(text: String, color: Hsla) -> gpui::AnyElement {
 fn sheet_button(
     id: &'static str,
     title: &'static str,
+    shortcut: &'static str,
     color: Option<Hsla>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
@@ -640,7 +685,9 @@ fn sheet_button(
         .text_size(px(12.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
+        .gap(px(6.))
         .child(title)
+        .child(div().text_size(px(10.5)).opacity(0.6).child(shortcut))
 }
 
 /// 取回 | 关闭窗口 for one window.
@@ -669,7 +716,18 @@ fn segmented(
             } else {
                 theme.secondary
             })
-            .when(selected, |d| d.bg(theme.control_hover))
+            .when(selected, |d| {
+                d.bg(theme.segment)
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .shadow(vec![gpui::BoxShadow {
+                        color: gpui::black().opacity(0.12),
+                        offset: point(px(0.), px(1.)),
+                        blur_radius: px(2.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
+            })
+            .when(!selected, |d| d.hover(|s| s.bg(theme.control_hover)))
             .on_click(cx.listener(move |viewer: &mut Viewer, _, _, cx| {
                 if let Some(item) = viewer.sheet.as_mut().and_then(|s| s.items.get_mut(index)) {
                     item.fate = value;

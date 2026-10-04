@@ -66,6 +66,7 @@ impl Render for Hint {
             .px(px(8.))
             .py(px(4.))
             .rounded(px(6.))
+            .max_w(px(360.))
             .bg(gpui::black().opacity(0.85))
             .text_size(px(12.))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -1333,7 +1334,15 @@ impl Shell {
         };
         let sheet = viewer.update(cx, |viewer, _, cx| {
             cx.notify();
-            viewer.sheet.take()
+            let sheet = viewer.sheet.take();
+            viewer.leaving = sheet.clone();
+            sheet
+        });
+        self.after(super::viewer::SHEET_OUT, cx, move |_, cx| {
+            let _ = viewer.update(cx, |viewer, _, cx| {
+                viewer.leaving = None;
+                cx.notify();
+            });
         });
         if let (Ok(Some(sheet)), Some(items)) = (sheet, items) {
             self.dismiss_now(sheet.display, items, cx);

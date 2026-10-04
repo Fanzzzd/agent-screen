@@ -24,6 +24,8 @@ pub struct Theme {
     pub screen_empty: Hsla,
     /// Covers the user's menu bar on an Agent Display's picture.
     pub menu_strip: Hsla,
+    /// The chosen segment of a segmented control, raised off its track.
+    pub segment: Hsla,
     /// The dimmed layer under a sheet.
     pub scrim: Hsla,
     pub sheet: Hsla,
@@ -44,6 +46,7 @@ pub fn palette(dark: bool) -> Theme {
             red: rgb(0xff453a).into(),
             screen_empty: rgba(0x00000059).into(),
             menu_strip: rgb(0x323236).into(),
+            segment: rgba(0xffffff38).into(),
             scrim: rgba(0x00000073).into(),
             sheet: rgba(0x2c2c2ef8).into(),
         }
@@ -61,6 +64,7 @@ pub fn palette(dark: bool) -> Theme {
             // Darker than the + tile, so an empty screen never reads as one.
             screen_empty: rgba(0x00000059).into(),
             menu_strip: rgb(0xe8e8ed).into(),
+            segment: rgb(0xffffff).into(),
             scrim: rgba(0x00000059).into(),
             sheet: rgba(0xfbfbfdf8).into(),
         }
