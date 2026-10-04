@@ -142,7 +142,9 @@ impl Forwarder {
     // Lock and the left/right device bits survive.
 
     pub fn mouse_down(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
-        self.send(move |w| w.mouse_down(at, button, clicks, flags));
+        self.send(move |w| {
+            w.mouse_down(at, button, clicks, flags);
+        });
     }
 
     pub fn mouse_dragged(&self, to: (f64, f64), button: Button, flags: CGEventFlags) {
@@ -180,19 +182,30 @@ impl Forwarder {
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
     // is posted, so a tool call can take a screenshot straight after.
 
-    pub async fn click(&self, at: (f64, f64), button: Button, count: i64, m: Modifiers) {
+    /// The window clicked, or None when no window is at `at`.
+    pub async fn click(
+        &self,
+        at: (f64, f64),
+        button: Button,
+        count: i64,
+        m: Modifiers,
+    ) -> Option<WindowTarget> {
         self.run(move |w| {
             let count = count.max(1);
+            let mut hit = None;
             for index in 1..=count {
-                w.mouse_down(at, button, index, flags(m));
+                hit = w.mouse_down(at, button, index, flags(m));
+                hit?;
                 thread::sleep(Duration::from_millis(30));
                 w.mouse_up(at, button, index, flags(m));
                 if index < count {
                     thread::sleep(Duration::from_millis(80));
                 }
             }
+            hit
         })
-        .await;
+        .await
+        .flatten()
     }
 
     pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) {
@@ -344,10 +357,16 @@ impl Worker {
         }
     }
 
-    fn mouse_down(&mut self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
+    fn mouse_down(
+        &mut self,
+        at: (f64, f64),
+        button: Button,
+        clicks: i64,
+        flags: CGEventFlags,
+    ) -> Option<WindowTarget> {
         let Some(hit) = self.hit(at, true) else {
             log::info!("input: no window at {at:?}");
-            return;
+            return None;
         };
         let target = hit.target;
         self.focus(target);
@@ -355,6 +374,7 @@ impl Worker {
         self.gesture = Some(Gesture { target, group });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
+        Some(target)
     }
 
     fn mouse_dragged(&mut self, to: (f64, f64), button: Button, flags: CGEventFlags) {

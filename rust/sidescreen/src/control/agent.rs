@@ -80,10 +80,17 @@ pub async fn handle(
                 })?;
             let modifiers = modifiers(&p)?;
             let forwarder = show_pointer(&core, id, point, true, cx);
-            forwarder
+            let hit = forwarder
                 .click(point, button, p.int("count").unwrap_or(1), modifiers)
                 .await;
-            Ok(json!({}))
+            match hit {
+                Some(window) => Ok(json!({ "windowId": window.window_id })),
+                None => Err(ControlError::not_found(format!(
+                    "nothing at ({}, {}): no window there to click",
+                    p.number("x").unwrap_or(0.0) as i64,
+                    p.number("y").unwrap_or(0.0) as i64
+                ))),
+            }
         }
         "move" => {
             let (id, point) = target(&core, &p, cx)?;

@@ -12,6 +12,9 @@ pub struct Window {
     pub title: String,
     /// Display-relative bounds for windows on a display, global otherwise.
     pub bounds: Rect,
+    /// Window level: 0 for documents, 3 for floating panels, 8 for modal
+    /// panels and alerts.
+    pub layer: i64,
 }
 
 impl Window {
@@ -23,29 +26,39 @@ impl Window {
             "x": self.bounds.x as i64,
             "y": self.bounds.y as i64,
             "width": self.bounds.width as i64,
-            "height": self.bounds.height as i64
+            "height": self.bounds.height as i64,
+            "kind": match self.layer {
+                0 => "window",
+                l if l >= 8 => "dialog",
+                _ => "panel",
+            }
         })
     }
 }
 
-/// Normal app windows (layer 0) of other apps, front to back, global bounds.
+/// Other apps' windows a user can act on, front to back, global bounds:
+/// documents, floating panels such as inspectors, and modal panels and
+/// alerts (levels 0 to 8). Menus, the Dock and status items sit higher.
 pub fn all() -> Vec<Window> {
+    let own = std::process::id() as i32;
     cg::on_screen_windows()
         .into_iter()
-        .filter(|w| w.layer == 0 && w.bounds.width > 40.0 && w.bounds.height > 40.0)
+        .filter(|w| {
+            (0..=8).contains(&w.layer)
+                && w.target.pid != own
+                && w.bounds.width > 40.0
+                && w.bounds.height > 40.0
+        })
         .map(|w| Window {
             target: w.target,
             app: w.owner_name,
             title: w.title,
             bounds: w.bounds,
+            layer: w.layer as i64,
         })
         .collect()
 }
 
-/// Windows on a display, with display-relative bounds. A window counts if it
-/// touches the display and its center is on no other display. A window
-/// hanging off the bottom edge still counts, so dismissing the display does
-/// not strand it off-screen.
 /// Whether a window with `bounds` is on the display covering `area`: it
 /// overlaps it, and no other display holds its center instead.
 fn belongs(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
@@ -77,6 +90,10 @@ pub fn counts(displays: &[DisplayId]) -> std::collections::HashMap<DisplayId, us
         .collect()
 }
 
+/// Windows on a display, with display-relative bounds. A window counts if it
+/// touches the display and its center is on no other display. A window
+/// hanging off the bottom edge still counts, so dismissing the display does
+/// not strand it off-screen.
 pub fn on_display(display: DisplayId) -> Vec<Window> {
     let area = cg::display_bounds(display);
     let others = other_displays(display);

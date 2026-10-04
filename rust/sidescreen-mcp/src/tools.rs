@@ -537,9 +537,27 @@ pub async fn run(
             control
                 .call("settle", json!({ "displayId": display }))
                 .await?;
-            window_state(control, display, window)
-                .await
-                .map(Output::Content)
+            match window_state(control, display, window).await {
+                // OK, Save or Close took its own window away: that is the
+                // action working, so show what is on the display now.
+                Err(error) if error.code == "not_found" => {
+                    let list = control
+                        .call("listWindows", json!({ "displayId": display }))
+                        .await?;
+                    let shot = control
+                        .call("screenshot", json!({ "displayId": display }))
+                        .await?;
+                    let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
+                    Ok(Output::Content(vec![
+                        text(format!(
+                            "Done; the action closed window {window}. Windows on the display now: {}",
+                            list.get("windows").cloned().unwrap_or(Value::Null)
+                        )),
+                        image(&get("data"), &get("mimeType")),
+                    ]))
+                }
+                other => other.map(Output::Content),
+            }
         }
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
@@ -578,7 +596,7 @@ async fn window_state(
         ""
     };
     let header = format!(
-        "Window {window}: {} {} elements{truncated}. Coordinates are window points from its top-left corner, the same space as the {}×{} image.",
+        "Window {window}: {} {} elements{truncated}. Coordinates are window points from its top-left corner, the same space as the {}×{} image; add the window's x and y to aim the computer tool at them.",
         get("window"),
         elements,
         get("width"),
