@@ -1,10 +1,11 @@
-//! The menus of the app in front on an Agent Display, opened from the
-//! Viewer's menu bar strip.
+//! The menu bar of the app in front on an Agent Display, for the Viewer.
 //!
-//! That strip mirrors the menu bar of the user's own front app, not the
-//! display's, and posted clicks never open a menu bar anyway. So a click
-//! there shows the display's front app menus as one native menu, read
-//! through accessibility, and the chosen item is pressed.
+//! macOS draws the menu bar of the user's own front app on every display,
+//! the Agent Display's included: agent apps never become active. So the
+//! Viewer covers that strip with the display's front app's own titles, read
+//! here through accessibility, and a click on a title opens that menu and
+//! presses the chosen item. Reads take a round trip per attribute, so they
+//! run off the main thread; menus are built on it.
 
 use super::ax::{self, Element, Sendable};
 use super::native::{Menu, MenuAction, set_checked, set_key_equivalent};
@@ -16,13 +17,6 @@ use std::cell::RefCell;
 thread_local! {
     /// Elements of the menu last shown, by `PressProxy` index.
     static ITEMS: RefCell<Vec<Sendable>> = const { RefCell::new(Vec::new()) };
-}
-
-/// The front app's menus, read through accessibility. Reading takes one
-/// round trip per attribute, so it runs off the main thread.
-pub struct Menus {
-    app: String,
-    titles: Vec<(String, Vec<Node>)>,
 }
 
 enum Node {
@@ -38,27 +32,54 @@ enum Node {
     },
 }
 
-/// The front app's menus on `display`, or None when no app there has any.
-pub fn read(display: DisplayId) -> Option<Menus> {
+/// The menu bar of the front app on a display: its name and its menu
+/// titles, without the Apple menu.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Bar {
+    pub pid: i32,
+    pub app: String,
+    pub titles: Vec<String>,
+}
+
+/// The front app on `display` and its menu bar, or None when it has none.
+pub fn bar(display: DisplayId) -> Option<Bar> {
     let window = windows::on_display(display).into_iter().next()?;
     let app = ax::application(window.target.pid);
     let bar = ax::element_attribute(&app, "AXMenuBar")?;
-    // The first title is the Apple menu, which belongs to the system.
-    let titles: Vec<(String, Vec<Node>)> = ax::elements_attribute(&bar, "AXChildren")
+    let titles: Vec<String> = ax::elements_attribute(&bar, "AXChildren")
         .into_iter()
         .skip(1)
-        .filter_map(|item| {
-            let submenu = ax::elements_attribute(&item, "AXChildren")
-                .into_iter()
-                .next()?;
-            let title = ax::string_attribute(&item, "AXTitle").unwrap_or_default();
-            Some((title, nodes(&submenu)))
-        })
+        .map(|item| ax::string_attribute(&item, "AXTitle").unwrap_or_default())
         .collect();
-    (!titles.is_empty()).then_some(Menus {
+    (!titles.is_empty()).then(|| Bar {
+        pid: window.target.pid,
         app: window.app,
         titles,
     })
+}
+
+/// The items of one menu of `pid`'s menu bar, `index` counting from the
+/// first title after the Apple menu.
+pub struct Items(Vec<Node>);
+
+pub fn items(pid: i32, index: usize) -> Option<Items> {
+    let app = ax::application(pid);
+    let bar = ax::element_attribute(&app, "AXMenuBar")?;
+    let title = ax::elements_attribute(&bar, "AXChildren")
+        .into_iter()
+        .nth(index + 1)?;
+    let menu = ax::elements_attribute(&title, "AXChildren")
+        .into_iter()
+        .next()?;
+    Some(Items(nodes(&menu)))
+}
+
+/// One menu, ready to pop up. Main thread.
+pub fn build_items(title: &str, items: Items) -> Menu {
+    let menu = Menu::new(title);
+    ITEMS.with(|items| items.borrow_mut().clear());
+    fill(&menu, items.0);
+    menu
 }
 
 fn nodes(ax_menu: &Element) -> Vec<Node> {
@@ -94,19 +115,6 @@ fn nodes(ax_menu: &Element) -> Vec<Node> {
             }
         })
         .collect()
-}
-
-/// One native menu with a submenu per title. Main thread.
-pub fn build(menus: Menus) -> Menu {
-    let menu = Menu::new(&menus.app);
-    menu.disabled(&menus.app);
-    ITEMS.with(|items| items.borrow_mut().clear());
-    for (title, nodes) in menus.titles {
-        let content = Menu::new(&title);
-        fill(&content, nodes);
-        menu.submenu(&title, content);
-    }
-    menu
 }
 
 fn fill(menu: &Menu, nodes: Vec<Node>) {

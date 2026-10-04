@@ -16,6 +16,13 @@ use std::collections::HashMap;
 
 pub const TILE_WIDTH: f32 = 208.;
 pub const THUMB_HEIGHT: f32 = 130.;
+/// The narrowest a tile gets when many displays share the card.
+pub const MIN_TILE: f32 = 120.;
+
+/// Thumbnail height for a tile width, at the 208×130 proportions.
+pub fn thumb_height(tile: f32) -> f32 {
+    tile * THUMB_HEIGHT / TILE_WIDTH
+}
 pub const LABEL_HEIGHT: f32 = 38.;
 pub const PADDING: f32 = 10.;
 pub const SPACING: f32 = 10.;
@@ -32,6 +39,8 @@ pub struct Peek {
     pub active: Option<DisplayId>,
     /// Windows on each display, refreshed by the shell.
     pub counts: HashMap<DisplayId, usize>,
+    /// Tile width: TILE_WIDTH unless that many tiles would not fit.
+    pub tile: f32,
 }
 
 impl Peek {
@@ -59,15 +68,23 @@ impl Peek {
             shown: false,
             active: None,
             counts: HashMap::new(),
+            tile: TILE_WIDTH,
         }
     }
 
-    /// Card size for `displays` tiles plus the "+".
-    pub fn size(displays: usize) -> (f64, f64) {
+    /// Card size and tile width for `displays` tiles plus the "+", no
+    /// wider than `room`: tiles shrink down to MIN_TILE to fit.
+    pub fn size(displays: usize, room: f64) -> (f64, f64, f32) {
         let add = if displays == 0 { TILE_WIDTH } else { NARROW };
-        let width = PADDING * 2. + displays as f32 * (TILE_WIDTH + SPACING) + add;
-        let height = PADDING * 2. + THUMB_HEIGHT + LABEL_HEIGHT;
-        (width as f64, height as f64)
+        let fixed = PADDING * 2. + add + displays as f32 * SPACING;
+        let tile = if displays == 0 {
+            TILE_WIDTH
+        } else {
+            ((room as f32 - fixed) / displays as f32).clamp(MIN_TILE, TILE_WIDTH)
+        };
+        let width = fixed + displays as f32 * tile;
+        let height = PADDING * 2. + thumb_height(tile) + LABEL_HEIGHT;
+        (width as f64, height as f64, tile)
     }
 }
 
@@ -102,6 +119,7 @@ impl Render for Peek {
                 pointer,
                 (display.width, display.height),
                 self.active == Some(*id),
+                self.tile,
                 &theme,
                 &self.shell,
             ));
@@ -125,7 +143,7 @@ impl Render for Peek {
                 tell(&shell, cx, move |shell, cx| shell.card_hover(hovered, cx));
             })
             .children(tiles)
-            .child(add_tile(narrow, &theme, &self.shell))
+            .child(add_tile(narrow, self.tile, &theme, &self.shell))
     }
 }
 
@@ -138,6 +156,7 @@ fn tile(
     pointer: Option<crate::model::AgentPointer>,
     size: (f64, f64),
     active: bool,
+    width: f32,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
 ) -> impl IntoElement {
@@ -165,7 +184,7 @@ fn tile(
             let text = format!("{label}\n{}", status.long);
             move |_, cx| super::shell::hint(text.clone(), cx)
         })
-        .w(px(TILE_WIDTH))
+        .w(px(width))
         .flex()
         .flex_col()
         .cursor_pointer()
@@ -174,7 +193,7 @@ fn tile(
             div()
                 .relative()
                 .w_full()
-                .h(px(THUMB_HEIGHT))
+                .h(px(thumb_height(width)))
                 .rounded(px(9.))
                 .overflow_hidden()
                 .bg(theme.screen_empty)
@@ -254,7 +273,7 @@ fn tile(
         )
 }
 
-fn add_tile(narrow: bool, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
+fn add_tile(narrow: bool, tile: f32, theme: &Theme, shell: &WeakEntity<Shell>) -> impl IntoElement {
     let shell = shell.clone();
     let width = if narrow { NARROW } else { TILE_WIDTH };
     div()
@@ -274,7 +293,7 @@ fn add_tile(narrow: bool, theme: &Theme, shell: &WeakEntity<Shell>) -> impl Into
         .child(
             div()
                 .w_full()
-                .h(px(THUMB_HEIGHT))
+                .h(px(thumb_height(tile)))
                 .rounded(px(9.))
                 .bg(theme.label.opacity(0.06))
                 .border(px(0.))
@@ -303,4 +322,31 @@ fn add_tile(narrow: bool, theme: &Theme, shell: &WeakEntity<Shell>) -> impl Into
                 .group_hover("add", |s| s.text_color(theme.label))
                 .when(!narrow, |d| d.child("新建显示器")),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_few_displays_get_full_size_tiles() {
+        let (width, _, tile) = Peek::size(3, 1424.0);
+        assert_eq!(tile, TILE_WIDTH);
+        assert_eq!(width, (20. + 3. * 218. + 44.) as f64);
+    }
+
+    #[test]
+    fn many_displays_shrink_their_tiles_to_fit() {
+        // Seven full-size tiles need 1590 pt on a 1424 pt screen.
+        let (width, height, tile) = Peek::size(7, 1424.0);
+        assert!(tile < TILE_WIDTH && tile >= MIN_TILE);
+        assert!(width <= 1424.0 + 0.5);
+        assert!(height < (PADDING * 2. + THUMB_HEIGHT + LABEL_HEIGHT) as f64);
+    }
+
+    #[test]
+    fn tiles_stop_shrinking_at_the_minimum() {
+        let (_, _, tile) = Peek::size(30, 1424.0);
+        assert_eq!(tile, MIN_TILE);
+    }
 }

@@ -37,9 +37,28 @@ pub struct Sheet {
 thread_local! {
     /// The 窗口 button's bounds in the window, from the last paint.
     static WINDOWS_BUTTON: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// The display image within the screen area, from the last paint:
+    /// left and top offsets and width, in window points.
+    static IMAGE: Cell<Option<(f32, f32, f32)>> = const { Cell::new(None) };
+    /// Each menu bar title's bounds in the window, by title index.
+    static TITLES: std::cell::RefCell<Vec<[f64; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The menu bar title under window x, with its bounds as x, y, width, height.
+pub fn title_at(x: f64) -> Option<(usize, [f64; 4])> {
+    TITLES.with(|t| {
+        t.borrow()
+            .iter()
+            .enumerate()
+            .find(|(_, b)| x >= b[0] && x < b[0] + b[2])
+            .map(|(i, b)| (i, *b))
+    })
 }
 
 pub struct Viewer {
+    /// The menu bar of the display's front app, drawn over the strip where
+    /// macOS shows the user's own app.
+    pub menu_bar: Option<crate::mac::menubar::Bar>,
     shell: WeakEntity<Shell>,
     core: Entity<Core>,
     streams: Entity<Streams>,
@@ -77,6 +96,7 @@ impl Viewer {
             core,
             streams,
             display: None,
+            menu_bar: None,
             count: 0,
             sheet: None,
             drop_target: false,
@@ -375,6 +395,13 @@ impl Viewer {
             |_, _, _| {},
             move |bounds, _, _: &mut Window, _| {
                 let c = content_rect(bounds, size);
+                IMAGE.with(|i| {
+                    i.set(Some((
+                        f32::from(c.origin.x - bounds.origin.x),
+                        f32::from(c.origin.y - bounds.origin.y),
+                        f32::from(c.size.width),
+                    )))
+                });
                 let rect = [c.origin.x, c.origin.y, c.size.width, c.size.height]
                     .map(|v| f32::from(v) as f64);
                 viewer_input::layout(Some(rect), blocked);
@@ -396,6 +423,10 @@ impl Viewer {
             .bg(theme.screen_empty)
             .child(picture)
             .child(theme::round_corners(SCREEN_RADIUS, theme.card))
+            .when_some(
+                self.menu_bar.clone().zip(IMAGE.with(Cell::get)),
+                |d, (bar, image)| d.child(menu_strip(bar, image, id, size, theme)),
+            )
             .child(pointer::layer(id, pointer, size, theme.accent))
             .when_some(outline, |d, (color, width)| {
                 d.child(
@@ -674,4 +705,72 @@ mod tests {
         assert_eq!(fit.size.width, px(160.));
         assert_eq!(fit.origin.x, px(20.));
     }
+}
+
+/// The display's front app menu bar, laid over the image's menu bar strip
+/// at the strip's own size. Clicks on it reach the shell through the native
+/// input monitor, which looks titles up with `title_at`.
+fn menu_strip(
+    bar: crate::mac::menubar::Bar,
+    (left, top, width): (f32, f32, f32),
+    id: DisplayId,
+    size: (f64, f64),
+    theme: &Theme,
+) -> impl IntoElement {
+    let scale = width / size.0 as f32;
+    let height = crate::mac::menubar_height(id) as f32 * scale;
+    let font = (13.0 * scale).max(8.0);
+    TITLES.with(|t| t.borrow_mut().clear());
+    let title = |index: usize, text: String, bold: bool| {
+        div()
+            .relative()
+            .h_full()
+            .flex()
+            .items_center()
+            .px(px(7.0 * scale))
+            .rounded(px(4.0 * scale))
+            .hover(|s| s.bg(theme.control_hover))
+            .when(bold, |d| d.font_weight(gpui::FontWeight::BOLD))
+            .child(text)
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        let rect = [b.origin.x, b.origin.y, b.size.width, b.size.height]
+                            .map(|v| f32::from(v) as f64);
+                        TITLES.with(|t| {
+                            let mut t = t.borrow_mut();
+                            if t.len() <= index {
+                                t.resize(index + 1, [0.0; 4]);
+                            }
+                            t[index] = rect;
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+    };
+    div()
+        .absolute()
+        .left(px(left))
+        .top(px(top))
+        .w(px(width))
+        .h(px(height))
+        .flex()
+        .items_center()
+        .px(px(6.0 * scale))
+        .bg(theme.card)
+        .text_size(px(font))
+        .text_color(theme.label)
+        .overflow_hidden()
+        // The first menu is the app's own, named in bold as on a Mac.
+        .children(
+            bar.titles
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| title(i, t, i == 0)),
+        )
 }

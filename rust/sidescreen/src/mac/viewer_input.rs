@@ -155,7 +155,10 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 if button == Button::Left
                     && at.1 - cg::display_bounds(display).y < menubar_height(display)
                 {
-                    native::send(Native::MenuBarClick { display });
+                    native::send(Native::MenuBarClick {
+                        display,
+                        x: event.locationInWindow().x,
+                    });
                     return true;
                 }
                 s.pressed = Some(button);

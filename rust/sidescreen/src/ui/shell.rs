@@ -5,7 +5,7 @@
 use super::peek::{self, Peek};
 use super::pointer;
 use super::stream::Streams;
-use super::viewer::{Sheet, Viewer};
+use super::viewer::{self, Sheet, Viewer};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
 use crate::mac::aerospace::AeroSpace;
@@ -345,7 +345,11 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         loop {
             cx.background_executor().timer(Duration::from_secs(1)).await;
             if counted
-                .update(cx, |shell, cx| shell.refresh_counts(cx))
+                .update(cx, |shell, cx| {
+                    shell.refresh_counts(cx);
+                    // The front app on the display can change any time.
+                    shell.refresh_menu_bar(cx);
+                })
                 .is_err()
             {
                 break;
@@ -397,7 +401,7 @@ impl Shell {
             Native::Menu(action) => self.menu(action, cx),
             Native::HelpClicked { display } => self.open_for_help(display, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
-            Native::MenuBarClick { display } => self.menu_bar(display, cx),
+            Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => self.schedule_guard(cx),
             Native::ColorsChanged => {
                 super::theme::set_accent(native::accent());
@@ -652,25 +656,27 @@ impl Shell {
             self.core.update(cx, |core, cx| core.sweep_ended(cx));
         }
         let ids = peek::ordered(self.core.read(cx));
-        let (w, h) = Peek::size(ids.len());
         let Some((screen, _)) = self.host_screen() else {
             return;
         };
+        let (w, h, tile) = Peek::size(ids.len(), screen.size.width - 16.0);
         let anchor = self.anchor();
         let (mid, top) = (
             anchor.origin.x + anchor.size.width / 2.0,
             anchor.origin.y - 6.0,
         );
-        let x = (mid - w / 2.0).clamp(
-            screen.origin.x + 8.0,
-            screen.origin.x + screen.size.width - w - 8.0,
-        );
+        // Centered under the anchor, inside the screen; a card wider than
+        // the screen starts at its left edge.
+        let x = (mid - w / 2.0)
+            .min(screen.origin.x + screen.size.width - w - 8.0)
+            .max(screen.origin.x + 8.0);
         let frame = rect(x.round(), (top - h).round(), w, h);
 
         let active = self.viewer_open.then_some(self.viewer_display).flatten();
         let _ = peek.update(cx, |peek, _, cx| {
             peek.shown = true;
             peek.active = active;
+            peek.tile = tile;
             cx.notify();
         });
         for id in &ids {
@@ -741,13 +747,15 @@ impl Shell {
             .iter()
             .position(|&d| d == id)?;
         let card = native::frame(window);
-        let step = (peek::TILE_WIDTH + peek::SPACING) as f64;
+        let tile = self.peek.as_ref()?.0.read(cx).ok()?.tile;
+        let thumb = peek::thumb_height(tile) as f64;
+        let step = (tile + peek::SPACING) as f64;
         let top = card.origin.y + card.size.height - peek::PADDING as f64;
         Some(rect(
             card.origin.x + peek::PADDING as f64 + index as f64 * step,
-            top - peek::THUMB_HEIGHT as f64,
-            peek::TILE_WIDTH as f64,
-            peek::THUMB_HEIGHT as f64,
+            top - thumb,
+            tile as f64,
+            thumb,
         ))
     }
 
@@ -808,6 +816,9 @@ impl Shell {
         let _ = viewer.update(cx, |viewer, _, cx| {
             if viewer.sheet.as_ref().is_some_and(|s| s.display != id) {
                 viewer.sheet = None;
+            }
+            if viewer.display != Some(id) {
+                viewer.menu_bar = None;
             }
             viewer.display = Some(id);
             viewer.count = count;
@@ -874,6 +885,7 @@ impl Shell {
         self.viewer_settled_at = Instant::now() + Duration::from_millis(400);
         self.streams
             .update(cx, |s, cx| s.want(id, "viewer", 60, pixels(size), cx));
+        self.refresh_menu_bar(cx);
         if let Some((peek, _)) = &self.peek {
             let _ = peek.update(cx, |peek, _, cx| {
                 peek.active = Some(id);
@@ -1133,19 +1145,64 @@ impl Shell {
         menu.pop_up_at(x, y);
     }
 
-    /// A click on the menu bar strip of the display image.
-    pub fn menu_bar(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        // The menu opens where the click was, once its items are read.
-        let (x, y) = native::mouse_location();
+    /// A click on the Viewer's menu bar: open the menu under that title,
+    /// right below it, as the real menu bar would.
+    pub fn menu_bar(&mut self, id: DisplayId, x: f64, cx: &mut Context<Self>) {
+        let Some((viewer, window)) = self.viewer.clone() else {
+            return;
+        };
+        let hit = viewer
+            .read(cx)
+            .ok()
+            .and_then(|v| Some((v.menu_bar.clone()?, viewer::title_at(x)?)))
+            .filter(|_| self.viewer_display == Some(id));
+        // A click beside the titles does nothing, as on a real menu bar.
+        let Some((bar, (index, bounds))) = hit else {
+            return;
+        };
+        let frame = native::frame(&window);
+        let at = (
+            frame.origin.x + bounds[0],
+            frame.origin.y + frame.size.height - (bounds[1] + bounds[3]),
+        );
+        let title = bar.titles.get(index).cloned().unwrap_or_default();
+        let pid = bar.pid;
         cx.spawn(async move |_, cx| {
-            let menus = cx
+            let items = cx
                 .background_executor()
-                .spawn(async move { menubar::read(id) })
+                .spawn(async move { menubar::items(pid, index) })
                 .await;
-            // An app without menus: the click just does nothing.
-            if let Some(menus) = menus {
-                menubar::build(menus).pop_up_at(x, y);
+            if let Some(items) = items {
+                menubar::build_items(&title, items).pop_up_at(at.0, at.1);
             }
+        })
+        .detach();
+    }
+
+    /// Read the menu bar of the front app on the Viewer's display, so the
+    /// Viewer can show it in place of the user's own.
+    fn refresh_menu_bar(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.viewer_display.filter(|_| self.viewer_open) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let bar = cx
+                .background_executor()
+                .spawn(async move { menubar::bar(id) })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                if shell.viewer_display != Some(id) {
+                    return;
+                }
+                if let Some((viewer, _)) = &shell.viewer {
+                    let _ = viewer.update(cx, |viewer, _, cx| {
+                        if viewer.menu_bar != bar {
+                            viewer.menu_bar = bar;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
         })
         .detach();
     }

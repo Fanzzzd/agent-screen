@@ -54,9 +54,11 @@ pub enum Native {
     ScreenTouched {
         display: u32,
     },
-    /// A left click on the menu bar strip of the display image.
+    /// A left click on the menu bar strip of the display image, `x` in
+    /// Viewer window points from its left edge.
     MenuBarClick {
         display: u32,
+        x: f64,
     },
     /// The user clicked the help notification of a display.
     HelpClicked {
