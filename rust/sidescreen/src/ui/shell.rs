@@ -1234,6 +1234,8 @@ impl Shell {
             frame.origin.x + bounds[0],
             frame.origin.y + frame.size.height - (bounds[1] + bounds[3]),
         );
+        // Choosing from the agent app's menu is the user operating it.
+        self.user_input(id, cx);
         let title = bar.titles.get(index).cloned().unwrap_or_default();
         let pid = bar.pid;
         cx.spawn(async move |_, cx| {

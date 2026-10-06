@@ -876,7 +876,7 @@ fn menu_strip(
         .group("menu-strip")
         .cursor(gpui::CursorStyle::OperationNotAllowed)
         .when(!empty, |d| d.bg(theme.menu_strip))
-        .when(empty, |d| d.hover(|s| s.bg(theme.red.opacity(0.22))))
+        .when(empty, |d| d.hover(|s| s.bg(theme.red.opacity(0.75))))
         .text_size(px(font))
         .text_color(theme.label)
         .overflow_hidden()
@@ -909,7 +909,7 @@ fn menu_strip(
                 div()
                     .absolute()
                     .inset_0()
-                    .bg(theme.red.opacity(0.45))
+                    .bg(theme.red.opacity(0.9))
                     .with_animation(
                         gpui::ElementId::NamedInteger("menu-refused".into(), refused),
                         Animation::new(std::time::Duration::from_millis(600)),

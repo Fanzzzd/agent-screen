@@ -150,8 +150,8 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                     return false;
                 };
                 native::make_key(&window);
-                // The user's first input takes the display over from its agent.
-                native::send(Native::ScreenTouched { display });
+                // The menu bar strip: only a click that opens a menu takes
+                // the display over, which the shell decides.
                 if button == Button::Left
                     && at.1 - cg::display_bounds(display).y < menubar_height(display)
                 {
@@ -161,6 +161,8 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                     });
                     return true;
                 }
+                // The user's first input takes the display over from its agent.
+                native::send(Native::ScreenTouched { display });
                 s.pressed = Some(button);
                 forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event));
                 true
