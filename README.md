@@ -35,9 +35,13 @@ Development switches for the Rust app:
 - **Live frames** come from ScreenCaptureKit as 420f pixel buffers that GPUI draws without a copy. One stream per display runs at the highest frame rate and size any view asks for: 60 fps at full size for the Viewer, 12 fps at 416 px wide for thumbnails.
 - **Input** in the panel goes to the target process through SkyLight's `SLEventPostToPid`, stamped with window-routing fields, plus a focus-without-raise handshake. The recipe is ported from [trycua/cua](https://github.com/trycua/cua) (MIT). Your cursor stays put and your frontmost app keeps its place.
 
+## Install
+
+`rust/sidescreen/scripts/install.sh` builds a release app, quits any running Sidescreen, installs it as `/Applications/Sidescreen.app` and opens it. Debug builds in `rust/target` don't touch the installed copy. Grant it Screen & System Audio Recording and Accessibility in System Settings, Privacy & Security. An app started from a terminal borrows the terminal's grants instead, so a build that works from the shell can still lack its own.
+
 ## Agent tools
 
-`Sidescreen mcp` is an MCP server over stdio. Register it with your client, for example `claude mcp add sidescreen -- /path/to/Sidescreen.app/Contents/MacOS/Sidescreen mcp`. It works with either app.
+`Sidescreen mcp` is an MCP server over stdio. Register it with your client, for example `claude mcp add sidescreen -- /Applications/Sidescreen.app/Contents/MacOS/Sidescreen mcp`. It works with either app.
 
 | Tool | What it does |
 | --- | --- |
