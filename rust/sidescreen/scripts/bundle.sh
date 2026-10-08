@@ -5,7 +5,8 @@
 #
 # Signing: macOS ties Screen Recording and Accessibility grants to the code
 # signature and bundle id. This bundle uses the Swift app's Info.plist and
-# the first Apple Development identity, so both builds share the grants.
+# the first Apple Development identity, else Developer ID Application, so
+# builds keep the grants.
 # Override with SIDESCREEN_SIGN_IDENTITY (use "-" for ad-hoc).
 set -euo pipefail
 
@@ -25,7 +26,16 @@ cp ../../apps/menubar/Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.ic
 
 identity="${SIDESCREEN_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
-  identity="$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ { print $2; exit }')"
+  identities="$(security find-identity -v -p codesigning)"
+  for kind in "Apple Development" "Developer ID Application"; do
+    identity="$(awk -F'"' -v kind="$kind" 'index($2, kind) == 1 { print $2; exit }' <<<"$identities")"
+    [[ -n "$identity" ]] && break
+  done
+fi
+if [[ -z "$identity" ]]; then
+  # An ad-hoc signature changes with every build, and macOS drops the
+  # grants of a bundle whose signature it no longer recognizes.
+  echo "warning: no signing identity; ad-hoc signing, so privacy grants won't carry over" >&2
 fi
 codesign --force --sign "${identity:--}" "$app" >/dev/null
 echo "$app (signed: ${identity:-ad-hoc})"
