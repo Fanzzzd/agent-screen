@@ -3,6 +3,7 @@
 //   probe windows PID         on-screen windows of PID as JSON lines
 //   probe displays            how many Sidescreen virtual displays are active
 //   probe idle                seconds since the user last touched a key or the pointer
+//   probe locked              1 while the screen is locked, else 0
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 import CoreGraphics
@@ -26,6 +27,9 @@ case "displays":
   print(ids[0..<Int(n)].filter { CGDisplayVendorNumber($0) == 0x5353 }.count)
 case "idle":
   print(Int(CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)))
+case "locked":
+  let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+  print((session["CGSSessionScreenIsLocked"] as? Bool ?? false) ? 1 : 0)
 case "pixel":
   let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
   let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!

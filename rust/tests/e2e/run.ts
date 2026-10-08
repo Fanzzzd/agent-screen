@@ -15,7 +15,7 @@ import { writeFileSync } from "node:fs"
 import * as path from "node:path"
 import {
   Control, buildTools, capture, check, digest, failed, fixture, hid, onScreen, out, pidOf, pixel,
-  reopenInstalled, restore, running, sh, snapshot, startDebugApp, startUngrantedApp, stopApp,
+  probe, reopenInstalled, voided, restore, running, sh, snapshot, startDebugApp, startUngrantedApp, stopApp,
   stopDebugApp, waitForQuiet, windowsOf
 } from "./lib.ts"
 
@@ -157,9 +157,12 @@ async function permissions() {
   stopDebugApp()
   const app = await startUngrantedApp()
   try {
-    await settle(1500)
     const pid = pidOf(`${app}/Contents/MacOS/Sidescreen`)!
-    const setup = windowsOf(pid).find((w) => w.layer === 0 && Math.abs(w.width - 480) < 2)
+    let setup: ReturnType<typeof windowsOf>[number] | undefined
+    for (let i = 0; i < 50 && !setup; i++) {
+      await settle(100)
+      setup = windowsOf(pid).find((w) => w.layer === 0 && Math.abs(w.width - 480) < 2)
+    }
     check("the setup window opens at launch", setup !== undefined)
     if (setup) capture("permissions-setup", [setup.x, setup.y, setup.width, setup.height])
 
@@ -212,10 +215,16 @@ const before = snapshot()
 try {
   for (const name of chosen) {
     console.log(`— ${name}`)
+    if (probe("locked") === "1" && !(await waitForQuiet())) break
+    const failedBefore = failed()
     try {
       await cases[name]()
     } catch (error) {
       check(`${name} ran`, false, String(error))
+    }
+    if (probe("locked") === "1" && failed() > failedBefore) {
+      console.log(`void: the screen locked during ${name}; rerun it`)
+      voided(failed() - failedBefore)
     }
 
   }

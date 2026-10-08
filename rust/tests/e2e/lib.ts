@@ -71,6 +71,10 @@ export const check = (label: string, ok: boolean, detail = "") => {
   if (!ok) failures++
 }
 export const failed = () => failures
+/** Take back failures from a case whose run doesn't count. */
+export const voided = (count: number) => {
+  failures -= count
+}
 
 /** A capture of a screen region in global points, written under target/e2e. */
 export const capture = (name: string, [x, y, w, h]: number[]) => {
@@ -88,14 +92,15 @@ export const pixel = (file: string, x: number, y: number) =>
 // MARK: Waiting for the user
 
 /**
- * Wait until the user has been idle for 45 s and has no Agent Display open,
- * since restarting the app ends every display. E2E_NOW=1 skips the wait.
+ * Wait until the user has been idle for 45 s, has no Agent Display open
+ * (restarting the app ends every display) and the screen is unlocked: a
+ * locked screen shows no windows and can't be captured. E2E_NOW=1 skips the wait.
  */
 export const waitForQuiet = async (limit = 3600) => {
   if (process.env.E2E_NOW === "1") return true
   const start = Date.now()
   while (Date.now() - start < limit * 1000) {
-    if (Number(probe("idle")) >= 45 && probe("displays") === "0") return true
+    if (Number(probe("idle")) >= 45 && probe("displays") === "0" && probe("locked") === "0") return true
     await Bun.sleep(5000)
   }
   return false
