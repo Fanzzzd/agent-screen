@@ -47,6 +47,11 @@ fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
     Ok(content)
 }
 
+/// Whether ScreenCaptureKit lets this process list the screen. Blocking.
+pub fn can_capture() -> bool {
+    content(true).is_ok()
+}
+
 /// What a display shows, without the menu bar macOS draws on it: that bar,
 /// its clock and status items belong to the user's front app, not to the
 /// agent. Its strip shows the wallpaper instead. Blocking.

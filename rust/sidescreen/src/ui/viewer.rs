@@ -454,7 +454,10 @@ impl Viewer {
             None => super::peek::waiting(13.).into_any_element(),
         };
         // The native input monitor needs to know where the image is.
-        let blocked = self.sheet.is_some();
+        // Without Screen Recording the picture stops; the notice over it
+        // takes the clicks.
+        let denied = !crate::mac::permissions::last().screen;
+        let blocked = self.sheet.is_some() || denied;
         let input = canvas(
             |_, _, _| {},
             move |bounds, _, _: &mut Window, _| {
@@ -511,6 +514,9 @@ impl Viewer {
                 )
             })
             .child(input)
+            .when(denied, |d| {
+                d.child(denied_notice(self.shell.clone(), theme))
+            })
     }
 
     fn sheet_view(
@@ -684,6 +690,40 @@ impl Viewer {
             shell.answer_dismiss(items, cx)
         });
     }
+}
+
+/// Over the picture while Screen Recording is off.
+fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .bg(theme.scrim)
+        .child(
+            div()
+                .text_size(px(15.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child("屏幕录制权限已关闭"),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(gpui::white().opacity(0.8))
+                .child("画面不再更新，agent 也截不到图。"),
+        )
+        .child(div().mt(px(6.)).child(button(
+            "denied-fix",
+            "打开设置".into(),
+            None,
+            Some(theme.accent),
+            theme,
+            move |cx| tell(&shell, cx, |shell, cx| shell.open_setup(cx)),
+        )))
 }
 
 fn note(text: String, color: Hsla) -> gpui::AnyElement {

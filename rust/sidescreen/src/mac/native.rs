@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -177,6 +177,8 @@ define_class!(
 
 pub struct StatusIcon {
     item: Retained<NSStatusItem>,
+    asking: Cell<bool>,
+    needs_setup: Cell<bool>,
 }
 
 impl StatusIcon {
@@ -204,31 +206,49 @@ impl StatusIcon {
             button.addTrackingArea(&area);
         }
         keep(Retained::into_super(Retained::into_super(target)));
-        let icon = StatusIcon { item };
-        icon.set_asking(false);
+        let icon = StatusIcon {
+            item,
+            asking: Cell::new(false),
+            needs_setup: Cell::new(false),
+        };
+        icon.redraw();
         icon
     }
 
     /// A raised hand while any Help Request is open.
     pub fn set_asking(&self, asking: bool) {
+        self.asking.set(asking);
+        self.redraw();
+    }
+
+    /// A struck-through, orange icon while a permission is missing: nothing
+    /// works until the user grants it.
+    pub fn set_needs_setup(&self, needs: bool) {
+        self.needs_setup.set(needs);
+        self.redraw();
+    }
+
+    fn redraw(&self) {
         let mtm = MainThreadMarker::new().expect("main thread");
         let Some(button) = self.item.button(mtm) else {
             return;
         };
-        let symbol = if asking {
-            "hand.raised.fill"
+        let (symbol, description) = if self.needs_setup.get() {
+            ("rectangle.on.rectangle.slash", "Sidescreen：需要权限")
+        } else if self.asking.get() {
+            ("hand.raised.fill", "Sidescreen：agent 在请求帮助")
         } else {
-            "rectangle.on.rectangle"
+            ("rectangle.on.rectangle", "Sidescreen")
         };
         let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str(symbol),
-            Some(&NSString::from_str("Sidescreen")),
+            Some(&NSString::from_str(description)),
         );
         if let Some(image) = image {
             image.setTemplate(true);
             button.setImage(Some(&image));
         }
-        let tint = asking.then(NSColor::systemOrangeColor);
+        let tint = (self.needs_setup.get() || self.asking.get()).then(NSColor::systemOrangeColor);
         button.setContentTintColor(tint.as_deref());
     }
 
@@ -786,4 +806,23 @@ pub fn watch_screens() {
     };
     let observer: Retained<AnyObject> = observer.into();
     keep(observer);
+}
+
+/// The app's own icon as PNG, for drawing it in GPUI.
+pub fn app_icon_png() -> Option<Vec<u8>> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+    let path = objc2_foundation::NSBundle::mainBundle()
+        .bundleURL()
+        .path()?;
+    let icon = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&path);
+    icon.setSize(objc2_foundation::NSSize::new(256.0, 256.0));
+    let tiff = icon.TIFFRepresentation()?;
+    let rep = NSBitmapImageRep::imageRepWithData(&tiff)?;
+    let png = unsafe {
+        rep.representationUsingType_properties(
+            NSBitmapImageFileType::PNG,
+            &objc2_foundation::NSDictionary::new(),
+        )
+    }?;
+    Some(png.to_vec())
 }

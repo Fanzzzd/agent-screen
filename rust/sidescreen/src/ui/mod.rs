@@ -2,6 +2,7 @@
 
 pub mod peek;
 pub mod pointer;
+pub mod setup;
 pub mod shell;
 pub mod status;
 pub mod stream;

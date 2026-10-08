@@ -60,6 +60,23 @@ pub fn layout(content: Option<[f64; 4]>, blocked: bool) {
     });
 }
 
+/// The Viewer's frame and its display image, in global top-left points,
+/// for tests. None while the Viewer shows no display.
+pub fn debug_layout() -> Option<([f64; 4], [f64; 4])> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        s.display.as_ref()?;
+        let [cx, cy, cw, ch] = s.content?;
+        let window = unsafe { &*(s.window as *const NSWindow) };
+        let f = window.frame();
+        let top = native::primary_height() - (f.origin.y + f.size.height);
+        Some((
+            [f.origin.x, top, f.size.width, f.size.height],
+            [f.origin.x + cx, top + cy, cw, ch],
+        ))
+    })
+}
+
 fn flags(event: &NSEvent) -> CGEventFlags {
     CGEventFlags(event.modifierFlags().0 as u64)
 }

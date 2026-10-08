@@ -4,20 +4,22 @@
 
 use super::peek::{self, Peek};
 use super::pointer;
+use super::setup::{self, Setup};
 use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
 use crate::mac::aerospace::AeroSpace;
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
-use crate::mac::{app, ax, cg, menubar, notify, viewer_input, windows};
+use crate::mac::permissions::{self, Permission};
+use crate::mac::{app, assist, cg, menubar, notify, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
     AnyView, App, AppContext, AsyncApp, Bounds, Context, Entity, IntoElement, ParentElement,
-    Render, SharedString, Styled, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions, div, point, px, size,
+    Render, SharedString, Styled, TitlebarOptions, WeakEntity, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
 };
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -128,6 +130,13 @@ pub struct Shell {
     conflicts: Vec<(String, String)>,
     guard_generation: u64,
     asking: bool,
+    /// Screen Recording and Accessibility, as last checked.
+    permissions: permissions::Status,
+    setup: Option<WindowHandle<Setup>>,
+    /// The permission whose pane the user was sent to.
+    waiting: Option<Permission>,
+    /// Screen Recording came on while running and capture still fails.
+    restart: bool,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -248,6 +257,10 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             conflicts: Vec::new(),
             guard_generation: 0,
             asking: false,
+            permissions: permissions::status(),
+            setup: None,
+            waiting: None,
+            restart: false,
         }
     });
     let weak = shell.downgrade();
@@ -342,6 +355,35 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .detach();
     }
     cursor_guard(core, cx);
+    // Permissions: the icon shows what's missing, and the setup window
+    // opens by itself at launch. Checked often while the user is granting,
+    // rarely after, to notice one being turned off.
+    shell.update(cx, |shell, cx| {
+        let status = shell.permissions;
+        shell.icon.set_needs_setup(!status.complete());
+        if !status.complete() {
+            shell.open_setup(cx);
+        }
+    });
+    let checked = shell.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            let fast = checked
+                .update(cx, |shell, _| shell.setup.is_some() || assist::is_shown())
+                .unwrap_or(false);
+            let wait = if fast { 400 } else { 2000 };
+            cx.background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            if checked
+                .update(cx, |shell, cx| shell.check_permissions(cx))
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+    .detach();
     // Windows come and go without telling us; recount once a second while
     // Peek or the Viewer shows the counts.
     let counted = shell.downgrade();
@@ -377,6 +419,9 @@ impl Shell {
             Native::IconClicked { right: true } => {
                 self.hide_peek(cx);
                 self.status_menu();
+            }
+            Native::IconClicked { right: false } if !self.permissions.complete() => {
+                self.open_setup(cx);
             }
             Native::IconClicked { right: false } => {
                 if self.peek_shown && self.latched {
@@ -556,6 +601,10 @@ impl Shell {
     fn hover_changed(&mut self, cx: &mut Context<Self>) {
         self.hover_generation += 1;
         let generation = self.hover_generation;
+        // Without permissions Peek has nothing to show; a click opens setup.
+        if !self.permissions.complete() && !self.peek_shown {
+            return;
+        }
         if self.latched || self.settle_until.is_some_and(|t| t > Instant::now()) {
             return;
         }
@@ -1062,6 +1111,28 @@ impl Shell {
     ) -> Result<(), String> {
         match surface {
             "peek" => self.show_peek(cx),
+            "setup" => self.open_setup(cx),
+            "setup-close" => self.close_setup(cx),
+            // The pane and its helper, without the system prompt.
+            "assist-screen" | "assist-ax" => {
+                let p = if surface == "assist-screen" {
+                    Permission::ScreenRecording
+                } else {
+                    Permission::Accessibility
+                };
+                permissions::open_pane(p);
+                assist::show(p, permissions::listed(p).unwrap_or(true));
+                self.waiting = Some(p);
+                self.push_setup(cx);
+            }
+            // The helper alone at the top-left corner of the main screen.
+            "assist-preview" | "assist-preview-unlisted" => assist::preview(
+                Permission::Accessibility,
+                surface == "assist-preview",
+                40.0,
+                60.0,
+            ),
+            "assist-hide" => assist::hide(),
             "click" => self.native(Native::IconClicked { right: false }, cx),
             "menu" => self.status_menu(),
             "hide" => self.hide_peek(cx),
@@ -1090,6 +1161,15 @@ impl Shell {
 
     fn status_menu(&self) {
         let menu = native::Menu::new("Sidescreen");
+        let missing = self.permissions.missing();
+        if !missing.is_empty() {
+            let names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
+            menu.action(
+                &format!("完成设置：还差{}…", names.join("、")),
+                MenuAction::GrantPermissions,
+            );
+            menu.separator();
+        }
         let create = menu.action("新建显示器", MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.separator();
@@ -1103,22 +1183,6 @@ impl Shell {
             fix.setToolTip(Some(&objc2_foundation::NSString::from_str(
                 "workspace-to-monitor-force-assignment 里的显示器编号会被虚拟屏占用。改用显示器名称，例如 et2 = 'DELL'。",
             )));
-            menu.separator();
-        }
-        let screen = objc2_core_graphics::CGPreflightScreenCaptureAccess();
-        let access = ax::is_trusted();
-        if !screen || !access {
-            let missing: Vec<&str> = [
-                (!screen).then_some("屏幕录制"),
-                (!access).then_some("辅助功能"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            menu.action(
-                &format!("授予权限：{}", missing.join("、")),
-                MenuAction::GrantPermissions,
-            );
             menu.separator();
         }
         let quit = menu.action("退出 Sidescreen", MenuAction::Quit);
@@ -1281,20 +1345,7 @@ impl Shell {
     fn menu(&mut self, action: MenuAction, cx: &mut Context<Self>) {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
-            MenuAction::GrantPermissions => {
-                // The launch already asked once, and macOS shows each
-                // prompt only once, so open the pane in System Settings.
-                let pane = if !objc2_core_graphics::CGPreflightScreenCaptureAccess() {
-                    "Privacy_ScreenCapture"
-                } else {
-                    "Privacy_Accessibility"
-                };
-                let _ = std::process::Command::new("/usr/bin/open")
-                    .arg(format!(
-                        "x-apple.systempreferences:com.apple.preference.security?{pane}"
-                    ))
-                    .spawn();
-            }
+            MenuAction::GrantPermissions => self.open_setup(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let config = [".config/aerospace/aerospace.toml", ".aerospace.toml"]
@@ -1449,6 +1500,142 @@ impl Shell {
     /// Quit. The tidy-up runs in the quit hook, so logout gets it too.
     fn quit(&mut self, cx: &mut Context<Self>) {
         cx.quit();
+    }
+
+    // MARK: Permissions
+
+    pub fn open_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.setup
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            cx.activate(true);
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        let status = self.permissions;
+        let bounds = Bounds::centered(None, size(px(setup::WIDTH), px(setup::HEIGHT)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("设置 Sidescreen".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(14.), px(14.))),
+            }),
+            focus: true,
+            show: true,
+            kind: WindowKind::Normal,
+            is_resizable: false,
+            is_minimizable: false,
+            ..Default::default()
+        };
+        match cx.open_window(options, |_, cx| cx.new(|_| Setup::new(weak, status))) {
+            Ok(handle) => {
+                self.setup = Some(handle);
+                self.push_setup(cx);
+                cx.activate(true);
+            }
+            Err(error) => log::info!("setup window: {error}"),
+        }
+    }
+
+    /// An agent call failed for a missing permission: show the user why,
+    /// once, without pulling the window forward on every retry.
+    pub fn setup_for_agent(&mut self, cx: &mut Context<Self>) {
+        let open = self
+            .setup
+            .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
+        if !open {
+            self.open_setup(cx);
+        }
+    }
+
+    pub fn close_setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.setup.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.waiting = None;
+        assist::hide();
+    }
+
+    /// The user clicked 开启… for `p`: the system prompt when macOS still
+    /// shows one, else the pane, with the helper pinned to it.
+    pub fn grant(&mut self, p: Permission, cx: &mut Context<Self>) {
+        permissions::request(p);
+        // Asking puts Sidescreen in the list, switched off.
+        let listed = permissions::listed(p).unwrap_or(true);
+        assist::show(p, listed);
+        self.waiting = Some(p);
+        self.push_setup(cx);
+    }
+
+    pub fn relaunch(&mut self, cx: &mut Context<Self>) {
+        permissions::relaunch();
+        self.quit(cx);
+    }
+
+    fn push_setup(&mut self, cx: &mut Context<Self>) {
+        let (status, waiting, restart) = (self.permissions, self.waiting, self.restart);
+        let Some(handle) = self.setup else { return };
+        if handle
+            .update(cx, |setup, _, cx| {
+                setup.status = status;
+                setup.waiting = waiting;
+                setup.restart = restart;
+                cx.notify();
+            })
+            .is_err()
+        {
+            // The user closed it with its close button.
+            self.setup = None;
+            self.waiting = None;
+            assist::hide();
+        }
+    }
+
+    fn check_permissions(&mut self, cx: &mut Context<Self>) {
+        if assist::is_shown() && !assist::tick() {
+            // System Settings quit.
+            assist::hide();
+        }
+        let now = permissions::status();
+        let before = self.permissions;
+        if now == before {
+            self.push_setup(cx);
+            return;
+        }
+        self.permissions = now;
+        self.icon.set_needs_setup(!now.complete());
+        // The Viewer covers its picture while Screen Recording is off.
+        self.repaint(cx);
+        if self.waiting.is_some_and(|p| now.has(p)) {
+            // Granted: back to the setup window, which shows the next step.
+            self.waiting = None;
+            assist::hide();
+            if let Some(handle) = self.setup {
+                let _ = handle.update(cx, |_, window, _| window.activate_window());
+                cx.activate(true);
+            }
+        }
+        if now.screen && !before.screen && !permissions::screen_recording_at_launch() {
+            // macOS may apply Screen Recording only to a new process.
+            cx.spawn(async move |shell, cx| {
+                let works = cx
+                    .background_executor()
+                    .spawn(async { crate::mac::screenshot::can_capture() })
+                    .await;
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.restart = !works;
+                    shell.push_setup(cx);
+                });
+            })
+            .detach();
+        }
+        if !now.complete() && before.complete() {
+            log::info!("permission turned off: {:?}", now.missing());
+        }
+        self.push_setup(cx);
     }
 
     // MARK: Handover

@@ -2,6 +2,7 @@
 
 pub mod aerospace;
 pub mod app;
+pub mod assist;
 pub mod ax;
 pub mod capture;
 pub mod cg;
@@ -10,6 +11,7 @@ pub mod input;
 pub mod menubar;
 pub mod native;
 pub mod notify;
+pub mod permissions;
 pub mod screenshot;
 pub mod viewer_input;
 pub mod windows;

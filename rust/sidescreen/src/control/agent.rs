@@ -28,6 +28,9 @@ pub async fn handle(
     cx: &mut AsyncApp,
 ) -> Reply {
     let p = Args(&p);
+    if needs_permissions(method) {
+        permitted(cx)?;
+    }
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => create_display(&core, connection, &p, cx),
         "endDisplay" => {
@@ -486,6 +489,11 @@ pub async fn handle(
             });
             Ok(json!({}))
         }
+        "debugViewer" if debug_methods() => {
+            let (frame, image) = crate::mac::viewer_input::debug_layout()
+                .ok_or_else(|| ControlError::not_found("the Viewer shows no display"))?;
+            Ok(json!({ "frame": frame, "image": image }))
+        }
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
@@ -502,6 +510,38 @@ pub async fn handle(
         other => Err(ControlError::invalid(format!("unknown method {other}"))),
     };
     result.and_then(reply)
+}
+
+/// Methods that see or drive the display. The rest (ending a display,
+/// asking for help, waiting for control) work without permissions.
+fn needs_permissions(method: &str) -> bool {
+    !matches!(
+        method,
+        "endDisplay" | "requestHelp" | "waitForControl" | "setDisposition" | "listWindows"
+    ) && !method.starts_with("debug")
+}
+
+/// Fail with what the user has to do when a permission is missing, and put
+/// the setup window in front of them.
+fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
+    let missing = crate::mac::permissions::status().missing();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(shell) = crate::ui::shell::current() {
+        let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(cx));
+    }
+    let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
+    Err(ControlError {
+        code: "permission",
+        message: format!(
+            "Sidescreen is missing the macOS {} permission, and only the user can grant it. \
+             Sidescreen has put its setup window on the user's screen (also reachable from its \
+             menu bar icon). Tell the user to turn it on there, then retry; until then every call \
+             fails the same way.",
+            names.join(" and ")
+        ),
+    })
 }
 
 /// A method's result as a reply; `return reply(...)` leaves a method early.
