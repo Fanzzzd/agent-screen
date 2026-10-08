@@ -493,6 +493,14 @@ impl Worker {
         let Some(hit) = self.hit(at, false) else {
             return;
         };
+        // On a Mac the window under the pointer takes the scroll, focused
+        // or not. Apps here see events posted to them, and some hand those
+        // to their focused view, so focus the window under the pointer when
+        // a gesture starts, as a click would. Wheel ticks have no phase.
+        let starts = matches!(phase, 1 | 128) || (phase == 0 && momentum == 0);
+        if starts && self.focused != Some(hit.target) {
+            self.focus(hit.target);
+        }
         let units = if continuous {
             CGScrollEventUnit::Pixel
         } else {
