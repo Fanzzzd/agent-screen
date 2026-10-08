@@ -30,6 +30,13 @@ const viewerOn = async (control: Control, session: string) => {
   return { display, image: [] as number[] }
 }
 
+/** Whether the user holds the display: waitForControl answers at once when not. */
+const takenOver = async (control: Control, id: number) =>
+  (await control.call("waitForControl", { displayId: id, timeoutSeconds: 1 })).outcome !== "returned"
+
+/** Give the display back to the agent, as 让 … 继续 does. */
+const release = (control: Control, id: number) => control.call("debugTakeover", { displayId: id, active: false })
+
 const showViewer = async (control: Control, display: Display) => {
   await control.call("debugShow", { surface: "viewer", displayId: display.displayId })
   await settle(1200)
@@ -68,6 +75,9 @@ async function scroll() {
     const page = [tx, ty, bx - tx, by - ty]
 
     const moved = async (label: string, gesture: () => void) => {
+      // A scroll is the user's input: it takes the display over. Hand it
+      // back so the agent can move focus away again.
+      await release(control, id)
       await focusCalculator()
       await settle(1500) // the agent's pointer fades
       const before = digest(capture(`scroll-${label}-0`, page))
@@ -104,6 +114,7 @@ async function strip() {
     const image = await showViewer(control, display)
     const [sx, sy] = onScreen(image, display, display.width / 2, 12)
     const region = [image[0], image[1], image[2], 60]
+    await release(control, id)
 
     const hover = path.join(out, "strip-hover.png")
     hid("hover", sx, sy, hover, region.map(Math.round).join(","))
@@ -111,9 +122,8 @@ async function strip() {
     check("an empty strip turns red under the pointer", r > g + 60, `rgb ${r} ${g}`)
 
     hid("click", sx, sy)
-    const refused = await control.send("click", { displayId: id, x: 640, y: 400 })
-    check("a click that opens no menu leaves the display to the agent", refused.error?.code !== "takeover",
-      refused.error?.code ?? "accepted")
+    await settle(300)
+    check("a click that opens no menu leaves the display to the agent", !(await takenOver(control, id)))
 
     await control.call("launchApp", { displayId: id, app: "Calculator" })
     await settle(2500)
@@ -127,9 +137,8 @@ async function strip() {
     check("a title opens the agent app's menu", menu !== undefined)
     hid("key", 53) // Escape closes it
     await settle(300)
-    const taken = await control.send("click", { displayId: id, x: 640, y: 400 })
-    check("opening a menu takes the display over", taken.error?.code === "takeover", taken.error?.code ?? "accepted")
-    await control.call("debugTakeover", { displayId: id, active: false })
+    check("opening a menu takes the display over", await takenOver(control, id))
+    await release(control, id)
   } finally {
     quitApp("Calculator")
     control.close()
@@ -208,6 +217,7 @@ try {
     } catch (error) {
       check(`${name} ran`, false, String(error))
     }
+
   }
 } finally {
   stopDebugApp()
