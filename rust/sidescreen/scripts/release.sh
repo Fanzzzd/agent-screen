@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Build a notarized Sidescreen.dmg for a GitHub release.
+# Build Sidescreen-<version>.dmg and its Homebrew cask for a GitHub release.
 #
 # Usage: scripts/release.sh
 #
-# Needs a Developer ID Application identity in the keychain and notarytool
+# Signs with a Developer ID Application identity under the hardened
+# runtime. Releases aren't notarized: users approve the app once in System
+# Settings. NOTARIZE=1 notarizes and staples too, given notarytool
 # credentials stored once under a keychain profile:
 #
 #   xcrun notarytool store-credentials sidescreen \
 #     --apple-id <you@example.com> --team-id <TEAMID> --password <app-specific password>
 #
-# NOTARY_PROFILE picks another profile name. SKIP_NOTARIZE=1 builds and signs
-# the DMG without notarizing, to check the rest.
+# NOTARY_PROFILE picks another profile name.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,7 +26,7 @@ if [[ -z "$identity" ]]; then
   exit 1
 fi
 
-if [[ "${SKIP_NOTARIZE:-}" != 1 ]] && ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
+if [[ "${NOTARIZE:-}" == 1 ]] && ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
   echo "error: no notarytool credentials under the profile \"$profile\"; see the top of $0" >&2
   exit 1
 fi
@@ -48,13 +49,11 @@ rm -f "$dmg"
 hdiutil create -quiet -volname Sidescreen -srcfolder "$stage" -format UDZO -fs HFS+ "$dmg"
 codesign --force --timestamp --sign "$identity" "$dmg"
 
-if [[ "${SKIP_NOTARIZE:-}" == 1 ]]; then
-  echo "$dmg (signed, not notarized)"
-  exit 0
+if [[ "${NOTARIZE:-}" == 1 ]]; then
+  xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
+  xcrun stapler staple "$dmg"
+  spctl --assess --type open --context context:primary-signature --verbose "$dmg"
 fi
-xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
-xcrun stapler staple "$dmg"
-spctl --assess --type open --context context:primary-signature --verbose "$dmg"
 sha="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"
 
 # The Homebrew cask for this release, for a tap repo's Casks folder.
