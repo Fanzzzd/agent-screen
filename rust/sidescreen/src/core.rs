@@ -6,6 +6,7 @@ use crate::mac::display::{self, VirtualDisplay};
 use crate::mac::input::Forwarder;
 use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
+use crate::numbers::Numbers;
 use gpui::Context;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -13,10 +14,9 @@ use std::time::Duration;
 pub struct Core {
     pub displays: Displays<VirtualDisplay>,
     forwarders: HashMap<DisplayId, Forwarder>,
-    /// Elements from the latest snapshot of each window, by their number.
-    /// The last accessibility snapshot of each window, by display, so
-    /// element numbers refer to it. Dropped with the display.
-    pub elements: HashMap<(DisplayId, WindowId), Vec<ax::Element>>,
+    /// The numbered elements of each window an agent has looked at, by
+    /// display. Dropped with the display.
+    pub elements: HashMap<(DisplayId, WindowId), Numbers<ax::Element>>,
     /// Connections that have closed. A request from one can still be queued
     /// behind its close, and must not create a display nobody owns.
     pub closed: HashSet<u64>,

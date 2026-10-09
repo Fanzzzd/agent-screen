@@ -261,8 +261,8 @@ pub fn definitions() -> Vec<Value> {
             "See one window",
             &[
                 "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
-                "brackets that act_on_element takes. Each new state of a window renumbers its elements, so always use the",
-                "numbers from the latest get_window_state or act_on_element result.",
+                "brackets that act_on_element takes, and its center in display coordinates. An element keeps its number",
+                "while it stays in the window; a number whose element went away fails instead of hitting another one.",
             ],
             object(
                 json!({ "display_id": display_id(), "window_id": window_id() }),
@@ -621,11 +621,9 @@ async fn window_state(
         ""
     };
     let header = format!(
-        "Window {window}: {} {} elements{truncated}. Coordinates are window points from its top-left corner, the same space as the {}×{} image; add the window's x and y to aim the computer tool at them.",
+        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in display coordinates, where the computer tool clicks; the image shows just this window.",
         get("window"),
         elements,
-        get("width"),
-        get("height")
     );
     let tree = state
         .get("tree")

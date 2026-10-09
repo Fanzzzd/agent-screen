@@ -290,7 +290,10 @@ pub struct Snapshot {
 // See Sendable.
 unsafe impl Send for Snapshot {}
 
-pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
+/// The window's elements, positioned by their centers in display points
+/// from `origin`, the display's top-left corner: the space the computer
+/// tool clicks in.
+pub fn snapshot(target: WindowTarget, origin: (f64, f64)) -> Option<Snapshot> {
     let window = window_element(target)?;
     // Chromium and Electron apps only publish their web content tree once a
     // client asks for it. Other apps ignore the attribute.
@@ -299,7 +302,6 @@ pub fn snapshot(target: WindowTarget) -> Option<Snapshot> {
         "AXManualAccessibility",
         CFBoolean::new(true),
     );
-    let origin = frame(&window).map_or((0.0, 0.0), |f| (f.x, f.y));
     let mut walker = TreeWalker {
         origin,
         lines: Vec::new(),
@@ -480,11 +482,17 @@ impl TreeWalker {
         };
         let string = |i: usize| {
             let text = values[i].downcast_ref::<CFString>()?.to_string();
+            // Apps wrap numbers and names in invisible direction marks.
+            let text: String = text.chars().filter(|c| !is_direction_mark(*c)).collect();
             let trimmed = text.trim();
             (!trimmed.is_empty()).then(|| trimmed.chars().take(80).collect::<String>())
         };
         let boolean = |i: usize| values[i].downcast_ref::<CFBoolean>().map(|b| b.as_bool());
         let role = string(0).unwrap_or_else(|| "AXUnknown".into());
+        // A ruler's tick marks: dozens of elements nobody acts on.
+        if role == "AXRulerMarker" {
+            return;
+        }
         let label = string(2).or_else(|| string(3));
         let value = values[4]
             .downcast_ref::<CFNumber>()
@@ -523,9 +531,9 @@ impl TreeWalker {
             if let Some(f) =
                 frame_from(&values[7], &values[8]).filter(|f| f.width > 0.0 && f.height > 0.0)
             {
-                let x = (f.x - self.origin.0) as i64;
-                let y = (f.y - self.origin.1) as i64;
-                line += &format!(" ({x},{y} {}×{})", f.width as i64, f.height as i64);
+                let x = (f.x - self.origin.0 + f.width / 2.0).round() as i64;
+                let y = (f.y - self.origin.1 + f.height / 2.0).round() as i64;
+                line += &format!(" at ({x},{y}) {}×{}", f.width as i64, f.height as i64);
             }
             self.lines.push(format!("{}{line}", "  ".repeat(depth)));
             self.elements
@@ -536,6 +544,11 @@ impl TreeWalker {
             self.visit(&child, indent);
         }
     }
+}
+
+/// Left-to-right and right-to-left marks, embeddings and isolates.
+fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// "AXButton" → "button".

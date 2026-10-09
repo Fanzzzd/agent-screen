@@ -11,6 +11,7 @@ use crate::model::{
     DEFAULT_SIZE, DisplayId, Disposition, EndReason, Origin, Owner, Rect, Wait, WindowTarget,
     shot_scale,
 };
+use crate::numbers;
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
@@ -353,10 +354,12 @@ pub async fn handle(
             let id = display(&core, &p, false, cx)?;
             let window = window_on(id, &p)?;
             let target = window.target;
+            let area = cg::display_bounds(id);
+            let origin = (area.x, area.y);
             // Walking a tree takes a round trip per element.
             let snapshot = cx
                 .background_executor()
-                .spawn(async move { ax::snapshot(target) })
+                .spawn(async move { ax::snapshot(target, origin) })
                 .await
                 .ok_or_else(|| {
                     ControlError::not_found(
@@ -364,9 +367,9 @@ pub async fn handle(
                     )
                 })?;
             let count = snapshot.elements.len();
-            core.update(cx, |c, _| {
-                c.elements
-                    .insert((id, window.target.window_id), snapshot.elements)
+            let tree = core.update(cx, |c, _| {
+                let numbers = c.elements.entry((id, window.target.window_id)).or_default();
+                numbers::relabel(&snapshot.tree, &numbers.renumber(snapshot.elements))
             });
             let size = (window.bounds.width, window.bounds.height);
             let shot = cx
@@ -376,7 +379,7 @@ pub async fn handle(
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
             result["window"] = window.json();
-            result["tree"] = json!(snapshot.tree);
+            result["tree"] = json!(tree);
             result["elements"] = json!(count);
             result["truncated"] = json!(snapshot.truncated);
             Ok(result)
@@ -388,8 +391,8 @@ pub async fn handle(
                 .int("element")
                 .ok_or_else(|| ControlError::invalid("element is required"))?;
             let element = core.read_with(cx, |c, _| {
-                let list = c.elements.get(&(id, window.target.window_id));
-                list.map(|l| l.get(index as usize).cloned())
+                let numbers = c.elements.get(&(id, window.target.window_id));
+                numbers.map(|n| (n.get(index as usize).cloned(), n.issued(index as usize)))
             });
             let element = match element {
                 None => {
@@ -397,34 +400,33 @@ pub async fn handle(
                         "call get_window_state for this window first",
                     ));
                 }
-                Some(None) => {
+                Some((None, true)) => {
+                    return Err(ControlError::not_found(format!(
+                        "element {index} is no longer in the window; call get_window_state again"
+                    )));
+                }
+                Some((None, false)) => {
                     return Err(ControlError::not_found(format!(
                         "no element {index}; call get_window_state again"
                     )));
                 }
-                Some(Some(element)) => element,
+                Some((Some(element), _)) => element,
             };
             let action = p.string("action").unwrap_or_else(|| "press".into());
             // A menu bar title lists its items rather than opening a menu
             // on the user's own menu bar.
             if matches!(action.as_str(), "press" | "click" | "show_menu") {
-                let first = core.read_with(cx, |c, _| {
-                    c.elements
-                        .get(&(id, window.target.window_id))
-                        .map_or(0, Vec::len)
-                });
                 let item = ax::Sendable(element.clone());
                 let menu = cx
                     .background_executor()
-                    .spawn(async move { ax::menu_items(item.get(), first) })
+                    .spawn(async move { ax::menu_items(item.get(), 0) })
                     .await;
                 if let Some(menu) = menu {
-                    core.update(cx, |c, _| {
-                        if let Some(list) = c.elements.get_mut(&(id, window.target.window_id)) {
-                            list.extend(menu.elements);
-                        }
+                    let tree = core.update(cx, |c, _| {
+                        let numbers = c.elements.entry((id, window.target.window_id)).or_default();
+                        numbers::relabel(&menu.tree, &numbers.extend(menu.elements))
                     });
-                    return reply(json!({ "menu": menu.tree }));
+                    return reply(json!({ "menu": tree }));
                 }
             }
             act(&core, id, &action, &element, p.string("value"), cx).await?;

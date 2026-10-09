@@ -537,7 +537,10 @@ mod tests {
         assert_eq!(inside.kept_inside(&area), inside);
         // Calculator widening to Scientific past the right edge.
         let wide = Rect::new(797.0, 392.0, 674.0, 408.0);
-        assert_eq!(wide.kept_inside(&area), Rect::new(606.0, 392.0, 674.0, 408.0));
+        assert_eq!(
+            wide.kept_inside(&area),
+            Rect::new(606.0, 392.0, 674.0, 408.0)
+        );
         let huge = Rect::new(-50.0, 10.0, 2000.0, 900.0);
         assert_eq!(huge.kept_inside(&area), area);
     }

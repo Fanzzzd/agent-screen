@@ -13,7 +13,7 @@ mod mac;
 mod ui;
 
 // The domain rules live in their own crate, which builds on every platform.
-use sidescreen_model::{keychord, model};
+use sidescreen_model::{keychord, model, numbers};
 
 use control::server::{self, Event};
 use futures::StreamExt;
