@@ -127,10 +127,12 @@ impl Render for Setup {
                     .child(
                         div()
                             .flex_1()
+                            // Wraps instead of pushing the button out.
+                            .min_w_0()
                             .text_size(px(11.))
                             .text_color(theme.secondary)
                             .child(t(
-                                "Sidescreen uses these only on this Mac. Turn them off anytime in System Settings.",
+                                "Used only on this Mac. Turn off anytime in System Settings.",
                                 "权限只用在这台 Mac 上，随时可以在系统设置里关掉。",
                             )),
                     )
