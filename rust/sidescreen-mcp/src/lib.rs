@@ -3,6 +3,7 @@
 
 mod control;
 pub mod endpoint;
+pub mod install;
 mod session;
 mod tools;
 

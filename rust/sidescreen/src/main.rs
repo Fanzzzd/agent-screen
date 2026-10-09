@@ -44,6 +44,19 @@ impl log::Log for Logger {
 fn main() {
     // `Sidescreen mcp`: the MCP server a client starts over stdio. It only
     // talks to the running app through the control socket.
+    if std::env::args().nth(1).as_deref() == Some("mcp")
+        && std::env::args().nth(2).as_deref() == Some("install")
+    {
+        let exe = std::env::current_exe().unwrap_or_default();
+        for outcome in sidescreen_mcp::install::install(&exe) {
+            match outcome.result {
+                None => println!("{}: not installed", outcome.client),
+                Some(Ok(done)) => println!("{}: {done}", outcome.client),
+                Some(Err(error)) => println!("{}: failed: {error}", outcome.client),
+            }
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         if let Err(error) = sidescreen_mcp::run() {
             eprintln!("Sidescreen mcp: {error}");

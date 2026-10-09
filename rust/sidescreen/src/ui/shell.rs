@@ -1207,6 +1207,11 @@ impl Shell {
             ))));
             menu.separator();
         }
+        menu.action(
+            t("Connect Claude Code and Codex", "连接 Claude Code 和 Codex"),
+            MenuAction::ConnectAgents,
+        );
+        menu.separator();
         let quit = menu.action(t("Quit Sidescreen", "退出 Sidescreen"), MenuAction::Quit);
         native::set_key_equivalent(&quit, "q", true, false, false, false);
         self.icon.pop_up(menu.into_native());
@@ -1382,6 +1387,37 @@ impl Shell {
                         .arg(config)
                         .spawn();
                 }
+            }
+            MenuAction::ConnectAgents => {
+                let install = cx.background_spawn(async {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    sidescreen_mcp::install::install(&exe)
+                });
+                cx.spawn(async move |_, _| {
+                    let outcomes = install.await;
+                    let lines: Vec<String> = outcomes
+                        .iter()
+                        .map(|o| match &o.result {
+                            None => tf!("{}: not installed", "{}：没有安装", o.client),
+                            Some(Ok(done)) => format!("{}: {done}", o.client),
+                            Some(Err(error)) => {
+                                tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
+                            }
+                        })
+                        .collect();
+                    native::alert(
+                        t("Sidescreen and your agents", "Sidescreen 与 agent"),
+                        &format!(
+                            "{}\n\n{}",
+                            lines.join("\n"),
+                            t(
+                                "Start a new agent session to load the tools.",
+                                "新开一个 agent 会话就能用上这些工具。"
+                            )
+                        ),
+                    );
+                })
+                .detach();
             }
             MenuAction::Quit => self.quit(cx),
             MenuAction::HandOver {

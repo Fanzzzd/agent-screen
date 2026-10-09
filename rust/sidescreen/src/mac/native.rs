@@ -76,6 +76,7 @@ pub enum MenuAction {
     CreateDisplay,
     GrantPermissions,
     OpenAeroSpaceConfig,
+    ConnectAgents,
     Quit,
     HandOver {
         display: u32,
@@ -406,6 +407,20 @@ pub fn set_key_equivalent(
         mask |= NSEventModifierFlags::Control;
     }
     item.setKeyEquivalentModifierMask(mask);
+}
+
+/// A plain alert in front of everything, for a one-off result.
+pub fn alert(title: &str, text: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    // A menu bar app is never active on its own.
+    #[allow(deprecated)]
+    objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    alert.runModal();
 }
 
 pub fn set_checked(item: &NSMenuItem) {
