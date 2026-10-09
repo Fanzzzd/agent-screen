@@ -10,6 +10,19 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Quitting ends every Agent Display, and with it whatever an agent is doing
+# there. Refuse while any is open, unless told otherwise.
+open_displays="$(swift -e '
+import CoreGraphics
+var ids = [CGDirectDisplayID](repeating: 0, count: 32); var n: UInt32 = 0
+CGGetOnlineDisplayList(32, &ids, &n)
+print(ids.prefix(Int(n)).filter { CGDisplayVendorNumber($0) == 0x5353 }.count)' 2>/dev/null || echo 0)"
+if [[ "$open_displays" != 0 && "${SIDESCREEN_FORCE_INSTALL:-}" != 1 ]]; then
+  echo "error: $open_displays Agent Display(s) open; installing would end them. Retry when none is open, or set SIDESCREEN_FORCE_INSTALL=1." >&2
+  exit 1
+fi
+
 scripts/bundle.sh release >/dev/null
 built="$(cd .. && pwd)/target/Sidescreen.app"
 installed=/Applications/Sidescreen.app

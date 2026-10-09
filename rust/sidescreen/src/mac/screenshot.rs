@@ -58,6 +58,15 @@ pub fn can_capture() -> bool {
 /// wallpaper and desktop icons, for agents: a photo makes up most of a
 /// screenshot's bytes and tells them nothing. Blocking.
 pub fn filter(id: DisplayId, fresh: bool, plain: bool) -> Result<SCContentFilter, String> {
+    filter_counting(id, fresh, plain).map(|(filter, _)| filter)
+}
+
+/// The filter, and how many windows on the display it leaves in.
+fn filter_counting(
+    id: DisplayId,
+    fresh: bool,
+    plain: bool,
+) -> Result<(SCContentFilter, usize), String> {
     let content = content(fresh)?;
     let display = content
         .displays()
@@ -87,12 +96,31 @@ pub fn filter(id: DisplayId, fresh: bool, plain: bool) -> Result<SCContentFilter
             across && (in_bar || desktop)
         })
         .collect();
+    // What an agent could see: app windows, panels and menus. The cursor,
+    // the recording indicator and other overlays from layer 1000 up, and
+    // 1-point status windows, don't make a picture.
+    let left = content
+        .windows()
+        .into_iter()
+        .filter(|w| {
+            let f = w.frame();
+            (0..1000).contains(&w.window_layer())
+                && f.size.width > 1.0
+                && f.size.height > 1.0
+                && f.origin.x < area.max_x()
+                && f.origin.x + f.size.width > area.x
+                && f.origin.y < area.max_y()
+                && f.origin.y + f.size.height > area.y
+                && !bar.iter().any(|b| b.window_id() == w.window_id())
+        })
+        .count();
     let refs: Vec<&SCWindow> = bar.iter().collect();
-    SCContentFilter::create()
+    let filter = SCContentFilter::create()
         .with_display(&display)
         .with_excluding_windows(&refs)
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok((filter, left))
 }
 
 /// Blocking: call off the main thread. `source` limits the capture to a
@@ -103,8 +131,13 @@ pub fn display(
     format: Format,
     source: Option<crate::model::Rect>,
 ) -> Result<Shot, String> {
-    let capture = |fresh: bool| -> Result<CGImage, String> {
-        let filter = filter(id, fresh, true)?;
+    let capture = |fresh: bool| -> Result<Option<CGImage>, String> {
+        let (filter, left) = filter_counting(id, fresh, true)?;
+        // Nothing but the desktop: ScreenCaptureKit refuses to capture
+        // an empty picture, and the answer is plain anyway.
+        if left == 0 {
+            return Ok(None);
+        }
         let mut config = SCStreamConfiguration::new()
             .with_width(size.0 as u32)
             .with_height(size.1 as u32)
@@ -117,14 +150,24 @@ pub fn display(
         config.set_source_rect(screencapturekit::cg::CGRect::new(
             r.x, r.y, r.width, r.height,
         ));
-        SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())
+        SCScreenshotManager::capture_image(&filter, &config)
+            .map(Some)
+            .map_err(|e| e.to_string())
     };
-    // Cached content can go stale when displays change; list it again.
-    let image = match capture(false) {
+    // A fresh listing every time: a cached one misses the wallpaper and
+    // menu bar windows a new display gets, so they'd show, and names
+    // windows that closed since, which fails the capture.
+    let image = match capture(true) {
         Ok(image) => image,
-        Err(_) => capture(true)?,
+        Err(_) => {
+            std::thread::sleep(Duration::from_millis(100));
+            capture(true)?
+        }
     };
-    encode(&image, format)
+    match image {
+        Some(image) => encode(&image, format),
+        None => plain(size, format),
+    }
 }
 
 /// One window without what lies above or below it. Blocking.
@@ -170,6 +213,47 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(object: *const c_void);
+}
+
+/// The empty desktop agents see: the background color, at the capture's
+/// size.
+fn plain(size: (f64, f64), format: Format) -> Result<Shot, String> {
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext,
+        CGImageAlphaInfo,
+    };
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    unsafe {
+        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
+        let context = CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            0,
+            Some(&space),
+            CGImageAlphaInfo::NoneSkipLast.0,
+        )
+        .ok_or("could not draw the screenshot")?;
+        CGContext::set_rgb_fill_color(Some(&context), 0.13, 0.13, 0.14, 1.0);
+        CGContext::fill_rect(
+            Some(&context),
+            objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                objc2_core_foundation::CGSize::new(size.0, size.1),
+            ),
+        );
+        let image =
+            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw the screenshot")?;
+        encode_raw(
+            objc2_core_foundation::CFRetained::as_ptr(&image)
+                .as_ptr()
+                .cast(),
+            width,
+            height,
+            format,
+        )
+    }
 }
 
 /// JPEG at quality 0.8, or PNG, through ImageIO.

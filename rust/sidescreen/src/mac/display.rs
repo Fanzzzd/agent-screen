@@ -69,9 +69,13 @@ impl VirtualDisplay {
     }
 }
 
-/// Park a virtual display diagonally off the bottom-right corner of the
-/// physical displays so the real cursor rarely wanders onto it. Further
+/// Park a virtual display diagonally off the top-right corner of the
+/// physical displays, so the real cursor rarely wanders onto it. Further
 /// virtual displays stack to the right of earlier ones.
+///
+/// Not the bottom corners: AeroSpace hides the windows of other workspaces
+/// in a monitor's bottom corner, hanging off screen, and a display there
+/// would show the user's hidden windows to agents.
 pub fn tuck_away(id: u32, virtual_ids: &[u32]) {
     let others: Vec<u32> = cg::active_displays()
         .into_iter()
@@ -103,7 +107,13 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) {
     unsafe {
         let mut config = std::ptr::null_mut();
         if CGBeginDisplayConfiguration(&mut config) == 0 {
-            CGConfigureDisplayOrigin(config, id, occupied.max_x() as i32, anchor.max_y() as i32);
+            let height = cg::display_bounds(id).height;
+            CGConfigureDisplayOrigin(
+                config,
+                id,
+                occupied.max_x() as i32,
+                (anchor.y - height) as i32,
+            );
             // kCGConfigureForSession
             CGCompleteDisplayConfiguration(config, 1);
         }

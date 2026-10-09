@@ -99,6 +99,14 @@ pub fn string_attribute(element: &AXUIElement, name: &str) -> Option<String> {
     )
 }
 
+/// Whether the app lets clients change the attribute.
+pub fn settable(element: &AXUIElement, name: &str) -> bool {
+    let name = CFString::from_str(name);
+    let mut settable: u8 = 0;
+    let error = unsafe { element.is_attribute_settable(&name, NonNull::from(&mut settable)) };
+    error == AXError::Success && settable != 0
+}
+
 pub fn set_attribute(element: &AXUIElement, name: &str, value: &CFType) -> bool {
     let name = CFString::from_str(name);
     unsafe { element.set_attribute_value(&name, value) == AXError::Success }
@@ -234,6 +242,11 @@ impl std::fmt::Display for MoveError {
 }
 
 /// Fit the window inside `bounds` with a 40 pt margin, centered.
+/// Minimize a window: what's left when it can't go where it belongs.
+pub fn minimize(target: WindowTarget) -> bool {
+    window_element(target).is_some_and(|w| set_attribute(&w, "AXMinimized", CFBoolean::new(true)))
+}
+
 pub fn move_into(target: WindowTarget, bounds: Rect) -> Result<(), MoveError> {
     // A removed display has empty bounds; the window would land in a
     // corner of the main screen.

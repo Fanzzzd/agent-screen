@@ -144,9 +144,13 @@ pub fn place(
         && let Some(name) = screen_name
         && let Ok(Some(monitor)) = aerospace.monitor_id(name)
     {
-        return aerospace
-            .move_to_monitor(target.window_id, &monitor)
-            .map_err(|e| format!("AeroSpace refused: {e}"));
+        // AeroSpace doesn't manage panels, such as an Open panel, and
+        // learns of a new window a moment late: move those directly.
+        let Err(refused) = aerospace.move_to_monitor(target.window_id, &monitor) else {
+            return Ok(());
+        };
+        return ax::move_into(target, cg::display_bounds(display))
+            .map_err(|e| format!("AeroSpace refused ({refused}) and Accessibility refused ({e})"));
     }
     ax::move_into(target, cg::display_bounds(display))
         .map_err(|e| format!("Accessibility refused: {e}"))

@@ -23,6 +23,9 @@ pub struct Core {
     /// The Agent Session each connection created or reused a display for.
     /// A connection may only use displays its session owns.
     pub sessions: HashMap<u64, String>,
+    /// Displays moved to where they stay. Until then a new display can sit
+    /// over one of the user's windows parked off screen.
+    pub tucked: HashSet<DisplayId>,
 }
 
 impl Core {
@@ -33,6 +36,7 @@ impl Core {
             elements: HashMap::new(),
             closed: HashSet::new(),
             sessions: HashMap::new(),
+            tucked: HashSet::new(),
         }
     }
 
@@ -61,6 +65,7 @@ impl Core {
             let _ = this.update(cx, |core, _| {
                 let virtual_ids: Vec<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
                 display::tuck_away(id, &virtual_ids);
+                core.tucked.insert(id);
             });
         })
         .detach();
@@ -89,6 +94,7 @@ impl Core {
         if self.displays.remove(id).is_some() {
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
+            self.tucked.remove(&id);
             cx.notify();
         }
     }

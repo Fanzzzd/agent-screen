@@ -41,7 +41,31 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+const USAGE: &str = "Sidescreen gives AI agents their own virtual displays.
+
+Usage:
+  Sidescreen               start the menu bar app (open Sidescreen.app instead)
+  Sidescreen mcp           the MCP server, started by an agent client over stdio
+  Sidescreen mcp install   register the MCP server with Claude Code and Codex
+  Sidescreen --version     print the version
+";
+
 fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("--help" | "-h" | "help") => {
+            print!("{USAGE}");
+            return;
+        }
+        Some("--version" | "-V") => {
+            println!("Sidescreen {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some(other) if other != "mcp" && !other.starts_with("-psn") => {
+            eprint!("Sidescreen: unknown argument {other}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+        _ => {}
+    }
     // `Sidescreen mcp`: the MCP server a client starts over stdio. It only
     // talks to the running app through the control socket.
     if std::env::args().nth(1).as_deref() == Some("mcp")
@@ -62,6 +86,13 @@ fn main() {
             eprintln!("Sidescreen mcp: {error}");
             std::process::exit(1);
         }
+        return;
+    }
+    // One app per user: another one answering on the control socket owns
+    // the displays and the menu bar icon.
+    #[cfg(unix)]
+    if std::os::unix::net::UnixStream::connect(sidescreen_mcp::endpoint::socket_path()).is_ok() {
+        eprintln!("Sidescreen is already running.");
         return;
     }
     log::set_logger(&Logger).ok();

@@ -39,7 +39,7 @@ pub async fn handle(
         usable(&core, connection, id as DisplayId, method, cx)?;
     }
     let result: Result<Value, ControlError> = match method {
-        "createDisplay" => create_display(&core, connection, &p, cx),
+        "createDisplay" => create_display(&core, connection, &p, cx).await,
         "endDisplay" => {
             let id = display(&core, &p, false, cx)?;
             core.update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
@@ -592,10 +592,10 @@ fn reply(value: Value) -> Reply {
 
 // MARK: Methods
 
-fn create_display(
+async fn create_display(
     core: &Entity<Core>,
     connection: u64,
-    p: &Args,
+    p: &Args<'_>,
     cx: &mut AsyncApp,
 ) -> Result<Value, ControlError> {
     let session_key = p
@@ -641,19 +641,32 @@ fn create_display(
         title: p.string("title").unwrap_or_else(|| "Untitled".into()),
         connection,
     };
-    core.update(cx, |c, cx| {
-        let id = c.create((width, height), Some(owner), cx)?;
-        c.displays.get(id).map(|d| {
-            let mut reply = describe(d, false);
-            if clamped {
-                reply["note"] = json!(format!(
-                    "sizes run from 640×480 to 2560×1600; made it {width}×{height}"
-                ));
-            }
-            reply
+    let reply = core
+        .update(cx, |c, cx| {
+            let id = c.create((width, height), Some(owner), cx)?;
+            c.displays.get(id).map(|d| {
+                let mut reply = describe(d, false);
+                if clamped {
+                    reply["note"] = json!(format!(
+                        "sizes run from 640×480 to 2560×1600; made it {width}×{height}"
+                    ));
+                }
+                reply
+            })
         })
-    })
-    .ok_or_else(|| ControlError::failed("macOS refused to create a virtual display"))
+        .ok_or_else(|| ControlError::failed("macOS refused to create a virtual display"))?;
+    // Answer once the display is where it stays, so a first screenshot
+    // shows only the display.
+    let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
+    for _ in 0..40 {
+        if core.read_with(cx, |c, _| c.tucked.contains(&id)) {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
+    }
+    Ok(reply)
 }
 
 fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
@@ -769,12 +782,14 @@ async fn act(
             let set = off_main(
                 cx,
                 Box::new(move |e| {
-                    ax::set_attribute(
-                        e,
-                        "AXValue",
-                        &objc2_core_foundation::CFString::from_str(&value),
-                    ) && ax::string_attribute(e, "AXValue")
-                        .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
+                    ax::settable(e, "AXValue")
+                        && ax::set_attribute(
+                            e,
+                            "AXValue",
+                            &objc2_core_foundation::CFString::from_str(&value),
+                        )
+                        && ax::string_attribute(e, "AXValue")
+                            .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
                 }),
             )
             .await;
@@ -837,6 +852,15 @@ async fn open_in_background(
                 Some(target) => open.arg("-a").arg(&app).arg(target),
                 None => open.arg(&app),
             };
+            // A document app that starts with nothing to open shows an Open
+            // panel, owned by a system service and left on the user's
+            // screen, instead of a window. Ask for an untitled document.
+            // Only a starting app reads its arguments.
+            open.args([
+                "--args",
+                "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
+                "NO",
+            ]);
             open.status().is_ok_and(|s| s.success())
         })
         .await
@@ -971,9 +995,19 @@ async fn settle(
             return Ok(placed);
         }
     }
+    // Left where it opened, it would sit on the user's screen.
+    let minimized = cx
+        .background_executor()
+        .spawn(async move { ax::minimize(target) })
+        .await;
     Err(ControlError::failed(format!(
-        "the window opened but could not be placed on the display{}",
-        last_error.map(|e| format!(": {e}")).unwrap_or_default()
+        "the window opened but could not be placed on the display{}; {}",
+        last_error.map(|e| format!(": {e}")).unwrap_or_default(),
+        if minimized {
+            "it was minimized so it stays off the user's screen"
+        } else {
+            "it may be on the user's screen"
+        }
     )))
 }
 
