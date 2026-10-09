@@ -708,7 +708,11 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 .await?;
         }
         "left_mouse_down" | "left_mouse_up" => {
-            let method = if action == "left_mouse_down" { "mouseDown" } else { "mouseUp" };
+            let method = if action == "left_mouse_down" {
+                "mouseDown"
+            } else {
+                "mouseUp"
+            };
             let mut params = json!({ "displayId": display, "modifiers": modifiers });
             if let Some((x, y)) = coordinate {
                 params["x"] = json!(x);
@@ -729,13 +733,15 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 .await?;
         }
         "zoom" => {
-            let region = a
-                .0
-                .get("region")
-                .cloned()
-                .ok_or_else(|| ControlError::invalid("region is required for zoom"))?;
+            let region =
+                a.0.get("region")
+                    .cloned()
+                    .ok_or_else(|| ControlError::invalid("region is required for zoom"))?;
             let shot = control
-                .call("screenshot", json!({ "displayId": display, "region": region }))
+                .call(
+                    "screenshot",
+                    json!({ "displayId": display, "region": region }),
+                )
                 .await?;
             let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
             return Ok(vec![

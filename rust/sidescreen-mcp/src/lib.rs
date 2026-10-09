@@ -8,8 +8,8 @@ mod tools;
 
 use control::Control;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
+    ListToolsResult, PaginatedRequestParams, ResultType, ServerCapabilities,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
@@ -47,7 +47,13 @@ impl ServerHandler for Sidescreen {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(from_json(json!({ "tools": tools::definitions() })))
+        // Protocol 2026-07-28 requires resultType on every result, and ttlMs
+        // and cacheScope on lists; rmcp drops them for older clients.
+        let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));
+        // The list is fixed for a build, the same for every user.
+        Ok(ListToolsResult::with_all_items(tools.tools)
+            .with_ttl_ms(3_600_000)
+            .with_cache_scope(CacheScope::Public))
     }
 
     async fn call_tool(
@@ -76,7 +82,9 @@ impl ServerHandler for Sidescreen {
             // Domain failures go back to the model as tool errors it can act on.
             Err(error) => json!({ "isError": true, "content": [text(error.to_string())] }),
         };
-        Ok(from_json::<CallToolResult>(result).into())
+        let mut result = from_json::<CallToolResult>(result);
+        result.result_type = Some(ResultType::COMPLETE);
+        Ok(result.into())
     }
 }
 
