@@ -146,6 +146,43 @@ async function strip() {
   }
 }
 
+// MARK: Focus
+
+/** The user's front app keeps its key window, and so its input method, while an agent types. */
+async function focus() {
+  if (running("Calculator")) {
+    console.log("skip focus: Calculator is the user's")
+    return
+  }
+  await startDebugApp()
+  const control = await Control.connect()
+  const holder = Bun.spawn([path.join(out, "keyholder"), "12"], { stdout: "pipe" })
+  try {
+    const display: Display = await control.call("createDisplay", { sessionKey: "e2e-focus", client: "E2E", title: "focus" })
+    const id = display.displayId
+    await control.call("launchApp", { displayId: id, app: "Calculator" })
+    await settle(1500)
+    // Launching may bring Calculator forward; the user's app is front again.
+    sh(path.join(out, "probe"), ["activate", String(holder.pid)], true)
+    await settle(800)
+    const before = Date.now()
+    for (const text of ["7+8=", "2*3="]) await control.call("type", { displayId: id, text })
+    const shot = await control.call("windowState", { displayId: id, windowId: (await control.call("listWindows", { displayId: id })).windows[0].windowId })
+    const typed = /value="\W*6"/.test(shot.tree)
+    await settle(Math.max(0, 2000 - (Date.now() - before)))
+    holder.kill()
+    const log = await new Response(holder.stdout).text()
+    const lines = log.split("\n").filter(Boolean)
+    check("the agent's typing reaches its app", typed, shot.tree.match(/statictext value="[^"]*"/g)?.join(" "))
+    check("the user's window stays key while the agent types", lines[0] === "key" && !lines.includes("resign"), lines.join(" "))
+  } finally {
+    holder.kill()
+    quitApp("Calculator")
+    control.close()
+    await settle(800)
+  }
+}
+
 // MARK: Permissions
 
 /** Without grants: the setup window, the agent's error, the Settings helper. */
@@ -211,7 +248,7 @@ async function permissions() {
 
 // MARK: Run
 
-const cases: Record<string, () => Promise<void>> = { scroll, strip, permissions }
+const cases: Record<string, () => Promise<void>> = { scroll, strip, focus, permissions }
 const chosen = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(cases)
 for (const name of chosen) if (!cases[name]) throw new Error(`no case ${name}; cases: ${Object.keys(cases).join(", ")}`)
 

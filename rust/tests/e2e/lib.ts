@@ -35,7 +35,7 @@ const osa = (script: string) => sh("/usr/bin/osascript", ["-e", script], true)
 /** Build the Swift helpers into target/e2e when their source is newer. */
 export const buildTools = () => {
   mkdirSync(out, { recursive: true })
-  for (const tool of ["hid", "probe"]) {
+  for (const tool of ["hid", "probe", "keyholder"]) {
     const source = new URL(`tools/${tool}.swift`, import.meta.url).pathname
     const binary = path.join(out, tool)
     if (!existsSync(binary) || statSync(binary).mtimeMs < statSync(source).mtimeMs) {

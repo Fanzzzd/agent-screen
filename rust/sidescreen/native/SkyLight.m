@@ -129,12 +129,15 @@ bool SSFocusWithoutRaise(pid_t pid, CGWindowID windowID) {
     if (SS.getFrontProcess(&front) != 0) return false;
     if (!SSProcessForWindow(windowID, pid, &target)) return false;
 
+    // The front process is the user's. Telling it its window lost focus,
+    // as a raise would, ends its text input session: the input method
+    // stops composing, and Chinese typing breaks until the user clicks.
+    // Only the target hears about focus, and a window of the user's own
+    // front app is left alone.
+    if (memcmp(&front, &target, sizeof(front)) == 0) return false;
     uint8_t record[0xF8];
-    SSFocusRecord(record, windowID, 0x02);
-    bool defocused = SS.postEventRecordTo(&front, record) == 0;
     SSFocusRecord(record, windowID, 0x01);
-    bool focused = SS.postEventRecordTo(&target, record) == 0;
-    return defocused && focused;
+    return SS.postEventRecordTo(&target, record) == 0;
 }
 
 bool SSAXWindowID(AXUIElementRef element, CGWindowID *outWindowID) {

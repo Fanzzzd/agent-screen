@@ -6,6 +6,7 @@
 //   probe locked              1 while the screen is locked, else 0
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -40,6 +41,10 @@ case "pixel":
   var sum = [0, 0, 0]
   for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
   print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "activate":
+  // Bring a process forward, as the user clicking it would.
+  let pid = pid_t(args[2])!
+  NSRunningApplication(processIdentifier: pid)?.activate()
 case "tap":
   FileManager.default.createFile(atPath: args[3], contents: nil)
   tapOut = FileHandle(forWritingAtPath: args[3])
