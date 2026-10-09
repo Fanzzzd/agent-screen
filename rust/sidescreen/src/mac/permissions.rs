@@ -6,6 +6,7 @@
 //! at launch: the setup window asks when the user clicks.
 
 use super::cg;
+use crate::i18n::t;
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use std::ffi::{CString, c_void};
 use std::sync::OnceLock;
@@ -23,8 +24,8 @@ impl Permission {
     /// The name System Settings uses.
     pub fn name(self) -> &'static str {
         match self {
-            Permission::ScreenRecording => "屏幕录制",
-            Permission::Accessibility => "辅助功能",
+            Permission::ScreenRecording => t("Screen Recording", "屏幕录制"),
+            Permission::Accessibility => t("Accessibility", "辅助功能"),
         }
     }
 

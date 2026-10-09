@@ -8,6 +8,7 @@ use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::dismissal::Item;
+use crate::i18n::t;
 use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
 use gpui::{
@@ -172,7 +173,10 @@ impl Render for Viewer {
                 .text_size(px(12.))
                 .text_color(theme.accent)
                 .truncate()
-                .child(format!("松手把窗口交给 {agent}"))
+                .child(tf!(
+                    "Drop to hand it over to {agent}",
+                    "松手把窗口交给 {agent}"
+                ))
                 .into_any_element()
         } else if status.kind == Kind::Help {
             // The reason is the one line the user must read; one line
@@ -265,20 +269,22 @@ fn header(
 ) -> impl IntoElement {
     let primary = match kind {
         Kind::Manual => None,
-        Kind::Agent => Some(("接手操作".to_string(), None, None)),
+        Kind::Agent => Some((t("Take Over", "接手操作").to_string(), None, None)),
         Kind::Help => Some((
-            "接手操作".to_string(),
+            t("Take Over", "接手操作").to_string(),
             Some("icons/hand.svg"),
             Some(theme.orange),
         )),
         Kind::Takeover => Some((
-            format!("让 {agent} 继续"),
+            tf!("Let {agent} Continue", "让 {agent} 继续"),
             Some("icons/play.svg"),
             Some(theme.accent),
         )),
-        Kind::Review | Kind::Disconnected => {
-            Some(("处理窗口…".to_string(), None, Some(theme.accent)))
-        }
+        Kind::Review | Kind::Disconnected => Some((
+            t("Review Windows…", "处理窗口…").to_string(),
+            None,
+            Some(theme.accent),
+        )),
     };
     let primary_shell = shell.clone();
     let windows_shell = shell.clone();
@@ -322,7 +328,7 @@ fn header(
                 .flex_none()
                 .child(button(
                     "windows",
-                    format!("窗口 {count}"),
+                    tf!("Windows {count}", "窗口 {count}"),
                     Some("icons/windows.svg"),
                     None,
                     theme,
@@ -348,7 +354,7 @@ fn header(
         .child(icon_button(
             "collapse",
             "icons/chevron-up.svg",
-            "收起到菜单栏",
+            t("Collapse to Menu Bar", "收起到菜单栏"),
             theme,
             move |cx| tell(&close_shell, cx, |shell, cx| shell.close_viewer(cx)),
         ))
@@ -482,7 +488,7 @@ impl Viewer {
         div()
             .id("screen")
             .role(Role::Image)
-            .aria_label("显示器画面")
+            .aria_label(t("Display picture", "显示器画面"))
             .relative()
             .size_full()
             .rounded(px(SCREEN_RADIUS))
@@ -536,12 +542,13 @@ impl Viewer {
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.label)
-                .child(format!("关闭「{}」？", sheet.label))
+                .child(tf!("Close “{}”?", "关闭「{}」？", sheet.label))
                 .into_any_element(),
         ];
         if sheet.live {
             lines.push(note(
-                format!(
+                tf!(
+                    "{} is still using this display and can’t go on once it closes.",
                     "{} 仍在使用这块显示器，关闭后它将无法继续操作。",
                     sheet.agent
                 ),
@@ -549,9 +556,12 @@ impl Viewer {
             ));
         }
         let explain = if sheet.items.is_empty() {
-            "这块显示器上没有窗口。"
+            t(
+                "There are no windows on this display.",
+                "这块显示器上没有窗口。",
+            )
         } else {
-            "选择这些窗口的去向。"
+            t("Choose where these windows go.", "选择这些窗口的去向。")
         };
         lines.push(note(explain.into(), theme.secondary));
 
@@ -565,7 +575,7 @@ impl Viewer {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.secondary)
-                        .child("取回原位置")
+                        .child(t("Goes back where it was", "取回原位置"))
                         .into_any_element()
                 } else {
                     segmented(index, item.fate, theme, cx).into_any_element()
@@ -664,12 +674,13 @@ impl Viewer {
                             .justify_end()
                             .gap(px(8.))
                             .child(
-                                sheet_button("cancel", "取消", "esc", None, theme).on_click(cancel),
+                                sheet_button("cancel", t("Cancel", "取消"), "esc", None, theme)
+                                    .on_click(cancel),
                             )
                             .child(
                                 sheet_button(
                                     "confirm",
-                                    "关闭显示器",
+                                    t("Close Display", "关闭显示器"),
                                     "⌘↩",
                                     Some(confirm_color),
                                     theme,
@@ -708,17 +719,20 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(gpui::white())
-                .child("屏幕录制权限已关闭"),
+                .child(t("Screen Recording is off", "屏幕录制权限已关闭")),
         )
         .child(
             div()
                 .text_size(px(12.))
                 .text_color(gpui::white().opacity(0.8))
-                .child("画面不再更新，agent 也截不到图。"),
+                .child(t(
+                    "The picture stopped updating, and the agent can’t take screenshots.",
+                    "画面不再更新，agent 也截不到图。",
+                )),
         )
         .child(div().mt(px(6.)).child(button(
             "denied-fix",
-            "打开设置".into(),
+            t("Open Settings", "打开设置").into(),
             None,
             Some(theme.accent),
             theme,
@@ -817,8 +831,8 @@ fn segmented(
         .gap(px(2.))
         .rounded(px(8.))
         .bg(theme.control)
-        .child(segment("取回", Fate::GiveBack, cx))
-        .child(segment("关闭窗口", Fate::Close, cx))
+        .child(segment(t("Take Back", "取回"), Fate::GiveBack, cx))
+        .child(segment(t("Close Window", "关闭窗口"), Fate::Close, cx))
 }
 
 #[cfg(test)]
@@ -941,7 +955,10 @@ fn menu_strip(
                     .text_color(gpui::white())
                     .opacity(0.)
                     .group_hover("menu-strip", |s| s.opacity(1.))
-                    .child("这里没有可用的菜单：屏幕上还没有 app"),
+                    .child(t(
+                        "No menus here: no app is open on this display yet",
+                        "这里没有可用的菜单：屏幕上还没有 app",
+                    )),
             )
         })
         .when(refused > 0, |d| {

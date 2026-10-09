@@ -85,7 +85,10 @@ pub fn update(display: u32, label: &str, reason: Option<&str>) {
     POSTED.with(|p| p.borrow_mut().insert(display, reason.to_string()));
 
     let content = UNMutableNotificationContent::new();
-    content.setTitle(&NSString::from_str(&format!("{label} 需要你帮忙")));
+    content.setTitle(&NSString::from_str(&tf!(
+        "{label} needs your help",
+        "{label} 需要你帮忙"
+    )));
     content.setBody(&NSString::from_str(reason));
     content.setSound(Some(&UNNotificationSound::defaultSound()));
     let request =

@@ -6,6 +6,7 @@
 //! the main dispatch queue, so their nested run loop never runs inside a
 //! GPUI update.
 
+use crate::i18n::t;
 use block2::RcBlock;
 use futures::channel::mpsc::UnboundedSender;
 use objc2::rc::Retained;
@@ -234,9 +235,18 @@ impl StatusIcon {
             return;
         };
         let (symbol, description) = if self.needs_setup.get() {
-            ("rectangle.on.rectangle.slash", "Sidescreen：需要权限")
+            (
+                "rectangle.on.rectangle.slash",
+                t("Sidescreen: needs permissions", "Sidescreen：需要权限"),
+            )
         } else if self.asking.get() {
-            ("hand.raised.fill", "Sidescreen：agent 在请求帮助")
+            (
+                "hand.raised.fill",
+                t(
+                    "Sidescreen: an agent is asking for help",
+                    "Sidescreen：agent 在请求帮助",
+                ),
+            )
         } else {
             ("rectangle.on.rectangle", "Sidescreen")
         };

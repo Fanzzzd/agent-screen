@@ -7,6 +7,7 @@
 
 use super::shell::{Shell, tell};
 use super::theme::{self, Theme};
+use crate::i18n::t;
 use crate::mac::permissions::{Permission, Status};
 use gpui::{
     App, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -54,13 +55,19 @@ impl Render for Setup {
         let ready = self.status.complete() && !self.restart;
         let (title, subtitle) = if ready {
             (
-                "Sidescreen 可以用了",
-                "让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。",
+                t("Sidescreen is ready", "Sidescreen 可以用了"),
+                t(
+                    "Ask an agent to create a display. Its apps run there, off your screen.",
+                    "让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。",
+                ),
             )
         } else {
             (
-                "让 Sidescreen 开始工作",
-                "Agent 在旁边的虚拟屏上操作 app。Sidescreen 要看到那块屏，也要替 agent 点击和输入。",
+                t("Get Sidescreen working", "让 Sidescreen 开始工作"),
+                t(
+                    "Agents use apps on a display beside yours. Sidescreen needs to see that display and to click and type for the agent.",
+                    "Agent 在旁边的虚拟屏上操作 app。Sidescreen 要看到那块屏，也要替 agent 点击和输入。",
+                ),
             )
         };
         let rows = Permission::ALL.map(|p| self.row(p, &theme));
@@ -122,11 +129,19 @@ impl Render for Setup {
                             .flex_1()
                             .text_size(px(11.))
                             .text_color(theme.secondary)
-                            .child("权限只用在这台 Mac 上，随时可以在系统设置里关掉。"),
+                            .child(t(
+                                "Sidescreen uses these only on this Mac. Turn them off anytime in System Settings.",
+                                "权限只用在这台 Mac 上，随时可以在系统设置里关掉。",
+                            )),
                     )
                     .child(button(
                         "setup-close",
-                        if ready { "完成" } else { "稍后" }.into(),
+                        if ready {
+                            t("Done", "完成")
+                        } else {
+                            t("Not Now", "稍后")
+                        }
+                        .into(),
                         ready.then_some(theme.accent),
                         &theme,
                         move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
@@ -141,11 +156,17 @@ impl Setup {
         let (icon, detail) = match p {
             Permission::ScreenRecording => (
                 "icons/display.svg",
-                "看到虚拟屏上的画面，给你看，也给 agent 截图",
+                t(
+                    "Show agent displays and take screenshots",
+                    "看到虚拟屏上的画面，给你看，也给 agent 截图",
+                ),
             ),
             Permission::Accessibility => (
                 "icons/pointer.svg",
-                "替 agent 点击、输入，把窗口摆到虚拟屏上",
+                t(
+                    "Click, type and place windows for agents",
+                    "替 agent 点击、输入，把窗口摆到虚拟屏上",
+                ),
             ),
         };
         let green: Hsla = gpui::rgb(0x30d158).into();
@@ -155,7 +176,7 @@ impl Setup {
         let action: gpui::AnyElement = if restart_here {
             button(
                 "setup-restart",
-                "重新打开 Sidescreen".into(),
+                t("Reopen Sidescreen", "重新打开 Sidescreen").into(),
                 Some(theme.accent),
                 theme,
                 move |cx| tell(&shell, cx, |shell, cx| shell.relaunch(cx)),
@@ -175,7 +196,7 @@ impl Setup {
                         .size(px(14.))
                         .text_color(green),
                 )
-                .child("已开启")
+                .child(t("On", "已开启"))
                 .into_any_element()
         } else {
             let next = self.next() == Some(p);
@@ -185,9 +206,9 @@ impl Setup {
                     Permission::Accessibility => "setup-grant-ax",
                 },
                 if waiting {
-                    "重新打开设置"
+                    t("Open Settings Again", "重新打开设置")
                 } else {
-                    "开启…"
+                    t("Turn On…", "开启…")
                 }
                 .into(),
                 (next && !waiting).then_some(theme.accent),
@@ -198,12 +219,20 @@ impl Setup {
         };
         let note = if restart_here {
             Some((
-                "macOS 要重新打开 Sidescreen 才能录屏".to_string(),
+                t(
+                    "macOS applies this after Sidescreen reopens",
+                    "macOS 要重新打开 Sidescreen 才能录屏",
+                )
+                .to_string(),
                 theme.orange,
             ))
         } else if waiting {
             Some((
-                "在系统设置里打开 Sidescreen 的开关，这里会自动更新".to_string(),
+                t(
+                    "Turn on Sidescreen in System Settings. This row updates by itself.",
+                    "在系统设置里打开 Sidescreen 的开关，这里会自动更新",
+                )
+                .to_string(),
                 theme.secondary,
             ))
         } else {

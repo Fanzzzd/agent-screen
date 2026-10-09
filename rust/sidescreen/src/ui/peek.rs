@@ -6,6 +6,7 @@ use super::status::Status;
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
+use crate::i18n::t;
 use crate::model::DisplayId;
 use gpui::{
     Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
@@ -250,7 +251,7 @@ fn tile(
         .id(gpui::ElementId::Integer(id as u64))
         .group(group.clone())
         .role(Role::Button)
-        .aria_label(format!("{label}，{}", status.long))
+        .aria_label(tf!("{label}, {}", "{label}，{}", status.long))
         .tooltip({
             let text = format!("{label}\n{}", status.long);
             move |_, cx| super::shell::hint(text.clone(), cx)
@@ -297,8 +298,10 @@ fn tile(
                             div()
                                 .id(gpui::ElementId::Name(format!("close-{id}").into()))
                                 .role(Role::Button)
-                                .aria_label("关闭显示器")
-                                .tooltip(|_, cx| super::shell::hint("关闭显示器", cx))
+                                .aria_label(t("Close Display", "关闭显示器"))
+                                .tooltip(|_, cx| {
+                                    super::shell::hint(t("Close Display", "关闭显示器"), cx)
+                                })
                                 .tooltip_show_delay(super::shell::HINT_DELAY)
                                 // A 17 pt disc in a 22 pt hit area.
                                 .absolute()
@@ -378,9 +381,9 @@ fn add_tile(
         .id("add")
         .group("add")
         .role(Role::Button)
-        .aria_label("新建显示器")
+        .aria_label(t("New Display", "新建显示器"))
         .when(narrow, |d| {
-            d.tooltip(|_, cx| super::shell::hint("新建显示器", cx))
+            d.tooltip(|_, cx| super::shell::hint(t("New Display", "新建显示器"), cx))
                 .tooltip_show_delay(super::shell::HINT_DELAY)
         })
         .w(px(width))
@@ -419,7 +422,7 @@ fn add_tile(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.secondary)
                 .group_hover("add", |s| s.text_color(theme.label))
-                .when(!narrow, |d| d.child("新建显示器")),
+                .when(!narrow, |d| d.child(t("New Display", "新建显示器"))),
         )
 }
 
@@ -459,5 +462,5 @@ pub fn waiting(size: f32) -> gpui::Div {
         .justify_center()
         .text_size(px(size))
         .text_color(gpui::white().opacity(0.7))
-        .child("等待画面…")
+        .child(t("Waiting for picture…", "等待画面…"))
 }

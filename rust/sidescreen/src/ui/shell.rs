@@ -9,6 +9,7 @@ use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
+use crate::i18n::t;
 use crate::mac::aerospace::AeroSpace;
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::permissions::{self, Permission};
@@ -1165,27 +1166,36 @@ impl Shell {
         if !missing.is_empty() {
             let names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
             menu.action(
-                &format!("完成设置：还差{}…", names.join("、")),
+                &tf!(
+                    "Finish Setup: Allow {}…",
+                    "完成设置：还差{}…",
+                    names.join(t(" and ", "、"))
+                ),
                 MenuAction::GrantPermissions,
             );
             menu.separator();
         }
-        let create = menu.action("新建显示器", MenuAction::CreateDisplay);
+        let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.separator();
         if !self.conflicts.is_empty() {
             for (workspace, display) in &self.conflicts {
-                menu.disabled(&format!(
+                menu.disabled(&tf!(
+                    "AeroSpace pins workspace {workspace} to {display}",
                     "AeroSpace 把工作区 {workspace} 固定到了 {display}"
                 ));
             }
-            let fix = menu.action("打开 AeroSpace 配置…", MenuAction::OpenAeroSpaceConfig);
-            fix.setToolTip(Some(&objc2_foundation::NSString::from_str(
+            let fix = menu.action(
+                t("Open AeroSpace Config…", "打开 AeroSpace 配置…"),
+                MenuAction::OpenAeroSpaceConfig,
+            );
+            fix.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
+                "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like et2 = 'DELL'.",
                 "workspace-to-monitor-force-assignment 里的显示器编号会被虚拟屏占用。改用显示器名称，例如 et2 = 'DELL'。",
-            )));
+            ))));
             menu.separator();
         }
-        let quit = menu.action("退出 Sidescreen", MenuAction::Quit);
+        let quit = menu.action(t("Quit Sidescreen", "退出 Sidescreen"), MenuAction::Quit);
         native::set_key_equivalent(&quit, "q", true, false, false, false);
         self.icon.pop_up(menu.into_native());
     }
@@ -1210,7 +1220,7 @@ impl Shell {
             .iter()
             .map(|d| cg::display_bounds(d.id))
             .collect();
-        let menu = native::Menu::new("窗口");
+        let menu = native::Menu::new(t("Windows", "窗口"));
 
         let hand = native::Menu::new("");
         for window in windows::all()
@@ -1228,12 +1238,12 @@ impl Shell {
             native::set_app_icon(&item, window.target.pid);
         }
         if hand.is_empty() {
-            hand.disabled("你的桌面上没有窗口");
+            hand.disabled(t("No Windows on Your Desktop", "你的桌面上没有窗口"));
         }
         let title = if display.owner.is_none() {
-            "放到这块显示器上".to_string()
+            t("Move to This Display", "放到这块显示器上").to_string()
         } else {
-            format!("交给 {}", display.agent_name())
+            tf!("Hand Over to {}", "交给 {}", display.agent_name())
         };
         menu.submenu(&title, hand).setEnabled(!display.is_ended());
 
@@ -1250,11 +1260,14 @@ impl Shell {
             native::set_app_icon(&item, window.target.pid);
         }
         if back.is_empty() {
-            back.disabled("这块显示器上没有窗口");
+            back.disabled(t("No Windows on This Display", "这块显示器上没有窗口"));
         }
-        menu.submenu("取回窗口", back);
+        menu.submenu(t("Take Back Window", "取回窗口"), back);
         menu.separator();
-        menu.action("关闭显示器…", MenuAction::Dismiss { display: id });
+        menu.action(
+            t("Close Display…", "关闭显示器…"),
+            MenuAction::Dismiss { display: id },
+        );
         let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
             let frame = native::frame(window);
             (
@@ -1519,7 +1532,7 @@ impl Shell {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("设置 Sidescreen".into()),
+                title: Some(t("Set Up Sidescreen", "设置 Sidescreen").into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),

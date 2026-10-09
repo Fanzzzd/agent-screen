@@ -2,6 +2,9 @@
 //! agent can operate GUI apps without taking over the user's screen, cursor
 //! or keyboard.
 
+// First, so `tf!` is in scope in every module below.
+#[macro_use]
+mod i18n;
 mod control;
 mod core;
 mod dismissal;
@@ -50,6 +53,7 @@ fn main() {
     }
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
+    log::debug!("language: {:?}", i18n::lang());
     let platform = gpui_platform::current_platform(false);
     // An accessory from launch: no Dock icon, never activated by starting.
     platform.set_activation_policy(ActivationPolicy::Accessory);

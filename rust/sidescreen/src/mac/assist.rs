@@ -9,6 +9,7 @@
 
 use super::cg;
 use super::native::primary_height;
+use crate::i18n::t;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -222,16 +223,21 @@ pub fn show(p: super::permissions::Permission, listed: bool) {
         let assist = a.get_or_insert_with(|| build(mtm));
         let (title, detail) = if listed {
             (
-                "打开列表里 Sidescreen 的开关".to_string(),
-                format!(
+                t("Turn on Sidescreen in the list", "打开列表里 Sidescreen 的开关").to_string(),
+                tf!(
+                    "Find Sidescreen in the “{}” list.\nNot there? Drag the icon at left into the list.",
                     "在“{}”列表里找到 Sidescreen。\n没有的话，把左边的图标拖进列表。",
                     p.name()
                 ),
             )
         } else {
             (
-                "把左边的图标拖进上面的列表".to_string(),
-                format!("拖进“{}”列表后，打开 Sidescreen 的开关。", p.name()),
+                t("Drag the icon into the list above", "把左边的图标拖进上面的列表").to_string(),
+                tf!(
+                    "Then turn on Sidescreen in the “{}” list.",
+                    "拖进“{}”列表后，打开 Sidescreen 的开关。",
+                    p.name()
+                ),
             )
         };
         assist.title.setStringValue(&NSString::from_str(&title));

@@ -57,11 +57,11 @@ Development switches for the Rust app:
 ## The user's side
 
 - **Peek.** Hover the menu bar icon, or click it to keep Peek up. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
-- **Takeover.** Your first click, scroll or key press in the Viewer, or 接手操作, pauses the agent. Its input tools fail until you press 让 … 继续. Collapsing the Viewer keeps the Takeover.
+- **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over (接手操作), pauses the agent. Its input tools fail until you press Let … Continue (让 … 继续). Collapsing the Viewer keeps the Takeover.
 - **Help Request.** `request_help` sends a notification and shows the reason in Peek and the Viewer. Clicking the notification opens the display in Takeover.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
-- **Handover.** Drag one of your windows onto the Viewer, or pick it under 窗口 ▸ 交给 …. 窗口 ▸ 取回窗口 brings any window back. A handed-over window returns to where it was.
-- **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows 待查看 until you press 处理窗口…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
+- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows (窗口) ▸ Hand Over to … (交给 …). Windows ▸ Take Back Window (取回窗口) brings any window back. A handed-over window returns to where it was.
+- **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review (待查看) until you press Review Windows… (处理窗口…). See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Dismissal.** Closing a display asks on the Viewer: it lists the windows with the agent's Disposition preselected, and you can change any of them. Esc cancels, ⌘Return confirms. Adding or closing a display keeps Peek and the Viewer open; the Viewer moves to the next display. Quitting Sidescreen applies the same plan without asking.
 
 ## Test

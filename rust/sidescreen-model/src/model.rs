@@ -526,29 +526,6 @@ pub fn default_fate(
     }
 }
 
-/// Why the default is what it is, shown under the window's name.
-pub fn fate_reason(
-    origin: Option<Origin>,
-    disposition: Option<Disposition>,
-    of_launched_app: bool,
-    agent: &str,
-) -> String {
-    match (origin, disposition) {
-        (Some(Origin::HandedOver), _) => "你交出的窗口".into(),
-        (_, Some(Disposition::Keep)) => format!("{agent} 建议保留"),
-        (_, Some(Disposition::Close)) => format!("{agent} 建议关闭"),
-        (Some(Origin::Launched), None) => format!("{agent} 打开的，未指定去向"),
-        (Some(Origin::Placed | Origin::Found), None) => format!("{agent} 移进来的，未指定去向"),
-        (None, None) => {
-            if of_launched_app {
-                format!("{agent} 打开的 app 的窗口")
-            } else {
-                format!("不是 {agent} 放进来的")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Rect;

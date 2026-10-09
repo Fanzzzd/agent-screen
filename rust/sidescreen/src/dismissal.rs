@@ -6,10 +6,11 @@
 //! always returns, whatever the agent said. The user sees the plan and can
 //! change any window before confirming.
 
+use crate::i18n::t;
 use crate::mac::aerospace::AeroSpace;
 use crate::mac::display::VirtualDisplay;
 use crate::mac::{ax, cg, windows};
-use crate::model::{Display, Fate, Home, Origin, Rect, WindowTarget, default_fate, fate_reason};
+use crate::model::{Display, Disposition, Fate, Home, Origin, Rect, WindowTarget, default_fate};
 use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
@@ -61,6 +62,35 @@ pub fn plan(display: &Display<VirtualDisplay>) -> Vec<Item> {
             }
         })
         .collect()
+}
+
+/// Why the default is what it is, shown under the window's name.
+fn fate_reason(
+    origin: Option<Origin>,
+    disposition: Option<Disposition>,
+    of_launched_app: bool,
+    agent: &str,
+) -> String {
+    match (origin, disposition) {
+        (Some(Origin::HandedOver), _) => t("You handed this over", "你交出的窗口").into(),
+        (_, Some(Disposition::Keep)) => tf!("{agent} suggests keeping it", "{agent} 建议保留"),
+        (_, Some(Disposition::Close)) => tf!("{agent} suggests closing it", "{agent} 建议关闭"),
+        (Some(Origin::Launched), None) => tf!(
+            "Opened by {agent}, no suggestion",
+            "{agent} 打开的，未指定去向"
+        ),
+        (Some(Origin::Placed | Origin::Found), None) => tf!(
+            "Moved here by {agent}, no suggestion",
+            "{agent} 移进来的，未指定去向"
+        ),
+        (None, None) => {
+            if of_launched_app {
+                tf!("From an app {agent} opened", "{agent} 打开的 app 的窗口")
+            } else {
+                tf!("Not placed here by {agent}", "不是 {agent} 放进来的")
+            }
+        }
+    }
 }
 
 /// Whether to ask before dismissing. An empty display nobody uses just goes.

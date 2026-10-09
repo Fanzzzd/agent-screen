@@ -2,6 +2,7 @@
 //! same words.
 
 use super::theme::Theme;
+use crate::i18n::{Lang, t};
 use crate::model::{Display, EndReason};
 use gpui::{Hsla, IntoElement, ParentElement, Styled, div, px, svg};
 
@@ -28,48 +29,64 @@ pub struct Status {
 impl Status {
     pub fn of<H>(display: &Display<H>, window_count: usize, theme: &Theme) -> Status {
         let agent = display.agent_name();
-        let windows = format!("{window_count} 个窗口");
+        let windows = match (crate::i18n::lang(), window_count) {
+            (Lang::En, 1) => "1 window".to_string(),
+            _ => tf!("{window_count} windows", "{window_count} 个窗口"),
+        };
         match display.ended {
             Some(EndReason::Disconnected) => Status {
                 kind: Kind::Disconnected,
-                short: format!("连接中断 · {windows}"),
-                long: format!("{agent} 的连接中断了，窗口还在这里"),
+                short: tf!("Disconnected · {windows}", "连接中断 · {windows}"),
+                long: tf!(
+                    "{agent} disconnected. Its windows are still here.",
+                    "{agent} 的连接中断了，窗口还在这里"
+                ),
                 icon: Some("icons/alert.svg"),
                 color: theme.secondary,
             },
             Some(EndReason::Finished) => Status {
                 kind: Kind::Review,
-                short: format!("待查看 · {windows}"),
-                long: format!("{agent} 已停止操作，窗口等你查看"),
+                short: tf!("Needs Review · {windows}", "待查看 · {windows}"),
+                long: tf!(
+                    "{agent} stopped. Its windows wait for your review.",
+                    "{agent} 已停止操作，窗口等你查看"
+                ),
                 icon: Some("icons/tray.svg"),
                 color: theme.secondary,
             },
             None if display.takeover => Status {
                 kind: Kind::Takeover,
-                short: "你在操作".into(),
-                long: format!("你在操作，{agent} 在等你交还"),
+                short: t("You’re in control", "你在操作").into(),
+                long: tf!(
+                    "You’re in control. {agent} is waiting to continue.",
+                    "你在操作，{agent} 在等你交还"
+                ),
                 icon: None,
                 color: theme.accent,
             },
             None => match (&display.help_request, &display.owner) {
                 (Some(reason), _) => Status {
                     kind: Kind::Help,
-                    short: format!("需要帮助：{reason}"),
-                    long: format!("需要你帮助：{reason}"),
+                    short: tf!("Needs help: {reason}", "需要帮助：{reason}"),
+                    long: tf!("Needs your help: {reason}", "需要你帮助：{reason}"),
                     icon: Some("icons/hand.svg"),
                     color: theme.orange,
                 },
                 (None, None) => Status {
                     kind: Kind::Manual,
-                    short: "你新建的".into(),
-                    long: "你新建的显示器，没有 agent 在用".into(),
+                    short: t("Created by you", "你新建的").into(),
+                    long: t(
+                        "Created by you. No agent is using it.",
+                        "你新建的显示器，没有 agent 在用",
+                    )
+                    .into(),
                     icon: None,
                     color: theme.secondary,
                 },
                 (None, Some(_)) => Status {
                     kind: Kind::Agent,
-                    short: format!("由 {agent} 控制"),
-                    long: format!("由 {agent} 控制"),
+                    short: tf!("Controlled by {agent}", "由 {agent} 控制"),
+                    long: tf!("Controlled by {agent}", "由 {agent} 控制"),
                     icon: None,
                     color: theme.secondary,
                 },
@@ -125,6 +142,7 @@ mod tests {
 
     #[test]
     fn copy_follows_the_display_state() {
+        crate::i18n::set_for_test(Lang::ZhHans);
         let manual = display(false);
         assert_eq!(status(&manual, 0).short, "你新建的");
 
@@ -149,5 +167,15 @@ mod tests {
         let mut lost = display(true);
         lost.end(7, EndReason::Disconnected);
         assert_eq!(status(&lost, 1).long, "Codex 的连接中断了，窗口还在这里");
+    }
+
+    #[test]
+    fn english_copy_counts_windows() {
+        crate::i18n::set_for_test(Lang::En);
+        let mut d = display(true);
+        assert_eq!(status(&d, 0).long, "Controlled by Codex");
+        d.end(7, EndReason::Finished);
+        assert_eq!(status(&d, 1).short, "Needs Review · 1 window");
+        assert_eq!(status(&d, 2).short, "Needs Review · 2 windows");
     }
 }
