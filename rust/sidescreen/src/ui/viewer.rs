@@ -732,7 +732,7 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
         )
         .child(div().mt(px(6.)).child(button(
             "denied-fix",
-            t("Open Settings", "打开设置").into(),
+            t("Fix Permissions…", "修复权限…").into(),
             None,
             Some(theme.accent),
             theme,

@@ -24,7 +24,7 @@ impl Permission {
     /// The name System Settings uses.
     pub fn name(self) -> &'static str {
         match self {
-            Permission::ScreenRecording => t("Screen Recording", "屏幕录制"),
+            Permission::ScreenRecording => t("Screen & System Audio Recording", "屏幕录制"),
             Permission::Accessibility => t("Accessibility", "辅助功能"),
         }
     }
