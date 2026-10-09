@@ -178,14 +178,24 @@ async function permissions() {
       const spid = pidOf("System Settings.app/Contents/MacOS/System Settings")
       settings = spid ? windowsOf(spid).find((w) => w.layer === 0 && w.width > 520 && w.height > 360) : undefined
     }
-    await settle(800)
-    const helper = windowsOf(pid).find((w) => w.layer === 3 && Math.abs(w.width - 392) < 2)
-    check("the drag helper sits inside System Settings' bottom-right corner",
-      settings !== undefined && helper !== undefined &&
-        helper.x + helper.width <= settings.x + settings.width && helper.x > settings.x + settings.width / 2 &&
-        helper.y + helper.height <= settings.y + settings.height && helper.y > settings.y + settings.height / 2,
-      JSON.stringify({ settings, helper }))
-    if (settings) capture("permissions-helper", [settings.x, settings.y, settings.width, settings.height])
+    // The helper follows System Settings on a 0.4 s tick once it's in front.
+    let helper: ReturnType<typeof windowsOf>[number] | undefined
+    for (let i = 0; i < 30 && !helper; i++) {
+      await settle(100)
+      helper = windowsOf(pid).find((w) => w.layer === 3 && Math.abs(w.width - 392) < 2)
+    }
+    await settle(1500) // the pane's list loads
+    // Right edges aligned, 18 pt in; just below the window, or inside its
+    // bottom-right corner when the screen has no room below.
+    const near = (a: number, b: number) => Math.abs(a - b) <= 3
+    const placed = settings !== undefined && helper !== undefined &&
+      near(helper.x + helper.width, settings.x + settings.width - 18) &&
+      (near(helper.y, settings.y + settings.height + 10) ||
+        near(helper.y + helper.height, settings.y + settings.height - 18))
+    check("the drag helper sits at System Settings' bottom-right", placed, JSON.stringify({ settings, helper }))
+    if (settings) {
+      capture("permissions-helper", [settings.x, settings.y, settings.width, settings.height + 120])
+    }
 
     quitApp("System Settings")
     await settle(1200)

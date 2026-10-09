@@ -4,7 +4,8 @@
 //!
 //! A non-activating panel, so System Settings stays the active app. It
 //! finds the Settings window in WindowServer's list, which gives bounds
-//! without Screen Recording, and sits inside its bottom-right corner.
+//! without Screen Recording, and sits just below it, or inside its
+//! bottom-right corner when the screen has no room.
 
 use super::cg;
 use super::native::primary_height;
@@ -25,6 +26,8 @@ const SETTINGS: &str = "com.apple.systempreferences";
 const WIDTH: f64 = 392.0;
 const HEIGHT: f64 = 92.0;
 const INSET: f64 = 18.0;
+/// Between the Settings window's bottom edge and the helper below it.
+const GAP_BELOW: f64 = 10.0;
 /// The icon's well, the icon in it, and the text beside them.
 const TILE: f64 = 64.0;
 const ICON: f64 = 52.0;
@@ -301,6 +304,25 @@ fn settings_window() -> Option<crate::model::Rect> {
         .map(|w| w.bounds)
 }
 
+/// Where the helper goes, Cocoa coordinates: just below the Settings
+/// window, right edges aligned, so it covers none of the list; inside its
+/// bottom-right corner when the screen has no room below.
+fn place(w: crate::model::Rect) -> NSPoint {
+    let x = w.x + w.width - WIDTH - INSET;
+    let below = NSPoint::new(x, primary_height() - (w.y + w.height + GAP_BELOW) - HEIGHT);
+    let fits = super::native::screens().iter().any(|(_, _, visible)| {
+        below.x >= visible.origin.x
+            && below.y >= visible.origin.y
+            && below.x + WIDTH <= visible.origin.x + visible.size.width
+            && below.y + HEIGHT <= visible.origin.y + visible.size.height
+    });
+    if fits {
+        return below;
+    }
+    let top = w.y + w.height - HEIGHT - INSET;
+    NSPoint::new(x, primary_height() - top - HEIGHT)
+}
+
 fn settings_frontmost() -> bool {
     NSWorkspace::sharedWorkspace()
         .frontmostApplication()
@@ -324,10 +346,7 @@ pub fn tick() -> bool {
         let Some(a) = a.as_ref() else { return };
         match window.filter(|_| settings_frontmost()) {
             Some(w) => {
-                let x = w.x + w.width - WIDTH - INSET;
-                let top = w.y + w.height - HEIGHT - INSET;
-                let origin = NSPoint::new(x, primary_height() - top - HEIGHT);
-                a.panel.setFrameOrigin(origin);
+                a.panel.setFrameOrigin(place(w));
                 a.panel.orderFrontRegardless();
             }
             None => a.panel.orderOut(None),
