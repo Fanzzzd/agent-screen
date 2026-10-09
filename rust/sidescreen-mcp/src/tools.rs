@@ -410,12 +410,16 @@ pub async fn run(
                     }),
                 )
                 .await?;
-            Ok(Output::Object(json!({
+            let mut out = json!({
                 "display_id": reply.get("displayId"),
                 "width": reply.get("width"),
                 "height": reply.get("height"),
                 "reused": reply.get("reused")
-            })))
+            });
+            if let Some(note) = reply.get("note") {
+                out["note"] = note.clone();
+            }
+            Ok(Output::Object(out))
         }
         "end_display" => {
             control

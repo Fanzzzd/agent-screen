@@ -394,6 +394,18 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             if counted
                 .update(cx, |shell, cx| {
                     shell.refresh_counts(cx);
+                    // A Review Display closes once its last window goes,
+                    // whenever that happens.
+                    if shell
+                        .core
+                        .read(cx)
+                        .displays
+                        .list
+                        .iter()
+                        .any(|d| d.is_ended())
+                    {
+                        shell.core.update(cx, |core, cx| core.sweep_ended(cx));
+                    }
                     // The front app on the display can change any time.
                     shell.refresh_menu_bar(cx);
                     if shell.peek_shown || shell.viewer_open {

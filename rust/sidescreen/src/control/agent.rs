@@ -606,23 +606,33 @@ fn create_display(
     core.update(cx, |c, _| {
         c.sessions.insert(connection, session_key.clone());
     });
-    if let Some(existing) = core.read_with(cx, |c, _| {
-        c.displays
-            .for_session(&session_key)
-            .map(|d| describe(d, true))
+    let asked = (p.number("width"), p.number("height"));
+    if let Some(mut existing) = core.read_with(cx, |c, _| {
+        c.displays.for_session(&session_key).map(|d| {
+            let size = (d.width, d.height);
+            (describe(d, true), size)
+        })
     }) {
-        return Ok(existing);
+        let (w, h) = existing.1;
+        if asked.0.is_some_and(|a| a.round() != w) || asked.1.is_some_and(|a| a.round() != h) {
+            existing.0["note"] = json!(format!(
+                "this session already has a {w}×{h} display, reused as is; end_display first for another size"
+            ));
+        }
+        return Ok(existing.0);
     }
-    let width = p
-        .number("width")
+    let width = asked
+        .0
         .unwrap_or(DEFAULT_SIZE.0)
         .clamp(640.0, 2560.0)
         .round();
-    let height = p
-        .number("height")
+    let height = asked
+        .1
         .unwrap_or(DEFAULT_SIZE.1)
         .clamp(480.0, 1600.0)
         .round();
+    let clamped =
+        asked.0.is_some_and(|a| a.round() != width) || asked.1.is_some_and(|a| a.round() != height);
     let owner = Owner {
         session_key,
         client: p.string("client").unwrap_or_else(|| "Agent".into()),
@@ -631,7 +641,15 @@ fn create_display(
     };
     core.update(cx, |c, cx| {
         let id = c.create((width, height), Some(owner), cx)?;
-        c.displays.get(id).map(|d| describe(d, false))
+        c.displays.get(id).map(|d| {
+            let mut reply = describe(d, false);
+            if clamped {
+                reply["note"] = json!(format!(
+                    "sizes run from 640×480 to 2560×1600; made it {width}×{height}"
+                ));
+            }
+            reply
+        })
     })
     .ok_or_else(|| ControlError::failed("macOS refused to create a virtual display"))
 }
@@ -744,6 +762,8 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
+            // Some elements, static text among them, report success and
+            // keep their value: read it back.
             let set = off_main(
                 cx,
                 Box::new(move |e| {
@@ -751,7 +771,8 @@ async fn act(
                         e,
                         "AXValue",
                         &objc2_core_foundation::CFString::from_str(&value),
-                    )
+                    ) && ax::string_attribute(e, "AXValue")
+                        .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
                 }),
             )
             .await;
