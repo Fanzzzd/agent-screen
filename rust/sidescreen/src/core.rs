@@ -20,6 +20,9 @@ pub struct Core {
     /// Connections that have closed. A request from one can still be queued
     /// behind its close, and must not create a display nobody owns.
     pub closed: HashSet<u64>,
+    /// The Agent Session each connection created or reused a display for.
+    /// A connection may only use displays its session owns.
+    pub sessions: HashMap<u64, String>,
 }
 
 impl Core {
@@ -29,6 +32,7 @@ impl Core {
             forwarders: HashMap::new(),
             elements: HashMap::new(),
             closed: HashSet::new(),
+            sessions: HashMap::new(),
         }
     }
 
@@ -73,6 +77,7 @@ impl Core {
 
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
         self.closed.insert(connection);
+        self.sessions.remove(&connection);
         if !self.displays.connection_closed(connection).is_empty() {
             cx.notify();
             schedule_sweep(cx);

@@ -31,6 +31,12 @@ pub async fn handle(
     if needs_permissions(method) {
         permitted(cx)?;
     }
+    if method != "createDisplay"
+        && !method.starts_with("debug")
+        && let Some(id) = p.int("displayId")
+    {
+        usable(&core, connection, id as DisplayId, method, cx)?;
+    }
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => create_display(&core, connection, &p, cx),
         "endDisplay" => {
@@ -544,6 +550,36 @@ fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     })
 }
 
+/// A display this connection may use for `method`: one its Agent Session
+/// owns, and still live unless the method is about ending.
+fn usable(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    method: &str,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    core.read_with(cx, |c, _| {
+        let Some(d) = c.displays.get(id) else {
+            // Gone or never there: the method's own lookup says which.
+            return Ok(());
+        };
+        let mine = c.sessions.get(&connection);
+        let owner = d.owner.as_ref().map(|o| &o.session_key);
+        if mine.is_none() || owner != mine {
+            return Err(ControlError::not_found(format!(
+                "display {id} belongs to another session; call create_display to get yours"
+            )));
+        }
+        if d.is_ended() && !matches!(method, "endDisplay" | "waitForControl") {
+            return Err(ControlError::ended(format!(
+                "display {id} has ended; call create_display for a new one"
+            )));
+        }
+        Ok(())
+    })
+}
+
 /// A method's result as a reply; `return reply(...)` leaves a method early.
 fn reply(value: Value) -> Reply {
     Ok(match value {
@@ -567,6 +603,9 @@ fn create_display(
     if core.read_with(cx, |c, _| c.closed.contains(&connection)) {
         return Err(ControlError::failed("the connection closed"));
     }
+    core.update(cx, |c, _| {
+        c.sessions.insert(connection, session_key.clone());
+    });
     if let Some(existing) = core.read_with(cx, |c, _| {
         c.displays
             .for_session(&session_key)
