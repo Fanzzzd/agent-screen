@@ -36,7 +36,7 @@ plist="$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$plist"
 # Notarization wants the hardened runtime and a secure timestamp.
-codesign --force --options runtime --timestamp --sign "$identity" "$app"
+codesign --force --options runtime --timestamp --sign "$identity" "$app" 2>/dev/null
 codesign --verify --strict "$app"
 
 dmg="$target/Sidescreen-$version.dmg"

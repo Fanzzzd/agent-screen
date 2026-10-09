@@ -37,5 +37,9 @@ if [[ -z "$identity" ]]; then
   # grants of a bundle whose signature it no longer recognizes.
   echo "warning: no signing identity; ad-hoc signing, so privacy grants won't carry over" >&2
 fi
-codesign --force --sign "${identity:--}" "$app" >/dev/null
+# Release builds run under the hardened runtime, as the notarized DMG does,
+# so the installed app behaves like the one users download.
+options=()
+[[ "$config" == release && -n "$identity" ]] && options=(--options runtime)
+codesign --force ${options[@]+"${options[@]}"} --sign "${identity:--}" "$app" >/dev/null
 echo "$app (signed: ${identity:-ad-hoc})"
