@@ -835,32 +835,6 @@ fn segmented(
         .child(segment(t("Close Window", "关闭窗口"), Fate::Close, cx))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn card_fits_the_screen() {
-        // A 16:10 display on a laptop screen: 62% of the width.
-        let (w, h) = Viewer::card_size((1440., 900.), (1728., 1080.));
-        assert_eq!(w, 1071.);
-        assert!(h <= 1080. * 0.86);
-        // A portrait display is limited by the height instead.
-        let (w, h) = Viewer::card_size((1000., 1500.), (1728., 1084.));
-        assert_eq!(h, (1084. * 0.86f64).round());
-        assert!(w < h);
-    }
-
-    #[test]
-    fn content_is_centered_and_aspect_fit() {
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
-        let fit = content_rect(bounds, (1440., 900.));
-        assert_eq!(fit.size.height, px(100.));
-        assert_eq!(fit.size.width, px(160.));
-        assert_eq!(fit.origin.x, px(20.));
-    }
-}
-
 /// The display's front app menu bar, laid over the image's menu bar strip
 /// at the strip's own size. Clicks on it reach the shell through the native
 /// input monitor, which looks titles up with `title_at`.
@@ -974,4 +948,30 @@ fn menu_strip(
                     ),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_fits_the_screen() {
+        // A 16:10 display on a laptop screen: 62% of the width.
+        let (w, h) = Viewer::card_size((1440., 900.), (1728., 1080.));
+        assert_eq!(w, 1071.);
+        assert!(h <= 1080. * 0.86);
+        // A portrait display is limited by the height instead.
+        let (w, h) = Viewer::card_size((1000., 1500.), (1728., 1084.));
+        assert_eq!(h, (1084. * 0.86f64).round());
+        assert!(w < h);
+    }
+
+    #[test]
+    fn content_is_centered_and_aspect_fit() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
+        let fit = content_rect(bounds, (1440., 900.));
+        assert_eq!(fit.size.height, px(100.));
+        assert_eq!(fit.size.width, px(160.));
+        assert_eq!(fit.origin.x, px(20.));
+    }
 }

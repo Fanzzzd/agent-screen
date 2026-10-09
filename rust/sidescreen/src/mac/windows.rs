@@ -54,7 +54,7 @@ pub fn all() -> Vec<Window> {
             app: w.owner_name,
             title: w.title,
             bounds: w.bounds,
-            layer: w.layer as i64,
+            layer: w.layer,
         })
         .collect()
 }

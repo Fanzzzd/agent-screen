@@ -1,6 +1,6 @@
 /** Minimal MCP client over stdio for the test scripts. */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { writeFileSync } from "node:fs"
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { existsSync, writeFileSync } from "node:fs"
 import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -47,6 +47,17 @@ export class McpClient {
 
   /** Spawn the server and run the 2025-06-18 handshake. */
   static async start(env: Record<string, string>) {
+    // A locked screen blocks input and lists no windows: every check would
+    // fail for that reason alone.
+    const probe = new URL("../../target/e2e/probe", import.meta.url).pathname
+    if (!existsSync(probe)) {
+      spawnSync("/usr/bin/swiftc", ["-O", new URL("../e2e/tools/probe.swift", import.meta.url).pathname, "-o", probe])
+    }
+    const locked = spawnSync(probe, ["locked"], { encoding: "utf8" })
+    if (locked.stdout.trim() === "1") {
+      console.log("skip: the screen is locked")
+      process.exit(0)
+    }
     await waitForApp()
     // SIDESCREEN_MCP="<binary> [args]" runs another server build, e.g.
     // `rust/target/debug/sidescreen-mcp`.

@@ -51,7 +51,7 @@ pub fn bar(display: DisplayId) -> Option<Bar> {
         .skip(1)
         .map(|item| ax::string_attribute(&item, "AXTitle").unwrap_or_default())
         .collect();
-    (!titles.is_empty()).then(|| Bar {
+    (!titles.is_empty()).then_some(Bar {
         pid: window.target.pid,
         app: window.app,
         titles,

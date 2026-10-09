@@ -81,7 +81,7 @@ try {
   // TextEdit from not running: a document window on the agent's display.
   const launched = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
   const window = structured(launched)?.window
-  check("TextEdit's first launch opens a document window", window?.app === "TextEdit", textOf(launched).slice(0, 160))
+  check("TextEdit's first launch opens a document window", window?.app === "TextEdit", textOf(launched))
   check("no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
   if (window) {
     await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "Hello from an agent" } })
@@ -91,7 +91,7 @@ try {
 
   // Launched again while running: a second document, still not on the user's screen.
   const again = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
-  check("TextEdit launched again opens a window on the display", structured(again)?.window?.app === "TextEdit", textOf(again).slice(0, 160))
+  check("TextEdit launched again opens a window on the display", structured(again)?.window?.app === "TextEdit", textOf(again))
   check("still no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
 
   // set_value on something without a settable value fails.

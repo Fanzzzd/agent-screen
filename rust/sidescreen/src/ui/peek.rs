@@ -426,33 +426,6 @@ fn add_tile(
         )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_few_displays_get_full_size_tiles() {
-        let (width, _, tile) = Peek::size(3, 1424.0);
-        assert_eq!(tile, TILE_WIDTH);
-        assert_eq!(width, (20. + 3. * 218. + 44.) as f64);
-    }
-
-    #[test]
-    fn many_displays_shrink_their_tiles_to_fit() {
-        // Seven full-size tiles need 1590 pt on a 1424 pt screen.
-        let (width, height, tile) = Peek::size(7, 1424.0);
-        assert!(tile < TILE_WIDTH && tile >= MIN_TILE);
-        assert!(width <= 1424.0 + 0.5);
-        assert!(height < (PADDING * 2. + THUMB_HEIGHT + LABEL_HEIGHT) as f64);
-    }
-
-    #[test]
-    fn tiles_stop_shrinking_at_the_minimum() {
-        let (_, _, tile) = Peek::size(30, 1424.0);
-        assert_eq!(tile, MIN_TILE);
-    }
-}
-
 /// What a screen shows before its first frame arrives.
 pub fn waiting(size: f32) -> gpui::Div {
     div()
@@ -463,4 +436,31 @@ pub fn waiting(size: f32) -> gpui::Div {
         .text_size(px(size))
         .text_color(gpui::white().opacity(0.7))
         .child(t("Waiting for picture…", "等待画面…"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_few_displays_get_full_size_tiles() {
+        let (width, _, tile) = Peek::size(3, 1424.0);
+        assert_eq!(tile, TILE_WIDTH);
+        assert_eq!(width, 20. + 3. * 218. + 44.);
+    }
+
+    #[test]
+    fn many_displays_shrink_their_tiles_to_fit() {
+        // Seven full-size tiles need 1590 pt on a 1424 pt screen.
+        let (width, height, tile) = Peek::size(7, 1424.0);
+        assert!((MIN_TILE..TILE_WIDTH).contains(&tile));
+        assert!(width <= 1424.0 + 0.5);
+        assert!(height < (PADDING * 2. + THUMB_HEIGHT + LABEL_HEIGHT) as f64);
+    }
+
+    #[test]
+    fn tiles_stop_shrinking_at_the_minimum() {
+        let (_, _, tile) = Peek::size(30, 1424.0);
+        assert_eq!(tile, MIN_TILE);
+    }
 }
