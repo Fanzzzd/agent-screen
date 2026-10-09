@@ -31,6 +31,15 @@ pub async fn handle(
     let p = Args(&p);
     if needs_permissions(method) {
         permitted(cx)?;
+        if cg::screen_locked() {
+            return Err(ControlError {
+                code: "locked",
+                message: "The Mac's screen is locked, so macOS blocks input and screenshots on \
+                          every display. Wait and retry after the user unlocks it, or call \
+                          request_help to ask for them."
+                    .into(),
+            });
+        }
     }
     if method != "createDisplay"
         && !method.starts_with("debug")
@@ -665,6 +674,40 @@ async fn create_display(
         cx.background_executor()
             .timer(Duration::from_millis(50))
             .await;
+    }
+    // Stock AeroSpace may show one of the user's workspaces on the new
+    // display until the shell's guard moves it back; their windows must
+    // not reach the agent.
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    if let Some(screen) = screen {
+        for _ in 0..30 {
+            let clear = cx
+                .background_executor()
+                .spawn({
+                    let screen = screen.clone();
+                    async move {
+                        let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() else {
+                            return true;
+                        };
+                        let Ok(Some(monitor)) = aerospace.monitor_id(&screen) else {
+                            return true;
+                        };
+                        aerospace
+                            .visible_workspace(&monitor)
+                            .ok()
+                            .flatten()
+                            .and_then(|w| aerospace.window_ids(&w).ok())
+                            .is_none_or(|windows| windows.is_empty())
+                    }
+                })
+                .await;
+            if clear {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
     }
     Ok(reply)
 }

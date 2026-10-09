@@ -1868,46 +1868,50 @@ impl Shell {
         self.guard_generation += 1;
         let generation = self.guard_generation;
         cx.spawn(async move |this, cx| {
-            // AeroSpace reacts to display changes on its own schedule.
-            cx.background_executor()
-                .timer(Duration::from_millis(900))
-                .await;
-            let Ok(Some(checks)) = this.update(cx, |shell, cx| {
-                (shell.guard_generation == generation).then(|| {
-                    let mtm = MainThreadMarker::new().expect("main thread");
-                    shell
-                        .core
-                        .read(cx)
-                        .displays
-                        .list
-                        .iter()
-                        .filter_map(|d| {
-                            let name = app::screen_name(d.id, mtm)?;
-                            Some((name, d.records.keys().copied().collect::<HashSet<u32>>()))
-                        })
-                        .collect::<Vec<_>>()
-                })
-            }) else {
-                return;
-            };
-            let conflicts = cx
-                .background_executor()
-                .spawn(async move {
-                    let Some(aerospace) = AeroSpace::current() else {
-                        return Vec::new();
-                    };
-                    checks
-                        .iter()
-                        .filter_map(|(name, ours)| guard(&aerospace, name, ours))
-                        .collect()
-                })
-                .await;
-            let _ = this.update(cx, |shell, _| {
-                for (workspace, display) in &conflicts {
-                    log::warn!("AeroSpace pins workspace {workspace} to {display}");
-                }
-                shell.conflicts = conflicts;
-            });
+            // AeroSpace reacts to display changes on its own schedule. Look
+            // soon, since a user's workspace on an Agent Display vanishes
+            // from their screen and shows to the agent, and look again.
+            for wait in [250, 650, 1100] {
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
+                let Ok(Some(checks)) = this.update(cx, |shell, cx| {
+                    (shell.guard_generation == generation).then(|| {
+                        let mtm = MainThreadMarker::new().expect("main thread");
+                        shell
+                            .core
+                            .read(cx)
+                            .displays
+                            .list
+                            .iter()
+                            .filter_map(|d| {
+                                let name = app::screen_name(d.id, mtm)?;
+                                Some((name, d.records.keys().copied().collect::<HashSet<u32>>()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                }) else {
+                    return;
+                };
+                let conflicts = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let Some(aerospace) = AeroSpace::current() else {
+                            return Vec::new();
+                        };
+                        checks
+                            .iter()
+                            .filter_map(|(name, ours)| guard(&aerospace, name, ours))
+                            .collect()
+                    })
+                    .await;
+                let _ = this.update(cx, |shell, _| {
+                    for (workspace, display) in &conflicts {
+                        log::warn!("AeroSpace pins workspace {workspace} to {display}");
+                    }
+                    shell.conflicts = conflicts;
+                });
+            }
         })
         .detach();
     }

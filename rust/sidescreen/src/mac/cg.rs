@@ -122,3 +122,23 @@ fn string(info: &NSDictionary<NSString, AnyObject>, key: &str) -> Option<String>
             .to_string(),
     )
 }
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *mut AnyObject;
+}
+
+/// Whether the user's session shows the lock screen. macOS then blocks
+/// input to apps and lists no windows, so nothing on a display works.
+pub fn screen_locked() -> bool {
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    let Some(session) = (unsafe { Retained::from_raw(raw) }) else {
+        return false;
+    };
+    let session: Retained<NSDictionary<NSString, AnyObject>> =
+        unsafe { Retained::cast_unchecked(session) };
+    session
+        .objectForKey(&NSString::from_str("CGSSessionScreenIsLocked"))
+        .and_then(|v| v.downcast::<NSNumber>().ok())
+        .is_some_and(|n| n.boolValue())
+}
