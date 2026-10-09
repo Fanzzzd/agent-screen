@@ -408,6 +408,29 @@ fn list_menu(
     }
 }
 
+/// Select all the text in `pid`'s focused text element. Select All in a
+/// menu acts on the key window's first responder, which an app in the
+/// background doesn't have, so neither its menu item nor a posted cmd+a
+/// selects anything there.
+pub fn select_all(pid: i32) -> bool {
+    let Some(focused) = element_attribute(&application(pid), "AXFocusedUIElement") else {
+        return false;
+    };
+    let Some(text) = string_attribute(&focused, "AXValue") else {
+        return false;
+    };
+    if !settable(&focused, "AXSelectedTextRange") {
+        return false;
+    }
+    let range = objc2_core_foundation::CFRange::new(0, text.encode_utf16().count() as isize);
+    let Some(value) =
+        (unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&range).cast::<c_void>()) })
+    else {
+        return false;
+    };
+    set_attribute(&focused, "AXSelectedTextRange", &value)
+}
+
 /// A menu item's key equivalent in the computer tool's key syntax, such as
 /// "cmd+shift+n". AXMenuItemCmdModifiers: bit 3 means no Command; bits 0-2
 /// add Shift, Option and Control.

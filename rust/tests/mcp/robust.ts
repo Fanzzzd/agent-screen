@@ -87,6 +87,13 @@ try {
     await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "Hello from an agent" } })
     const state = await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: window.windowId } })
     check("typing reaches the document", textOf(state).includes("Hello from an agent"))
+
+    // Menu shortcuts reach an app in the background.
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "cmd+a" } })
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "Replaced" } })
+    const replaced = await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: window.windowId } })
+    const value = textOf(replaced).match(/textarea[^\n]*value="([^"]*)"/)?.[1]
+    check("cmd+a selects all in a background app", value === "Replaced", JSON.stringify(value))
   }
 
   // Launched again while running: a second document, still not on the user's screen.

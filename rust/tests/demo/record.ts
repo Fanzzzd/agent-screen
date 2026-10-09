@@ -10,7 +10,7 @@
  * unlocked, then puts the front app and the installed Sidescreen back.
  */
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync } from "node:fs"
 import * as path from "node:path"
 import {
   Control, buildTools, reopenInstalled, restore, root, sh, snapshot, startDebugApp, stopDebugApp, waitForQuiet
@@ -43,10 +43,23 @@ try {
   })
   const id = display.displayId
   const editor = (await control.call("launchApp", { displayId: id, app: "TextEdit" })).window
+  // TextEdit may bring back an earlier untitled document: start blank,
+  // once its text view has settled.
+  const text = async () =>
+    ((await control.call("windowState", { displayId: id, windowId: editor.windowId })).tree as string)
+      .match(/textarea[^\n]*value="([^"]*)"/)?.[1] ?? ""
+  for (let attempt = 0; attempt < 5 && (await text()) !== ""; attempt++) {
+    await pause(1000)
+    await control.call("key", { displayId: id, keys: "cmd+a" })
+    await control.call("key", { displayId: id, keys: "BackSpace" })
+  }
+  console.log("starting text:", JSON.stringify(await text()))
   await control.call("debugShow", { surface: "viewer", displayId: id })
   await pause(1500)
   const { frame } = await control.call("debugViewer")
 
+  // screencapture won't replace an existing movie.
+  rmSync(movie, { force: true })
   recorder = spawn("/usr/sbin/screencapture", ["-v", "-x", "-V", "24", "-R", frame.map(Math.round).join(","), movie])
   await pause(1500)
 
@@ -69,8 +82,8 @@ try {
   await control.call("requestHelp", { displayId: id, reason: "Please sign in to the publishing site for me." })
   await new Promise((resolve) => recorder!.once("exit", resolve))
   recorder = undefined
-  void editor
 
+  if (!existsSync(movie)) throw new Error("screencapture recorded nothing")
   mkdirSync(media, { recursive: true })
   const ffmpeg = spawnSync("ffmpeg", ["-y", "-loglevel", "error", "-i", movie, "-vf",
     "fps=12,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",

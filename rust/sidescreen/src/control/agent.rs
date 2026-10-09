@@ -278,8 +278,20 @@ pub async fn handle(
                 .map_err(|e| ControlError::invalid(e.to_string()))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let repeat = p.int("repeat").unwrap_or(1);
+            let bounds = cg::display_bounds(id);
             for chord in chords {
-                if !forwarder.press(chord, repeat, cg::display_bounds(id)).await {
+                // Select All needs a first responder, which an app in the
+                // background lacks; set the selection through accessibility.
+                if chord == KeyChord::parse("cmd+a").expect("a chord")
+                    && let Some(target) = forwarder.keys_target(bounds).await
+                    && cx
+                        .background_executor()
+                        .spawn(async move { ax::select_all(target.pid) })
+                        .await
+                {
+                    continue;
+                }
+                if !forwarder.press(chord, repeat, bounds).await {
                     return Err(no_keyboard_target());
                 }
             }

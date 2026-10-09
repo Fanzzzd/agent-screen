@@ -343,6 +343,16 @@ impl Forwarder {
         .unwrap_or(false)
     }
 
+    /// The window keys would go to now, if any.
+    pub async fn keys_target(&self, within: Rect) -> Option<WindowTarget> {
+        self.run(move |w| {
+            w.focus_something(within);
+            w.focused
+        })
+        .await
+        .flatten()
+    }
+
     /// False when no window on the display can take the keys.
     pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> bool {
         self.run(move |w| {
