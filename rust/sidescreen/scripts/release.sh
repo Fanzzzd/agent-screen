@@ -55,5 +55,27 @@ fi
 xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
 xcrun stapler staple "$dmg"
 spctl --assess --type open --context context:primary-signature --verbose "$dmg"
-shasum -a 256 "$dmg"
+sha="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"
+
+# The Homebrew cask for this release, for a tap repo's Casks folder.
+repo="${SIDESCREEN_REPO:-fanzzzd/sidescreen}"
+cask="$target/sidescreen.rb"
+cat >"$cask" <<CASK
+cask "sidescreen" do
+  version "$version"
+  sha256 "$sha"
+
+  url "https://github.com/$repo/releases/download/v#{version}/Sidescreen-#{version}.dmg"
+  name "Sidescreen"
+  desc "Virtual displays for AI agents, so they work without taking your mouse"
+  homepage "https://github.com/$repo"
+
+  depends_on macos: ">= :sequoia"
+
+  app "Sidescreen.app"
+
+  zap trash: "~/Library/Application Support/Sidescreen"
+end
+CASK
 echo "$dmg"
+echo "$cask (sha256 $sha)"
