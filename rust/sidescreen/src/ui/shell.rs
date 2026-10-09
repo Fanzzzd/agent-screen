@@ -1146,6 +1146,7 @@ impl Shell {
                 60.0,
             ),
             "assist-hide" => assist::hide(),
+            "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "click" => self.native(Native::IconClicked { right: false }, cx),
             "menu" => self.status_menu(),
             "hide" => self.hide_peek(cx),
