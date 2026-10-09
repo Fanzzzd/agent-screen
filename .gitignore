@@ -4,3 +4,11 @@ node_modules/
 .swiftpm/
 *.xcodeproj/
 DerivedData/
+
+# Build outputs, release artifacts, signing material and local tool state
+target/
+*.dmg
+*.p12
+*.mobileprovision
+.env*
+.claude/
