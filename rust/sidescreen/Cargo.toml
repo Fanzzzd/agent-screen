@@ -2,6 +2,7 @@
 name = "sidescreen"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "The Sidescreen menu bar app: Agent Displays, the control socket, Peek and the Viewer."
 

@@ -2,6 +2,7 @@
 name = "sidescreen-mcp"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "Sidescreen's MCP server: tools for Agent Sessions, served over stdio, talking to the app's control socket."
 
