@@ -84,12 +84,22 @@ impl Control {
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
             return Ok(connection.clone());
         }
-        let (reader, writer) = endpoint::connect().await.map_err(|error| {
-            ControlError::new(
-                "unavailable",
-                format!("The Sidescreen app is not running ({error}). Ask the user to start it."),
-            )
-        })?;
+        let (reader, writer) = match endpoint::connect().await {
+            Ok(ends) => ends,
+            // The app isn't running: start it, as the user would, and wait
+            // for its socket.
+            #[cfg(target_os = "macos")]
+            Err(first) => start_app(first).await?,
+            #[cfg(not(target_os = "macos"))]
+            Err(error) => {
+                return Err(ControlError::new(
+                    "unavailable",
+                    format!(
+                        "The Sidescreen app is not running ({error}). Ask the user to start it."
+                    ),
+                ));
+            }
+        };
         let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> =
             Default::default();
         let open = Arc::new(AtomicBool::new(true));
@@ -106,6 +116,45 @@ impl Control {
         *slot = Some(connection.clone());
         Ok(connection)
     }
+}
+
+#[cfg(target_os = "macos")]
+/// Start the Sidescreen app in the background and connect once it listens.
+/// The server is the app's own binary, so it opens the bundle around
+/// itself; a bare build opens the installed app by bundle id.
+async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlError> {
+    let unavailable = |detail: String| {
+        ControlError::new(
+            "unavailable",
+            format!(
+                "The Sidescreen app is not running and could not be started ({detail}). Ask the user to open Sidescreen."
+            ),
+        )
+    };
+    let bundle = std::env::current_exe().ok().and_then(|exe| {
+        exe.ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+            .map(|p| p.to_path_buf())
+    });
+    let mut open = std::process::Command::new("/usr/bin/open");
+    open.arg("-g");
+    match &bundle {
+        Some(app) => open.arg(app),
+        None => open.args(["-b", "dev.sidescreen.menubar"]),
+    };
+    let status = open.status().map_err(|e| unavailable(e.to_string()))?;
+    if !status.success() {
+        return Err(unavailable(format!(
+            "open exited with {status}; first error: {first}"
+        )));
+    }
+    for _ in 0..75 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Ok(ends) = endpoint::connect().await {
+            return Ok(ends);
+        }
+    }
+    Err(unavailable("it did not answer within 15 s".into()))
 }
 
 async fn receive(
