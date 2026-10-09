@@ -54,8 +54,10 @@ pub fn can_capture() -> bool {
 
 /// What a display shows, without the menu bar macOS draws on it: that bar,
 /// its clock and status items belong to the user's front app, not to the
-/// agent. Its strip shows the wallpaper instead. Blocking.
-pub fn filter(id: DisplayId, fresh: bool) -> Result<SCContentFilter, String> {
+/// agent. Its strip shows the wallpaper instead. `plain` also leaves out the
+/// wallpaper and desktop icons, for agents: a photo makes up most of a
+/// screenshot's bytes and tells them nothing. Blocking.
+pub fn filter(id: DisplayId, fresh: bool, plain: bool) -> Result<SCContentFilter, String> {
     let content = content(fresh)?;
     let display = content
         .displays()
@@ -72,12 +74,17 @@ pub fn filter(id: DisplayId, fresh: bool) -> Result<SCContentFilter, String> {
         .into_iter()
         .filter(|w| {
             let f = w.frame();
-            w.window_layer() >= 24
+            let across = f.origin.x < area.max_x()
+                && f.origin.x + f.size.width > area.x
+                && f.origin.y < area.max_y()
+                && f.origin.y + f.size.height > area.y;
+            // The wallpaper and desktop icons sit below every normal level.
+            let desktop = plain && w.window_layer() < 0;
+            let in_bar = w.window_layer() >= 24
                 && f.size.height <= 40.0
                 && f.origin.y >= area.y - 1.0
-                && f.origin.y < area.y + 40.0
-                && f.origin.x < area.max_x()
-                && f.origin.x + f.size.width > area.x
+                && f.origin.y < area.y + 40.0;
+            across && (in_bar || desktop)
         })
         .collect();
     let refs: Vec<&SCWindow> = bar.iter().collect();
@@ -97,16 +104,19 @@ pub fn display(
     source: Option<crate::model::Rect>,
 ) -> Result<Shot, String> {
     let capture = |fresh: bool| -> Result<CGImage, String> {
-        let filter = filter(id, fresh)?;
+        let filter = filter(id, fresh, true)?;
         let mut config = SCStreamConfiguration::new()
             .with_width(size.0 as u32)
             .with_height(size.1 as u32)
             .with_shows_cursor(false);
-        if let Some(r) = source {
-            config.set_source_rect(screencapturekit::cg::CGRect::new(
-                r.x, r.y, r.width, r.height,
-            ));
-        }
+        // Where the wallpaper was: the dark gray of a window background.
+        config.set_background_color(0.13, 0.13, 0.14);
+        // Without the wallpaper, the content would shrink to the windows'
+        // bounds; pin it to the whole display.
+        let r = source.unwrap_or(crate::model::Rect::new(0.0, 0.0, size.0, size.1));
+        config.set_source_rect(screencapturekit::cg::CGRect::new(
+            r.x, r.y, r.width, r.height,
+        ));
         SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())
     };
     // Cached content can go stale when displays change; list it again.

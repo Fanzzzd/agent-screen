@@ -108,7 +108,7 @@ impl Capture {
         // The menu bar strip, about 24 to 38 pt, is left out of the change
         // count: it shows the user's own menus and clock.
         let skip = 40.0 / super::cg::display_bounds(display_id).height.max(1.0);
-        let filter = super::screenshot::filter(display_id, true).map_err(anyhow::Error::msg)?;
+        let filter = super::screenshot::filter(display_id, true, false).map_err(anyhow::Error::msg)?;
         let mut stream = SCStream::new(&filter, &configuration(pixels, fps))?;
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
@@ -165,7 +165,7 @@ impl Capture {
     /// Blocking.
     pub fn refresh_filter(&self, display_id: u32) {
         let _turn = self.turn.lock().unwrap();
-        if let Ok(filter) = super::screenshot::filter(display_id, false)
+        if let Ok(filter) = super::screenshot::filter(display_id, false, false)
             && let Err(error) = self.stream.update_content_filter(&filter)
         {
             log::debug!("capture filter of display {display_id} stays: {error}");

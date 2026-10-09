@@ -124,7 +124,7 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
                 "screenshot pixels and coordinates are the same space. Every action except wait returns a fresh screenshot.",
-                "The strip at the top, where macOS draws the user's menu bar, shows only the wallpaper and takes no",
+                "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
                 "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
