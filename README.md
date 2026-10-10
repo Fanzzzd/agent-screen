@@ -27,7 +27,8 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 1. Download the DMG from the [latest release](../../releases/latest) and drag Sidescreen into Applications. It needs macOS 15 or later. Or use Homebrew:
 
    ```sh
-   brew install --cask fanzzzd/sidescreen/sidescreen
+   brew tap fanzzzd/sidescreen
+   brew install --cask sidescreen
    ```
 
 2. Open it. Sidescreen is signed with a Developer ID but not notarized, so the first time macOS says it can't check the app. Go to System Settings ▸ Privacy & Security and press **Open Anyway** under the message about Sidescreen. Or clear the download flag once in Terminal:
