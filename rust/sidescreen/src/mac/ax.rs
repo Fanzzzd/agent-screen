@@ -412,8 +412,18 @@ fn list_menu(
 /// menu acts on the key window's first responder, which an app in the
 /// background doesn't have, so neither its menu item nor a posted cmd+a
 /// selects anything there.
-pub fn select_all(pid: i32) -> bool {
-    let Some(focused) = element_attribute(&application(pid), "AXFocusedUIElement") else {
+pub fn select_all(target: WindowTarget) -> bool {
+    // An app that hasn't had a click yet may have no focused element: take
+    // the window's first text field and focus it.
+    let focused = element_attribute(&application(target.pid), "AXFocusedUIElement")
+        .filter(|e| string_attribute(e, "AXValue").is_some())
+        .or_else(|| {
+            let window = window_element(target)?;
+            let field = first_text(&window, 0, &mut 0)?;
+            set_attribute(&field, "AXFocused", CFBoolean::new(true));
+            Some(field)
+        });
+    let Some(focused) = focused else {
         return false;
     };
     let Some(text) = string_attribute(&focused, "AXValue") else {
@@ -429,6 +439,24 @@ pub fn select_all(pid: i32) -> bool {
         return false;
     };
     set_attribute(&focused, "AXSelectedTextRange", &value)
+}
+
+/// The first text area or field under `element`, depth first.
+fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Option<Element> {
+    *visited += 1;
+    if depth > 12 || *visited > 400 {
+        return None;
+    }
+    for child in elements_attribute(element, "AXChildren") {
+        let role = string_attribute(&child, "AXRole").unwrap_or_default();
+        if matches!(role.as_str(), "AXTextArea" | "AXTextField") {
+            return Some(child);
+        }
+        if let Some(found) = first_text(&child, depth + 1, visited) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// A menu item's key equivalent in the computer tool's key syntax, such as

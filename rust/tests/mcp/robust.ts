@@ -83,7 +83,18 @@ try {
   const window = structured(launched)?.window
   check("TextEdit's first launch opens a document window", window?.app === "TextEdit", textOf(launched))
   check("no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
+  const docText = async (id: number) =>
+    textOf(await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: id } }))
+      .match(/textarea[^\n]*value="([^"]*)"/)?.[1] ?? ""
   if (window) {
+    check("the new document starts empty, with nothing restored", (await docText(window.windowId)) === "", JSON.stringify(await docText(window.windowId)))
+    // The judge's sequence: type, select all, type over it, with no click.
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "one two" } })
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "cmd+a" } })
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "X" } })
+    check("type, cmd+a, type replaces the text", (await docText(window.windowId)) === "X", JSON.stringify(await docText(window.windowId)))
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "cmd+a" } })
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "BackSpace" } })
     await client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: "Hello from an agent" } })
     const state = await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: window.windowId } })
     check("typing reaches the document", textOf(state).includes("Hello from an agent"))
@@ -94,6 +105,24 @@ try {
     const replaced = await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: window.windowId } })
     const value = textOf(replaced).match(/textarea[^\n]*value="([^"]*)"/)?.[1]
     check("cmd+a selects all in a background app", value === "Replaced", JSON.stringify(value))
+  }
+
+  // Two sessions launching the same app at once each get their own window.
+  {
+    const other = await McpClient.start({ CLAUDE_CODE_SESSION_ID: `robust-other-${Date.now()}` })
+    const second = structured(await other.request("tools/call", { name: "create_display", arguments: { title: "Robust 2" } })).display_id
+    const [a, b] = await Promise.all([
+      client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } }),
+      other.request("tools/call", { name: "launch_app", arguments: { display_id: second, app: "TextEdit" } }),
+    ])
+    const wa = structured(a)?.window?.windowId
+    const wb = structured(b)?.window?.windowId
+    check("concurrent launches get distinct windows", wa !== undefined && wb !== undefined && wa !== wb, `${wa} ${wb} ${textOf(a).slice(0, 80)} ${textOf(b).slice(0, 80)}`)
+    const onSecond = (structured(await other.request("tools/call", { name: "list_windows", arguments: { display_id: second } })).windows as any[]).map((w) => w.windowId)
+    check("the second session's window is on its display", onSecond.includes(wb), JSON.stringify(onSecond))
+    check("no window on the user's screen after concurrent launches", onMainDisplay("TextEdit") === 0)
+    await other.request("tools/call", { name: "end_display", arguments: { display_id: second } })
+    other.close()
   }
 
   // Launched again while running: a second document, still not on the user's screen.

@@ -26,6 +26,9 @@ pub struct Core {
     /// Displays moved to where they stay. Until then a new display can sit
     /// over one of the user's windows parked off screen.
     pub tucked: HashSet<DisplayId>,
+    /// Apps an Agent Session is launching. Two launches of one app at once
+    /// can't tell their new windows apart, so they take turns.
+    pub launching: HashSet<std::path::PathBuf>,
 }
 
 impl Core {
@@ -37,6 +40,7 @@ impl Core {
             closed: HashSet::new(),
             sessions: HashMap::new(),
             tucked: HashSet::new(),
+            launching: HashSet::new(),
         }
     }
 

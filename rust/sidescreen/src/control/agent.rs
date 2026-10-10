@@ -286,7 +286,7 @@ pub async fn handle(
                     && let Some(target) = forwarder.keys_target(bounds).await
                     && cx
                         .background_executor()
-                        .spawn(async move { ax::select_all(target.pid) })
+                        .spawn(async move { ax::select_all(target) })
                         .await
                 {
                     continue;
@@ -911,10 +911,14 @@ async fn open_in_background(
             // panel, owned by a system service and left on the user's
             // screen, instead of a window. Ask for an untitled document.
             // Only a starting app reads its arguments.
+            // Nor bring back windows from its last run, unsaved text
+            // included, which may be the user's.
             open.args([
                 "--args",
                 "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
                 "NO",
+                "-ApplePersistenceIgnoreState",
+                "YES",
             ]);
             open.status().is_ok_and(|s| s.success())
         })
@@ -930,8 +934,40 @@ async fn launch(
 ) -> Result<Option<windows::Window>, ControlError> {
     let path = app::resolve(name)
         .ok_or_else(|| ControlError::not_found(format!("no app named {name}")))?;
-    let before: std::collections::HashSet<u32> =
+    // Wait for another session's launch of the same app to finish.
+    for _ in 0..300 {
+        let free = core.update(cx, |c, _| c.launching.insert(path.clone()));
+        if free {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    let result = launch_now(core, id, name, &path, target, cx).await;
+    core.update(cx, |c, _| c.launching.remove(&path));
+    result
+}
+
+async fn launch_now(
+    core: &Entity<Core>,
+    id: DisplayId,
+    name: &str,
+    path: &std::path::Path,
+    target: Option<&str>,
+    cx: &mut AsyncApp,
+) -> Result<Option<windows::Window>, ControlError> {
+    let path = path.to_path_buf();
+    // Windows already on screen, or claimed by any display, aren't new.
+    let mut before: std::collections::HashSet<u32> =
         windows::all().iter().map(|w| w.target.window_id).collect();
+    before.extend(core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .flat_map(|d| d.records.keys().copied())
+            .collect::<Vec<_>>()
+    }));
     let was_running = app::running_pid(&path).is_some();
 
     // A starting app opens the URL or file in its first window. A running
@@ -1047,6 +1083,18 @@ async fn settle(
             // The new app's window takes the keys, not the last one clicked.
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             forwarder.focus(target).await;
+            // A window bigger than the display gets pulled inside.
+            let moved = cx
+                .background_executor()
+                .spawn(async move { windows::keep_inside(id) })
+                .await;
+            if moved
+                && let Some(kept) = windows::on_display(id)
+                    .into_iter()
+                    .find(|w| w.target == target)
+            {
+                return Ok(kept);
+            }
             return Ok(placed);
         }
     }
