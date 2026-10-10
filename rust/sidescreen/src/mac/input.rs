@@ -693,7 +693,9 @@ fn hits() -> Vec<Hit> {
     cg::on_screen_windows()
         .into_iter()
         .filter(|w| {
-            w.layer >= 0
+            // From 1000 up are overlays that take no clicks, such as the
+            // one screencapture spreads over every display while recording.
+            (0..1000).contains(&w.layer)
                 && w.layer != menu
                 && w.layer != status
                 && w.owner_name != "Window Server"

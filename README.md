@@ -2,7 +2,7 @@
 
 Give each AI agent its own Mac screen. Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.
 
-![An agent types in TextEdit and works Calculator on its own display, then asks for help](docs/media/demo.gif)
+![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
 
 Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Sidescreen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.
 

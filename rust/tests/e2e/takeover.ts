@@ -6,6 +6,7 @@
  *
  *     SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts
  */
+import { spawn } from "node:child_process"
 import { Control, check, failed, instance, probe, buildTools, running, sh, startTestApp, stopTestApp, waitForUnlocked } from "./lib.ts"
 
 if (!instance) throw new Error("run with SIDESCREEN_INSTANCE=e2e")
@@ -53,6 +54,10 @@ try {
   const onMain = fx < mw && fx + fw > 0 && fy < mh && fy + fh > 0
   check("the Viewer opens on the stage, not the user's screen", !onMain, JSON.stringify(frame))
 
+  // A screen recording spreads an overlay over every display, the agent's
+  // too; clicks must still reach the app under it.
+  const recording = spawn("/usr/sbin/screencapture", ["-v", "-x", "-V", "30", "-R", `${fx},${fy},40,40`, "/tmp/sidescreen-takeover.mov"])
+  await Bun.sleep(1500)
   await control.call("requestHelp", { displayId: id, reason: "Please check the draft." })
   await control.call("debugViewerInput", { kind: "click", x: 0.5, y: 0.7 })
   const blocked = await control.call("type", { displayId: id, text: "x" }).then(() => false, () => true)
@@ -61,7 +66,8 @@ try {
   await typeInViewer(" User added this.")
   await Bun.sleep(400)
   watchFront()
-  check("the user's keys reach the agent's app", documentText().includes("User added this."), JSON.stringify(documentText()))
+  recording.kill()
+  check("the user's keys reach the agent's app, while the screen is recorded", documentText().includes("User added this."), JSON.stringify(documentText()))
 
   const resumed = control.call("waitForControl", { displayId: id, timeoutSeconds: 10 })
   await control.call("debugShow", { surface: "primary", displayId: id })
