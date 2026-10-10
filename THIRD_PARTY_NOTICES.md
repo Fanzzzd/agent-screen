@@ -1,6 +1,6 @@
 # Third-party notices
 
-The background input recipe in `rust/sidescreen/native/SkyLight.m` and `rust/sidescreen/src/mac/input.rs` (and the older Swift app under `apps/menubar`) is ported from [trycua/cua](https://github.com/trycua/cua), used under the MIT License:
+The background input recipe in `rust/sidescreen/native/SkyLight.m` and `rust/sidescreen/src/mac/input.rs` is ported from [trycua/cua](https://github.com/trycua/cua), used under the MIT License:
 
 > MIT License
 > 

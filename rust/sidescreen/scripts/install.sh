@@ -6,7 +6,7 @@
 # The installed copy is the one to use day to day: debug builds in
 # rust/target don't overwrite it. It keeps the Screen Recording and
 # Accessibility grants, which follow the bundle id and signature. A running
-# Sidescreen, Swift or Rust, quits first: both use the same control socket.
+# Sidescreen quits first: they share the control socket.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,7 +29,7 @@ installed=/Applications/Sidescreen.app
 
 # A normal quit hands each display's windows back; a kill leaves them to
 # macOS, which moves them onto the user's screen.
-for app in "$installed" "$built" "$(cd ../.. && pwd)/apps/menubar/.build/Sidescreen.app"; do
+for app in "$installed" "$built"; do
   # Telling an app that isn't running to quit would launch it first.
   if pgrep -f "$app/Contents/MacOS/Sidescreen" >/dev/null; then
     osascript -e "tell application \"$app\" to quit" >/dev/null 2>&1 || true

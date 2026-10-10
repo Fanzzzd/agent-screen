@@ -5048,23 +5048,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spike-gpui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "core-foundation 0.10.0",
- "core-video",
- "futures",
- "gpui",
- "gpui_macos",
- "gpui_platform",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "screencapturekit 11.0.0",
-]
-
-[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

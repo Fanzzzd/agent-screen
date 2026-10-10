@@ -4,8 +4,8 @@
 # Usage: scripts/bundle.sh [debug|release]
 #
 # Signing: macOS ties Screen Recording and Accessibility grants to the code
-# signature and bundle id. This bundle uses the Swift app's Info.plist and
-# the first Apple Development identity, else Developer ID Application, so
+# signature and bundle id. This bundle signs with the first Apple
+# Development identity, else Developer ID Application, so
 # builds keep the grants.
 # Override with SIDESCREEN_SIGN_IDENTITY (use "-" for ad-hoc).
 set -euo pipefail
@@ -21,8 +21,8 @@ app="$target/Sidescreen.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$target/$config/Sidescreen" "$app/Contents/MacOS/Sidescreen"
-cp ../../apps/menubar/Resources/Info.plist "$app/Contents/Info.plist"
-cp ../../apps/menubar/Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp resources/Info.plist "$app/Contents/Info.plist"
+cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 identity="${SIDESCREEN_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then

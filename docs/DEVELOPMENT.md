@@ -3,24 +3,24 @@
 ## Layout
 
 ```
-rust/sidescreen/      the app in Rust: GPUI UI, control socket, `Sidescreen mcp`
-rust/sidescreen-mcp/  the MCP server (rmcp), built into the app binary
-rust/tests/mcp/       end-to-end scripts that act as an MCP client
-rust/docs/            Linux and Windows feasibility notes
-apps/menubar/         the Swift app the Rust one replaces (SwiftPM, macOS 15+)
-docs/                 ADRs and the AGENTS.md convention
+rust/sidescreen/        the app: GPUI UI, control socket, `Sidescreen mcp`
+rust/sidescreen-mcp/    the MCP server (rmcp), built into the app binary
+rust/sidescreen-model/  domain rules with no OS calls: displays, windows, key chords
+rust/tests/             MCP scripts, user-side e2e tests and the demo recorder
+rust/docs/              Linux and Windows feasibility notes
+docs/                   ADRs and the AGENTS.md convention
 ```
 
-The Rust app has reached parity with the Swift app on macOS; see [ADR 0005](docs/adr/0005-rust-app-and-mcp.md). Both use the bundle id `dev.sidescreen.menubar` and the same control socket, so run one at a time.
+Sidescreen started as a Swift app; the Rust app replaced it ([ADR 0005](docs/adr/0005-rust-app-and-mcp.md)), and the Swift code lives on in the history.
 
 ## Build
 
 ```sh
 rust/sidescreen/scripts/bundle.sh [release]   # build rust/target/Sidescreen.app
-bun run dev                                   # Swift: build, sign, restart the app
+rust/sidescreen/scripts/release.sh            # the DMG and Homebrew cask for a release
 ```
 
-The Rust toolchain is pinned in `rust/rust-toolchain.toml`. Each bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
+The Rust toolchain is pinned in `rust/rust-toolchain.toml`. The bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
 
 Development switches for the Rust app:
 
