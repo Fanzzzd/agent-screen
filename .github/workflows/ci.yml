@@ -13,7 +13,7 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rust-toolchain.toml pins the version; rustup installs it on first use.
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
