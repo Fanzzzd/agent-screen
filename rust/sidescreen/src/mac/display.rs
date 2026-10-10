@@ -76,7 +76,10 @@ impl VirtualDisplay {
 /// Not the bottom corners: AeroSpace hides the windows of other workspaces
 /// in a monitor's bottom corner, hanging off screen, and a display there
 /// would show the user's hidden windows to agents.
-pub fn tuck_away(id: u32, virtual_ids: &[u32]) {
+///
+/// True once the display sits there. A display WindowServer has only just
+/// added ignores the configuration, so callers try again.
+pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     let others: Vec<u32> = cg::active_displays()
         .into_iter()
         .filter(|&d| d != id)
@@ -97,27 +100,25 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) {
             .reduce(|a, b| a.union(&b))
     };
     let Some(anchor) = union(&anchor_ids) else {
-        return;
+        return false;
     };
     let occupied = others
         .iter()
         .filter(|d| virtual_ids.contains(d))
         .map(|&d| cg::display_bounds(d))
         .fold(anchor, |a, b| a.union(&b));
+    let height = cg::display_bounds(id).height;
+    let origin = (occupied.max_x() as i32, (anchor.y - height) as i32);
     unsafe {
         let mut config = std::ptr::null_mut();
         if CGBeginDisplayConfiguration(&mut config) == 0 {
-            let height = cg::display_bounds(id).height;
-            CGConfigureDisplayOrigin(
-                config,
-                id,
-                occupied.max_x() as i32,
-                (anchor.y - height) as i32,
-            );
+            CGConfigureDisplayOrigin(config, id, origin.0, origin.1);
             // kCGConfigureForSession
             CGCompleteDisplayConfiguration(config, 1);
         }
     }
+    let now = cg::display_bounds(id);
+    (now.x as i32, now.y as i32) == origin
 }
 
 fn class(name: &str) -> Option<&'static AnyClass> {

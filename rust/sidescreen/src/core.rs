@@ -61,16 +61,25 @@ impl Core {
         let handle = VirtualDisplay::create(&name, size.0 as u32, size.1 as u32, serial)?;
         let id = handle.id;
         self.displays.add(id, name, size, owner, handle);
-        // WindowServer needs a moment before the display accepts configuration.
+        // WindowServer needs a moment before the display accepts
+        // configuration; try until it does.
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(400))
-                .await;
-            let _ = this.update(cx, |core, _| {
-                let virtual_ids: Vec<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-                display::tuck_away(id, &virtual_ids);
-                core.tucked.insert(id);
-            });
+            for _ in 0..30 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let Ok(placed) = this.update(cx, |core, _| {
+                    let virtual_ids: Vec<DisplayId> =
+                        core.displays.list.iter().map(|d| d.id).collect();
+                    display::tuck_away(id, &virtual_ids)
+                }) else {
+                    return;
+                };
+                if placed {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |core, _| core.tucked.insert(id));
         })
         .detach();
         cx.notify();

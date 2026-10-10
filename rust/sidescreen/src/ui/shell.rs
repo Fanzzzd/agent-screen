@@ -1871,7 +1871,7 @@ impl Shell {
             // AeroSpace reacts to display changes on its own schedule. Look
             // soon, since a user's workspace on an Agent Display vanishes
             // from their screen and shows to the agent, and look again.
-            for wait in [250, 650, 1100] {
+            for wait in [100, 150, 250, 650, 1100] {
                 cx.background_executor()
                     .timer(Duration::from_millis(wait))
                     .await;
