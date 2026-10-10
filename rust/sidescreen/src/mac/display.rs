@@ -87,7 +87,7 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     let physical: Vec<u32> = others
         .iter()
         .copied()
-        .filter(|d| !virtual_ids.contains(d))
+        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
         .collect();
     let anchor_ids = if physical.is_empty() {
         vec![cg::main_display()]
@@ -104,7 +104,7 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     };
     let occupied = others
         .iter()
-        .filter(|d| virtual_ids.contains(d))
+        .filter(|&&d| virtual_ids.contains(&d) || cg::is_sidescreen(d))
         .map(|&d| cg::display_bounds(d))
         .fold(anchor, |a, b| a.union(&b));
     let height = cg::display_bounds(id).height;

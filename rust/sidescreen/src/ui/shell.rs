@@ -123,6 +123,9 @@ pub struct Shell {
     resting: Option<NSRect>,
 
     known: HashSet<DisplayId>,
+    /// Tests: an Agent Display that stands in for the user's screen, so
+    /// panels open where the user can't see them.
+    stage: Option<DisplayId>,
     drag: Option<Drag>,
     /// Where the left button went down, until the first drag event.
     drag_from: Option<(f64, f64)>,
@@ -252,6 +255,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer_generation: 0,
             resting: None,
             known: HashSet::new(),
+            stage: None,
             drag: None,
             drag_from: None,
             drop_hover: false,
@@ -676,7 +680,10 @@ impl Shell {
     fn user_screens(&self) -> Vec<(NSRect, NSRect)> {
         native::screens()
             .into_iter()
-            .filter(|(id, _, _)| !self.known.contains(id))
+            .filter(|(id, _, _)| match self.stage {
+                Some(stage) => *id == stage,
+                None => !self.known.contains(id),
+            })
             .map(|(_, frame, visible)| (frame, visible))
             .collect()
     }
@@ -1164,6 +1171,7 @@ impl Shell {
             }
             "focus" => self.take_keyboard(),
             "viewer" => self.open_viewer(id, cx),
+            "stage" => self.stage = (id != 0).then_some(id),
             "select" => self.select(id, cx),
             "quit" => self.quit(cx),
             other => return Err(format!("unknown surface {other}")),

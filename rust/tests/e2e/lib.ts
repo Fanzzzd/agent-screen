@@ -8,14 +8,17 @@
  */
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs"
 import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 
 export const root = new URL("../../", import.meta.url).pathname // rust/
 export const out = path.join(root, "target/e2e")
-export const socketPath = path.join(os.homedir(), "Library/Application Support/Sidescreen/control.sock")
+/** SIDESCREEN_INSTANCE=e2e talks to a test app beside the user's, on its own socket. */
+export const instance = process.env.SIDESCREEN_INSTANCE || undefined
+export const socketPath = path.join(os.homedir(), "Library/Application Support/Sidescreen",
+  instance ? `control-${instance}.sock` : "control.sock")
 const debugApp = path.join(root, "target/Sidescreen.app")
 export const installedApp = "/Applications/Sidescreen.app"
 
@@ -144,15 +147,56 @@ export const startDebugApp = async (env: Record<string, string> = {}) => {
   quit(installedApp)
   quit(debugApp)
   // Started from here it borrows this terminal's privacy grants.
+  // E2E_LOG=FILE keeps the app's log.
+  const log = process.env.E2E_LOG ? openSync(process.env.E2E_LOG, "w") : "ignore"
   spawn(path.join(debugApp, "Contents/MacOS/Sidescreen"), [], {
     env: { ...process.env, ...env },
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", log, log],
     detached: true
   }).unref()
   for (let i = 0; i < 60 && !(await listening()); i++) await Bun.sleep(250)
 }
 
 export const stopDebugApp = () => quit(debugApp)
+
+/**
+ * The debug app as a second instance beside the user's Sidescreen, which
+ * keeps running with its displays. Needs SIDESCREEN_INSTANCE. Agent-side
+ * tests run this way at any time: their input goes to app processes, not
+ * to the user's pointer and keyboard.
+ */
+export const startTestApp = async (env: Record<string, string> = {}) => {
+  if (!instance) throw new Error("set SIDESCREEN_INSTANCE to run beside the user's app")
+  sh(path.join(root, "sidescreen/scripts/bundle.sh"), ["debug"])
+  if (await listening()) return
+  const log = process.env.E2E_LOG ? openSync(process.env.E2E_LOG, "w") : "ignore"
+  spawn(path.join(debugApp, "Contents/MacOS/Sidescreen"), [], {
+    env: { ...process.env, ...env },
+    stdio: ["ignore", log, log],
+    detached: true
+  }).unref()
+  for (let i = 0; i < 60 && !(await listening()); i++) await Bun.sleep(250)
+  if (!(await listening())) throw new Error("the test app didn't start")
+}
+
+/** Quit the test instance through its socket; AppleScript would find the user's app by bundle id. */
+export const stopTestApp = async () => {
+  if (!(await listening())) return
+  const control = await Control.connect()
+  await control.call("debugQuit").catch(() => {})
+  control.close()
+  for (let i = 0; i < 50 && (await listening()); i++) await Bun.sleep(100)
+}
+
+/** Wait until the screen is unlocked: a locked screen blocks input and capture. */
+export const waitForUnlocked = async (limit = 3600) => {
+  const start = Date.now()
+  while (Date.now() - start < limit * 1000) {
+    if (probe("locked") === "0") return true
+    await Bun.sleep(5000)
+  }
+  return false
+}
 
 /** Start a copy under another bundle id, so it has no privacy grants. */
 export const startUngrantedApp = async () => {

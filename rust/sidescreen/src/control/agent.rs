@@ -519,9 +519,36 @@ pub async fn handle(
             Ok(json!({}))
         }
         "debugViewer" if debug_methods() => {
-            let (frame, image) = crate::mac::viewer_input::debug_layout()
+            let (frame, image, key) = crate::mac::viewer_input::debug_layout()
                 .ok_or_else(|| ControlError::not_found("the Viewer shows no display"))?;
-            Ok(json!({ "frame": frame, "image": image }))
+            Ok(json!({ "frame": frame, "image": image, "key": key }))
+        }
+        "debugViewerInput" if debug_methods() => {
+            use crate::mac::viewer_input;
+            match p.string("kind").as_deref() {
+                Some("click") => viewer_input::inject_click(
+                    p.number("x").unwrap_or(0.5),
+                    p.number("y").unwrap_or(0.5),
+                ),
+                Some("key") => viewer_input::inject_key(
+                    p.int("code").unwrap_or(0) as u16,
+                    p.int("shift").unwrap_or(0) == 1,
+                ),
+                _ => Err("kind is click or key".into()),
+            }
+            .map_err(ControlError::failed)?;
+            Ok(json!({}))
+        }
+        "debugQuit" if debug_methods() => {
+            // Quits the way the menu does, after this reply goes out.
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+            Ok(json!({}))
         }
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());

@@ -7,6 +7,13 @@
 //   hid wheel X Y TICKS        mouse wheel ticks, no phases
 //   hid replay LOG FROM TO X Y replay scroll events recorded by `probe tap`
 //   hid key CODE               press and release a key, the pointer untouched
+//   hid type TEXT MS           type ASCII TEXT with real key codes, MS between characters
+//   hid source [ID]            print the keyboard input source, or select ID
+//   hid where                  print the pointer's location "x y"
+//   hid warp X Y               put the pointer there
+//
+// HID_STAY=1 leaves the pointer where a command took it.
+import Carbon
 import CoreGraphics
 import Foundation
 
@@ -47,6 +54,54 @@ if args[1] == "key" {
   CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!.post(tap: .cghidEventTap)
   usleep(30_000)
   CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)!.post(tap: .cghidEventTap)
+  exit(0)
+}
+
+if args[1] == "type" {
+  // US ANSI key codes, so the keys travel like real ones: the Viewer forwards codes.
+  let plain = Array("asdfhgzxcv\u{0}bqweryt123465=97-80]ou[ip\u{0}lj'k;\\,/nm.")
+  let shifted = Array("ASDFHGZXCV\u{0}BQWERYT!@#$^%+(&_*)}OU{IP\u{0}LJ\"K:|<?NM>")
+  let pause = useconds_t((Int(args.count > 3 ? args[3] : "60") ?? 60) * 1000)
+  func press(_ code: CGKeyCode, _ flags: CGEventFlags) {
+    let shift = flags.contains(.maskShift)
+    if shift { CGEvent(keyboardEventSource: nil, virtualKey: 56, keyDown: true)!.post(tap: .cghidEventTap); usleep(8_000) }
+    defer { if shift { CGEvent(keyboardEventSource: nil, virtualKey: 56, keyDown: false)!.post(tap: .cghidEventTap) } }
+    for down in [true, false] {
+      let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)!
+      e.flags = flags
+      e.post(tap: .cghidEventTap)
+      usleep(8_000)
+    }
+  }
+  for ch in args[2] {
+    if ch == " " { press(49, []) }
+    else if ch == "\n" { press(36, []) }
+    else if let i = plain.firstIndex(of: ch) { press(CGKeyCode(i), []) }
+    else if let i = shifted.firstIndex(of: ch) { press(CGKeyCode(i), .maskShift) }
+    usleep(pause)
+  }
+  exit(0)
+}
+if args[1] == "source" {
+  // Print the keyboard input source, or select the one given.
+  if args.count > 2 {
+    let list = TISCreateInputSourceList([kTISPropertyInputSourceID: args[2]] as CFDictionary, false).takeRetainedValue() as! [TISInputSource]
+    guard let source = list.first else { print("no input source \(args[2])"); exit(1) }
+    TISSelectInputSource(source)
+  } else {
+    let source = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+    print(Unmanaged<CFString>.fromOpaque(TISGetInputSourceProperty(source, kTISPropertyInputSourceID)).takeUnretainedValue())
+  }
+  exit(0)
+}
+if args[1] == "where" {
+  print(Int(saved.x), Int(saved.y))
+  exit(0)
+}
+if args[1] == "warp" {
+  let to = CGPoint(x: Double(args[2])!, y: Double(args[3])!)
+  post(.mouseMoved, to)
+  CGWarpMouseCursorPosition(to)
   exit(0)
 }
 
@@ -93,5 +148,7 @@ case "replay":
 default:
   print("unknown command \(args[1])"); exit(2)
 }
-post(.mouseMoved, saved)
-CGWarpMouseCursorPosition(saved)
+if ProcessInfo.processInfo.environment["HID_STAY"] != "1" {
+  post(.mouseMoved, saved)
+  CGWarpMouseCursorPosition(saved)
+}

@@ -4,10 +4,14 @@
  * TextEdit and Calculator not in use:
  *
  *     bun rust/tests/mcp/robust.ts
+ *
+ * With SIDESCREEN_INSTANCE=e2e it starts the debug app beside the user's
+ * and quits it afterwards, so it can run while the user works.
  */
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import { McpClient } from "./client.ts"
+import { McpClient, instance } from "./client.ts"
+import { startTestApp, stopTestApp } from "../e2e/lib.ts"
 
 let failures = 0
 const check = (label: string, ok: boolean, detail = "") => {
@@ -49,6 +53,7 @@ if (running("TextEdit") || running("Calculator")) {
   process.exit(0)
 }
 
+if (instance) await startTestApp()
 const client = await McpClient.start({ CLAUDE_CODE_SESSION_ID: `robust-${Date.now()}`})
 const structured = (r: any) => r.result?.structuredContent
 const textOf = (r: any) => r.result?.content?.find((c: any) => c.type === "text")?.text ?? ""
@@ -147,5 +152,6 @@ try {
   quit("Calculator")
   client.close()
 }
+if (instance) await stopTestApp()
 console.log(failures ? `${failures} failed` : "all passed")
 process.exit(failures ? 1 : 0)

@@ -5,8 +5,10 @@ import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 
-/** The app's control socket. */
-export const socketPath = path.join(os.homedir(), "Library/Application Support/Sidescreen/control.sock")
+/** SIDESCREEN_INSTANCE=e2e talks to a test app beside the user's, on its own socket. */
+export const instance = process.env.SIDESCREEN_INSTANCE || undefined
+export const socketPath = path.join(os.homedir(), "Library/Application Support/Sidescreen",
+  instance ? `control-${instance}.sock` : "control.sock")
 
 /** The server under test: the app binary's `mcp` subcommand from rust/target. */
 const defaultServer = [new URL("../../target/Sidescreen.app/Contents/MacOS/Sidescreen", import.meta.url).pathname, "mcp"]

@@ -7,6 +7,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
 pub type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
+/// A second app beside the user's, for tests: `SIDESCREEN_INSTANCE=e2e`
+/// gives it its own socket and display serials. Letters, digits and dashes.
+pub fn instance() -> Option<String> {
+    std::env::var("SIDESCREEN_INSTANCE")
+        .ok()
+        .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
 /// The socket, in a directory only the user can read.
 #[cfg(unix)]
 pub fn socket_path() -> std::path::PathBuf {
@@ -21,7 +29,10 @@ pub fn socket_path() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(|dir| PathBuf::from(dir).join("sidescreen"))
         .unwrap_or_else(|| home.join(".local/state/sidescreen"));
-    base.join("control.sock")
+    match instance() {
+        Some(instance) => base.join(format!("control-{instance}.sock")),
+        None => base.join("control.sock"),
+    }
 }
 
 /// The pipe, named per user. The app creates it with a security
@@ -29,7 +40,10 @@ pub fn socket_path() -> std::path::PathBuf {
 #[cfg(windows)]
 pub fn pipe_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_default();
-    format!(r"\\.\pipe\sidescreen-control-{user}")
+    match instance() {
+        Some(instance) => format!(r"\\.\pipe\sidescreen-control-{user}-{instance}"),
+        None => format!(r"\\.\pipe\sidescreen-control-{user}"),
+    }
 }
 
 pub async fn connect() -> std::io::Result<(Reader, Writer)> {

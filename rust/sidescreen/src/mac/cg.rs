@@ -14,6 +14,14 @@ pub fn rect(r: CGRect) -> Rect {
     Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
 }
 
+/// Whether a display is one of Sidescreen's, from this app or another.
+pub fn is_sidescreen(id: DisplayId) -> bool {
+    unsafe extern "C" {
+        fn CGDisplayVendorNumber(display: u32) -> u32;
+    }
+    unsafe { CGDisplayVendorNumber(id) == 0x5353 }
+}
+
 pub fn display_bounds(id: DisplayId) -> Rect {
     rect(CGDisplayBounds(id))
 }

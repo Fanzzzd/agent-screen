@@ -5,6 +5,9 @@
 //   probe idle                seconds since the user last touched a key or the pointer
 //   probe locked              1 while the screen is locked, else 0
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
+//   probe span PNG Y R G B    first and last x in row Y within 40 of the color, or nothing
+//   probe front               the front app's name
+//   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 import AppKit
 import CoreGraphics
@@ -41,6 +44,21 @@ case "pixel":
   var sum = [0, 0, 0]
   for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
   print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "span":
+  let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
+  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+  let y = Int(Double(args[3])!)
+  let want = args[4...6].map { Int($0)! }
+  let ctx = CGContext(data: nil, width: image.width, height: 1, bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+  ctx.draw(image, in: CGRect(x: 0, y: -(image.height - y - 1), width: image.width, height: image.height))
+  let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+  let hits = (0..<image.width).filter { x in (0..<3).allSatisfy { abs(Int(px[x * 4 + $0]) - want[$0]) <= 40 } }
+  if let first = hits.first, let last = hits.last { print(first, last) }
+case "main":
+  let b = CGDisplayBounds(CGMainDisplayID())
+  print(Int(b.width), Int(b.height))
+case "front":
+  print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
 case "activate":
   // Bring a process forward, as the user clicking it would.
   let pid = pid_t(args[2])!

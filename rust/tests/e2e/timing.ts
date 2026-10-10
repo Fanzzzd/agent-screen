@@ -1,14 +1,18 @@
 /**
  * How long createDisplay takes to answer, over a few displays.
  *
- *     bun rust/tests/e2e/timing.ts
+ *     SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts    beside the user's app
+ *     bun rust/tests/e2e/timing.ts                            in its place, once the user is idle
  */
-import { Control, buildTools, reopenInstalled, restore, snapshot, startDebugApp, stopDebugApp, waitForQuiet } from "./lib.ts"
+import {
+  Control, buildTools, instance, reopenInstalled, restore, snapshot, startDebugApp, startTestApp, stopDebugApp,
+  stopTestApp, waitForQuiet, waitForUnlocked
+} from "./lib.ts"
 
 buildTools()
-if (!(await waitForQuiet())) process.exit(1)
-const before = snapshot()
-await startDebugApp()
+if (!(await (instance ? waitForUnlocked() : waitForQuiet()))) process.exit(1)
+const before = instance ? undefined : snapshot()
+await (instance ? startTestApp() : startDebugApp())
 const control = await Control.connect()
 const times: number[] = []
 try {
@@ -22,8 +26,12 @@ try {
   console.log("createDisplay ms:", times.join(" "))
 } finally {
   control.close()
-  await Bun.sleep(800)
-  stopDebugApp()
-  reopenInstalled()
-  restore(before)
+  if (instance) {
+    await stopTestApp()
+  } else {
+    await Bun.sleep(800)
+    stopDebugApp()
+    reopenInstalled()
+    restore(before!)
+  }
 }

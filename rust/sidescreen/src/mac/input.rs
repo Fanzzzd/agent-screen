@@ -450,6 +450,7 @@ impl Worker {
             return None;
         };
         let target = hit.target;
+        log::debug!("input: press at {at:?} goes to {target:?}");
         self.focus(target);
         let group = self.next_group();
         self.gesture = Some(Gesture {
@@ -561,7 +562,10 @@ impl Worker {
     }
 
     fn key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
-        let Some(target) = self.focused else { return };
+        let Some(target) = self.focused else {
+            log::debug!("input: key {code} dropped, no window focused");
+            return;
+        };
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, down) else {
             return;
         };

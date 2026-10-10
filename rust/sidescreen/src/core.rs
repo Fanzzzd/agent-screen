@@ -57,7 +57,12 @@ impl Core {
         owner: Option<Owner>,
         cx: &mut Context<Self>,
     ) -> Option<DisplayId> {
-        let (serial, name) = self.displays.next_serial();
+        let (mut serial, mut name) = self.displays.next_serial();
+        // A test instance's displays must not pass for the user's.
+        if let Some(instance) = sidescreen_mcp::endpoint::instance() {
+            name = format!("Sidescreen {instance} {serial}");
+            serial += 10_000;
+        }
         let handle = VirtualDisplay::create(&name, size.0 as u32, size.1 as u32, serial)?;
         let id = handle.id;
         self.displays.add(id, name, size, owner, handle);

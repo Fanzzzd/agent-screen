@@ -35,6 +35,82 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+    /// Handling an event a test made: the Viewer must not take the keyboard.
+    static INJECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests: a click at a point of the display image, given as fractions of
+/// its width and height, handled as if the user made it.
+pub fn inject_click(x: f64, y: f64) -> Result<(), String> {
+    let (window, content) = STATE.with(|s| {
+        let s = s.borrow();
+        (s.window, s.content)
+    });
+    let [cx, cy, cw, ch] = content.ok_or("the Viewer shows no display")?;
+    if window == 0 {
+        return Err("no Viewer".into());
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let height = window.contentView().ok_or("no Viewer")?.frame().size.height;
+    let at = objc2_foundation::NSPoint::new(cx + x * cw, height - (cy + y * ch));
+    for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind,
+            at,
+            objc2_app_kit::NSEventModifierFlags::empty(),
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        )
+        .ok_or("no event")?;
+        inject(&event)?;
+    }
+    Ok(())
+}
+
+/// Tests: press and release a key on the Viewer, as if the user typed it.
+pub fn inject_key(code: u16, shift: bool) -> Result<(), String> {
+    let window = STATE.with(|s| s.borrow().window);
+    if window == 0 {
+        return Err("no Viewer".into());
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let flags = if shift {
+        objc2_app_kit::NSEventModifierFlags::Shift
+    } else {
+        objc2_app_kit::NSEventModifierFlags::empty()
+    };
+    let empty = objc2_foundation::NSString::new();
+    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            flags,
+            0.0,
+            window.windowNumber(),
+            None,
+            &empty,
+            &empty,
+            false,
+            code,
+        )
+        .ok_or("no event")?;
+        inject(&event)?;
+    }
+    Ok(())
+}
+
+fn inject(event: &NSEvent) -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    INJECTING.with(|i| i.set(true));
+    let handled = handle(event, mtm);
+    INJECTING.with(|i| i.set(false));
+    handled
+        .then_some(())
+        .ok_or_else(|| "the Viewer let the event through".into())
 }
 
 pub fn attach(window: &NSWindow) {
@@ -62,7 +138,7 @@ pub fn layout(content: Option<[f64; 4]>, blocked: bool) {
 
 /// The Viewer's frame and its display image, in global top-left points,
 /// for tests. None while the Viewer shows no display.
-pub fn debug_layout() -> Option<([f64; 4], [f64; 4])> {
+pub fn debug_layout() -> Option<([f64; 4], [f64; 4], bool)> {
     STATE.with(|s| {
         let s = s.borrow();
         s.display.as_ref()?;
@@ -73,6 +149,7 @@ pub fn debug_layout() -> Option<([f64; 4], [f64; 4])> {
         Some((
             [f.origin.x, top, f.size.width, f.size.height],
             [f.origin.x + cx, top + cy, cw, ch],
+            window.isKeyWindow(),
         ))
     })
 }
@@ -166,7 +243,9 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 let Some(at) = remote(event, &window, content, display, false) else {
                     return false;
                 };
-                native::make_key(&window);
+                if !INJECTING.with(|i| i.get()) {
+                    native::make_key(&window);
+                }
                 // The menu bar strip: only a click that opens a menu takes
                 // the display over, which the shell decides.
                 if button == Button::Left
