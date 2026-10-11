@@ -13,7 +13,7 @@
  * docs/media/demo.gif. Needs ffmpeg.
  */
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import * as path from "node:path"
 import { createInterface } from "node:readline"
 
@@ -58,7 +58,10 @@ try {
     sessionKey: "demo", client: "Claude Code", title: "Write the launch note", width: 800, height: 500
   })
   const id = display.displayId
-  await control.call("launchApp", { displayId: id, app: "TextEdit" })
+  // A named document, not "Untitled 32", in 16 pt so it reads in the GIF.
+  const note = path.join(out, "Launch note.rtf")
+  writeFileSync(note, "{\\rtf1\\ansi{\\fonttbl\\f0\\fswiss Helvetica;}\\f0\\fs32 \\par }")
+  await control.call("launchApp", { displayId: id, app: "TextEdit", open: note })
   await control.call("debugShow", { surface: "viewer", displayId: id })
   await pause(1500)
   const { frame, image } = await control.call("debugViewer")
@@ -91,7 +94,8 @@ try {
   await pause(900)
 
   await control.call("requestHelp", { displayId: id, reason: "Please check the draft before I publish it." })
-  await pause(1600)
+  // Long enough to read the request.
+  await pause(3000)
   // Let … Continue takes the place of Take Over, which shares its right edge.
   const header = capture("demo-header", [fx, fy, fw, 52])
   const span = probe("span", header, "52", "255", "159", "10").split(" ").map(Number)
