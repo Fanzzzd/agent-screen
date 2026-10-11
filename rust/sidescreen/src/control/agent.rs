@@ -781,6 +781,13 @@ fn claim(
 }
 
 /// Move a window onto a display, off the main thread.
+async fn held(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    cx.background_executor()
+        .spawn(async move { windows::held(target, id, screen.as_deref()) })
+        .await
+}
+
 pub async fn place(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> Result<(), String> {
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
     cx.background_executor()
@@ -1103,6 +1110,20 @@ async fn settle(
         cx.background_executor()
             .timer(Duration::from_millis(200))
             .await;
+        if !held(target, id, cx).await {
+            continue;
+        }
+        // Look again: AeroSpace may still take it back to its own layout.
+        cx.background_executor()
+            .timer(Duration::from_millis(300))
+            .await;
+        if !held(target, id, cx).await {
+            log::info!(
+                "window {} left display {id} after placing; placing again",
+                target.window_id
+            );
+            continue;
+        }
         if let Some(placed) = windows::on_display(id)
             .into_iter()
             .find(|w| w.target == target)

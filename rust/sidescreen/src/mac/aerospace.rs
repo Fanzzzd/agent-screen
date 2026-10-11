@@ -29,6 +29,7 @@ impl AeroSpace {
         let workspace = self
             .visible_workspace(monitor)?
             .ok_or_else(|| format!("no visible workspace on monitor {monitor}"))?;
+        log::debug!("aerospace: window {window} to workspace {workspace} on monitor {monitor}");
         self.move_window(window, &workspace)
     }
 
@@ -94,6 +95,7 @@ impl AeroSpace {
     }
 
     pub fn move_workspace(&self, workspace: &str, monitor: &str) -> Result<(), String> {
+        log::debug!("aerospace: workspace {workspace} to monitor {monitor}");
         self.run(&[
             "move-workspace-to-monitor",
             "--workspace",

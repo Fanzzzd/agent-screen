@@ -426,9 +426,26 @@ pub fn select_all(target: WindowTarget) -> bool {
     let Some(focused) = focused else {
         return false;
     };
-    let Some(text) = string_attribute(&focused, "AXValue") else {
+    let Some(mut text) = string_attribute(&focused, "AXValue") else {
         return false;
     };
+    // Typing just before can still be landing, and text checking such as
+    // TextEdit's automatic capitals rewrites a word late and moves the
+    // caret: wait until the text holds still for 100 ms, at most 600 ms.
+    let mut still = 0;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let now = string_attribute(&focused, "AXValue").unwrap_or_default();
+        if now == text {
+            still += 1;
+            if still >= 2 {
+                break;
+            }
+        } else {
+            still = 0;
+            text = now;
+        }
+    }
     if !settable(&focused, "AXSelectedTextRange") {
         return false;
     }

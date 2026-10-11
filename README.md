@@ -4,6 +4,8 @@ Give each AI agent its own Mac screen. Claude Code or Codex opens apps, clicks a
 
 ![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
 
+<sub>A scripted replay: [rust/tests/demo/record.ts](rust/tests/demo/record.ts) makes the same calls the MCP tools make, and draws the user's notes and pointer.</sub>
+
 Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Sidescreen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.
 
 ## What you get
@@ -12,7 +14,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 - **Peek.** Hover the menu bar icon to see every agent's screen live.
 - **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.
 - **Help Request.** An agent stuck on a login or a captcha asks for you with a notification, then waits.
-- **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, which is faster and more reliable than clicking pixels.
+- **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.
 - **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back from the Windows menu.
 
 | | Sidescreen | Built-in computer use | A virtual machine |
@@ -87,7 +89,17 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - A window that refuses to close, such as one with unsaved changes, is left to macOS, which moves it to your main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.
+- Copy, paste and undo need a focused app, so they do nothing in an app on an agent's display. Command-A still selects all, and `set_value` replaces text.
+- Window managers move windows too. AeroSpace is supported: Sidescreen keeps your workspaces off agent displays and checks that AeroSpace files each placed window on the agent's display. Others, such as yabai, are untested.
+- The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
+
+## Troubleshooting
+
+- **The agent has no Sidescreen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get sidescreen` shows whether Claude Code has it.
+- **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Sidescreen off and on.
+- **Tools say Sidescreen isn't running.** The first tool call starts it. If that fails, open `/Applications/Sidescreen.app` once yourself.
+- **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 
 ## Develop
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for building, testing and how it works. Sidescreen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+To build and install from source instead of the DMG, with Rust installed: `rust/sidescreen/scripts/install.sh`. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for testing and how it works. Sidescreen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

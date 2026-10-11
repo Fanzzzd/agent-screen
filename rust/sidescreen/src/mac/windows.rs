@@ -135,6 +135,32 @@ pub fn find(window_id: u32) -> Option<Window> {
 ///
 /// Blocking. `screen_name` is the display's localized name, read on the
 /// main thread.
+/// Whether a window placed on a display stays there. AeroSpace can take a
+/// move for a window it hasn't registered yet, then lay the window out in
+/// the user's workspace once it does: the window must sit in the workspace
+/// AeroSpace shows on the display, not just inside the display's bounds.
+pub fn held(target: WindowTarget, display: DisplayId, screen_name: Option<&str>) -> bool {
+    if !on_display(display).iter().any(|w| w.target == target) {
+        return false;
+    }
+    let Some(aerospace) = AeroSpace::current() else {
+        return true;
+    };
+    let Some(monitor) = screen_name.and_then(|name| aerospace.monitor_id(name).ok().flatten())
+    else {
+        return true;
+    };
+    match (
+        aerospace.workspace_of(target.window_id),
+        aerospace.visible_workspace(&monitor),
+    ) {
+        (Ok(Some(workspace)), Ok(Some(visible))) => workspace == visible,
+        // Not managed by AeroSpace, such as a panel: its bounds decide.
+        (Ok(None), _) => true,
+        _ => false,
+    }
+}
+
 pub fn place(
     target: WindowTarget,
     display: DisplayId,
