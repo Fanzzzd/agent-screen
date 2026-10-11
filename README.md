@@ -90,7 +90,15 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.
 - Copy, paste and undo shortcuts need a focused app, so they do nothing in an app on an agent's display. Agents copy and paste with `act_on_element`'s `read_text` and `insert_text` instead; Command-A still selects all.
-- Window managers move windows too. AeroSpace is supported: Sidescreen keeps your workspaces off agent displays and checks that AeroSpace files each placed window on the agent's display. Others, such as yabai, are untested.
+- Window managers move windows too. Stock AeroSpace treats agent displays as monitors: it shows your workspaces on them, and an agent's new window can pass over your screen for a frame or two first. Sidescreen moves your workspaces back. To stop it at the source, AeroSpace needs an `ignored-monitors` option, [proposed upstream](https://github.com/nikitabobko/AeroSpace/pull/2306). Until it lands, install our build of AeroSpace, which is AeroSpace plus that one patch, and keep your config:
+
+  ```sh
+  brew tap fanzzzd/sidescreen
+  brew uninstall --cask aerospace
+  brew install --cask aerospace-sidescreen
+  ```
+
+  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS asks you to allow Accessibility for AeroSpace again. Other window managers, such as yabai, are untested.
 - The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
 
 ## Troubleshooting

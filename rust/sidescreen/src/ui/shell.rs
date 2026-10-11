@@ -1912,8 +1912,9 @@ impl Shell {
             "AeroSpace 会管理所有显示器，包括 Sidescreen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 agent 的截图里。agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
-            let commands = "brew uninstall --cask aerospace
-brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
+            let commands = "brew tap fanzzzd/sidescreen
+brew uninstall --cask aerospace
+brew install --cask aerospace-sidescreen";
             let go = native::confirm(
                 t(
                     "This AeroSpace can't leave displays alone",
