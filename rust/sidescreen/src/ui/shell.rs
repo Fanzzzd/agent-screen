@@ -2001,9 +2001,11 @@ brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
 
     /// Stock AeroSpace manages every display, virtual ones included, and may
     /// show one of the user's workspaces on a new Agent Display. After a
-    /// display change, move such a workspace back to the main monitor and
-    /// refocus the workspace the user was on. Workspaces force-assigned to a
-    /// monitor number cannot move; those become conflicts the menu explains.
+    /// display change, move such a workspace back to the monitor it was on,
+    /// then show and focus what the user had before. Workspaces
+    /// force-assigned to a monitor number cannot move; those become
+    /// conflicts the menu explains. While nothing needs fixing, note where
+    /// the user's workspaces are, for the next time.
     fn schedule_guard(&mut self, cx: &mut Context<Self>) {
         self.guard_generation += 1;
         let generation = self.guard_generation;
@@ -2011,7 +2013,9 @@ brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
             // AeroSpace reacts to display changes on its own schedule. Look
             // soon, since a user's workspace on an Agent Display vanishes
             // from their screen and shows to the agent, and look again.
-            for wait in [100, 150, 250, 650, 1100] {
+            let waits = [100, 150, 250, 650, 1100];
+            for (pass, wait) in waits.into_iter().enumerate() {
+                let last = pass + 1 == waits.len();
                 cx.background_executor()
                     .timer(Duration::from_millis(wait))
                     .await;
@@ -2039,10 +2043,22 @@ brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
                         let Some(aerospace) = AeroSpace::current() else {
                             return Vec::new();
                         };
-                        checks
+                        let results: Vec<Guarded> = checks
                             .iter()
-                            .filter_map(|(name, ours)| guard(&aerospace, name, ours))
-                            .collect()
+                            .map(|(name, ours)| guard(&aerospace, name, ours))
+                            .collect();
+                        if results.contains(&Guarded::Moved) {
+                            aerospace.restore();
+                        } else if last && results.iter().all(|r| *r == Guarded::Clean) {
+                            aerospace.remember();
+                        }
+                        results
+                            .into_iter()
+                            .filter_map(|r| match r {
+                                Guarded::Pinned(workspace, display) => Some((workspace, display)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
                     })
                     .await;
                 let _ = this.update(cx, |shell, _| {
@@ -2057,35 +2073,49 @@ brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
     }
 }
 
-/// Check one Agent Display; a conflict when its workspace cannot move.
-fn guard(aerospace: &AeroSpace, name: &str, ours: &HashSet<u32>) -> Option<(String, String)> {
+#[derive(Debug, PartialEq)]
+enum Guarded {
+    /// The display shows only the agent's windows.
+    Clean,
+    /// A workspace of the user's moved back where it was.
+    Moved,
+    /// The workspace, pinned to the display, cannot move.
+    Pinned(String, String),
+}
+
+/// Check one Agent Display, and move a workspace of the user's on it back.
+fn guard(aerospace: &AeroSpace, name: &str, ours: &HashSet<u32>) -> Guarded {
     // One call when nothing is wrong, the usual case: AeroSpace answers
     // slowly right after a display change, and every call waits in line.
     if aerospace
         .visible_windows_on(name)
         .is_ok_and(|windows| windows.iter().all(|w| ours.contains(w)))
     {
-        return None;
+        return Guarded::Clean;
     }
-    let monitor = aerospace.monitor_id(name).ok().flatten()?;
+    let Some(monitor) = aerospace.monitor_id(name).ok().flatten() else {
+        return Guarded::Clean;
+    };
+    let mut result = Guarded::Clean;
     // Each eviction makes AeroSpace pick another workspace; stop after a few.
     for _ in 0..3 {
-        let workspace = aerospace.visible_workspace(&monitor).ok().flatten()?;
-        let windows = aerospace.window_ids(&workspace).ok()?;
+        let Some(workspace) = aerospace.visible_workspace(&monitor).ok().flatten() else {
+            break;
+        };
+        let Ok(windows) = aerospace.window_ids(&workspace) else {
+            break;
+        };
         if windows.iter().all(|w| ours.contains(w)) {
-            return None;
+            break;
         }
-        let focused = aerospace.focused_workspace().ok().flatten();
-        if aerospace.move_workspace(&workspace, "main").is_err() {
-            return Some((workspace, name.to_string()));
+        let home = aerospace.home_of(&workspace);
+        log::info!("aerospace: workspace {workspace} took {name}; back to monitor {home}");
+        if aerospace.move_workspace(&workspace, &home).is_err() {
+            return Guarded::Pinned(workspace, name.to_string());
         }
-        if let Some(focused) = focused
-            && focused != workspace
-        {
-            let _ = aerospace.focus_workspace(&focused);
-        }
+        result = Guarded::Moved;
     }
-    None
+    result
 }
 
 /// "Safari — Flights", or just the app when the title adds nothing.

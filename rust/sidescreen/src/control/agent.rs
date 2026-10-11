@@ -708,6 +708,15 @@ async fn create_display(
         title: p.string("title").unwrap_or_else(|| "Untitled".into()),
         connection,
     };
+    // Where the user's AeroSpace workspaces are, so the guard can put back
+    // any the new display takes.
+    cx.background_executor()
+        .spawn(async {
+            if let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() {
+                aerospace.remember_before_first();
+            }
+        })
+        .await;
     let started = Instant::now();
     let reply = core
         .update(cx, |c, cx| {

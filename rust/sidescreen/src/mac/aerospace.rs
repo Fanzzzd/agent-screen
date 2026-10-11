@@ -119,12 +119,6 @@ impl AeroSpace {
         Ok((!name.is_empty()).then(|| name.to_string()))
     }
 
-    pub fn focused_workspace(&self) -> Result<Option<String>, String> {
-        let name = self.run(&["list-workspaces", "--focused"])?;
-        let name = name.trim();
-        Ok((!name.is_empty()).then(|| name.to_string()))
-    }
-
     pub fn window_ids(&self, workspace: &str) -> Result<Vec<u32>, String> {
         Ok(self
             .run(&[
@@ -152,6 +146,91 @@ impl AeroSpace {
 
     pub fn focus_workspace(&self, workspace: &str) -> Result<(), String> {
         self.run(&["workspace", workspace]).map(|_| ())
+    }
+
+    /// Every workspace's monitor, what each monitor shows, and the focused
+    /// workspace, in one call.
+    pub fn layout(&self) -> Result<Layout, String> {
+        let mut layout = Layout::default();
+        let list = self.run(&[
+            "list-workspaces",
+            "--all",
+            "--format",
+            "%{workspace}|%{monitor-name}|%{workspace-is-visible}|%{workspace-is-focused}",
+        ])?;
+        for line in list.lines() {
+            let parts: Vec<&str> = line.split('|').collect();
+            let [workspace, monitor, visible, focused] = parts[..] else {
+                continue;
+            };
+            layout
+                .monitor_of
+                .insert(workspace.to_string(), monitor.to_string());
+            if visible == "true" {
+                layout
+                    .shown
+                    .insert(monitor.to_string(), workspace.to_string());
+            }
+            if focused == "true" {
+                layout.focused = Some(workspace.to_string());
+            }
+        }
+        Ok(layout)
+    }
+
+    /// Note where the user's workspaces are now, for `restore`. Workspaces
+    /// on Agent Displays keep the monitor noted before. Call it only when no
+    /// Agent Display shows a workspace of the user's.
+    pub fn remember(&self) {
+        let Ok(now) = self.layout() else { return };
+        self.keep(now);
+    }
+
+    /// `remember`, while no Agent Display is there to have taken anything:
+    /// before the first one opens.
+    pub fn remember_before_first(&self) {
+        let Ok(now) = self.layout() else { return };
+        if !now.monitor_of.values().any(|m| is_agent_display(m)) {
+            self.keep(now);
+        }
+    }
+
+    fn keep(&self, now: Layout) {
+        let mut remembered = REMEMBERED.lock().unwrap();
+        *remembered = Some(merged(remembered.take(), now));
+    }
+
+    /// Where the user had a workspace, as a monitor AeroSpace can move it
+    /// to now: the remembered monitor if it is still there, else the main.
+    pub fn home_of(&self, workspace: &str) -> String {
+        let monitor = REMEMBERED
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|l| l.monitor_of.get(workspace).cloned());
+        monitor
+            .and_then(|name| self.monitor_id(&name).ok().flatten())
+            .unwrap_or_else(|| "main".to_string())
+    }
+
+    /// After workspaces moved back from Agent Displays: show on each of the
+    /// user's monitors the workspace it showed before, and focus the one
+    /// that was focused.
+    pub fn restore(&self) {
+        let Some(before) = REMEMBERED.lock().unwrap().clone() else {
+            return;
+        };
+        let Ok(now) = self.layout() else { return };
+        for workspace in to_show(&before, &now) {
+            log::info!("aerospace: showing workspace {workspace} where it was");
+            let _ = self.focus_workspace(&workspace);
+        }
+        if let Some(focused) = before.focused
+            && now.focused.as_ref() != Some(&focused)
+            && !is_agent_display(before.monitor_of.get(&focused).map_or("", |m| m))
+        {
+            let _ = self.focus_workspace(&focused);
+        }
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {
@@ -194,6 +273,70 @@ impl AeroSpace {
         }
         Ok(output)
     }
+}
+
+// MARK: The user's workspaces
+
+/// Where AeroSpace keeps workspaces, by monitor name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Layout {
+    pub monitor_of: std::collections::HashMap<String, String>,
+    /// The workspace each monitor shows.
+    pub shown: std::collections::HashMap<String, String>,
+    pub focused: Option<String>,
+}
+
+static REMEMBERED: std::sync::Mutex<Option<Layout>> = std::sync::Mutex::new(None);
+
+fn is_agent_display(monitor: &str) -> bool {
+    monitor.starts_with("Sidescreen")
+}
+
+/// `now`, except that what sits on Agent Displays keeps its place in
+/// `before`: AeroSpace put it there, the user didn't.
+fn merged(before: Option<Layout>, now: Layout) -> Layout {
+    let before = before.unwrap_or_default();
+    let mut layout = Layout {
+        focused: now
+            .focused
+            .clone()
+            .filter(|w| !now.monitor_of.get(w).is_some_and(|m| is_agent_display(m)))
+            .or(before.focused),
+        ..Layout::default()
+    };
+    for (workspace, monitor) in now.monitor_of {
+        let monitor = if is_agent_display(&monitor) {
+            match before.monitor_of.get(&workspace) {
+                Some(m) => m.clone(),
+                None => continue,
+            }
+        } else {
+            monitor
+        };
+        layout.monitor_of.insert(workspace, monitor);
+    }
+    for (monitor, workspace) in now.shown {
+        if !is_agent_display(&monitor) {
+            layout.shown.insert(monitor, workspace);
+        }
+    }
+    layout
+}
+
+/// Workspaces to show again: each of the user's monitors showed one before
+/// and shows another now, though the workspace is back on that monitor.
+fn to_show(before: &Layout, now: &Layout) -> Vec<String> {
+    let mut show: Vec<String> = before
+        .shown
+        .iter()
+        .filter(|(monitor, workspace)| {
+            now.shown.get(*monitor) != Some(*workspace)
+                && now.monitor_of.get(*workspace) == Some(*monitor)
+        })
+        .map(|(_, workspace)| workspace.clone())
+        .collect();
+    show.sort();
+    show
 }
 
 // MARK: ignored-monitors
@@ -401,6 +544,65 @@ mod tests {
             "# ignored-monitors = ['^Sidescreen']\n"
         ));
         assert!(!ignores_agent_displays("gaps.inner.horizontal = 8\n"));
+    }
+
+    fn layout(rows: &[(&str, &str, bool)], focused: &str) -> Layout {
+        let mut l = Layout {
+            focused: Some(focused.to_string()),
+            ..Layout::default()
+        };
+        for (w, m, shown) in rows {
+            l.monitor_of.insert(w.to_string(), m.to_string());
+            if *shown {
+                l.shown.insert(m.to_string(), w.to_string());
+            }
+        }
+        l
+    }
+
+    /// The case that hurt: workspace 11 showed on the Studio Display, an
+    /// Agent Display took it, and the old guard moved it to the main monitor.
+    #[test]
+    fn puts_workspaces_back_where_they_were() {
+        let before = layout(
+            &[
+                ("1", "Built-in", true),
+                ("10", "Studio", false),
+                ("11", "Studio", true),
+            ],
+            "1",
+        );
+        let remembered = merged(None, before.clone());
+        assert_eq!(remembered, before);
+
+        // AeroSpace shows 11 on the new display, and 10 on the Studio.
+        let taken = layout(
+            &[
+                ("1", "Built-in", true),
+                ("10", "Studio", true),
+                ("11", "Sidescreen 1", true),
+            ],
+            "1",
+        );
+        let kept = merged(Some(remembered), taken.clone());
+        assert_eq!(kept.monitor_of["11"], "Studio");
+        assert_eq!(
+            kept.shown["Studio"], "10",
+            "what the user's monitor shows now"
+        );
+        assert!(!kept.shown.contains_key("Sidescreen 1"));
+
+        // Moved back, 11 is on the Studio again but hidden behind 10.
+        let back = layout(
+            &[
+                ("1", "Built-in", true),
+                ("10", "Studio", true),
+                ("11", "Studio", false),
+            ],
+            "1",
+        );
+        assert_eq!(to_show(&before, &back), vec!["11".to_string()]);
+        assert!(to_show(&before, &before).is_empty());
     }
 
     /// Reads the AeroSpace running on this Mac; changes nothing.
