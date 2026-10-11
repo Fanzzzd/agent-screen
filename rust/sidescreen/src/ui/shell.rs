@@ -2065,6 +2065,15 @@ open -a AeroSpace";
             // AeroSpace reacts to display changes on its own schedule. Look
             // soon, since a user's workspace on an Agent Display vanishes
             // from their screen and shows to the agent, and look again.
+            // Most users run no AeroSpace, and with ignored-monitors it
+            // takes nothing: then there is nothing to guard.
+            let needed = cx
+                .background_executor()
+                .spawn(async { !aerospace::ignores_now() && AeroSpace::current().is_some() })
+                .await;
+            if !needed {
+                return;
+            }
             let waits = [100, 150, 250, 650, 1100];
             for (pass, wait) in waits.into_iter().enumerate() {
                 let last = pass + 1 == waits.len();

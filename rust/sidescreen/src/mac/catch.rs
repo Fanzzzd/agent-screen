@@ -164,10 +164,10 @@ pub fn follow_aerospace(target: WindowTarget, display: DisplayId, screen: String
     if super::aerospace::ignores_now() {
         return;
     }
+    let Some(aerospace) = super::aerospace::AeroSpace::current() else {
+        return;
+    };
     std::thread::spawn(move || {
-        let Some(aerospace) = super::aerospace::AeroSpace::current() else {
-            return;
-        };
         for wait in [10, 20, 40, 80, 160, 320] {
             if let Ok(Some((monitor, _))) = aerospace.whereabouts(id) {
                 if monitor != screen {
