@@ -1,0 +1,142 @@
+# Builds, signs and publishes a Sidescreen release, then points the
+# Homebrew tap at it.
+#
+# Two ways in:
+# - Run the workflow from the Actions tab with a version, such as 0.1.3: it
+#   sets that version in the Cargo.toml files, commits, tags v0.1.3 and pushes.
+# - Push a tag v0.1.3 yourself, after setting the version in Cargo.toml.
+#
+# Release notes come from docs/releases/<version>.md if it exists, else
+# GitHub writes them from the commits.
+#
+# Secrets:
+# - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
+#   Application certificate and its private key.
+# - TAP_DEPLOY_KEY: private half of a write deploy key of
+#   Fanzzzd/homebrew-sidescreen.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v, such as 0.1.3'
+        required: true
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set the version, commit and tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like 0.1.3"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::v$VERSION is already tagged"; exit 1
+          fi
+          for toml in rust/sidescreen/Cargo.toml rust/sidescreen-mcp/Cargo.toml rust/sidescreen-model/Cargo.toml; do
+            sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$toml"
+          done
+          (cd rust && cargo metadata --format-version 1 >/dev/null)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam "Sidescreen $VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"
+
+      - name: Check the tag matches Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^version/ { print $2; exit }' rust/sidescreen/Cargo.toml)"
+          tag="$(git describe --tags --exact-match HEAD)"
+          if [[ "$tag" != "v$version" ]]; then
+            echo "::error::tag $tag but Cargo.toml says $version"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Check
+        working-directory: rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Import the Developer ID certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$P12_PASSWORD" -f pkcs12 -k "$keychain" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+          existing=()
+          while IFS= read -r line; do existing+=("$(echo "$line" | xargs)"); done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application"
+
+      - name: Build the DMG and cask
+        run: rust/sidescreen/scripts/release.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes=(--generate-notes)
+          [[ -f "docs/releases/$VERSION.md" ]] && notes=(--notes-file "docs/releases/$VERSION.md")
+          gh release create "v$VERSION" "rust/target/Sidescreen-$VERSION.dmg" \
+            --title "Sidescreen $VERSION" "${notes[@]}"
+          # What users download must be what the cask names.
+          gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
+          want="$(awk -F'"' '/sha256/ { print $2 }' rust/target/sidescreen.rb)"
+          got="$(shasum -a 256 "$RUNNER_TEMP/check/Sidescreen-$VERSION.dmg" | cut -d' ' -f1)"
+          [[ "$want" == "$got" ]] || { echo "::error::downloaded DMG is $got, cask says $want"; exit 1; }
+
+      - name: Point the tap at it
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q git@github.com:Fanzzzd/homebrew-sidescreen.git "$RUNNER_TEMP/tap"
+          cp rust/target/sidescreen.rb "$RUNNER_TEMP/tap/Casks/sidescreen.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -qam "sidescreen $VERSION"
+          git push -q origin HEAD:main
+          rm "$key"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true

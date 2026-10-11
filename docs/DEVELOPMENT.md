@@ -76,3 +76,11 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 ## Install a local build
 
 `rust/sidescreen/scripts/install.sh` builds a release app, quits any running Sidescreen, installs it as `/Applications/Sidescreen.app` and opens it. Debug builds in `rust/target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
+
+## Release
+
+CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request.
+
+`.github/workflows/release.yml` publishes a release. Write the notes in `docs/releases/<version>.md`, push, then run **Release** from the Actions tab with the version, such as `0.1.3`. It sets the version in the three `Cargo.toml` files, commits and tags `v0.1.3` on `main`, runs the checks, builds and signs the DMG with `release.sh`, publishes the GitHub release, checks the downloaded DMG against the cask's sha256, and pushes the cask to `Fanzzzd/homebrew-sidescreen`. Pushing a `v*` tag yourself does the same from the build step on, once the tag matches `Cargo.toml`. Without a notes file, GitHub writes the notes from the commits.
+
+Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) and `TAP_DEPLOY_KEY`, a write deploy key of the tap. Releases aren't notarized.
