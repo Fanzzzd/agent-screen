@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.5 (2026-10-11)
+
+### Fixes
+
+#### launch_app answers at once for a single-window app
+
+For a running app whose menus have no New Window command, such as Calculator, `launch_app` answers `no_new_window` right away instead of after 3 seconds. Its answers now include `wasRunning`.
+
+#### place_window keeps to an agent's own windows
+
+`place_window` refuses a window on another session's display, and its description says how an agent gets one of your windows: you hand it over.
+
+#### Sidescreen takes a running app's windows for at most 4 seconds
+
+When an agent opens a file in an app you are running, Sidescreen stops taking that app's windows 4 seconds after the request at most, even if the app is still opening the file; `launch_app` then answers with `still_opening`. Before, an app slow to open a file kept that window open for 6 seconds.
+
 ## 0.1.4 (2026-10-11)
 
 ### Fixes
