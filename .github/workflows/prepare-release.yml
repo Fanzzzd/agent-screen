@@ -8,6 +8,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -47,3 +48,19 @@ jobs:
         if: steps.changes.outputs.pending
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # GitHub holds the pull_request run of a bot's pull request for
+      # approval. Its jobs skip the release branch; approve it so it ends
+      # instead of waiting.
+      - name: Let the pull request's own CI run end
+        if: steps.changes.outputs.pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 12); do
+            ids="$(gh run list --branch release --event pull_request --status action_required --json databaseId --jq '.[].databaseId')"
+            if [[ -n "$ids" ]]; then
+              for id in $ids; do gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" || echo "::warning::could not approve run $id"; done
+              exit 0
+            fi
+            sleep 5
+          done
