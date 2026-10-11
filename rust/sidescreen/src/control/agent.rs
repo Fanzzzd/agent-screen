@@ -709,10 +709,12 @@ async fn create_display(
         connection,
     };
     // Where the user's AeroSpace workspaces are, so the guard can put back
-    // any the new display takes.
+    // any the new display takes. With ignored-monitors it takes none.
+    let aerospace_takes = !crate::mac::aerospace::ignores_now();
     cx.background_executor()
-        .spawn(async {
-            if let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() {
+        .spawn(async move {
+            if aerospace_takes && let Some(aerospace) = crate::mac::aerospace::AeroSpace::current()
+            {
                 aerospace.remember_before_first();
             }
         })
@@ -749,7 +751,7 @@ async fn create_display(
     // not reach the agent.
     let tucked = started.elapsed().as_millis();
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
-    if let Some(screen) = screen {
+    if let Some(screen) = screen.filter(|_| aerospace_takes) {
         for _ in 0..30 {
             let clear = cx
                 .background_executor()
@@ -1018,7 +1020,20 @@ async fn open_in_background(
                 "-ApplePersistenceIgnoreState",
                 "YES",
             ]);
-            open.status().is_ok_and(|s| s.success())
+            // `open` returns once the app has finished starting, a second
+            // or more; the caller watches for the process meanwhile. An app
+            // that fails to open never shows up there.
+            match open.spawn() {
+                Ok(mut child) => {
+                    std::thread::spawn(move || {
+                        if !child.wait().is_ok_and(|s| s.success()) {
+                            log::warn!("open failed for {}", app.display());
+                        }
+                    });
+                    true
+                }
+                Err(_) => false,
+            }
         })
         .await
 }
@@ -1056,6 +1071,7 @@ async fn launch_now(
     cx: &mut AsyncApp,
 ) -> Result<Option<windows::Window>, ControlError> {
     let path = path.to_path_buf();
+    let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
     let mut before: std::collections::HashSet<u32> =
         windows::all().iter().map(|w| w.target.window_id).collect();
@@ -1123,7 +1139,8 @@ async fn launch_now(
         }
     }
     log::debug!(
-        "launch: {name} is pid {pid}, catching new windows: {}",
+        "launch: {name} is pid {pid} at {} ms, catching new windows: {}",
+        started.elapsed().as_millis(),
         catch.is_some()
     );
     // Started hidden: once its windows sit on the display, show them there.
@@ -1151,15 +1168,20 @@ async fn launch_now(
         crate::mac::input::post_key_to_pid(pid, chord);
     }
 
-    for _ in 0..40 {
+    for _ in 0..120 {
         cx.background_executor()
-            .timer(Duration::from_millis(150))
+            .timer(Duration::from_millis(50))
             .await;
         if let Some(fresh) = windows::all()
             .into_iter()
             .find(|w| w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id))
         {
+            let found = started.elapsed().as_millis();
             let placed = settle(core, fresh.target, id, cx).await?;
+            log::debug!(
+                "launch: {name} window at {found} ms, placed at {} ms",
+                started.elapsed().as_millis()
+            );
             // The new window is the app's front one now, where it opens the
             // URL or file.
             if was_running
@@ -1215,6 +1237,19 @@ async fn settle(
         return Err(ended());
     }
     claim(core, id, target, Origin::Launched, cx);
+    // Stock AeroSpace may take a placed window back to its own layout a
+    // moment later; then look twice, a while apart. Otherwise a window
+    // placed is a window held.
+    let aerospace_takes = !crate::mac::aerospace::ignores_now()
+        && cx
+            .background_executor()
+            .spawn(async { crate::mac::aerospace::AeroSpace::current().is_some() })
+            .await;
+    let (first_look, second_look) = if aerospace_takes {
+        (200, Some(300))
+    } else {
+        (30, None)
+    };
     let mut last_error = None;
     for _ in 0..12 {
         if !takes_windows(core, id, cx) {
@@ -1224,21 +1259,22 @@ async fn settle(
             last_error = Some(e);
         }
         cx.background_executor()
-            .timer(Duration::from_millis(200))
+            .timer(Duration::from_millis(first_look))
             .await;
         if !held(target, id, cx).await {
             continue;
         }
-        // Look again: AeroSpace may still take it back to its own layout.
-        cx.background_executor()
-            .timer(Duration::from_millis(300))
-            .await;
-        if !held(target, id, cx).await {
-            log::info!(
-                "window {} left display {id} after placing; placing again",
-                target.window_id
-            );
-            continue;
+        if let Some(wait) = second_look {
+            cx.background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            if !held(target, id, cx).await {
+                log::info!(
+                    "window {} left display {id} after placing; placing again",
+                    target.window_id
+                );
+                continue;
+            }
         }
         if let Some(placed) = windows::on_display(id)
             .into_iter()

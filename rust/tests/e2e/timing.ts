@@ -1,11 +1,12 @@
 /**
- * How long createDisplay takes to answer: median and p90 over 10 displays.
+ * How long createDisplay takes to answer, median and p90 over 10 displays,
+ * and launchApp for TextEdit, cold and already running, over 5 launches.
  *
  *     SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts    beside the user's app
  *     bun rust/tests/e2e/timing.ts                            in its place, once the user is idle
  */
 import {
-  Control, buildTools, instance, sh, reopenInstalled, restore, snapshot, startDebugApp, startTestApp, stopDebugApp,
+  Control, buildTools, instance, running, sh, reopenInstalled, restore, snapshot, startDebugApp, startTestApp, stopDebugApp,
   stopTestApp, waitForQuiet, waitForUnlocked
 } from "./lib.ts"
 
@@ -15,6 +16,11 @@ const before = instance ? undefined : snapshot()
 await (instance ? startTestApp() : startDebugApp())
 const control = await Control.connect()
 const times: number[] = []
+const report = (what: string, values: number[]) => {
+  const sorted = [...values].sort((a, b) => a - b)
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)]
+  console.log(`${what}: median ${at(0.5)}, p90 ${at(0.9)} (${values.join(" ")})`)
+}
 try {
   for (let i = 0; i < Number(process.env.RUNS || 10); i++) {
     const start = performance.now()
@@ -23,10 +29,31 @@ try {
     await control.call("endDisplay", { displayId: display.displayId })
     await Bun.sleep(1500)
   }
-  const sorted = [...times].sort((a, b) => a - b)
-  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)]
   const aerospace = sh("/usr/bin/pgrep", ["-x", "AeroSpace"], true) ? "with AeroSpace" : "without AeroSpace"
-  console.log(`createDisplay ms ${aerospace}: median ${at(0.5)}, p90 ${at(0.9)} (${times.join(" ")})`)
+  report(`createDisplay ms ${aerospace}`, times)
+
+  if (running("TextEdit")) {
+    console.log("skip launchApp: TextEdit is the user's")
+  } else {
+    const cold: number[] = []
+    const warm: number[] = []
+    const quitTextEdit = () =>
+      sh("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to close every document saving no\ntell application "TextEdit" to quit'], true)
+    for (let i = 0; i < Number(process.env.LAUNCHES || 5); i++) {
+      const display = await control.call("createDisplay", { sessionKey: `launch-${i}`, title: "Timing" })
+      for (const into of [cold, warm]) {
+        const start = performance.now()
+        await control.call("launchApp", { displayId: display.displayId, app: "TextEdit" })
+        into.push(Math.round(performance.now() - start))
+      }
+      quitTextEdit()
+      await Bun.sleep(1000)
+      await control.call("endDisplay", { displayId: display.displayId })
+      await Bun.sleep(1500)
+    }
+    report(`launchApp TextEdit cold ms ${aerospace}`, cold)
+    report(`launchApp TextEdit running ms ${aerospace}`, warm)
+  }
 } finally {
   control.close()
   if (instance) {

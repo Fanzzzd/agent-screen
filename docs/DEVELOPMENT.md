@@ -41,11 +41,23 @@ bun rust/tests/mcp/control.ts         # Takeover and Help Request, needs a debug
 bun rust/tests/mcp/smoke.ts           # end to end with Calculator
 bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar strip, focus, permission setup
 
-# Beside your own Sidescreen, at any time:
+# Beside your own Sidescreen:
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts      # what agents get back, and nothing on your screen
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts    # Takeover through the Viewer
-SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_display takes
+SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_display and launch_app take
 ```
+
+`robust.ts` and `timing.ts` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust.ts` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
+
+`timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, 2026-10-11:
+
+| | median | p90 |
+| --- | --- | --- |
+| `create_display` | 772 ms | 922 ms |
+| `launch_app` TextEdit, not running | 1781 ms | 1947 ms |
+| `launch_app` TextEdit, running | 612 ms | 803 ms |
+
+Most of a cold launch is TextEdit starting. Under stock AeroSpace, each step waits for AeroSpace to answer and is slower.
 
 With AeroSpace running, a window counts as placed only once AeroSpace files it under the workspace it shows on the display: it can accept a move for a window it hasn't registered yet and then lay the window out in your workspace. `robust.ts` passed 10 of 10 runs in a row after that change; loop it to check a fix for flakes:
 

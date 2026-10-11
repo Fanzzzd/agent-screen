@@ -143,6 +143,9 @@ pub fn held(target: WindowTarget, display: DisplayId, screen_name: Option<&str>)
     if !on_display(display).iter().any(|w| w.target == target) {
         return false;
     }
+    if super::aerospace::ignores_now() {
+        return true;
+    }
     let Some(aerospace) = AeroSpace::current() else {
         return true;
     };
@@ -162,7 +165,8 @@ pub fn place(
     display: DisplayId,
     screen_name: Option<&str>,
 ) -> Result<(), String> {
-    if let Some(aerospace) = AeroSpace::current()
+    if !super::aerospace::ignores_now()
+        && let Some(aerospace) = AeroSpace::current()
         && let Some(name) = screen_name
         && let Ok(Some(monitor)) = aerospace.monitor_id(name)
     {
