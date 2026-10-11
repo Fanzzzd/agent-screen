@@ -96,9 +96,11 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
   brew tap fanzzzd/sidescreen
   brew uninstall --cask aerospace
   brew install --cask aerospace-sidescreen
+  tccutil reset Accessibility bobko.aerospace
+  open -a AeroSpace
   ```
 
-  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS asks you to allow Accessibility for AeroSpace again.
+  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS keeps Accessibility permission per app signature, so the old AeroSpace's entry doesn't work for this build; `tccutil reset` clears it, and macOS asks again when AeroSpace starts.
 
   The build follows AeroSpace's releases; each one is built, tested and signed in [CI](https://github.com/Fanzzzd/AeroSpace/actions/workflows/sidescreen-release.yml). [Compare it with upstream](https://github.com/Fanzzzd/AeroSpace/compare/v0.21.3-Beta...sidescreen) to see the patch: 168 lines added and 20 removed across 26 files, most of them tests and docs. To go back to stock AeroSpace, run `brew uninstall --cask aerospace-sidescreen && brew install --cask nikitabobko/tap/aerospace` and remove the `ignored-monitors` line.
 

@@ -1926,7 +1926,9 @@ impl Shell {
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
             let commands = "brew tap fanzzzd/sidescreen
 brew uninstall --cask aerospace
-brew install --cask aerospace-sidescreen";
+brew install --cask aerospace-sidescreen
+tccutil reset Accessibility bobko.aerospace
+open -a AeroSpace";
             let go = native::confirm(
                 t(
                     "This AeroSpace can't leave displays alone",
@@ -1945,8 +1947,8 @@ brew install --cask aerospace-sidescreen";
                         "在 AeroSpace 官方加上 ignored-monitors 选项之前，Sidescreen 提供一个加了这个选项的 AeroSpace。在终端里安装，你的配置不变：",
                     ),
                     t(
-                        "macOS then asks you to allow Accessibility for AeroSpace again. Then choose this menu item once more.",
-                        "装好后 macOS 会请你重新给 AeroSpace 授予辅助功能权限。授予后再点一次这个菜单项。",
+                        "macOS keeps Accessibility per signature, so the old AeroSpace's permission doesn't carry over; the tccutil line clears it. Allow AeroSpace when macOS asks, then choose this menu item once more.",
+                        "macOS 按签名记录辅助功能权限，旧 AeroSpace 的授权对新版本无效，tccutil 那一行会把它清掉。macOS 请你授权时点允许，然后再点一次这个菜单项。",
                     ),
                 ),
                 t("Copy Commands", "复制命令"),
