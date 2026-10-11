@@ -90,21 +90,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.
 - Copy, paste and undo shortcuts need a focused app, so they do nothing in an app on an agent's display. Agents copy and paste with `act_on_element`'s `read_text` and `insert_text` instead; Command-A still selects all.
-- Window managers move windows too. Without one, skip this. If you use AeroSpace: stock AeroSpace treats agent displays as monitors: it shows your workspaces on them, and an agent's new window can pass over your screen for a frame or two first. Sidescreen moves your workspaces back. To stop it at the source, AeroSpace needs an `ignored-monitors` option, [proposed upstream](https://github.com/nikitabobko/AeroSpace/pull/2306). Until it lands, install our build of AeroSpace, which is AeroSpace plus that one patch, and keep your config:
-
-  ```sh
-  brew tap fanzzzd/sidescreen
-  brew uninstall --cask aerospace
-  brew install --cask aerospace-sidescreen
-  tccutil reset Accessibility bobko.aerospace
-  open -a AeroSpace
-  ```
-
-  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS keeps Accessibility permission per app signature, so the old AeroSpace's entry doesn't work for this build; `tccutil reset` clears it, and macOS asks again when AeroSpace starts.
-
-  The build follows AeroSpace's releases; each one is built, tested and signed in [CI](https://github.com/Fanzzzd/AeroSpace/actions/workflows/sidescreen-release.yml). [Compare it with upstream](https://github.com/Fanzzzd/AeroSpace/compare/v0.21.3-Beta...sidescreen) to see the patch: 168 lines added and 20 removed across 26 files, most of them tests and docs. To go back to stock AeroSpace, run `brew uninstall --cask aerospace-sidescreen && brew install --cask nikitabobko/tap/aerospace` and remove the `ignored-monitors` line.
-
-  Other window managers, such as yabai, are untested.
+- Window managers move windows too. With AeroSpace, see [docs/aerospace.md](docs/aerospace.md). Others, such as yabai, are untested.
 - The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
 
 ## Troubleshooting
