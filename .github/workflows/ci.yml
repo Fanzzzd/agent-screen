@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # prepare-release.yml runs it on the release branch: a pull request that
+  # GITHUB_TOKEN opens or updates starts no workflows by itself.
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -44,3 +47,31 @@ jobs:
           if [[ -n "$app" && -z "$notes" ]]; then
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."
           fi
+
+  # The app says it needs macOS 15. It builds only with the macOS 26 SDK,
+  # so build there and start it on 15: a symbol 15 lacks fails at load.
+  build-release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo build --release -p sidescreen
+        working-directory: rust
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sidescreen-binary
+          path: rust/target/release/Sidescreen
+          if-no-files-found: error
+
+  starts-on-macos-15:
+    needs: build-release
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sidescreen-binary
+      - run: |
+          chmod +x Sidescreen
+          ./Sidescreen --version

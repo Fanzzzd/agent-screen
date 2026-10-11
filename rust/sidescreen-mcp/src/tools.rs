@@ -519,7 +519,22 @@ pub async fn run(
             Ok(Output::Object(match reply.get("window") {
                 Some(window) if !window.is_null() => json!({ "window": window }),
                 _ => {
-                    json!({ "window": null, "note": "No new window appeared on the display. An app Sidescreen started may still open one; a window it opens in the next 30 s moves onto the display: call list_windows to check. An app that was already running may have opened the file in an existing window, or, like a single-window app, opened none: use place_window to move one." })
+                    let reason = reply
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("still_starting");
+                    let note = match reason {
+                        "existing_window" => {
+                            "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. Call list_windows: if that window is on another display, ask the user before using place_window on it."
+                        }
+                        "no_new_window" => {
+                            "The app was already running and made no new window, as single-window apps such as Calculator do; nothing moved. Ask the user, or have them quit it, then call launch_app again."
+                        }
+                        _ => {
+                            "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
+                        }
+                    };
+                    json!({ "window": null, "reason": reason, "note": note })
                 }
             }))
         }

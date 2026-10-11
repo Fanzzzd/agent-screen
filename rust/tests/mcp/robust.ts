@@ -198,6 +198,14 @@ try {
     arguments: { display_id, window_id: calc.windowId, element: two, action: "set_value", value: "9" }
   })
   check("set_value on a button fails", set.result?.isError === true, textOf(set).slice(0, 120))
+
+  // Calculator runs and has one window: a second launch makes none, says
+  // so soon, and takes nothing.
+  const startedAgain = Date.now()
+  const second = structured(await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "Calculator" } }))
+  const tookMs = Date.now() - startedAgain
+  check("launch_app on a running single-window app says no_new_window within 4 s",
+    second?.window === null && second?.reason === "no_new_window" && tookMs < 4000, `${JSON.stringify(second)?.slice(0, 120)} in ${tookMs} ms`)
 } finally {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
   quit("TextEdit", true)

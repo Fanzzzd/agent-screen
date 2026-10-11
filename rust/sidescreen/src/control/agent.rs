@@ -484,8 +484,11 @@ pub async fn handle(
                 .string("app")
                 .ok_or_else(|| ControlError::invalid("app is required"))?;
             let target = p.string("open").map(|t| open_target(&t)).transpose()?;
-            let window = launch(&core, id, &name, target.as_deref(), cx).await?;
-            Ok(window.map_or(json!({}), |w| json!({ "window": w.json() })))
+            let launched = launch(&core, id, &name, target.as_deref(), cx).await?;
+            Ok(match launched.window {
+                Some(w) => json!({ "window": w.json(), "wasRunning": launched.was_running }),
+                None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
+            })
         }
         "requestHelp" => {
             let id = display(&core, &p, true, cx)?;
@@ -1041,24 +1044,48 @@ async fn open_in_background(
         .await
 }
 
+/// What `launch_app` did.
+struct Launched {
+    window: Option<windows::Window>,
+    was_running: bool,
+    /// Why there is no window: `still_starting` (the app Sidescreen started
+    /// has none yet; one it opens soon moves onto the display),
+    /// `existing_window` (a running app opened the file in a window it
+    /// already had), or `no_new_window` (a running app made no window).
+    reason: Option<&'static str>,
+}
+
+/// How long a running app may take to make the window Sidescreen asked
+/// for. A window it makes later may be the user's.
+const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
+/// The same, counted from when `open` returns: it returns once the app has
+/// the file.
+const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
+
 async fn launch(
     core: &Entity<Core>,
     id: DisplayId,
     name: &str,
     target: Option<&str>,
     cx: &mut AsyncApp,
-) -> Result<Option<windows::Window>, ControlError> {
+) -> Result<Launched, ControlError> {
     let path = app::resolve(name)
         .ok_or_else(|| ControlError::not_found(format!("no app named {name}")))?;
     // Wait for another session's launch of the same app to finish.
-    for _ in 0..300 {
-        let free = core.update(cx, |c, _| c.launching.insert(path.clone()));
+    let mut free = false;
+    for _ in 0..450 {
+        free = core.update(cx, |c, _| c.launching.insert(path.clone()));
         if free {
             break;
         }
         cx.background_executor()
             .timer(Duration::from_millis(100))
             .await;
+    }
+    if !free {
+        return Err(ControlError::failed(format!(
+            "another session is still launching {name}; try again shortly"
+        )));
     }
     let result = launch_now(core, id, name, &path, target, cx).await;
     core.update(cx, |c, _| c.launching.remove(&path));
@@ -1072,7 +1099,7 @@ async fn launch_now(
     path: &std::path::Path,
     target: Option<&str>,
     cx: &mut AsyncApp,
-) -> Result<Option<windows::Window>, ControlError> {
+) -> Result<Launched, ControlError> {
     let path = path.to_path_buf();
     let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
@@ -1117,10 +1144,15 @@ async fn launch_now(
     } else {
         None
     };
-    let failed = |opening: &Option<std::sync::mpsc::Receiver<bool>>| {
-        opening
-            .as_ref()
-            .is_some_and(|o| matches!(o.try_recv(), Ok(false)))
+    // How `open` ended: None while it runs, or without one.
+    let mut opened: Option<(bool, Instant)> = None;
+    let poll_open = |opened: &mut Option<(bool, Instant)>| {
+        if opened.is_none()
+            && let Some(Ok(ok)) = opening.as_ref().map(|o| o.try_recv())
+        {
+            *opened = Some((ok, Instant::now()));
+        }
+        matches!(opened, Some((false, _)))
     };
     let mut pid = None;
     for _ in 0..200 {
@@ -1128,7 +1160,7 @@ async fn launch_now(
         if pid.is_some() {
             break;
         }
-        if failed(&opening) {
+        if poll_open(&mut opened) {
             return Err(could_not_open());
         }
         cx.background_executor()
@@ -1177,12 +1209,11 @@ async fn launch_now(
     }
 
     // A running app opens no window on launch; ask it for a new one.
-    if was_running
-        && (target.is_none() || is_url)
-        && let Ok(chord) = KeyChord::parse("cmd+n")
-    {
+    let asked_for_window = was_running && (target.is_none() || is_url);
+    if asked_for_window && let Ok(chord) = KeyChord::parse("cmd+n") {
         crate::mac::input::post_key_to_pid(pid, chord);
     }
+    let asked_at = Instant::now();
 
     // A running app may be the user's: its new window is the one the catch
     // took, never one the user opens meanwhile. A starting app's windows
@@ -1193,14 +1224,28 @@ async fn launch_now(
             && !before.contains(&w.target.window_id)
             && (!was_running || taken == Some(w.target.window_id))
     };
+    let mut gave_up = false;
     for _ in 0..120 {
         cx.background_executor()
             .timer(Duration::from_millis(50))
             .await;
-        if failed(&opening) {
+        let taken = catch.as_ref().and_then(|c| c.taken());
+        let open_failed = poll_open(&mut opened);
+        // A window already caught is the app's answer; keep it even if
+        // `open` reports a failure, so it isn't left unclaimed.
+        if open_failed && taken.is_none() {
             return Err(could_not_open());
         }
-        let taken = catch.as_ref().and_then(|c| c.taken());
+        // A running app had its chance: stop taking its windows, which may
+        // now be the user's.
+        if was_running
+            && taken.is_none()
+            && waited_long_enough(asked_for_window, asked_at, opened.map(|(_, at)| at))
+        {
+            catch = None;
+            gave_up = true;
+            break;
+        }
         if let Some(fresh) = windows::all().into_iter().find(|w| is_ours(w, taken)) {
             let found = started.elapsed().as_millis();
             let placed = settle(core, fresh.target, id, cx).await?;
@@ -1235,9 +1280,15 @@ async fn launch_now(
                     )));
                 }
             }
-            return Ok(Some(placed));
+            return Ok(Launched {
+                window: Some(placed),
+                was_running,
+                reason: None,
+            });
         }
     }
+    drop(catch);
+    log::debug!("launch: {name} made no window of Sidescreen's (gave up early: {gave_up})");
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen. Only for an app Sidescreen
     // started: a running app's later windows may be the user's.
@@ -1269,7 +1320,31 @@ async fn launch_now(
             "{name} opened no new window, so the URL was not opened; call list_windows, then open it in a window on your display"
         )));
     }
-    Ok(None)
+    Ok(Launched {
+        window: None,
+        was_running,
+        reason: Some(if !was_running {
+            "still_starting"
+        } else if asked_for_window {
+            "no_new_window"
+        } else {
+            "existing_window"
+        }),
+    })
+}
+
+/// Whether a running app has had its time to make the window Sidescreen
+/// asked for: counted from Command-N, or from when `open` returned.
+fn waited_long_enough(
+    asked_for_window: bool,
+    asked_at: Instant,
+    opened_at: Option<Instant>,
+) -> bool {
+    if asked_for_window {
+        asked_at.elapsed() > ASKED_WINDOW_WAIT
+    } else {
+        opened_at.is_some_and(|at| at.elapsed() > OPENED_WINDOW_WAIT)
+    }
 }
 
 /// Place a new window and wait until it is really on the display. A window
@@ -1731,4 +1806,24 @@ impl Args<'_> {
 /// release build.
 fn debug_methods() -> bool {
     cfg!(debug_assertions) || std::env::var_os("SIDESCREEN_DEBUG").is_some_and(|v| v == "1")
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn ago(ms: u64) -> Instant {
+        Instant::now() - Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_running_app_gets_a_short_turn() {
+        // Command-N: 3 s from the key press.
+        assert!(!waited_long_enough(true, ago(1000), None));
+        assert!(waited_long_enough(true, ago(3500), None));
+        // A file: 2 s from when `open` returned, however long that took.
+        assert!(!waited_long_enough(false, ago(9000), None));
+        assert!(!waited_long_enough(false, ago(9000), Some(ago(500))));
+        assert!(waited_long_enough(false, ago(9000), Some(ago(2500))));
+    }
 }

@@ -104,6 +104,14 @@ impl AeroSpace {
             }))
     }
 
+    /// Whether AeroSpace manages any Agent Display right now.
+    pub fn lists_agent_display(&self) -> Result<bool, String> {
+        Ok(self
+            .run(&["list-monitors", "--format", "%{monitor-name}"])?
+            .lines()
+            .any(is_agent_display))
+    }
+
     pub fn monitor_id(&self, name: &str) -> Result<Option<String>, String> {
         Ok(self
             .run(&["list-monitors", "--format", "%{monitor-id}|%{monitor-name}"])?
@@ -381,9 +389,13 @@ fn read_ignoring() -> Option<Ignoring> {
     if !supports_ignored_monitors(&bundle.join("Contents/MacOS/AeroSpace")) {
         return Some(Ignoring::Unsupported);
     }
-    let ignores = config_path()
+    let configured = config_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .is_some_and(|text| ignores_agent_displays(&text));
+    // The file may say so before AeroSpace reloads it: an AeroSpace that
+    // still lists an Agent Display hasn't.
+    let ignores = configured
+        && !AeroSpace::current().is_some_and(|a| a.lists_agent_display().unwrap_or(true));
     Some(if ignores {
         Ignoring::Yes
     } else {

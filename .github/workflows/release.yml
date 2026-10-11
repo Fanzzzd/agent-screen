@@ -120,11 +120,22 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "v$VERSION" > /dev/null 2>&1; then
+            # Finishing a release: the DMG on GitHub is the one users get,
+            # and a rebuild never has the same bytes, so the cask follows it.
             echo "v$VERSION is already released"
+            gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
+            sha="$(sha256sum "$RUNNER_TEMP/check/Sidescreen-$VERSION.dmg" | cut -d' ' -f1)"
+            sed -i "s/^  sha256 \".*\"/  sha256 \"$sha\"/" rust/target/sidescreen.rb
           else
             knope release --verbose
+            # knope titles a release by version and date; add the name and
+            # how to install.
+            notes="$(gh release view "v$VERSION" --json body --jq .body)"
+            printf '%s\n\n%s\n' "$notes" "$(cat .github/release-footer.md)" > "$RUNNER_TEMP/notes.md"
+            gh release edit "v$VERSION" --title "Sidescreen $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
           fi
           # What users download must be what the cask names.
+          rm -rf "$RUNNER_TEMP/check"
           gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
           want="$(awk -F'"' '/sha256/ { print $2 }' rust/target/sidescreen.rb)"
           got="$(sha256sum "$RUNNER_TEMP/check/Sidescreen-$VERSION.dmg" | cut -d' ' -f1)"

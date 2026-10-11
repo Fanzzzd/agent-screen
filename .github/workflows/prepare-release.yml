@@ -8,6 +8,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -43,3 +44,8 @@ jobs:
         if: steps.changes.outputs.pending
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Check the release branch
+        if: steps.changes.outputs.pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref release
