@@ -10,7 +10,7 @@ Sidescreen treats AeroSpace as leaving its displays alone only when AeroSpace ha
 
 #### launch_app says why there is no window
 
-When `launch_app` returns no window it now gives a `reason`: `still_starting`, `existing_window` (an app you were running opened the file in a window it had) or `no_new_window` (an app you were running made none, such as Calculator), with the next step for each. For an app you were running, Sidescreen stops waiting 2 to 3 seconds after its request, so a window you open in that app afterwards always stays on your screen.
+When `launch_app` returns no window it now gives a `reason`: `still_starting`, `existing_window` (an app you were running opened the file in a window it had) or `no_new_window` (an app you were running made none, such as Calculator), with the next step for each. For an app you were running, Sidescreen stops taking its windows 3 seconds after asking it for a new window, or 2 seconds after it opened the file; a window you open in that app after that stays on your screen. An app that is slow to open a file could still hand Sidescreen a window you opened in it up to 6 seconds after the request.
 
 ## 0.1.3 (2026-10-11)
 

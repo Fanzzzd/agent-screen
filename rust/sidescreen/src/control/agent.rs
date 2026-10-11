@@ -365,6 +365,17 @@ pub async fn handle(
                 .int("windowId")
                 .and_then(|w| windows::find(w as u32))
                 .ok_or_else(|| ControlError::not_found("no window with that id"))?;
+            let elsewhere = core.read_with(cx, |c, _| {
+                c.displays
+                    .list
+                    .iter()
+                    .any(|d| d.id != id && d.records.contains_key(&window.target.window_id))
+            });
+            if elsewhere {
+                return Err(ControlError::failed(
+                    "that window belongs to another session's display",
+                ));
+            }
             claim(&core, id, window.target, Origin::Placed, cx);
             place(window.target, id, cx)
                 .await
@@ -713,17 +724,14 @@ async fn create_display(
     };
     // Where the user's AeroSpace workspaces are, so the guard can put back
     // any the new display takes. With ignored-monitors it takes none.
-    // Read AeroSpace's state now: the user may have started, quit or
-    // reconfigured it since Sidescreen last looked.
-    let aerospace_takes = cx
-        .background_executor()
+    // Note where the user's workspaces are while no Agent Display can have
+    // taken one. Whether AeroSpace leaves the new display alone shows only
+    // once it exists.
+    cx.background_executor()
         .spawn(async move {
-            use crate::mac::aerospace;
-            let takes = aerospace::ignoring().is_some_and(|i| i != aerospace::Ignoring::Yes);
-            if takes && let Some(aerospace) = aerospace::AeroSpace::current() {
+            if let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() {
                 aerospace.remember_before_first();
             }
-            takes
         })
         .await;
     let started = Instant::now();
@@ -758,6 +766,15 @@ async fn create_display(
     // not reach the agent.
     let tucked = started.elapsed().as_millis();
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    // Read AeroSpace's state now that the display exists: the user may have
+    // started, quit or reconfigured it since Sidescreen last looked.
+    let aerospace_takes = cx
+        .background_executor()
+        .spawn(async move {
+            use crate::mac::aerospace;
+            aerospace::ignoring().is_some_and(|i| i != aerospace::Ignoring::Yes)
+        })
+        .await;
     if let Some(screen) = screen.filter(|_| aerospace_takes) {
         for _ in 0..30 {
             let clear = cx
@@ -1061,6 +1078,9 @@ const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
 /// The same, counted from when `open` returns: it returns once the app has
 /// the file.
 const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
+/// However long `open` takes, a running app's turn ends this long after
+/// Sidescreen's request.
+const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);
 
 async fn launch(
     core: &Entity<Core>,
@@ -1135,6 +1155,7 @@ async fn launch_now(
     // TextEdit and others answer a reopen with a window of their own, on
     // the user's screen, besides the one Command-N asks for below.
     let could_not_open = || ControlError::failed(format!("could not open {name}"));
+    let requested_at = Instant::now();
     let opening = if !was_running || first.is_some() {
         Some(
             open_in_background(path.clone(), first, !was_running, cx)
@@ -1208,8 +1229,23 @@ async fn launch_now(
         app::unhide(pid);
     }
 
-    // A running app opens no window on launch; ask it for a new one.
+    // A running app opens no window on launch; ask it for a new one. An app
+    // without Command-N, such as Calculator, has none to give: say so now.
     let asked_for_window = was_running && (target.is_none() || is_url);
+    if asked_for_window
+        && cx
+            .background_executor()
+            .spawn(async move { ax::has_new_window_command(pid) })
+            .await
+            == Some(false)
+    {
+        drop(catch);
+        return Ok(Launched {
+            window: None,
+            was_running,
+            reason: Some("no_new_window"),
+        });
+    }
     if asked_for_window && let Ok(chord) = KeyChord::parse("cmd+n") {
         crate::mac::input::post_key_to_pid(pid, chord);
     }
@@ -1240,7 +1276,12 @@ async fn launch_now(
         // now be the user's.
         if was_running
             && taken.is_none()
-            && waited_long_enough(asked_for_window, asked_at, opened.map(|(_, at)| at))
+            && waited_long_enough(
+                asked_for_window,
+                asked_at,
+                requested_at,
+                opened.map(|(_, at)| at),
+            )
         {
             catch = None;
             gave_up = true;
@@ -1327,6 +1368,8 @@ async fn launch_now(
             "still_starting"
         } else if asked_for_window {
             "no_new_window"
+        } else if opened.is_none() {
+            "still_opening"
         } else {
             "existing_window"
         }),
@@ -1334,16 +1377,19 @@ async fn launch_now(
 }
 
 /// Whether a running app has had its time to make the window Sidescreen
-/// asked for: counted from Command-N, or from when `open` returned.
+/// asked for: counted from Command-N, or from when `open` returned, and
+/// never longer than RUNNING_APP_TURN from the request.
 fn waited_long_enough(
     asked_for_window: bool,
     asked_at: Instant,
+    requested_at: Instant,
     opened_at: Option<Instant>,
 ) -> bool {
     if asked_for_window {
         asked_at.elapsed() > ASKED_WINDOW_WAIT
     } else {
-        opened_at.is_some_and(|at| at.elapsed() > OPENED_WINDOW_WAIT)
+        requested_at.elapsed() > RUNNING_APP_TURN
+            || opened_at.is_some_and(|at| at.elapsed() > OPENED_WINDOW_WAIT)
     }
 }
 
@@ -1819,11 +1865,23 @@ mod launch_tests {
     #[test]
     fn a_running_app_gets_a_short_turn() {
         // Command-N: 3 s from the key press.
-        assert!(!waited_long_enough(true, ago(1000), None));
-        assert!(waited_long_enough(true, ago(3500), None));
-        // A file: 2 s from when `open` returned, however long that took.
-        assert!(!waited_long_enough(false, ago(9000), None));
-        assert!(!waited_long_enough(false, ago(9000), Some(ago(500))));
-        assert!(waited_long_enough(false, ago(9000), Some(ago(2500))));
+        assert!(!waited_long_enough(true, ago(1000), ago(1500), None));
+        assert!(waited_long_enough(true, ago(3500), ago(4000), None));
+        // A file: 2 s from when `open` returned...
+        assert!(!waited_long_enough(
+            false,
+            ago(0),
+            ago(1000),
+            Some(ago(500))
+        ));
+        assert!(waited_long_enough(
+            false,
+            ago(0),
+            ago(3000),
+            Some(ago(2500))
+        ));
+        // ...and 4 s from the request at most, even while `open` runs.
+        assert!(!waited_long_enough(false, ago(0), ago(3000), None));
+        assert!(waited_long_enough(false, ago(0), ago(4500), None));
     }
 }

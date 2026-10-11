@@ -204,8 +204,8 @@ try {
   const startedAgain = Date.now()
   const second = structured(await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "Calculator" } }))
   const tookMs = Date.now() - startedAgain
-  check("launch_app on a running single-window app says no_new_window within 4 s",
-    second?.window === null && second?.reason === "no_new_window" && tookMs < 4000, `${JSON.stringify(second)?.slice(0, 120)} in ${tookMs} ms`)
+  check("launch_app on a running single-window app says no_new_window within 1.5 s",
+    second?.window === null && second?.reason === "no_new_window" && tookMs < 1500, `${JSON.stringify(second)?.slice(0, 120)} in ${tookMs} ms`)
 } finally {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
   quit("TextEdit", true)

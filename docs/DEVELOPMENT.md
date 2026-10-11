@@ -79,7 +79,7 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 
 ## Release
 
-CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request.
+CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, and starts a release build on macOS 15.
 
 Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 
@@ -89,4 +89,4 @@ Releases follow the changesets model, with [knope](https://knope.tech) (`knope.t
 
 Running **Release** from the Actions tab is a dry run: checks, signing and the DMG, kept as an artifact, and nothing published.
 
-Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) and `TAP_DEPLOY_KEY`, a write deploy key of the tap. Releases aren't notarized. Commit messages stay plain sentences: knope ignores conventional commits here.
+Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) `TAP_DEPLOY_KEY`, a write deploy key of the tap, and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. Releases aren't notarized. Commit messages stay plain sentences: knope ignores conventional commits here.

@@ -210,7 +210,7 @@ pub fn definitions() -> Vec<Value> {
             "place_window",
             "Place a window on the display",
             &[
-                "Move an existing app window onto the display. Get window ids from list_windows (pass another display's id) or from launch_app.",
+                "Move a window onto the display: one launch_app returned, or one whose id the user gave you. Agents can't list the user's windows. To work in one, ask the user to hand it over: they drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu. Windows on another session's display are refused.",
             ],
             object(
                 json!({
@@ -516,27 +516,7 @@ pub async fn run(
                     json!({ "displayId": a.require_int("display_id")?, "app": app, "open": a.string("open")? }),
                 )
                 .await?;
-            Ok(Output::Object(match reply.get("window") {
-                Some(window) if !window.is_null() => json!({ "window": window }),
-                _ => {
-                    let reason = reply
-                        .get("reason")
-                        .and_then(|r| r.as_str())
-                        .unwrap_or("still_starting");
-                    let note = match reason {
-                        "existing_window" => {
-                            "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. Call list_windows: if that window is on another display, ask the user before using place_window on it."
-                        }
-                        "no_new_window" => {
-                            "The app was already running and made no new window, as single-window apps such as Calculator do; nothing moved. Ask the user, or have them quit it, then call launch_app again."
-                        }
-                        _ => {
-                            "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
-                        }
-                    };
-                    json!({ "window": null, "reason": reason, "note": note })
-                }
-            }))
+            Ok(Output::Object(launch_output(&Value::Object(reply))))
         }
         "get_window_state" => window_state(
             control,
@@ -862,9 +842,63 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
     ])
 }
 
+/// What launch_app returns: the window, or why there is none and what to
+/// do next. `wasRunning` says whether the app was already running.
+fn launch_output(reply: &Value) -> Value {
+    let was_running = reply
+        .get("wasRunning")
+        .cloned()
+        .unwrap_or(Value::Bool(false));
+    match reply.get("window") {
+        Some(window) if !window.is_null() => json!({ "window": window, "wasRunning": was_running }),
+        _ => {
+            let reason = reply
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("still_starting");
+            let note = match reason {
+                "existing_window" => {
+                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer."
+                }
+                "no_new_window" => {
+                    "The app was already running and has no new-window command, as single-window apps such as Calculator do; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                }
+                "still_opening" => {
+                    "The app was already running and is still opening the file; nothing moved. Call list_windows in a few seconds; if no window came, ask the user to hand it over."
+                }
+                _ => {
+                    "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
+                }
+            };
+            json!({ "window": null, "wasRunning": was_running, "reason": reason, "note": note })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_output_says_why_and_whether_it_ran() {
+        let placed = launch_output(&json!({ "window": { "windowId": 7 }, "wasRunning": true }));
+        assert_eq!(placed["wasRunning"], true);
+        assert_eq!(placed["window"]["windowId"], 7);
+        for reason in [
+            "still_starting",
+            "existing_window",
+            "no_new_window",
+            "still_opening",
+        ] {
+            let none = launch_output(
+                &json!({ "wasRunning": reason != "still_starting", "reason": reason }),
+            );
+            assert!(none["window"].is_null());
+            assert_eq!(none["reason"], reason);
+            assert!(none["wasRunning"].is_boolean());
+            assert!(none["note"].as_str().unwrap().len() > 40, "{reason}");
+        }
+    }
 
     #[test]
     fn eleven_tools_with_object_schemas() {

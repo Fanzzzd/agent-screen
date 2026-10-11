@@ -496,6 +496,27 @@ fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Optio
 /// A menu item's key equivalent in the computer tool's key syntax, such as
 /// "cmd+shift+n". AXMenuItemCmdModifiers: bit 3 means no Command; bits 0-2
 /// add Shift, Option and Control.
+/// Whether an app's menus offer an enabled Command-N, as apps that open
+/// more windows do. None when its menu bar can't be read.
+pub fn has_new_window_command(pid: i32) -> Option<bool> {
+    let bar = element_attribute(&application(pid), "AXMenuBar")?;
+    let menus = elements_attribute(&bar, "AXChildren");
+    if menus.is_empty() {
+        return None;
+    }
+    let found = menus.iter().any(|title| {
+        elements_attribute(title, "AXChildren").iter().any(|menu| {
+            elements_attribute(menu, "AXChildren").iter().any(|item| {
+                shortcut(item).as_deref() == Some("cmd+n")
+                    && attribute(item, "AXEnabled")
+                        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+                        .unwrap_or(true)
+            })
+        })
+    });
+    Some(found)
+}
+
 fn shortcut(element: &AXUIElement) -> Option<String> {
     let key = string_attribute(element, "AXMenuItemCmdChar")?;
     let key = key.trim();

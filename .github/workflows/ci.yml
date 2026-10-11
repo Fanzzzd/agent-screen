@@ -1,15 +1,16 @@
 name: CI
 
 on:
+  # The release branch is pushed by prepare-release.yml with a deploy key;
+  # its push runs are the checks on the release pull request.
   push:
-    branches: [main]
+    branches: [main, release]
   pull_request:
-  # prepare-release.yml runs it on the release branch: a pull request that
-  # GITHUB_TOKEN opens or updates starts no workflows by itself.
   workflow_dispatch:
 
 jobs:
   rust:
+    if: github.event_name != 'pull_request' || github.head_ref != 'release'
     # apple-metal needs the macOS 26 SDK.
     runs-on: macos-26
     defaults:
@@ -51,6 +52,7 @@ jobs:
   # The app says it needs macOS 15. It builds only with the macOS 26 SDK,
   # so build there and start it on 15: a symbol 15 lacks fails at load.
   build-release:
+    if: github.event_name != 'pull_request' || github.head_ref != 'release'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5

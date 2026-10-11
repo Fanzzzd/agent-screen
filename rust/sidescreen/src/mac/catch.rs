@@ -143,6 +143,11 @@ extern "C" fn created(
     let (taken, left) = take(target.left.get());
     target.left.set(left);
     if !taken {
+        log::info!(
+            "catch: pid {} made another window, {:?}, after the one Sidescreen asked for; left where it is",
+            target.pid,
+            ax::window_id(window)
+        );
         return;
     }
     target.taken.set(ax::window_id(window));
