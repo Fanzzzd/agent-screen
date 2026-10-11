@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.3 (2026-10-11)
+
+### Fixes
+
+#### AeroSpace config edits keep dotfile links and comments
+
+Adding `ignored-monitors` from the menu writes to the file a symlinked config points to, so dotfile managers keep tracking it, and reads lists with comments in them. Sidescreen also notices when AeroSpace is started, quit or reconfigured while it runs.
+
+#### launch_app reports a failed open
+
+An app or file that macOS can't open fails `launch_app` with "could not open" within about a second, and a URL that didn't open in the new window is an error instead of a success.
+
+#### Windows you open stay on your screen while an agent launches the same app
+
+When an agent launched an app you were also using, a window you opened in that app within the next half minute could move onto the agent's display. Now Sidescreen moves only the window it asked the app for.
+
 ## 0.1.2 (2026-10-11)
 
 Agents' windows stay off your screen, and launch_app is faster.
