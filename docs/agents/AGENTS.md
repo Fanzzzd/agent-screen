@@ -5,9 +5,7 @@ The user works on the same Mac. Operate GUI apps on your own Agent Display from 
 ## Before any GUI work
 
 1. `create_display` with a short task title. It returns a `display_id`; calling it again returns the same one.
-2. Put every window you will operate on that display:
-   - an app you open: `launch_app`, never `open -a`;
-   - a window that already exists: `place_window`, with its id from `list_windows`.
+2. Open every app you will operate with `launch_app`, never `open -a`. Its window opens on your display. You can't see the user's windows: for one of theirs, ask the user to hand it over. They drag it onto your display in the Viewer.
 
 The step is done when `list_windows` shows each window you will touch.
 

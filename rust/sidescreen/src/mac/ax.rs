@@ -493,30 +493,138 @@ fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Optio
     None
 }
 
+/// What came of asking a running app for a new window through its menus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NewWindow {
+    Pressed,
+    /// The item is there but greyed out, as while a dialog is open.
+    Disabled,
+    /// No item opens a plain window.
+    Missing,
+    /// The menus can't be read or the press failed, as just after launch.
+    NotReady,
+}
+
+/// A menu item as `pick_new_window` sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuEntry {
+    pub title: String,
+    pub shortcut: Option<String>,
+    /// The title of the submenu's item this one sits under, if any.
+    pub parent: Option<String>,
+    pub has_submenu: bool,
+}
+
+const WINDOW_TITLES: &[&str] = &[
+    "New Window",
+    "New Finder Window",
+    "新建窗口",
+    "新窗口",
+    "新建访达窗口",
+];
+const DOCUMENT_TITLES: &[&str] = &[
+    "New",
+    "New Document",
+    "New…",
+    "新建",
+    "新建文稿",
+    "新建文档",
+    "新建…",
+];
+
+/// Which item opens a plain new window: one titled New Window, or the
+/// Command-N item of a New Window submenu, as in Terminal, or a document
+/// app's Command-N New. Command-N alone isn't enough: in Notes, Music or
+/// Calendar it makes a note, playlist or event in the user's data.
+pub fn pick_new_window(items: &[MenuEntry]) -> Option<usize> {
+    let is_cmd_n = |e: &MenuEntry| e.shortcut.as_deref() == Some("cmd+n");
+    let rank = |e: &MenuEntry| {
+        if e.has_submenu {
+            None
+        } else if e.parent.is_none() && WINDOW_TITLES.contains(&e.title.as_str()) {
+            Some(0)
+        } else if e
+            .parent
+            .as_deref()
+            .is_some_and(|p| WINDOW_TITLES.contains(&p))
+            && is_cmd_n(e)
+        {
+            Some(1)
+        } else if e.parent.is_none() && DOCUMENT_TITLES.contains(&e.title.as_str()) && is_cmd_n(e) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    (0..items.len())
+        .filter_map(|i| rank(&items[i]).map(|r| (r, i)))
+        .min()
+        .map(|(_, i)| i)
+}
+
+/// Presses the item `pick_new_window` chooses in a running app's menus.
+pub fn press_new_window(pid: i32) -> NewWindow {
+    let Some(bar) = element_attribute(&application(pid), "AXMenuBar") else {
+        return NewWindow::NotReady;
+    };
+    let menus = elements_attribute(&bar, "AXChildren");
+    if menus.is_empty() {
+        return NewWindow::NotReady;
+    }
+    let mut entries = Vec::new();
+    let mut elements = Vec::new();
+    let entry = |item: &AXUIElement, parent: Option<String>, has_submenu: bool| MenuEntry {
+        title: string_attribute(item, "AXTitle").unwrap_or_default(),
+        shortcut: shortcut(item),
+        parent,
+        has_submenu,
+    };
+    for title in &menus {
+        for menu in elements_attribute(title, "AXChildren") {
+            for item in elements_attribute(&menu, "AXChildren") {
+                let submenu = elements_attribute(&item, "AXChildren");
+                entries.push(entry(&item, None, !submenu.is_empty()));
+                elements.push(item.clone());
+                let parent = string_attribute(&item, "AXTitle");
+                for sub in submenu {
+                    for inner in elements_attribute(&sub, "AXChildren") {
+                        entries.push(entry(&inner, parent.clone(), false));
+                        elements.push(inner);
+                    }
+                }
+            }
+        }
+    }
+    match pick_new_window(&entries) {
+        None => NewWindow::Missing,
+        Some(i) => {
+            let enabled = attribute(&elements[i], "AXEnabled")
+                .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+                .unwrap_or(true);
+            // The item's own shortcut, where it has one: the app makes the
+            // window as for a key press, and tells the catch at once. A
+            // press through accessibility reports the window only after.
+            let chord = entries[i]
+                .shortcut
+                .as_deref()
+                .and_then(|s| crate::keychord::KeyChord::parse(s).ok());
+            if !enabled {
+                NewWindow::Disabled
+            } else if let Some(chord) = chord {
+                super::input::post_key_to_pid(pid, chord);
+                NewWindow::Pressed
+            } else if perform(&elements[i], "AXPress") {
+                NewWindow::Pressed
+            } else {
+                NewWindow::NotReady
+            }
+        }
+    }
+}
+
 /// A menu item's key equivalent in the computer tool's key syntax, such as
 /// "cmd+shift+n". AXMenuItemCmdModifiers: bit 3 means no Command; bits 0-2
 /// add Shift, Option and Control.
-/// Whether an app's menus offer an enabled Command-N, as apps that open
-/// more windows do. None when its menu bar can't be read.
-pub fn has_new_window_command(pid: i32) -> Option<bool> {
-    let bar = element_attribute(&application(pid), "AXMenuBar")?;
-    let menus = elements_attribute(&bar, "AXChildren");
-    if menus.is_empty() {
-        return None;
-    }
-    let found = menus.iter().any(|title| {
-        elements_attribute(title, "AXChildren").iter().any(|menu| {
-            elements_attribute(menu, "AXChildren").iter().any(|item| {
-                shortcut(item).as_deref() == Some("cmd+n")
-                    && attribute(item, "AXEnabled")
-                        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
-                        .unwrap_or(true)
-            })
-        })
-    });
-    Some(found)
-}
-
 fn shortcut(element: &AXUIElement) -> Option<String> {
     let key = string_attribute(element, "AXMenuItemCmdChar")?;
     let key = key.trim();
@@ -696,4 +804,47 @@ fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
         unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
     let values = array.to_vec();
     (values.len() == NAMES.len()).then_some(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str, shortcut: Option<&str>) -> MenuEntry {
+        MenuEntry {
+            title: title.into(),
+            shortcut: shortcut.map(String::from),
+            parent: None,
+            has_submenu: false,
+        }
+    }
+
+    #[test]
+    fn picks_the_item_that_opens_a_window() {
+        // Safari and VS Code: New Window, whatever else Command-N does.
+        let vscode = [
+            item("New Text File", Some("cmd+n")),
+            item("New Window", Some("cmd+shift+n")),
+        ];
+        assert_eq!(pick_new_window(&vscode), Some(1));
+        // TextEdit: a document app's New.
+        assert_eq!(
+            pick_new_window(&[item("New", Some("cmd+n")), item("Open…", Some("cmd+o"))]),
+            Some(0)
+        );
+        // Terminal: New Window is a submenu; its Command-N item.
+        let mut basic = item("Basic", Some("cmd+n"));
+        basic.parent = Some("New Window".into());
+        let mut submenu = item("New Window", None);
+        submenu.has_submenu = true;
+        assert_eq!(pick_new_window(&[submenu, basic]), Some(1));
+        // Notes, Calendar, Music: Command-N makes the user's data.
+        assert_eq!(pick_new_window(&[item("New Note", Some("cmd+n"))]), None);
+        assert_eq!(pick_new_window(&[item("New Event", Some("cmd+n"))]), None);
+        let mut playlist = item("Playlist", Some("cmd+n"));
+        playlist.parent = Some("New".into());
+        assert_eq!(pick_new_window(&[playlist]), None);
+        // Calculator: nothing.
+        assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
+    }
 }

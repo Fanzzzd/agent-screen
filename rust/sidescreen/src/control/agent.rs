@@ -314,6 +314,11 @@ pub async fn handle(
             forwarder.chord(chord, false, within).await;
             Ok(json!({}))
         }
+        "listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => {
+            let id = display(&core, &p, false, cx)?;
+            let list: Vec<Value> = strays(&core, id, cx).iter().map(|w| w.json()).collect();
+            Ok(json!({ "windows": list }))
+        }
         "listWindows" => {
             let id = display(&core, &p, false, cx)?;
             let records = core.read_with(cx, |c, _| {
@@ -361,21 +366,15 @@ pub async fn handle(
         }
         "placeWindow" => {
             let id = input_display(&core, &p, cx)?;
-            let window = p
-                .int("windowId")
-                .and_then(|w| windows::find(w as u32))
-                .ok_or_else(|| ControlError::not_found("no window with that id"))?;
-            let elsewhere = core.read_with(cx, |c, _| {
-                c.displays
-                    .list
-                    .iter()
-                    .any(|d| d.id != id && d.records.contains_key(&window.target.window_id))
-            });
-            if elsewhere {
-                return Err(ControlError::failed(
-                    "that window belongs to another session's display",
-                ));
-            }
+            let wanted = p.int("windowId").unwrap_or(-1);
+            let window = strays(&core, id, cx)
+                .into_iter()
+                .find(|w| w.target.window_id as i64 == wanted)
+                .ok_or_else(|| {
+                    ControlError::not_found(
+                        "that window isn't a stray of an app you started: call list_windows with strays: true. For one of the user's windows, ask the user to hand it over",
+                    )
+                })?;
             claim(&core, id, window.target, Origin::Placed, cx);
             place(window.target, id, cx)
                 .await
@@ -821,6 +820,63 @@ fn shot_json(shot: &screenshot::Shot) -> Value {
 }
 
 /// Record a window Sidescreen put on a display.
+/// Keep the catch on an app this display's session started, for as long
+/// as the display lives. A running app's catch ends here: its later windows
+/// may be the user's.
+fn keep_catch(
+    core: &Entity<Core>,
+    id: DisplayId,
+    catch: Option<crate::mac::catch::Catch>,
+    cx: &mut AsyncApp,
+) {
+    let Some(catch) = catch else { return };
+    core.update(cx, |c, _| {
+        let ours = c
+            .displays
+            .get(id)
+            .is_some_and(|d| d.started.contains(&catch.pid()));
+        let kept = c.kept_catches.iter().any(|(_, k)| k.pid() == catch.pid());
+        if ours && !kept {
+            c.kept_catches.push((id, catch));
+        }
+    });
+}
+
+/// Windows of the apps launch_app started for this display that sit on no
+/// Agent Display and no display's records, such as one that opened on the
+/// user's screen before its catch was ready.
+fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
+    let (started, displays, recorded) = core.read_with(cx, |c, _| {
+        (
+            c.displays
+                .get(id)
+                .map(|d| d.started.clone())
+                .unwrap_or_default(),
+            c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>(),
+            c.displays
+                .list
+                .iter()
+                .flat_map(|d| d.records.keys().copied())
+                .collect::<Vec<_>>(),
+        )
+    });
+    if started.is_empty() {
+        return Vec::new();
+    }
+    let placed: std::collections::HashSet<u32> = displays
+        .into_iter()
+        .flat_map(windows::on_display)
+        .map(|w| w.target.window_id)
+        .chain(recorded)
+        .collect();
+    windows::all()
+        .into_iter()
+        .filter(|w| {
+            w.layer == 0 && started.contains(&w.target.pid) && !placed.contains(&w.target.window_id)
+        })
+        .collect()
+}
+
 fn claim(
     core: &Entity<Core>,
     id: DisplayId,
@@ -1107,8 +1163,21 @@ async fn launch(
             "another session is still launching {name}; try again shortly"
         )));
     }
+    // A catch kept on this app would race the launch's own for its window.
+    let pid = app::running_pid(&path);
+    let pause = |c: &mut Core, on: bool| {
+        for (_, kept) in &c.kept_catches {
+            if Some(kept.pid()) == pid {
+                kept.pause(on);
+            }
+        }
+    };
+    core.update(cx, |c, _| pause(c, true));
     let result = launch_now(core, id, name, &path, target, cx).await;
-    core.update(cx, |c, _| c.launching.remove(&path));
+    core.update(cx, |c, _| {
+        pause(c, false);
+        c.launching.remove(&path);
+    });
     result
 }
 
@@ -1189,6 +1258,16 @@ async fn launch_now(
             .await;
     }
     let pid = pid.ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
+    // Two sessions launching an app at once both see it start; it's the
+    // first one's.
+    if !was_running {
+        core.update(cx, |c, _| {
+            let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
+            if !claimed && let Some(d) = c.displays.get_mut(id) {
+                d.started.insert(pid);
+            }
+        });
+    }
     // A starting app takes accessibility observers only once it has set
     // up; until then, try again, and move any window that beats it.
     for _ in 0..100 {
@@ -1229,25 +1308,43 @@ async fn launch_now(
         app::unhide(pid);
     }
 
-    // A running app opens no window on launch; ask it for a new one. An app
-    // without Command-N, such as Calculator, has none to give: say so now.
+    // A running app opens no window on launch; ask it for a new one through
+    // the menu item that opens one. Without such an item, as in Calculator
+    // or Notes, there is none to give: say so now.
     let asked_for_window = was_running && (target.is_none() || is_url);
-    if asked_for_window
-        && cx
-            .background_executor()
-            .spawn(async move { ax::has_new_window_command(pid) })
-            .await
-            == Some(false)
-    {
-        drop(catch);
-        return Ok(Launched {
-            window: None,
-            was_running,
-            reason: Some("no_new_window"),
-        });
-    }
-    if asked_for_window && let Ok(chord) = KeyChord::parse("cmd+n") {
-        crate::mac::input::post_key_to_pid(pid, chord);
+    if asked_for_window {
+        // An app that has just started may not have its menus yet.
+        let mut asked = ax::NewWindow::NotReady;
+        for _ in 0..10 {
+            asked = cx
+                .background_executor()
+                .spawn(async move { ax::press_new_window(pid) })
+                .await;
+            if asked != ax::NewWindow::NotReady {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+        }
+        let missing = match asked {
+            ax::NewWindow::Pressed => None,
+            ax::NewWindow::Disabled => Some("app_busy"),
+            ax::NewWindow::Missing | ax::NewWindow::NotReady => Some("no_new_window"),
+        };
+        if let Some(reason) = missing {
+            drop(catch);
+            if is_url {
+                return Err(ControlError::failed(format!(
+                    "{name} is running and can't open a new window now ({reason}), so the URL was not opened; ask the user to quit {name}, then call launch_app again"
+                )));
+            }
+            return Ok(Launched {
+                window: None,
+                was_running,
+                reason: Some(reason),
+            });
+        }
     }
     let asked_at = Instant::now();
 
@@ -1321,6 +1418,7 @@ async fn launch_now(
                     )));
                 }
             }
+            keep_catch(core, id, catch, cx);
             return Ok(Launched {
                 window: Some(placed),
                 was_running,
@@ -1328,7 +1426,7 @@ async fn launch_now(
             });
         }
     }
-    drop(catch);
+    keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Sidescreen's (gave up early: {gave_up})");
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen. Only for an app Sidescreen
@@ -1358,7 +1456,7 @@ async fn launch_now(
     // would add a tab to whatever window the user has in front.
     if was_running && is_url {
         return Err(ControlError::failed(format!(
-            "{name} opened no new window, so the URL was not opened; call list_windows, then open it in a window on your display"
+            "{name} opened no new window, so the URL was not opened; ask the user to quit {name}, then call launch_app again"
         )));
     }
     Ok(Launched {

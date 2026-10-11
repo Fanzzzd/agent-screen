@@ -10,7 +10,7 @@ on:
 
 jobs:
   rust:
-    if: github.event_name != 'pull_request' || github.head_ref != 'release'
+    if: github.event_name != 'pull_request' || github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
     # apple-metal needs the macOS 26 SDK.
     runs-on: macos-26
     defaults:
@@ -52,7 +52,7 @@ jobs:
   # The app says it needs macOS 15. It builds only with the macOS 26 SDK,
   # so build there and start it on 15: a symbol 15 lacks fails at load.
   build-release:
-    if: github.event_name != 'pull_request' || github.head_ref != 'release'
+    if: github.event_name != 'pull_request' || github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5

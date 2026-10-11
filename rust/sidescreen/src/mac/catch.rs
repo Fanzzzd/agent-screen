@@ -51,6 +51,8 @@ struct Target {
     left: std::cell::Cell<Option<usize>>,
     /// The last window taken.
     taken: std::cell::Cell<Option<u32>>,
+    /// Set while a launch of the same app runs its own catch.
+    paused: std::cell::Cell<bool>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -84,6 +86,7 @@ impl Catch {
             screen,
             left: std::cell::Cell::new(limit),
             taken: std::cell::Cell::new(None),
+            paused: std::cell::Cell::new(false),
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -106,6 +109,15 @@ impl Catch {
     }
 
     /// The window id of the last window taken, if any.
+    /// Let a launch of the same app take its window alone.
+    pub fn pause(&self, paused: bool) {
+        unsafe { (*self.target).paused.set(paused) }
+    }
+
+    pub fn pid(&self) -> i32 {
+        unsafe { (*self.target).pid }
+    }
+
     pub fn taken(&self) -> Option<u32> {
         unsafe { (*self.target).taken.get() }
     }
@@ -135,6 +147,9 @@ extern "C" fn created(
         return;
     }
     let (window, target) = unsafe { (&*element, &*refcon.cast::<Target>()) };
+    if target.paused.get() {
+        return;
+    }
     // Panels and sheets stay where the app puts them; Sidescreen places
     // those through the usual path.
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {

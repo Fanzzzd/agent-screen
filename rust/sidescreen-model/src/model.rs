@@ -221,6 +221,9 @@ pub struct Display<H> {
     pub ended: Option<EndReason>,
     /// Windows Sidescreen put on this display, by id.
     pub records: BTreeMap<WindowId, Record>,
+    /// Processes launch_app started for this display. Their windows are
+    /// the Agent Session's wherever they open; other apps' may be the user's.
+    pub started: std::collections::BTreeSet<i32>,
     /// The user is operating the display in the Viewer; agent input is refused.
     pub takeover: bool,
     /// The reason of an open Help Request.
@@ -365,6 +368,7 @@ impl<H> Displays<H> {
             owner,
             ended: None,
             records: BTreeMap::new(),
+            started: Default::default(),
             takeover: false,
             help_request: None,
             pointer: None,

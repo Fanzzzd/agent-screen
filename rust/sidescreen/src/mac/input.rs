@@ -710,7 +710,7 @@ fn hits() -> Vec<Hit> {
 }
 
 /// A key chord through the public API, for apps that need no focus
-/// handshake: asking a running app for a new window.
+/// handshake: a running app's New Window shortcut.
 pub fn post_key_to_pid(pid: i32, chord: KeyChord) {
     for down in [true, false] {
         if let Some(event) = CGEvent::new_keyboard_event(None, chord.code, down) {

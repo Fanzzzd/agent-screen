@@ -201,16 +201,25 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "List app windows on the display, front to back, with ids and bounds in screenshot pixels. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
-                "set_disposition verdict or null.",
+                "set_disposition verdict or null. With strays: true it lists instead the windows of apps launch_app started",
+                "for you that opened off your display, for place_window. It never lists the user's windows.",
             ],
-            object(json!({ "display_id": display_id() }), &["display_id"]),
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "strays": { "type": "boolean", "description": "List your apps' windows that opened off the display." }
+                }),
+                &["display_id"],
+            ),
             READ_ONLY,
         ),
         tool(
             "place_window",
             "Place a window on the display",
             &[
-                "Move a window onto the display: one launch_app returned, or one whose id the user gave you. Agents can't list the user's windows. To work in one, ask the user to hand it over: they drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu. Windows on another session's display are refused.",
+                "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a second window or",
+                "a late one can. Get ids from list_windows with strays: true. You can't place the user's windows: to work in one, ask",
+                "the user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
             ],
             object(
                 json!({
@@ -470,7 +479,7 @@ pub async fn run(
             let reply = control
                 .call(
                     "listWindows",
-                    json!({ "displayId": a.require_int("display_id")? }),
+                    json!({ "displayId": a.require_int("display_id")?, "strays": a.0.get("strays").and_then(Value::as_bool).unwrap_or(false) }),
                 )
                 .await?;
             Ok(Output::Object(Value::Object(reply)))
@@ -861,10 +870,13 @@ fn launch_output(reply: &Value) -> Value {
                     "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer."
                 }
                 "no_new_window" => {
-                    "The app was already running and has no new-window command, as single-window apps such as Calculator do; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                    "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                }
+                "app_busy" => {
+                    "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."
                 }
                 "still_opening" => {
-                    "The app was already running and is still opening the file; nothing moved. Call list_windows in a few seconds; if no window came, ask the user to hand it over."
+                    "The app was already running and hadn't opened the file after 4 s; its window will open on the user's screen, not yours. Ask the user to hand it over: they drag it onto your display in the Viewer."
                 }
                 _ => {
                     "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
@@ -888,6 +900,7 @@ mod tests {
             "still_starting",
             "existing_window",
             "no_new_window",
+            "app_busy",
             "still_opening",
         ] {
             let none = launch_output(

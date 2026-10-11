@@ -29,6 +29,10 @@ pub struct Core {
     /// Apps an Agent Session is launching. Two launches of one app at once
     /// can't tell their new windows apart, so they take turns.
     pub launching: HashSet<std::path::PathBuf>,
+    /// Catches on apps launch_app started, kept while their display lives:
+    /// a window such an app opens later, as TextEdit does for a second
+    /// `open`, goes to the agent's display instead of the user's screen.
+    pub kept_catches: Vec<(DisplayId, crate::mac::catch::Catch)>,
 }
 
 impl Core {
@@ -41,6 +45,7 @@ impl Core {
             sessions: HashMap::new(),
             tucked: HashSet::new(),
             launching: HashSet::new(),
+            kept_catches: Vec::new(),
         }
     }
 
@@ -113,6 +118,7 @@ impl Core {
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
+            self.kept_catches.retain(|(display, _)| *display != id);
             cx.notify();
         }
     }

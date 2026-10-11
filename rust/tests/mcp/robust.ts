@@ -199,6 +199,12 @@ try {
   })
   check("set_value on a button fails", set.result?.isError === true, textOf(set).slice(0, 120))
 
+  // place_window takes only strays of apps this session started.
+  const strays = structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id, strays: true } }))
+  check("list_windows strays lists none when every window is on the display", Array.isArray(strays?.windows) && strays.windows.length === 0, JSON.stringify(strays))
+  const notOurs = await client.request("tools/call", { name: "place_window", arguments: { display_id, window_id: 1 } })
+  check("place_window refuses a window that isn't a stray of the session's apps", notOurs.result?.isError === true, textOf(notOurs).slice(0, 120))
+
   // Calculator runs and has one window: a second launch makes none, says
   // so soon, and takes nothing.
   const startedAgain = Date.now()

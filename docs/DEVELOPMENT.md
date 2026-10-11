@@ -89,4 +89,4 @@ Releases follow the changesets model, with [knope](https://knope.tech) (`knope.t
 
 Running **Release** from the Actions tab is a dry run: checks, signing and the DMG, kept as an artifact, and nothing published.
 
-Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) `TAP_DEPLOY_KEY`, a write deploy key of the tap, and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. Releases aren't notarized. Commit messages stay plain sentences: knope ignores conventional commits here.
+Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`), `TAP_DEPLOY_KEY`, a write deploy key of the tap, and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. Releases aren't notarized. Commit messages stay plain sentences: knope ignores conventional commits here.
