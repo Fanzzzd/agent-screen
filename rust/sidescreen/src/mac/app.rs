@@ -20,6 +20,13 @@ pub fn running_pid(bundle: &Path) -> Option<i32> {
     })
 }
 
+/// The bundle of a running app, by bundle id.
+pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))
+        .iter()
+        .find_map(|app| Some(PathBuf::from(app.bundleURL()?.path()?.to_string())))
+}
+
 /// Show a hidden app's windows, where they are now.
 pub fn unhide(pid: i32) {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {

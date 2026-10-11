@@ -76,6 +76,7 @@ pub enum MenuAction {
     CreateDisplay,
     GrantPermissions,
     OpenAeroSpaceConfig,
+    IgnoreInAeroSpace,
     ConnectAgents,
     Quit,
     HandOver {
@@ -421,6 +422,33 @@ pub fn alert(title: &str, text: &str) {
     #[allow(deprecated)]
     objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     alert.runModal();
+}
+
+/// An alert asking to go ahead: true when the user picks `go`.
+pub fn confirm(title: &str, text: &str, go: &str) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    alert.addButtonWithTitle(&NSString::from_str(go));
+    alert.addButtonWithTitle(&NSString::from_str(t("Cancel", "取消")));
+    #[allow(deprecated)]
+    objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
+}
+
+/// Put text on the clipboard.
+pub fn copy(text: &str) {
+    let board = objc2_app_kit::NSPasteboard::generalPasteboard();
+    board.clearContents();
+    unsafe {
+        board.setString_forType(
+            &NSString::from_str(text),
+            objc2_app_kit::NSPasteboardTypeString,
+        )
+    };
 }
 
 pub fn set_checked(item: &NSMenuItem) {

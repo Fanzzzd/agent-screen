@@ -10,7 +10,7 @@ use super::viewer::{self, Sheet, Viewer};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
 use crate::i18n::t;
-use crate::mac::aerospace::AeroSpace;
+use crate::mac::aerospace::{self, AeroSpace};
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, cg, menubar, notify, viewer_input, windows};
@@ -132,6 +132,8 @@ pub struct Shell {
     drop_hover: bool,
     /// AeroSpace workspaces pinned to a monitor number an Agent Display took.
     conflicts: Vec<(String, String)>,
+    /// Whether AeroSpace leaves Agent Displays alone; None without AeroSpace.
+    aerospace: Option<aerospace::Ignoring>,
     guard_generation: u64,
     asking: bool,
     /// Screen Recording and Accessibility, as last checked.
@@ -260,6 +262,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             drag_from: None,
             drop_hover: false,
             conflicts: Vec::new(),
+            aerospace: None,
             guard_generation: 0,
             asking: false,
             permissions: permissions::status(),
@@ -296,9 +299,10 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::set_keyable(&peek_ns, false);
     native::set_keyable(&viewer_ns, true);
     viewer_input::attach(&viewer_ns);
-    shell.update(cx, |shell, _| {
+    shell.update(cx, |shell, cx| {
         shell.peek = Some((peek, peek_ns));
         shell.viewer = Some((viewer, viewer_ns));
+        shell.check_aerospace(cx);
     });
 
     cx.spawn(async move |cx: &mut AsyncApp| {
@@ -430,6 +434,10 @@ impl Shell {
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
         match event {
             Native::IconHover(over) => {
+                // Before the menu opens; AeroSpace may have changed since.
+                if over && !self.over_icon {
+                    self.check_aerospace(cx);
+                }
                 self.over_icon = over;
                 self.hover_changed(cx);
             }
@@ -1216,6 +1224,23 @@ impl Shell {
             ))));
             menu.separator();
         }
+        if matches!(
+            self.aerospace,
+            Some(aerospace::Ignoring::Available | aerospace::Ignoring::Unsupported)
+        ) {
+            let item = menu.action(
+                t(
+                    "Keep AeroSpace Off Sidescreen's Displays…",
+                    "让 AeroSpace 不管 Sidescreen 的显示器…",
+                ),
+                MenuAction::IgnoreInAeroSpace,
+            );
+            item.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
+                "AeroSpace shows your workspaces on these displays, and agents' new windows pass over your screen.",
+                "AeroSpace 会把你的工作区放到这些显示器上，agent 打开的新窗口也会先在你屏幕上闪一下。",
+            ))));
+            menu.separator();
+        }
         menu.action(
             t("Connect Claude Code and Codex", "连接 Claude Code 和 Codex"),
             MenuAction::ConnectAgents,
@@ -1397,6 +1422,7 @@ impl Shell {
                         .spawn();
                 }
             }
+            MenuAction::IgnoreInAeroSpace => self.ignore_in_aerospace(cx),
             MenuAction::ConnectAgents => {
                 let install = cx.background_spawn(async {
                     let exe = std::env::current_exe().unwrap_or_default();
@@ -1863,6 +1889,112 @@ impl Shell {
                 cx.notify();
             });
         }
+    }
+
+    // MARK: AeroSpace
+
+    fn check_aerospace(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let ignoring = cx
+                .background_executor()
+                .spawn(async { aerospace::ignoring() })
+                .await;
+            let _ = this.update(cx, |shell, _| shell.aerospace = ignoring);
+        })
+        .detach();
+    }
+
+    /// Set AeroSpace to leave Agent Displays alone, or say how to get an
+    /// AeroSpace that can (docs/adr/0006).
+    fn ignore_in_aerospace(&mut self, cx: &mut Context<Self>) {
+        let why = t(
+            "AeroSpace manages every display, Sidescreen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
+            "AeroSpace 会管理所有显示器，包括 Sidescreen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 agent 的截图里。agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
+        );
+        if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
+            let commands = "brew uninstall --cask aerospace
+brew install --cask fanzzzd/sidescreen/aerospace-sidescreen";
+            let go = native::confirm(
+                t(
+                    "This AeroSpace can't leave displays alone",
+                    "这个版本的 AeroSpace 还不能不管显示器",
+                ),
+                &format!(
+                    "{why}
+
+{}
+
+{commands}
+
+{}",
+                    t(
+                        "Sidescreen's build of AeroSpace adds an ignored-monitors option, until AeroSpace has it. Install it in Terminal, keeping your config:",
+                        "在 AeroSpace 官方加上 ignored-monitors 选项之前，Sidescreen 提供一个加了这个选项的 AeroSpace。在终端里安装，你的配置不变：",
+                    ),
+                    t(
+                        "macOS then asks you to allow Accessibility for AeroSpace again. Then choose this menu item once more.",
+                        "装好后 macOS 会请你重新给 AeroSpace 授予辅助功能权限。授予后再点一次这个菜单项。",
+                    ),
+                ),
+                t("Copy Commands", "复制命令"),
+            );
+            if go {
+                native::copy(commands);
+            }
+            return;
+        }
+        let path = aerospace::config_path()
+            .map(|p| {
+                p.display()
+                    .to_string()
+                    .replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1)
+            })
+            .unwrap_or_else(|| "~/.config/aerospace/aerospace.toml".into());
+        let go = native::confirm(
+            t(
+                "Let AeroSpace leave Sidescreen's displays alone?",
+                "让 AeroSpace 不管 Sidescreen 的显示器？",
+            ),
+            &format!(
+                "{why}
+
+{}",
+                tf!(
+                    "Sidescreen adds ignored-monitors = ['^Sidescreen'] to {}, keeps the old file beside it as .before-sidescreen, and reloads AeroSpace's config.",
+                    "Sidescreen 会在 {} 里加上 ignored-monitors = ['^Sidescreen']，旧文件另存为 .before-sidescreen，然后让 AeroSpace 重新加载配置。",
+                    path
+                )
+            ),
+            t("Add and Reload", "添加并重新加载"),
+        );
+        if !go {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { aerospace::ignore_agent_displays() })
+                .await;
+            match result {
+                Ok(_) => log::info!("AeroSpace now ignores Agent Displays"),
+                Err(error) => {
+                    log::warn!("AeroSpace refused ignored-monitors: {error}");
+                    native::alert(
+                        t("AeroSpace refused the change", "AeroSpace 没有接受这个改动"),
+                        &tf!(
+                            "Your config is as it was. AeroSpace said: {}",
+                            "你的配置已经还原。AeroSpace 的提示：{}",
+                            error
+                        ),
+                    );
+                }
+            }
+            let _ = this.update(cx, |shell, cx| {
+                shell.check_aerospace(cx);
+                shell.schedule_guard(cx);
+            });
+        })
+        .detach();
     }
 
     // MARK: AeroSpace guard

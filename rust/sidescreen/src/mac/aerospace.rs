@@ -195,3 +195,232 @@ impl AeroSpace {
         Ok(output)
     }
 }
+
+// MARK: ignored-monitors
+
+/// Whether AeroSpace leaves Agent Displays alone, through its
+/// `ignored-monitors` option (docs/adr/0006).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ignoring {
+    /// The config ignores Agent Displays.
+    Yes,
+    /// The running AeroSpace has the option and the config doesn't use it.
+    Available,
+    /// The running AeroSpace has no such option, as stock AeroSpace.
+    Unsupported,
+}
+
+/// What every Agent Display's name starts with.
+const DISPLAY_NAME: &str = "Sidescreen 1";
+const PATTERN: &str = "'^Sidescreen'";
+
+/// None while AeroSpace isn't running. Reads AeroSpace's binary once per
+/// build, about 20 MB: run it off the main thread.
+pub fn ignoring() -> Option<Ignoring> {
+    let bundle = super::app::running_bundle("bobko.aerospace")?;
+    if !supports_ignored_monitors(&bundle.join("Contents/MacOS/AeroSpace")) {
+        return Some(Ignoring::Unsupported);
+    }
+    let ignores = config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| ignores_agent_displays(&text));
+    Some(if ignores {
+        Ignoring::Yes
+    } else {
+        Ignoring::Available
+    })
+}
+
+fn supports_ignored_monitors(binary: &std::path::Path) -> bool {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<(std::path::PathBuf, std::time::SystemTime, bool)>> =
+        Mutex::new(None);
+    let modified = std::fs::metadata(binary).and_then(|m| m.modified()).ok();
+    let mut seen = SEEN.lock().unwrap();
+    if let (Some((path, at, answer)), Some(modified)) = (seen.as_ref(), modified)
+        && path == binary
+        && *at == modified
+    {
+        return *answer;
+    }
+    let needle = b"ignored-monitors";
+    let answer =
+        std::fs::read(binary).is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle));
+    if let Some(modified) = modified {
+        *seen = Some((binary.to_path_buf(), modified, answer));
+    }
+    answer
+}
+
+/// The config AeroSpace reads: `~/.aerospace.toml`, else the one under
+/// `$XDG_CONFIG_HOME`, by default `~/.config`.
+pub fn config_path() -> Option<std::path::PathBuf> {
+    [
+        Some(home().join(".aerospace.toml")),
+        Some(xdg_config_path()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|p| p.exists())
+}
+
+fn home() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+fn xdg_config_path() -> std::path::PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| home().join(".config"))
+        .join("aerospace/aerospace.toml")
+}
+
+/// The list of `ignored-monitors = [...]` in a config, as its span in
+/// `text` between the brackets.
+fn ignored_monitors_list(text: &str) -> Option<std::ops::Range<usize>> {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let key = line.trim_start();
+        if let Some(rest) = key.strip_prefix("ignored-monitors")
+            && rest.trim_start().starts_with('=')
+        {
+            let open = offset + line.find('[')? + 1;
+            let close = open + text[open..].find(']')?;
+            return Some(open..close);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Whether a config's `ignored-monitors` matches Agent Displays. AeroSpace
+/// takes each entry as a case-insensitive regex searched in the name.
+pub fn ignores_agent_displays(text: &str) -> bool {
+    let Some(list) = ignored_monitors_list(text) else {
+        return false;
+    };
+    let entries = regex::Regex::new(r#"'([^']*)'|"((?:[^"\\]|\\.)*)""#).unwrap();
+    entries.captures_iter(&text[list]).any(|c| {
+        let pattern = c.get(1).or(c.get(2)).map_or("", |m| m.as_str());
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .is_ok_and(|r| r.is_match(DISPLAY_NAME))
+    })
+}
+
+/// A config with Agent Displays added to `ignored-monitors`.
+pub fn with_agent_displays_ignored(text: &str) -> String {
+    if let Some(list) = ignored_monitors_list(text) {
+        let separator = if text[list.clone()].trim().is_empty() {
+            ""
+        } else {
+            ", "
+        };
+        return format!(
+            "{}{PATTERN}{separator}{}",
+            &text[..list.start],
+            &text[list.start..]
+        );
+    }
+    // A top-level key: before any table, so at the top.
+    format!(
+        "# Sidescreen's virtual displays are for AI agents: leave them alone.\n\
+         ignored-monitors = [{PATTERN}]\n\n{text}"
+    )
+}
+
+/// Add Agent Displays to `ignored-monitors` and reload AeroSpace's config.
+/// Keeps the old config beside it and puts it back if AeroSpace refuses the
+/// new one. A user without a config gets AeroSpace's default config, which
+/// is what AeroSpace runs without one. Blocking; the config's path on
+/// success, with the copy's path if there was a config.
+pub fn ignore_agent_displays() -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), String> {
+    let aerospace = AeroSpace::current().ok_or("AeroSpace isn't running")?;
+    let (path, old) = match config_path() {
+        Some(path) => {
+            let old = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            (path, Some(old))
+        }
+        None => (xdg_config_path(), None),
+    };
+    let base = match &old {
+        Some(old) => old.clone(),
+        None => {
+            let bundle =
+                super::app::running_bundle("bobko.aerospace").ok_or("AeroSpace isn't running")?;
+            std::fs::read_to_string(bundle.join("Contents/Resources/default-config.toml"))
+                .map_err(|e| format!("AeroSpace's default config: {e}"))?
+        }
+    };
+    let backup = match &old {
+        Some(old) => {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let mut backup = path.with_file_name(format!("{name}.before-sidescreen"));
+            let mut n = 2;
+            while backup.exists() {
+                backup = path.with_file_name(format!("{name}.before-sidescreen-{n}"));
+                n += 1;
+            }
+            std::fs::write(&backup, old).map_err(|e| e.to_string())?;
+            Some(backup)
+        }
+        None => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            None
+        }
+    };
+    std::fs::write(&path, with_agent_displays_ignored(&base)).map_err(|e| e.to_string())?;
+    if let Err(refused) = aerospace.run(&["reload-config", "--no-gui"]) {
+        let _ = match &old {
+            Some(old) => std::fs::write(&path, old),
+            None => std::fs::remove_file(&path),
+        };
+        let _ = aerospace.run(&["reload-config", "--no-gui"]);
+        return Err(refused);
+    }
+    Ok((path, backup))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_agent_displays_in_ignored_monitors() {
+        assert!(ignores_agent_displays(
+            "ignored-monitors = ['^Sidescreen']\n"
+        ));
+        assert!(ignores_agent_displays(
+            "ignored-monitors = [\n  'dummy',\n  \"sidescreen\",\n]\n"
+        ));
+        assert!(!ignores_agent_displays("ignored-monitors = ['dummy']\n"));
+        assert!(!ignores_agent_displays(
+            "# ignored-monitors = ['^Sidescreen']\n"
+        ));
+        assert!(!ignores_agent_displays("gaps.inner.horizontal = 8\n"));
+    }
+
+    /// Reads the AeroSpace running on this Mac; changes nothing.
+    #[test]
+    #[ignore]
+    fn reads_the_running_aerospace() {
+        println!("ignoring: {:?}, config: {:?}", ignoring(), config_path());
+    }
+
+    #[test]
+    fn adds_agent_displays_to_a_config() {
+        let fresh =
+            with_agent_displays_ignored("start-at-login = true\n\n[gaps]\ninner.horizontal = 8\n");
+        assert!(fresh.contains("ignored-monitors = ['^Sidescreen']\n\nstart-at-login"));
+        assert!(ignores_agent_displays(&fresh));
+
+        let listed = with_agent_displays_ignored("ignored-monitors = ['dummy']\n");
+        assert_eq!(listed, "ignored-monitors = ['^Sidescreen', 'dummy']\n");
+
+        let empty = with_agent_displays_ignored("ignored-monitors = []\n");
+        assert_eq!(empty, "ignored-monitors = ['^Sidescreen']\n");
+    }
+}

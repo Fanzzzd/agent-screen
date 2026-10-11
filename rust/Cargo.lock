@@ -4905,6 +4905,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-user-notifications",
  "raw-window-handle",
+ "regex",
  "screencapturekit 11.0.0",
  "serde_json",
  "sidescreen-mcp",
