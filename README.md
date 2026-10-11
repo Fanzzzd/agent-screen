@@ -57,7 +57,7 @@ Then ask your agent something like "Use Sidescreen to open Calculator on your ow
 | `create_display`, `end_display` | Get the session's display, one per session, or finish with it. |
 | `launch_app`, `place_window`, `list_windows` | Put windows on the display and list them. |
 | `computer` | Anthropic-style actions on the whole display. Every action returns a screenshot. |
-| `get_window_state`, `act_on_element` | One window's screenshot and accessibility tree, and actions on its numbered elements. Numbers stay put while the element stays in the window. |
+| `get_window_state`, `act_on_element` | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. |
 | `set_disposition` | Keep or close a window when the user closes the display. |
 | `wait_for_control`, `request_help` | Wait out a Takeover, or ask the user to step in. |
 
@@ -89,7 +89,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - A window that refuses to close, such as one with unsaved changes, is left to macOS, which moves it to your main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.
-- Copy, paste and undo need a focused app, so they do nothing in an app on an agent's display. Command-A still selects all, and `set_value` replaces text.
+- Copy, paste and undo shortcuts need a focused app, so they do nothing in an app on an agent's display. Agents copy and paste with `act_on_element`'s `read_text` and `insert_text` instead; Command-A still selects all.
 - Window managers move windows too. AeroSpace is supported: Sidescreen keeps your workspaces off agent displays and checks that AeroSpace files each placed window on the agent's display. Others, such as yabai, are untested.
 - The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
 

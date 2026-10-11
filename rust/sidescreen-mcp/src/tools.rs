@@ -127,8 +127,9 @@ pub fn definitions() -> Vec<Value> {
                 "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
                 "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
                 "Apps on your display stay in the background, so menu shortcuts that act on the selection (copy, paste,",
-                "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. Use set_value to",
-                "replace text. Shortcuts for app commands, such as cmd+n or cmd+w, work.",
+                "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. To copy and paste, use",
+                "act_on_element's read_text and insert_text; set_value replaces a field's text. Shortcuts for app commands,",
+                "such as cmd+n or cmd+w, work.",
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
@@ -281,6 +282,9 @@ pub fn definitions() -> Vec<Value> {
                 "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
+                "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
+                "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
+                "Both work in background apps, where Command-C and Command-V do nothing.",
                 "Fails with a takeover error while the user operates the display.",
             ],
             object(
@@ -289,9 +293,10 @@ pub fn definitions() -> Vec<Value> {
                     "window_id": window_id(),
                     "element": { "type": "integer", "description": "The bracketed number from get_window_state." },
                     "action": { "type": "string", "enum": [
-                        "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "scroll_into_view"
+                        "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "insert_text",
+                        "read_text", "scroll_into_view"
                     ] },
-                    "value": { "type": "string", "description": "Text for set_value." }
+                    "value": { "type": "string", "description": "Text for set_value and insert_text." }
                 }),
                 &["display_id", "window_id", "element", "action"],
             ),
@@ -539,6 +544,8 @@ pub async fn run(
                         "show_menu",
                         "focus",
                         "set_value",
+                        "insert_text",
+                        "read_text",
                         "scroll_into_view",
                     ],
                 )?
@@ -555,6 +562,17 @@ pub async fn run(
                     }),
                 )
                 .await?;
+            if action == "read_text" {
+                let field = |key: &str| reply.get(key).and_then(Value::as_str).map(String::from);
+                let mut out = String::new();
+                if let Some(selected) = field("selected") {
+                    out.push_str(&format!("Selected:\n{selected}\n\n"));
+                }
+                if let Some(value) = field("text") {
+                    out.push_str(&format!("Value:\n{value}"));
+                }
+                return Ok(Output::Content(vec![text(out.trim_end().to_string())]));
+            }
             if let Some(menu) = reply.get("menu").and_then(Value::as_str) {
                 return Ok(Output::Content(vec![text(format!(
                     "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"

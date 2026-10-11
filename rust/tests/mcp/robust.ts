@@ -135,6 +135,26 @@ try {
   check("TextEdit launched again opens a window on the display", structured(again)?.window?.app === "TextEdit", textOf(again))
   check("still no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
 
+  // Copy and paste between two documents, through accessibility.
+  {
+    const docs = (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])
+      .filter((w) => w.app === "TextEdit")
+    const area = async (id: number) =>
+      Number(textOf(await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: id } }))
+        .match(/\[(\d+)\] textarea/)?.[1])
+    const [from, to] = docs
+    const long = "Copied text that runs well past the eighty characters the window tree keeps of any value."
+    const source = await area(from.windowId)
+    await client.request("tools/call", { name: "act_on_element", arguments: { display_id, window_id: from.windowId, element: source, action: "set_value", value: long } })
+    const read = textOf(await client.request("tools/call", { name: "act_on_element", arguments: { display_id, window_id: from.windowId, element: source, action: "read_text" } }))
+    check("read_text returns the whole value", read.includes(long), read.slice(0, 120))
+    const target = await area(to.windowId)
+    await client.request("tools/call", { name: "act_on_element", arguments: { display_id, window_id: to.windowId, element: target, action: "set_value", value: "Before. After." } })
+    const pasted = await client.request("tools/call", { name: "act_on_element", arguments: { display_id, window_id: to.windowId, element: target, action: "insert_text", value: "Pasted. " } })
+    const after = textOf(await client.request("tools/call", { name: "act_on_element", arguments: { display_id, window_id: to.windowId, element: target, action: "read_text" } }))
+    check("insert_text pastes into a background app", !pasted.result?.isError && after.includes("Pasted."), after.slice(0, 120))
+  }
+
   // set_value on something without a settable value fails.
   await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "Calculator" } })
   const calc = (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])

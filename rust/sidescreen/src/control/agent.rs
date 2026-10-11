@@ -450,6 +450,25 @@ pub async fn handle(
                     return reply(json!({ "menu": tree }));
                 }
             }
+            if action == "read_text" {
+                let item = ax::Sendable(element.clone());
+                let (value, selected) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let e = item.get();
+                        (
+                            ax::string_attribute(e, "AXValue"),
+                            ax::string_attribute(e, "AXSelectedText"),
+                        )
+                    })
+                    .await;
+                if value.is_none() && selected.is_none() {
+                    return Err(ControlError::not_found("the element has no text to read"));
+                }
+                return reply(
+                    json!({ "text": value, "selected": selected.filter(|s| !s.is_empty()) }),
+                );
+            }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
@@ -885,6 +904,34 @@ async fn act(
             if !set {
                 return Err(ControlError::failed(
                     "the element's value cannot be set; focus it and type instead",
+                ));
+            }
+        }
+        "insert_text" => {
+            let value =
+                value.ok_or_else(|| ControlError::invalid("value is required for insert_text"))?;
+            // Replacing the selection through accessibility is a paste that
+            // needs no focus and no pasteboard.
+            let set = off_main(
+                cx,
+                Box::new(move |e| {
+                    let before = ax::string_attribute(e, "AXValue");
+                    ax::settable(e, "AXSelectedText")
+                        && ax::set_attribute(
+                            e,
+                            "AXSelectedText",
+                            &objc2_core_foundation::CFString::from_str(&value),
+                        )
+                        && (value.is_empty()
+                            || ax::string_attribute(e, "AXValue").is_none_or(|now| {
+                                Some(&now) != before.as_ref() && now.contains(value.trim())
+                            }))
+                }),
+            )
+            .await;
+            if !set {
+                return Err(ControlError::failed(
+                    "the element takes no inserted text; focus it and type instead",
                 ));
             }
         }
