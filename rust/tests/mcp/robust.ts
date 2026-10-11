@@ -11,7 +11,8 @@
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { McpClient, instance } from "./client.ts"
-import { startTestApp, stopTestApp } from "../e2e/lib.ts"
+import { spawn } from "node:child_process"
+import { buildTools, startTestApp, stopTestApp, waitForIdle } from "../e2e/lib.ts"
 
 let failures = 0
 const check = (label: string, ok: boolean, detail = "") => {
@@ -53,7 +54,30 @@ if (running("TextEdit") || running("Calculator")) {
   process.exit(0)
 }
 
+// Launching windows can show them on the user's screen for a moment.
+buildTools()
+if (instance && !(await waitForIdle())) process.exit(1)
 if (instance) await startTestApp()
+const flashTool = new URL("../../target/e2e/flash", import.meta.url).pathname
+if (!existsSync(flashTool)) {
+  execFileSync("/usr/bin/swiftc", ["-O", new URL("tools/flash.swift", import.meta.url).pathname, "-o", flashTool])
+}
+/**
+ * Watch the main display for TextEdit windows while `work` runs. Under stock
+ * AeroSpace a new window can show there for two frames, 34 ms, before it
+ * moves; with `ignored-monitors` it never does (docs/adr/0006).
+ */
+const flashLimit = 34
+const watchFlash = async (work: () => Promise<unknown>) => {
+  const watcher = spawn(flashTool, ["TextEdit"], { stdio: ["pipe", "pipe", "inherit"] })
+  let out = ""
+  watcher.stdout!.on("data", (d) => (out += d))
+  await Bun.sleep(100)
+  await work()
+  watcher.stdin!.end()
+  await new Promise((r) => watcher.once("exit", r))
+  return JSON.parse(out) as { windows: number; ms: number }
+}
 const client = await McpClient.start({ CLAUDE_CODE_SESSION_ID: `robust-${Date.now()}`})
 const structured = (r: any) => r.result?.structuredContent
 const textOf = (r: any) => r.result?.content?.find((c: any) => c.type === "text")?.text ?? ""
@@ -84,7 +108,11 @@ try {
   check("an empty display's screenshot is plain", sizes.length > 0 && Math.max(...sizes) < 30_000, `largest ${Math.max(...sizes)} bytes`)
 
   // TextEdit from not running: a document window on the agent's display.
-  const launched = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
+  let launched: any
+  const firstFlash = await watchFlash(async () => {
+    launched = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
+  })
+  check("TextEdit's first window shows on the user's screen 34 ms at most", firstFlash.ms <= flashLimit, `${firstFlash.windows} windows for ${firstFlash.ms} ms`)
   const window = structured(launched)?.window
   check("TextEdit's first launch opens a document window", window?.app === "TextEdit", textOf(launched))
   check("no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
@@ -131,7 +159,11 @@ try {
   }
 
   // Launched again while running: a second document, still not on the user's screen.
-  const again = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
+  let again: any
+  const againFlash = await watchFlash(async () => {
+    again = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
+  })
+  check("a running app's new window shows on the user's screen 34 ms at most", againFlash.ms <= flashLimit, `${againFlash.windows} windows for ${againFlash.ms} ms`)
   check("TextEdit launched again opens a window on the display", structured(again)?.window?.app === "TextEdit", textOf(again))
   check("still no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
 

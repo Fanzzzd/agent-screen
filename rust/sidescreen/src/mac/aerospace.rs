@@ -59,6 +59,51 @@ impl AeroSpace {
             .map(|(_, workspace)| workspace.to_string()))
     }
 
+    /// Windows in the workspace shown on the monitor named `name`, in one
+    /// call: right after a display change AeroSpace answers each call late.
+    pub fn visible_windows_on(&self, name: &str) -> Result<Vec<u32>, String> {
+        Ok(self
+            .run(&[
+                "list-windows",
+                "--all",
+                "--format",
+                "%{window-id}|%{monitor-name}|%{workspace-is-visible}",
+            ])?
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '|');
+                let (id, monitor, visible) = (parts.next()?, parts.next()?, parts.next()?);
+                (monitor == name && visible == "true")
+                    .then(|| id.parse().ok())
+                    .flatten()
+            })
+            .collect())
+    }
+
+    /// The monitor AeroSpace files a window under, and whether its workspace
+    /// shows there, from one snapshot. None for a window AeroSpace doesn't
+    /// manage, such as a panel.
+    pub fn whereabouts(&self, window: u32) -> Result<Option<(String, bool)>, String> {
+        let id = window.to_string();
+        Ok(self
+            .run(&[
+                "list-windows",
+                "--all",
+                "--format",
+                "%{window-id}|%{monitor-name}|%{workspace-is-visible}",
+            ])?
+            .lines()
+            .find_map(|line| {
+                let mut parts = line.splitn(3, '|');
+                (parts.next()? == id).then(|| {
+                    (
+                        parts.next().unwrap_or("").to_string(),
+                        parts.next() == Some("true"),
+                    )
+                })
+            }))
+    }
+
     pub fn monitor_id(&self, name: &str) -> Result<Option<String>, String> {
         Ok(self
             .run(&["list-monitors", "--format", "%{monitor-id}|%{monitor-name}"])?

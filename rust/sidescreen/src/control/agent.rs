@@ -708,6 +708,7 @@ async fn create_display(
         title: p.string("title").unwrap_or_else(|| "Untitled".into()),
         connection,
     };
+    let started = Instant::now();
     let reply = core
         .update(cx, |c, cx| {
             let id = c.create((width, height), Some(owner), cx)?;
@@ -725,6 +726,7 @@ async fn create_display(
     // Answer once the display is where it stays, so a first screenshot
     // shows only the display.
     let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
+    let created = started.elapsed().as_millis();
     for _ in 0..40 {
         if core.read_with(cx, |c, _| c.tucked.contains(&id)) {
             break;
@@ -736,6 +738,7 @@ async fn create_display(
     // Stock AeroSpace may show one of the user's workspaces on the new
     // display until the shell's guard moves it back; their windows must
     // not reach the agent.
+    let tucked = started.elapsed().as_millis();
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
     if let Some(screen) = screen {
         for _ in 0..30 {
@@ -747,14 +750,9 @@ async fn create_display(
                         let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() else {
                             return true;
                         };
-                        let Ok(Some(monitor)) = aerospace.monitor_id(&screen) else {
-                            return true;
-                        };
                         aerospace
-                            .visible_workspace(&monitor)
+                            .visible_windows_on(&screen)
                             .ok()
-                            .flatten()
-                            .and_then(|w| aerospace.window_ids(&w).ok())
                             .is_none_or(|windows| windows.is_empty())
                     }
                 })
@@ -767,6 +765,10 @@ async fn create_display(
                 .await;
         }
     }
+    log::debug!(
+        "createDisplay {id}: created {created} ms, parked {tucked} ms, clear of the user's workspaces {} ms",
+        started.elapsed().as_millis()
+    );
     Ok(reply)
 }
 
@@ -978,12 +980,18 @@ fn open_target(text: &str) -> Result<String, ControlError> {
 async fn open_in_background(
     app: std::path::PathBuf,
     target: Option<String>,
+    hidden: bool,
     cx: &mut AsyncApp,
 ) -> bool {
     cx.background_executor()
         .spawn(async move {
             let mut open = std::process::Command::new("/usr/bin/open");
             open.arg("-g");
+            // A starting app draws its first window wherever macOS puts it,
+            // on the user's screen; hidden, it draws nothing until moved.
+            if hidden {
+                open.arg("-j");
+            }
             match target {
                 Some(target) => open.arg("-a").arg(&app).arg(target),
                 None => open.arg(&app),
@@ -1050,6 +1058,12 @@ async fn launch_now(
             .collect::<Vec<_>>()
     }));
     let was_running = app::running_pid(&path).is_some();
+    // New windows go straight onto the display, before the user sees them
+    // or AeroSpace files them in the user's workspace.
+    let bounds = cg::display_bounds(id);
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone());
+    let mut catch = app::running_pid(&path).and_then(catch_from);
 
     // A starting app opens the URL or file in its first window. A running
     // one opens a file in a window of its own, but a URL as a tab of its
@@ -1059,20 +1073,63 @@ async fn launch_now(
     let first = (!was_running || !is_url)
         .then(|| target.map(String::from))
         .flatten();
-    if !open_in_background(path.clone(), first, cx).await {
+    // Opening a running app with nothing to open only reopens it, and
+    // TextEdit and others answer a reopen with a window of their own, on
+    // the user's screen, besides the one Command-N asks for below.
+    if (!was_running || first.is_some())
+        && !open_in_background(path.clone(), first, !was_running, cx).await
+    {
         return Err(ControlError::failed(format!("could not open {name}")));
     }
     let mut pid = None;
-    for _ in 0..40 {
+    for _ in 0..200 {
         pid = app::running_pid(&path);
         if pid.is_some() {
             break;
         }
         cx.background_executor()
-            .timer(Duration::from_millis(100))
+            .timer(Duration::from_millis(20))
             .await;
     }
     let pid = pid.ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
+    // A starting app takes accessibility observers only once it has set
+    // up; until then, try again, and move any window that beats it.
+    for _ in 0..100 {
+        if catch.is_some() {
+            break;
+        }
+        catch = catch_from(pid);
+        for w in windows::all() {
+            if w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id) {
+                let _ = ax::move_into(w.target, bounds);
+            }
+        }
+        if catch.is_none() {
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+    }
+    log::debug!(
+        "launch: {name} is pid {pid}, catching new windows: {}",
+        catch.is_some()
+    );
+    // Started hidden: once its windows sit on the display, show them there.
+    if !was_running {
+        for _ in 0..150 {
+            let moved = cx
+                .background_executor()
+                .spawn(async move { ax::move_all_into(pid, bounds) })
+                .await;
+            if moved > 0 {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+        app::unhide(pid);
+    }
 
     // A running app opens no window on launch; ask it for a new one.
     if was_running
@@ -1097,7 +1154,7 @@ async fn launch_now(
                 && is_url
                 && let Some(target) = target
             {
-                open_in_background(path.clone(), Some(target.to_string()), cx).await;
+                open_in_background(path.clone(), Some(target.to_string()), false, cx).await;
             }
             return Ok(Some(placed));
         }

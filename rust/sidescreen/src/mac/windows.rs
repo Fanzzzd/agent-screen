@@ -146,18 +146,14 @@ pub fn held(target: WindowTarget, display: DisplayId, screen_name: Option<&str>)
     let Some(aerospace) = AeroSpace::current() else {
         return true;
     };
-    let Some(monitor) = screen_name.and_then(|name| aerospace.monitor_id(name).ok().flatten())
-    else {
+    let Some(name) = screen_name else {
         return true;
     };
-    match (
-        aerospace.workspace_of(target.window_id),
-        aerospace.visible_workspace(&monitor),
-    ) {
-        (Ok(Some(workspace)), Ok(Some(visible))) => workspace == visible,
+    match aerospace.whereabouts(target.window_id) {
+        Ok(Some((monitor, visible))) => monitor == name && visible,
         // Not managed by AeroSpace, such as a panel: its bounds decide.
-        (Ok(None), _) => true,
-        _ => false,
+        Ok(None) => true,
+        Err(_) => false,
     }
 }
 

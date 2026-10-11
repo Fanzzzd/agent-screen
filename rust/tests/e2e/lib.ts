@@ -188,6 +188,21 @@ export const stopTestApp = async () => {
   for (let i = 0; i < 50 && (await listening()); i++) await Bun.sleep(100)
 }
 
+/**
+ * Wait until the user has been idle for 45 s with the screen unlocked.
+ * Tests beside the user's app that open windows need it: macOS shows a new
+ * window on the user's screen for a moment before Sidescreen moves it.
+ */
+export const waitForIdle = async (limit = 3600) => {
+  if (process.env.E2E_NOW === "1") return probe("locked") === "0"
+  const start = Date.now()
+  while (Date.now() - start < limit * 1000) {
+    if (Number(probe("idle")) >= 45 && probe("locked") === "0") return true
+    await Bun.sleep(5000)
+  }
+  return false
+}
+
 /** Wait until the screen is unlocked: a locked screen blocks input and capture. */
 export const waitForUnlocked = async (limit = 3600) => {
   const start = Date.now()

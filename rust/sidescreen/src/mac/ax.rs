@@ -254,17 +254,34 @@ pub fn move_into(target: WindowTarget, bounds: Rect) -> Result<(), MoveError> {
         return Err(MoveError::Rejected);
     }
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    move_element_into(&window, bounds)
+}
+
+/// Move every window of `pid` into `bounds`; how many there were.
+pub fn move_all_into(pid: i32, bounds: Rect) -> usize {
+    elements_attribute(&application(pid), "AXWindows")
+        .iter()
+        .filter(|w| string_attribute(w, "AXRole").as_deref() == Some("AXWindow"))
+        .filter(|w| move_element_into(w, bounds).is_ok())
+        .count()
+}
+
+/// Center a window element inside `bounds`, shrunk to fit.
+pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
+    if bounds.width <= 80.0 || bounds.height <= 80.0 {
+        return Err(MoveError::Rejected);
+    }
     let area = bounds.inset(40.0, 40.0);
-    let size = attribute(&window, "AXSize")
+    let size = attribute(window, "AXSize")
         .and_then(|v| size_value(&v))
         .unwrap_or(CGSize::new(800.0, 600.0));
     let fitted = (size.width.min(area.width), size.height.min(area.height));
     let (mid_x, mid_y) = area.mid();
-    if !set_position(&window, mid_x - fitted.0 / 2.0, mid_y - fitted.1 / 2.0) {
+    if !set_position(window, mid_x - fitted.0 / 2.0, mid_y - fitted.1 / 2.0) {
         return Err(MoveError::Rejected);
     }
     if fitted != (size.width, size.height) {
-        set_size(&window, fitted.0, fitted.1);
+        set_size(window, fitted.0, fitted.1);
     }
     Ok(())
 }

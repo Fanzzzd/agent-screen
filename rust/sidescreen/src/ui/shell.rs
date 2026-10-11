@@ -1927,6 +1927,14 @@ impl Shell {
 
 /// Check one Agent Display; a conflict when its workspace cannot move.
 fn guard(aerospace: &AeroSpace, name: &str, ours: &HashSet<u32>) -> Option<(String, String)> {
+    // One call when nothing is wrong, the usual case: AeroSpace answers
+    // slowly right after a display change, and every call waits in line.
+    if aerospace
+        .visible_windows_on(name)
+        .is_ok_and(|windows| windows.iter().all(|w| ours.contains(w)))
+    {
+        return None;
+    }
     let monitor = aerospace.monitor_id(name).ok().flatten()?;
     // Each eviction makes AeroSpace pick another workspace; stop after a few.
     for _ in 0..3 {

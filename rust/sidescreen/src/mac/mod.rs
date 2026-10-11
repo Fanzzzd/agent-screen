@@ -5,6 +5,7 @@ pub mod app;
 pub mod assist;
 pub mod ax;
 pub mod capture;
+pub mod catch;
 pub mod cg;
 pub mod display;
 pub mod input;

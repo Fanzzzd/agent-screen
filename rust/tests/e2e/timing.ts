@@ -16,7 +16,7 @@ await (instance ? startTestApp() : startDebugApp())
 const control = await Control.connect()
 const times: number[] = []
 try {
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < Number(process.env.RUNS || 10); i++) {
     const start = performance.now()
     const display = await control.call("createDisplay", { sessionKey: `timing-${i}`, title: "Timing" })
     times.push(Math.round(performance.now() - start))

@@ -20,6 +20,13 @@ pub fn running_pid(bundle: &Path) -> Option<i32> {
     })
 }
 
+/// Show a hidden app's windows, where they are now.
+pub fn unhide(pid: i32) {
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        app.unhide();
+    }
+}
+
 /// An app by bundle id or name, as an .app path.
 pub fn resolve(app: &str) -> Option<PathBuf> {
     if let Some(url) = NSWorkspace::sharedWorkspace()
