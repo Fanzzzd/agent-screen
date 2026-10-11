@@ -710,13 +710,17 @@ async fn create_display(
     };
     // Where the user's AeroSpace workspaces are, so the guard can put back
     // any the new display takes. With ignored-monitors it takes none.
-    let aerospace_takes = !crate::mac::aerospace::ignores_now();
-    cx.background_executor()
+    // Read AeroSpace's state now: the user may have started, quit or
+    // reconfigured it since Sidescreen last looked.
+    let aerospace_takes = cx
+        .background_executor()
         .spawn(async move {
-            if aerospace_takes && let Some(aerospace) = crate::mac::aerospace::AeroSpace::current()
-            {
+            use crate::mac::aerospace;
+            let takes = aerospace::ignoring().is_some_and(|i| i != aerospace::Ignoring::Yes);
+            if takes && let Some(aerospace) = aerospace::AeroSpace::current() {
                 aerospace.remember_before_first();
             }
+            takes
         })
         .await;
     let started = Instant::now();
@@ -993,7 +997,7 @@ async fn open_in_background(
     target: Option<String>,
     hidden: bool,
     cx: &mut AsyncApp,
-) -> bool {
+) -> Option<std::sync::mpsc::Receiver<bool>> {
     cx.background_executor()
         .spawn(async move {
             let mut open = std::process::Command::new("/usr/bin/open");
@@ -1021,19 +1025,18 @@ async fn open_in_background(
                 "YES",
             ]);
             // `open` returns once the app has finished starting, a second
-            // or more; the caller watches for the process meanwhile. An app
-            // that fails to open never shows up there.
-            match open.spawn() {
-                Ok(mut child) => {
-                    std::thread::spawn(move || {
-                        if !child.wait().is_ok_and(|s| s.success()) {
-                            log::warn!("open failed for {}", app.display());
-                        }
-                    });
-                    true
+            // or more; the caller watches for the process meanwhile, and
+            // hears whether `open` succeeded when it ends.
+            let mut child = open.spawn().ok()?;
+            let (done, outcome) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ok = child.wait().is_ok_and(|s| s.success());
+                if !ok {
+                    log::warn!("open failed for {}", app.display());
                 }
-                Err(_) => false,
-            }
+                let _ = done.send(ok);
+            });
+            Some(outcome)
         })
         .await
 }
@@ -1104,16 +1107,29 @@ async fn launch_now(
     // Opening a running app with nothing to open only reopens it, and
     // TextEdit and others answer a reopen with a window of their own, on
     // the user's screen, besides the one Command-N asks for below.
-    if (!was_running || first.is_some())
-        && !open_in_background(path.clone(), first, !was_running, cx).await
-    {
-        return Err(ControlError::failed(format!("could not open {name}")));
-    }
+    let could_not_open = || ControlError::failed(format!("could not open {name}"));
+    let opening = if !was_running || first.is_some() {
+        Some(
+            open_in_background(path.clone(), first, !was_running, cx)
+                .await
+                .ok_or_else(could_not_open)?,
+        )
+    } else {
+        None
+    };
+    let failed = |opening: &Option<std::sync::mpsc::Receiver<bool>>| {
+        opening
+            .as_ref()
+            .is_some_and(|o| matches!(o.try_recv(), Ok(false)))
+    };
     let mut pid = None;
     for _ in 0..200 {
         pid = app::running_pid(&path);
         if pid.is_some() {
             break;
+        }
+        if failed(&opening) {
+            return Err(could_not_open());
         }
         cx.background_executor()
             .timer(Duration::from_millis(20))
@@ -1168,14 +1184,24 @@ async fn launch_now(
         crate::mac::input::post_key_to_pid(pid, chord);
     }
 
+    // A running app may be the user's: its new window is the one the catch
+    // took, never one the user opens meanwhile. A starting app's windows
+    // are all Sidescreen's.
+    let is_ours = |w: &windows::Window, taken: Option<u32>| {
+        w.target.pid == pid
+            && w.layer == 0
+            && !before.contains(&w.target.window_id)
+            && (!was_running || taken == Some(w.target.window_id))
+    };
     for _ in 0..120 {
         cx.background_executor()
             .timer(Duration::from_millis(50))
             .await;
-        if let Some(fresh) = windows::all()
-            .into_iter()
-            .find(|w| w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id))
-        {
+        if failed(&opening) {
+            return Err(could_not_open());
+        }
+        let taken = catch.as_ref().and_then(|c| c.taken());
+        if let Some(fresh) = windows::all().into_iter().find(|w| is_ours(w, taken)) {
             let found = started.elapsed().as_millis();
             let placed = settle(core, fresh.target, id, cx).await?;
             log::debug!(
@@ -1188,32 +1214,54 @@ async fn launch_now(
                 && is_url
                 && let Some(target) = target
             {
-                open_in_background(path.clone(), Some(target.to_string()), false, cx).await;
+                let opened =
+                    match open_in_background(path.clone(), Some(target.to_string()), false, cx)
+                        .await
+                    {
+                        Some(outcome) => {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    outcome
+                                        .recv_timeout(Duration::from_secs(10))
+                                        .unwrap_or(false)
+                                })
+                                .await
+                        }
+                        None => false,
+                    };
+                if !opened {
+                    return Err(ControlError::failed(format!(
+                        "{name} opened a window on the display but not {target}; open it there yourself"
+                    )));
+                }
             }
             return Ok(Some(placed));
         }
     }
     // A slow launch can open its window after we stop waiting. Keep watching
-    // so it does not stay on the user's screen.
+    // so it does not stay on the user's screen. Only for an app Sidescreen
+    // started: a running app's later windows may be the user's.
     let core = core.clone();
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        for _ in 0..200 {
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            if let Some(late) = windows::all().into_iter().find(|w| {
-                w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id)
-            }) {
-                let _ = settle(&core, late.target, id, cx).await;
-                return;
+    if !was_running {
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            for _ in 0..200 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                if let Some(late) = windows::all().into_iter().find(|w| {
+                    w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id)
+                }) {
+                    let _ = settle(&core, late.target, id, cx).await;
+                    return;
+                }
+                // Ended or removed meanwhile: the window stays where it opened.
+                if !takes_windows(&core, id, cx) {
+                    return;
+                }
             }
-            // Ended or removed meanwhile: the window stays where it opened.
-            if !takes_windows(&core, id, cx) {
-                return;
-            }
-        }
-    })
-    .detach();
+        })
+        .detach();
+    }
     // The URL waits for the new window, which never came: opening it now
     // would add a tab to whatever window the user has in front.
     if was_running && is_url {

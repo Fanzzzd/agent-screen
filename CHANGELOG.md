@@ -5,8 +5,8 @@
 Agents' windows stay off your screen, and launch_app is faster.
 
 - A launched app's new window moves onto the agent's display the moment macOS creates it. An app that wasn't running starts hidden and shows once its window is there.
-- When an agent opens a window in an app you also use, Sidescreen takes only that one window; yours stay where they are.
-- `launch_app` for an app that is already running: 612 ms median, was 1244. `create_display`: 772 ms median.
+- When an agent opens a window in an app you also use, the window it asked for moves onto its display the moment macOS creates it.
+- `launch_app` for an app that is already running: 612 ms median, was 1244. `create_display`: 772 ms median. Measured with AeroSpace set to ignore agent displays.
 
 If you use AeroSpace: Sidescreen puts any workspace a new display takes back on the monitor it came from, and the menu offers to set AeroSpace's `ignored-monitors` so it leaves agent displays alone. See [docs/aerospace.md](https://github.com/Fanzzzd/sidescreen/blob/main/docs/aerospace.md).
 

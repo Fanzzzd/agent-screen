@@ -225,7 +225,7 @@ pub fn definitions() -> Vec<Value> {
             "launch_app",
             "Launch an app on the display",
             &[
-                "Open an app in the background and put its new window on the display. If the app is already running, a new window is opened for you instead of taking the user's.",
+                "Open an app in the background and put its new window on the display. If the app is already running, Sidescreen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
                 "With open, the app opens that URL or file in the window.",
             ],
             object(
@@ -519,7 +519,7 @@ pub async fn run(
             Ok(Output::Object(match reply.get("window") {
                 Some(window) if !window.is_null() => json!({ "window": window }),
                 _ => {
-                    json!({ "window": null, "note": "The app opened but no new window appeared yet. A window it opens in the next 30 s moves onto the display; call list_windows to check. A running single-window app opens none: use place_window instead." })
+                    json!({ "window": null, "note": "No new window appeared on the display. An app Sidescreen started may still open one; a window it opens in the next 30 s moves onto the display: call list_windows to check. An app that was already running may have opened the file in an existing window, or, like a single-window app, opened none: use place_window to move one." })
                 }
             }))
         }

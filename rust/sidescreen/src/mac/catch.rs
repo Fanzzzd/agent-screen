@@ -49,6 +49,8 @@ struct Target {
     screen: Option<String>,
     /// How many more windows to take; None for every one.
     left: std::cell::Cell<Option<usize>>,
+    /// The last window taken.
+    taken: std::cell::Cell<Option<u32>>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -81,6 +83,7 @@ impl Catch {
             bounds: super::cg::display_bounds(display),
             screen,
             left: std::cell::Cell::new(limit),
+            taken: std::cell::Cell::new(None),
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -100,6 +103,11 @@ impl Catch {
             );
         }
         Some(Catch { observer, target })
+    }
+
+    /// The window id of the last window taken, if any.
+    pub fn taken(&self) -> Option<u32> {
+        unsafe { (*self.target).taken.get() }
     }
 }
 
@@ -137,6 +145,7 @@ extern "C" fn created(
     if !taken {
         return;
     }
+    target.taken.set(ax::window_id(window));
     let moved = ax::move_element_into(window, target.bounds).is_ok();
     log::debug!("catch: a new window, moved onto the display: {moved}");
     // AeroSpace registers the window a moment later, in the user's focused

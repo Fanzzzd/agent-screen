@@ -458,8 +458,14 @@ fn ignored_monitors_list(text: &str) -> Option<std::ops::Range<usize>> {
 fn list_end(text: &str) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
+    let mut comment = false;
     for (i, c) in text.char_indices() {
+        if comment {
+            comment = c != '\n';
+            continue;
+        }
         match (quote, c) {
+            (None, '#') => comment = true,
             (Some('"'), '\\') if !escaped => {
                 escaped = true;
                 continue;
@@ -474,6 +480,38 @@ fn list_end(text: &str) -> Option<usize> {
     None
 }
 
+/// TOML text without its `#` comments; quoted `#`s stay.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut quote, mut escaped, mut comment) = (None, false, false);
+    for c in text.chars() {
+        if comment {
+            comment = c != '\n';
+            if !comment {
+                out.push(c);
+            }
+            continue;
+        }
+        match (quote, c) {
+            (None, '#') => {
+                comment = true;
+                continue;
+            }
+            (Some('"'), '\\') if !escaped => {
+                escaped = true;
+                out.push(c);
+                continue;
+            }
+            (Some(q), c) if c == q && !escaped => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            _ => {}
+        }
+        escaped = false;
+        out.push(c);
+    }
+    out
+}
+
 /// Whether a config's `ignored-monitors` matches Agent Displays. AeroSpace
 /// takes each entry as a case-insensitive regex searched in the name.
 pub fn ignores_agent_displays(text: &str) -> bool {
@@ -481,13 +519,15 @@ pub fn ignores_agent_displays(text: &str) -> bool {
         return false;
     };
     let entries = regex::Regex::new(r#"'([^']*)'|"((?:[^"\\]|\\.)*)""#).unwrap();
-    entries.captures_iter(&text[list]).any(|c| {
-        let pattern = c.get(1).or(c.get(2)).map_or("", |m| m.as_str());
-        regex::RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .build()
-            .is_ok_and(|r| r.is_match(DISPLAY_NAME))
-    })
+    entries
+        .captures_iter(&without_comments(&text[list]))
+        .any(|c| {
+            let pattern = c.get(1).or(c.get(2)).map_or("", |m| m.as_str());
+            regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .is_ok_and(|r| r.is_match(DISPLAY_NAME))
+        })
 }
 
 /// A config with Agent Displays added to `ignored-monitors`.
@@ -532,8 +572,11 @@ fn not_written(reason: impl Into<String>) -> NotIgnored {
     }
 }
 
-/// Replace a file in one step, so AeroSpace never reads half of it.
+/// Replace a file in one step, so AeroSpace never reads half of it. A
+/// symlinked config, as dotfile managers make, keeps its link: the file it
+/// points to changes.
 fn replace(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let temporary = path.with_file_name(format!(".{name}.sidescreen"));
     std::fs::write(&temporary, text)?;
@@ -589,7 +632,12 @@ pub fn ignore_agent_displays() -> Result<Ignored, NotIgnored> {
             None
         }
     };
-    replace(&path, &with_agent_displays_ignored(&base)).map_err(|e| not_written(e.to_string()))?;
+    replace(&path, &with_agent_displays_ignored(&base)).map_err(|e| {
+        not_written(format!(
+            "{} can't be written ({e}); if your dotfiles manage it, add ignored-monitors = ['^Sidescreen'] there",
+            path.display()
+        ))
+    })?;
     if let Err(refused) = aerospace.run(&["reload-config", "--no-gui"]) {
         let restored = match &old {
             Some(old) => replace(&path, old),
@@ -684,6 +732,31 @@ mod tests {
         );
         assert_eq!(to_show(&before, &back), vec!["11".to_string()]);
         assert!(to_show(&before, &before).is_empty());
+    }
+
+    #[test]
+    fn skips_comments_in_the_list() {
+        let text = "ignored-monitors = [\n  'dummy', # don't touch\n  '^Sidescreen',\n]\n";
+        assert!(ignores_agent_displays(text));
+    }
+
+    #[test]
+    fn writes_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("sidescreen-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (real, link) = (dir.join("real.toml"), dir.join("aerospace.toml"));
+        std::fs::write(&real, "old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        replace(&link, "new").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Reads the AeroSpace running on this Mac; changes nothing.

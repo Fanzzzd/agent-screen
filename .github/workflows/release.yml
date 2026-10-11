@@ -4,7 +4,9 @@
 # section and the DMG, then points the Homebrew tap at it.
 #
 # Run it from the Actions tab for a dry run: check, sign and build only,
-# with the DMG kept as an artifact.
+# with the DMG kept as an artifact. With "publish" ticked it publishes the
+# current version instead, skipping what's already done: to finish a
+# release that failed partway.
 #
 # Secrets:
 # - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
@@ -18,6 +20,11 @@ on:
     types: [closed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the current version, skipping what is already done'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -73,7 +80,7 @@ jobs:
         run: rust/sidescreen/scripts/release.sh
 
       - name: Keep the dry run's DMG
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && !inputs.publish
         uses: actions/upload-artifact@v4
         with:
           name: dry-run
@@ -82,19 +89,23 @@ jobs:
             rust/target/sidescreen.rb
 
       - uses: knope-dev/action@v2.1.2
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         with:
           version: 0.23.0
 
       - name: Publish the release
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          knope release --verbose
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "v$VERSION is already released"
+          else
+            knope release --verbose
+          fi
           # What users download must be what the cask names.
           gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
           want="$(awk -F'"' '/sha256/ { print $2 }' rust/target/sidescreen.rb)"
@@ -102,7 +113,7 @@ jobs:
           [[ "$want" == "$got" ]] || { echo "::error::downloaded DMG is $got, cask says $want"; exit 1; }
 
       - name: Point the tap at it
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -115,6 +126,10 @@ jobs:
           git clone -q git@github.com:Fanzzzd/homebrew-sidescreen.git "$RUNNER_TEMP/tap"
           cp rust/target/sidescreen.rb "$RUNNER_TEMP/tap/Casks/sidescreen.rb"
           cd "$RUNNER_TEMP/tap"
+          if git diff --quiet; then
+            echo "The tap already has sidescreen $VERSION"
+            exit 0
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -qam "sidescreen $VERSION"

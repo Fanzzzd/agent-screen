@@ -1935,26 +1935,19 @@ open -a AeroSpace";
                     "这个版本的 AeroSpace 还不能不管显示器",
                 ),
                 &format!(
-                    "{why}
-
-{}
-
-{commands}
-
-{}",
+                    "{why}\n\n{}",
                     t(
-                        "Sidescreen's build of AeroSpace adds an ignored-monitors option, until AeroSpace has it. Install it in Terminal, keeping your config:",
-                        "在 AeroSpace 官方加上 ignored-monitors 选项之前，Sidescreen 提供一个加了这个选项的 AeroSpace。在终端里安装，你的配置不变：",
-                    ),
-                    t(
-                        "macOS keeps Accessibility per signature, so the old AeroSpace's permission doesn't carry over; the tccutil line clears it. Allow AeroSpace when macOS asks, then choose this menu item once more.",
-                        "macOS 按签名记录辅助功能权限，旧 AeroSpace 的授权对新版本无效，tccutil 那一行会把它清掉。macOS 请你授权时点允许，然后再点一次这个菜单项。",
+                        "Sidescreen's build of AeroSpace adds the option it needs and keeps your config. The guide shows the five Terminal commands; they're on your clipboard.",
+                        "Sidescreen 提供的 AeroSpace 加上了需要的选项，你的配置不变。说明页里有 5 条终端命令，已经复制到剪贴板。",
                     ),
                 ),
-                t("Copy Commands", "复制命令"),
+                t("Copy Commands and Open Guide", "复制命令并打开说明"),
             );
             if go {
                 native::copy(commands);
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("https://github.com/Fanzzzd/sidescreen/blob/main/docs/aerospace.md")
+                    .spawn();
             }
             return;
         }
@@ -2069,7 +2062,9 @@ open -a AeroSpace";
             // takes nothing: then there is nothing to guard.
             let needed = cx
                 .background_executor()
-                .spawn(async { !aerospace::ignores_now() && AeroSpace::current().is_some() })
+                .spawn(async {
+                    aerospace::ignoring().is_some_and(|i| i != aerospace::Ignoring::Yes)
+                })
                 .await;
             if !needed {
                 return;

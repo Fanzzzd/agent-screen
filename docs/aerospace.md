@@ -28,11 +28,11 @@ The build follows AeroSpace's releases. Each one is built, tested and signed in 
 
 ## Going back
 
+Remove the `ignored-monitors` line from your config first: stock AeroSpace doesn't know the option and refuses the config. Then:
+
 ```sh
 brew uninstall --cask aerospace-sidescreen
 brew install --cask nikitabobko/tap/aerospace
 tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace
 ```
-
-Then remove the `ignored-monitors` line from your config.
