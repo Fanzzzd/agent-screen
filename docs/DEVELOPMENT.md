@@ -81,6 +81,12 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 
 CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request.
 
-`.github/workflows/release.yml` publishes a release. Write the notes in `docs/releases/<version>.md`, push, then run **Release** from the Actions tab with the version, such as `0.1.3`. It sets the version in the three `Cargo.toml` files, commits and tags `v0.1.3` on `main`, runs the checks, builds and signs the DMG with `release.sh`, publishes the GitHub release, checks the downloaded DMG against the cask's sha256, and pushes the cask to `Fanzzzd/homebrew-sidescreen`. Tick **dry run** to stop after signing and building, with the DMG kept as an artifact. Pushing a `v*` tag yourself does the same from the build step on, once the tag matches `Cargo.toml`. Without a notes file, GitHub writes the notes from the commits.
+Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 
-Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) and `TAP_DEPLOY_KEY`, a write deploy key of the tap. Releases aren't notarized.
+1. With each change users will notice, add a changeset: `knope document-change` asks for the kind (patch, minor or major) and a summary, and writes `.changeset/<name>.md`. Write the summary for users. CI warns when the app changes without one; tests and refactors need none.
+2. Every push to `main` with changesets runs `prepare-release.yml`. It keeps one pull request, **Release Sidescreen x.y.z**, open from the `release` branch: the version in the three `Cargo.toml` files and `Cargo.lock`, and a new `CHANGELOG.md` section from the changesets, which it deletes.
+3. Merging that pull request runs `release.yml`. It runs the checks, builds and signs the DMG with `release.sh`, has knope tag `v<version>` and publish the GitHub release with the changelog section and the DMG, checks the downloaded DMG against the cask's sha256, and pushes the cask to `Fanzzzd/homebrew-sidescreen`.
+
+Running **Release** from the Actions tab is a dry run: checks, signing and the DMG, kept as an artifact, and nothing published.
+
+Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`) and `TAP_DEPLOY_KEY`, a write deploy key of the tap. Releases aren't notarized. Commit messages stay plain sentences: knope ignores conventional commits here.

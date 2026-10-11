@@ -1,0 +1,45 @@
+# Keeps a "Release Sidescreen x.y.z" pull request open while .changeset
+# holds changes: knope sets the version and writes CHANGELOG.md on the
+# `release` branch. Merging it runs release.yml. See docs/DEVELOPMENT.md.
+name: Prepare release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency: prepare-release
+
+jobs:
+  prepare-release:
+    # A merged release pull request has nothing left to prepare.
+    if: ${{ !contains(github.event.head_commit.message, 'Release Sidescreen ') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Any changesets?
+        id: changes
+        run: |
+          if compgen -G ".changeset/*.md" > /dev/null; then
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changesets since the last release."
+          fi
+      - name: Configure Git
+        if: steps.changes.outputs.pending
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - uses: knope-dev/action@v2.1.2
+        if: steps.changes.outputs.pending
+        with:
+          version: 0.23.0
+      - run: knope prepare-release --verbose
+        if: steps.changes.outputs.pending
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

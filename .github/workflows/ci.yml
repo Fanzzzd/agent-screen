@@ -22,3 +22,25 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  changeset:
+    # A reminder, not a gate: tests and refactors need no changeset.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Does the app change come with a changeset?
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$BEFORE" 2>/dev/null || exit 0
+          changed="$(git diff --name-only "$BEFORE" "$AFTER")"
+          app="$(grep -E '^rust/sidescreen(-mcp|-model)?/(src|resources)/' <<<"$changed" || true)"
+          notes="$(grep -E '^\.changeset/.+\.md$' <<<"$changed" || true)"
+          if [[ -n "$app" && -z "$notes" ]]; then
+            echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."
+          fi

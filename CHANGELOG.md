@@ -1,3 +1,7 @@
+# Changelog
+
+## 0.1.2 (2026-10-11)
+
 Agents' windows stay off your screen, and launch_app is faster.
 
 - A launched app's new window moves onto the agent's display the moment macOS creates it. An app that wasn't running starts hidden and shows once its window is there.

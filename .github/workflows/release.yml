@@ -1,13 +1,10 @@
-# Builds, signs and publishes a Sidescreen release, then points the
-# Homebrew tap at it.
+# Publishes a release when a "Release Sidescreen x.y.z" pull request from
+# prepare-release.yml merges: checks, signs and builds the DMG, has knope
+# tag v<version> and publish the GitHub release with the CHANGELOG.md
+# section and the DMG, then points the Homebrew tap at it.
 #
-# Two ways in:
-# - Run the workflow from the Actions tab with a version, such as 0.1.3: it
-#   sets that version in the Cargo.toml files, commits, tags v0.1.3 and pushes.
-# - Push a tag v0.1.3 yourself, after setting the version in Cargo.toml.
-#
-# Release notes come from docs/releases/<version>.md if it exists, else
-# GitHub writes them from the commits.
+# Run it from the Actions tab for a dry run: check, sign and build only,
+# with the DMG kept as an artifact.
 #
 # Secrets:
 # - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
@@ -17,17 +14,10 @@
 name: Release
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version without the v, such as 0.1.3'
-        required: true
-      dry_run:
-        description: 'Check, sign and build only: no commit, tag, release or tap change'
-        type: boolean
-        default: false
-  push:
-    tags: ['v*']
 
 permissions:
   contents: write
@@ -36,44 +26,18 @@ concurrency: release
 
 jobs:
   release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged && github.head_ref == 'release')
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Set the version, commit and tag
-        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like 0.1.3"; exit 1; }
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::v$VERSION is already tagged"; exit 1
-          fi
-          for toml in rust/sidescreen/Cargo.toml rust/sidescreen-mcp/Cargo.toml rust/sidescreen-model/Cargo.toml; do
-            sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$toml"
-          done
-          (cd rust && cargo metadata --format-version 1 >/dev/null)
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -qam "Sidescreen $VERSION"
-          git tag "v$VERSION"
-          git push origin HEAD:main "v$VERSION"
-
-      - name: Check the tag matches Cargo.toml
+      - name: Version
         id: version
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          version="$(awk -F'"' '/^version/ { print $2; exit }' rust/sidescreen/Cargo.toml)"
-          tag="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
-          if [[ "$DRY_RUN" != true && "$tag" != "v$version" ]]; then
-            echo "::error::tag $tag but Cargo.toml says $version"; exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(awk -F'"' '/^version/ { print $2; exit }' rust/sidescreen/Cargo.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -109,7 +73,7 @@ jobs:
         run: rust/sidescreen/scripts/release.sh
 
       - name: Keep the dry run's DMG
-        if: inputs.dry_run
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: dry-run
@@ -117,17 +81,20 @@ jobs:
             rust/target/Sidescreen-*.dmg
             rust/target/sidescreen.rb
 
+      - uses: knope-dev/action@v2.1.2
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          version: 0.23.0
+
       - name: Publish the release
-        if: ${{ !inputs.dry_run }}
+        if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          notes=(--generate-notes)
-          [[ -f "docs/releases/$VERSION.md" ]] && notes=(--notes-file "docs/releases/$VERSION.md")
-          gh release create "v$VERSION" "rust/target/Sidescreen-$VERSION.dmg" \
-            --title "Sidescreen $VERSION" "${notes[@]}"
+          knope release --verbose
           # What users download must be what the cask names.
           gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
           want="$(awk -F'"' '/sha256/ { print $2 }' rust/target/sidescreen.rb)"
@@ -135,7 +102,7 @@ jobs:
           [[ "$want" == "$got" ]] || { echo "::error::downloaded DMG is $got, cask says $want"; exit 1; }
 
       - name: Point the tap at it
-        if: ${{ !inputs.dry_run }}
+        if: github.event_name != 'workflow_dispatch'
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
