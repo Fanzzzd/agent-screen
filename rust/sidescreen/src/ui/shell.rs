@@ -1411,12 +1411,24 @@ impl Shell {
             MenuAction::CreateDisplay => self.create_display(cx),
             MenuAction::GrantPermissions => self.open_setup(cx),
             MenuAction::OpenAeroSpaceConfig => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let config = [".config/aerospace/aerospace.toml", ".aerospace.toml"]
+                let pinned: Vec<String> = self
+                    .conflicts
                     .iter()
-                    .map(|p| std::path::Path::new(&home).join(p))
-                    .find(|p| p.exists());
-                if let Some(config) = config {
+                    .map(|(workspace, _)| workspace.clone())
+                    .collect();
+                let go = native::confirm(
+                    t(
+                        "A workspace is pinned to a monitor number",
+                        "有工作区被固定到了显示器编号",
+                    ),
+                    &tf!(
+                        "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Sidescreen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Sidescreen's AeroSpace and add ignored-monitors.",
+                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 agent 的显示器上，Sidescreen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Sidescreen 版 AeroSpace 并加上 ignored-monitors。",
+                        pinned.join(", ")
+                    ),
+                    t("Open Config", "打开配置"),
+                );
+                if go && let Some(config) = aerospace::config_path() {
                     let _ = std::process::Command::new("/usr/bin/open")
                         .arg(config)
                         .spawn();
@@ -1976,17 +1988,54 @@ brew install --cask aerospace-sidescreen";
                 .background_executor()
                 .spawn(async { aerospace::ignore_agent_displays() })
                 .await;
+            let short = |p: &std::path::Path| {
+                p.display()
+                    .to_string()
+                    .replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1)
+            };
             match result {
-                Ok(_) => log::info!("AeroSpace now ignores Agent Displays"),
-                Err(error) => {
-                    log::warn!("AeroSpace refused ignored-monitors: {error}");
-                    native::alert(
-                        t("AeroSpace refused the change", "AeroSpace 没有接受这个改动"),
-                        &tf!(
-                            "Your config is as it was. AeroSpace said: {}",
-                            "你的配置已经还原。AeroSpace 的提示：{}",
-                            error
+                Ok(done) => {
+                    log::info!("AeroSpace now ignores Agent Displays");
+                    let old = match &done.backup {
+                        Some(backup) => tf!(
+                            "Your old config is at {}.",
+                            "旧配置在 {}。",
+                            short(backup)
                         ),
+                        None => t(
+                            "You had no config; this one is AeroSpace's default plus that line.",
+                            "你原来没有配置文件；新文件是 AeroSpace 的默认配置加上这一行。",
+                        )
+                        .to_string(),
+                    };
+                    native::alert(
+                        t(
+                            "AeroSpace now leaves Sidescreen's displays alone",
+                            "AeroSpace 不再管 Sidescreen 的显示器了",
+                        ),
+                        &format!(
+                            "{}\n\n{old}",
+                            tf!(
+                                "Added ignored-monitors = ['^Sidescreen'] to {}.",
+                                "已在 {} 里加上 ignored-monitors = ['^Sidescreen']。",
+                                short(&done.config)
+                            )
+                        ),
+                    );
+                }
+                Err(failed) => {
+                    log::warn!("AeroSpace refused ignored-monitors: {}", failed.reason);
+                    let state = if failed.unchanged {
+                        t("Your config is as it was.", "你的配置没有变。")
+                    } else {
+                        t(
+                            "Sidescreen couldn't put your old config back; it's in the .before-sidescreen file beside it.",
+                            "Sidescreen 没能把旧配置放回去；它在旁边的 .before-sidescreen 文件里。",
+                        )
+                    };
+                    native::alert(
+                        t("AeroSpace didn't take the change", "AeroSpace 没有接受这个改动"),
+                        &format!("{state}\n\n{}", failed.reason),
                     );
                 }
             }
@@ -2041,6 +2090,10 @@ brew install --cask aerospace-sidescreen";
                 let conflicts = cx
                     .background_executor()
                     .spawn(async move {
+                        // With ignored-monitors, AeroSpace takes nothing.
+                        if aerospace::ignores_now() {
+                            return Vec::new();
+                        }
                         let Some(aerospace) = AeroSpace::current() else {
                             return Vec::new();
                         };
@@ -2111,7 +2164,11 @@ fn guard(aerospace: &AeroSpace, name: &str, ours: &HashSet<u32>) -> Guarded {
         }
         let home = aerospace.home_of(&workspace);
         log::info!("aerospace: workspace {workspace} took {name}; back to monitor {home}");
-        if aerospace.move_workspace(&workspace, &home).is_err() {
+        if let Err(error) = aerospace.move_workspace(&workspace, &home) {
+            // A slow AeroSpace isn't a pin; the next pass tries again.
+            if error.contains("timed out") {
+                break;
+            }
             return Guarded::Pinned(workspace, name.to_string());
         }
         result = Guarded::Moved;

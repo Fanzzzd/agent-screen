@@ -98,7 +98,11 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
   brew install --cask aerospace-sidescreen
   ```
 
-  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS asks you to allow Accessibility for AeroSpace again. Other window managers, such as yabai, are untested.
+  Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add `ignored-monitors = ['^Sidescreen']` to your AeroSpace config yourself. macOS asks you to allow Accessibility for AeroSpace again.
+
+  The build follows AeroSpace's releases; each one is built, tested and signed in [CI](https://github.com/Fanzzzd/AeroSpace/actions/workflows/sidescreen-release.yml). [Compare it with upstream](https://github.com/Fanzzzd/AeroSpace/compare/v0.21.3-Beta...sidescreen) to see the patch: 168 lines added and 20 removed across 26 files, most of them tests and docs. To go back to stock AeroSpace, run `brew uninstall --cask aerospace-sidescreen && brew install --cask nikitabobko/tap/aerospace` and remove the `ignored-monitors` line.
+
+  Other window managers, such as yabai, are untested.
 - The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
 
 ## Troubleshooting

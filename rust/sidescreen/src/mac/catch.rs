@@ -47,11 +47,30 @@ struct Target {
     bounds: Rect,
     /// The display's screen name, for AeroSpace.
     screen: Option<String>,
+    /// How many more windows to take; None for every one.
+    left: std::cell::Cell<Option<usize>>,
+}
+
+/// Whether to take a new window, and how many are left after it.
+fn take(left: Option<usize>) -> (bool, Option<usize>) {
+    match left {
+        None => (true, None),
+        Some(0) => (false, Some(0)),
+        Some(n) => (true, Some(n - 1)),
+    }
 }
 
 impl Catch {
     /// None while the app doesn't take observers yet, as just after launch.
-    pub fn start(pid: i32, display: DisplayId, screen: Option<String>) -> Option<Catch> {
+    /// `limit` caps how many windows it takes: an app the user runs too
+    /// makes windows of the user's in the meantime, so take only the one
+    /// Sidescreen asks for.
+    pub fn start(
+        pid: i32,
+        display: DisplayId,
+        screen: Option<String>,
+        limit: Option<usize>,
+    ) -> Option<Catch> {
         let mut observer: Observer = std::ptr::null_mut();
         if unsafe { AXObserverCreate(pid, created, &mut observer) } != 0 || observer.is_null() {
             return None;
@@ -61,6 +80,7 @@ impl Catch {
             display,
             bounds: super::cg::display_bounds(display),
             screen,
+            left: std::cell::Cell::new(limit),
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -112,6 +132,11 @@ extern "C" fn created(
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
         return;
     }
+    let (taken, left) = take(target.left.get());
+    target.left.set(left);
+    if !taken {
+        return;
+    }
     let moved = ax::move_element_into(window, target.bounds).is_ok();
     log::debug!("catch: a new window, moved onto the display: {moved}");
     // AeroSpace registers the window a moment later, in the user's focused
@@ -132,14 +157,18 @@ extern "C" fn created(
 
 /// Once AeroSpace registers a new window, which it files in the user's
 /// focused workspace whatever the window's position, move it to the
-/// display's workspace. Polls on a thread of its own, every 10 ms for 500 ms.
+/// display's workspace. Polls on a thread of its own, 6 times over 630 ms.
 pub fn follow_aerospace(target: WindowTarget, display: DisplayId, screen: String) {
     let id = target.window_id;
+    // With ignored-monitors, AeroSpace leaves the window alone.
+    if super::aerospace::ignores_now() {
+        return;
+    }
     std::thread::spawn(move || {
         let Some(aerospace) = super::aerospace::AeroSpace::current() else {
             return;
         };
-        for _ in 0..50 {
+        for wait in [10, 20, 40, 80, 160, 320] {
             if let Ok(Some((monitor, _))) = aerospace.whereabouts(id) {
                 if monitor != screen {
                     let _ = windows::place(target, display, Some(&screen));
@@ -147,7 +176,23 @@ pub fn follow_aerospace(target: WindowTarget, display: DisplayId, screen: String
                 log::debug!("catch: AeroSpace first had window {id} on {monitor}");
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(wait));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take;
+
+    #[test]
+    fn takes_only_as_many_windows_as_asked() {
+        assert_eq!(take(Some(1)), (true, Some(0)));
+        assert_eq!(
+            take(Some(0)),
+            (false, Some(0)),
+            "the user's next window stays"
+        );
+        assert_eq!(take(None), (true, None));
+    }
 }

@@ -1071,7 +1071,10 @@ async fn launch_now(
     // or AeroSpace files them in the user's workspace.
     let bounds = cg::display_bounds(id);
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
-    let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone());
+    // A running app may be the user's: take only the window Sidescreen
+    // opens. A starting app's windows are all Sidescreen's.
+    let limit = was_running.then_some(1);
+    let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
     let mut catch = app::running_pid(&path).and_then(catch_from);
 
     // A starting app opens the URL or file in its first window. A running
