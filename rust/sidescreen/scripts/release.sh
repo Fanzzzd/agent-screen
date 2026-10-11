@@ -69,7 +69,7 @@ cask "sidescreen" do
   desc "Virtual displays for AI agents, so they work without taking your mouse"
   homepage "https://github.com/$repo"
 
-  depends_on macos: ">= :sequoia"
+  depends_on macos: :sequoia
 
   app "Sidescreen.app"
 
