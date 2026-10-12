@@ -204,7 +204,7 @@ pub async fn handle(
             show_pointer(&core, id, released, false, cx);
             if matches!(dragged, Sent::Stopped(_)) {
                 return Err(ControlError::takeover(format!(
-                    "the user took over display {id} during the drag, which let go short of its target. Call wait_for_control to wait until they hand it back."
+                    "the user took over display {id} during the drag, which let go short of its target; near the start, the release may have acted on what it grabbed. Call wait_for_control to wait until they hand it back."
                 )));
             }
             if dragged == Sent::Nowhere {
@@ -318,7 +318,13 @@ pub async fn handle(
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let repeat = p.int("repeat").unwrap_or(1);
             let bounds = cg::display_bounds(id);
-            for chord in chords {
+            let total = chords.len();
+            for (pressed, chord) in chords.into_iter().enumerate() {
+                if forwarder.agent_stopped() {
+                    return Err(ControlError::takeover(format!(
+                        "the user took over display {id} after {pressed} of {total} keys. Call wait_for_control, then take a screenshot before you press the rest."
+                    )));
+                }
                 // Select All needs a first responder, which an app in the
                 // background lacks; set the selection through accessibility.
                 if chord == KeyChord::parse("cmd+a").expect("a chord")
@@ -1655,6 +1661,17 @@ async fn launch_now(
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
+            // Just started and no window yet: its menus may not have the
+            // item yet, and the first launch's watch moves its window when
+            // it comes.
+            ax::NewWindow::Missing
+                if app::launched_within(pid, LATE_WINDOW_WAIT)
+                    && !windows::all()
+                        .iter()
+                        .any(|w| w.target.pid == pid && w.layer == 0) =>
+            {
+                Some("still_starting")
+            }
             ax::NewWindow::Missing => Some("no_new_window"),
             ax::NewWindow::NotReady => Some("menus_unreadable"),
         };

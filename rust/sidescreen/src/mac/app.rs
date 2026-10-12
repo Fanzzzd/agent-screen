@@ -20,6 +20,13 @@ pub fn running_pid(bundle: &Path) -> Option<i32> {
     })
 }
 
+/// Whether the app started less than `span` ago.
+pub fn launched_within(pid: i32, span: std::time::Duration) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.launchDate())
+        .is_some_and(|date| -date.timeIntervalSinceNow() < span.as_secs_f64())
+}
+
 /// The frontmost app's pid.
 pub fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()

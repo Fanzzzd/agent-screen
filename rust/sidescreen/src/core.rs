@@ -95,6 +95,7 @@ impl Core {
         cx.spawn(async move |this, cx| {
             let started = std::time::Instant::now();
             let mut tries = 0;
+            let mut parked = false;
             for attempt in 0..75 {
                 // At once, then every 20 ms: each try that WindowServer takes
                 // ends the wait for create_display.
@@ -112,13 +113,20 @@ impl Core {
                     return;
                 };
                 if placed {
+                    parked = true;
                     break;
                 }
             }
-            log::debug!(
-                "display {id} parked after {tries} tries, {} ms",
-                started.elapsed().as_millis()
-            );
+            if parked {
+                log::debug!(
+                    "display {id} parked after {tries} tries, {} ms",
+                    started.elapsed().as_millis()
+                );
+            } else {
+                // create_display answers anyway: the display works where it
+                // is, but the user's pointer may wander onto it.
+                log::warn!("display {id} could not be parked after {tries} tries");
+            }
             let _ = this.update(cx, |core, _| core.tucked.insert(id));
         })
         .detach();

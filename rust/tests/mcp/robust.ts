@@ -89,6 +89,9 @@ const imageBytes = (r: any) => {
   return image ? Buffer.from(image.data, "base64").length : 0
 }
 
+// Files TextEdit has open stay until the end: deleting one under it can
+// raise an autosave sheet later.
+const temporary: string[] = []
 const { display_id } = structured(await client.request("tools/call", { name: "create_display", arguments: { title: "Robust" } }))
 try {
   // An empty display: every screenshot succeeds, small, with no wallpaper.
@@ -157,6 +160,26 @@ try {
       const typed = Number(textOf(stopped).match(/after (\d+) of/)?.[1] ?? -1)
       check("it stopped partway, not at the start or the end", typed > 0 && typed < 2000, String(typed))
     }
+
+    // The same for a held key and a drag: both let go when the user steps in.
+    {
+      const viewer = await Control.connect()
+      const takeOver = async (work: Promise<any>) => {
+        const started = Date.now()
+        await Bun.sleep(300)
+        await viewer.call("debugTakeover", { displayId: display_id, active: true })
+        const reply = await work
+        const ms = Date.now() - started
+        await viewer.call("debugTakeover", { displayId: display_id, active: false })
+        return { reply, ms }
+      }
+      const held = await takeOver(client.request("tools/call", { name: "computer", arguments: { display_id, action: "hold_key", text: "shift", duration: 5 } }))
+      check("a takeover releases a held key at once", /keys were released early/.test(textOf(held.reply)) && held.ms < 1500, `${held.ms} ms: ${textOf(held.reply).slice(0, 100)}`)
+      const w = window
+      const dragged = await takeOver(client.request("tools/call", { name: "computer", arguments: { display_id, action: "left_click_drag", start_coordinate: [w.x + 40, w.y + 60], coordinate: [w.x + w.width - 40, w.y + w.height - 40] } }))
+      check("a takeover stops a drag short of its target", /let go short of its target/.test(textOf(dragged.reply)), textOf(dragged.reply).slice(0, 120))
+      viewer.close()
+    }
   }
 
   // Two sessions launching the same app at once each get their own window.
@@ -193,13 +216,13 @@ try {
   const fileWindow = structured(opened)?.window
   check("a file opened in a running app lands on the display", fileWindow?.title?.startsWith("sidescreen robust"), textOf(opened).slice(0, 160))
   check("the file's window isn't on the user's screen", onMainDisplay("TextEdit") === 0)
-  execFileSync("/bin/rm", ["-f", file])
+  temporary.push(file)
   // The same with a file URL.
   const urlFile = `/tmp/sidescreen url ${Date.now()}.txt`
   await Bun.write(urlFile, "robust\n")
   const byUrl = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit", open: `file://${encodeURI(urlFile)}` } })
   check("a file:// URL opens like its path", structured(byUrl)?.window?.title?.startsWith("sidescreen url"), textOf(byUrl).slice(0, 160))
-  execFileSync("/bin/rm", ["-f", urlFile])
+  temporary.push(urlFile)
 
   // Copy and paste between two documents, through accessibility.
   {
@@ -266,15 +289,16 @@ try {
       (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])
         .filter((w) => w.app === "TextEdit")
     const shown = await list()
-    const before = shown.length
     const front = shown[shown.length - 1]
-    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "left_click", coordinate: [front.x + Math.round(front.width / 2), front.y + 10] } })
+    // The title bar's right end, clear of the title: a click on a
+    // document's title can open its rename popover.
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "left_click", coordinate: [front.x + front.width - 30, front.y + 10] } })
     const mainAtKey = onMainDisplay("TextEdit")
     const key = await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "cmd+n" } })
     await Bun.sleep(1000)
-    const after = (await list()).length
-    check("a window the agent's key press opens lands on the display", after === before + 1,
-      `${before} -> ${after} on the display, ${mainAtKey} -> ${onMainDisplay("TextEdit")} on the user's screen; ${textOf(key).slice(0, 80)}; before ${shown.map((w) => w.title).join("|")}; after ${(await list()).map((w) => w.title).join("|")}`)
+    const added = (await list()).filter((w) => !shown.some((s) => s.windowId === w.windowId))
+    check("a window the agent's key press opens lands on the display", added.length === 1 && added[0].kind === "window",
+      `new on the display: ${JSON.stringify(added.map((w) => ({ title: w.title, kind: w.kind, size: [w.width, w.height] })))}; ${mainAtKey} -> ${onMainDisplay("TextEdit")} on the user's screen; ${textOf(key).slice(0, 80)}`)
     await Bun.sleep(3500)
     const mainBefore = onMainDisplay("TextEdit")
     execFileSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to make new document'])
@@ -314,6 +338,7 @@ try {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
   quit("TextEdit", true)
   quit("Calculator")
+  for (const f of temporary) execFileSync("/bin/rm", ["-f", f])
   client.close()
 }
 if (instance) await stopTestApp()

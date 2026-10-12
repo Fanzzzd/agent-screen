@@ -145,13 +145,13 @@ impl Default for Forwarder {
 }
 
 impl Forwarder {
-    /// Stop the agent's long input at its next step, while the user is in
-    /// control.
     /// Whether the user is in control and the agent's input stops.
     pub fn agent_stopped(&self) -> bool {
         self.stopped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Stop the agent's long input at its next step, while the user is in
+    /// control.
     pub fn stop_agent(&self, stop: bool) {
         self.stopped
             .store(stop, std::sync::atomic::Ordering::Relaxed);
@@ -265,7 +265,8 @@ impl Forwarder {
                 w.mouse_dragged(at, Button::Left, flags(m));
                 // The user took over: let go where the pointer is, short of
                 // the drop the agent was heading for. Checked after a move,
-                // so a stopped drag never ends as a click on its source.
+                // so the release is at least a step away from the source,
+                // though still inside a large one.
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     w.mouse_up(at, Button::Left, 1, flags(m));
                     return Sent::Stopped(at);
