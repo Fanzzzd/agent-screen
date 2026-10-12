@@ -424,7 +424,7 @@ fn add_tile(
                             .text_color(theme.secondary)
                             .child(t(
                                 "Agents create their own displays. Right-click the icon for the menu.",
-                                "agent 会自己创建显示器。右键点图标打开菜单。",
+                                "Agent 会自己创建显示器。右键点图标打开菜单。",
                             )),
                     )
                 }),

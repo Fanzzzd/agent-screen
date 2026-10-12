@@ -1261,8 +1261,8 @@ impl Shell {
                 MenuAction::OpenAeroSpaceConfig,
             );
             fix.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
-                "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like et2 = 'DELL'.",
-                "workspace-to-monitor-force-assignment 里的显示器编号会被显示器占用。改用显示器名称，例如 et2 = 'DELL'。",
+                "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like 2 = 'DELL'.",
+                "Agent 显示器会占用 workspace-to-monitor-force-assignment 里的显示器编号。改用显示器名称，例如 2 = 'DELL'。",
             ))));
             menu.separator();
         }

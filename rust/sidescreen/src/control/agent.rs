@@ -1606,11 +1606,16 @@ async fn launch_now(
             break;
         }
         catch = catch_from(pid);
-        for w in windows::all() {
-            if w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id) {
-                let _ = ax::move_into(w.target, bounds);
-            }
-        }
+        let seen = before.clone();
+        cx.background_executor()
+            .spawn(async move {
+                for w in windows::all() {
+                    if w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id) {
+                        let _ = ax::move_into(w.target, bounds);
+                    }
+                }
+            })
+            .await;
         if catch.is_none() {
             cx.background_executor()
                 .timer(Duration::from_millis(20))
@@ -1658,6 +1663,10 @@ async fn launch_now(
                 .timer(Duration::from_millis(150))
                 .await;
         }
+        // Only this display's own launch has a watch that moves the window.
+        let started_here = core.read_with(cx, |c, _| {
+            c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+        });
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
@@ -1665,7 +1674,8 @@ async fn launch_now(
             // item yet, and the first launch's watch moves its window when
             // it comes.
             ax::NewWindow::Missing
-                if app::launched_within(pid, LATE_WINDOW_WAIT)
+                if started_here
+                    && app::launched_within(pid, LATE_WINDOW_WAIT)
                     && !windows::all()
                         .iter()
                         .any(|w| w.target.pid == pid && w.layer == 0) =>
@@ -1694,15 +1704,22 @@ async fn launch_now(
     // A running app may be the user's: its new window is the one the catch
     // took, never one the user opens meanwhile. A starting app's windows
     // are all Sidescreen's.
-    let is_ours = |w: &windows::Window, taken: Option<u32>| {
-        w.target.pid == pid
-            && w.layer == 0
-            && !before.contains(&w.target.window_id)
-            && (!was_running
-                || taken == Some(w.target.window_id)
-                || document
-                    .as_deref()
-                    .is_some_and(|d| shows_document(w.target, d)))
+    // Off the main thread: reading a window's document asks the app, which
+    // may be busy.
+    let find_ours = |taken: Option<u32>| {
+        let (before, document) = (before.clone(), document.clone());
+        async move {
+            windows::all().into_iter().find(|w| {
+                w.target.pid == pid
+                    && w.layer == 0
+                    && !before.contains(&w.target.window_id)
+                    && (!was_running
+                        || taken == Some(w.target.window_id)
+                        || document
+                            .as_deref()
+                            .is_some_and(|d| shows_document(w.target, d)))
+            })
+        }
     };
     let mut gave_up = false;
     // Takes over from `catch` for a file still opening, with no gap between.
@@ -1740,7 +1757,7 @@ async fn launch_now(
             gave_up = true;
             break;
         }
-        if let Some(fresh) = windows::all().into_iter().find(|w| is_ours(w, taken)) {
+        if let Some(fresh) = cx.background_executor().spawn(find_ours(taken)).await {
             let found = started.elapsed().as_millis();
             let placed = settle(core, fresh.target, id, cx).await?;
             log::debug!(
@@ -1790,13 +1807,21 @@ async fn launch_now(
     let core = core.clone();
     // The app showed the file in a window it had before; otherwise its
     // window is still to come, and the watcher above moves it.
-    let shown_already = document.as_deref().is_some_and(|d| {
-        windows::all().iter().any(|w| {
-            w.target.pid == pid
-                && before.contains(&w.target.window_id)
-                && shows_document(w.target, d)
-        })
-    });
+    let shown_already = match document.clone() {
+        Some(d) => {
+            let before = before.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    windows::all().iter().any(|w| {
+                        w.target.pid == pid
+                            && before.contains(&w.target.window_id)
+                            && shows_document(w.target, &d)
+                    })
+                })
+                .await
+        }
+        None => false,
+    };
     let watching = document
         .clone()
         .filter(|_| !shown_already)
@@ -1811,13 +1836,20 @@ async fn launch_now(
                     .timer(Duration::from_millis(150))
                     .await;
                 let taken = catch.as_ref().and_then(|c| c.taken());
-                if let Some(late) = windows::all().into_iter().find(|w| {
-                    w.target.pid == pid
-                        && w.layer == 0
-                        && !before.contains(&w.target.window_id)
-                        && (taken == Some(w.target.window_id)
-                            || shows_document(w.target, &document))
-                }) {
+                let (seen, file) = (before.clone(), document.clone());
+                let late = cx
+                    .background_executor()
+                    .spawn(async move {
+                        windows::all().into_iter().find(|w| {
+                            w.target.pid == pid
+                                && w.layer == 0
+                                && !seen.contains(&w.target.window_id)
+                                && (taken == Some(w.target.window_id)
+                                    || shows_document(w.target, &file))
+                        })
+                    })
+                    .await;
+                if let Some(late) = late {
                     let _ = settle(&core, late.target, id, cx).await;
                     break;
                 }

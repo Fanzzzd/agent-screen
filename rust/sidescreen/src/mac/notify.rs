@@ -87,7 +87,7 @@ pub fn update(display: u32, label: &str, reason: Option<&str>) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(&tf!(
         "{label} needs your help",
-        "{label} 需要你帮忙"
+        "{label} 需要你帮助"
     )));
     content.setBody(&NSString::from_str(reason));
     content.setSound(Some(&UNNotificationSound::defaultSound()));

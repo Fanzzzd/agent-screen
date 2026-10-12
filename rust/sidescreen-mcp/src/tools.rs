@@ -226,7 +226,7 @@ pub fn definitions() -> Vec<Value> {
                 "within 3 s of your input, element action or launch there, unless the user meanwhile clicked or typed in the app,",
                 "Finder, the Dock or a launcher such as Spotlight; one the user opened is theirs. Once the user takes back any",
                 "window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
-                "user to hand it over. They drag it onto your display in the Viewer, or right-click Sidescreen's menu bar icon and choose Windows > Hand Over.",
+                "user to hand it over. They drag it onto your display in the Viewer, or click Windows in the Viewer's header and choose Hand Over.",
             ],
             object(
                 json!({
@@ -917,7 +917,7 @@ fn launch_output(reply: &Value) -> Value {
                 .unwrap_or("still_starting");
             let note = match reason {
                 "existing_window" => {
-                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or right-click Sidescreen's menu bar icon and choose Windows > Hand Over."
+                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or click Windows in the Viewer's header and choose Hand Over."
                 }
                 "no_new_window" => {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."

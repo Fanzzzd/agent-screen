@@ -65,7 +65,7 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 - **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
 - **Help Request.** `request_help` sends a notification and shows the reason in Peek and the Viewer. Clicking the notification opens the display in Takeover.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
-- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows ▸ Hand Over to … in the menu. Windows ▸ Take Back Window brings any window back. A handed-over window returns to where it was.
+- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows ▸ Hand Over to … in the Viewer's header. Windows ▸ Take Back Window brings any window back. A handed-over window returns to where it was.
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Closing a display** lists its windows with what the agent suggested for each, keep or close, and you can change any of them. Esc cancels, ⌘Return confirms. Quitting Sidescreen applies the same plan without asking.
 

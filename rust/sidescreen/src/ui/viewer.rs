@@ -282,7 +282,7 @@ fn header(
             Some(theme.accent),
         )),
         Kind::Review | Kind::Disconnected => Some((
-            t("Review Windows…", "处理窗口…").to_string(),
+            t("Review Windows…", "查看窗口…").to_string(),
             None,
             Some(theme.accent),
         )),
@@ -576,7 +576,7 @@ impl Viewer {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.secondary)
-                        .child(t("Goes back where it was", "取回原位置"))
+                        .child(t("Goes back where it was", "放回原位置"))
                         .into_any_element()
                 } else {
                     segmented(index, item.fate, theme, cx).into_any_element()
@@ -720,7 +720,10 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(gpui::white())
-                .child(t("Screen Recording is off", "录屏与系统录音权限已关闭")),
+                .child(t(
+                    "Screen & System Audio Recording is off",
+                    "录屏与系统录音权限已关闭",
+                )),
         )
         .child(
             div()
@@ -932,7 +935,7 @@ fn menu_strip(
                     .group_hover("menu-strip", |s| s.opacity(1.))
                     .child(t(
                         "No menus here: no app is open on this display yet",
-                        "这里没有可用的菜单：屏幕上还没有 app",
+                        "这里没有可用的菜单：这块显示器上还没有 app",
                     )),
             )
         })
