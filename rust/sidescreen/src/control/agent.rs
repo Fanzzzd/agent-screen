@@ -718,8 +718,19 @@ fn needs_permissions(method: &str) -> bool {
 /// the setup window in front of them.
 fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     let missing = crate::mac::permissions::status().missing();
-    if missing.is_empty() {
+    let reopen = crate::mac::permissions::NEEDS_REOPEN.load(std::sync::atomic::Ordering::Relaxed);
+    if missing.is_empty() && !reopen {
         return Ok(());
+    }
+    if missing.is_empty() {
+        if let Some(shell) = crate::ui::shell::current() {
+            let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(cx));
+        }
+        return Err(ControlError {
+            code: "permission",
+            message: "The user turned on Screen Recording, and macOS applies it only once                       Sidescreen reopens. Sidescreen has put its setup window on the user's                       screen: tell the user to press Reopen Sidescreen there, then retry."
+                .into(),
+        });
     }
     if let Some(shell) = crate::ui::shell::current() {
         let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(cx));
@@ -759,9 +770,7 @@ fn usable(
             )));
         }
         if d.is_ended() && !matches!(method, "endDisplay" | "waitForControl") {
-            return Err(ControlError::ended(format!(
-                "display {id} has ended; call create_display for a new one"
-            )));
+            return Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)));
         }
         Ok(())
     })
@@ -955,16 +964,20 @@ fn undecided_strays(c: &mut Core, id: DisplayId) -> Vec<Value> {
                 .filter(|(display, _)| *display == id)
                 .map(|(_, w)| *w),
         )
-        .filter(|w| !c.told.contains(w))
+        .filter(|w| !c.told.contains(&(id, *w)))
         .collect();
     c.left_alone.retain(|(display, _)| *display != id);
+    // Most screenshots have nothing to report: skip the window list.
+    if fresh.is_empty() {
+        return Vec::new();
+    }
     let Some(d) = c.displays.get(id) else {
         return Vec::new();
     };
     let shown = windows::all();
     let mut out = Vec::new();
     for window in fresh {
-        if !c.told.insert(window) {
+        if !c.told.insert((id, window)) {
             continue;
         }
         let Some(w) = shown.iter().find(|w| w.target.window_id == window) else {
@@ -2018,13 +2031,13 @@ fn display(
         .ok_or_else(|| ControlError::invalid("displayId is required"))? as DisplayId;
     core.read_with(cx, |c, _| match c.displays.get(id) {
         None if c.displays.retired.contains(&id) => {
-            Err(ControlError::ended(format!("display {id} has ended")))
+            Err(ended_error(id, c.displays.closed_by_user.contains(&id)))
         }
         None => Err(ControlError::not_found(format!(
             "display {id} does not exist; call create_display again"
         ))),
         Some(d) if live && d.is_ended() => {
-            Err(ControlError::ended(format!("display {id} has ended")))
+            Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)))
         }
         Some(_) => Ok(id),
     })
@@ -2203,6 +2216,18 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
             );
         }
     }
+}
+
+/// The error for a call on an ended display. One the user closed means
+/// they want the agent to stop.
+fn ended_error(id: DisplayId, by_user: bool) -> ControlError {
+    ControlError::ended(if by_user {
+        format!(
+            "the user closed display {id}, so stop working on screen; ask the user before you call create_display again"
+        )
+    } else {
+        format!("display {id} has ended; call create_display for a new one")
+    })
 }
 
 fn target(

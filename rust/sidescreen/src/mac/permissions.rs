@@ -24,7 +24,7 @@ impl Permission {
     /// The name System Settings uses.
     pub fn name(self) -> &'static str {
         match self {
-            Permission::ScreenRecording => t("Screen & System Audio Recording", "屏幕录制"),
+            Permission::ScreenRecording => t("Screen & System Audio Recording", "录屏与系统录音"),
             Permission::Accessibility => t("Accessibility", "辅助功能"),
         }
     }
@@ -121,8 +121,12 @@ pub fn screen_recording() -> bool {
         .any(|w| w.target.pid != me && w.layer == 0 && !w.title.is_empty())
 }
 
-/// Whether Screen Recording was off when Sidescreen started: capture may
-/// need a fresh process even after the user turns it on.
+/// Set while Screen Recording is on but capture fails until Sidescreen
+/// reopens.
+pub static NEEDS_REOPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Screen Recording was on when Sidescreen started. Off then,
+/// capture may need a fresh process even after the user turns it on.
 pub fn screen_recording_at_launch() -> bool {
     static AT_LAUNCH: OnceLock<bool> = OnceLock::new();
     *AT_LAUNCH.get_or_init(|| CGPreflightScreenCaptureAccess())

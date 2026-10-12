@@ -719,7 +719,7 @@ fn denied_notice(shell: WeakEntity<Shell>, theme: &Theme) -> impl IntoElement {
                 .text_size(px(15.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(gpui::white())
-                .child(t("Screen Recording is off", "屏幕录制权限已关闭")),
+                .child(t("Screen Recording is off", "录屏与系统录音权限已关闭")),
         )
         .child(
             div()

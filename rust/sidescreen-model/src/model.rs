@@ -107,6 +107,8 @@ pub enum EndReason {
     Finished,
     /// Its control connection closed.
     Disconnected,
+    /// The user closed it while the agent was using it.
+    ClosedByUser,
 }
 
 /// How a window came onto an Agent Display. Decides what dismissal does with
@@ -347,6 +349,9 @@ pub struct Displays<H> {
     /// Ended displays that are gone. The agent still gets "ended", not
     /// "does not exist", for them.
     pub retired: HashSet<DisplayId>,
+    /// Of those, the ones the user closed: the agent should stop, not make
+    /// another display.
+    pub closed_by_user: HashSet<DisplayId>,
     next_serial: u32,
 }
 
@@ -355,6 +360,7 @@ impl<H> Default for Displays<H> {
         Self {
             list: Vec::new(),
             retired: HashSet::new(),
+            closed_by_user: HashSet::new(),
             next_serial: 1,
         }
     }
@@ -417,6 +423,9 @@ impl<H> Displays<H> {
         let mut display = self.list.remove(index);
         if display.is_ended() {
             self.retired.insert(id);
+        }
+        if display.ended == Some(EndReason::ClosedByUser) {
+            self.closed_by_user.insert(id);
         }
         display.resume_waiters(ControlWait::Ended);
         Some(display)

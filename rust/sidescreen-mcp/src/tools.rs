@@ -123,7 +123,7 @@ pub fn definitions() -> Vec<Value> {
             "Operate the display",
             &[
                 "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
-                "screenshot pixels and coordinates are the same space. Every action except wait returns a fresh screenshot.",
+                "screenshot pixels and coordinates are the same space. Every action except wait and cursor_position returns a fresh screenshot.",
                 "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
                 "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
                 "Apps on your display stay in the background, so menu shortcuts that act on the selection (copy, paste,",
@@ -157,7 +157,7 @@ pub fn definitions() -> Vec<Value> {
                     "text": { "type": "string" },
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
-                    "duration": { "type": "number", "description": "Seconds, for wait and hold_key." }
+                    "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." }
                 }),
                 &["display_id", "action"],
             ),
@@ -222,7 +222,7 @@ pub fn definitions() -> Vec<Value> {
                 "within 3 s of your input, element action or launch there, unless the user meanwhile clicked or typed in the app,",
                 "Finder, the Dock or a launcher such as Spotlight; one the user opened is theirs. Once the user takes back any",
                 "window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
-                "user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
+                "user to hand it over. They drag it onto your display in the Viewer, or right-click Sidescreen's menu bar icon and choose Windows > Hand Over.",
             ],
             object(
                 json!({
@@ -603,8 +603,9 @@ pub async fn run(
                     let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
                     Ok(Output::Content(vec![
                         text(format!(
-                            "Done; the action closed window {window}. Windows on the display now: {}",
-                            list.get("windows").cloned().unwrap_or(Value::Null)
+                            "Done; the action closed window {window}. Windows on the display now: {}{}",
+                            list.get("windows").cloned().unwrap_or(Value::Null),
+                            strayed_note(&shot)
                         )),
                         image(&get("data"), &get("mimeType")),
                     ]))
@@ -802,9 +803,10 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
             return Ok(vec![
                 text(format!(
-                    "{}×{} zoom of region {region} on display {display}. Its pixels are not screen coordinates.",
+                    "{}×{} zoom of region {region} on display {display}. Its pixels are not screen coordinates.{}",
                     get("width"),
-                    get("height")
+                    get("height"),
+                    strayed_note(&shot)
                 )),
                 image(&get("data"), &get("mimeType")),
             ]);
@@ -854,8 +856,8 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         }
         _ => {
             // wait
-            let seconds = a.number("duration")?.unwrap_or(1.0);
-            tokio::time::sleep(Duration::from_secs_f64(seconds.clamp(0.0, 30.0))).await;
+            let seconds = a.number("duration")?.unwrap_or(1.0).clamp(0.0, 30.0);
+            tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
             return Ok(vec![text(format!("Waited {seconds} s."))]);
         }
     }
@@ -895,7 +897,7 @@ fn launch_output(reply: &Value) -> Value {
                 .unwrap_or("still_starting");
             let note = match reason {
                 "existing_window" => {
-                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu."
+                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or right-click Sidescreen's menu bar icon and choose Windows > Hand Over."
                 }
                 "no_new_window" => {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."

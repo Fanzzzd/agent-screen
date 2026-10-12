@@ -44,7 +44,7 @@ impl Status {
                 icon: Some("icons/alert.svg"),
                 color: theme.secondary,
             },
-            Some(EndReason::Finished) => Status {
+            Some(EndReason::Finished | EndReason::ClosedByUser) => Status {
                 kind: Kind::Review,
                 short: tf!("Needs Review · {windows}", "待查看 · {windows}"),
                 long: tf!(

@@ -36,7 +36,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    Or download the DMG from the [latest release](../../releases/latest) and drag Sidescreen into Applications. Sidescreen is signed with a Developer ID but not notarized, so the first time you open the downloaded app, macOS says it can't check it: go to System Settings ▸ Privacy & Security and press **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Sidescreen.app`. Homebrew does that for you.
 
 2. Open Sidescreen. The setup window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
-3. Connect your agents. Choose **Connect Claude Code and Codex** in the menu, or run:
+3. Connect your agents. Press **Connect…** in the setup window, or right-click the menu bar icon and choose **Connect Claude Code and Codex**, or run:
 
    ```sh
    /Applications/Sidescreen.app/Contents/MacOS/Sidescreen mcp install
@@ -44,7 +44,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe.
 
-Then ask your agent something like "Use Sidescreen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, the menu bar menu names the agent. If Sidescreen isn't running, the first tool call starts it.
+Then ask your agent something like "Use Sidescreen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, the setup window and the menu name the agent. If Sidescreen isn't running, the first tool call starts it.
 
 ## Agent tools
 
@@ -61,11 +61,11 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 
 ## Your side
 
-- **Peek.** Hover the menu bar icon, or click it to keep Peek up. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
+- **Peek.** Hover the menu bar icon, or click it to keep Peek up. Right-click it for the menu. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
 - **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
 - **Help Request.** `request_help` sends a notification and shows the reason in Peek and the Viewer. Clicking the notification opens the display in Takeover.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
-- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows ▸ Hand Over to …. Windows ▸ Take Back Window brings any window back. A handed-over window returns to where it was.
+- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows ▸ Hand Over to … in the menu. Windows ▸ Take Back Window brings any window back. A handed-over window returns to where it was.
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Closing a display** lists its windows with what the agent suggested for each, keep or close, and you can change any of them. Esc cancels, ⌘Return confirms. Quitting Sidescreen applies the same plan without asking.
 
@@ -94,7 +94,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 ## Troubleshooting
 
 - **The agent has no Sidescreen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get sidescreen` shows whether Claude Code has it.
-- **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Sidescreen off and on.
+- **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Sidescreen off and on.
 - **Tools say Sidescreen isn't running.** The first tool call starts it. If that fails, open `/Applications/Sidescreen.app` once yourself.
 - **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 

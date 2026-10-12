@@ -36,7 +36,7 @@ pub struct Core {
     /// Files a running app is still opening, by pid, each watched once.
     pub watching: HashSet<(i32, std::path::PathBuf)>,
     /// Undecided windows of the kept catches already reported to an agent.
-    pub told: HashSet<u32>,
+    pub told: HashSet<(DisplayId, u32)>,
     /// Windows `adopt_opened` left on the user's screen because the user
     /// had just acted on the app, by display, until reported.
     pub left_alone: Vec<(DisplayId, u32)>,
@@ -135,6 +135,8 @@ impl Core {
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
+            self.told.retain(|(display, _)| *display != id);
+            self.left_alone.retain(|(display, _)| *display != id);
             cx.notify();
         }
     }

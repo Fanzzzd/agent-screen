@@ -31,10 +31,46 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// An app opened from Finder has a short PATH, so look where the installers
-/// put the CLI too.
+/// The PATH the user's terminal has. An app opened from Finder gets only
+/// /usr/bin:/bin:/usr/sbin:/sbin, which misses node for an npm-installed
+/// CLI and the version managers' directories. Asks an interactive login
+/// shell, as a terminal would start, and gives up after 5 s.
+fn user_path() -> Option<std::ffi::OsString> {
+    static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+        let marker = "__SIDESCREEN_PATH__";
+        let mut child = Command::new(shell)
+            .args(["-ilc", &format!("printf '\\n{marker}%s' \"$PATH\"")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let started = std::time::Instant::now();
+        while child.try_wait().ok()?.is_none() {
+            if started.elapsed() > std::time::Duration::from_secs(5) {
+                let _ = child.kill();
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+        let path = out.rsplit(marker).next()?.trim().to_string();
+        (!path.is_empty() && out.contains(marker)).then(|| path.into())
+    })
+    .clone()
+}
+
+/// The PATH to run the CLI with: the user's, else the app's.
+fn path() -> Option<std::ffi::OsString> {
+    user_path().or_else(|| std::env::var_os("PATH"))
+}
+
+/// Look on the user's PATH, and where the installers put the CLI too.
 fn claude_cli() -> Option<PathBuf> {
-    let on_path = std::env::var_os("PATH")
+    let on_path = path()
         .map(|p| {
             std::env::split_paths(&p)
                 .map(|d| d.join("claude"))
@@ -52,7 +88,11 @@ fn claude_cli() -> Option<PathBuf> {
 
 fn claude(cli: &Path, exe: &Path) -> Result<String, String> {
     let run = |args: &[&str]| {
-        Command::new(cli)
+        let mut command = Command::new(cli);
+        if let Some(path) = path() {
+            command.env("PATH", path);
+        }
+        command
             .args(args)
             .output()
             .map_err(|e| format!("could not run {}: {e}", cli.display()))

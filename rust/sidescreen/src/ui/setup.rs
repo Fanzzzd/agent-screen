@@ -17,7 +17,7 @@ use gpui::{
 use std::sync::Arc;
 
 pub const WIDTH: f32 = 480.;
-pub const HEIGHT: f32 = 432.;
+pub const HEIGHT: f32 = 496.;
 
 pub struct Setup {
     shell: WeakEntity<Shell>,
@@ -61,12 +61,12 @@ impl Render for Setup {
                 t("Sidescreen is ready", "Sidescreen 可以用了"),
                 match self.agent.clone() {
                     Some(agent) => tf!(
-                        "{agent} loaded Sidescreen's tools. Ask it to create a display: its apps run there, off your screen.",
-                        "{agent} 已加载 Sidescreen 的工具。让它创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。"
+                        "{agent} loaded Sidescreen's tools. Ask your agent to create a display: its apps run there, off your screen.",
+                        "{agent} 已加载 Sidescreen 的工具。让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。"
                     ),
                     None => t(
-                        "Ask an agent to create a display. Its apps run there, off your screen. No agent has loaded the tools yet: start a new session after connecting one.",
-                        "让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。还没有 agent 加载工具：接入后开一个新会话。",
+                        "Connect your agent below, then start a new session and ask it to create a display. Its apps run there, off your screen.",
+                        "在下面接入 agent，再开一个新会话，让它创建虚拟屏。它的 app 会在旁边运行，不占你的屏幕。",
                     )
                     .to_string(),
                 },
@@ -81,7 +81,11 @@ impl Render for Setup {
                 .to_string(),
             )
         };
-        let rows = Permission::ALL.map(|p| self.row(p, &theme));
+        let mut rows: Vec<gpui::AnyElement> = Permission::ALL
+            .map(|p| self.row(p, &theme).into_any_element())
+            .into_iter()
+            .collect();
+        rows.push(self.agent_row(&theme).into_any_element());
         let shell = self.shell.clone();
         div()
             .size_full()
@@ -155,7 +159,8 @@ impl Render for Setup {
                             t("Not Now", "稍后")
                         }
                         .into(),
-                        ready.then_some(theme.accent),
+                        // Connect is the next step until an agent loads the tools.
+                        (ready && self.agent.is_some()).then_some(theme.accent),
                         &theme,
                         move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
                     )),
@@ -164,6 +169,86 @@ impl Render for Setup {
 }
 
 impl Setup {
+    /// Connecting Claude Code and Codex, the step after the permissions.
+    fn agent_row(&self, theme: &Theme) -> impl IntoElement {
+        let green: Hsla = gpui::rgb(0x30d158).into();
+        let shell = self.shell.clone();
+        let loaded = self.agent.is_some();
+        let action: gpui::AnyElement = if loaded {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(green)
+                .child(
+                    svg()
+                        .path("icons/check.svg")
+                        .size(px(14.))
+                        .text_color(green),
+                )
+                .child(t("Connected", "已接入"))
+                .into_any_element()
+        } else {
+            button(
+                "setup-connect",
+                t("Connect…", "接入…").into(),
+                self.status.complete().then_some(theme.accent),
+                theme,
+                move |cx| tell(&shell, cx, |shell, cx| shell.connect_agents(cx)),
+            )
+            .into_any_element()
+        };
+        let detail = match &self.agent {
+            Some(agent) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
+            None => t(
+                "Add Sidescreen to Claude Code and Codex, then start a new session",
+                "把 Sidescreen 加到 Claude Code 和 Codex，再开一个新会话",
+            )
+            .to_string(),
+        };
+        let color = if loaded { green } else { theme.accent };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .py(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(34.))
+                    .rounded(px(9.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(color.opacity(if loaded { 0.18 } else { 0.16 }))
+                    .child(svg().path("icons/plus.svg").size(px(18.)).text_color(color)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t("Your agents", "你的 agent")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.secondary)
+                            .child(detail),
+                    ),
+            )
+            .child(action)
+    }
+
     fn row(&self, p: Permission, theme: &Theme) -> impl IntoElement {
         let granted = self.status.has(p);
         let (icon, detail) = match p {

@@ -405,12 +405,29 @@ fn add_tile(
                 .flex()
                 .items_center()
                 .justify_center()
+                .flex_col()
+                .gap(px(8.))
                 .child(
                     svg()
                         .path("icons/plus.svg")
                         .size(px(20.))
                         .text_color(theme.secondary),
-                ),
+                )
+                // With no displays yet: agents make their own, and the menu
+                // is a right-click away.
+                .when(!narrow, |d| {
+                    d.child(
+                        div()
+                            .px(px(10.))
+                            .text_center()
+                            .text_size(px(10.5))
+                            .text_color(theme.secondary)
+                            .child(t(
+                                "Agents create their own displays. Right-click the icon for the menu.",
+                                "agent 会自己创建显示器。右键点图标打开菜单。",
+                            )),
+                    )
+                }),
         )
         .child(
             div()
@@ -434,7 +451,7 @@ pub fn waiting(size: f32) -> gpui::Div {
         .items_center()
         .justify_center()
         .text_size(px(size))
-        .text_color(gpui::white().opacity(0.7))
+        .text_color(gpui::white().opacity(0.85))
         .child(t("Waiting for picture…", "等待画面…"))
 }
 

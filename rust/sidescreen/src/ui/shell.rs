@@ -1206,6 +1206,15 @@ impl Shell {
                 MenuAction::GrantPermissions,
             );
             menu.separator();
+        } else if self.restart {
+            menu.action(
+                t(
+                    "Finish Setup: Reopen Sidescreen…",
+                    "完成设置：重新打开 Sidescreen…",
+                ),
+                MenuAction::GrantPermissions,
+            );
+            menu.separator();
         }
         // Setup worked on the agent's side too: its session has the tools.
         match self.agents_ready() {
@@ -1450,37 +1459,7 @@ impl Shell {
                 }
             }
             MenuAction::IgnoreInAeroSpace => self.ignore_in_aerospace(cx),
-            MenuAction::ConnectAgents => {
-                let install = cx.background_spawn(async {
-                    let exe = std::env::current_exe().unwrap_or_default();
-                    sidescreen_mcp::install::install(&exe)
-                });
-                cx.spawn(async move |_, _| {
-                    let outcomes = install.await;
-                    let lines: Vec<String> = outcomes
-                        .iter()
-                        .map(|o| match &o.result {
-                            None => tf!("{}: not installed", "{}：没有安装", o.client),
-                            Some(Ok(done)) => format!("{}: {done}", o.client),
-                            Some(Err(error)) => {
-                                tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
-                            }
-                        })
-                        .collect();
-                    native::alert(
-                        t("Sidescreen and your agents", "Sidescreen 与 agent"),
-                        &format!(
-                            "{}\n\n{}",
-                            lines.join("\n"),
-                            t(
-                                "Start a new agent session to load the tools.",
-                                "新开一个 agent 会话就能用上这些工具。"
-                            )
-                        ),
-                    );
-                })
-                .detach();
-            }
+            MenuAction::ConnectAgents => self.connect_agents(cx),
             MenuAction::Quit => self.quit(cx),
             MenuAction::HandOver {
                 display,
@@ -1585,7 +1564,7 @@ impl Shell {
 
     fn dismiss_now(&mut self, id: DisplayId, items: Vec<Item>, cx: &mut Context<Self>) {
         self.core
-            .update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
+            .update(cx, |core, cx| core.end(id, EndReason::ClosedByUser, cx));
         let main_name = main_screen_name();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -1701,6 +1680,46 @@ impl Shell {
         self.quit(cx);
     }
 
+    /// Register the MCP server with Claude Code and Codex, and say how it went.
+    pub fn connect_agents(&mut self, cx: &mut Context<Self>) {
+        let install = cx.background_spawn(async {
+            let exe = std::env::current_exe().unwrap_or_default();
+            sidescreen_mcp::install::install(&exe)
+        });
+        cx.spawn(async move |_, _| {
+            let outcomes = install.await;
+            let lines: Vec<String> = outcomes
+                .iter()
+                .map(|o| match &o.result {
+                    None => tf!("{}: not installed", "{}：没有安装", o.client),
+                    Some(Ok(done)) => format!("{}: {done}", o.client),
+                    Some(Err(error)) => {
+                        tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
+                    }
+                })
+                .collect();
+            let failed = outcomes.iter().any(|o| matches!(o.result, Some(Err(_))));
+            let next = if failed {
+                tf!(
+                    "To try in Terminal, where your agents' PATH is set:\n{} mcp install",
+                    "可以在终端里重试，那里有 agent 需要的 PATH：\n{} mcp install",
+                    std::env::current_exe().unwrap_or_default().display()
+                )
+            } else {
+                t(
+                    "Start a new agent session to load the tools.",
+                    "新开一个 agent 会话就能用上这些工具。",
+                )
+                .to_string()
+            };
+            native::alert(
+                t("Sidescreen and your agents", "Sidescreen 与 agent"),
+                &format!("{}\n\n{next}", lines.join("\n")),
+            );
+        })
+        .detach();
+    }
+
     pub fn last_agent_ready(&self) -> Option<String> {
         self.agents_ready()
     }
@@ -1777,6 +1796,7 @@ impl Shell {
                     .await;
                 let _ = shell.update(cx, |shell, cx| {
                     shell.restart = !works;
+                    permissions::NEEDS_REOPEN.store(!works, std::sync::atomic::Ordering::Relaxed);
                     shell.push_setup(cx);
                 });
             })

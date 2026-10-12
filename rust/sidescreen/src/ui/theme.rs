@@ -61,8 +61,9 @@ pub fn palette(dark: bool) -> Theme {
             accent: rgb(0x007aff).into(),
             orange: rgb(0xff9500).into(),
             red: rgb(0xff3b30).into(),
-            // Darker than the + tile, so an empty screen never reads as one.
-            screen_empty: rgba(0x00000059).into(),
+            // Darker than the + tile, so an empty screen never reads as one,
+            // and dark enough for the white "Waiting for picture…".
+            screen_empty: rgba(0x0000008c).into(),
             menu_strip: rgb(0xe8e8ed).into(),
             segment: rgb(0xffffff).into(),
             scrim: rgba(0x00000059).into(),
