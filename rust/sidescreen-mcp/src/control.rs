@@ -60,6 +60,9 @@ struct Connection {
 pub struct Control {
     connection: Mutex<Option<Arc<Connection>>>,
     next_id: AtomicU64,
+    /// Sent first on every connection, so an app that starts or restarts
+    /// later still hears it.
+    greeting: std::sync::Mutex<Option<(String, Value)>>,
 }
 
 impl Control {
@@ -79,11 +82,33 @@ impl Control {
             .unwrap_or_else(|_| Err(closed("the connection dropped")))
     }
 
-    /// Tell the app something if it is running, without starting it.
-    pub async fn notify_if_running(&self, method: &str, params: Value) {
-        if self.open_running().await.is_some() {
-            let _ = self.call(method, params).await;
+    /// Tell the app something now if it is running, without starting it,
+    /// and again on each later connection.
+    pub async fn greet(&self, method: &str, params: Value) {
+        *self.greeting.lock().unwrap() = Some((method.into(), params));
+        let slot = self.connection.lock().await;
+        if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
+            self.send_greeting(connection).await;
+            return;
         }
+        drop(slot);
+        let _ = self.open_running().await;
+    }
+
+    /// Write the greeting without waiting for its reply, which `receive`
+    /// drops for want of a pending entry.
+    async fn send_greeting(&self, connection: &Connection) {
+        let Some((method, params)) = self.greeting.lock().unwrap().clone() else {
+            return;
+        };
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let Ok(mut line) =
+            serde_json::to_vec(&json!({ "id": id, "method": method, "params": params }))
+        else {
+            return;
+        };
+        line.push(b'\n');
+        let _ = connection.writer.lock().await.write_all(&line).await;
     }
 
     async fn open_running(&self) -> Option<Arc<Connection>> {
@@ -93,6 +118,7 @@ impl Control {
         }
         let (reader, writer) = endpoint::connect().await.ok()?;
         let connection = attach(reader, writer);
+        self.send_greeting(&connection).await;
         *slot = Some(connection.clone());
         Some(connection)
     }
@@ -119,6 +145,7 @@ impl Control {
             }
         };
         let connection = attach(reader, writer);
+        self.send_greeting(&connection).await;
         *slot = Some(connection.clone());
         Ok(connection)
     }

@@ -239,7 +239,38 @@ try {
     const probe = await Control.connect()
     const ready = await probe.call("debugAgentReady")
     probe.close()
-    check("listing the tools tells the app an agent loaded them", typeof ready?.agent === "string", JSON.stringify(ready))
+    check("listing the tools tells the app which agent loaded them", ready?.agent === "smoke", JSON.stringify(ready))
+  }
+
+  // Window ownership: a window the agent's action opens goes to the display;
+  // one that opens with no action near it stays put, and the agent may
+  // place it.
+  {
+    const list = async () =>
+      (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])
+        .filter((w) => w.app === "TextEdit")
+    const shown = await list()
+    const before = shown.length
+    const front = shown[shown.length - 1]
+    await client.request("tools/call", { name: "computer", arguments: { display_id, action: "left_click", coordinate: [front.x + Math.round(front.width / 2), front.y + 10] } })
+    const mainAtKey = onMainDisplay("TextEdit")
+    const key = await client.request("tools/call", { name: "computer", arguments: { display_id, action: "key", text: "cmd+n" } })
+    await Bun.sleep(1000)
+    const after = (await list()).length
+    check("a window the agent's key press opens lands on the display", after === before + 1,
+      `${before} -> ${after} on the display, ${mainAtKey} -> ${onMainDisplay("TextEdit")} on the user's screen; ${textOf(key).slice(0, 80)}`)
+    await Bun.sleep(3500)
+    const mainBefore = onMainDisplay("TextEdit")
+    execFileSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to make new document'])
+    await Bun.sleep(1500)
+    check("a window that opens long after the agent's last action stays put", onMainDisplay("TextEdit") === mainBefore + 1)
+    const strays = structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id, strays: true } }))
+    const late = strays?.windows?.find((w: any) => w.app === "TextEdit")
+    check("that window is a stray the agent may place", !!late, JSON.stringify(strays).slice(0, 160))
+    if (late) {
+      const placed = await client.request("tools/call", { name: "place_window", arguments: { display_id, window_id: late.windowId } })
+      check("place_window moves it", placed.result?.isError !== true, textOf(placed).slice(0, 120))
+    }
   }
 
   // The user takes a TextEdit window back: TextEdit is theirs from then on.

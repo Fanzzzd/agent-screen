@@ -33,27 +33,98 @@ unsafe extern "C" {
     static kCFRunLoopDefaultMode: *const CFString;
 }
 
-/// When the Agent Session last drove each display: input, an element
-/// action or a launch.
+/// Until when each display counts as just driven: by its agent's input,
+/// element actions and launches, or by the user through its viewer.
 static ACTED: std::sync::Mutex<Vec<(DisplayId, std::time::Instant)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// How long after an agent's action a new window counts as its result.
+/// When the user last clicked or pressed a key outside Sidescreen, and
+/// where it went. Events Sidescreen posts to an app's pid never reach the
+/// global monitors that set this.
+static USER_INPUT: std::sync::Mutex<Option<(std::time::Instant, Towards)>> =
+    std::sync::Mutex::new(None);
+
+/// Where a press of the user's went: read when a window needs it, not on
+/// every press.
+#[derive(Clone, Copy, Debug)]
+pub enum Towards {
+    /// A key press, to the frontmost app.
+    App(i32),
+    /// A click, on the window under the pointer.
+    Window(u32),
+    Unknown,
+}
+
+/// How long after an action a new window counts as its result.
 const ACTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Note that the agent just drove a display.
+/// Note that the display was just driven.
 pub fn agent_acted(display: DisplayId) {
+    agent_acted_for(display, ACTION_WINDOW);
+}
+
+/// Count the display as driven for `span`, as while an app it launched
+/// is still starting.
+pub fn agent_acted_for(display: DisplayId, span: std::time::Duration) {
+    let until = std::time::Instant::now() + span;
     let mut acted = ACTED.lock().unwrap_or_else(|e| e.into_inner());
-    acted.retain(|(d, _)| *d != display);
-    acted.push((display, std::time::Instant::now()));
+    if let Some(at) = acted.iter_mut().find(|(d, _)| *d == display) {
+        at.1 = at.1.max(until);
+    } else {
+        acted.push((display, until));
+    }
+}
+
+/// Note a click or key press of the user's outside Sidescreen.
+pub fn user_acted(towards: Towards) {
+    *USER_INPUT.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), towards));
 }
 
 fn acted_recently(display: DisplayId) -> bool {
+    let now = std::time::Instant::now();
     ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .any(|(d, at)| *d == display && at.elapsed() < ACTION_WINDOW)
+        .any(|(d, until)| *d == display && now < *until)
+}
+
+/// Whether the user just pressed something that could make `pid` open a
+/// window: a key or click in that app, or a click in Finder or the Dock,
+/// which open files and apps. Typing in another app doesn't count.
+fn user_acted_recently(pid: i32) -> bool {
+    let input = *USER_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((_, towards)) = input.filter(|(at, _)| at.elapsed() < ACTION_WINDOW) else {
+        return false;
+    };
+    let to = match towards {
+        Towards::App(p) => Some(p),
+        Towards::Window(id) => windows::find(id).map(|w| w.target.pid),
+        Towards::Unknown => None,
+    };
+    match to {
+        Some(p) => p == pid || super::app::opens_things(p),
+        None => true,
+    }
+}
+
+/// Whose a new window in an app the agent started is.
+#[derive(Debug, PartialEq)]
+enum Owner {
+    Agent,
+    User,
+    /// Both acted, or neither: leave the window where it is, for the agent
+    /// to place if it's its own.
+    Unknown,
+}
+
+fn owner(agent: bool, user: bool) -> Owner {
+    match (agent, user) {
+        (true, false) => Owner::Agent,
+        (false, true) => Owner::User,
+        _ => Owner::Unknown,
+    }
 }
 
 /// Moves each window `pid` creates onto a display while it lives. Create
@@ -80,7 +151,7 @@ struct Target {
     document: Option<std::path::PathBuf>,
     /// Kept while the display lives, past the launch.
     kept: std::cell::Cell<bool>,
-    /// Windows left alone because the user made them with the app in front.
+    /// Windows left alone because the user made them.
     skipped: std::cell::RefCell<Vec<u32>>,
 }
 
@@ -161,12 +232,12 @@ impl Catch {
         Some(Catch { observer, target })
     }
 
-    /// From now on, leave alone windows the user makes with the app in front.
+    /// From now on, take only windows the agent's actions make.
     pub fn keep(&self) {
         unsafe { (*self.target).kept.set(true) }
     }
 
-    /// Windows the user made in the app while it was in front.
+    /// Windows the user made in the app.
     pub fn skipped(&self) -> Vec<u32> {
         unsafe { (*self.target).skipped.borrow().clone() }
     }
@@ -218,14 +289,22 @@ extern "C" fn created(
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
         return;
     }
-    // A kept catch leaves alone windows the user makes while using the app.
-    // A kept catch takes a window only right after the agent acted on its
-    // display: anything else in the app is the user's doing.
-    if target.kept.get() && !acted_recently(target.display) {
-        if let Some(id) = ax::window_id(window) {
-            target.skipped.borrow_mut().push(id);
+    // A kept catch takes a window only right after its display was driven,
+    // and records one the user made so nothing moves it later.
+    if target.kept.get() {
+        match owner(
+            acted_recently(target.display),
+            user_acted_recently(target.pid),
+        ) {
+            Owner::Agent => {}
+            Owner::User => {
+                if let Some(id) = ax::window_id(window) {
+                    target.skipped.borrow_mut().push(id);
+                }
+                return;
+            }
+            Owner::Unknown => return,
         }
-        return;
     }
     // A window that doesn't name its document yet may be the file's: look
     // again when its title changes, as it does once the file loads.
@@ -300,7 +379,23 @@ pub fn follow_aerospace(target: WindowTarget, display: DisplayId, screen: String
 
 #[cfg(test)]
 mod tests {
-    use super::take;
+    use super::{Owner, owner, take};
+
+    #[test]
+    fn a_window_is_the_agents_only_when_the_user_did_nothing() {
+        assert_eq!(owner(true, false), Owner::Agent);
+        assert_eq!(owner(false, true), Owner::User);
+        assert_eq!(
+            owner(true, true),
+            Owner::Unknown,
+            "the user's own click may have made it"
+        );
+        assert_eq!(
+            owner(false, false),
+            Owner::Unknown,
+            "a slow window stays placeable"
+        );
+    }
 
     #[test]
     fn takes_only_as_many_windows_as_asked() {

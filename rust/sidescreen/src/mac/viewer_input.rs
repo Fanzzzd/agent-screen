@@ -259,6 +259,7 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 }
                 // The user's first input takes the display over from its agent.
                 native::send(Native::ScreenTouched { display });
+                super::catch::agent_acted(display);
                 s.pressed = Some(button);
                 forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event));
                 true
@@ -298,6 +299,7 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                     return false;
                 };
                 native::send(Native::ScreenTouched { display });
+                super::catch::agent_acted(display);
                 forwarder.scroll(
                     at,
                     (event.scrollingDeltaX(), event.scrollingDeltaY()),
@@ -311,6 +313,7 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
             NSEventType::KeyDown => {
                 let code = event.keyCode();
                 native::send(Native::ScreenTouched { display });
+                super::catch::agent_acted(display);
                 forwarder.key(code, true, flags(event));
                 // Command shortcuts often never report their release, so
                 // send it now and skip the real one if it comes.

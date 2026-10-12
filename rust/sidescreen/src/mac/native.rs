@@ -469,7 +469,8 @@ pub fn set_app_icon(item: &NSMenuItem, pid: i32) {
 // MARK: Mouse monitors
 
 /// Report every mouse down anywhere, and left-button drags, for Peek's
-/// outside clicks and for window Handover by drag.
+/// outside clicks and for window Handover by drag. Note the user's presses
+/// for the catches.
 pub fn watch_mouse() {
     let mask = NSEventMask::LeftMouseDown
         | NSEventMask::RightMouseDown
@@ -491,6 +492,27 @@ pub fn watch_mouse() {
     };
     let global = RcBlock::new(move |event: NonNull<NSEvent>| report(unsafe { event.as_ref() }));
     if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global) {
+        keep(monitor);
+    }
+    // The user's clicks and key presses in other apps, which tell their new
+    // windows from an agent's. Events posted to a pid never reach these.
+    let user = RcBlock::new(|event: NonNull<NSEvent>| {
+        use super::catch::Towards;
+        let towards = if unsafe { event.as_ref() }.r#type() == NSEventType::KeyDown {
+            super::app::frontmost_pid().map_or(Towards::Unknown, Towards::App)
+        } else {
+            let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
+            let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
+                NSEvent::mouseLocation(),
+                0,
+                mtm,
+            );
+            u32::try_from(number).map_or(Towards::Unknown, Towards::Window)
+        };
+        super::catch::user_acted(towards);
+    });
+    let presses = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::KeyDown;
+    if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(presses, &user) {
         keep(monitor);
     }
     let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {

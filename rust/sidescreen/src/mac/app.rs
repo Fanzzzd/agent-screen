@@ -20,6 +20,26 @@ pub fn running_pid(bundle: &Path) -> Option<i32> {
     })
 }
 
+/// The frontmost app's pid.
+pub fn frontmost_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+}
+
+/// Whether the user opens files and apps through this process: a click in
+/// it can open a window in any app.
+pub fn opens_things(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.bundleIdentifier())
+        .is_some_and(|id| {
+            matches!(
+                id.to_string().as_str(),
+                "com.apple.finder" | "com.apple.dock" | "com.apple.Spotlight"
+            )
+        })
+}
+
 /// The bundle of a running app, by bundle id.
 pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
     NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))

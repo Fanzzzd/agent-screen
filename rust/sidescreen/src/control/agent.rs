@@ -52,6 +52,8 @@ pub async fn handle(
     let acting = matches!(
         method,
         "click"
+            | "mouseDown"
+            | "mouseUp"
             | "move"
             | "drag"
             | "scroll"
@@ -414,6 +416,17 @@ pub async fn handle(
             if released {
                 return Err(ControlError::failed(
                     "the user took back a window of that app, which makes the app theirs: its windows stay on their screen. Ask the user to hand over the window you need",
+                ));
+            }
+            let made = core.update(cx, |c, _| {
+                sync_user_made(c, id);
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.user_made.contains(&(wanted as u32)))
+            });
+            if made {
+                return Err(ControlError::failed(
+                    "the user opened that window themselves, so it stays on their screen. Ask them to hand it over if you need it",
                 ));
             }
             let window = strays(&core, id, cx)
@@ -1250,6 +1263,9 @@ struct Launched {
     reason: Option<&'static str>,
 }
 
+/// How long a launch watches for a window that comes after it gave up.
+const LATE_WINDOW_WAIT: Duration = Duration::from_secs(30);
+
 /// How long a running app may take to make the window Sidescreen asked
 /// for. A window it makes later may be the user's.
 const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
@@ -1638,6 +1654,10 @@ async fn launch_now(
         })
         .detach();
     } else if !was_running {
+        // The kept catch takes the first window the moment it opens, unless
+        // the user is clicking or typing then; the poll is for an app that
+        // won't take observers yet.
+        crate::mac::catch::agent_acted_for(id, LATE_WINDOW_WAIT);
         cx.spawn(async move |cx: &mut AsyncApp| {
             let mut seen = before;
             for _ in 0..200 {

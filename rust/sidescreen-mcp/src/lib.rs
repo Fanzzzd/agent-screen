@@ -50,21 +50,21 @@ impl ServerHandler for Sidescreen {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // The setup window shows that an agent loaded the tools. A running
-        // app hears it; a stopped one isn't started for it.
+        // The menu and setup window show that an agent loaded the tools. A
+        // running app hears it now, one that starts later when it connects.
         if !self
             .announced
             .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            let client = context
+            let name = context
                 .peer
                 .peer_info()
-                .map(|info| info.client_info.name.clone())
-                .unwrap_or_else(|| "An agent".into());
+                .map(|info| info.client_info.name.clone());
+            let client = session::pretty_client_name(name.as_deref());
             let control = self.control.clone();
             tokio::spawn(async move {
                 control
-                    .notify_if_running("agentReady", json!({ "client": client }))
+                    .greet("agentReady", json!({ "client": client }))
                     .await;
             });
         }

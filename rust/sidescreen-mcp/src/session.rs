@@ -70,7 +70,7 @@ fn folder(dir: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn pretty_client_name(name: Option<&str>) -> String {
+pub(crate) fn pretty_client_name(name: Option<&str>) -> String {
     match name {
         None => "Agent".into(),
         Some("claude-code") => "Claude Code".into(),

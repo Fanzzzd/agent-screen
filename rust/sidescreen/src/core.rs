@@ -111,7 +111,11 @@ impl Core {
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
         self.closed.insert(connection);
         self.sessions.remove(&connection);
-        if !self.displays.connection_closed(connection).is_empty() {
+        let ended = self.displays.connection_closed(connection);
+        if !ended.is_empty() {
+            // As in `end`: an ended display takes no more windows.
+            self.kept_catches
+                .retain(|(display, _)| !ended.contains(display));
             cx.notify();
             schedule_sweep(cx);
         }
