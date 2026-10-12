@@ -197,8 +197,12 @@ pub async fn handle(
             }
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
-            show_pointer(&core, id, to, false, cx);
-            if dragged == Sent::Stopped {
+            let released = match dragged {
+                Sent::Stopped(at) => at,
+                _ => to,
+            };
+            show_pointer(&core, id, released, false, cx);
+            if matches!(dragged, Sent::Stopped(_)) {
                 return Err(ControlError::takeover(format!(
                     "the user took over display {id} during the drag, which let go short of its target. Call wait_for_control to wait until they hand it back."
                 )));
@@ -292,7 +296,7 @@ pub async fn handle(
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            let total = text.chars().count();
+            let total = crate::mac::input::typed_text(&text).chars().count();
             match forwarder.type_text(text, cg::display_bounds(id)).await {
                 Sent::Nowhere => return Err(no_keyboard_target()),
                 Sent::Typed(typed) => {
@@ -345,8 +349,20 @@ pub async fn handle(
             if !forwarder.chord(chord, true, within).await {
                 return Err(no_keyboard_target());
             }
-            cx.background_executor().timer(held).await;
+            // Let go at once if the user takes over: their keys would come
+            // out with the agent's modifier held.
+            let until = std::time::Instant::now() + held;
+            while std::time::Instant::now() < until && !forwarder.agent_stopped() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50).min(until - std::time::Instant::now()))
+                    .await;
+            }
             forwarder.chord(chord, false, within).await;
+            if forwarder.agent_stopped() {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id}, so the keys were released early. Call wait_for_control to wait until they hand it back."
+                )));
+            }
             Ok(json!({}))
         }
         "listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => {

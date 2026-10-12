@@ -102,12 +102,18 @@ type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sent {
     All,
-    /// The user took the display over partway through a drag.
-    Stopped,
+    /// The user took the display over partway through a drag, which let
+    /// go here.
+    Stopped((f64, f64)),
     /// The same, partway through text: how many characters went in.
     Typed(usize),
     /// No window to send it to.
     Nowhere,
+}
+
+/// The text as typed: a Windows line ending, \r\n, is one Return.
+pub fn typed_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// One display's input queue. Cheap to clone.
@@ -141,6 +147,11 @@ impl Default for Forwarder {
 impl Forwarder {
     /// Stop the agent's long input at its next step, while the user is in
     /// control.
+    /// Whether the user is in control and the agent's input stops.
+    pub fn agent_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn stop_agent(&self, stop: bool) {
         self.stopped
             .store(stop, std::sync::atomic::Ordering::Relaxed);
@@ -246,19 +257,19 @@ impl Forwarder {
             if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
                 return Sent::Nowhere;
             }
-            let mut at = from;
             thread::sleep(Duration::from_millis(100));
             const STEPS: i32 = 20;
             for step in 1..=STEPS {
-                // The user took over: let go where the pointer is, short
-                // of the drop the agent was heading for.
+                let t = step as f64 / STEPS as f64;
+                let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                w.mouse_dragged(at, Button::Left, flags(m));
+                // The user took over: let go where the pointer is, short of
+                // the drop the agent was heading for. Checked after a move,
+                // so a stopped drag never ends as a click on its source.
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     w.mouse_up(at, Button::Left, 1, flags(m));
-                    return Sent::Stopped;
+                    return Sent::Stopped(at);
                 }
-                let t = step as f64 / STEPS as f64;
-                at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-                w.mouse_dragged(at, Button::Left, flags(m));
                 thread::sleep(Duration::from_millis(16));
             }
             thread::sleep(Duration::from_millis(100));
@@ -319,6 +330,7 @@ impl Forwarder {
             let Some(target) = w.focused else {
                 return Sent::Nowhere;
             };
+            let text = typed_text(&text);
             for (typed, character) in text.chars().enumerate() {
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     return Sent::Typed(typed);
@@ -751,5 +763,13 @@ pub fn post_key_to_pid(pid: i32, chord: KeyChord) {
             CGEvent::set_flags(Some(&event), flags(chord.modifiers));
             CGEvent::post_to_pid(pid, Some(&event));
         }
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    #[test]
+    fn a_windows_line_ending_is_one_return() {
+        assert_eq!(super::typed_text("a\r\nb\nc\rd"), "a\nb\nc\rd");
     }
 }
