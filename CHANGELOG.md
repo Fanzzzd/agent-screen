@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.8 (2026-10-12)
+
+### Fixes
+
+#### A slow file window moves as it opens
+
+When an app you are running takes a while to open a file, Sidescreen now moves the file's window onto the agent's display the moment it appears, instead of after it showed on your screen. `launch_app` says `existing_window` only when a window the app already had shows the file; otherwise `still_opening`. `file://` URLs open like their paths.
+
+#### An agent's app stops taking your windows when you use it
+
+A window you open in an app the agent started stays on your screen while that app is in front, and after you take back one of its windows. `place_window` on a window you took back says so. `list_windows` marks further windows of the agent's apps as `launched`.
+
 ## 0.1.7 (2026-10-12)
 
 ### Fixes
