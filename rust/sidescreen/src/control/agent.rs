@@ -1217,6 +1217,11 @@ async fn launch_now(
     // front window, which may be the user's: it gets a new window first,
     // below, and the URL after.
     let is_url = target.is_some_and(|t| !t.starts_with('/'));
+    // A running app given a file: its window is the one that shows the
+    // file, whenever it comes, and never one the user opens meanwhile.
+    let document = target
+        .filter(|t| was_running && t.starts_with('/'))
+        .and_then(|t| std::fs::canonicalize(t).ok());
     let first = (!was_running || !is_url)
         .then(|| target.map(String::from))
         .flatten();
@@ -1355,7 +1360,11 @@ async fn launch_now(
         w.target.pid == pid
             && w.layer == 0
             && !before.contains(&w.target.window_id)
-            && (!was_running || taken == Some(w.target.window_id))
+            && (!was_running
+                || taken == Some(w.target.window_id)
+                || document
+                    .as_deref()
+                    .is_some_and(|d| shows_document(w.target, d)))
     };
     let mut gave_up = false;
     for _ in 0..120 {
@@ -1429,10 +1438,31 @@ async fn launch_now(
     keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Sidescreen's (gave up early: {gave_up})");
     // A slow launch can open its window after we stop waiting. Keep watching
-    // so it does not stay on the user's screen. Only for an app Sidescreen
-    // started: a running app's later windows may be the user's.
+    // so it does not stay on the user's screen: for an app Sidescreen
+    // started, any new window; for a running app, the one showing the file.
     let core = core.clone();
-    if !was_running {
+    if let Some(document) = document.clone() {
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            for _ in 0..200 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                if let Some(late) = windows::all().into_iter().find(|w| {
+                    w.target.pid == pid
+                        && w.layer == 0
+                        && !before.contains(&w.target.window_id)
+                        && shows_document(w.target, &document)
+                }) {
+                    let _ = settle(&core, late.target, id, cx).await;
+                    return;
+                }
+                if !takes_windows(&core, id, cx) {
+                    return;
+                }
+            }
+        })
+        .detach();
+    } else if !was_running {
         cx.spawn(async move |cx: &mut AsyncApp| {
             for _ in 0..200 {
                 cx.background_executor()
@@ -1472,6 +1502,39 @@ async fn launch_now(
             "existing_window"
         }),
     })
+}
+
+/// Whether a window shows a file, by its AXDocument URL.
+fn shows_document(target: WindowTarget, path: &std::path::Path) -> bool {
+    ax::window_element(target)
+        .and_then(|w| ax::string_attribute(&w, "AXDocument"))
+        .and_then(|url| file_url_path(&url))
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .is_some_and(|p| p == path)
+}
+
+/// The path of a file URL, with its percent escapes decoded.
+fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = rest
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    Some(std::path::PathBuf::from(path.trim_end_matches('/')))
 }
 
 /// Whether a running app has had its time to make the window Sidescreen
@@ -1958,6 +2021,19 @@ mod launch_tests {
 
     fn ago(ms: u64) -> Instant {
         Instant::now() - Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn reads_file_urls() {
+        assert_eq!(
+            file_url_path("file:///Users/me/My%20Notes/a%C3%A9.txt"),
+            Some(std::path::PathBuf::from("/Users/me/My Notes/aé.txt"))
+        );
+        assert_eq!(
+            file_url_path("file://localhost/tmp/x/"),
+            Some(std::path::PathBuf::from("/tmp/x"))
+        );
+        assert_eq!(file_url_path("https://example.com"), None);
     }
 
     #[test]

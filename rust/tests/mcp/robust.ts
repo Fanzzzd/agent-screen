@@ -170,6 +170,15 @@ try {
   check("TextEdit launched again opens a window on the display", structured(again)?.window?.app === "TextEdit", textOf(again))
   check("still no TextEdit window on the user's screen", onMainDisplay("TextEdit") === 0)
 
+  // A file opened in the running app: the window showing it is the agent's.
+  const file = `/tmp/sidescreen robust ${Date.now()}.txt`
+  await Bun.write(file, "robust\n")
+  const opened = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit", open: file } })
+  const fileWindow = structured(opened)?.window
+  check("a file opened in a running app lands on the display", fileWindow?.title?.startsWith("sidescreen robust"), textOf(opened).slice(0, 160))
+  check("the file's window isn't on the user's screen", onMainDisplay("TextEdit") === 0)
+  execFileSync("/bin/rm", ["-f", file])
+
   // Copy and paste between two documents, through accessibility.
   {
     const docs = (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])
