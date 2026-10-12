@@ -296,6 +296,7 @@ pub async fn handle(
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            keys_allowed(&forwarder, cg::display_bounds(id)).await?;
             let total = crate::mac::input::typed_text(&text).chars().count();
             match forwarder.type_text(text, cg::display_bounds(id)).await {
                 Sent::Nowhere => return Err(no_keyboard_target()),
@@ -318,6 +319,7 @@ pub async fn handle(
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let repeat = p.int("repeat").unwrap_or(1);
             let bounds = cg::display_bounds(id);
+            keys_allowed(&forwarder, bounds).await?;
             let total = chords.len();
             for (pressed, chord) in chords.into_iter().enumerate() {
                 if forwarder.agent_stopped() {
@@ -352,9 +354,10 @@ pub async fn handle(
                 Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let within = cg::display_bounds(id);
-            if !forwarder.chord(chord, true, within).await {
+            keys_allowed(&forwarder, within).await?;
+            let Some(pressed) = forwarder.chord(chord, true, within).await else {
                 return Err(no_keyboard_target());
-            }
+            };
             // Let go at once if the user takes over: their keys would come
             // out with the agent's modifier held.
             let until = std::time::Instant::now() + held;
@@ -363,7 +366,8 @@ pub async fn handle(
                     .timer(Duration::from_millis(50).min(until - std::time::Instant::now()))
                     .await;
             }
-            forwarder.chord(chord, false, within).await;
+            // Released where it was pressed, wherever keys go now.
+            forwarder.release_chord(chord, pressed).await;
             if forwarder.agent_stopped() {
                 return Err(ControlError::takeover(format!(
                     "the user took over display {id}, so the keys were released early. Call wait_for_control to wait until they hand it back."
@@ -384,10 +388,11 @@ pub async fn handle(
                     .map(|d| (d.records.clone(), d.started.clone()))
                     .unwrap_or_default()
             });
+            let scale = display_scale(&core, id, cx);
             let list: Vec<Value> = windows::on_display(id)
                 .iter()
                 .map(|w| {
-                    let mut json = w.json();
+                    let mut json = in_shot(w.json(), scale);
                     let record = records.get(&w.target.window_id);
                     // A further window of an app the agent started, which its
                     // catch moved here, is as launched as the first.
@@ -492,10 +497,11 @@ pub async fn handle(
             let target = window.target;
             let area = cg::display_bounds(id);
             let origin = (area.x, area.y);
+            let scale = display_scale(&core, id, cx);
             // Walking a tree takes a round trip per element.
             let snapshot = cx
                 .background_executor()
-                .spawn(async move { ax::snapshot(target, origin) })
+                .spawn(async move { ax::snapshot(target, origin, scale) })
                 .await
                 // The window is there, so this isn't `not_found`, which
                 // reads as closed: the app is busy, or AX is off.
@@ -516,7 +522,7 @@ pub async fn handle(
                 .await
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
-            result["window"] = window.json();
+            result["window"] = in_shot(window.json(), scale);
             result["tree"] = json!(tree);
             result["elements"] = json!(count);
             result["truncated"] = json!(snapshot.truncated);
@@ -604,7 +610,10 @@ pub async fn handle(
             let target = p.string("open").map(|t| open_target(&t)).transpose()?;
             let launched = launch(&core, id, &name, target.as_deref(), cx).await?;
             Ok(match launched.window {
-                Some(w) => json!({ "window": w.json(), "wasRunning": launched.was_running }),
+                Some(w) => json!({
+                    "window": in_shot(w.json(), display_scale(&core, id, cx)),
+                    "wasRunning": launched.was_running
+                }),
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
             })
         }
@@ -2192,6 +2201,44 @@ thread_local! {
     /// When each display last settled after an action.
     static AGENT_ACTIVE: std::cell::RefCell<std::collections::HashMap<DisplayId, std::time::Instant>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Screenshot pixels per display point: below 1 on displays whose
+/// screenshot is scaled down.
+fn display_scale(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> f64 {
+    let size = core
+        .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+        .unwrap_or(DEFAULT_SIZE);
+    shot_scale(size)
+}
+
+/// A window's bounds, in display points, as screenshot pixels: the space
+/// the computer tool clicks in.
+fn in_shot(mut window: Value, scale: f64) -> Value {
+    for key in ["x", "y", "width", "height"] {
+        if let Some(n) = window[key].as_f64() {
+            window[key] = json!((n * scale).round() as i64);
+        }
+    }
+    window
+}
+
+/// Keys posted to the app the user is in reach its key window, which is
+/// the user's, not the agent's.
+async fn keys_allowed(
+    forwarder: &crate::mac::input::Forwarder,
+    within: Rect,
+) -> Result<(), ControlError> {
+    let Some(target) = forwarder.keys_target(within).await else {
+        return Err(no_keyboard_target());
+    };
+    if app::frontmost_pid() == Some(target.pid) {
+        let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
+        return Err(ControlError::failed(format!(
+            "the user is working in {name} right now, so keys would reach their window, not yours. Set text with act_on_element (set_value) instead, or wait and try again"
+        )));
+    }
+    Ok(())
 }
 
 fn no_keyboard_target() -> ControlError {

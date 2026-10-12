@@ -155,6 +155,11 @@ impl Forwarder {
     pub fn stop_agent(&self, stop: bool) {
         self.stopped
             .store(stop, std::sync::atomic::Ordering::Relaxed);
+        // A takeover lets go of the agent's held button at once, so the
+        // user's pointer reaches apps again.
+        if stop {
+            self.send(|w| w.release_agent_button());
+        }
     }
 
     fn send(&self, job: impl FnOnce(&mut Worker) + Send + 'static) {
@@ -374,20 +379,36 @@ impl Forwarder {
         self.run(move |w| w.focus(target)).await;
     }
 
-    /// Press or release a key chord, for apps that act on held keys. The
-    /// caller waits between the two off the worker, so other input on the
-    /// display isn't held up. False when nothing can take the keys.
-    pub async fn chord(&self, chord: KeyChord, down: bool, within: Rect) -> bool {
+    /// Press a key chord and keep it down, for apps that act on held keys.
+    /// The caller waits off the worker, so other input on the display isn't
+    /// held up. The window it went to, or None when nothing can take keys.
+    pub async fn chord(&self, chord: KeyChord, down: bool, within: Rect) -> Option<WindowTarget> {
         self.run(move |w| {
             w.focus_something(within);
-            if w.focused.is_none() {
-                return false;
-            }
+            let target = w.focused?;
             w.key(chord.code, down, flags(chord.modifiers));
-            true
+            Some(target)
         })
         .await
-        .unwrap_or(false)
+        .flatten()
+    }
+
+    /// Release a held chord in the window it was pressed in, even if keys
+    /// go elsewhere now or it left the display.
+    pub async fn release_chord(&self, chord: KeyChord, target: WindowTarget) {
+        self.run(move |w| w.key_to(target, chord.code, false, flags(chord.modifiers)))
+            .await;
+    }
+
+    /// Forget the keyboard target if it is `target`, as when the user takes
+    /// that window back.
+    pub async fn forget_target(&self, target: WindowTarget) {
+        self.run(move |w| {
+            if w.focused == Some(target) {
+                w.focused = None;
+            }
+        })
+        .await;
     }
 
     /// The window keys would go to now, if any.
@@ -424,6 +445,8 @@ struct Gesture {
     group: i64,
     /// Pressed by an agent's left_mouse_down, which holds it across calls.
     agent: bool,
+    /// Where the pointer last was in this gesture.
+    at: (f64, f64),
 }
 
 struct Worker {
@@ -481,17 +504,7 @@ impl Worker {
     ) -> Option<WindowTarget> {
         // A button an agent left held is released before anyone presses
         // again, such as the user taking over.
-        if let Some(g) = self.gesture.take_if(|g| g.agent) {
-            self.post(
-                Button::Left.up(),
-                at,
-                g.target,
-                Button::Left,
-                1,
-                g.group,
-                flags,
-            );
-        }
+        self.release_agent_button();
         let Some(hit) = self.hit(at, true) else {
             log::info!("input: no window at {at:?}");
             return None;
@@ -504,14 +517,32 @@ impl Worker {
             target,
             group,
             agent: false,
+            at,
         });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
         Some(target)
     }
 
+    /// Let go of a button an agent left held, where its pointer was, not
+    /// where the user now presses: an agent's drag drops where it was.
+    fn release_agent_button(&mut self) {
+        if let Some(g) = self.gesture.take_if(|g| g.agent) {
+            self.post(
+                Button::Left.up(),
+                g.at,
+                g.target,
+                Button::Left,
+                1,
+                g.group,
+                CGEventFlags::empty(),
+            );
+        }
+    }
+
     fn mouse_dragged(&mut self, to: (f64, f64), button: Button, flags: CGEventFlags) {
-        let Some(g) = &self.gesture else { return };
+        let Some(g) = &mut self.gesture else { return };
+        g.at = to;
         let (target, group) = (g.target, g.group);
         self.post(button.dragged(), to, target, button, 1, group, flags);
     }
@@ -613,6 +644,10 @@ impl Worker {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
+        self.key_to(target, code, down, flags);
+    }
+
+    fn key_to(&mut self, target: WindowTarget, code: u16, down: bool, flags: CGEventFlags) {
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, down) else {
             return;
         };

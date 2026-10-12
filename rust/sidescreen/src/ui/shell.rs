@@ -1660,6 +1660,10 @@ impl Shell {
             core.pending_returns.insert((id, target.pid));
             home
         });
+        // Keys typed in the Viewer must not follow the window home.
+        let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
+        cx.background_spawn(async move { forwarder.forget_target(target).await })
+            .detach();
         let main_name = main_screen_name();
         // The app's new windows go to the screen this window came from.
         let screen = home
@@ -2118,12 +2122,14 @@ impl Shell {
 
     fn dragging(&self) -> bool {
         let Some(drag) = &self.drag else { return false };
-        // Moved, not resized: a resize from the left or top edge moves
-        // the origin too.
+        // Moved, not resized: a resize from the left or top edge keeps the
+        // opposite edge still. A tiled window that grows back to its old
+        // size as it's dragged away still moves both.
         windows::find(drag.target.window_id).is_some_and(|w| {
-            ((w.bounds.x - drag.frame.x).abs() > 4.0 || (w.bounds.y - drag.frame.y).abs() > 4.0)
-                && (w.bounds.width - drag.frame.width).abs() <= 1.0
-                && (w.bounds.height - drag.frame.height).abs() <= 1.0
+            let (b, f) = (&w.bounds, &drag.frame);
+            let moved_x = (b.x - f.x).abs() > 4.0 && (b.max_x() - f.max_x()).abs() > 4.0;
+            let moved_y = (b.y - f.y).abs() > 4.0 && (b.max_y() - f.max_y()).abs() > 4.0;
+            moved_x || moved_y
         })
     }
 

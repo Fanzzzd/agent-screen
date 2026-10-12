@@ -695,7 +695,7 @@ async fn window_state(
         ""
     };
     let header = format!(
-        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in display coordinates, where the computer tool clicks; the image shows just this window.{}",
+        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in screenshot pixels, where the computer tool clicks; the image shows just this window.{}",
         get("window"),
         elements,
         strayed_note(&state),

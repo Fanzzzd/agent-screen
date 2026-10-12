@@ -333,7 +333,9 @@ unsafe impl Send for Snapshot {}
 /// The window's elements, positioned by their centers in display points
 /// from `origin`, the display's top-left corner: the space the computer
 /// tool clicks in.
-pub fn snapshot(target: WindowTarget, origin: (f64, f64)) -> Option<Snapshot> {
+/// `origin` is the display's top-left corner; `scale` turns its points
+/// into screenshot pixels.
+pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<Snapshot> {
     let window = window_element(target)?;
     // Chromium and Electron apps only publish their web content tree once a
     // client asks for it. Other apps ignore the attribute.
@@ -344,6 +346,7 @@ pub fn snapshot(target: WindowTarget, origin: (f64, f64)) -> Option<Snapshot> {
     );
     let mut walker = TreeWalker {
         origin,
+        scale,
         lines: Vec::new(),
         elements: Vec::new(),
         truncated: false,
@@ -442,8 +445,15 @@ fn list_menu(
 pub fn select_all(target: WindowTarget) -> bool {
     // An app that hasn't had a click yet may have no focused element: take
     // the window's first text field and focus it.
+    // The app's focused element may be in another of its windows, the
+    // user's: use it only when it is in this one.
     let focused = element_attribute(&application(target.pid), "AXFocusedUIElement")
         .filter(|e| string_attribute(e, "AXValue").is_some())
+        .filter(|e| {
+            element_attribute(e, "AXWindow")
+                .and_then(|w| window_id(&w))
+                .is_some_and(|id| id == target.window_id)
+        })
         .or_else(|| {
             let window = window_element(target)?;
             let field = first_text(&window, 0, &mut 0)?;
@@ -741,6 +751,7 @@ fn shortcut(element: &AXUIElement) -> Option<String> {
 /// short without losing anything an agent could act on.
 struct TreeWalker {
     origin: (f64, f64),
+    scale: f64,
     lines: Vec<String>,
     elements: Vec<Element>,
     truncated: bool,
@@ -838,9 +849,11 @@ impl TreeWalker {
             if let Some(f) =
                 frame_from(&values[7], &values[8]).filter(|f| f.width > 0.0 && f.height > 0.0)
             {
-                let x = (f.x - self.origin.0 + f.width / 2.0).round() as i64;
-                let y = (f.y - self.origin.1 + f.height / 2.0).round() as i64;
-                line += &format!(" at ({x},{y}) {}×{}", f.width as i64, f.height as i64);
+                let s = self.scale;
+                let x = ((f.x - self.origin.0 + f.width / 2.0) * s).round() as i64;
+                let y = ((f.y - self.origin.1 + f.height / 2.0) * s).round() as i64;
+                let (w, h) = ((f.width * s).round() as i64, (f.height * s).round() as i64);
+                line += &format!(" at ({x},{y}) {w}×{h}");
             }
             self.lines.push(format!("{}{line}", "  ".repeat(depth)));
             self.elements
