@@ -81,13 +81,29 @@ impl Core {
         let handle = VirtualDisplay::create(&name, size.0 as u32, size.1 as u32, serial)?;
         let id = handle.id;
         self.displays.add(id, name, size, owner, handle);
-        // WindowServer needs a moment before the display accepts
-        // configuration; try until it does.
+        // Usually WindowServer takes the position at once. Here, before the
+        // main thread turns to everything a new display sets off, which
+        // held a spawned first try back by up to 400 ms.
+        let virtual_ids: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
+        if display::tuck_away(id, &virtual_ids) {
+            self.tucked.insert(id);
+            cx.notify();
+            return Some(id);
+        }
+        // Otherwise it needs a moment before it accepts configuration; try
+        // until it does.
         cx.spawn(async move |this, cx| {
-            for _ in 0..30 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
+            let started = std::time::Instant::now();
+            let mut tries = 0;
+            for attempt in 0..75 {
+                // At once, then every 20 ms: each try that WindowServer takes
+                // ends the wait for create_display.
+                if attempt > 0 {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(20))
+                        .await;
+                }
+                tries += 1;
                 let Ok(placed) = this.update(cx, |core, _| {
                     let virtual_ids: Vec<DisplayId> =
                         core.displays.list.iter().map(|d| d.id).collect();
@@ -99,6 +115,10 @@ impl Core {
                     break;
                 }
             }
+            log::debug!(
+                "display {id} parked after {tries} tries, {} ms",
+                started.elapsed().as_millis()
+            );
             let _ = this.update(cx, |core, _| core.tucked.insert(id));
         })
         .detach();

@@ -274,7 +274,7 @@ try {
     await Bun.sleep(1000)
     const after = (await list()).length
     check("a window the agent's key press opens lands on the display", after === before + 1,
-      `${before} -> ${after} on the display, ${mainAtKey} -> ${onMainDisplay("TextEdit")} on the user's screen; ${textOf(key).slice(0, 80)}`)
+      `${before} -> ${after} on the display, ${mainAtKey} -> ${onMainDisplay("TextEdit")} on the user's screen; ${textOf(key).slice(0, 80)}; before ${shown.map((w) => w.title).join("|")}; after ${(await list()).map((w) => w.title).join("|")}`)
     await Bun.sleep(3500)
     const mainBefore = onMainDisplay("TextEdit")
     execFileSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to make new document'])

@@ -939,12 +939,12 @@ async fn create_display(
     // shows only the display.
     let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
     let created = started.elapsed().as_millis();
-    for _ in 0..40 {
+    for _ in 0..100 {
         if core.read_with(cx, |c, _| c.tucked.contains(&id)) {
             break;
         }
         cx.background_executor()
-            .timer(Duration::from_millis(50))
+            .timer(Duration::from_millis(20))
             .await;
     }
     // Stock AeroSpace may show one of the user's workspaces on the new

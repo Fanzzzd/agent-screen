@@ -49,13 +49,15 @@ SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_disp
 
 `robust.ts` and `timing.ts` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust.ts` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
 
-The table predates 0.1.7, which caches AeroSpace's answer instead of asking it on each `create_display`; a run on 2026-10-12 was discarded because the load average was 81. `timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, 2026-10-11:
+`timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, two debug-build runs on 2026-10-12 at load average 33 to 50. This Mac rarely drops below 20, so the numbers include that contention:
 
 | | median | p90 |
 | --- | --- | --- |
-| `create_display` | 772 ms | 922 ms |
-| `launch_app` TextEdit, not running | 1781 ms | 1947 ms |
-| `launch_app` TextEdit, running | 612 ms | 803 ms |
+| `create_display` | 884 to 913 ms | 1040 to 1317 ms |
+| `launch_app` TextEdit, not running | 1035 to 1496 ms | 1237 to 1629 ms |
+| `launch_app` TextEdit, running | 585 to 598 ms | 673 to 1617 ms |
+
+`create_display` breaks down in the debug log as: macOS creates the virtual display in 330 to 510 ms; WindowServer accepts its position on the first try, in 3 to 88 ms; the rest, 100 to 400 ms, is the main thread busy with what a new display sets off before the parking task runs. The AeroSpace check adds 10 to 30 ms. On 2026-10-11, at lower load, `create_display` was 772 ms median.
 
 `bun rust/tests/mcp/flash.ts` measures how long a running app's new window shows on your screen before it moves: 29 ms median, 55 ms p90 and 138 ms at most over 30 launches of TextEdit. Pressing the app's menu item, a catch on its own thread, and making the app's window on the display its main window first didn't change it; hiding the app made it worse, 341 ms median. A file that opens after the 4 s turn, forced with `FILES=1 SIDESCREEN_RUNNING_TURN_MS=0` in a debug build, shows longer: 64 to 86 ms median and 189 ms at most over three runs of 15 on 2026-10-12, at load average 15 to 30. A file opened within the turn showed for 0 ms median and 43 ms at most.
 
