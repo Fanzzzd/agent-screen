@@ -57,7 +57,7 @@ The table predates 0.1.7, which caches AeroSpace's answer instead of asking it o
 | `launch_app` TextEdit, not running | 1781 ms | 1947 ms |
 | `launch_app` TextEdit, running | 612 ms | 803 ms |
 
-`bun rust/tests/mcp/flash.ts` measures how long a running app's new window shows on your screen before it moves: 29 ms median, 55 ms p90 and 138 ms at most over 30 launches of TextEdit. Pressing the app's menu item, a catch on its own thread, and making the app's window on the display its main window first didn't change it; hiding the app made it worse, 341 ms median.
+`bun rust/tests/mcp/flash.ts` measures how long a running app's new window shows on your screen before it moves: 29 ms median, 55 ms p90 and 138 ms at most over 30 launches of TextEdit. Pressing the app's menu item, a catch on its own thread, and making the app's window on the display its main window first didn't change it; hiding the app made it worse, 341 ms median. A file that opens after the 4 s turn, forced with `FILES=1 SIDESCREEN_RUNNING_TURN_MS=0` in a debug build, shows longer: 64 to 86 ms median and 189 ms at most over three runs of 15 on 2026-10-12, at load average 15 to 30. A file opened within the turn showed for 0 ms median and 43 ms at most.
 
 Most of a cold launch is TextEdit starting. These are the numbers with AeroSpace ignoring agent displays, which makes Sidescreen skip AeroSpace entirely, as without AeroSpace. Under stock AeroSpace each step also waits for AeroSpace to answer: `create_display` measured 1204 ms median and `launch_app` on a running app 1244 ms before these changes.
 

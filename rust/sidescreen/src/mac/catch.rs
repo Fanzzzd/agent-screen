@@ -178,7 +178,7 @@ impl Drop for Catch {
 }
 
 extern "C" fn created(
-    _observer: Observer,
+    observer: Observer,
     element: *const AXUIElement,
     _notification: *const CFString,
     refcon: *mut c_void,
@@ -202,11 +202,21 @@ extern "C" fn created(
         }
         return;
     }
-    // A window that doesn't show the file yet is left to the poll behind it.
-    if let Some(document) = &target.document
-        && ax::document_path(window).as_ref() != Some(document)
-    {
-        return;
+    // A window that doesn't name its document yet may be the file's: look
+    // again when its title changes, as it does once the file loads.
+    if let Some(document) = &target.document {
+        if target.taken.get().is_some() {
+            return;
+        }
+        match ax::document_path(window) {
+            Some(shown) if shown == *document => {}
+            Some(_) => return,
+            None => {
+                let name = CFString::from_static_str("AXTitleChanged");
+                unsafe { AXObserverAddNotification(observer, window, &*name, refcon) };
+                return;
+            }
+        }
     }
     let (taken, left) = take(target.left.get());
     target.left.set(left);

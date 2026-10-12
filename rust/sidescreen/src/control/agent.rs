@@ -1204,6 +1204,16 @@ const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
 /// Sidescreen's request.
 const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);
 
+/// RUNNING_APP_TURN, or in test builds SIDESCREEN_RUNNING_TURN_MS, which
+/// sends every file down the path of one that opens late.
+fn running_app_turn() -> Duration {
+    std::env::var("SIDESCREEN_RUNNING_TURN_MS")
+        .ok()
+        .filter(|_| debug_methods())
+        .and_then(|ms| ms.parse().ok())
+        .map_or(RUNNING_APP_TURN, Duration::from_millis)
+}
+
 async fn launch(
     core: &Entity<Core>,
     id: DisplayId,
@@ -1442,6 +1452,8 @@ async fn launch_now(
                     .is_some_and(|d| shows_document(w.target, d)))
     };
     let mut gave_up = false;
+    // Takes over from `catch` for a file still opening, with no gap between.
+    let mut document_catch = None;
     for _ in 0..120 {
         cx.background_executor()
             .timer(Duration::from_millis(50))
@@ -1464,6 +1476,13 @@ async fn launch_now(
                 opened.map(|(_, at)| at),
             )
         {
+            document_catch = document
+                .clone()
+                .and_then(|d| crate::mac::catch::Catch::for_document(pid, id, screen.clone(), d));
+            log::debug!(
+                "launch: {name} file catch armed: {}",
+                document_catch.is_some()
+            );
             catch = None;
             gave_up = true;
             break;
@@ -1532,9 +1551,8 @@ async fn launch_now(
     if let Some(document) = watching {
         // A catch for the file's window moves it as it appears; the poll
         // covers an app that names the document only after.
-        let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+        let catch = document_catch.take();
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let catch = crate::mac::catch::Catch::for_document(pid, id, screen, document.clone());
             for _ in 0..200 {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
@@ -1623,7 +1641,7 @@ fn waited_long_enough(
     if asked_for_window {
         asked_at.elapsed() > ASKED_WINDOW_WAIT
     } else {
-        requested_at.elapsed() > RUNNING_APP_TURN
+        requested_at.elapsed() > running_app_turn()
             || opened_at.is_some_and(|at| at.elapsed() > OPENED_WINDOW_WAIT)
     }
 }

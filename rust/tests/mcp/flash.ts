@@ -4,6 +4,7 @@
  * distribution. TextEdit must not be in use.
  *
  *     SIDESCREEN_INSTANCE=e2e E2E_NOW=1 bun rust/tests/mcp/flash.ts
+ *     FILES=1 SIDESCREEN_RUNNING_TURN_MS=0 ...   a file window that comes late
  */
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync } from "node:fs"
@@ -39,10 +40,20 @@ const times: number[] = []
 try {
   await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
   for (let i = 0; i < Number(process.env.RUNS || 15); i++) {
-    const flash = await watchFlash(() =>
-      client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit" } })
-    )
+    // FILES=1: open a new file each time. With SIDESCREEN_RUNNING_TURN_MS=0
+    // each one takes the path of a file that opens after the 4 s turn.
+    const file = process.env.FILES === "1" ? `/tmp/sidescreen flash ${Date.now()}.txt` : undefined
+    if (file) await Bun.write(file, "flash\n")
+    const flash = await watchFlash(async () => {
+      const reply = await client.request("tools/call", {
+        name: "launch_app",
+        arguments: { display_id, app: "TextEdit", ...(file ? { open: file } : {}) }
+      })
+      // A late file window moves after the reply: give it the time.
+      if (file && !reply.result?.structuredContent?.window) await Bun.sleep(1500)
+    })
     times.push(flash.ms)
+    if (file) execFileSync("/bin/rm", ["-f", file])
   }
 } finally {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
