@@ -338,7 +338,9 @@ impl Forwarder {
     pub async fn type_text(&self, text: String, within: Rect) -> Sent {
         let stopped = self.stopped.clone();
         self.run(move |w| {
-            w.focus_something(within);
+            let Some(_held) = w.focus_something(within) else {
+                return Sent::Nowhere;
+            };
             let Some(target) = w.focused else {
                 return Sent::Nowhere;
             };
@@ -390,7 +392,7 @@ impl Forwarder {
     /// held up. The window it went to, or None when nothing can take keys.
     pub async fn chord(&self, chord: KeyChord, down: bool, within: Rect) -> Option<WindowTarget> {
         self.run(move |w| {
-            w.focus_something(within);
+            let _held = w.focus_something(within)?;
             let target = w.focused?;
             w.key(chord.code, down, flags(chord.modifiers));
             Some(target)
@@ -426,7 +428,7 @@ impl Forwarder {
     /// The window keys would go to now, if any.
     pub async fn keys_target(&self, within: Rect) -> Option<WindowTarget> {
         self.run(move |w| {
-            w.focus_something(within);
+            w.focus_something(within)?;
             w.focused
         })
         .await
@@ -436,10 +438,9 @@ impl Forwarder {
     /// False when no window on the display can take the keys.
     pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> bool {
         self.run(move |w| {
-            w.focus_something(within);
-            if w.focused.is_none() {
+            let Some(_held) = w.focus_something(within) else {
                 return false;
-            }
+            };
             for _ in 0..count.max(1) {
                 w.key(chord.code, true, flags(chord.modifiers));
                 thread::sleep(Duration::from_millis(20));
@@ -449,6 +450,44 @@ impl Forwarder {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+/// Apps whose keys a display's worker is sending: one at a time per app.
+static APPS_IN_USE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+static APP_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Holds an app for one display's keys until dropped.
+struct AppKeys(i32);
+
+impl AppKeys {
+    /// Waits for another display's keys to that app, at most 2 s, then
+    /// goes ahead.
+    fn hold(pid: i32) -> AppKeys {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut in_use = APPS_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        while in_use.contains(&pid) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            in_use = APP_FREED
+                .wait_timeout(in_use, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        in_use.push(pid);
+        AppKeys(pid)
+    }
+}
+
+impl Drop for AppKeys {
+    fn drop(&mut self) {
+        let mut in_use = APPS_IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = in_use.iter().position(|&p| p == self.0) {
+            in_use.swap_remove(i);
+        }
+        APP_FREED.notify_all();
     }
 }
 
@@ -467,6 +506,9 @@ struct Worker {
     /// The user's window in a shared app whose key focus the agent's keys
     /// took; handed back when they are done.
     restore: Option<WindowTarget>,
+    /// Focus went back to the user's window: the next keys for this
+    /// display focus `focused` again first.
+    handed_back: bool,
     gesture: Option<Gesture>,
     cache: Option<(Vec<Hit>, Instant)>,
     seed: u64,
@@ -484,6 +526,7 @@ impl Worker {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState),
             focused: None,
             restore: None,
+            handed_back: false,
             gesture: None,
             cache: None,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -501,7 +544,7 @@ impl Worker {
 
     /// Make `target` the window keys go to, without raising it.
     fn focus(&mut self, target: WindowTarget) {
-        if self.focused != Some(target) {
+        if self.focused != Some(target) || self.handed_back {
             self.send_focus(target);
         }
     }
@@ -513,6 +556,7 @@ impl Worker {
             thread::sleep(Duration::from_millis(50));
         }
         self.focused = Some(target);
+        self.handed_back = false;
     }
 
     /// Focus `target` for an agent's keys. The app may have made another
@@ -542,7 +586,14 @@ impl Worker {
     /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
         if let Some(window) = self.restore.take() {
-            unsafe { SSFocusWithoutRaise(window.pid, window.window_id) };
+            // The app came to the front meanwhile: the focus record is
+            // refused there, so make the user's window main through
+            // accessibility, as their click would.
+            if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
+                super::ax::make_main(window);
+            }
+            // Keys typed in the Viewer must focus the agent's window again.
+            self.handed_back = true;
         }
     }
 
@@ -695,6 +746,9 @@ impl Worker {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
+        if self.handed_back {
+            self.send_focus(target);
+        }
         self.key_to(target, code, down, flags);
     }
 
@@ -708,6 +762,9 @@ impl Worker {
 
     fn flags_changed(&mut self, code: u16, flags: CGEventFlags) {
         let Some(target) = self.focused else { return };
+        if self.handed_back {
+            self.send_focus(target);
+        }
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, true) else {
             return;
         };
@@ -718,22 +775,28 @@ impl Worker {
 
     /// Keys go to the last clicked window. When nothing on this display has
     /// been clicked yet, pick its topmost window so typing still lands.
-    fn focus_something(&mut self, within: Rect) {
+    ///
+    /// Holds the app for this display's keys until the guard drops, so
+    /// another session typing into the same app can't make its own window
+    /// key in the middle.
+    fn focus_something(&mut self, within: Rect) -> Option<AppKeys> {
         let list = hits();
         let still_there = self
             .focused
-            .and_then(|t| list.iter().find(|h| h.target == t));
-        if let Some(h) = still_there.filter(|h| within.intersects(&h.bounds)) {
-            let target = h.target;
-            self.focus_for_keys(target, within);
-            return;
-        }
-        match list.iter().find(|h| within.contains(h.bounds.mid())) {
-            Some(top) => self.focus_for_keys(top.target, within),
+            .and_then(|t| list.iter().find(|h| h.target == t))
+            .filter(|h| within.intersects(&h.bounds));
+        let Some(target) = still_there
+            .or_else(|| list.iter().find(|h| within.contains(h.bounds.mid())))
+            .map(|h| h.target)
+        else {
             // The window left the display, as when the user took it back:
             // keys must not follow it to the user's screen.
-            None => self.focused = None,
-        }
+            self.focused = None;
+            return None;
+        };
+        let held = AppKeys::hold(target.pid);
+        self.focus_for_keys(target, within);
+        Some(held)
     }
 
     #[allow(clippy::too_many_arguments)]

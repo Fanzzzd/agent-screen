@@ -144,6 +144,12 @@ pub fn try_action(element: &AXUIElement, action: &str) -> bool {
     )
 }
 
+/// Make `target` its app's main window, as a click on it would, without
+/// the focus event that would end the front app's text input session.
+pub fn make_main(target: WindowTarget) -> bool {
+    window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
+}
+
 /// The window an app sends keys to: its focused window. Asked before
 /// input, so a hung app gets 0.1 s, not the usual 1 s.
 pub fn focused_window_id(pid: i32) -> Option<u32> {

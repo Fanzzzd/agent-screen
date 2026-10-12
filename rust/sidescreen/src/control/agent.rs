@@ -398,6 +398,7 @@ pub async fn handle(
                 return Err(e);
             }
             let Some(pressed) = forwarder.chord(chord, true, within).await else {
+                forwarder.keys_done().await;
                 return Err(no_keyboard_target());
             };
             // Let go at once if the user takes over: their keys would come
@@ -2288,7 +2289,7 @@ async fn keys_allowed(
     if elsewhere {
         let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
         return Err(ControlError::failed(format!(
-            "the user is working in {name} right now, so keys would reach their window, not yours. Set text with act_on_element (set_value) instead, or wait and try again"
+            "the user is working in {name} right now, so keys would reach their window, not yours. Set text with act_on_element (set_value) instead, or wait and try again."
         )));
     }
     Ok(())
