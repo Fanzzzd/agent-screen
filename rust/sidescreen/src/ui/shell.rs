@@ -139,8 +139,8 @@ pub struct Shell {
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
     setup: Option<WindowHandle<Setup>>,
-    /// The last agent whose MCP server loaded the tools.
-    agent_ready: Option<String>,
+    /// The agents whose MCP servers loaded the tools, first to last.
+    agent_ready: Vec<String>,
     /// The permission whose pane the user was sent to.
     waiting: Option<Permission>,
     /// Screen Recording came on while running and capture still fails.
@@ -269,7 +269,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             asking: false,
             permissions: permissions::status(),
             setup: None,
-            agent_ready: None,
+            agent_ready: Vec::new(),
             waiting: None,
             restart: false,
         }
@@ -1208,7 +1208,7 @@ impl Shell {
             menu.separator();
         }
         // Setup worked on the agent's side too: its session has the tools.
-        match &self.agent_ready {
+        match self.agents_ready() {
             Some(agent) => menu.disabled(&tf!(
                 "{agent} loaded Sidescreen's tools",
                 "{agent} 已加载 Sidescreen 的工具"
@@ -1702,19 +1702,30 @@ impl Shell {
     }
 
     pub fn last_agent_ready(&self) -> Option<String> {
-        self.agent_ready.clone()
+        self.agents_ready()
+    }
+
+    /// The agents that loaded the tools since Sidescreen started, by name.
+    fn agents_ready(&self) -> Option<String> {
+        match self.agent_ready.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            [rest @ .., last] => Some(format!("{} {} {last}", rest.join(", "), t("and", "和"))),
+        }
     }
 
     /// An agent's MCP server listed the tools: setup worked on its side.
     pub fn agent_ready(&mut self, client: String, cx: &mut Context<Self>) {
         log::info!("{client} loaded the tools");
-        self.agent_ready = Some(client);
+        if !self.agent_ready.contains(&client) {
+            self.agent_ready.push(client);
+        }
         self.push_setup(cx);
     }
 
     fn push_setup(&mut self, cx: &mut Context<Self>) {
         let (status, waiting, restart) = (self.permissions, self.waiting, self.restart);
-        let agent = self.agent_ready.clone();
+        let agent = self.agents_ready();
         let Some(handle) = self.setup else { return };
         if handle
             .update(cx, |setup, _, cx| {

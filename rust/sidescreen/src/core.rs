@@ -37,6 +37,9 @@ pub struct Core {
     pub watching: HashSet<(i32, std::path::PathBuf)>,
     /// Undecided windows of the kept catches already reported to an agent.
     pub told: HashSet<u32>,
+    /// Windows `adopt_opened` left on the user's screen because the user
+    /// had just acted on the app, by display, until reported.
+    pub left_alone: Vec<(DisplayId, u32)>,
 }
 
 impl Core {
@@ -52,6 +55,7 @@ impl Core {
             kept_catches: Vec::new(),
             watching: HashSet::new(),
             told: HashSet::new(),
+            left_alone: Vec::new(),
         }
     }
 

@@ -219,9 +219,9 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a slow or second",
                 "window can. Get ids from list_windows with strays: true. A new window of such an app moves to the display by itself",
-                "within 3 s of your input, element action or launch there, unless the user clicked or typed in the app; one the user",
-                "opened is theirs. Once the user takes back any window of the app, all its windows are theirs. You can't place the",
-                "user's windows: to work in one, ask the",
+                "within 3 s of your input, element action or launch there, unless the user meanwhile clicked or typed in the app,",
+                "Finder, the Dock or a launcher such as Spotlight; one the user opened is theirs. Once the user takes back any",
+                "window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
                 "user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
             ],
             object(
@@ -629,6 +629,31 @@ fn describe_wait(reply: &Object) -> Value {
     }
 }
 
+/// What a result's `strayed` windows are: new windows of the agent's apps
+/// that stayed on the user's screen, because the user was using the app
+/// too or nobody had just acted.
+fn strayed_note(result: &serde_json::Map<String, Value>) -> String {
+    let mut note = String::new();
+    for w in result
+        .get("strayed")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let app = w.get("app").and_then(Value::as_str).unwrap_or("app");
+        let id = w.get("windowId").cloned().unwrap_or(Value::Null);
+        let next = if w.get("placeable") == Some(&Value::Bool(true)) {
+            "If your action opened it, call place_window with that id."
+        } else {
+            "If you need it, ask the user to hand it over."
+        };
+        note.push_str(&format!(
+            " A new {app} window, {id}, opened on the user's screen and stayed there: the user was using the app too, or it opened long after your last action. {next}"
+        ));
+    }
+    note
+}
+
 /// Window state as tool content: the tree as text, then the window image.
 async fn window_state(
     control: &Control,
@@ -649,9 +674,10 @@ async fn window_state(
         ""
     };
     let header = format!(
-        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in display coordinates, where the computer tool clicks; the image shows just this window.",
+        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in display coordinates, where the computer tool clicks; the image shows just this window.{}",
         get("window"),
         elements,
+        strayed_note(&state),
     );
     let tree = state
         .get("tree")
@@ -849,18 +875,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         get("width"),
         get("height")
     );
-    for w in shot
-        .get("strayed")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        header.push_str(&format!(
-            " A new {} window, {}, opened on the user's screen and stayed there: the user was using the app too, or it opened long after your last action. If your action opened it, call place_window with that id.",
-            w.get("app").and_then(Value::as_str).unwrap_or("app"),
-            w.get("windowId").cloned().unwrap_or(Value::Null),
-        ));
-    }
+    header.push_str(&strayed_note(&shot));
     Ok(vec![text(header), image(&get("data"), &get("mimeType"))])
 }
 

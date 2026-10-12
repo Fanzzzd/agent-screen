@@ -94,8 +94,7 @@ pub async fn handle(
             } else {
                 Format::Jpeg
             };
-            let settle = p.0.get("settle") == Some(&Value::Bool(true));
-            if settle {
+            if p.0.get("settle") == Some(&Value::Bool(true)) {
                 settle_display(&core, id, size, cx).await;
             }
             // Within the image budget the agent reads coordinates in, and
@@ -140,14 +139,7 @@ pub async fn handle(
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
             result["scale"] = json!(scale);
-            // After an action: windows it may have opened that stayed on the
-            // user's screen, for the agent to place if they're its own.
-            if settle {
-                let strayed = core.update(cx, |c, _| undecided_strays(c, id));
-                if !strayed.is_empty() {
-                    result["strayed"] = json!(strayed);
-                }
-            }
+            add_strayed(&core, id, &mut result, cx);
             Ok(result)
         }
         "click" => {
@@ -484,6 +476,7 @@ pub async fn handle(
             result["tree"] = json!(tree);
             result["elements"] = json!(count);
             result["truncated"] = json!(snapshot.truncated);
+            add_strayed(&core, id, &mut result, cx);
             Ok(result)
         }
         "elementAction" => {
@@ -945,8 +938,10 @@ fn sync_user_made(c: &mut Core, id: DisplayId) {
     }
 }
 
-/// Windows the kept catches left on the user's screen because both the
+/// Windows of the agent's apps left on the user's screen because both the
 /// user and the agent had just acted, or neither, not reported before.
+/// `placeable` says whether place_window takes it: it does for apps the
+/// agent started; others need a handover.
 fn undecided_strays(c: &mut Core, id: DisplayId) -> Vec<Value> {
     sync_user_made(c, id);
     let fresh: Vec<u32> = c
@@ -954,19 +949,54 @@ fn undecided_strays(c: &mut Core, id: DisplayId) -> Vec<Value> {
         .iter()
         .filter(|(display, _)| *display == id)
         .flat_map(|(_, k)| k.undecided())
+        .chain(
+            c.left_alone
+                .iter()
+                .filter(|(display, _)| *display == id)
+                .map(|(_, w)| *w),
+        )
         .filter(|w| !c.told.contains(w))
         .collect();
+    c.left_alone.retain(|(display, _)| *display != id);
     let Some(d) = c.displays.get(id) else {
         return Vec::new();
     };
+    let shown = windows::all();
     let mut out = Vec::new();
     for window in fresh {
-        c.told.insert(window);
-        if let Some(w) = windows::find(window).filter(|w| d.is_stray(w.target, false)) {
-            out.push(json!({ "windowId": window, "app": w.app }));
+        if !c.told.insert(window) {
+            continue;
         }
+        let Some(w) = shown.iter().find(|w| w.target.window_id == window) else {
+            continue;
+        };
+        if d.returned.contains(&window) || d.user_made.contains(&window) {
+            continue;
+        }
+        // Moved onto an Agent Display meanwhile, by a catch or a handover.
+        if c.displays
+            .list
+            .iter()
+            .any(|a| cg::display_bounds(a.id).contains(w.bounds.mid()))
+        {
+            continue;
+        }
+        out.push(json!({
+            "windowId": window,
+            "app": w.app,
+            "placeable": d.is_stray(w.target, false),
+        }));
     }
     out
+}
+
+/// Name in a screenshot's result the windows an action may have opened that
+/// stayed on the user's screen.
+fn add_strayed(core: &Entity<Core>, id: DisplayId, result: &mut Value, cx: &mut AsyncApp) {
+    let strayed = core.update(cx, |c, _| undecided_strays(c, id));
+    if !strayed.is_empty() {
+        result["strayed"] = json!(strayed);
+    }
 }
 
 /// Whether a kept catch on the display left this window alone as nobody's
@@ -2136,15 +2166,29 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
                     pids.contains(&w.target.pid)
                         && !released.contains(&w.target.pid)
                         && !kept_out.contains(&w.target.window_id)
-                        && !crate::mac::catch::user_acted_recently(w.target.pid)
                         && !before.contains(&w.target.window_id)
                         && w.layer == 0
                         && !agent_areas.iter().any(|a| a.contains(w.bounds.mid()))
                 })
                 .map(|w| w.target)
-                .collect::<Vec<_>>()
+                .partition::<Vec<_>, _>(|w| !crate::mac::catch::user_acted_recently(w.pid))
         })
         .await;
+    let (opened, left) = opened;
+    // The user just acted on the app too: leave the window, and tell the
+    // agent on its next screenshot.
+    if !left.is_empty() {
+        core.update(cx, |c, _| {
+            c.left_alone.extend(left.iter().map(|w| (id, w.window_id)))
+        });
+    }
+    for target in left.iter().chain(&opened) {
+        BEFORE.with(|b| {
+            if let Some((ids, _)) = b.borrow_mut().get_mut(&id) {
+                ids.insert(target.window_id);
+            }
+        });
+    }
     for target in opened {
         // Seen once is enough: a window that won't move isn't retried.
         BEFORE.with(|b| {
