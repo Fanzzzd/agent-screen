@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.7 (2026-10-12)
+
+### Fixes
+
+#### create_display asks AeroSpace less
+
+Once AeroSpace has left an Agent Display alone, Sidescreen trusts that until AeroSpace restarts or its config file changes, instead of asking AeroSpace again on each new display.
+
+#### A file opened in a running app finds its way to the agent's display
+
+When an agent opens a file in an app you are running, Sidescreen recognizes the file's window by the document it shows. If the app takes longer than 4 seconds, the window still moves to the agent's display when it opens, for up to 30 seconds, and `still_opening` says so. Your other windows in that app stay where they are.
+
+#### New Window in other languages
+
+`launch_app` finds New Window and New in German, French, Spanish, Italian, Portuguese, Dutch, Swedish, Russian, Japanese, Korean and Chinese menus. When an app's menus can't be read, it answers `menus_unreadable` instead of `no_new_window`.
+
+#### A window you take back stays yours
+
+A window you take back from an agent is never listed by `list_windows` with `strays: true` again, and `place_window` refuses it, even in an app the agent started. Once an agent ends its display, Sidescreen stops moving that app's new windows onto it.
+
 ## 0.1.6 (2026-10-12)
 
 ### Fixes
