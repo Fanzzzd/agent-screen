@@ -36,7 +36,7 @@ Development switches for the Rust app:
 ## Test
 
 ```sh
-cargo test --manifest-path rust/Cargo.toml   # unit tests
+(cd rust && cargo test)                # unit tests
 bun rust/tests/mcp/control.ts         # Takeover and Help Request, needs a debug build running
 bun rust/tests/mcp/smoke.ts           # end to end with Calculator
 bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar strip, focus, permission setup
