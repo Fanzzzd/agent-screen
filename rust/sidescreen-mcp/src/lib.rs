@@ -29,7 +29,9 @@ const INSTRUCTIONS: &[&str] = &[
 
 #[derive(Default)]
 struct Sidescreen {
-    control: Control,
+    control: std::sync::Arc<Control>,
+    /// Whether the app has heard that this client loaded the tools.
+    announced: std::sync::atomic::AtomicBool,
 }
 
 impl ServerHandler for Sidescreen {
@@ -46,8 +48,26 @@ impl ServerHandler for Sidescreen {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        // The setup window shows that an agent loaded the tools. A running
+        // app hears it; a stopped one isn't started for it.
+        if !self
+            .announced
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let client = context
+                .peer
+                .peer_info()
+                .map(|info| info.client_info.name.clone())
+                .unwrap_or_else(|| "An agent".into());
+            let control = self.control.clone();
+            tokio::spawn(async move {
+                control
+                    .notify_if_running("agentReady", json!({ "client": client }))
+                    .await;
+            });
+        }
         // Protocol 2026-07-28 requires resultType on every result, and ttlMs
         // and cacheScope on lists; rmcp drops them for older clients.
         let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));

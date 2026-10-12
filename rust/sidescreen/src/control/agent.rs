@@ -549,6 +549,14 @@ pub async fn handle(
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
             })
         }
+        // The MCP server of an agent session listed the tools.
+        "agentReady" => {
+            let client = p.string("client").unwrap_or_else(|| "An agent".into());
+            if let Some(shell) = crate::ui::shell::current() {
+                let _ = shell.update(cx, |shell, cx| shell.agent_ready(client, cx));
+            }
+            Ok(json!({}))
+        }
         "requestHelp" => {
             let id = display(&core, &p, true, cx)?;
             let reason = p
@@ -637,6 +645,14 @@ pub async fn handle(
                 .await;
             Ok(json!({}))
         }
+        // Test hook: which agent the setup window says loaded the tools.
+        "debugAgentReady" if debug_methods() => {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let agent = shell
+                .read_with(cx, |shell, _| shell.last_agent_ready())
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "agent": agent }))
+        }
         "debugQuit" if debug_methods() => {
             // Quits the way the menu does, after this reply goes out.
             cx.spawn(async |cx| {
@@ -674,7 +690,12 @@ pub async fn handle(
 fn needs_permissions(method: &str) -> bool {
     !matches!(
         method,
-        "endDisplay" | "requestHelp" | "waitForControl" | "setDisposition" | "listWindows"
+        "endDisplay"
+            | "requestHelp"
+            | "waitForControl"
+            | "setDisposition"
+            | "listWindows"
+            | "agentReady"
     ) && !method.starts_with("debug")
 }
 

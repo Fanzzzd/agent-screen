@@ -79,6 +79,24 @@ impl Control {
             .unwrap_or_else(|_| Err(closed("the connection dropped")))
     }
 
+    /// Tell the app something if it is running, without starting it.
+    pub async fn notify_if_running(&self, method: &str, params: Value) {
+        if self.open_running().await.is_some() {
+            let _ = self.call(method, params).await;
+        }
+    }
+
+    async fn open_running(&self) -> Option<Arc<Connection>> {
+        let mut slot = self.connection.lock().await;
+        if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
+            return Some(connection.clone());
+        }
+        let (reader, writer) = endpoint::connect().await.ok()?;
+        let connection = attach(reader, writer);
+        *slot = Some(connection.clone());
+        Some(connection)
+    }
+
     async fn open(&self) -> Result<Arc<Connection>, ControlError> {
         let mut slot = self.connection.lock().await;
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
@@ -100,22 +118,25 @@ impl Control {
                 ));
             }
         };
-        let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> =
-            Default::default();
-        let open = Arc::new(AtomicBool::new(true));
-        tokio::spawn(receive(
-            BufReader::new(reader),
-            pending.clone(),
-            open.clone(),
-        ));
-        let connection = Arc::new(Connection {
-            writer: Mutex::new(writer),
-            pending,
-            open,
-        });
+        let connection = attach(reader, writer);
         *slot = Some(connection.clone());
         Ok(connection)
     }
+}
+
+fn attach(reader: Reader, writer: Writer) -> Arc<Connection> {
+    let pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Reply>>>> = Default::default();
+    let open = Arc::new(AtomicBool::new(true));
+    tokio::spawn(receive(
+        BufReader::new(reader),
+        pending.clone(),
+        open.clone(),
+    ));
+    Arc::new(Connection {
+        writer: Mutex::new(writer),
+        pending,
+        open,
+    })
 }
 
 #[cfg(target_os = "macos")]

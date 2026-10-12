@@ -139,6 +139,8 @@ pub struct Shell {
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
     setup: Option<WindowHandle<Setup>>,
+    /// The last agent whose MCP server loaded the tools.
+    agent_ready: Option<String>,
     /// The permission whose pane the user was sent to.
     waiting: Option<Permission>,
     /// Screen Recording came on while running and capture still fails.
@@ -267,6 +269,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             asking: false,
             permissions: permissions::status(),
             setup: None,
+            agent_ready: None,
             waiting: None,
             restart: false,
         }
@@ -1686,14 +1689,27 @@ impl Shell {
         self.quit(cx);
     }
 
+    pub fn last_agent_ready(&self) -> Option<String> {
+        self.agent_ready.clone()
+    }
+
+    /// An agent's MCP server listed the tools: setup worked on its side.
+    pub fn agent_ready(&mut self, client: String, cx: &mut Context<Self>) {
+        log::info!("{client} loaded the tools");
+        self.agent_ready = Some(client);
+        self.push_setup(cx);
+    }
+
     fn push_setup(&mut self, cx: &mut Context<Self>) {
         let (status, waiting, restart) = (self.permissions, self.waiting, self.restart);
+        let agent = self.agent_ready.clone();
         let Some(handle) = self.setup else { return };
         if handle
             .update(cx, |setup, _, cx| {
                 setup.status = status;
                 setup.waiting = waiting;
                 setup.restart = restart;
+                setup.agent = agent;
                 cx.notify();
             })
             .is_err()

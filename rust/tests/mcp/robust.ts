@@ -231,6 +231,17 @@ try {
   check("launch_app on a running single-window app says no_new_window within 1.5 s",
     second?.window === null && second?.reason === "no_new_window" && tookMs < 1500, `${JSON.stringify(second)?.slice(0, 120)} in ${tookMs} ms`)
 
+  // Listing the tools tells the running app an agent loaded them, for the
+  // setup window.
+  await client.request("tools/list", {})
+  await Bun.sleep(500)
+  {
+    const probe = await Control.connect()
+    const ready = await probe.call("debugAgentReady")
+    probe.close()
+    check("listing the tools tells the app an agent loaded them", typeof ready?.agent === "string", JSON.stringify(ready))
+  }
+
   // The user takes a TextEdit window back: TextEdit is theirs from then on.
   // A window they make next stays on their screen and isn't a stray.
   const control = await Control.connect()

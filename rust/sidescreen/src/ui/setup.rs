@@ -27,6 +27,8 @@ pub struct Setup {
     /// Screen Recording came on while running, and capture still fails:
     /// macOS applies it to a new process.
     pub restart: bool,
+    /// The last agent that loaded Sidescreen's tools, if any did.
+    pub agent: Option<String>,
     icon: Option<Arc<gpui::Image>>,
 }
 
@@ -39,6 +41,7 @@ impl Setup {
             status,
             waiting: None,
             restart: false,
+            agent: None,
             icon,
         }
     }
@@ -56,10 +59,17 @@ impl Render for Setup {
         let (title, subtitle) = if ready {
             (
                 t("Sidescreen is ready", "Sidescreen 可以用了"),
-                t(
-                    "Ask an agent to create a display. Its apps run there, off your screen.",
-                    "让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。",
-                ),
+                match self.agent.clone() {
+                    Some(agent) => tf!(
+                        "{agent} loaded Sidescreen's tools. Ask it to create a display: its apps run there, off your screen.",
+                        "{agent} 已加载 Sidescreen 的工具。让它创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。"
+                    ),
+                    None => t(
+                        "Ask an agent to create a display. Its apps run there, off your screen. No agent has loaded the tools yet: start a new session after connecting one.",
+                        "让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。还没有 agent 加载工具：接入后开一个新会话。",
+                    )
+                    .to_string(),
+                },
             )
         } else {
             (
@@ -67,7 +77,8 @@ impl Render for Setup {
                 t(
                     "Agents use apps on a display beside yours. Sidescreen needs to see that display and to click and type for the agent.",
                     "Agent 在旁边的虚拟屏上操作 app。Sidescreen 要看到那块屏，也要替 agent 点击和输入。",
-                ),
+                )
+                .to_string(),
             )
         };
         let rows = Permission::ALL.map(|p| self.row(p, &theme));

@@ -44,7 +44,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe.
 
-Then ask your agent something like "Use Sidescreen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. If Sidescreen isn't running, the first tool call starts it.
+Then ask your agent something like "Use Sidescreen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Sidescreen's setup window, under the menu bar icon, names the agent. If Sidescreen isn't running, the first tool call starts it.
 
 ## Agent tools
 
