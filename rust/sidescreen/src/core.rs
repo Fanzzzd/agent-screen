@@ -33,6 +33,8 @@ pub struct Core {
     /// a window such an app opens later, as TextEdit does for a second
     /// `open`, goes to the agent's display instead of the user's screen.
     pub kept_catches: Vec<(DisplayId, crate::mac::catch::Catch)>,
+    /// Files a running app is still opening, by pid, each watched once.
+    pub watching: HashSet<(i32, std::path::PathBuf)>,
 }
 
 impl Core {
@@ -46,6 +48,7 @@ impl Core {
             tucked: HashSet::new(),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
+            watching: HashSet::new(),
         }
     }
 

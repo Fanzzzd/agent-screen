@@ -1593,6 +1593,9 @@ impl Shell {
                 .get(&target.window_id)
                 .and_then(|r| r.home.clone());
             display.give_back(target.window_id);
+            // Taking a window back says the app is the user's now: its
+            // later windows stay on the user's screen.
+            core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
             home
         });
         let main_name = main_screen_name();

@@ -49,7 +49,7 @@ SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_disp
 
 `robust.ts` and `timing.ts` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust.ts` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
 
-`timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, 2026-10-11:
+The table predates 0.1.7, which caches AeroSpace's answer instead of asking it on each `create_display`; a run on 2026-10-12 was discarded because the load average was 81. `timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, 2026-10-11:
 
 | | median | p90 |
 | --- | --- | --- |

@@ -178,6 +178,12 @@ try {
   check("a file opened in a running app lands on the display", fileWindow?.title?.startsWith("sidescreen robust"), textOf(opened).slice(0, 160))
   check("the file's window isn't on the user's screen", onMainDisplay("TextEdit") === 0)
   execFileSync("/bin/rm", ["-f", file])
+  // The same with a file URL.
+  const urlFile = `/tmp/sidescreen url ${Date.now()}.txt`
+  await Bun.write(urlFile, "robust\n")
+  const byUrl = await client.request("tools/call", { name: "launch_app", arguments: { display_id, app: "TextEdit", open: `file://${encodeURI(urlFile)}` } })
+  check("a file:// URL opens like its path", structured(byUrl)?.window?.title?.startsWith("sidescreen url"), textOf(byUrl).slice(0, 160))
+  execFileSync("/bin/rm", ["-f", urlFile])
 
   // Copy and paste between two documents, through accessibility.
   {

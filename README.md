@@ -83,7 +83,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - Clicks on an empty part of a display reach nothing.
 - `launch_app` on a running single-window app such as Calculator gets no new window, and says so at once. Quit it first, or hand its window over.
 - When an agent opens a new window in an app that is already running, the window shows on your screen for about 30 ms before it moves, 140 ms at most in tests.
-- While an agent's display is open, every window of an app that agent started opens on its display, including one you open in that app.
+- While an agent's display is open, a new window of an app that agent started opens on its display, unless that app is in front on your screen. Take one of its windows back and the app is yours again. A window you take back never returns to the agent.
 - A window that refuses to close, such as one with unsaved changes, is left to macOS, which moves it to your main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.

@@ -321,10 +321,10 @@ pub async fn handle(
         }
         "listWindows" => {
             let id = display(&core, &p, false, cx)?;
-            let records = core.read_with(cx, |c, _| {
+            let (records, started) = core.read_with(cx, |c, _| {
                 c.displays
                     .get(id)
-                    .map(|d| d.records.clone())
+                    .map(|d| (d.records.clone(), d.started.clone()))
                     .unwrap_or_default()
             });
             let list: Vec<Value> = windows::on_display(id)
@@ -332,7 +332,14 @@ pub async fn handle(
                 .map(|w| {
                     let mut json = w.json();
                     let record = records.get(&w.target.window_id);
-                    json["origin"] = json!(record.map_or("unknown", |r| r.origin.as_str()));
+                    // A further window of an app the agent started, which its
+                    // catch moved here, is as launched as the first.
+                    let unrecorded = if started.contains(&w.target.pid) {
+                        "launched"
+                    } else {
+                        "unknown"
+                    };
+                    json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
                     json["disposition"] =
                         json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
                     json
@@ -367,6 +374,16 @@ pub async fn handle(
         "placeWindow" => {
             let id = input_display(&core, &p, cx)?;
             let wanted = p.int("windowId").unwrap_or(-1);
+            let returned = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.returned.contains(&(wanted as u32)))
+            });
+            if returned {
+                return Err(ControlError::failed(
+                    "the user took that window back; it stays theirs. Ask them to hand it over again if you need it",
+                ));
+            }
             let window = strays(&core, id, cx)
                 .into_iter()
                 .find(|w| w.target.window_id as i64 == wanted)
@@ -845,41 +862,26 @@ fn keep_catch(
 /// Agent Display and no display's records, such as one that opened on the
 /// user's screen before its catch was ready.
 fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
-    let (display, displays, recorded) = core.read_with(cx, |c, _| {
-        (
-            c.displays
-                .get(id)
-                .map(|d| (d.started.clone(), d.returned.clone())),
-            c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>(),
-            c.displays
-                .list
-                .iter()
-                .flat_map(|d| d.records.keys().copied())
-                .collect::<std::collections::HashSet<_>>(),
-        )
+    let displays = core.read_with(cx, |c, _| {
+        c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>()
     });
-    let Some((started, _)) = &display else {
-        return Vec::new();
-    };
-    if started.is_empty() {
-        return Vec::new();
-    }
     let placed: std::collections::HashSet<u32> = displays
         .into_iter()
         .flat_map(windows::on_display)
         .map(|w| w.target.window_id)
         .collect();
-    let windows: Vec<windows::Window> = windows::all()
+    let off_displays: Vec<windows::Window> = windows::all()
         .into_iter()
         .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
         .collect();
     core.read_with(cx, |c, _| {
-        let Some(d) = c.displays.get(id) else {
+        let Some(display) = c.displays.get(id) else {
             return Vec::new();
         };
-        windows
+        let recorded = |w: u32| c.displays.list.iter().any(|d| d.records.contains_key(&w));
+        off_displays
             .into_iter()
-            .filter(|w| d.is_stray(w.target, recorded.contains(&w.target.window_id)))
+            .filter(|w| display.is_stray(w.target, recorded(w.target.window_id)))
             .collect()
     })
 }
@@ -1060,6 +1062,10 @@ fn open_target(text: &str) -> Result<String, ControlError> {
         } else {
             Err(ControlError::not_found(format!("no file at {text}")))
         };
+    }
+    // A file URL is a file: a running app opens it in a window of its own.
+    if let Some(path) = ax::file_url_path(text) {
+        return open_target(&path.to_string_lossy());
     }
     let scheme = text.split_once(':').map(|(s, _)| s);
     if scheme.is_some_and(|s| {
@@ -1450,25 +1456,45 @@ async fn launch_now(
     // so it does not stay on the user's screen: for an app Sidescreen
     // started, any new window; for a running app, the one showing the file.
     let core = core.clone();
-    if let Some(document) = document.clone() {
+    // The app showed the file in a window it had before; otherwise its
+    // window is still to come, and the watcher above moves it.
+    let shown_already = document.as_deref().is_some_and(|d| {
+        windows::all().iter().any(|w| {
+            w.target.pid == pid
+                && before.contains(&w.target.window_id)
+                && shows_document(w.target, d)
+        })
+    });
+    let watching = document
+        .clone()
+        .filter(|d| core.update(cx, |c, _| c.watching.insert((pid, d.clone()))));
+    if let Some(document) = watching {
+        // A catch for the file's window moves it as it appears; the poll
+        // covers an app that names the document only after.
+        let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
         cx.spawn(async move |cx: &mut AsyncApp| {
+            let catch = crate::mac::catch::Catch::for_document(pid, id, screen, document.clone());
             for _ in 0..200 {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
+                let taken = catch.as_ref().and_then(|c| c.taken());
                 if let Some(late) = windows::all().into_iter().find(|w| {
                     w.target.pid == pid
                         && w.layer == 0
                         && !before.contains(&w.target.window_id)
-                        && shows_document(w.target, &document)
+                        && (taken == Some(w.target.window_id)
+                            || shows_document(w.target, &document))
                 }) {
                     let _ = settle(&core, late.target, id, cx).await;
-                    return;
+                    break;
                 }
                 if !takes_windows(&core, id, cx) {
-                    return;
+                    break;
                 }
             }
+            drop(catch);
+            core.update(cx, |c, _| c.watching.remove(&(pid, document)));
         })
         .detach();
     } else if !was_running {
@@ -1505,10 +1531,10 @@ async fn launch_now(
             "still_starting"
         } else if asked_for_window {
             "no_new_window"
-        } else if opened.is_none() {
-            "still_opening"
-        } else {
+        } else if shown_already {
             "existing_window"
+        } else {
+            "still_opening"
         }),
     })
 }
@@ -1516,34 +1542,8 @@ async fn launch_now(
 /// Whether a window shows a file, by its AXDocument URL.
 fn shows_document(target: WindowTarget, path: &std::path::Path) -> bool {
     ax::window_element(target)
-        .and_then(|w| ax::string_attribute(&w, "AXDocument"))
-        .and_then(|url| file_url_path(&url))
-        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|w| ax::document_path(&w))
         .is_some_and(|p| p == path)
-}
-
-/// The path of a file URL, with its percent escapes decoded.
-fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    let bytes = rest.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let Some(byte) = rest
-                .get(i + 1..i + 3)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            out.push(byte);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    let path = String::from_utf8(out).ok()?;
-    Some(std::path::PathBuf::from(path.trim_end_matches('/')))
 }
 
 /// Whether a running app has had its time to make the window Sidescreen
@@ -2035,14 +2035,14 @@ mod launch_tests {
     #[test]
     fn reads_file_urls() {
         assert_eq!(
-            file_url_path("file:///Users/me/My%20Notes/a%C3%A9.txt"),
+            ax::file_url_path("file:///Users/me/My%20Notes/a%C3%A9.txt"),
             Some(std::path::PathBuf::from("/Users/me/My Notes/aé.txt"))
         );
         assert_eq!(
-            file_url_path("file://localhost/tmp/x/"),
+            ax::file_url_path("file://localhost/tmp/x/"),
             Some(std::path::PathBuf::from("/tmp/x"))
         );
-        assert_eq!(file_url_path("https://example.com"), None);
+        assert_eq!(ax::file_url_path("https://example.com"), None);
     }
 
     #[test]

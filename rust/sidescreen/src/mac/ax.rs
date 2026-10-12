@@ -493,6 +493,37 @@ fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Optio
     None
 }
 
+/// The path of a file URL, with its percent escapes decoded.
+pub fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = rest
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    Some(std::path::PathBuf::from(path.trim_end_matches('/')))
+}
+
+/// The file a window shows, from its AXDocument URL, with symlinks resolved.
+pub fn document_path(window: &AXUIElement) -> Option<std::path::PathBuf> {
+    string_attribute(window, "AXDocument")
+        .and_then(|url| file_url_path(&url))
+        .and_then(|p| std::fs::canonicalize(p).ok())
+}
+
 /// What came of asking a running app for a new window through its menus.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NewWindow {
@@ -515,82 +546,54 @@ pub struct MenuEntry {
     pub has_submenu: bool,
 }
 
-/// New Window, as macOS's languages title it, Finder's included.
+/// New Window as macOS titles it: Terminal's MainMenu.loctable in macOS
+/// 26 for 21 languages, and Finder's New Finder Window in English and
+/// Simplified Chinese.
 const WINDOW_TITLES: &[&str] = &[
     "new window",
-    "new finder window",
     "neues fenster",
-    "neues finder-fenster",
     "nouvelle fenêtre",
-    "nouvelle fenêtre de finder",
-    "nouvelle fenêtre finder",
     "nueva ventana",
-    "nueva ventana del finder",
-    "nueva ventana de finder",
     "nuova finestra",
-    "nuova finestra di finder",
-    "nuova finestra del finder",
     "nova janela",
-    "nova janela do finder",
     "nieuw venster",
-    "nieuw finder-venster",
     "nytt fönster",
-    "nytt finder-fönster",
+    "nyt vindue",
+    "nytt vindu",
+    "uusi ikkuna",
+    "nowe okno",
     "новое окно",
-    "новое окно finder",
+    "нове вікно",
+    "yeni pencere",
     "新規ウインドウ",
-    "新規finderウインドウ",
-    "新しいウインドウ",
     "새로운 윈도우",
-    "새 윈도우",
-    "새로운 finder 윈도우",
     "新建窗口",
-    "新窗口",
-    "新建访达窗口",
     "新增視窗",
-    "新視窗",
-    "新增 finder 視窗",
+    "new finder window",
+    "新建访达窗口",
 ];
-/// A document app's New, which opens a blank document window.
+/// A document app's New: TextEdit's Edit.loctable in macOS 26, plus the
+/// English New Document.
 const DOCUMENT_TITLES: &[&str] = &[
     "new",
     "new document",
-    "new…",
     "neu",
-    "neues dokument",
-    "neu …",
-    "neu…",
     "nouveau",
-    "nouveau document",
-    "nouveau…",
     "nuevo",
-    "nuevo documento",
-    "nuevo…",
     "nuovo",
-    "nuovo documento",
-    "nuovo…",
     "novo",
-    "novo documento",
-    "novo…",
     "nieuw",
-    "nieuw document",
-    "nieuw…",
-    "ny",
     "nytt",
-    "nytt dokument",
+    "ny",
+    "uusi",
+    "nowy",
     "новый",
-    "новый документ",
+    "новий",
+    "yeni",
     "新規",
-    "新規書類",
-    "新規…",
-    "새로 만들기",
-    "새로운 문서",
+    "신규",
     "新建",
-    "新建文稿",
-    "新建文档",
-    "新建…",
     "新增",
-    "新增文件",
 ];
 
 fn is_one_of(title: &str, titles: &[&str]) -> bool {
@@ -910,25 +913,60 @@ mod tests {
         let mut playlist = item("Playlist", Some("cmd+n"));
         playlist.parent = Some("New".into());
         assert_eq!(pick_new_window(&[playlist]), None);
-        // Other languages.
-        assert_eq!(
-            pick_new_window(&[item("Neues Fenster", Some("cmd+n"))]),
-            Some(0)
-        );
-        assert_eq!(
-            pick_new_window(&[item("Nouvelle fenêtre", Some("cmd+n"))]),
-            Some(0)
-        );
-        assert_eq!(
-            pick_new_window(&[item("新規ウインドウ", Some("cmd+n"))]),
-            Some(0)
-        );
-        assert_eq!(pick_new_window(&[item("Neu", Some("cmd+n"))]), Some(0));
-        assert_eq!(pick_new_window(&[item("Neue Notiz", Some("cmd+n"))]), None);
-        assert_eq!(
-            pick_new_window(&[item("Nouvel événement", Some("cmd+n"))]),
-            None
-        );
+        // Other languages, as macOS ships them: Terminal's New Window,
+        // TextEdit's New, and Notes' New Note, which must pick nothing.
+        for title in [
+            "Neues Fenster",
+            "Nouvelle fenêtre",
+            "Nueva ventana",
+            "Nova Janela",
+            "Nowe okno",
+            "Новое окно",
+            "Yeni Pencere",
+            "新規ウインドウ",
+            "새로운 윈도우",
+            "新增視窗",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neu",
+            "Nouveau",
+            "Nuovo",
+            "Nytt",
+            "Новый",
+            "新規",
+            "신규",
+            "新增",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neue Notiz",
+            "Nouvelle note",
+            "Nueva nota",
+            "新規メモ",
+            "새로운 메모",
+            "新建备忘录",
+            "新增備忘錄",
+            "Новая заметка",
+            "Yeni Not",
+            "Nowa notatka",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                None,
+                "{title}"
+            );
+        }
         // Calculator: nothing.
         assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
     }

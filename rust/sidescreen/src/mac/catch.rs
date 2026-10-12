@@ -53,6 +53,8 @@ struct Target {
     taken: std::cell::Cell<Option<u32>>,
     /// Set while a launch of the same app runs its own catch.
     paused: std::cell::Cell<bool>,
+    /// Take only a window that shows this file.
+    document: Option<std::path::PathBuf>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -75,6 +77,27 @@ impl Catch {
         screen: Option<String>,
         limit: Option<usize>,
     ) -> Option<Catch> {
+        Self::start_with(pid, display, screen, limit, None)
+    }
+
+    /// A catch for the one window that shows `document`, for a running app
+    /// still opening a file: no window of the user's can match it.
+    pub fn for_document(
+        pid: i32,
+        display: DisplayId,
+        screen: Option<String>,
+        document: std::path::PathBuf,
+    ) -> Option<Catch> {
+        Self::start_with(pid, display, screen, Some(1), Some(document))
+    }
+
+    fn start_with(
+        pid: i32,
+        display: DisplayId,
+        screen: Option<String>,
+        limit: Option<usize>,
+        document: Option<std::path::PathBuf>,
+    ) -> Option<Catch> {
         let mut observer: Observer = std::ptr::null_mut();
         if unsafe { AXObserverCreate(pid, created, &mut observer) } != 0 || observer.is_null() {
             return None;
@@ -87,6 +110,7 @@ impl Catch {
             left: std::cell::Cell::new(limit),
             taken: std::cell::Cell::new(None),
             paused: std::cell::Cell::new(false),
+            document,
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -153,6 +177,16 @@ extern "C" fn created(
     // Panels and sheets stay where the app puts them; Sidescreen places
     // those through the usual path.
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
+        return;
+    }
+    // A kept catch leaves alone windows the user makes while using the app.
+    if target.left.get().is_none() && super::app::frontmost_pid() == Some(target.pid) {
+        return;
+    }
+    // A window that doesn't show the file yet is left to the poll behind it.
+    if let Some(document) = &target.document
+        && ax::document_path(window).as_ref() != Some(document)
+    {
         return;
     }
     let (taken, left) = take(target.left.get());

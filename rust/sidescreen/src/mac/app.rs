@@ -28,6 +28,13 @@ pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
 }
 
 /// Show a hidden app's windows, where they are now.
+/// The app in front on the user's screen.
+pub fn frontmost_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+}
+
 pub fn unhide(pid: i32) {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
         app.unhide();
