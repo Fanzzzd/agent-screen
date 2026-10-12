@@ -391,7 +391,10 @@ extern "C" fn created(
     // The user's app: send back what opens on the agent's display by itself.
     if let Some(home) = target.home {
         let on_display = ax::frame(window).is_some_and(|f| target.bounds.contains(f.mid()));
-        if on_display && !acted_recently(target.display, target.pid) {
+        // The app is the user's: a tie goes to them.
+        if on_display
+            && (!acted_recently(target.display, target.pid) || user_acted_recently(target.pid))
+        {
             let moved = ax::move_element_into(window, home).is_ok();
             log::debug!("catch: returned a window of the user's app: {moved}");
         }

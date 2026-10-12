@@ -1644,26 +1644,40 @@ impl Shell {
             // later windows stay on the user's screen, even one it opens
             // beside a window of its own still on the display.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
-            if !core
-                .returning
-                .iter()
-                .any(|(d, k)| *d == id && k.pid() == target.pid)
-                && let Some(catch) = crate::mac::catch::Catch::returning(
-                    target.pid,
-                    id,
-                    crate::mac::cg::display_bounds(crate::mac::cg::main_display()),
-                )
-            {
-                core.returning.push((id, catch));
-            }
             home
         });
         let main_name = main_screen_name();
+        // The app's new windows go to the screen this window came from.
+        let screen = home
+            .as_ref()
+            .and_then(|h| {
+                crate::mac::cg::active_displays()
+                    .into_iter()
+                    .map(crate::mac::cg::display_bounds)
+                    .find(|b| b.contains(h.frame.mid()))
+            })
+            .unwrap_or_else(|| crate::mac::cg::display_bounds(crate::mac::cg::main_display()));
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .spawn(async move { dismissal::give_back(target, home.as_ref(), main_name.as_deref()) })
                 .await;
-            let _ = this.update(cx, |shell, cx| shell.refresh_counts(cx));
+            let _ = this.update(cx, |shell, cx| {
+                // Armed once the window is back: registering asks the app,
+                // which may be slow.
+                shell.core.update(cx, |core, _| {
+                    let armed = core
+                        .returning
+                        .iter()
+                        .any(|(d, k)| *d == id && k.pid() == target.pid);
+                    if !armed
+                        && let Some(catch) =
+                            crate::mac::catch::Catch::returning(target.pid, id, screen)
+                    {
+                        core.returning.push((id, catch));
+                    }
+                });
+                shell.refresh_counts(cx)
+            });
         })
         .detach();
     }
@@ -1994,6 +2008,10 @@ impl Shell {
                     shell.core.update(cx, |core, cx| {
                         let display = core.displays.get_mut(id)?;
                         display.claim(target, Origin::HandedOver, home);
+                        // Handed over again: the app's late windows are the
+                        // agent's to have, not to send back.
+                        core.returning
+                            .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
                         cx.notify();
                         Some(())
                     })
