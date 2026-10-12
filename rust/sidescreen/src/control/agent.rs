@@ -28,6 +28,29 @@ pub async fn handle(
     p: Params,
     cx: &mut AsyncApp,
 ) -> Reply {
+    // A click, drag or scroll focuses the agent's window too: hand key
+    // focus back to the user's window in a shared app once it's done, as
+    // after keys.
+    let pointer = matches!(method, "click" | "drag" | "mouseUp" | "scroll")
+        .then(|| Args(&p).int("displayId"))
+        .flatten()
+        .map(|id| id as DisplayId);
+    let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    if let Some(id) = pointer
+        && let Some(forwarder) = core.read_with(cx, |c, _| c.existing_forwarder(id))
+    {
+        forwarder.keys_done().await;
+    }
+    reply
+}
+
+async fn handle_one(
+    core: Entity<Core>,
+    connection: u64,
+    method: &str,
+    p: Params,
+    cx: &mut AsyncApp,
+) -> Reply {
     let p = Args(&p);
     if needs_permissions(method) {
         permitted(cx).await?;

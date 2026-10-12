@@ -68,8 +68,6 @@ impl Core {
         }
     }
 
-    /// One input queue per display, so each display remembers its own
-    /// focused window. The Viewer and the Agent Session of a display share it.
     /// The user left the Viewer: each display hands key focus back to the
     /// user's windows its keys took it from.
     pub fn hand_back_keys(&self) {
@@ -78,6 +76,13 @@ impl Core {
         }
     }
 
+    /// The display's input queue, if it has one yet.
+    pub fn existing_forwarder(&self, id: DisplayId) -> Option<Forwarder> {
+        self.forwarders.get(&id).cloned()
+    }
+
+    /// One input queue per display, so each display remembers its own
+    /// focused window. The Viewer and the Agent Session of a display share it.
     pub fn forwarder(&mut self, id: DisplayId) -> Forwarder {
         self.forwarders.entry(id).or_default().clone()
     }

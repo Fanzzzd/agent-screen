@@ -213,7 +213,7 @@ impl Forwarder {
     }
 
     pub fn key(&self, code: u16, down: bool, flags: CGEventFlags) {
-        self.send(move |w| w.key(code, down, flags));
+        self.send(move |w| w.viewer_key(code, down, flags));
     }
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
@@ -470,6 +470,15 @@ fn on_a_sidescreen(id: u32) -> bool {
     })
 }
 
+/// The bounds of the display window `id` is on.
+fn display_of(id: u32) -> Option<Rect> {
+    let window = super::windows::find(id)?;
+    super::cg::active_displays()
+        .into_iter()
+        .map(super::cg::display_bounds)
+        .find(|area| area.contains(window.bounds.mid()))
+}
+
 /// Apps whose keys a display's worker is sending: one at a time per app.
 static APPS_IN_USE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 static APP_FREED: std::sync::Condvar = std::sync::Condvar::new();
@@ -522,7 +531,10 @@ struct Worker {
     focused: Option<WindowTarget>,
     /// The user's window in a shared app whose key focus the agent's keys
     /// took; handed back when they are done.
-    restore: Option<WindowTarget>,
+    restore: Vec<WindowTarget>,
+    /// The display's windows when keys last went out, to tell one a
+    /// shortcut opened since.
+    known: Vec<u32>,
 
     gesture: Option<Gesture>,
     cache: Option<(Vec<Hit>, Instant)>,
@@ -540,7 +552,8 @@ impl Worker {
         Worker {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState),
             focused: None,
-            restore: None,
+            restore: Vec::new(),
+            known: Vec::new(),
 
             gesture: None,
             cache: None,
@@ -561,22 +574,21 @@ impl Worker {
     ///
     /// The app's key window may have moved to another of its windows
     /// since, as when the user clicked theirs or the agent's keys handed
-    /// focus back: then focus the target again, and remember the window
-    /// to hand focus back to once these keys are done.
+    /// focus back: then focus the target again, and remember the window to
+    /// hand focus back to once these keys are done.
     fn focus(&mut self, target: WindowTarget) {
         let before = super::ax::focused_window_id(target.pid);
-        let elsewhere = before.is_some_and(|id| id != target.window_id);
-        if self.focused == Some(target) && !elsewhere {
-            return;
-        }
-        if let Some(id) = before.filter(|_| elsewhere)
-            && self.restore.is_none()
-            && !on_a_sidescreen(id)
-        {
-            self.restore = Some(WindowTarget {
+        if let Some(other) = before.filter(|&id| id != target.window_id) {
+            let other = WindowTarget {
                 pid: target.pid,
-                window_id: id,
-            });
+                window_id: other,
+            };
+            if !on_a_sidescreen(other.window_id) && !self.restore.iter().any(|w| w.pid == other.pid)
+            {
+                self.restore.push(other);
+            }
+        } else if self.focused == Some(target) {
+            return;
         }
         self.send_focus(target);
     }
@@ -593,19 +605,20 @@ impl Worker {
     /// Hand key focus back to the user's window the agent's keys took it
     /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
-        let Some(window) = self.restore.take() else {
-            return;
-        };
-        // The user may have picked a window since: leave theirs alone.
-        let ours = self.focused.map(|t| t.window_id);
-        if ours.is_none() || super::ax::focused_window_id(window.pid) != ours {
-            return;
-        }
-        // The app came to the front meanwhile: the focus record is refused
-        // there, so make the user's window main through accessibility, as
-        // their click would.
-        if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
-            super::ax::make_main(window);
+        for window in std::mem::take(&mut self.restore) {
+            // Only while an agent's window, this one's or another
+            // session's, still has the keys: a window the user picked
+            // since is left alone.
+            let now = super::ax::focused_window_id(window.pid);
+            if !now.is_some_and(on_a_sidescreen) {
+                continue;
+            }
+            // The app came to the front meanwhile: the focus record is
+            // refused there, so make the user's window main through
+            // accessibility, as their click would.
+            if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
+                super::ax::make_main(window);
+            }
         }
     }
 
@@ -626,6 +639,14 @@ impl Worker {
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
         self.focus(target);
+        // Keys go to the window clicked, not to one that opened earlier.
+        if let Some(within) = display_of(target.window_id) {
+            self.known = hits()
+                .iter()
+                .filter(|h| within.contains(h.bounds.mid()))
+                .map(|h| h.target.window_id)
+                .collect();
+        }
         let group = self.next_group();
         self.gesture = Some(Gesture {
             target,
@@ -753,15 +774,30 @@ impl Worker {
         deliver(&event, hit.target.pid, false);
     }
 
+    /// A key the user types in the Viewer. The app may have moved its key
+    /// window since the last key, or a shortcut opened a window: pick and
+    /// focus as for an agent's keys, holding the app the same way.
+    fn viewer_key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
+        let Some(target) = self.focused else {
+            log::debug!("input: key {code} dropped, no window focused");
+            return;
+        };
+        let _held = match display_of(target.window_id).filter(|_| down) {
+            Some(within) => match self.focus_something(within) {
+                Some(held) => Some(held),
+                None => return,
+            },
+            None => None,
+        };
+        self.key(code, down, flags);
+    }
+
+    /// A key to the focused window, already picked and focused.
     fn key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
         let Some(target) = self.focused else {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
-        // The app may have moved its key window since the last key.
-        if down {
-            self.focus(target);
-        }
         self.key_to(target, code, down, flags);
     }
 
@@ -790,15 +826,7 @@ impl Worker {
     /// another session typing into the same app can't make its own window
     /// key in the middle.
     fn focus_something(&mut self, within: Rect) -> Option<AppKeys> {
-        let list = hits();
-        let still_there = self
-            .focused
-            .and_then(|t| list.iter().find(|h| h.target == t))
-            .filter(|h| within.intersects(&h.bounds));
-        let Some(target) = still_there
-            .or_else(|| list.iter().find(|h| within.contains(h.bounds.mid())))
-            .map(|h| h.target)
-        else {
+        let Some(target) = self.pick_for_keys(within) else {
             // The window left the display, as when the user took it back:
             // keys must not follow it to the user's screen.
             self.focused = None;
@@ -807,6 +835,29 @@ impl Worker {
         let held = AppKeys::hold(target.pid);
         self.focus(target);
         Some(held)
+    }
+
+    /// The window on the display keys go to: the one last focused, or a
+    /// window its app opened on the display since, as a shortcut such as
+    /// cmd+n does, or else the topmost.
+    fn pick_for_keys(&mut self, within: Rect) -> Option<WindowTarget> {
+        let list = hits();
+        let on: Vec<_> = list
+            .iter()
+            .filter(|h| within.contains(h.bounds.mid()))
+            .collect();
+        let cached = self
+            .focused
+            .and_then(|t| list.iter().find(|h| h.target == t))
+            .filter(|h| within.intersects(&h.bounds))
+            .map(|h| h.target);
+        let opened = cached.and_then(|c| {
+            on.iter()
+                .find(|h| h.target.pid == c.pid && !self.known.contains(&h.target.window_id))
+                .map(|h| h.target)
+        });
+        self.known = on.iter().map(|h| h.target.window_id).collect();
+        opened.or(cached).or_else(|| on.first().map(|h| h.target))
     }
 
     #[allow(clippy::too_many_arguments)]

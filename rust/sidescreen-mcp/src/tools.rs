@@ -125,7 +125,7 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
                 "screenshot pixels and coordinates are the same space. Every action except wait and cursor_position returns a fresh screenshot.",
-                "type sends one character at a time, about 200 a second: for long text in a field, use act_on_element insert_text.",
+                "type sends one character at a time, about 200 a second: for long text in a field, use act_on_element insert_text. Keys go to the window you last clicked; after a shortcut opens a window, click in it before typing.",
                 "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
                 "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
                 "Apps on your display stay in the background, so menu shortcuts that act on the selection (copy, paste,",

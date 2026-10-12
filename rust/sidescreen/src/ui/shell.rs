@@ -1539,10 +1539,29 @@ impl Shell {
             ),
             MenuAction::Dismiss { display } => self.dismiss(display, cx),
             MenuAction::PressProxy { index } => {
-                if let Some(element) = menubar::chosen(index) {
-                    cx.background_spawn(async move { element.perform("AXPress") })
-                        .detach();
-                }
+                let Some(element) = menubar::chosen(index) else {
+                    return;
+                };
+                // A menu command acts on the app's key window: make that the
+                // display's window of the app first, not the user's own in a
+                // shared app. Leaving the Viewer hands it back.
+                let pid = self.viewer.as_ref().and_then(|(viewer, _)| {
+                    viewer.read(cx).ok()?.menu_bar.as_ref().map(|bar| bar.pid)
+                });
+                let forwarder = self
+                    .viewer_display
+                    .map(|id| (id, self.core.update(cx, |core, _| core.forwarder(id))));
+                cx.background_spawn(async move {
+                    if let (Some(pid), Some((id, forwarder))) = (pid, forwarder)
+                        && let Some(window) = windows::on_display(id)
+                            .into_iter()
+                            .find(|w| w.target.pid == pid && w.layer == 0)
+                    {
+                        forwarder.focus(window.target).await;
+                    }
+                    element.perform("AXPress")
+                })
+                .detach();
             }
         }
     }

@@ -4,7 +4,12 @@
  * window on the user's screen, behind their front app, and closes it at
  * the end.
  *
- * Not covered: handing key focus back to the user's window. Only a real
+ * Not covered: a window a shortcut opens. TextEdit in the background
+ * keeps its first window key whatever focus record it gets, so keys after
+ * cmd+n reach the earlier window until the agent clicks the new one; the
+ * computer tool's description says so.
+ *
+ * Not covered either: handing key focus back to the user's window. Only a real
  * click makes a background app's other window key (AXRaise doesn't), and
  * that click would bring TextEdit to the front, taking the user's focus.
  *
@@ -60,6 +65,7 @@ try {
   await type("third")
   check("the next call reaches the agent's window again", textOf(agent).toLowerCase() === "first second\nthird", JSON.stringify(textOf(agent)))
   check("still nothing in the user's window", textOf(user) === "", JSON.stringify(textOf(user)))
+
 } finally {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
   try {
@@ -69,7 +75,7 @@ try {
     execFileSync("/usr/bin/pkill", ["-x", "TextEdit"])
   }
   client.close()
+  if (instance) await stopTestApp()
 }
-if (instance) await stopTestApp()
 console.log(failures ? `${failures} failed` : "all passed")
 process.exit(failures ? 1 : 0)
