@@ -58,6 +58,12 @@ thread_local! {
     static POSTED: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
 }
 
+fn withdraw(display: u32) {
+    let ids = NSArray::from_retained_slice(&[NSString::from_str(&format!("help-{display}"))]);
+    center().removePendingNotificationRequestsWithIdentifiers(&ids);
+    center().removeDeliveredNotificationsWithIdentifiers(&ids);
+}
+
 fn center() -> Retained<UNUserNotificationCenter> {
     UNUserNotificationCenter::currentNotificationCenter()
 }
@@ -73,9 +79,7 @@ pub fn update(display: u32, label: &str, reason: Option<&str>) {
     let identifier = NSString::from_str(&format!("help-{display}"));
     let Some(reason) = reason else {
         if POSTED.with(|p| p.borrow_mut().remove(&display)).is_some() {
-            center().removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&[
-                identifier,
-            ]));
+            withdraw(display);
         }
         return;
     };
@@ -93,9 +97,17 @@ pub fn update(display: u32, label: &str, reason: Option<&str>) {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
-    let added = RcBlock::new(|error: *mut NSError| match unsafe { error.as_ref() } {
+    let added = RcBlock::new(move |error: *mut NSError| match unsafe { error.as_ref() } {
         Some(error) => log::warn!("notification failed: {}", error.localizedDescription()),
-        None => log::debug!("notification posted"),
+        None => {
+            log::debug!("notification posted");
+            // Withdrawn while macOS was still asking for permission.
+            native::main_async(move || {
+                if POSTED.with(|p| !p.borrow().contains_key(&display)) {
+                    withdraw(display);
+                }
+            });
+        }
     });
     let authorized = RcBlock::new(move |granted: Bool, error: *mut NSError| {
         if let Some(error) = unsafe { error.as_ref() } {

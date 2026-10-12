@@ -129,7 +129,11 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
         {
             return;
         }
-        if ax::set_frame(target, home.frame).is_ok() {
+        // Its screen may have gone since, as when a monitor is unplugged.
+        let screen_there = cg::active_displays()
+            .into_iter()
+            .any(|d| cg::display_bounds(d).contains(home.frame.mid()));
+        if screen_there && ax::set_frame(target, home.frame).is_ok() {
             return;
         }
     }

@@ -640,8 +640,11 @@ impl Worker {
         if still_there.is_some_and(|h| within.intersects(&h.bounds)) {
             return;
         }
-        if let Some(top) = list.iter().find(|h| within.contains(h.bounds.mid())) {
-            self.focus(top.target);
+        match list.iter().find(|h| within.contains(h.bounds.mid())) {
+            Some(top) => self.focus(top.target),
+            // The window left the display, as when the user took it back:
+            // keys must not follow it to the user's screen.
+            None => self.focused = None,
         }
     }
 

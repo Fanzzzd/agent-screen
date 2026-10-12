@@ -263,6 +263,7 @@ impl AeroSpace {
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 return Err(format!(
                     "aerospace {} timed out",
                     args.first().unwrap_or(&"")

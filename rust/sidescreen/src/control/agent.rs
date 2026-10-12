@@ -473,9 +473,17 @@ pub async fn handle(
                     )
                 })?;
             claim(&core, id, window.target, Origin::Placed, cx);
-            place(window.target, id, cx)
-                .await
-                .map_err(|e| ControlError::failed(format!("could not move the window: {e}")))?;
+            if let Err(e) = place(window.target, id, cx).await {
+                // Still a stray, so the agent can try again.
+                core.update(cx, |c, _| {
+                    if let Some(d) = c.displays.get_mut(id) {
+                        d.forget(window.target.window_id);
+                    }
+                });
+                return Err(ControlError::failed(format!(
+                    "could not move the window: {e}"
+                )));
+            }
             Ok(json!({}))
         }
         "windowState" => {
@@ -489,9 +497,11 @@ pub async fn handle(
                 .background_executor()
                 .spawn(async move { ax::snapshot(target, origin) })
                 .await
+                // The window is there, so this isn't `not_found`, which
+                // reads as closed: the app is busy, or AX is off.
                 .ok_or_else(|| {
-                    ControlError::not_found(
-                        "the window has no accessibility element; is Accessibility granted?",
+                    ControlError::failed(
+                        "the app didn't answer accessibility in time, or Accessibility isn't granted; call get_window_state again",
                     )
                 })?;
             let count = snapshot.elements.len();
@@ -2430,7 +2440,8 @@ fn global(
         .unwrap_or(DEFAULT_SIZE);
     let scale = shot_scale(size);
     let (w, h) = ((size.0 * scale).round(), (size.1 * scale).round());
-    if !(0.0..=w).contains(&x) || !(0.0..=h).contains(&y) {
+    // Half-open: x == w is the next display's first column.
+    if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
         return Err(ControlError::invalid(format!(
             "({}, {}) is outside the {}×{} screenshot",
             x as i64, y as i64, w as i64, h as i64

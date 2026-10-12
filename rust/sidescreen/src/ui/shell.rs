@@ -506,7 +506,20 @@ impl Shell {
             Native::LeftDragged { x, y } => self.drag_moved((x, y), cx),
             Native::LeftUp { x, y } => self.drag_ended((x, y), cx),
             Native::Menu(action) => self.menu(action, cx),
-            Native::HelpClicked { display } => self.open_for_help(display, cx),
+            // A banner that outlived its request only opens the display.
+            Native::HelpClicked { display } => {
+                let asking = self
+                    .core
+                    .read(cx)
+                    .displays
+                    .get(display)
+                    .is_some_and(|d| d.help_request.is_some());
+                if asking {
+                    self.open_for_help(display, cx)
+                } else {
+                    self.open_viewer(display, cx)
+                }
+            }
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => self.schedule_guard(cx),
@@ -2105,8 +2118,12 @@ impl Shell {
 
     fn dragging(&self) -> bool {
         let Some(drag) = &self.drag else { return false };
+        // Moved, not resized: a resize from the left or top edge moves
+        // the origin too.
         windows::find(drag.target.window_id).is_some_and(|w| {
-            (w.bounds.x - drag.frame.x).abs() > 4.0 || (w.bounds.y - drag.frame.y).abs() > 4.0
+            ((w.bounds.x - drag.frame.x).abs() > 4.0 || (w.bounds.y - drag.frame.y).abs() > 4.0)
+                && (w.bounds.width - drag.frame.width).abs() <= 1.0
+                && (w.bounds.height - drag.frame.height).abs() <= 1.0
         })
     }
 
