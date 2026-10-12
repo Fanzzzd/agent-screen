@@ -4,7 +4,7 @@
 use super::server::{ControlError, Reply};
 use crate::core::Core;
 use crate::keychord::KeyChord;
-use crate::mac::input::Button;
+use crate::mac::input::{Button, Sent};
 use crate::mac::screenshot::{self, Format};
 use crate::mac::{app, ax, cg, windows};
 use crate::model::{
@@ -198,7 +198,12 @@ pub async fn handle(
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
             show_pointer(&core, id, to, false, cx);
-            if !dragged {
+            if dragged == Sent::Stopped {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id} during the drag, which let go short of its target. Call wait_for_control to wait until they hand it back."
+                )));
+            }
+            if dragged == Sent::Nowhere {
                 return Err(ControlError::not_found(format!(
                     "nothing at ({}, {}) to drag",
                     p.number("fromX").unwrap_or(0.0) as i64,
@@ -287,8 +292,15 @@ pub async fn handle(
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            if !forwarder.type_text(text, cg::display_bounds(id)).await {
-                return Err(no_keyboard_target());
+            let total = text.chars().count();
+            match forwarder.type_text(text, cg::display_bounds(id)).await {
+                Sent::Nowhere => return Err(no_keyboard_target()),
+                Sent::Typed(typed) => {
+                    return Err(ControlError::takeover(format!(
+                        "the user took over display {id} after {typed} of {total} characters. Call wait_for_control, then take a screenshot before you type the rest."
+                    )));
+                }
+                _ => {}
             }
             Ok(json!({}))
         }
@@ -587,12 +599,14 @@ pub async fn handle(
         }
         "withdrawHelp" => {
             let id = display(&core, &p, false, cx)?;
-            core.update(cx, |c, cx| {
-                if c.displays.withdraw_help(id) {
+            let withdrawn = core.update(cx, |c, cx| {
+                let withdrawn = c.displays.withdraw_help(id);
+                if withdrawn {
                     cx.notify();
                 }
+                withdrawn
             });
-            Ok(json!({}))
+            Ok(json!({ "withdrawn": withdrawn }))
         }
         "waitForControl" => {
             let id = display(&core, &p, false, cx)?;
@@ -621,12 +635,19 @@ pub async fn handle(
                             .get(id)
                             .is_some_and(|d| d.ended == Some(EndReason::ClosedByUser))
                 });
+            // Timed out with the Help Request unanswered: the user may not
+            // have come at all.
+            let help_open = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.help_request.is_some() && !d.takeover)
+            });
             let outcome = if closed {
                 "closedByUser"
             } else {
                 outcome.as_str()
             };
-            Ok(json!({ "outcome": outcome }))
+            Ok(json!({ "outcome": outcome, "helpOpen": help_open }))
         }
         // Test hook: stands in for the user's input in the Viewer.
         "debugTakeover" if debug_methods() => {

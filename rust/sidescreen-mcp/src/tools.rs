@@ -460,15 +460,17 @@ pub async fn run(
                     json!({ "displayId": a.require_int("display_id")?, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            Ok(Output::Object(describe_wait(&reply, false)))
+            let help_open = reply.get("helpOpen") == Some(&Value::Bool(true));
+            Ok(Output::Object(describe_wait(&reply, help_open)))
         }
         "request_help" => {
             let display = a.require_int("display_id")?;
             if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
-                control
+                let reply = control
                     .call("withdrawHelp", json!({ "displayId": display }))
                     .await?;
-                return Ok(Output::Object(json!({ "withdrawn": true })));
+                let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
+                return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
             }
             let reason = a
                 .string("reason")?
@@ -627,8 +629,8 @@ pub async fn run(
     }
 }
 
-/// What a wait for control came to. `helping`: the wait follows a Help
-/// Request, which the user may not have seen yet.
+/// What a wait for control came to. `helping`: a Help Request is open, and
+/// the user may not have seen it yet.
 fn describe_wait(reply: &Object, helping: bool) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
         Some("returned") => {

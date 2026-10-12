@@ -514,9 +514,16 @@ impl<H> Displays<H> {
     }
 
     /// The agent no longer needs the user: clear its Help Request.
+    /// Waiters for control go on unless the user is in control.
     pub fn withdraw_help(&mut self, id: DisplayId) -> bool {
-        self.get_mut(id)
-            .is_some_and(|d| d.help_request.take().is_some())
+        let Some(d) = self.get_mut(id) else {
+            return false;
+        };
+        let withdrawn = d.help_request.take().is_some();
+        if withdrawn && !d.takeover {
+            d.resume_waiters(ControlWait::Returned);
+        }
+        withdrawn
     }
 
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {
@@ -644,6 +651,18 @@ mod tests {
             d.wait_for_control(7),
             Wait::Now(ControlWait::Returned)
         ));
+    }
+
+    #[test]
+    fn withdrawing_help_frees_waiters() {
+        let mut d = displays();
+        assert!(!d.withdraw_help(7), "nothing to withdraw");
+        assert!(d.request_help(7, "登录".into()));
+        let Wait::Later(mut rx) = d.wait_for_control(7) else {
+            panic!("should wait")
+        };
+        assert!(d.withdraw_help(7));
+        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Returned));
     }
 
     #[test]

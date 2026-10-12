@@ -141,6 +141,22 @@ try {
     const replaced = await client.request("tools/call", { name: "get_window_state", arguments: { display_id, window_id: window.windowId } })
     const value = textOf(replaced).match(/textarea[^\n]*value="([^"]*)"/)?.[1]
     check("cmd+a selects all in a background app", value === "Replaced", JSON.stringify(value))
+
+    // The user takes over in the middle of a long type: it stops there,
+    // and the agent hears how far it got.
+    {
+      const viewer = await Control.connect()
+      const long = "x".repeat(2000)
+      const typing = client.request("tools/call", { name: "computer", arguments: { display_id, action: "type", text: long } })
+      await Bun.sleep(400)
+      await viewer.call("debugTakeover", { displayId: display_id, active: true })
+      const stopped = await typing
+      await viewer.call("debugTakeover", { displayId: display_id, active: false })
+      viewer.close()
+      check("a takeover stops the agent's typing partway", /took over display \d+ after \d+ of 2000 characters/.test(textOf(stopped)), textOf(stopped).slice(0, 140))
+      const typed = Number(textOf(stopped).match(/after (\d+) of/)?.[1] ?? -1)
+      check("it stopped partway, not at the start or the end", typed > 0 && typed < 2000, String(typed))
+    }
   }
 
   // Two sessions launching the same app at once each get their own window.

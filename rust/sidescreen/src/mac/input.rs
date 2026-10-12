@@ -98,6 +98,18 @@ pub fn flags(m: Modifiers) -> CGEventFlags {
 
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 
+/// How much of an agent's drag or text went out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sent {
+    All,
+    /// The user took the display over partway through a drag.
+    Stopped,
+    /// The same, partway through text: how many characters went in.
+    Typed(usize),
+    /// No window to send it to.
+    Nowhere,
+}
+
 /// One display's input queue. Cheap to clone.
 #[derive(Clone)]
 pub struct Forwarder {
@@ -228,32 +240,33 @@ impl Forwarder {
     /// A press-move-release that apps take as a drag: a hold before moving,
     /// so the press doesn't read as a click, small steps, and a pause at the
     /// end so drop targets see the pointer arrive before the release.
-    pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> bool {
+    pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> Sent {
         let stopped = self.stopped.clone();
         self.run(move |w| {
             if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
-                return false;
+                return Sent::Nowhere;
             }
+            let mut at = from;
             thread::sleep(Duration::from_millis(100));
             const STEPS: i32 = 20;
             for step in 1..=STEPS {
+                // The user took over: let go where the pointer is, short
+                // of the drop the agent was heading for.
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
+                    w.mouse_up(at, Button::Left, 1, flags(m));
+                    return Sent::Stopped;
                 }
                 let t = step as f64 / STEPS as f64;
-                w.mouse_dragged(
-                    (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
-                    Button::Left,
-                    flags(m),
-                );
+                at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+                w.mouse_dragged(at, Button::Left, flags(m));
                 thread::sleep(Duration::from_millis(16));
             }
             thread::sleep(Duration::from_millis(100));
             w.mouse_up(to, Button::Left, 1, flags(m));
-            true
+            Sent::All
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(Sent::Nowhere)
     }
 
     /// Half a click, for drags an agent drives step by step. The window hit
@@ -299,16 +312,16 @@ impl Forwarder {
     /// and Tab keys, so they submit and move between fields. The events
     /// carry no modifiers, whatever the user holds down meanwhile. False
     /// when no window on the display can take the text.
-    pub async fn type_text(&self, text: String, within: Rect) -> bool {
+    pub async fn type_text(&self, text: String, within: Rect) -> Sent {
         let stopped = self.stopped.clone();
         self.run(move |w| {
             w.focus_something(within);
             let Some(target) = w.focused else {
-                return false;
+                return Sent::Nowhere;
             };
-            for character in text.chars() {
+            for (typed, character) in text.chars().enumerate() {
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
+                    return Sent::Typed(typed);
                 }
                 let code = match character {
                     '\n' | '\r' => Some(36),
@@ -337,10 +350,10 @@ impl Forwarder {
                 }
                 thread::sleep(Duration::from_millis(4));
             }
-            true
+            Sent::All
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(Sent::Nowhere)
     }
 
     /// Send keys to `target` from now on, as a click on it would.

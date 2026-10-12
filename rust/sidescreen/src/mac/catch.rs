@@ -133,20 +133,27 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
-/// Displays with a kept catch on each app: sessions that started it.
-static KEPT: std::sync::Mutex<Vec<(DisplayId, i32)>> = std::sync::Mutex::new(Vec::new());
-
-/// Whether another session that also started `pid` drove its display just
-/// now. Sessions in other apps don't count.
+/// Whether another Agent Display that shows a window of `pid` was driven
+/// just now: that session may have made the new window as well.
 fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
-    let sharing: Vec<DisplayId> = KEPT
+    let now = std::time::Instant::now();
+    let others: Vec<DisplayId> = ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .filter(|(d, p)| *d != display && *p == pid)
-        .map(|(d, _)| *d)
+        .filter(|(d, p, until)| *d != display && p.is_none_or(|p| p == pid) && now < *until)
+        .map(|(d, _, _)| *d)
         .collect();
-    sharing.into_iter().any(|d| acted_recently(d, pid))
+    if others.is_empty() {
+        return false;
+    }
+    let shown = windows::all();
+    others.into_iter().any(|d| {
+        let area = super::cg::display_bounds(d);
+        shown
+            .iter()
+            .any(|w| w.target.pid == pid && area.contains(w.bounds.mid()))
+    })
 }
 
 /// Whether the user just pressed something that could make `pid` open a
@@ -308,12 +315,7 @@ impl Catch {
 
     /// From now on, take only windows the agent's actions make.
     pub fn keep(&self) {
-        let target = unsafe { &*self.target };
-        if !target.kept.replace(true) {
-            KEPT.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((target.display, target.pid));
-        }
+        unsafe { (*self.target).kept.set(true) }
     }
 
     /// Windows the user made in the app.
@@ -343,13 +345,6 @@ impl Catch {
 
 impl Drop for Catch {
     fn drop(&mut self) {
-        let target = unsafe { &*self.target };
-        if target.kept.get() {
-            let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(i) = kept.iter().position(|k| *k == (target.display, target.pid)) {
-                kept.remove(i);
-            }
-        }
         unsafe {
             CFRunLoopRemoveSource(
                 CFRunLoopGetMain(),
@@ -383,8 +378,8 @@ extern "C" fn created(
     // A kept catch takes a window only right after its display was driven,
     // and records one the user made so nothing moves it later.
     if target.kept.get() {
-        // Another session driving the same app just now may have made it:
-        // then it's nobody's for sure, and that session can place it.
+        // Another session with a window of this app, driving its display
+        // just now, may have made it: then it's nobody's for sure.
         let agent = acted_recently(target.display, target.pid)
             && !others_acted_recently(target.display, target.pid);
         let user = user_acted_recently(target.pid);
