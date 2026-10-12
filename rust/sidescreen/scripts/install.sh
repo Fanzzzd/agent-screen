@@ -22,6 +22,7 @@ if [[ "$open_displays" != 0 && "${SIDESCREEN_FORCE_INSTALL:-}" != 1 ]]; then
   echo "error: $open_displays Agent Display(s) open; installing would end them. Retry when none is open, or set SIDESCREEN_FORCE_INSTALL=1." >&2
   exit 1
 fi
+[[ "$open_displays" != 0 ]] && echo "ending $open_displays Agent Display(s)"
 
 scripts/bundle.sh release >/dev/null
 built="$(cd .. && pwd)/target/Sidescreen.app"
