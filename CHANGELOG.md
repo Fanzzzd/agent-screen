@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.10 (2026-10-12)
+
+### Features
+
+#### See when an agent has loaded Sidescreen
+
+The menu bar menu and the setup window name the agent once its session has loaded Sidescreen's tools, so you can tell setup worked before asking the agent for anything. Until one has, it says to start a new session after connecting.
+
+### Fixes
+
+#### Which windows of an agent's app are the agent's
+
+A new window of an app the agent started goes to the agent's display only when it appears within 3 seconds of the agent acting on that display. Bringing the app to the front no longer decides it, so the agent's own late window can't get stuck on your screen. After you take back a window of the app, `place_window` says the app is yours now. A `file://` link with `#` or `?` opens its file in apps other than browsers, and a missing file is reported before anything opens.
+
+#### A late file window is caught as it names its document
+
+When an app you run opens a file after Sidescreen's 4-second turn, Sidescreen watches the new window until it shows the file and then moves it to the agent's display.
+
 ## 0.1.9 (2026-10-12)
 
 ### Fixes
