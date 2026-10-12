@@ -133,6 +133,22 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
+/// Displays with a kept catch on each app: sessions that started it.
+static KEPT: std::sync::Mutex<Vec<(DisplayId, i32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether another session that also started `pid` drove its display just
+/// now. Sessions in other apps don't count.
+fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
+    let sharing: Vec<DisplayId> = KEPT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(d, p)| *d != display && *p == pid)
+        .map(|(d, _)| *d)
+        .collect();
+    sharing.into_iter().any(|d| acted_recently(d, pid))
+}
+
 /// Whether the user just pressed something that could make `pid` open a
 /// window: a key or click in that app, or in Finder, the Dock or a
 /// launcher such as Spotlight, which open files and apps. Typing in
@@ -292,7 +308,12 @@ impl Catch {
 
     /// From now on, take only windows the agent's actions make.
     pub fn keep(&self) {
-        unsafe { (*self.target).kept.set(true) }
+        let target = unsafe { &*self.target };
+        if !target.kept.replace(true) {
+            KEPT.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((target.display, target.pid));
+        }
     }
 
     /// Windows the user made in the app.
@@ -322,6 +343,13 @@ impl Catch {
 
 impl Drop for Catch {
     fn drop(&mut self) {
+        let target = unsafe { &*self.target };
+        if target.kept.get() {
+            let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = kept.iter().position(|k| *k == (target.display, target.pid)) {
+                kept.remove(i);
+            }
+        }
         unsafe {
             CFRunLoopRemoveSource(
                 CFRunLoopGetMain(),
@@ -355,10 +383,12 @@ extern "C" fn created(
     // A kept catch takes a window only right after its display was driven,
     // and records one the user made so nothing moves it later.
     if target.kept.get() {
-        match owner(
-            acted_recently(target.display, target.pid),
-            user_acted_recently(target.pid),
-        ) {
+        // Another session driving the same app just now may have made it:
+        // then it's nobody's for sure, and that session can place it.
+        let agent = acted_recently(target.display, target.pid)
+            && !others_acted_recently(target.display, target.pid);
+        let user = user_acted_recently(target.pid);
+        match owner(agent, user) {
             Owner::Agent => {}
             Owner::User => {
                 if let Some(id) = ax::window_id(window) {

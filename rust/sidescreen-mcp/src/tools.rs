@@ -91,7 +91,8 @@ pub fn definitions() -> Vec<Value> {
             "Create Agent Display",
             &[
                 "Get a private virtual display for this session to operate GUI apps on, without touching the user's screen,",
-                "cursor or keyboard. Call it only when you need a screen. Calling it again returns the same display.",
+                "cursor or keyboard. Call it only when you need a screen. Calling it again returns the same display, and so",
+                "does a call from a subagent of this session: let one subagent do all the GUI work.",
                 "The returned display_id stays valid until end_display or until this session ends.",
                 "Put windows on it with launch_app or place_window, then drive it with the computer tool.",
             ],
@@ -183,15 +184,17 @@ pub fn definitions() -> Vec<Value> {
                 "Ask the user to take over your display for something you cannot do, such as a login, a captcha or a",
                 "two-factor code. The user gets a system notification with your reason. The call then waits like",
                 "wait_for_control until the user has stepped in and handed the display back, or until the timeout.",
-                "On a timeout the request stays open; call wait_for_control to keep waiting.",
+                "On a timeout the request stays open; call wait_for_control to keep waiting. If you got past it yourself,",
+                "call request_help with withdraw: true to take the request back.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
                     "reason": { "type": "string", "description": "What you need the user to do, in one short sentence." },
+                    "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
                     "timeout_seconds": timeout()
                 }),
-                &["display_id", "reason"],
+                &["display_id"],
             ),
             PLAIN,
         ),
@@ -457,10 +460,16 @@ pub async fn run(
                     json!({ "displayId": a.require_int("display_id")?, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            Ok(Output::Object(describe_wait(&reply)))
+            Ok(Output::Object(describe_wait(&reply, false)))
         }
         "request_help" => {
             let display = a.require_int("display_id")?;
+            if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
+                control
+                    .call("withdrawHelp", json!({ "displayId": display }))
+                    .await?;
+                return Ok(Output::Object(json!({ "withdrawn": true })));
+            }
             let reason = a
                 .string("reason")?
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
@@ -476,7 +485,7 @@ pub async fn run(
                     json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            Ok(Output::Object(describe_wait(&reply)))
+            Ok(Output::Object(describe_wait(&reply, true)))
         }
         "list_windows" => {
             let reply = control
@@ -618,13 +627,21 @@ pub async fn run(
     }
 }
 
-fn describe_wait(reply: &Object) -> Value {
+/// What a wait for control came to. `helping`: the wait follows a Help
+/// Request, which the user may not have seen yet.
+fn describe_wait(reply: &Object, helping: bool) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
         Some("returned") => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
         }
+        Some("timedOut") if helping => {
+            json!({ "control": "user", "note": "The user hasn't handed the display back yet; the request stays open. Call wait_for_control to keep waiting, or request_help with withdraw: true if you no longer need them." })
+        }
         Some("timedOut") => {
             json!({ "control": "user", "note": "The user is still operating the display. Wait again or do something else." })
+        }
+        Some("closedByUser") => {
+            json!({ "control": "none", "note": "The user closed the display, so stop working on screen. Ask the user before you call create_display again." })
         }
         _ => json!({ "control": "none", "note": "The display has ended." }),
     }

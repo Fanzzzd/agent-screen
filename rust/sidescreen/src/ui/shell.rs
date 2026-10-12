@@ -1111,6 +1111,7 @@ impl Shell {
     pub fn user_input(&mut self, id: DisplayId, cx: &mut Context<Self>) {
         self.core.update(cx, |core, cx| {
             if core.displays.begin_takeover(id) {
+                core.stop_agent_input(id, true);
                 cx.notify();
             }
         });
@@ -1132,6 +1133,7 @@ impl Shell {
         } else if takeover {
             self.core.update(cx, |core, cx| {
                 if core.displays.end_takeover(id) {
+                    core.stop_agent_input(id, false);
                     cx.notify();
                 }
             });
@@ -1581,6 +1583,21 @@ impl Shell {
     fn dismiss_now(&mut self, id: DisplayId, items: Vec<Item>, cx: &mut Context<Self>) {
         self.core
             .update(cx, |core, cx| core.end(id, EndReason::ClosedByUser, cx));
+        // The agent may have opened windows while the sheet was up: plan
+        // again now it has stopped, keeping the user's choice for each
+        // window they saw.
+        let items = match self.core.read(cx).displays.get(id) {
+            Some(display) => dismissal::plan(display)
+                .into_iter()
+                .map(|mut fresh| {
+                    if let Some(seen) = items.iter().find(|i| i.target == fresh.target) {
+                        fresh.fate = seen.fate;
+                    }
+                    fresh
+                })
+                .collect(),
+            None => items,
+        };
         let main_name = main_screen_name();
         cx.spawn(async move |this, cx| {
             cx.background_executor()

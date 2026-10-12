@@ -115,6 +115,14 @@ impl Core {
         }
     }
 
+    /// The user took the display over, or handed it back: an agent's
+    /// typing or drag in flight stops while they're in control.
+    pub fn stop_agent_input(&self, id: DisplayId, stop: bool) {
+        if let Some(forwarder) = self.forwarders.get(&id) {
+            forwarder.stop_agent(stop);
+        }
+    }
+
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
         self.closed.insert(connection);
         self.sessions.remove(&connection);

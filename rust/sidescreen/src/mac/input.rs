@@ -102,6 +102,9 @@ type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 #[derive(Clone)]
 pub struct Forwarder {
     jobs: mpsc::Sender<Job>,
+    /// Set while the user has taken the display over: an agent's typing or
+    /// drag still running stops at its next step.
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for Forwarder {
@@ -116,11 +119,21 @@ impl Default for Forwarder {
                 }
             })
             .expect("input thread");
-        Forwarder { jobs }
+        Forwarder {
+            jobs,
+            stopped: Default::default(),
+        }
     }
 }
 
 impl Forwarder {
+    /// Stop the agent's long input at its next step, while the user is in
+    /// control.
+    pub fn stop_agent(&self, stop: bool) {
+        self.stopped
+            .store(stop, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn send(&self, job: impl FnOnce(&mut Worker) + Send + 'static) {
         let _ = self.jobs.send(Box::new(job));
     }
@@ -216,6 +229,7 @@ impl Forwarder {
     /// so the press doesn't read as a click, small steps, and a pause at the
     /// end so drop targets see the pointer arrive before the release.
     pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> bool {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
             if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
                 return false;
@@ -223,6 +237,9 @@ impl Forwarder {
             thread::sleep(Duration::from_millis(100));
             const STEPS: i32 = 20;
             for step in 1..=STEPS {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let t = step as f64 / STEPS as f64;
                 w.mouse_dragged(
                     (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
@@ -283,12 +300,16 @@ impl Forwarder {
     /// carry no modifiers, whatever the user holds down meanwhile. False
     /// when no window on the display can take the text.
     pub async fn type_text(&self, text: String, within: Rect) -> bool {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
             w.focus_something(within);
             let Some(target) = w.focused else {
                 return false;
             };
             for character in text.chars() {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 let code = match character {
                     '\n' | '\r' => Some(36),
                     '\t' => Some(48),

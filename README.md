@@ -10,7 +10,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
 ## What you get
 
-- **A display per agent session.** Run three agents at once and each gets its own screen. Your windows never move.
+- **A display per agent session.** Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.
 - **Peek.** Hover the menu bar icon to see every agent's screen live.
 - **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.
 - **Help Request.** An agent stuck on a login or a captcha asks for you with a notification, then waits.

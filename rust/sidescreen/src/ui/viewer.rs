@@ -178,9 +178,10 @@ impl Render for Viewer {
                     "松手把窗口交给 {agent}"
                 ))
                 .into_any_element()
-        } else if status.kind == Kind::Help {
-            // The reason is the one line the user must read; one line
-            // can't hold a long one, so it shows in full on hover.
+        } else if matches!(status.kind, Kind::Help | Kind::Takeover) {
+            // The reason is the one line the user must read, through the
+            // Takeover that answers it; one line can't hold a long one, so
+            // it shows in full on hover.
             let reason = status.long.clone();
             div()
                 .id("status")

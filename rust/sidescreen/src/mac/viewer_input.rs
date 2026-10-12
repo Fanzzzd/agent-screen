@@ -298,8 +298,13 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 let Some(at) = remote(event, &window, content, display, false) else {
                     return false;
                 };
-                native::send(Native::ScreenTouched { display });
-                super::catch::agent_acted(display);
+                // Fingers resting on the trackpad send MayBegin and empty
+                // events: only a scroll that moves something takes over.
+                let moved = event.scrollingDeltaX() != 0.0 || event.scrollingDeltaY() != 0.0;
+                if moved && !event.phase().contains(NSEventPhase::MayBegin) {
+                    native::send(Native::ScreenTouched { display });
+                    super::catch::agent_acted(display);
+                }
                 forwarder.scroll(
                     at,
                     (event.scrollingDeltaX(), event.scrollingDeltaY()),

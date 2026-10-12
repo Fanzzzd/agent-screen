@@ -513,6 +513,12 @@ impl<H> Displays<H> {
         }
     }
 
+    /// The agent no longer needs the user: clear its Help Request.
+    pub fn withdraw_help(&mut self, id: DisplayId) -> bool {
+        self.get_mut(id)
+            .is_some_and(|d| d.help_request.take().is_some())
+    }
+
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {
         if let Some(d) = self.get_mut(id) {
             let seq = d.pointer.map_or(0, |p| p.seq) + 1;

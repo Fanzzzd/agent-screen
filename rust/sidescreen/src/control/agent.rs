@@ -585,6 +585,15 @@ pub async fn handle(
             });
             Ok(json!({}))
         }
+        "withdrawHelp" => {
+            let id = display(&core, &p, false, cx)?;
+            core.update(cx, |c, cx| {
+                if c.displays.withdraw_help(id) {
+                    cx.notify();
+                }
+            });
+            Ok(json!({}))
+        }
         "waitForControl" => {
             let id = display(&core, &p, false, cx)?;
             let seconds = p
@@ -604,7 +613,20 @@ pub async fn handle(
                     }
                 }
             };
-            Ok(json!({ "outcome": outcome.as_str() }))
+            // Ended because the user closed it: the agent should stop.
+            let closed = outcome == crate::model::ControlWait::Ended
+                && core.read_with(cx, |c, _| {
+                    c.displays.closed_by_user.contains(&id)
+                        || c.displays
+                            .get(id)
+                            .is_some_and(|d| d.ended == Some(EndReason::ClosedByUser))
+                });
+            let outcome = if closed {
+                "closedByUser"
+            } else {
+                outcome.as_str()
+            };
+            Ok(json!({ "outcome": outcome }))
         }
         // Test hook: stands in for the user's input in the Viewer.
         "debugTakeover" if debug_methods() => {
@@ -617,6 +639,7 @@ pub async fn handle(
                     c.displays.end_takeover(id)
                 };
                 if changed {
+                    c.stop_agent_input(id, active);
                     cx.notify();
                 }
             });

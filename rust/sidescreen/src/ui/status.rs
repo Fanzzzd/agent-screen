@@ -57,10 +57,17 @@ impl Status {
             None if display.takeover => Status {
                 kind: Kind::Takeover,
                 short: t("You’re in control", "你在操作").into(),
-                long: tf!(
-                    "You’re in control. {agent} is waiting to continue.",
-                    "你在操作，{agent} 在等你交还"
-                ),
+                // The reason stays up while the user answers it.
+                long: match &display.help_request {
+                    Some(reason) => tf!(
+                        "You’re in control. {agent} asked: {reason}",
+                        "你在操作。{agent} 请你：{reason}"
+                    ),
+                    None => tf!(
+                        "You’re in control. {agent} is waiting to continue.",
+                        "你在操作，{agent} 在等你交还"
+                    ),
+                },
                 icon: None,
                 color: theme.accent,
             },
@@ -156,8 +163,10 @@ mod tests {
             (Kind::Help, "需要帮助：输入验证码")
         );
 
-        // A Takeover outranks the Help Request it answers.
+        // A Takeover outranks the Help Request it answers, and keeps its reason.
         d.begin_takeover(7);
+        assert_eq!(status(&d, 0).long, "你在操作。Codex 请你：输入验证码");
+        d.withdraw_help(7);
         assert_eq!(status(&d, 0).long, "你在操作，Codex 在等你交还");
 
         d.end_takeover(7);

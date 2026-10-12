@@ -61,6 +61,14 @@ await debug("debugTakeover", { displayId: display_id, active: false })
 const helped = await help
 check("request_help returns when the Takeover ends", helped.structuredContent?.control === "agent")
 
+// Nobody answers: the agent hears the request is still open, and can take it back.
+const unanswered = await client.call("request_help", { display_id, reason: "Enter the code", timeout_seconds: 1 })
+check("an unanswered Help Request says it stays open", /request stays open/.test(unanswered.structuredContent?.note ?? ""), unanswered.structuredContent?.note)
+const withdrawn = await client.call("request_help", { display_id, withdraw: true })
+check("request_help withdraw takes the request back", withdrawn.structuredContent?.withdrawn === true, JSON.stringify(withdrawn.structuredContent))
+const after = await client.call("wait_for_control", { display_id, timeout_seconds: 1 })
+check("after a withdraw the agent has control", after.structuredContent?.control === "agent", JSON.stringify(after.structuredContent))
+
 const noWindow = await client.call("get_window_state", { display_id, window_id: 1 })
 check("get_window_state rejects a window not on the display", noWindow.content[0].text.startsWith("not_found"))
 
