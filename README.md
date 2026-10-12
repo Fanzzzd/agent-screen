@@ -73,7 +73,7 @@ The app follows your Mac's language: Chinese when it comes first in your preferr
 
 ## Privacy
 
-Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it show agent displays and take the screenshots agents ask for. Accessibility lets it click, type and place windows on them. Agents reach it through a socket only your user account can open.
+Sidescreen runs on your Mac and sends nothing anywhere. Screen & System Audio Recording lets it show agent displays and take the screenshots agents ask for. Accessibility lets it click, type and place windows on them. Agents reach it through a socket only your user account can open.
 
 ## Known limits
 

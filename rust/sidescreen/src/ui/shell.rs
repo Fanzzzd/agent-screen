@@ -1465,7 +1465,7 @@ impl Shell {
                     ),
                     &tf!(
                         "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Sidescreen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Sidescreen's AeroSpace and add ignored-monitors.",
-                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 agent 的显示器上，Sidescreen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Sidescreen 版 AeroSpace 并加上 ignored-monitors。",
+                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 Agent 的显示器上，Sidescreen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Sidescreen 版 AeroSpace 并加上 ignored-monitors。",
                         pinned.join(", ")
                     ),
                     t("Open Config", "打开配置"),
@@ -2113,7 +2113,7 @@ impl Shell {
     fn ignore_in_aerospace(&mut self, cx: &mut Context<Self>) {
         let why = t(
             "AeroSpace manages every display, Sidescreen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
-            "AeroSpace 会管理所有显示器，包括 Sidescreen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 agent 的截图里。agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
+            "AeroSpace 会管理所有显示器，包括 Sidescreen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 Agent 的截图里。Agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
             let commands = "brew tap fanzzzd/sidescreen

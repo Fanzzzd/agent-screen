@@ -927,9 +927,26 @@ async fn create_display(
         })
         .await;
     let started = Instant::now();
+    // macOS takes 300 to 500 ms to make the display: off the main thread,
+    // so Peek and the Viewer keep drawing meanwhile.
+    let (serial, name) = core.update(cx, |c, _| c.next_name());
+    let made = cx
+        .background_executor()
+        .spawn({
+            let name = name.clone();
+            async move {
+                crate::mac::display::VirtualDisplay::create(
+                    &name,
+                    width as u32,
+                    height as u32,
+                    serial,
+                )
+            }
+        })
+        .await;
     let reply = core
         .update(cx, |c, cx| {
-            let id = c.create((width, height), Some(owner), cx)?;
+            let id = c.adopt(made?, name, (width, height), Some(owner), cx);
             c.displays.get(id).map(|d| {
                 let mut reply = describe(d, false);
                 if clamped {
@@ -1423,8 +1440,10 @@ struct Launched {
     /// `still_starting`, none yet; one it opens soon moves onto the display.
     /// For a running app: `existing_window`, the file shows in a window it
     /// had; `still_opening`, the file's window hasn't come yet;
-    /// `no_new_window`, its menus have no New Window; `app_busy`, that item
-    /// is greyed out; `menus_unreadable`, its menus can't be read or used.
+    /// `just_started`, the user or another session started it moments ago
+    /// and it isn't ready; `no_new_window`, its menus have no New Window;
+    /// `app_busy`, that item is greyed out; `menus_unreadable`, its menus
+    /// can't be read or used.
     reason: Option<&'static str>,
 }
 
@@ -1663,6 +1682,28 @@ async fn launch_now(
                 .timer(Duration::from_millis(150))
                 .await;
         }
+        // Just started and no window yet: its menus may not have the item
+        // yet. Give them up to 3 s.
+        let just_started = || {
+            app::launched_within(pid, LATE_WINDOW_WAIT)
+                && !windows::all()
+                    .iter()
+                    .any(|w| w.target.pid == pid && w.layer == 0)
+        };
+        if asked == ax::NewWindow::Missing && just_started() {
+            for _ in 0..20 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                asked = cx
+                    .background_executor()
+                    .spawn(async move { ax::press_new_window(pid) })
+                    .await;
+                if asked != ax::NewWindow::Missing {
+                    break;
+                }
+            }
+        }
         // Only this display's own launch has a watch that moves the window.
         let started_here = core.read_with(cx, |c, _| {
             c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
@@ -1670,18 +1711,10 @@ async fn launch_now(
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
-            // Just started and no window yet: its menus may not have the
-            // item yet, and the first launch's watch moves its window when
-            // it comes.
-            ax::NewWindow::Missing
-                if started_here
-                    && app::launched_within(pid, LATE_WINDOW_WAIT)
-                    && !windows::all()
-                        .iter()
-                        .any(|w| w.target.pid == pid && w.layer == 0) =>
-            {
-                Some("still_starting")
-            }
+            // The first launch's watch moves its window when it comes.
+            ax::NewWindow::Missing if started_here && just_started() => Some("still_starting"),
+            // Started by the user or another session moments ago.
+            ax::NewWindow::Missing if just_started() => Some("just_started"),
             ax::NewWindow::Missing => Some("no_new_window"),
             ax::NewWindow::NotReady => Some("menus_unreadable"),
         };
@@ -1724,9 +1757,10 @@ async fn launch_now(
     let mut gave_up = false;
     // Takes over from `catch` for a file still opening, with no gap between.
     let mut document_catch = None;
-    for _ in 0..120 {
+    // Every 25 ms for 6 s: the caught window is answered within a tick.
+    for _ in 0..240 {
         cx.background_executor()
-            .timer(Duration::from_millis(50))
+            .timer(Duration::from_millis(25))
             .await;
         let taken = catch.as_ref().and_then(|c| c.taken());
         let open_failed = poll_open(&mut opened);

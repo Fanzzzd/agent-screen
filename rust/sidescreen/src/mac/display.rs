@@ -25,6 +25,10 @@ pub struct VirtualDisplay {
     _handle: Retained<AnyObject>,
 }
 
+// Made on a background thread and then only held, never messaged, on the
+// main thread, until released there.
+unsafe impl Send for VirtualDisplay {}
+
 impl VirtualDisplay {
     /// A HiDPI display of `width` × `height` points.
     pub fn create(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {

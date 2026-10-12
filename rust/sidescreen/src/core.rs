@@ -72,13 +72,30 @@ impl Core {
         owner: Option<Owner>,
         cx: &mut Context<Self>,
     ) -> Option<DisplayId> {
-        let (mut serial, mut name) = self.displays.next_serial();
-        // A test instance's displays must not pass for the user's.
-        if let Some(instance) = sidescreen_mcp::endpoint::instance() {
-            name = format!("Sidescreen {instance} {serial}");
-            serial += 10_000;
-        }
+        let (serial, name) = self.next_name();
         let handle = VirtualDisplay::create(&name, size.0 as u32, size.1 as u32, serial)?;
+        Some(self.adopt(handle, name, size, owner, cx))
+    }
+
+    /// The serial and name for the next display. A test instance's
+    /// displays must not pass for the user's.
+    pub fn next_name(&mut self) -> (u32, String) {
+        let (serial, name) = self.displays.next_serial();
+        match sidescreen_mcp::endpoint::instance() {
+            Some(instance) => (serial + 10_000, format!("Sidescreen {instance} {serial}")),
+            None => (serial, name),
+        }
+    }
+
+    /// Take on a display made elsewhere, as off the main thread, and park it.
+    pub fn adopt(
+        &mut self,
+        handle: VirtualDisplay,
+        name: String,
+        size: (f64, f64),
+        owner: Option<Owner>,
+        cx: &mut Context<Self>,
+    ) -> DisplayId {
         let id = handle.id;
         self.displays.add(id, name, size, owner, handle);
         // Usually WindowServer takes the position at once. Here, before the
@@ -88,7 +105,7 @@ impl Core {
         if display::tuck_away(id, &virtual_ids) {
             self.tucked.insert(id);
             cx.notify();
-            return Some(id);
+            return id;
         }
         // Otherwise it needs a moment before it accepts configuration; try
         // until it does.
@@ -131,7 +148,7 @@ impl Core {
         })
         .detach();
         cx.notify();
-        Some(id)
+        id
     }
 
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {

@@ -919,6 +919,9 @@ fn launch_output(reply: &Value) -> Value {
                 "existing_window" => {
                     "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or click Windows in the Viewer's header and choose Hand Over."
                 }
+                "just_started" => {
+                    "The app started moments ago, by the user or another agent, and isn't ready to open a window yet; nothing moved. Wait a few seconds and call launch_app again. Don't ask the user to quit it: its first window may be someone's work."
+                }
                 "no_new_window" => {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
                 }
@@ -956,6 +959,7 @@ mod tests {
             "app_busy",
             "menus_unreadable",
             "still_opening",
+            "just_started",
         ] {
             let none = launch_output(
                 &json!({ "wasRunning": reason != "still_starting", "reason": reason }),
