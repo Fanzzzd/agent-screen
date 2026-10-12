@@ -27,7 +27,21 @@ pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
         .find_map(|app| Some(PathBuf::from(app.bundleURL()?.path()?.to_string())))
 }
 
-/// Show a hidden app's windows, where they are now.
+/// Whether an app opens web pages, by the URL schemes its Info.plist
+/// declares.
+pub fn handles_web(bundle: &Path) -> bool {
+    std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleURLTypes", "json", "-o", "-"])
+        .arg(bundle.join("Contents/Info.plist"))
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.contains("\"http\"") || text.contains("\"https\"")
+        })
+}
+
 /// The app in front on the user's screen.
 pub fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()
@@ -35,6 +49,7 @@ pub fn frontmost_pid() -> Option<i32> {
         .map(|app| app.processIdentifier())
 }
 
+/// Show a hidden app's windows, where they are now.
 pub fn unhide(pid: i32) {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
         app.unhide();

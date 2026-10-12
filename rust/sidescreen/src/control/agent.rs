@@ -588,6 +588,23 @@ pub async fn handle(
             .map_err(ControlError::failed)?;
             Ok(json!({}))
         }
+        // Test hook: the user takes a window back from the Windows menu.
+        "debugTakeBack" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let target = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?
+                .target;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            shell
+                .update(cx, |shell, cx| shell.take_back(target, id, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            Ok(json!({}))
+        }
         "debugQuit" if debug_methods() => {
             // Quits the way the menu does, after this reply goes out.
             cx.spawn(async |cx| {
@@ -836,6 +853,36 @@ fn shot_json(shot: &screenshot::Shot) -> Value {
     })
 }
 
+/// Note the windows the user made in the display's apps, which the kept
+/// catches left alone.
+fn sync_user_made(c: &mut Core, id: DisplayId) {
+    let made: Vec<u32> = c
+        .kept_catches
+        .iter()
+        .flat_map(|(_, k)| k.skipped())
+        .collect();
+    if let Some(d) = c.displays.get_mut(id) {
+        d.user_made.extend(made);
+    }
+}
+
+/// Whether a window that opened late is still the agent's to move: its
+/// app is still the agent's, and the user isn't using it.
+fn still_agents(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> bool {
+    app::frontmost_pid() != Some(target.pid)
+        && core.update(cx, |c, _| {
+            sync_user_made(c, id);
+            c.displays
+                .get(id)
+                .is_some_and(|d| d.is_stray(target, false))
+        })
+}
+
 /// Keep the catch on an app this display's session started, for as long
 /// as the display lives. A running app's catch ends here: its later windows
 /// may be the user's.
@@ -846,6 +893,7 @@ fn keep_catch(
     cx: &mut AsyncApp,
 ) {
     let Some(catch) = catch else { return };
+    catch.keep();
     core.update(cx, |c, _| {
         let ours = c
             .displays
@@ -874,14 +922,20 @@ fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows:
         .into_iter()
         .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
         .collect();
-    core.read_with(cx, |c, _| {
+    core.update(cx, |c, _| {
+        sync_user_made(c, id);
+        let recorded: std::collections::HashSet<u32> = c
+            .displays
+            .list
+            .iter()
+            .flat_map(|d| d.records.keys().copied())
+            .collect();
         let Some(display) = c.displays.get(id) else {
             return Vec::new();
         };
-        let recorded = |w: u32| c.displays.list.iter().any(|d| d.records.contains_key(&w));
         off_displays
             .into_iter()
-            .filter(|w| display.is_stray(w.target, recorded(w.target.window_id)))
+            .filter(|w| display.is_stray(w.target, recorded.contains(&w.target.window_id)))
             .collect()
     })
 }
@@ -1063,10 +1117,6 @@ fn open_target(text: &str) -> Result<String, ControlError> {
             Err(ControlError::not_found(format!("no file at {text}")))
         };
     }
-    // A file URL is a file: a running app opens it in a window of its own.
-    if let Some(path) = ax::file_url_path(text) {
-        return open_target(&path.to_string_lossy());
-    }
     let scheme = text.split_once(':').map(|(s, _)| s);
     if scheme.is_some_and(|s| {
         !s.is_empty()
@@ -1135,10 +1185,12 @@ async fn open_in_background(
 struct Launched {
     window: Option<windows::Window>,
     was_running: bool,
-    /// Why there is no window: `still_starting` (the app Sidescreen started
-    /// has none yet; one it opens soon moves onto the display),
-    /// `existing_window` (a running app opened the file in a window it
-    /// already had), or `no_new_window` (a running app made no window).
+    /// Why there is no window. For an app Sidescreen started:
+    /// `still_starting`, none yet; one it opens soon moves onto the display.
+    /// For a running app: `existing_window`, the file shows in a window it
+    /// had; `still_opening`, the file's window hasn't come yet;
+    /// `no_new_window`, its menus have no New Window; `app_busy`, that item
+    /// is greyed out; `menus_unreadable`, its menus can't be read or used.
     reason: Option<&'static str>,
 }
 
@@ -1161,6 +1213,14 @@ async fn launch(
 ) -> Result<Launched, ControlError> {
     let path = app::resolve(name)
         .ok_or_else(|| ControlError::not_found(format!("no app named {name}")))?;
+    // A plain file URL is its file, except for a browser, which opens it as
+    // a page: then the URL route gives it a window of its own first.
+    let file = target
+        .filter(|t| t.starts_with("file://") && !t.contains(['?', '#']))
+        .filter(|_| !app::handles_web(&path))
+        .and_then(ax::file_url_path)
+        .map(|p| p.to_string_lossy().into_owned());
+    let target = file.as_deref().or(target);
     // Wait for another session's launch of the same app to finish.
     let mut free = false;
     for _ in 0..450 {
@@ -1467,6 +1527,7 @@ async fn launch_now(
     });
     let watching = document
         .clone()
+        .filter(|_| !shown_already)
         .filter(|d| core.update(cx, |c, _| c.watching.insert((pid, d.clone()))));
     if let Some(document) = watching {
         // A catch for the file's window moves it as it appears; the poll
@@ -1506,7 +1567,11 @@ async fn launch_now(
                 if let Some(late) = windows::all().into_iter().find(|w| {
                     w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id)
                 }) {
-                    let _ = settle(&core, late.target, id, cx).await;
+                    // Unless the user made it: with the app in front, or
+                    // after taking one of its windows back.
+                    if still_agents(&core, id, late.target, cx) {
+                        let _ = settle(&core, late.target, id, cx).await;
+                    }
                     return;
                 }
                 // Ended or removed meanwhile: the window stays where it opened.
@@ -2043,6 +2108,15 @@ mod launch_tests {
             Some(std::path::PathBuf::from("/tmp/x"))
         );
         assert_eq!(ax::file_url_path("https://example.com"), None);
+        // A page's query and fragment aren't part of its file.
+        assert_eq!(
+            ax::file_url_path("file:///tmp/a.html#sec"),
+            Some(std::path::PathBuf::from("/tmp/a.html"))
+        );
+        assert_eq!(
+            ax::file_url_path("file:///tmp/a%2Fb.html?q=1"),
+            Some(std::path::PathBuf::from("/tmp/a/b.html"))
+        );
     }
 
     #[test]

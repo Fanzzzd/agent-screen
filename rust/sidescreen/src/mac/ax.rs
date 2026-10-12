@@ -496,6 +496,7 @@ fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Optio
 /// The path of a file URL, with its percent escapes decoded.
 pub fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
     let rest = url.strip_prefix("file://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

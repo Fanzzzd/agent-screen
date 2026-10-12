@@ -1585,14 +1585,14 @@ impl Shell {
 
     /// Return one window to the user: its old place for a Handover, the
     /// main display otherwise.
-    fn take_back(&mut self, target: WindowTarget, id: DisplayId, cx: &mut Context<Self>) {
+    pub fn take_back(&mut self, target: WindowTarget, id: DisplayId, cx: &mut Context<Self>) {
         let home = self.core.update(cx, |core, _| {
             let display = core.displays.get_mut(id)?;
             let home = display
                 .records
                 .get(&target.window_id)
                 .and_then(|r| r.home.clone());
-            display.give_back(target.window_id);
+            display.give_back(target);
             // Taking a window back says the app is the user's now: its
             // later windows stay on the user's screen.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);

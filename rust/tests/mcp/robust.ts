@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { McpClient, instance } from "./client.ts"
 import { spawn } from "node:child_process"
-import { buildTools, startTestApp, stopTestApp, waitForIdle } from "../e2e/lib.ts"
+import { Control, buildTools, startTestApp, stopTestApp, waitForIdle } from "../e2e/lib.ts"
 
 let failures = 0
 const check = (label: string, ok: boolean, detail = "") => {
@@ -230,6 +230,24 @@ try {
   const tookMs = Date.now() - startedAgain
   check("launch_app on a running single-window app says no_new_window within 1.5 s",
     second?.window === null && second?.reason === "no_new_window" && tookMs < 1500, `${JSON.stringify(second)?.slice(0, 120)} in ${tookMs} ms`)
+
+  // The user takes a TextEdit window back: TextEdit is theirs from then on.
+  // A window they make next stays on their screen and isn't a stray.
+  const control = await Control.connect()
+  try {
+    const mine = (structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id } })).windows as any[])
+      .find((w) => w.app === "TextEdit")
+    await control.call("debugTakeBack", { displayId: display_id, windowId: mine.windowId })
+    execFileSync("/usr/bin/osascript", ["-e", 'tell application "TextEdit" to make new document'])
+    await Bun.sleep(1500)
+    check("after a take-back, a window the user makes stays on their screen", onMainDisplay("TextEdit") >= 2)
+    const after = structured(await client.request("tools/call", { name: "list_windows", arguments: { display_id, strays: true } }))
+    check("after a take-back, strays lists none of the user's windows", after?.windows?.length === 0, JSON.stringify(after).slice(0, 160))
+    const back = await client.request("tools/call", { name: "place_window", arguments: { display_id, window_id: mine.windowId } })
+    check("place_window refuses the window taken back", back.result?.isError === true && textOf(back).includes("took that window back"), textOf(back).slice(0, 120))
+  } finally {
+    control.close()
+  }
 } finally {
   await client.request("tools/call", { name: "end_display", arguments: { display_id } })
   quit("TextEdit", true)

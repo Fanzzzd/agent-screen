@@ -55,6 +55,10 @@ struct Target {
     paused: std::cell::Cell<bool>,
     /// Take only a window that shows this file.
     document: Option<std::path::PathBuf>,
+    /// Kept while the display lives, past the launch.
+    kept: std::cell::Cell<bool>,
+    /// Windows left alone because the user made them with the app in front.
+    skipped: std::cell::RefCell<Vec<u32>>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -111,6 +115,8 @@ impl Catch {
             taken: std::cell::Cell::new(None),
             paused: std::cell::Cell::new(false),
             document,
+            kept: std::cell::Cell::new(false),
+            skipped: std::cell::RefCell::new(Vec::new()),
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -130,6 +136,16 @@ impl Catch {
             );
         }
         Some(Catch { observer, target })
+    }
+
+    /// From now on, leave alone windows the user makes with the app in front.
+    pub fn keep(&self) {
+        unsafe { (*self.target).kept.set(true) }
+    }
+
+    /// Windows the user made in the app while it was in front.
+    pub fn skipped(&self) -> Vec<u32> {
+        unsafe { (*self.target).skipped.borrow().clone() }
     }
 
     /// Let a launch of the same app take its window alone.
@@ -180,7 +196,10 @@ extern "C" fn created(
         return;
     }
     // A kept catch leaves alone windows the user makes while using the app.
-    if target.left.get().is_none() && super::app::frontmost_pid() == Some(target.pid) {
+    if target.kept.get() && super::app::frontmost_pid() == Some(target.pid) {
+        if let Some(id) = ax::window_id(window) {
+            target.skipped.borrow_mut().push(id);
+        }
         return;
     }
     // A window that doesn't show the file yet is left to the poll behind it.

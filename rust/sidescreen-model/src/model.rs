@@ -227,6 +227,8 @@ pub struct Display<H> {
     /// Windows the user took back. They are the user's from then on, even
     /// in an app the agent started.
     pub returned: std::collections::BTreeSet<WindowId>,
+    /// Windows the user made in an app the agent started, while using it.
+    pub user_made: std::collections::BTreeSet<WindowId>,
     /// The user is operating the display in the Viewer; agent input is refused.
     pub takeover: bool,
     /// The reason of an open Help Request.
@@ -279,6 +281,8 @@ impl<H> Display<H> {
         {
             return;
         }
+        // Handed over again after a take-back: the agent's once more.
+        self.returned.remove(&target.window_id);
         self.records.insert(
             target.window_id,
             Record {
@@ -295,18 +299,22 @@ impl<H> Display<H> {
     }
 
     /// The user takes a window back: it leaves the records for good.
-    pub fn give_back(&mut self, window: WindowId) {
-        self.records.remove(&window);
-        self.returned.insert(window);
+    /// Taking one window back makes its app the user's: none of its
+    /// windows is the agent's to place any more.
+    pub fn give_back(&mut self, target: WindowTarget) {
+        self.records.remove(&target.window_id);
+        self.returned.insert(target.window_id);
+        self.started.remove(&target.pid);
     }
 
     /// Whether a window off every display is the agent's to place: one of
-    /// an app it started, that no display records and the user never took
-    /// back.
+    /// an app it started, that no display records, that the user didn't
+    /// make while using the app, and never took back.
     pub fn is_stray(&self, target: WindowTarget, recorded_anywhere: bool) -> bool {
         self.started.contains(&target.pid)
             && !recorded_anywhere
             && !self.returned.contains(&target.window_id)
+            && !self.user_made.contains(&target.window_id)
     }
 
     /// The Agent Session's verdict on a window. It can change its mind any time.
@@ -388,6 +396,7 @@ impl<H> Displays<H> {
             records: BTreeMap::new(),
             started: Default::default(),
             returned: Default::default(),
+            user_made: Default::default(),
             takeover: false,
             help_request: None,
             pointer: None,
@@ -671,8 +680,30 @@ mod tests {
             "an app the agent didn't start"
         );
         display.claim(ours, Origin::Launched, None);
-        display.give_back(1);
+        display.give_back(ours);
         assert!(!display.is_stray(ours, false));
+        // The app is the user's now: its next window isn't a stray either.
+        let next = WindowTarget {
+            pid: 5,
+            window_id: 3,
+        };
+        assert!(!display.is_stray(next, false));
+        // Handed over again, it's the agent's.
+        display.claim(ours, Origin::HandedOver, None);
+        assert!(!display.returned.contains(&1));
+    }
+
+    #[test]
+    fn a_window_the_user_made_is_never_a_stray() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        display.started.insert(5);
+        let made = WindowTarget {
+            pid: 5,
+            window_id: 4,
+        };
+        display.user_made.insert(4);
+        assert!(!display.is_stray(made, false));
     }
 
     #[test]

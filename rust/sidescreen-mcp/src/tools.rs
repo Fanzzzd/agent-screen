@@ -241,7 +241,7 @@ pub fn definitions() -> Vec<Value> {
                 json!({
                     "display_id": display_id(),
                     "app": { "type": "string", "description": "App name (\"Safari\") or bundle id (\"com.apple.Safari\")." },
-                    "open": { "type": "string", "description": "A URL (https://…) or an absolute file path to open in the app." }
+                    "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." }
                 }),
                 &["display_id", "app"],
             ),
@@ -879,7 +879,7 @@ fn launch_output(reply: &Value) -> Value {
                     "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."
                 }
                 "still_opening" => {
-                    "The app was already running and hadn't opened the file after 4 s. When a window showing the file opens in the next 30 s, it moves onto your display; call list_windows to check. If none comes, ask the user to hand the window over."
+                    "The app was already running and hadn't shown the file yet. When a window showing the file opens in the next 30 s, it moves onto your display; call list_windows to check. If none comes, ask the user to hand the window over."
                 }
                 _ => {
                     "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
