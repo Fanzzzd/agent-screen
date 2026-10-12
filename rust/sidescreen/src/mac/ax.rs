@@ -144,9 +144,12 @@ pub fn try_action(element: &AXUIElement, action: &str) -> bool {
     )
 }
 
-/// The window an app sends keys to: its focused window.
+/// The window an app sends keys to: its focused window. Asked before
+/// input, so a hung app gets 0.1 s, not the usual 1 s.
 pub fn focused_window_id(pid: i32) -> Option<u32> {
-    let window = element_attribute(&application(pid), "AXFocusedWindow")?;
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    let window = element_attribute(&app, "AXFocusedWindow")?;
     window_id(&window)
 }
 

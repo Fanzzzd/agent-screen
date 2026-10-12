@@ -406,6 +406,12 @@ impl Forwarder {
             .await;
     }
 
+    /// Done with keys for now: hand focus back to the user's window in a
+    /// shared app, if the agent's keys took it.
+    pub async fn keys_done(&self) {
+        self.run(|w| w.restore_focus()).await;
+    }
+
     /// Forget the keyboard target if it is `target`, as when the user takes
     /// that window back.
     pub async fn forget_target(&self, target: WindowTarget) {
@@ -458,6 +464,9 @@ struct Gesture {
 struct Worker {
     source: Option<CFRetained<CGEventSource>>,
     focused: Option<WindowTarget>,
+    /// The user's window in a shared app whose key focus the agent's keys
+    /// took; handed back when they are done.
+    restore: Option<WindowTarget>,
     gesture: Option<Gesture>,
     cache: Option<(Vec<Hit>, Instant)>,
     seed: u64,
@@ -474,6 +483,7 @@ impl Worker {
         Worker {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState),
             focused: None,
+            restore: None,
             gesture: None,
             cache: None,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -491,17 +501,48 @@ impl Worker {
 
     /// Make `target` the window keys go to, without raising it.
     fn focus(&mut self, target: WindowTarget) {
-        // Cached, but the app may have made another of its windows, the
-        // user's, the one keys go to since: then tell it again.
-        let moved_on =
-            || super::ax::focused_window_id(target.pid).is_some_and(|id| id != target.window_id);
-        if self.focused != Some(target) || moved_on() {
-            // Let AppKit in the target update its key-window routing before
-            // events arrive (cua uses the same 50 ms settle).
-            if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
-                thread::sleep(Duration::from_millis(50));
-            }
-            self.focused = Some(target);
+        if self.focused != Some(target) {
+            self.send_focus(target);
+        }
+    }
+
+    fn send_focus(&mut self, target: WindowTarget) {
+        // Let AppKit in the target update its key-window routing before
+        // events arrive (cua uses the same 50 ms settle).
+        if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.focused = Some(target);
+    }
+
+    /// Focus `target` for an agent's keys. The app may have made another
+    /// of its windows key since, as when the user clicked theirs: focus the
+    /// target again, and remember the user's window to hand focus back to
+    /// once the agent's keys are done, so the user's typing in that app
+    /// still goes to their window.
+    fn focus_for_keys(&mut self, target: WindowTarget, within: Rect) {
+        let before = super::ax::focused_window_id(target.pid);
+        let elsewhere = before.is_some_and(|id| id != target.window_id);
+        if self.focused == Some(target) && !elsewhere {
+            return;
+        }
+        if let Some(id) = before.filter(|_| elsewhere)
+            && self.restore.is_none()
+            && super::windows::find(id).is_some_and(|w| !within.intersects(&w.bounds))
+        {
+            self.restore = Some(WindowTarget {
+                pid: target.pid,
+                window_id: id,
+            });
+        }
+        self.send_focus(target);
+    }
+
+    /// Hand key focus back to the user's window the agent's keys took it
+    /// from. The agent's window is focused again on its next keys.
+    fn restore_focus(&mut self) {
+        if let Some(window) = self.restore.take() {
+            unsafe { SSFocusWithoutRaise(window.pid, window.window_id) };
         }
     }
 
@@ -684,11 +725,11 @@ impl Worker {
             .and_then(|t| list.iter().find(|h| h.target == t));
         if let Some(h) = still_there.filter(|h| within.intersects(&h.bounds)) {
             let target = h.target;
-            self.focus(target);
+            self.focus_for_keys(target, within);
             return;
         }
         match list.iter().find(|h| within.contains(h.bounds.mid())) {
-            Some(top) => self.focus(top.target),
+            Some(top) => self.focus_for_keys(top.target, within),
             // The window left the display, as when the user took it back:
             // keys must not follow it to the user's screen.
             None => self.focused = None,
