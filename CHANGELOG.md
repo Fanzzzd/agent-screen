@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.11 (2026-10-12)
+
+### Fixes
+
+#### The menu names Claude Code and Codex by name
+
+The menu bar line says "Claude Code loaded Sidescreen's tools" instead of the raw client id. When Sidescreen starts after the agent, or restarts after an update, the line comes back within 2 seconds.
+
+#### Connect your agent from the setup window
+
+The setup window has a row for Claude Code and Codex with a **Connect…** button, and shows which agent loaded the tools. Connect now finds a `claude` installed with npm, nvm, volta or fnm, because it uses the PATH your terminal has; if it still fails, the alert gives the command to run in Terminal. Peek with no displays says agents create their own, and that the menu opens on right-click. "Waiting for picture…" is easier to read in light mode. The Chinese name of the Screen Recording permission matches System Settings: 录屏与系统录音.
+
+#### Setup picks up where it left off
+
+After you press **Reopen Sidescreen**, the setup window opens again at the Connect step. The Connect row says "Connecting…" while it works, ignores a second press, and once Claude Code or Codex has Sidescreen it says so and offers **Connect Again…**. If neither client is installed, Connect gives the command and argument for any other MCP client. Connect's results are in your language. If the Screen Recording grant starts working without a reopen, agents stop being told to ask for one. Closing the setup window is no longer undone by the agent's next call.
+
+"Added to" now counts only an entry that runs this copy of Sidescreen, so a registration left by a moved or older copy shows **Connect…** again. While the setup window asks you to reopen, it checks every 2 seconds whether the grant took effect anyway. The Chinese setup window calls displays 显示器, like the rest of the app.
+
+#### Closing a display stops the agent
+
+When you close a display the agent is using, the agent is told you closed it and to ask before making another, instead of being told to create a new one. When Screen Recording needs Sidescreen to reopen, the menu offers **Finish Setup: Reopen Sidescreen…**, and agents are told to ask you to reopen it. `wait` reports the time it waited, at most 30 seconds.
+
+#### Your clicks and keys keep your windows yours
+
+A new window of an app the agent started now goes to the agent's display only if the agent acted there in the last 3 seconds and you didn't click or type meanwhile in that app, Finder, the Dock or a launcher such as Spotlight. A window you open yourself stays on your screen. A window that opens while you both act, or with nobody acting, stays where it opened; the agent's next screenshot or window state tells it, and it can place the window with `place_window`. For an app the agent cold-starts, this holds for 30 seconds from the launch. Raycast and Alfred count like Spotlight. Clicks and keys you send through a display's viewer count as driving that display. When a session disconnects, its display stops taking new windows.
+
 ## 0.1.10 (2026-10-12)
 
 ### Features
