@@ -36,6 +36,10 @@ pub struct Core {
     /// For apps the user took back: returns their new windows that open on
     /// the display by themselves.
     pub returning: Vec<(DisplayId, crate::mac::catch::Catch)>,
+    /// Take-backs whose returning catch is still to be armed, once the
+    /// window is back. A Handover or the display's removal meanwhile
+    /// cancels it.
+    pub pending_returns: std::collections::HashSet<(DisplayId, i32)>,
     /// Files a running app is still opening, by pid, each watched once.
     pub watching: HashSet<(i32, std::path::PathBuf)>,
     /// Undecided windows of the kept catches already reported to an agent.
@@ -57,6 +61,7 @@ impl Core {
             launching: HashSet::new(),
             kept_catches: Vec::new(),
             returning: Vec::new(),
+            pending_returns: Default::default(),
             watching: HashSet::new(),
             told: HashSet::new(),
             left_alone: Vec::new(),
@@ -182,6 +187,7 @@ impl Core {
             self.tucked.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
             self.returning.retain(|(display, _)| *display != id);
+            self.pending_returns.retain(|(display, _)| *display != id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
             cx.notify();

@@ -1644,6 +1644,7 @@ impl Shell {
             // later windows stay on the user's screen, even one it opens
             // beside a window of its own still on the display.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
+            core.pending_returns.insert((id, target.pid));
             home
         });
         let main_name = main_screen_name();
@@ -1665,11 +1666,14 @@ impl Shell {
                 // Armed once the window is back: registering asks the app,
                 // which may be slow.
                 shell.core.update(cx, |core, _| {
-                    let armed = core
-                        .returning
-                        .iter()
-                        .any(|(d, k)| *d == id && k.pid() == target.pid);
-                    if !armed
+                    // Still wanted: no Handover of the app and the display
+                    // still there.
+                    let wanted = core.pending_returns.remove(&(id, target.pid))
+                        && !core
+                            .returning
+                            .iter()
+                            .any(|(d, k)| *d == id && k.pid() == target.pid);
+                    if wanted
                         && let Some(catch) =
                             crate::mac::catch::Catch::returning(target.pid, id, screen)
                     {
@@ -2012,6 +2016,7 @@ impl Shell {
                         // agent's to have, not to send back.
                         core.returning
                             .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
+                        core.pending_returns.remove(&(id, target.pid));
                         cx.notify();
                         Some(())
                     })
