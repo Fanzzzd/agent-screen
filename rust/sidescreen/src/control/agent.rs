@@ -296,16 +296,32 @@ pub async fn handle(
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
-            keys_allowed(&forwarder, cg::display_bounds(id)).await?;
-            let total = crate::mac::input::typed_text(&text).chars().count();
-            match forwarder.type_text(text, cg::display_bounds(id)).await {
-                Sent::Nowhere => return Err(no_keyboard_target()),
-                Sent::Typed(typed) => {
-                    return Err(ControlError::takeover(format!(
-                        "the user took over display {id} after {typed} of {total} characters. Call wait_for_control, then take a screenshot before you type the rest."
-                    )));
+            let bounds = cg::display_bounds(id);
+            let chars: Vec<char> = crate::mac::input::typed_text(&text).chars().collect();
+            let total = chars.len();
+            let mut done = 0;
+            // In runs of 20, about 100 ms each, so the user switching to the
+            // app mid-way stops the rest.
+            for run in chars.chunks(20) {
+                if let Err(e) = keys_allowed(&forwarder, bounds, cx).await {
+                    return Err(match done {
+                        0 => e,
+                        _ => ControlError::failed(format!(
+                            "typed {done} of {total} characters, then stopped: {}",
+                            e.message
+                        )),
+                    });
                 }
-                _ => {}
+                match forwarder.type_text(run.iter().collect(), bounds).await {
+                    Sent::Nowhere => return Err(no_keyboard_target()),
+                    Sent::Typed(typed) => {
+                        let typed = done + typed;
+                        return Err(ControlError::takeover(format!(
+                            "the user took over display {id} after {typed} of {total} characters. Call wait_for_control, then take a screenshot before you type the rest."
+                        )));
+                    }
+                    _ => done += run.len(),
+                }
             }
             Ok(json!({}))
         }
@@ -319,13 +335,21 @@ pub async fn handle(
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let repeat = p.int("repeat").unwrap_or(1);
             let bounds = cg::display_bounds(id);
-            keys_allowed(&forwarder, bounds).await?;
             let total = chords.len();
             for (pressed, chord) in chords.into_iter().enumerate() {
                 if forwarder.agent_stopped() {
                     return Err(ControlError::takeover(format!(
                         "the user took over display {id} after {pressed} of {total} keys. Call wait_for_control, then take a screenshot before you press the rest."
                     )));
+                }
+                if let Err(e) = keys_allowed(&forwarder, bounds, cx).await {
+                    return Err(match pressed {
+                        0 => e,
+                        _ => ControlError::failed(format!(
+                            "pressed {pressed} of {total} keys, then stopped: {}",
+                            e.message
+                        )),
+                    });
                 }
                 // Select All needs a first responder, which an app in the
                 // background lacks; set the selection through accessibility.
@@ -354,7 +378,7 @@ pub async fn handle(
                 Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let within = cg::display_bounds(id);
-            keys_allowed(&forwarder, within).await?;
+            keys_allowed(&forwarder, within, cx).await?;
             let Some(pressed) = forwarder.chord(chord, true, within).await else {
                 return Err(no_keyboard_target());
             };
@@ -2228,11 +2252,21 @@ fn in_shot(mut window: Value, scale: f64) -> Value {
 async fn keys_allowed(
     forwarder: &crate::mac::input::Forwarder,
     within: Rect,
+    cx: &mut AsyncApp,
 ) -> Result<(), ControlError> {
     let Some(target) = forwarder.keys_target(within).await else {
         return Err(no_keyboard_target());
     };
-    if app::frontmost_pid() == Some(target.pid) {
+    // In front with the agent's window focused, as when an app it started
+    // activates itself, keys go to that window: fine.
+    let pid = target.pid;
+    let elsewhere = app::frontmost_pid() == Some(pid)
+        && cx
+            .background_executor()
+            .spawn(async move { ax::focused_window_id(pid) })
+            .await
+            != Some(target.window_id);
+    if elsewhere {
         let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
         return Err(ControlError::failed(format!(
             "the user is working in {name} right now, so keys would reach their window, not yours. Set text with act_on_element (set_value) instead, or wait and try again"

@@ -289,7 +289,13 @@ impl Forwarder {
     /// Half a click, for drags an agent drives step by step. The window hit
     /// by the press, or None when there is nothing under the point.
     pub async fn button(&self, at: (f64, f64), down: bool, m: Modifiers) -> Option<WindowTarget> {
+        let stopped = self.stopped.clone();
         self.run(move |w| {
+            // A takeover since the agent asked: its press must not land
+            // after the release the takeover sent.
+            if down && stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
             if down {
                 let hit = w.mouse_down(at, Button::Left, 1, flags(m));
                 if let Some(g) = &mut w.gesture {
@@ -485,7 +491,11 @@ impl Worker {
 
     /// Make `target` the window keys go to, without raising it.
     fn focus(&mut self, target: WindowTarget) {
-        if self.focused != Some(target) {
+        // Cached, but the app may have made another of its windows, the
+        // user's, the one keys go to since: then tell it again.
+        let moved_on =
+            || super::ax::focused_window_id(target.pid).is_some_and(|id| id != target.window_id);
+        if self.focused != Some(target) || moved_on() {
             // Let AppKit in the target update its key-window routing before
             // events arrive (cua uses the same 50 ms settle).
             if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
@@ -672,7 +682,9 @@ impl Worker {
         let still_there = self
             .focused
             .and_then(|t| list.iter().find(|h| h.target == t));
-        if still_there.is_some_and(|h| within.intersects(&h.bounds)) {
+        if let Some(h) = still_there.filter(|h| within.intersects(&h.bounds)) {
+            let target = h.target;
+            self.focus(target);
             return;
         }
         match list.iter().find(|h| within.contains(h.bounds.mid())) {

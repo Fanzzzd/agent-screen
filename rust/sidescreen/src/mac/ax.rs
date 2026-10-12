@@ -144,6 +144,12 @@ pub fn try_action(element: &AXUIElement, action: &str) -> bool {
     )
 }
 
+/// The window an app sends keys to: its focused window.
+pub fn focused_window_id(pid: i32) -> Option<u32> {
+    let window = element_attribute(&application(pid), "AXFocusedWindow")?;
+    window_id(&window)
+}
+
 pub fn window_id(element: &AXUIElement) -> Option<u32> {
     let mut id = 0u32;
     unsafe { SSAXWindowID(element, &mut id) }.then_some(id)
