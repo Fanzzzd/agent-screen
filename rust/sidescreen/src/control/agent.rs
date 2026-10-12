@@ -771,7 +771,7 @@ async fn create_display(
         .background_executor()
         .spawn(async move {
             use crate::mac::aerospace;
-            aerospace::ignoring().is_some_and(|i| i != aerospace::Ignoring::Yes)
+            aerospace::ignoring_with_display().is_some_and(|i| i != aerospace::Ignoring::Yes)
         })
         .await;
     if let Some(screen) = screen.filter(|_| aerospace_takes) {
@@ -819,7 +819,6 @@ fn shot_json(shot: &screenshot::Shot) -> Value {
     })
 }
 
-/// Record a window Sidescreen put on a display.
 /// Keep the catch on an app this display's session started, for as long
 /// as the display lives. A running app's catch ends here: its later windows
 /// may be the user's.
@@ -846,20 +845,22 @@ fn keep_catch(
 /// Agent Display and no display's records, such as one that opened on the
 /// user's screen before its catch was ready.
 fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
-    let (started, displays, recorded) = core.read_with(cx, |c, _| {
+    let (display, displays, recorded) = core.read_with(cx, |c, _| {
         (
             c.displays
                 .get(id)
-                .map(|d| d.started.clone())
-                .unwrap_or_default(),
+                .map(|d| (d.started.clone(), d.returned.clone())),
             c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>(),
             c.displays
                 .list
                 .iter()
                 .flat_map(|d| d.records.keys().copied())
-                .collect::<Vec<_>>(),
+                .collect::<std::collections::HashSet<_>>(),
         )
     });
+    let Some((started, _)) = &display else {
+        return Vec::new();
+    };
     if started.is_empty() {
         return Vec::new();
     }
@@ -867,16 +868,23 @@ fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows:
         .into_iter()
         .flat_map(windows::on_display)
         .map(|w| w.target.window_id)
-        .chain(recorded)
         .collect();
-    windows::all()
+    let windows: Vec<windows::Window> = windows::all()
         .into_iter()
-        .filter(|w| {
-            w.layer == 0 && started.contains(&w.target.pid) && !placed.contains(&w.target.window_id)
-        })
-        .collect()
+        .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
+        .collect();
+    core.read_with(cx, |c, _| {
+        let Some(d) = c.displays.get(id) else {
+            return Vec::new();
+        };
+        windows
+            .into_iter()
+            .filter(|w| d.is_stray(w.target, recorded.contains(&w.target.window_id)))
+            .collect()
+    })
 }
 
+/// Record a window Sidescreen put on a display.
 fn claim(
     core: &Entity<Core>,
     id: DisplayId,
@@ -1335,7 +1343,8 @@ async fn launch_now(
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
-            ax::NewWindow::Missing | ax::NewWindow::NotReady => Some("no_new_window"),
+            ax::NewWindow::Missing => Some("no_new_window"),
+            ax::NewWindow::NotReady => Some("menus_unreadable"),
         };
         if let Some(reason) = missing {
             drop(catch);

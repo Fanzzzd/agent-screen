@@ -368,7 +368,18 @@ const PATTERN: &str = "'^Sidescreen'";
 /// None while AeroSpace isn't running. Reads AeroSpace's binary once per
 /// build, about 20 MB: run it off the main thread.
 pub fn ignoring() -> Option<Ignoring> {
-    let answer = read_ignoring();
+    store(read_ignoring(false))
+}
+
+/// The same, asked while an Agent Display exists, which AeroSpace lists
+/// unless it has loaded `ignored-monitors`. A Yes holds until AeroSpace or
+/// its config file changes, so later checks skip asking AeroSpace, which
+/// answers slowly just after a display appears.
+pub fn ignoring_with_display() -> Option<Ignoring> {
+    store(read_ignoring(true))
+}
+
+fn store(answer: Option<Ignoring>) -> Option<Ignoring> {
     IGNORES.store(
         answer == Some(Ignoring::Yes),
         std::sync::atomic::Ordering::Relaxed,
@@ -384,18 +395,36 @@ pub fn ignores_now() -> bool {
     IGNORES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn read_ignoring() -> Option<Ignoring> {
+/// The AeroSpace process and config file last seen leaving an existing
+/// Agent Display alone.
+static LOADED: std::sync::Mutex<Option<(i32, Option<std::time::SystemTime>)>> =
+    std::sync::Mutex::new(None);
+
+fn read_ignoring(display_exists: bool) -> Option<Ignoring> {
     let bundle = super::app::running_bundle("bobko.aerospace")?;
     if !supports_ignored_monitors(&bundle.join("Contents/MacOS/AeroSpace")) {
         return Some(Ignoring::Unsupported);
     }
-    let configured = config_path()
+    let path = config_path();
+    let configured = path
+        .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .is_some_and(|text| ignores_agent_displays(&text));
+    let key = (
+        super::app::running_pid(&bundle).unwrap_or(0),
+        path.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()),
+    );
+    let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
     // The file may say so before AeroSpace reloads it: an AeroSpace that
     // still lists an Agent Display hasn't.
     let ignores = configured
-        && !AeroSpace::current().is_some_and(|a| a.lists_agent_display().unwrap_or(true));
+        && (*loaded == Some(key)
+            || !AeroSpace::current().is_some_and(|a| a.lists_agent_display().unwrap_or(true)));
+    if ignores && display_exists {
+        *loaded = Some(key);
+    } else if !ignores {
+        *loaded = None;
+    }
     Some(if ignores {
         Ignoring::Yes
     } else {

@@ -515,22 +515,88 @@ pub struct MenuEntry {
     pub has_submenu: bool,
 }
 
+/// New Window, as macOS's languages title it, Finder's included.
 const WINDOW_TITLES: &[&str] = &[
-    "New Window",
-    "New Finder Window",
+    "new window",
+    "new finder window",
+    "neues fenster",
+    "neues finder-fenster",
+    "nouvelle fenêtre",
+    "nouvelle fenêtre de finder",
+    "nouvelle fenêtre finder",
+    "nueva ventana",
+    "nueva ventana del finder",
+    "nueva ventana de finder",
+    "nuova finestra",
+    "nuova finestra di finder",
+    "nuova finestra del finder",
+    "nova janela",
+    "nova janela do finder",
+    "nieuw venster",
+    "nieuw finder-venster",
+    "nytt fönster",
+    "nytt finder-fönster",
+    "новое окно",
+    "новое окно finder",
+    "新規ウインドウ",
+    "新規finderウインドウ",
+    "新しいウインドウ",
+    "새로운 윈도우",
+    "새 윈도우",
+    "새로운 finder 윈도우",
     "新建窗口",
     "新窗口",
     "新建访达窗口",
+    "新增視窗",
+    "新視窗",
+    "新增 finder 視窗",
 ];
+/// A document app's New, which opens a blank document window.
 const DOCUMENT_TITLES: &[&str] = &[
-    "New",
-    "New Document",
-    "New…",
+    "new",
+    "new document",
+    "new…",
+    "neu",
+    "neues dokument",
+    "neu …",
+    "neu…",
+    "nouveau",
+    "nouveau document",
+    "nouveau…",
+    "nuevo",
+    "nuevo documento",
+    "nuevo…",
+    "nuovo",
+    "nuovo documento",
+    "nuovo…",
+    "novo",
+    "novo documento",
+    "novo…",
+    "nieuw",
+    "nieuw document",
+    "nieuw…",
+    "ny",
+    "nytt",
+    "nytt dokument",
+    "новый",
+    "новый документ",
+    "新規",
+    "新規書類",
+    "新規…",
+    "새로 만들기",
+    "새로운 문서",
     "新建",
     "新建文稿",
     "新建文档",
     "新建…",
+    "新增",
+    "新增文件",
 ];
+
+fn is_one_of(title: &str, titles: &[&str]) -> bool {
+    let title = title.trim().to_lowercase();
+    titles.contains(&title.as_str())
+}
 
 /// Which item opens a plain new window: one titled New Window, or the
 /// Command-N item of a New Window submenu, as in Terminal, or a document
@@ -541,16 +607,16 @@ pub fn pick_new_window(items: &[MenuEntry]) -> Option<usize> {
     let rank = |e: &MenuEntry| {
         if e.has_submenu {
             None
-        } else if e.parent.is_none() && WINDOW_TITLES.contains(&e.title.as_str()) {
+        } else if e.parent.is_none() && is_one_of(&e.title, WINDOW_TITLES) {
             Some(0)
         } else if e
             .parent
             .as_deref()
-            .is_some_and(|p| WINDOW_TITLES.contains(&p))
+            .is_some_and(|p| is_one_of(p, WINDOW_TITLES))
             && is_cmd_n(e)
         {
             Some(1)
-        } else if e.parent.is_none() && DOCUMENT_TITLES.contains(&e.title.as_str()) && is_cmd_n(e) {
+        } else if e.parent.is_none() && is_one_of(&e.title, DOCUMENT_TITLES) && is_cmd_n(e) {
             Some(2)
         } else {
             None
@@ -844,6 +910,25 @@ mod tests {
         let mut playlist = item("Playlist", Some("cmd+n"));
         playlist.parent = Some("New".into());
         assert_eq!(pick_new_window(&[playlist]), None);
+        // Other languages.
+        assert_eq!(
+            pick_new_window(&[item("Neues Fenster", Some("cmd+n"))]),
+            Some(0)
+        );
+        assert_eq!(
+            pick_new_window(&[item("Nouvelle fenêtre", Some("cmd+n"))]),
+            Some(0)
+        );
+        assert_eq!(
+            pick_new_window(&[item("新規ウインドウ", Some("cmd+n"))]),
+            Some(0)
+        );
+        assert_eq!(pick_new_window(&[item("Neu", Some("cmd+n"))]), Some(0));
+        assert_eq!(pick_new_window(&[item("Neue Notiz", Some("cmd+n"))]), None);
+        assert_eq!(
+            pick_new_window(&[item("Nouvel événement", Some("cmd+n"))]),
+            None
+        );
         // Calculator: nothing.
         assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
     }

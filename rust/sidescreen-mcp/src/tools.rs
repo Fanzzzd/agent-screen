@@ -872,6 +872,9 @@ fn launch_output(reply: &Value) -> Value {
                 "no_new_window" => {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
                 }
+                "menus_unreadable" => {
+                    "The app was already running and Sidescreen couldn't read or use its menus, so it didn't ask for a window; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                }
                 "app_busy" => {
                     "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."
                 }
@@ -901,6 +904,7 @@ mod tests {
             "existing_window",
             "no_new_window",
             "app_busy",
+            "menus_unreadable",
             "still_opening",
         ] {
             let none = launch_output(

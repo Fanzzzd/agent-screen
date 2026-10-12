@@ -108,7 +108,6 @@ impl Catch {
         Some(Catch { observer, target })
     }
 
-    /// The window id of the last window taken, if any.
     /// Let a launch of the same app take its window alone.
     pub fn pause(&self, paused: bool) {
         unsafe { (*self.target).paused.set(paused) }
@@ -118,6 +117,7 @@ impl Catch {
         unsafe { (*self.target).pid }
     }
 
+    /// The window id of the last window taken, if any.
     pub fn taken(&self) -> Option<u32> {
         unsafe { (*self.target).taken.get() }
     }

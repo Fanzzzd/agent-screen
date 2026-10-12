@@ -224,6 +224,9 @@ pub struct Display<H> {
     /// Processes launch_app started for this display. Their windows are
     /// the Agent Session's wherever they open; other apps' may be the user's.
     pub started: std::collections::BTreeSet<i32>,
+    /// Windows the user took back. They are the user's from then on, even
+    /// in an app the agent started.
+    pub returned: std::collections::BTreeSet<WindowId>,
     /// The user is operating the display in the Viewer; agent input is refused.
     pub takeover: bool,
     /// The reason of an open Help Request.
@@ -289,6 +292,21 @@ impl<H> Display<H> {
 
     pub fn forget(&mut self, window: WindowId) {
         self.records.remove(&window);
+    }
+
+    /// The user takes a window back: it leaves the records for good.
+    pub fn give_back(&mut self, window: WindowId) {
+        self.records.remove(&window);
+        self.returned.insert(window);
+    }
+
+    /// Whether a window off every display is the agent's to place: one of
+    /// an app it started, that no display records and the user never took
+    /// back.
+    pub fn is_stray(&self, target: WindowTarget, recorded_anywhere: bool) -> bool {
+        self.started.contains(&target.pid)
+            && !recorded_anywhere
+            && !self.returned.contains(&target.window_id)
     }
 
     /// The Agent Session's verdict on a window. It can change its mind any time.
@@ -369,6 +387,7 @@ impl<H> Displays<H> {
             ended: None,
             records: BTreeMap::new(),
             started: Default::default(),
+            returned: Default::default(),
             takeover: false,
             help_request: None,
             pointer: None,
@@ -630,6 +649,30 @@ mod tests {
             default_fate(Some(Origin::HandedOver), Some(Disposition::Close), false),
             Fate::GiveBack
         );
+    }
+
+    #[test]
+    fn a_window_taken_back_is_never_a_stray() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        let ours = WindowTarget {
+            pid: 5,
+            window_id: 1,
+        };
+        let users = WindowTarget {
+            pid: 6,
+            window_id: 2,
+        };
+        display.started.insert(5);
+        assert!(display.is_stray(ours, false));
+        assert!(!display.is_stray(ours, true), "on a display's records");
+        assert!(
+            !display.is_stray(users, false),
+            "an app the agent didn't start"
+        );
+        display.claim(ours, Origin::Launched, None);
+        display.give_back(1);
+        assert!(!display.is_stray(ours, false));
     }
 
     #[test]

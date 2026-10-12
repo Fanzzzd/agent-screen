@@ -98,6 +98,8 @@ impl Core {
 
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
         if self.displays.end(id, reason) {
+            // An ended display takes no more windows, from catches either.
+            self.kept_catches.retain(|(display, _)| *display != id);
             cx.notify();
             schedule_sweep(cx);
         }

@@ -1592,7 +1592,7 @@ impl Shell {
                 .records
                 .get(&target.window_id)
                 .and_then(|r| r.home.clone());
-            display.forget(target.window_id);
+            display.give_back(target.window_id);
             home
         });
         let main_name = main_screen_name();

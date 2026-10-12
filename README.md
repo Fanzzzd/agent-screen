@@ -51,7 +51,7 @@ Then ask your agent something like "Use Sidescreen to open Calculator on your ow
 | Tool | What it does |
 | --- | --- |
 | `create_display`, `end_display` | Get the session's display, one per session, or finish with it. |
-| `launch_app`, `place_window`, `list_windows` | Put windows on the display and list them. |
+| `launch_app`, `place_window`, `list_windows` | Open apps on the display and list its windows. `list_windows` with `strays: true` lists windows of the agent's apps that opened elsewhere, for `place_window`. |
 | `computer` | Anthropic-style actions on the whole display. Every action returns a screenshot. |
 | `get_window_state`, `act_on_element` | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. |
 | `set_disposition` | Keep or close a window when the user closes the display. |
