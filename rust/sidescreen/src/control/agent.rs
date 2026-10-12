@@ -28,13 +28,16 @@ pub async fn handle(
     p: Params,
     cx: &mut AsyncApp,
 ) -> Reply {
-    // A click, drag or scroll focuses the agent's window too: hand key
-    // focus back to the user's window in a shared app once it's done, as
-    // after keys.
-    let pointer = matches!(method, "click" | "drag" | "mouseUp" | "scroll")
-        .then(|| Args(&p).int("displayId"))
-        .flatten()
-        .map(|id| id as DisplayId);
+    // A click, drag, scroll, element action or launch focuses the agent's
+    // window too: hand key focus back to the user's window in a shared app
+    // once it's done, as after keys.
+    let pointer = matches!(
+        method,
+        "click" | "drag" | "mouseUp" | "scroll" | "elementAction" | "launchApp"
+    )
+    .then(|| Args(&p).int("displayId"))
+    .flatten()
+    .map(|id| id as DisplayId);
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
     if let Some(id) = pointer
         && let Some(forwarder) = core.read_with(cx, |c, _| c.existing_forwarder(id))

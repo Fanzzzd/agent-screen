@@ -212,8 +212,8 @@ impl Forwarder {
         self.send(move |w| w.scroll(at, delta, continuous, phase, momentum, flags));
     }
 
-    pub fn key(&self, code: u16, down: bool, flags: CGEventFlags) {
-        self.send(move |w| w.viewer_key(code, down, flags));
+    pub fn key(&self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
+        self.send(move |w| w.viewer_key(code, down, flags, within));
     }
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
@@ -382,6 +382,26 @@ impl Forwarder {
         .unwrap_or(Sent::Nowhere)
     }
 
+    /// Focus the display's window of app `pid` for a menu command: the one
+    /// last clicked if it is that app's, else its topmost window there.
+    pub async fn focus_app(&self, pid: i32, within: Rect) {
+        self.run(move |w| {
+            let target = w.focused.filter(|t| t.pid == pid).or_else(|| {
+                hits()
+                    .into_iter()
+                    .find(|h| {
+                        h.layer == 0 && h.target.pid == pid && within.contains(h.bounds.mid())
+                    })
+                    .map(|h| h.target)
+            });
+            if let Some(target) = target {
+                let _held = AppKeys::hold(pid);
+                w.focus(target);
+            }
+        })
+        .await;
+    }
+
     /// Send keys to `target` from now on, as a click on it would.
     pub async fn focus(&self, target: WindowTarget) {
         self.run(move |w| w.focus(target)).await;
@@ -545,6 +565,7 @@ struct Worker {
 struct Hit {
     target: WindowTarget,
     bounds: Rect,
+    layer: i64,
 }
 
 impl Worker {
@@ -606,6 +627,8 @@ impl Worker {
     /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
         for window in std::mem::take(&mut self.restore) {
+            // Not in the middle of another display's keys to the app.
+            let _held = AppKeys::hold(window.pid);
             // Only while an agent's window, this one's or another
             // session's, still has the keys: a window the user picked
             // since is left alone.
@@ -638,12 +661,15 @@ impl Worker {
         };
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
-        self.focus(target);
+        {
+            let _held = AppKeys::hold(target.pid);
+            self.focus(target);
+        }
         // Keys go to the window clicked, not to one that opened earlier.
         if let Some(within) = display_of(target.window_id) {
             self.known = hits()
                 .iter()
-                .filter(|h| within.contains(h.bounds.mid()))
+                .filter(|h| h.layer == 0 && within.contains(h.bounds.mid()))
                 .map(|h| h.target.window_id)
                 .collect();
         }
@@ -777,17 +803,18 @@ impl Worker {
     /// A key the user types in the Viewer. The app may have moved its key
     /// window since the last key, or a shortcut opened a window: pick and
     /// focus as for an agent's keys, holding the app the same way.
-    fn viewer_key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
-        let Some(target) = self.focused else {
-            log::debug!("input: key {code} dropped, no window focused");
+    fn viewer_key(&mut self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
+        // A key-up goes where its key-down went.
+        if !down {
+            self.key(code, down, flags);
             return;
-        };
-        let _held = match display_of(target.window_id).filter(|_| down) {
-            Some(within) => match self.focus_something(within) {
-                Some(held) => Some(held),
-                None => return,
-            },
-            None => None,
+        }
+        // Only a window on the Viewer's display: the one focused may have
+        // closed or left, and the app would send the key to its own key
+        // window, maybe the user's.
+        let Some(_held) = self.focus_something(within) else {
+            log::debug!("input: key {code} dropped, no window on the display");
+            return;
         };
         self.key(code, down, flags);
     }
@@ -851,13 +878,27 @@ impl Worker {
             .and_then(|t| list.iter().find(|h| h.target == t))
             .filter(|h| within.intersects(&h.bounds))
             .map(|h| h.target);
+        // Documents only: a suggestions popup or panel is no new window.
         let opened = cached.and_then(|c| {
             on.iter()
-                .find(|h| h.target.pid == c.pid && !self.known.contains(&h.target.window_id))
+                .find(|h| {
+                    h.layer == 0
+                        && h.target.pid == c.pid
+                        && !self.known.contains(&h.target.window_id)
+                })
                 .map(|h| h.target)
         });
-        self.known = on.iter().map(|h| h.target.window_id).collect();
-        opened.or(cached).or_else(|| on.first().map(|h| h.target))
+        self.known = on
+            .iter()
+            .filter(|h| h.layer == 0)
+            .map(|h| h.target.window_id)
+            .collect();
+        opened.or(cached).or_else(|| {
+            on.iter()
+                .find(|h| h.layer == 0)
+                .or(on.first())
+                .map(|h| h.target)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -967,6 +1008,7 @@ fn hits() -> Vec<Hit> {
         .map(|w| Hit {
             target: w.target,
             bounds: w.bounds,
+            layer: w.layer,
         })
         .collect()
 }

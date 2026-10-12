@@ -319,11 +319,11 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 let code = event.keyCode();
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
-                forwarder.key(code, true, flags(event));
+                forwarder.key(code, true, flags(event), cg::display_bounds(display));
                 // Command shortcuts often never report their release, so
                 // send it now and skip the real one if it comes.
                 if flags(event).contains(CGEventFlags::MaskCommand) {
-                    forwarder.key(code, false, flags(event));
+                    forwarder.key(code, false, flags(event), cg::display_bounds(display));
                     s.sent_up.insert(code);
                 } else {
                     // A plain press: its release is a real one.
@@ -334,7 +334,7 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
             NSEventType::KeyUp => {
                 let code = event.keyCode();
                 if !s.sent_up.remove(&code) {
-                    forwarder.key(code, false, flags(event));
+                    forwarder.key(code, false, flags(event), cg::display_bounds(display));
                 }
                 true
             }
