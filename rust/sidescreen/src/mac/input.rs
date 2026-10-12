@@ -416,9 +416,8 @@ impl Forwarder {
         self.run(move |w| {
             if let Some(id) = super::ax::focused_window_id(pid)
                 && !on_a_sidescreen(id)
-                && !w.restore.iter().any(|r| r.pid == pid)
             {
-                w.restore.push(WindowTarget { pid, window_id: id });
+                w.remember(WindowTarget { pid, window_id: id });
             }
         })
         .await;
@@ -630,9 +629,8 @@ impl Worker {
                 pid: target.pid,
                 window_id: other,
             };
-            if !on_a_sidescreen(other.window_id) && !self.restore.iter().any(|w| w.pid == other.pid)
-            {
-                self.restore.push(other);
+            if !on_a_sidescreen(other.window_id) {
+                self.remember(other);
             }
         } else if self.focused == Some(target) {
             return;
@@ -651,6 +649,13 @@ impl Worker {
 
     /// Hand key focus back to the user's window the agent's keys took it
     /// from. The agent's window is focused again on its next keys.
+    /// The user's window of an app to hand key focus back to: the latest,
+    /// one per app.
+    fn remember(&mut self, window: WindowTarget) {
+        self.restore.retain(|w| w.pid != window.pid);
+        self.restore.push(window);
+    }
+
     fn restore_focus(&mut self) {
         for window in std::mem::take(&mut self.restore) {
             // Not in the middle of another display's keys to the app.
@@ -659,6 +664,12 @@ impl Worker {
             // session's, still has the keys: a window the user picked
             // since is left alone.
             let now = super::ax::focused_window_id(window.pid);
+            // Still the user's, as when an action that will take it is
+            // still running: keep it for that action's hand-back.
+            if now == Some(window.window_id) {
+                self.restore.push(window);
+                continue;
+            }
             if !now.is_some_and(on_a_sidescreen) {
                 continue;
             }

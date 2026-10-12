@@ -42,8 +42,14 @@ pub struct Bar {
 }
 
 /// The front app on `display` and its menu bar, or None when it has none.
+/// Its topmost document window there, as a menu command acts on one: a
+/// panel or alert alone gives no strip.
 pub fn bar(display: DisplayId) -> Option<Bar> {
-    let window = windows::on_display(display).into_iter().next()?;
+    let area = crate::mac::cg::display_bounds(display);
+    let local = crate::model::Rect::new(0.0, 0.0, area.width, area.height);
+    let window = windows::on_display(display)
+        .into_iter()
+        .find(|w| w.layer == 0 && local.contains(w.bounds.mid()))?;
     let app = ax::application(window.target.pid);
     let bar = ax::element_attribute(&app, "AXMenuBar")?;
     let titles: Vec<String> = ax::elements_attribute(&bar, "AXChildren")

@@ -1926,6 +1926,8 @@ async fn launch_now(
                 && is_url
                 && let Some(target) = target
             {
+                // The title before the URL, to tell when it has arrived.
+                let before = windows::find(placed.target.window_id).map(|w| w.title);
                 let opened =
                     match open_in_background(path.clone(), Some(target.to_string()), false, cx)
                         .await
@@ -1949,9 +1951,9 @@ async fn launch_now(
                 // `open` returns once the URL is sent, not handled: wait for
                 // the window to show it, at most 2 s, so focus handed back
                 // after doesn't make the app open it in the user's window.
-                let (window_id, title) = (placed.target.window_id, placed.title.clone());
+                let (window_id, title) = (placed.target.window_id, before);
                 for _ in 0..40 {
-                    if windows::find(window_id).is_none_or(|w| w.title != title) {
+                    if windows::find(window_id).is_none_or(|w| Some(w.title) != title) {
                         break;
                     }
                     cx.background_executor()
