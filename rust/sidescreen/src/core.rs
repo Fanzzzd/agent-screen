@@ -35,6 +35,8 @@ pub struct Core {
     pub kept_catches: Vec<(DisplayId, crate::mac::catch::Catch)>,
     /// Files a running app is still opening, by pid, each watched once.
     pub watching: HashSet<(i32, std::path::PathBuf)>,
+    /// Undecided windows of the kept catches already reported to an agent.
+    pub told: HashSet<u32>,
 }
 
 impl Core {
@@ -49,6 +51,7 @@ impl Core {
             launching: HashSet::new(),
             kept_catches: Vec::new(),
             watching: HashSet::new(),
+            told: HashSet::new(),
         }
     }
 

@@ -51,6 +51,16 @@ pub fn set_global_timeout() {
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 }
 
+/// The pid of the app with keyboard focus, which may not be the frontmost
+/// one: a launcher panel such as Spotlight's takes keys from behind it.
+pub fn focused_app_pid() -> Option<i32> {
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let app = element_attribute(&system, "AXFocusedApplication")?;
+    let mut pid = 0;
+    let ok = unsafe { app.pid(NonNull::from(&mut pid)) } == AXError::Success;
+    ok.then_some(pid)
+}
+
 /// An app's root element. A busy or modal app would otherwise hold each call
 /// for 6 s.
 pub fn application(pid: i32) -> Element {

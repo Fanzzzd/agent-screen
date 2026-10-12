@@ -499,7 +499,8 @@ pub fn watch_mouse() {
     let user = RcBlock::new(|event: NonNull<NSEvent>| {
         use super::catch::Towards;
         let towards = if unsafe { event.as_ref() }.r#type() == NSEventType::KeyDown {
-            super::app::frontmost_pid().map_or(Towards::Unknown, Towards::App)
+            super::catch::user_pressed_key();
+            return;
         } else {
             let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
             let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
@@ -507,7 +508,8 @@ pub fn watch_mouse() {
                 0,
                 mtm,
             );
-            u32::try_from(number).map_or(Towards::Unknown, Towards::Window)
+            let front = super::app::frontmost_pid();
+            u32::try_from(number).map_or(Towards::Unknown, |n| Towards::Window(n, front))
         };
         super::catch::user_acted(towards);
     });

@@ -1210,7 +1210,7 @@ impl Shell {
         // Setup worked on the agent's side too: its session has the tools.
         match &self.agent_ready {
             Some(agent) => menu.disabled(&tf!(
-                "{agent} has Sidescreen's tools",
+                "{agent} loaded Sidescreen's tools",
                 "{agent} 已加载 Sidescreen 的工具"
             )),
             None => menu.disabled(t(

@@ -94,7 +94,8 @@ pub async fn handle(
             } else {
                 Format::Jpeg
             };
-            if p.0.get("settle") == Some(&Value::Bool(true)) {
+            let settle = p.0.get("settle") == Some(&Value::Bool(true));
+            if settle {
                 settle_display(&core, id, size, cx).await;
             }
             // Within the image budget the agent reads coordinates in, and
@@ -139,6 +140,14 @@ pub async fn handle(
                 .map_err(ControlError::failed)?;
             let mut result = shot_json(&shot);
             result["scale"] = json!(scale);
+            // After an action: windows it may have opened that stayed on the
+            // user's screen, for the agent to place if they're its own.
+            if settle {
+                let strayed = core.update(cx, |c, _| undecided_strays(c, id));
+                if !strayed.is_empty() {
+                    result["strayed"] = json!(strayed);
+                }
+            }
             Ok(result)
         }
         "click" => {
@@ -936,8 +945,41 @@ fn sync_user_made(c: &mut Core, id: DisplayId) {
     }
 }
 
+/// Windows the kept catches left on the user's screen because both the
+/// user and the agent had just acted, or neither, not reported before.
+fn undecided_strays(c: &mut Core, id: DisplayId) -> Vec<Value> {
+    sync_user_made(c, id);
+    let fresh: Vec<u32> = c
+        .kept_catches
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .flat_map(|(_, k)| k.undecided())
+        .filter(|w| !c.told.contains(w))
+        .collect();
+    let Some(d) = c.displays.get(id) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for window in fresh {
+        c.told.insert(window);
+        if let Some(w) = windows::find(window).filter(|w| d.is_stray(w.target, false)) {
+            out.push(json!({ "windowId": window, "app": w.app }));
+        }
+    }
+    out
+}
+
+/// Whether a kept catch on the display left this window alone as nobody's
+/// for sure.
+fn undecided(c: &Core, id: DisplayId, window: u32) -> bool {
+    c.kept_catches
+        .iter()
+        .any(|(display, k)| *display == id && k.undecided().contains(&window))
+}
+
 /// Whether a window that opened late is still the agent's to move: the
-/// user hasn't taken its app back or made it themselves.
+/// user hasn't taken its app back or made it themselves, and the catch
+/// didn't leave it alone.
 fn still_agents(
     core: &Entity<Core>,
     id: DisplayId,
@@ -946,9 +988,10 @@ fn still_agents(
 ) -> bool {
     core.update(cx, |c, _| {
         sync_user_made(c, id);
-        c.displays
-            .get(id)
-            .is_some_and(|d| d.is_stray(target, false))
+        !undecided(c, id, target.window_id)
+            && c.displays
+                .get(id)
+                .is_some_and(|d| d.is_stray(target, false))
     })
 }
 
@@ -1657,7 +1700,7 @@ async fn launch_now(
         // The kept catch takes the first window the moment it opens, unless
         // the user is clicking or typing then; the poll is for an app that
         // won't take observers yet.
-        crate::mac::catch::agent_acted_for(id, LATE_WINDOW_WAIT);
+        crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
         cx.spawn(async move |cx: &mut AsyncApp| {
             let mut seen = before;
             for _ in 0..200 {
@@ -2048,11 +2091,6 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     if cg::on_screen_ids().is_subset(&before) {
         return;
     }
-    // The app the user works in is theirs: a window it opens now, such as
-    // their own cmd+N, stays with them.
-    let active = objc2_app_kit::NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier());
     let agent_areas: Vec<Rect> = core.read_with(cx, |c, _| {
         c.displays
             .list
@@ -2061,6 +2099,30 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
             .map(|d| cg::display_bounds(d.id))
             .collect()
     });
+    // The catches' rule: a window the user may have opened stays with
+    // them, as does any window of an app they took back.
+    let theirs = core.update(cx, |c, _| {
+        sync_user_made(c, id);
+        let Some(d) = c.displays.get(id) else {
+            return (Default::default(), Default::default());
+        };
+        let undecided: std::collections::HashSet<u32> = c
+            .kept_catches
+            .iter()
+            .filter(|(display, _)| *display == id)
+            .flat_map(|(_, k)| k.undecided())
+            .collect();
+        (
+            d.released.clone(),
+            d.user_made
+                .iter()
+                .chain(&d.returned)
+                .copied()
+                .chain(undecided)
+                .collect::<std::collections::HashSet<u32>>(),
+        )
+    });
+    let (released, kept_out) = theirs;
     let opened = cx
         .background_executor()
         .spawn(async move {
@@ -2072,7 +2134,9 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
                 .into_iter()
                 .filter(|w| {
                     pids.contains(&w.target.pid)
-                        && Some(w.target.pid) != active
+                        && !released.contains(&w.target.pid)
+                        && !kept_out.contains(&w.target.window_id)
+                        && !crate::mac::catch::user_acted_recently(w.target.pid)
                         && !before.contains(&w.target.window_id)
                         && w.layer == 0
                         && !agent_areas.iter().any(|a| a.contains(w.bounds.mid()))

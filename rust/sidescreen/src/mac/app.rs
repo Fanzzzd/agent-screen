@@ -35,7 +35,11 @@ pub fn opens_things(pid: i32) -> bool {
         .is_some_and(|id| {
             matches!(
                 id.to_string().as_str(),
-                "com.apple.finder" | "com.apple.dock" | "com.apple.Spotlight"
+                "com.apple.finder"
+                    | "com.apple.dock"
+                    | "com.apple.Spotlight"
+                    | "com.raycast.macos"
+                    | "com.runningwithcrayons.Alfred"
             )
         })
 }

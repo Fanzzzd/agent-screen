@@ -4,10 +4,10 @@ An app the agent started keeps running after `launch_app` returns. The user may 
 
 The catch takes the window when the display was driven in the last 3 s and the user didn't act on the app meanwhile.
 
-- **The display was driven.** The agent's input, element actions and launches on the display count, and so does the user's input through the display's Viewer. A cold start counts for 30 s, the time a slow app may take to show its first window.
-- **The user acted.** A key press with the app frontmost, or a click on one of its windows or in Finder, the Dock or Spotlight, which open files and apps. Global NSEvent monitors report these. Events Sidescreen posts to a pid don't reach those monitors. They do reset the HID idle timer, so that timer can't tell the two apart.
+- **The display was driven.** The agent's input, element actions and launches on the display count, and so does the user's input through the display's Viewer. A cold start counts for 30 s, for that app alone: the time a slow app may take to show its first window.
+- **The user acted.** A key press to the app, or a click on one of its windows. A key press or click in Finder, the Dock or a launcher such as Spotlight, Raycast or Alfred counts for every app, since those open files and apps. A key press counts for the app with keyboard focus, which Accessibility reports: a launcher panel takes keys without coming to the front. The last 3 s of presses count, not only the latest. Global NSEvent monitors report these. Events Sidescreen posts to a pid don't reach those monitors. They do reset the HID idle timer, so that timer can't tell the two apart.
 
-When only the user acted, the window is theirs, and nothing moves it later. When both acted, or neither did, the window stays where it opened, and the agent can move it with `place_window` from `list_windows` with `strays: true`. Taking back any window of the app makes all its windows the user's.
+When only the user acted, the window is theirs, and nothing moves it later. When both acted, or neither did, the window stays where it opened, and the agent can move it with `place_window` from `list_windows` with `strays: true`. The agent's next screenshot names it, and the launch poll leaves it alone. Taking back any window of the app makes all its windows the user's.
 
 We tried two rules before this one. Under the first, the catch left alone any window the app made while it was frontmost. That left the agent's own windows on the user's screen whenever the app came to the front. Under the second, any window within 3 s of an agent action went to the agent. That took windows the user opened while the agent worked, and it marked a slow agent window as the user's for good.
 

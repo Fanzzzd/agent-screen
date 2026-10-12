@@ -83,8 +83,29 @@ impl Control {
     }
 
     /// Tell the app something now if it is running, without starting it,
-    /// and again on each later connection.
-    pub async fn greet(&self, method: &str, params: Value) {
+    /// and again on each later connection. While the app is down, look for
+    /// it every 2 s, so one that starts or restarts later hears it too.
+    pub async fn greet(self: &Arc<Self>, method: &str, params: Value) {
+        if self.greeting.lock().unwrap().is_none() {
+            let control = Arc::downgrade(self);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let Some(control) = control.upgrade() else {
+                        return;
+                    };
+                    let open = control
+                        .connection
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|c| c.open.load(Ordering::Relaxed));
+                    if !open {
+                        let _ = control.open_running().await;
+                    }
+                }
+            });
+        }
         *self.greeting.lock().unwrap() = Some((method.into(), params));
         let slot = self.connection.lock().await;
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {

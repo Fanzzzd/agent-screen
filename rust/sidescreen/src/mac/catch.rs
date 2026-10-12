@@ -34,24 +34,27 @@ unsafe extern "C" {
 }
 
 /// Until when each display counts as just driven: by its agent's input,
-/// element actions and launches, or by the user through its viewer.
-static ACTED: std::sync::Mutex<Vec<(DisplayId, std::time::Instant)>> =
+/// element actions and launches, or by the user through its viewer. An
+/// entry with a pid counts only for that app's windows, as for a cold
+/// start's first window.
+static ACTED: std::sync::Mutex<Vec<(DisplayId, Option<i32>, std::time::Instant)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// When the user last clicked or pressed a key outside Sidescreen, and
-/// where it went. Events Sidescreen posts to an app's pid never reach the
-/// global monitors that set this.
-static USER_INPUT: std::sync::Mutex<Option<(std::time::Instant, Towards)>> =
-    std::sync::Mutex::new(None);
+/// The user's clicks and key presses outside Sidescreen in the last few
+/// seconds, and where each went. Events Sidescreen posts to an app's pid
+/// never reach the global monitors that note these.
+static USER_INPUT: std::sync::Mutex<Vec<(std::time::Instant, Towards)>> =
+    std::sync::Mutex::new(Vec::new());
 
-/// Where a press of the user's went: read when a window needs it, not on
-/// every press.
+/// Where a press of the user's went.
 #[derive(Clone, Copy, Debug)]
 pub enum Towards {
-    /// A key press, to the frontmost app.
+    /// A key press, to the app with keyboard focus.
     App(i32),
-    /// A click, on the window under the pointer.
-    Window(u32),
+    /// A click on the window under the pointer, with the frontmost app at
+    /// the time for a window gone since, such as a menu. The owner is read
+    /// when a new window needs it, not on every click.
+    Window(u32, Option<i32>),
     Unknown,
 }
 
@@ -60,53 +63,104 @@ const ACTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Note that the display was just driven.
 pub fn agent_acted(display: DisplayId) {
-    agent_acted_for(display, ACTION_WINDOW);
+    drive(display, None, ACTION_WINDOW);
 }
 
-/// Count the display as driven for `span`, as while an app it launched
-/// is still starting.
-pub fn agent_acted_for(display: DisplayId, span: std::time::Duration) {
-    let until = std::time::Instant::now() + span;
+/// Count `pid`'s new windows on the display as the agent's for `span`, as
+/// while an app it launched is still starting.
+pub fn agent_acted_for(display: DisplayId, pid: i32, span: std::time::Duration) {
+    drive(display, Some(pid), span);
+}
+
+fn drive(display: DisplayId, pid: Option<i32>, span: std::time::Duration) {
+    let now = std::time::Instant::now();
     let mut acted = ACTED.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(at) = acted.iter_mut().find(|(d, _)| *d == display) {
-        at.1 = at.1.max(until);
-    } else {
-        acted.push((display, until));
+    acted.retain(|(_, _, until)| *until > now);
+    let until = now + span;
+    match acted
+        .iter_mut()
+        .find(|(d, p, _)| *d == display && *p == pid)
+    {
+        Some(at) => at.2 = at.2.max(until),
+        None => acted.push((display, pid, until)),
     }
 }
 
 /// Note a click or key press of the user's outside Sidescreen.
 pub fn user_acted(towards: Towards) {
-    *USER_INPUT.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((std::time::Instant::now(), towards));
+    let now = std::time::Instant::now();
+    let mut input = USER_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    input.retain(|(at, _)| now.duration_since(*at) < ACTION_WINDOW);
+    // Typing fast fills this with the same app; one entry per place will do.
+    if !matches!(input.last(), Some((_, Towards::App(p))) if matches!(towards, Towards::App(q) if q == *p))
+    {
+        input.push((now, towards));
+    } else if let Some(last) = input.last_mut() {
+        last.0 = now;
+    }
 }
 
-fn acted_recently(display: DisplayId) -> bool {
+/// Note a key press of the user's: to the frontmost app at once, and to
+/// the app with keyboard focus once Accessibility says which. A launcher
+/// such as Spotlight takes keys without coming to the front.
+pub fn user_pressed_key() {
+    static FOCUS: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
+    if let Some(pid) = super::app::frontmost_pid() {
+        user_acted(Towards::App(pid));
+    }
+    let focus = FOCUS.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                // A burst of keys needs one lookup.
+                while rx.try_recv().is_ok() {}
+                if let Some(pid) = ax::focused_app_pid() {
+                    user_acted(Towards::App(pid));
+                }
+            }
+        });
+        tx
+    });
+    let _ = focus.send(());
+}
+
+fn acted_recently(display: DisplayId, pid: i32) -> bool {
     let now = std::time::Instant::now();
     ACTED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .any(|(d, until)| *d == display && now < *until)
+        .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
 /// Whether the user just pressed something that could make `pid` open a
-/// window: a key or click in that app, or a click in Finder or the Dock,
-/// which open files and apps. Typing in another app doesn't count.
-fn user_acted_recently(pid: i32) -> bool {
-    let input = *USER_INPUT.lock().unwrap_or_else(|e| e.into_inner());
-    let Some((_, towards)) = input.filter(|(at, _)| at.elapsed() < ACTION_WINDOW) else {
+/// window: a key or click in that app, or in Finder, the Dock or a
+/// launcher such as Spotlight, which open files and apps. Typing in
+/// another app doesn't count.
+pub fn user_acted_recently(pid: i32) -> bool {
+    let input: Vec<Towards> = USER_INPUT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(at, _)| at.elapsed() < ACTION_WINDOW)
+        .map(|(_, towards)| *towards)
+        .collect();
+    if input.is_empty() {
         return false;
-    };
-    let to = match towards {
-        Towards::App(p) => Some(p),
-        Towards::Window(id) => windows::find(id).map(|w| w.target.pid),
-        Towards::Unknown => None,
-    };
-    match to {
-        Some(p) => p == pid || super::app::opens_things(p),
-        None => true,
     }
+    let shown = super::cg::on_screen_windows();
+    input.into_iter().any(|towards| {
+        let to = match towards {
+            Towards::App(p) => Some(p),
+            Towards::Window(id, front) => shown
+                .iter()
+                .find(|w| w.target.window_id == id)
+                .map(|w| w.target.pid)
+                .or(front),
+            Towards::Unknown => None,
+        };
+        to.is_none_or(|p| p == pid || super::app::opens_things(p))
+    })
 }
 
 /// Whose a new window in an app the agent started is.
@@ -153,6 +207,9 @@ struct Target {
     kept: std::cell::Cell<bool>,
     /// Windows left alone because the user made them.
     skipped: std::cell::RefCell<Vec<u32>>,
+    /// Windows left where they opened because both the agent and the user
+    /// had just acted, or neither: the agent may place them.
+    undecided: std::cell::RefCell<Vec<u32>>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -211,6 +268,7 @@ impl Catch {
             document,
             kept: std::cell::Cell::new(false),
             skipped: std::cell::RefCell::new(Vec::new()),
+            undecided: std::cell::RefCell::new(Vec::new()),
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -240,6 +298,11 @@ impl Catch {
     /// Windows the user made in the app.
     pub fn skipped(&self) -> Vec<u32> {
         unsafe { (*self.target).skipped.borrow().clone() }
+    }
+
+    /// Windows left where they opened, nobody's for sure.
+    pub fn undecided(&self) -> Vec<u32> {
+        unsafe { (*self.target).undecided.borrow().clone() }
     }
 
     /// Let a launch of the same app take its window alone.
@@ -293,7 +356,7 @@ extern "C" fn created(
     // and records one the user made so nothing moves it later.
     if target.kept.get() {
         match owner(
-            acted_recently(target.display),
+            acted_recently(target.display, target.pid),
             user_acted_recently(target.pid),
         ) {
             Owner::Agent => {}
@@ -303,7 +366,12 @@ extern "C" fn created(
                 }
                 return;
             }
-            Owner::Unknown => return,
+            Owner::Unknown => {
+                if let Some(id) = ax::window_id(window) {
+                    target.undecided.borrow_mut().push(id);
+                }
+                return;
+            }
         }
     }
     // A window that doesn't name its document yet may be the file's: look

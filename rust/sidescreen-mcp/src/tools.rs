@@ -844,14 +844,24 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         )
         .await?;
     let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
-    Ok(vec![
-        text(format!(
-            "{}×{} screenshot of display {display}.",
-            get("width"),
-            get("height")
-        )),
-        image(&get("data"), &get("mimeType")),
-    ])
+    let mut header = format!(
+        "{}×{} screenshot of display {display}.",
+        get("width"),
+        get("height")
+    );
+    for w in shot
+        .get("strayed")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        header.push_str(&format!(
+            " A new {} window, {}, opened on the user's screen and stayed there: the user was using the app too, or it opened long after your last action. If your action opened it, call place_window with that id.",
+            w.get("app").and_then(Value::as_str).unwrap_or("app"),
+            w.get("windowId").cloned().unwrap_or(Value::Null),
+        ));
+    }
+    Ok(vec![text(header), image(&get("data"), &get("mimeType"))])
 }
 
 /// What launch_app returns: the window, or why there is none and what to
