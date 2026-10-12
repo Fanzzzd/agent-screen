@@ -1207,6 +1207,18 @@ impl Shell {
             );
             menu.separator();
         }
+        // Setup worked on the agent's side too: its session has the tools.
+        match &self.agent_ready {
+            Some(agent) => menu.disabled(&tf!(
+                "{agent} has Sidescreen's tools",
+                "{agent} 已加载 Sidescreen 的工具"
+            )),
+            None => menu.disabled(t(
+                "No agent has loaded the tools yet",
+                "还没有 agent 加载工具",
+            )),
+        };
+        menu.separator();
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.separator();
