@@ -384,19 +384,41 @@ impl Forwarder {
 
     /// Focus the display's window of app `pid` for a menu command: the one
     /// last clicked if it is that app's, else its topmost window there.
-    pub async fn focus_app(&self, pid: i32, within: Rect) {
+    /// False when the app has no window there: then a menu command would
+    /// act on its key window elsewhere, maybe the user's.
+    pub async fn focus_app(&self, pid: i32, within: Rect) -> bool {
         self.run(move |w| {
-            let target = w.focused.filter(|t| t.pid == pid).or_else(|| {
-                hits()
-                    .into_iter()
-                    .find(|h| {
-                        h.layer == 0 && h.target.pid == pid && within.contains(h.bounds.mid())
-                    })
-                    .map(|h| h.target)
-            });
-            if let Some(target) = target {
-                let _held = AppKeys::hold(pid);
-                w.focus(target);
+            let there: Vec<_> = hits()
+                .into_iter()
+                .filter(|h| h.layer == 0 && h.target.pid == pid && within.contains(h.bounds.mid()))
+                .map(|h| h.target)
+                .collect();
+            // The one last clicked, if it is still there.
+            let target = w
+                .focused
+                .filter(|t| there.contains(t))
+                .or(there.first().copied());
+            let Some(target) = target else {
+                return false;
+            };
+            let _held = AppKeys::hold(pid);
+            w.focus(target);
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Note the app's key window, if it is the user's, to hand key focus
+    /// back to once the agent is done: before an action that makes one of
+    /// the agent's windows key, such as asking a running app for a new one.
+    pub async fn remember_user_window(&self, pid: i32) {
+        self.run(move |w| {
+            if let Some(id) = super::ax::focused_window_id(pid)
+                && !on_a_sidescreen(id)
+                && !w.restore.iter().any(|r| r.pid == pid)
+            {
+                w.restore.push(WindowTarget { pid, window_id: id });
             }
         })
         .await;
@@ -404,7 +426,11 @@ impl Forwarder {
 
     /// Send keys to `target` from now on, as a click on it would.
     pub async fn focus(&self, target: WindowTarget) {
-        self.run(move |w| w.focus(target)).await;
+        self.run(move |w| {
+            let _held = AppKeys::hold(target.pid);
+            w.focus(target)
+        })
+        .await;
     }
 
     /// Press a key chord and keep it down, for apps that act on held keys.
@@ -749,6 +775,7 @@ impl Worker {
         // a gesture starts, as a click would. Wheel ticks have no phase.
         let starts = matches!(phase, 1 | 128) || (phase == 0 && momentum == 0);
         if starts && self.focused != Some(hit.target) {
+            let _held = AppKeys::hold(hit.target.pid);
             self.focus(hit.target);
         }
         let units = if continuous {

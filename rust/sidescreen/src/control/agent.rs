@@ -663,6 +663,11 @@ async fn handle_one(
                     json!({ "text": value, "selected": selected.filter(|s| !s.is_empty()) }),
                 );
             }
+            if matches!(action.as_str(), "focus" | "set_value" | "press") {
+                core.update(cx, |c, _| c.forwarder(id))
+                    .remember_user_window(window.target.pid)
+                    .await;
+            }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
@@ -1678,6 +1683,13 @@ async fn launch_now(
     // the user's screen, besides the one Command-N asks for below.
     let could_not_open = || ControlError::failed(format!("could not open {name}"));
     let requested_at = Instant::now();
+    // The new window may take the app's key focus from the user's window
+    // before Sidescreen sees it: note theirs now, to hand it back after.
+    if let Some(pid) = app::running_pid(&path) {
+        core.update(cx, |c, _| c.forwarder(id))
+            .remember_user_window(pid)
+            .await;
+    }
     let opening = if !was_running || first.is_some() {
         Some(
             open_in_background(path.clone(), first, !was_running, cx)
@@ -1933,6 +1945,18 @@ async fn launch_now(
                     return Err(ControlError::failed(format!(
                         "{name} opened a window on the display but not {target}; open it there yourself"
                     )));
+                }
+                // `open` returns once the URL is sent, not handled: wait for
+                // the window to show it, at most 2 s, so focus handed back
+                // after doesn't make the app open it in the user's window.
+                let (window_id, title) = (placed.target.window_id, placed.title.clone());
+                for _ in 0..40 {
+                    if windows::find(window_id).is_none_or(|w| w.title != title) {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
                 }
             }
             keep_catch(core, id, catch, cx);

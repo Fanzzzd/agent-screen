@@ -1552,12 +1552,17 @@ impl Shell {
                     .viewer_display
                     .map(|id| (id, self.core.update(cx, |core, _| core.forwarder(id))));
                 cx.background_spawn(async move {
-                    if let (Some(pid), Some((id, forwarder))) = (pid, forwarder) {
-                        forwarder
-                            .focus_app(pid, crate::mac::cg::display_bounds(id))
-                            .await;
+                    let (Some(pid), Some((id, forwarder))) = (pid, forwarder) else {
+                        return;
+                    };
+                    if forwarder
+                        .focus_app(pid, crate::mac::cg::display_bounds(id))
+                        .await
+                    {
+                        element.perform("AXPress");
+                    } else {
+                        log::info!("menu strip: no window of the app on the display, not pressed");
                     }
-                    element.perform("AXPress")
                 })
                 .detach();
             }
