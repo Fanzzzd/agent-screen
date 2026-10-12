@@ -10,6 +10,19 @@ use std::ffi::c_void;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
+    fn CGDisplayCopyAllDisplayModes(display: u32, options: *const c_void) -> *const c_void;
+    static kCGDisplayShowDuplicateLowResolutionModes: core_foundation::string::CFStringRef;
+    fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+    fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
+    fn CGDisplayModeGetHeight(mode: *const c_void) -> usize;
+    fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+    fn CGDisplayModeRelease(mode: *const c_void);
+    fn CGConfigureDisplayWithDisplayMode(
+        config: *mut c_void,
+        display: u32,
+        mode: *const c_void,
+        options: *const c_void,
+    ) -> i32;
     fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
     fn CGConfigureDisplayOrigin(config: *mut c_void, display: u32, x: i32, y: i32) -> i32;
     fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
@@ -65,6 +78,17 @@ impl VirtualDisplay {
                 return None;
             }
             let id: u32 = msg_send![&handle, displayID];
+            // macOS keeps the resolution last used for a display's serial,
+            // and serials repeat across launches: a display that once ran
+            // at another size comes back at it, maybe at 1x, and shows
+            // blurry. Ask for this size at 2x. A display WindowServer has
+            // only just added may ignore it, so try for a moment.
+            for _ in 0..25 {
+                if use_hidpi_mode(id, width, height) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             Some(Self {
                 id,
                 _handle: handle,
@@ -123,6 +147,62 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     }
     let now = cg::display_bounds(id);
     (now.x as i32, now.y as i32) == origin
+}
+
+/// Switch display `id` to `width` × `height` points at 2x. True once it
+/// runs that way.
+fn use_hidpi_mode(id: u32, width: u32, height: u32) -> bool {
+    let (width, height) = (width as usize, height as usize);
+    let is_wanted = |mode: *const c_void| unsafe {
+        CGDisplayModeGetWidth(mode) == width
+            && CGDisplayModeGetHeight(mode) == height
+            && CGDisplayModeGetPixelWidth(mode) == width * 2
+    };
+    unsafe {
+        let current = CGDisplayCopyDisplayMode(id);
+        if !current.is_null() {
+            let done = is_wanted(current);
+            CGDisplayModeRelease(current);
+            if done {
+                return true;
+            }
+        }
+        use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+        use core_foundation::base::CFRelease;
+        use core_foundation::base::TCFType;
+        // HiDPI modes only show among the "duplicate" ones.
+        let options = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
+            core_foundation::string::CFString::wrap_under_get_rule(
+                kCGDisplayShowDuplicateLowResolutionModes,
+            ),
+            core_foundation::boolean::CFBoolean::true_value(),
+        )]);
+        let modes = CGDisplayCopyAllDisplayModes(id, options.as_concrete_TypeRef() as *const c_void)
+            as CFArrayRef;
+        if modes.is_null() {
+            return false;
+        }
+        let wanted = (0..CFArrayGetCount(modes))
+            .map(|i| CFArrayGetValueAtIndex(modes, i))
+            .find(|&mode| is_wanted(mode));
+        log::debug!(
+            "display {id}: {} modes, {width}×{height} at 2x among them: {}",
+            CFArrayGetCount(modes),
+            wanted.is_some()
+        );
+        if let Some(mode) = wanted {
+            let mut config = std::ptr::null_mut();
+            if CGBeginDisplayConfiguration(&mut config) == 0 {
+                let set = CGConfigureDisplayWithDisplayMode(config, id, mode, std::ptr::null());
+                // kCGConfigurePermanently: macOS remembers it for the
+                // serial, so the next display with it starts right.
+                let done = CGCompleteDisplayConfiguration(config, 2);
+                log::debug!("display {id}: mode set {set}, completed {done}");
+            }
+        }
+        CFRelease(modes as *const c_void);
+    }
+    false
 }
 
 fn class(name: &str) -> Option<&'static AnyClass> {

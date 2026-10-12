@@ -670,6 +670,12 @@ impl Worker {
                 self.restore.push(window);
                 continue;
             }
+            // The app didn't answer in time, as under load: try again on
+            // the next hand-back rather than lose the user's window.
+            if now.is_none() {
+                self.restore.push(window);
+                continue;
+            }
             if !now.is_some_and(on_a_sidescreen) {
                 continue;
             }

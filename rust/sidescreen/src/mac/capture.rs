@@ -175,13 +175,21 @@ impl Capture {
 }
 
 fn configuration(pixels: (u32, u32), fps: i32) -> SCStreamConfiguration {
-    SCStreamConfiguration::new()
+    let mut configuration = SCStreamConfiguration::new()
         .with_width(pixels.0)
         .with_height(pixels.1)
         .with_pixel_format(PixelFormat::YCbCr_420f)
         .with_minimum_frame_interval(&CMTime::new(1, fps))
         .with_shows_cursor(false)
-        .with_queue_depth(6)
+        .with_queue_depth(6);
+    // Automatic renders a virtual display at 1x and scales that up to the
+    // size asked for, so a 2x frame of it is blurry. Best renders at 2x.
+    if let Err(error) = configuration.set_capture_resolution_type(
+        screencapturekit::stream::configuration::SCCaptureResolutionType::Best,
+    ) {
+        log::debug!("capture resolution stays automatic: {error:?}");
+    }
+    configuration
 }
 
 impl Drop for Capture {

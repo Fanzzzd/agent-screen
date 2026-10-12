@@ -134,6 +134,7 @@ impl Streams {
         if wanted == stream.running {
             return;
         }
+        let before = stream.running;
         stream.running = wanted;
         *stream.target.lock().unwrap() = wanted;
         let fps = wanted.0;
@@ -142,6 +143,17 @@ impl Streams {
         if fps == 0 {
             if let Some(capture) = stream.capture.take() {
                 cx.background_spawn(async move { drop(capture) }).detach();
+            }
+        } else if grows(before.1, wanted.1)
+            && let Some(capture) = stream.capture.take()
+        {
+            // ScreenCaptureKit sends a frame only when the picture changes:
+            // resized in place, a still display would keep showing the
+            // small frame, scaled up and blurry. A new stream sends one
+            // at once.
+            cx.background_spawn(async move { drop(capture) }).detach();
+            if !stream.starting {
+                self.start(id, cx);
             }
         } else if let Some(capture) = stream.capture.clone() {
             let target = stream.target.clone();
@@ -191,6 +203,12 @@ impl Streams {
                         let running = stream.running;
                         if running.0 == 0 {
                             cx.background_spawn(async move { drop(capture) }).detach();
+                            return;
+                        }
+                        // Wanted larger meanwhile: start again, as above.
+                        if grows(pixels, running.1) {
+                            cx.background_spawn(async move { drop(capture) }).detach();
+                            streams.start(id, cx);
                             return;
                         }
                         stream.capture = Some(capture.clone());
@@ -246,4 +264,9 @@ impl Streams {
         }
         self.frames.remove(&id);
     }
+}
+
+/// Whether `to` needs more pixels than `from` in either direction.
+fn grows(from: (u32, u32), to: (u32, u32)) -> bool {
+    to.0 > from.0 || to.1 > from.1
 }
