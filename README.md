@@ -82,6 +82,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - The first click on a window only activates it, the same as a real click on an inactive window.
 - Clicks on an empty part of a display reach nothing.
 - `launch_app` on a running single-window app such as Calculator gets no new window, and says so at once. Quit it first, or hand its window over.
+- When an agent opens a new window in an app that is already running, the window shows on your screen for about 30 ms before it moves, 140 ms at most in tests.
 - While an agent's display is open, every window of an app that agent started opens on its display, including one you open in that app.
 - A window that refuses to close, such as one with unsaved changes, is left to macOS, which moves it to your main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.

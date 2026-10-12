@@ -57,6 +57,8 @@ SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_disp
 | `launch_app` TextEdit, not running | 1781 ms | 1947 ms |
 | `launch_app` TextEdit, running | 612 ms | 803 ms |
 
+`bun rust/tests/mcp/flash.ts` measures how long a running app's new window shows on your screen before it moves: 29 ms median, 55 ms p90 and 138 ms at most over 30 launches of TextEdit. Pressing the app's menu item, a catch on its own thread, and making the app's window on the display its main window first didn't change it; hiding the app made it worse, 341 ms median.
+
 Most of a cold launch is TextEdit starting. These are the numbers with AeroSpace ignoring agent displays, which makes Sidescreen skip AeroSpace entirely, as without AeroSpace. Under stock AeroSpace each step also waits for AeroSpace to answer: `create_display` measured 1204 ms median and `launch_app` on a running app 1244 ms before these changes.
 
 With AeroSpace running, a window counts as placed only once AeroSpace files it under the workspace it shows on the display: it can accept a move for a window it hasn't registered yet and then lay the window out in your workspace. `robust.ts` passed 10 of 10 runs in a row after that change; loop it to check a fix for flakes:
