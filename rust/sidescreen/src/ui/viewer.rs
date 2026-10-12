@@ -104,6 +104,14 @@ impl Viewer {
         // Light and dark switch while the panel is up.
         cx.observe_window_appearance(window, |_, _, cx| cx.notify())
             .detach();
+        // Leaving the Viewer, as with cmd-tab, hands an app shared with an
+        // agent its key window back, so the user's typing goes to theirs.
+        cx.observe_window_activation(window, |viewer: &mut Viewer, window, cx| {
+            if !window.is_window_active() {
+                viewer.core.read(cx).hand_back_keys();
+            }
+        })
+        .detach();
         cx.subscribe(&streams, |viewer: &mut Viewer, _, frame: &NewFrame, cx| {
             if viewer.display == Some(frame.0) {
                 cx.notify();

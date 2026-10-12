@@ -408,6 +408,12 @@ impl Forwarder {
             .await;
     }
 
+    /// The user left the Viewer: hand focus back to their window in a
+    /// shared app, if keys typed there took it.
+    pub fn hand_back(&self) {
+        self.send(|w| w.restore_focus());
+    }
+
     /// Done with keys for now: hand focus back to the user's window in a
     /// shared app, if the agent's keys took it.
     pub async fn keys_done(&self) {
@@ -451,6 +457,17 @@ impl Forwarder {
         .await
         .unwrap_or(false)
     }
+}
+
+/// Whether window `id` is on one of Sidescreen's displays: an agent's,
+/// never the user's to hand focus back to.
+fn on_a_sidescreen(id: u32) -> bool {
+    super::windows::find(id).is_some_and(|w| {
+        super::cg::active_displays()
+            .into_iter()
+            .filter(|&d| super::cg::is_sidescreen(d))
+            .any(|d| super::cg::display_bounds(d).contains(w.bounds.mid()))
+    })
 }
 
 /// Apps whose keys a display's worker is sending: one at a time per app.
@@ -506,9 +523,7 @@ struct Worker {
     /// The user's window in a shared app whose key focus the agent's keys
     /// took; handed back when they are done.
     restore: Option<WindowTarget>,
-    /// Focus went back to the user's window: the next keys for this
-    /// display focus `focused` again first.
-    handed_back: bool,
+
     gesture: Option<Gesture>,
     cache: Option<(Vec<Hit>, Instant)>,
     seed: u64,
@@ -526,7 +541,7 @@ impl Worker {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState),
             focused: None,
             restore: None,
-            handed_back: false,
+
             gesture: None,
             cache: None,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -543,28 +558,12 @@ impl Worker {
     }
 
     /// Make `target` the window keys go to, without raising it.
+    ///
+    /// The app's key window may have moved to another of its windows
+    /// since, as when the user clicked theirs or the agent's keys handed
+    /// focus back: then focus the target again, and remember the window
+    /// to hand focus back to once these keys are done.
     fn focus(&mut self, target: WindowTarget) {
-        if self.focused != Some(target) || self.handed_back {
-            self.send_focus(target);
-        }
-    }
-
-    fn send_focus(&mut self, target: WindowTarget) {
-        // Let AppKit in the target update its key-window routing before
-        // events arrive (cua uses the same 50 ms settle).
-        if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
-            thread::sleep(Duration::from_millis(50));
-        }
-        self.focused = Some(target);
-        self.handed_back = false;
-    }
-
-    /// Focus `target` for an agent's keys. The app may have made another
-    /// of its windows key since, as when the user clicked theirs: focus the
-    /// target again, and remember the user's window to hand focus back to
-    /// once the agent's keys are done, so the user's typing in that app
-    /// still goes to their window.
-    fn focus_for_keys(&mut self, target: WindowTarget, within: Rect) {
         let before = super::ax::focused_window_id(target.pid);
         let elsewhere = before.is_some_and(|id| id != target.window_id);
         if self.focused == Some(target) && !elsewhere {
@@ -572,7 +571,7 @@ impl Worker {
         }
         if let Some(id) = before.filter(|_| elsewhere)
             && self.restore.is_none()
-            && super::windows::find(id).is_some_and(|w| !within.intersects(&w.bounds))
+            && !on_a_sidescreen(id)
         {
             self.restore = Some(WindowTarget {
                 pid: target.pid,
@@ -582,18 +581,31 @@ impl Worker {
         self.send_focus(target);
     }
 
+    fn send_focus(&mut self, target: WindowTarget) {
+        // Let AppKit in the target update its key-window routing before
+        // events arrive (cua uses the same 50 ms settle).
+        if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.focused = Some(target);
+    }
+
     /// Hand key focus back to the user's window the agent's keys took it
     /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
-        if let Some(window) = self.restore.take() {
-            // The app came to the front meanwhile: the focus record is
-            // refused there, so make the user's window main through
-            // accessibility, as their click would.
-            if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
-                super::ax::make_main(window);
-            }
-            // Keys typed in the Viewer must focus the agent's window again.
-            self.handed_back = true;
+        let Some(window) = self.restore.take() else {
+            return;
+        };
+        // The user may have picked a window since: leave theirs alone.
+        let ours = self.focused.map(|t| t.window_id);
+        if ours.is_none() || super::ax::focused_window_id(window.pid) != ours {
+            return;
+        }
+        // The app came to the front meanwhile: the focus record is refused
+        // there, so make the user's window main through accessibility, as
+        // their click would.
+        if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
+            super::ax::make_main(window);
         }
     }
 
@@ -746,8 +758,9 @@ impl Worker {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
-        if self.handed_back {
-            self.send_focus(target);
+        // The app may have moved its key window since the last key.
+        if down {
+            self.focus(target);
         }
         self.key_to(target, code, down, flags);
     }
@@ -762,9 +775,6 @@ impl Worker {
 
     fn flags_changed(&mut self, code: u16, flags: CGEventFlags) {
         let Some(target) = self.focused else { return };
-        if self.handed_back {
-            self.send_focus(target);
-        }
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, true) else {
             return;
         };
@@ -795,7 +805,7 @@ impl Worker {
             return None;
         };
         let held = AppKeys::hold(target.pid);
-        self.focus_for_keys(target, within);
+        self.focus(target);
         Some(held)
     }
 
