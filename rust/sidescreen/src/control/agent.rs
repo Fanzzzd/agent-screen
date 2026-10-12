@@ -30,7 +30,7 @@ pub async fn handle(
 ) -> Reply {
     let p = Args(&p);
     if needs_permissions(method) {
-        permitted(cx)?;
+        permitted(cx).await?;
         if cg::screen_locked() {
             return Err(ControlError {
                 code: "locked",
@@ -715,25 +715,38 @@ fn needs_permissions(method: &str) -> bool {
 }
 
 /// Fail with what the user has to do when a permission is missing, and put
-/// the setup window in front of them.
-fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
+/// the setup window in front of them once for each state.
+async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
+    use std::sync::atomic::Ordering;
     let missing = crate::mac::permissions::status().missing();
-    let reopen = crate::mac::permissions::NEEDS_REOPEN.load(std::sync::atomic::Ordering::Relaxed);
+    let mut reopen = crate::mac::permissions::NEEDS_REOPEN.load(Ordering::Relaxed);
+    // macOS can apply the grant a moment after the first probe failed: look
+    // again before sending the agent to the user.
+    if missing.is_empty() && reopen {
+        let works = cx
+            .background_executor()
+            .spawn(async { crate::mac::screenshot::can_capture() })
+            .await;
+        if works {
+            crate::mac::permissions::NEEDS_REOPEN.store(false, Ordering::Relaxed);
+            if let Some(shell) = crate::ui::shell::current() {
+                let _ = shell.update(cx, |shell, cx| shell.capture_works(cx));
+            }
+            reopen = false;
+        }
+    }
     if missing.is_empty() && !reopen {
         return Ok(());
     }
+    if let Some(shell) = crate::ui::shell::current() {
+        let state = (missing.clone(), reopen);
+        let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(state, cx));
+    }
     if missing.is_empty() {
-        if let Some(shell) = crate::ui::shell::current() {
-            let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(cx));
-        }
         return Err(ControlError {
             code: "permission",
-            message: "The user turned on Screen Recording, and macOS applies it only once                       Sidescreen reopens. Sidescreen has put its setup window on the user's                       screen: tell the user to press Reopen Sidescreen there, then retry."
-                .into(),
+            message: "The user turned on Screen Recording, and macOS applies it only once Sidescreen reopens. Sidescreen has put its setup window on the user's screen: tell the user to press Reopen Sidescreen there, then retry.".into(),
         });
-    }
-    if let Some(shell) = crate::ui::shell::current() {
-        let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(cx));
     }
     let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
     Err(ControlError {

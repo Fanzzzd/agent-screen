@@ -60,7 +60,8 @@ fn main() {
             println!("Sidescreen {}", env!("CARGO_PKG_VERSION"));
             return;
         }
-        Some(other) if other != "mcp" && !other.starts_with("-psn") => {
+        // --setup: reopened from the setup window, which shows again.
+        Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {
             eprint!("Sidescreen: unknown argument {other}\n\n{USAGE}");
             std::process::exit(2);
         }

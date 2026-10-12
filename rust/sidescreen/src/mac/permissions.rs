@@ -189,7 +189,10 @@ pub fn relaunch() {
         return;
     };
     let pid = std::process::id();
-    let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; open \"$0\"",);
+    // --setup: the new process shows the setup window again, at the step
+    // after the permissions.
+    let script =
+        format!("while kill -0 {pid} 2>/dev/null; do sleep 0.1; done; open \"$0\" --args --setup");
     let _ = std::process::Command::new("/bin/sh")
         .args(["-c", &script])
         .arg(bundle)

@@ -42,7 +42,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    /Applications/Sidescreen.app/Contents/MacOS/Sidescreen mcp install
    ```
 
-   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe.
+   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe. For any other MCP client, add a stdio server with the command `/Applications/Sidescreen.app/Contents/MacOS/Sidescreen` and the argument `mcp`.
 
 Then ask your agent something like "Use Sidescreen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, the setup window and the menu name the agent. If Sidescreen isn't running, the first tool call starts it.
 
@@ -96,6 +96,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - **The agent has no Sidescreen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get sidescreen` shows whether Claude Code has it.
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Sidescreen off and on.
 - **Tools say Sidescreen isn't running.** The first tool call starts it. If that fails, open `/Applications/Sidescreen.app` once yourself.
+- **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.
 - **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 
 ## Develop

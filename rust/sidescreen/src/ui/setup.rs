@@ -29,6 +29,10 @@ pub struct Setup {
     pub restart: bool,
     /// The last agent that loaded Sidescreen's tools, if any did.
     pub agent: Option<String>,
+    /// A Connect is running.
+    pub connecting: bool,
+    /// Clients whose config has Sidescreen's server.
+    pub registered: Vec<&'static str>,
     icon: Option<Arc<gpui::Image>>,
 }
 
@@ -42,6 +46,8 @@ impl Setup {
             waiting: None,
             restart: false,
             agent: None,
+            connecting: false,
+            registered: Vec::new(),
             icon,
         }
     }
@@ -64,6 +70,11 @@ impl Render for Setup {
                         "{agent} loaded Sidescreen's tools. Ask your agent to create a display: its apps run there, off your screen.",
                         "{agent} 已加载 Sidescreen 的工具。让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。"
                     ),
+                    None if !self.registered.is_empty() => t(
+                        "Start a new agent session and ask it to create a display. Its apps run there, off your screen.",
+                        "开一个新的 agent 会话，让它创建虚拟屏。它的 app 会在旁边运行，不占你的屏幕。",
+                    )
+                    .to_string(),
                     None => t(
                         "Connect your agent below, then start a new session and ask it to create a display. Its apps run there, off your screen.",
                         "在下面接入 agent，再开一个新会话，让它创建虚拟屏。它的 app 会在旁边运行，不占你的屏幕。",
@@ -160,7 +171,8 @@ impl Render for Setup {
                         }
                         .into(),
                         // Connect is the next step until an agent loads the tools.
-                        (ready && self.agent.is_some()).then_some(theme.accent),
+                        (ready && (self.agent.is_some() || !self.registered.is_empty()))
+                            .then_some(theme.accent),
                         &theme,
                         move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
                     )),
@@ -190,23 +202,40 @@ impl Setup {
                 )
                 .child(t("Connected", "已接入"))
                 .into_any_element()
+        } else if self.connecting {
+            div()
+                .text_size(px(12.))
+                .text_color(theme.secondary)
+                .child(t("Connecting…", "正在接入…"))
+                .into_any_element()
         } else {
+            let again = !self.registered.is_empty();
             button(
                 "setup-connect",
-                t("Connect…", "接入…").into(),
-                self.status.complete().then_some(theme.accent),
+                if again {
+                    t("Connect Again…", "重新接入…")
+                } else {
+                    t("Connect…", "接入…")
+                }
+                .into(),
+                (self.status.complete() && !again).then_some(theme.accent),
                 theme,
                 move |cx| tell(&shell, cx, |shell, cx| shell.connect_agents(cx)),
             )
             .into_any_element()
         };
-        let detail = match &self.agent {
-            Some(agent) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
-            None => t(
+        let detail = match (&self.agent, self.registered.as_slice()) {
+            (Some(agent), _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
+            (None, []) => t(
                 "Add Sidescreen to Claude Code and Codex, then start a new session",
                 "把 Sidescreen 加到 Claude Code 和 Codex，再开一个新会话",
             )
             .to_string(),
+            (None, clients) => tf!(
+                "Added to {}. Start a new session to load the tools",
+                "已加到 {}。开一个新会话就能加载工具",
+                clients.join(t(" and ", " 和 "))
+            ),
         };
         let color = if loaded { green } else { theme.accent };
         div()

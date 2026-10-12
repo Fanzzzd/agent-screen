@@ -7,7 +7,42 @@ use std::process::Command;
 pub struct Outcome {
     pub client: &'static str,
     /// What happened, or why it couldn't; None when the client isn't installed.
-    pub result: Option<Result<String, String>>,
+    pub result: Option<Result<Done, String>>,
+}
+
+/// What registering did, for the caller to put in the user's language.
+pub enum Done {
+    Already,
+    /// Claude Code, for every project.
+    Connected,
+    /// Codex, in this config file.
+    AddedTo(PathBuf),
+}
+
+impl std::fmt::Display for Done {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Done::Already => write!(f, "already connected"),
+            Done::Connected => write!(f, "connected for all projects"),
+            Done::AddedTo(path) => write!(f, "added to {}", path.display()),
+        }
+    }
+}
+
+/// The clients whose config already has Sidescreen's server, by reading
+/// their files: Claude Code's ~/.claude.json and Codex's config.toml.
+pub fn registered() -> Vec<&'static str> {
+    let has = |path: PathBuf, needle: &str| {
+        std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle))
+    };
+    let mut found = Vec::new();
+    if has(home().join(".claude.json"), "\"sidescreen\"") {
+        found.push("Claude Code");
+    }
+    if codex_config().is_some_and(|config| has(config, HEADER)) {
+        found.push("Codex");
+    }
+    found
 }
 
 /// Register `exe mcp` with every client found. Safe to run again: an entry
@@ -86,7 +121,7 @@ fn claude_cli() -> Option<PathBuf> {
     on_path.into_iter().chain(usual).find(|p| p.is_file())
 }
 
-fn claude(cli: &Path, exe: &Path) -> Result<String, String> {
+fn claude(cli: &Path, exe: &Path) -> Result<Done, String> {
     let run = |args: &[&str]| {
         let mut command = Command::new(cli);
         if let Some(path) = path() {
@@ -101,7 +136,7 @@ fn claude(cli: &Path, exe: &Path) -> Result<String, String> {
     let current = run(&["mcp", "get", "sidescreen"])?;
     let listed = String::from_utf8_lossy(&current.stdout).to_string();
     if current.status.success() && listed.contains(&*exe) {
-        return Ok("already connected".into());
+        return Ok(Done::Already);
     }
     if current.status.success() {
         // Registered elsewhere, such as an older copy of the app.
@@ -118,7 +153,7 @@ fn claude(cli: &Path, exe: &Path) -> Result<String, String> {
         "mcp",
     ])?;
     if added.status.success() {
-        Ok("connected for all projects".into())
+        Ok(Done::Connected)
     } else {
         Err(String::from_utf8_lossy(&added.stderr).trim().to_string())
     }
@@ -133,15 +168,15 @@ fn codex_config() -> Option<PathBuf> {
 
 const HEADER: &str = "[mcp_servers.sidescreen]";
 
-fn codex(config: &Path, exe: &Path) -> Result<String, String> {
+fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
     let text = std::fs::read_to_string(config).unwrap_or_default();
     let (text, done) = with_codex_entry(&text, &exe.to_string_lossy());
     if !done {
-        return Ok("already connected".into());
+        return Ok(Done::Already);
     }
     std::fs::write(config, text)
         .map_err(|e| format!("could not write {}: {e}", config.display()))?;
-    Ok(format!("added to {}", config.display()))
+    Ok(Done::AddedTo(config.to_path_buf()))
 }
 
 /// The config with Sidescreen's entry pointing at `exe`, and whether it

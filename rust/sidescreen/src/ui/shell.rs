@@ -145,6 +145,11 @@ pub struct Shell {
     waiting: Option<Permission>,
     /// Screen Recording came on while running and capture still fails.
     restart: bool,
+    /// The missing permissions and reopen state an agent's call last
+    /// opened the setup window for.
+    /// A Connect is running.
+    connecting: bool,
+    setup_shown_for: Option<(Vec<Permission>, bool)>,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -272,6 +277,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             agent_ready: Vec::new(),
             waiting: None,
             restart: false,
+            setup_shown_for: None,
+            connecting: false,
         }
     });
     let weak = shell.downgrade();
@@ -373,7 +380,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     shell.update(cx, |shell, cx| {
         let status = shell.permissions;
         shell.icon.set_needs_setup(!status.complete());
-        if !status.complete() {
+        // Reopened from the setup window: finish setup with the agents.
+        let reopened = std::env::args().any(|a| a == "--setup");
+        if !status.complete() || reopened {
             shell.open_setup(cx);
         }
     });
@@ -1266,7 +1275,7 @@ impl Shell {
             menu.separator();
         }
         menu.action(
-            t("Connect Claude Code and Codex", "连接 Claude Code 和 Codex"),
+            t("Connect Claude Code and Codex", "接入 Claude Code 和 Codex"),
             MenuAction::ConnectAgents,
         );
         menu.separator();
@@ -1647,13 +1656,25 @@ impl Shell {
 
     /// An agent call failed for a missing permission: show the user why,
     /// once, without pulling the window forward on every retry.
-    pub fn setup_for_agent(&mut self, cx: &mut Context<Self>) {
+    /// An agent's call failed for want of `state`'s permissions or a
+    /// reopen: show the setup window, once per state, so closing it sticks.
+    pub fn setup_for_agent(&mut self, state: (Vec<Permission>, bool), cx: &mut Context<Self>) {
+        if self.setup_shown_for.as_ref() == Some(&state) {
+            return;
+        }
+        self.setup_shown_for = Some(state);
         let open = self
             .setup
             .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
         if !open {
             self.open_setup(cx);
         }
+    }
+
+    /// Capture works after all: no reopen needed.
+    pub fn capture_works(&mut self, cx: &mut Context<Self>) {
+        self.restart = false;
+        self.push_setup(cx);
     }
 
     pub fn close_setup(&mut self, cx: &mut Context<Self>) {
@@ -1682,28 +1703,58 @@ impl Shell {
 
     /// Register the MCP server with Claude Code and Codex, and say how it went.
     pub fn connect_agents(&mut self, cx: &mut Context<Self>) {
+        // Finding the user's PATH and running the CLI takes seconds; a second
+        // press would race the first.
+        if self.connecting {
+            return;
+        }
+        self.connecting = true;
+        self.push_setup(cx);
         let install = cx.background_spawn(async {
             let exe = std::env::current_exe().unwrap_or_default();
             sidescreen_mcp::install::install(&exe)
         });
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |shell, cx| {
+            use sidescreen_mcp::install::Done;
             let outcomes = install.await;
             let lines: Vec<String> = outcomes
                 .iter()
                 .map(|o| match &o.result {
                     None => tf!("{}: not installed", "{}：没有安装", o.client),
-                    Some(Ok(done)) => format!("{}: {done}", o.client),
+                    Some(Ok(Done::Already)) => {
+                        tf!("{}: already connected", "{}：已经接入", o.client)
+                    }
+                    Some(Ok(Done::Connected)) => tf!(
+                        "{}: connected for all projects",
+                        "{}：已接入，所有项目都能用",
+                        o.client
+                    ),
+                    Some(Ok(Done::AddedTo(path))) => tf!(
+                        "{}: added to {}",
+                        "{}：已写入 {}",
+                        o.client,
+                        path.display()
+                    ),
                     Some(Err(error)) => {
                         tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
                     }
                 })
                 .collect();
+            let exe = std::env::current_exe().unwrap_or_default();
             let failed = outcomes.iter().any(|o| matches!(o.result, Some(Err(_))));
-            let next = if failed {
+            let none = outcomes.iter().all(|o| o.result.is_none());
+            let next = if none {
+                tf!(
+                    "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n{} mcp install",
+                    "其他 MCP 客户端：添加一个 stdio 服务器，命令是\n{}\n参数是 [\"mcp\"]。装了 Claude Code 的话，在终端里运行：\n{} mcp install",
+                    exe.display(),
+                    exe.display()
+                )
+            } else if failed {
                 tf!(
                     "To try in Terminal, where your agents' PATH is set:\n{} mcp install",
                     "可以在终端里重试，那里有 agent 需要的 PATH：\n{} mcp install",
-                    std::env::current_exe().unwrap_or_default().display()
+                    exe.display()
                 )
             } else {
                 t(
@@ -1712,6 +1763,10 @@ impl Shell {
                 )
                 .to_string()
             };
+            let _ = shell.update(cx, |shell, cx| {
+                shell.connecting = false;
+                shell.push_setup(cx);
+            });
             native::alert(
                 t("Sidescreen and your agents", "Sidescreen 与 agent"),
                 &format!("{}\n\n{next}", lines.join("\n")),
@@ -1745,13 +1800,17 @@ impl Shell {
     fn push_setup(&mut self, cx: &mut Context<Self>) {
         let (status, waiting, restart) = (self.permissions, self.waiting, self.restart);
         let agent = self.agents_ready();
+        let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
+        let registered = sidescreen_mcp::install::registered();
         if handle
             .update(cx, |setup, _, cx| {
                 setup.status = status;
                 setup.waiting = waiting;
                 setup.restart = restart;
                 setup.agent = agent;
+                setup.connecting = connecting;
+                setup.registered = registered;
                 cx.notify();
             })
             .is_err()

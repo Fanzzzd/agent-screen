@@ -710,6 +710,19 @@ mod tests {
     }
 
     #[test]
+    fn a_display_the_user_closed_stays_closed_by_them() {
+        let mut d = displays();
+        assert!(d.end(7, EndReason::ClosedByUser));
+        assert!(
+            !d.end(7, EndReason::Disconnected),
+            "the first reason stands"
+        );
+        assert!(d.remove(7).is_some());
+        assert!(d.retired.contains(&7));
+        assert!(d.closed_by_user.contains(&7));
+    }
+
+    #[test]
     fn a_window_the_user_made_is_never_a_stray() {
         let mut d = displays();
         let display = d.get_mut(7).unwrap();
