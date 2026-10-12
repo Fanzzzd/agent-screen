@@ -145,11 +145,16 @@ pub struct Shell {
     waiting: Option<Permission>,
     /// Screen Recording came on while running and capture still fails.
     restart: bool,
-    /// The missing permissions and reopen state an agent's call last
-    /// opened the setup window for.
     /// A Connect is running.
     connecting: bool,
+    /// A late check of Screen Recording is pending.
+    rechecking: bool,
+    /// The missing permissions and reopen state an agent's call last
+    /// opened the setup window for.
     setup_shown_for: Option<(Vec<Permission>, bool)>,
+    /// Clients whose config runs this copy of Sidescreen, read when the
+    /// setup window opens and after a Connect: not on every tick.
+    registered: Vec<&'static str>,
 }
 
 /// Pixel size a thumbnail needs: twice its width in points, for Retina.
@@ -279,6 +284,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             restart: false,
             setup_shown_for: None,
             connecting: false,
+            rechecking: false,
+            registered: Vec::new(),
         }
     });
     let weak = shell.downgrade();
@@ -1253,7 +1260,7 @@ impl Shell {
             );
             fix.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
                 "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like et2 = 'DELL'.",
-                "workspace-to-monitor-force-assignment 里的显示器编号会被虚拟屏占用。改用显示器名称，例如 et2 = 'DELL'。",
+                "workspace-to-monitor-force-assignment 里的显示器编号会被显示器占用。改用显示器名称，例如 et2 = 'DELL'。",
             ))));
             menu.separator();
         }
@@ -1648,14 +1655,13 @@ impl Shell {
             Ok(handle) => {
                 self.setup = Some(handle);
                 self.push_setup(cx);
+                self.read_registered(cx);
                 cx.activate(true);
             }
             Err(error) => log::info!("setup window: {error}"),
         }
     }
 
-    /// An agent call failed for a missing permission: show the user why,
-    /// once, without pulling the window forward on every retry.
     /// An agent's call failed for want of `state`'s permissions or a
     /// reopen: show the setup window, once per state, so closing it sticks.
     pub fn setup_for_agent(&mut self, state: (Vec<Permission>, bool), cx: &mut Context<Self>) {
@@ -1669,6 +1675,49 @@ impl Shell {
         if !open {
             self.open_setup(cx);
         }
+    }
+
+    /// Which clients run this copy, off the main thread: Claude Code's
+    /// config holds every project's history and can be large.
+    fn read_registered(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |shell, cx| {
+            let registered = cx
+                .background_spawn(async {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    sidescreen_mcp::install::registered(&exe)
+                })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.registered = registered;
+                shell.push_setup(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// While the setup window asks for a reopen, look every 2 s whether
+    /// macOS applied the grant late after all.
+    fn recheck_capture(&mut self, cx: &mut Context<Self>) {
+        if !self.restart || self.setup.is_none() || self.rechecking {
+            return;
+        }
+        self.rechecking = true;
+        cx.spawn(async move |shell, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let works = cx
+                .background_spawn(async { crate::mac::screenshot::can_capture() })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.rechecking = false;
+                if works && shell.restart {
+                    permissions::NEEDS_REOPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+                    shell.capture_works(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Capture works after all: no reopen needed.
@@ -1763,8 +1812,12 @@ impl Shell {
                 )
                 .to_string()
             };
+            let registered = cx
+                .background_spawn(async move { sidescreen_mcp::install::registered(&exe) })
+                .await;
             let _ = shell.update(cx, |shell, cx| {
                 shell.connecting = false;
+                shell.registered = registered;
                 shell.push_setup(cx);
             });
             native::alert(
@@ -1802,7 +1855,7 @@ impl Shell {
         let agent = self.agents_ready();
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
-        let registered = sidescreen_mcp::install::registered();
+        let registered = self.registered.clone();
         if handle
             .update(cx, |setup, _, cx| {
                 setup.status = status;
@@ -1830,6 +1883,7 @@ impl Shell {
         let now = permissions::status();
         let before = self.permissions;
         if now == before {
+            self.recheck_capture(cx);
             self.push_setup(cx);
             return;
         }

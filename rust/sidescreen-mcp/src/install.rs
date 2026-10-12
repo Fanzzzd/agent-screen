@@ -29,20 +29,35 @@ impl std::fmt::Display for Done {
     }
 }
 
-/// The clients whose config already has Sidescreen's server, by reading
-/// their files: Claude Code's ~/.claude.json and Codex's config.toml.
-pub fn registered() -> Vec<&'static str> {
-    let has = |path: PathBuf, needle: &str| {
-        std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle))
-    };
+/// The clients whose config runs `exe` as Sidescreen's server, by reading
+/// their files: Claude Code's ~/.claude.json and Codex's config.toml. An
+/// entry for another copy, moved or deleted since, doesn't count.
+pub fn registered(exe: &Path) -> Vec<&'static str> {
+    let exe = exe.to_string_lossy();
     let mut found = Vec::new();
-    if has(home().join(".claude.json"), "\"sidescreen\"") {
+    let claude = std::fs::read_to_string(home().join(".claude.json")).unwrap_or_default();
+    if claude_runs(&claude, &exe) {
         found.push("Claude Code");
     }
-    if codex_config().is_some_and(|config| has(config, HEADER)) {
+    let codex = codex_config()
+        .and_then(|config| std::fs::read_to_string(config).ok())
+        .unwrap_or_default();
+    if codex_runs(&codex, &exe) {
         found.push("Codex");
     }
     found
+}
+
+/// Whether Claude Code's user config has a sidescreen server running `exe`.
+fn claude_runs(config: &str, exe: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(config)
+        .ok()
+        .and_then(|v| v.pointer("/mcpServers/sidescreen/command").cloned())
+        .is_some_and(|command| command.as_str() == Some(exe))
+}
+
+fn codex_runs(config: &str, exe: &str) -> bool {
+    !with_codex_entry(config, exe).1
 }
 
 /// Register `exe mcp` with every client found. Safe to run again: an entry
@@ -217,6 +232,28 @@ mod tests {
     use super::*;
 
     const EXE: &str = "/Applications/Sidescreen.app/Contents/MacOS/Sidescreen";
+
+    #[test]
+    fn counts_only_an_entry_that_runs_this_copy() {
+        let claude = |command: &str| {
+            format!(
+                r#"{{"projects":{{"/x":{{"disabledMcpServers":["sidescreen"]}}}},"mcpServers":{{"sidescreen":{{"command":"{command}","args":["mcp"]}}}}}}"#
+            )
+        };
+        assert!(claude_runs(&claude(EXE), EXE));
+        assert!(!claude_runs(&claude("/Users/me/old/Sidescreen"), EXE));
+        assert!(
+            !claude_runs(
+                r#"{"projects":{"/x":{"disabledMcpServers":["sidescreen"]}}}"#,
+                EXE
+            ),
+            "a project list naming it isn't a registration"
+        );
+        let (codex, _) = with_codex_entry("", EXE);
+        assert!(codex_runs(&codex, EXE));
+        assert!(!codex_runs(&codex, "/Users/me/old/Sidescreen"));
+        assert!(!codex_runs("", EXE));
+    }
 
     #[test]
     fn appends_to_a_config_without_it() {

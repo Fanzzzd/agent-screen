@@ -68,16 +68,16 @@ impl Render for Setup {
                 match self.agent.clone() {
                     Some(agent) => tf!(
                         "{agent} loaded Sidescreen's tools. Ask your agent to create a display: its apps run there, off your screen.",
-                        "{agent} 已加载 Sidescreen 的工具。让 agent 创建虚拟屏，它的 app 会在旁边运行，不占你的屏幕。"
+                        "{agent} 已加载 Sidescreen 的工具。让 agent 创建显示器，它的 app 会在旁边运行，不占你的屏幕。"
                     ),
                     None if !self.registered.is_empty() => t(
                         "Start a new agent session and ask it to create a display. Its apps run there, off your screen.",
-                        "开一个新的 agent 会话，让它创建虚拟屏。它的 app 会在旁边运行，不占你的屏幕。",
+                        "开一个新的 agent 会话，让它创建显示器。它的 app 会在旁边运行，不占你的屏幕。",
                     )
                     .to_string(),
                     None => t(
                         "Connect your agent below, then start a new session and ask it to create a display. Its apps run there, off your screen.",
-                        "在下面接入 agent，再开一个新会话，让它创建虚拟屏。它的 app 会在旁边运行，不占你的屏幕。",
+                        "在下面接入 agent，再开一个新会话，让它创建显示器。它的 app 会在旁边运行，不占你的屏幕。",
                     )
                     .to_string(),
                 },
@@ -87,7 +87,7 @@ impl Render for Setup {
                 t("Get Sidescreen working", "让 Sidescreen 开始工作"),
                 t(
                     "Agents use apps on a display beside yours. Sidescreen needs to see that display and to click and type for the agent.",
-                    "Agent 在旁边的虚拟屏上操作 app。Sidescreen 要看到那块屏，也要替 agent 点击和输入。",
+                    "Agent 在旁边的显示器上操作 app。Sidescreen 要看到那块显示器，也要替 agent 点击和输入。",
                 )
                 .to_string(),
             )
@@ -285,14 +285,14 @@ impl Setup {
                 "icons/display.svg",
                 t(
                     "Show agent displays and take screenshots",
-                    "看到虚拟屏上的画面，给你看，也给 agent 截图",
+                    "看到显示器上的画面，给你看，也给 agent 截图",
                 ),
             ),
             Permission::Accessibility => (
                 "icons/pointer.svg",
                 t(
                     "Click, type and place windows for agents",
-                    "替 agent 点击、输入，把窗口摆到虚拟屏上",
+                    "替 agent 点击、输入，把窗口摆到显示器上",
                 ),
             ),
         };
