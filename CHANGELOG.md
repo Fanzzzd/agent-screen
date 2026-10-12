@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.12 (2026-10-12)
+
+### Fixes
+
+#### Peek and the Viewer keep drawing while a display is made
+
+macOS takes about half a second to make a virtual display. Sidescreen now does that off its main thread, so Peek and the Viewer keep drawing, and parks the display right after. `create_display` measured 771 ms median at load 27, down from 884 to 913 ms. `launch_app` notices a running app's new window up to 25 ms sooner. When another agent or you started an app moments ago, `launch_app` waits up to 3 seconds for its menus and then says it just started, instead of telling the agent to ask you to quit it.
+
+#### The right place to hand over a window
+
+Agents now tell you to hand a window over from **Windows** in the Viewer's header, where the command is; they used to point at the menu bar icon's menu, which has no Windows item. Chinese copy is more consistent: 查看窗口…, 放回原位置, 需要你帮助, and the AeroSpace hint names Agent displays. A slow or busy app no longer stalls Sidescreen while a launch checks which file its window shows.
+
+#### Taking over and asking for help
+
+While you answer a help request in the Viewer, its reason stays in the header. When you take over, the agent's typing stops at the next character and its drag lets go where the pointer is, short of the drop; the agent is told how far it got. A finger resting on the trackpad over the Viewer no longer takes the display over; a scroll that moves does. An agent whose help request goes unanswered hears that the request is still open, and can take it back with `withdraw: true`. If you close the display while the agent waits, it is told you closed it. A new window of an app that another agent is also using on its own display, opened while both were acting, stays where it opened. Closing a display now also closes or returns windows the agent opened while you were deciding.
+
+`hold_key` lets go as soon as you take over, so your typing doesn't come out with the agent's Shift held. A drag stopped right after it starts lets go a step away from what it grabbed, which usually keeps it from acting as a click. Text with Windows line endings types one Return per line.
+
+A key sequence such as Down × 40 also stops when you take over, and the agent hears how many keys went in. `launch_app` on an app that has just started and has no window yet says it is still starting, not that it has no New Window command.
+
 ## 0.1.11 (2026-10-12)
 
 ### Fixes
