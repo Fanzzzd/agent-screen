@@ -1641,8 +1641,21 @@ impl Shell {
                 .and_then(|r| r.home.clone());
             display.give_back(target);
             // Taking a window back says the app is the user's now: its
-            // later windows stay on the user's screen.
+            // later windows stay on the user's screen, even one it opens
+            // beside a window of its own still on the display.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
+            if !core
+                .returning
+                .iter()
+                .any(|(d, k)| *d == id && k.pid() == target.pid)
+                && let Some(catch) = crate::mac::catch::Catch::returning(
+                    target.pid,
+                    id,
+                    crate::mac::cg::display_bounds(crate::mac::cg::main_display()),
+                )
+            {
+                core.returning.push((id, catch));
+            }
             home
         });
         let main_name = main_screen_name();

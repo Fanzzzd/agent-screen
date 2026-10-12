@@ -233,6 +233,10 @@ struct Target {
     /// Windows left where they opened because both the agent and the user
     /// had just acted, or neither: the agent may place them.
     undecided: std::cell::RefCell<Vec<u32>>,
+    /// For an app the user took back: where to return a new window that
+    /// opens on the display without the agent acting, as an app does next
+    /// to its main window.
+    home: Option<Rect>,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -256,6 +260,14 @@ impl Catch {
         limit: Option<usize>,
     ) -> Option<Catch> {
         Self::start_with(pid, display, screen, limit, None)
+    }
+
+    /// A catch for an app the user took back: it returns to `home` each new
+    /// window that opens on the display while the agent isn't acting there.
+    pub fn returning(pid: i32, display: DisplayId, home: Rect) -> Option<Catch> {
+        let catch = Self::start_with(pid, display, None, None, None)?;
+        unsafe { (*catch.target).home = Some(home) };
+        Some(catch)
     }
 
     /// A catch for the one window that shows `document`, for a running app
@@ -292,6 +304,7 @@ impl Catch {
             kept: std::cell::Cell::new(false),
             skipped: std::cell::RefCell::new(Vec::new()),
             undecided: std::cell::RefCell::new(Vec::new()),
+            home: None,
         }));
         let app = ax::application(pid);
         let name = CFString::from_static_str("AXWindowCreated");
@@ -373,6 +386,15 @@ extern "C" fn created(
     // Panels and sheets stay where the app puts them; Sidescreen places
     // those through the usual path.
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
+        return;
+    }
+    // The user's app: send back what opens on the agent's display by itself.
+    if let Some(home) = target.home {
+        let on_display = ax::frame(window).is_some_and(|f| target.bounds.contains(f.mid()));
+        if on_display && !acted_recently(target.display, target.pid) {
+            let moved = ax::move_element_into(window, home).is_ok();
+            log::debug!("catch: returned a window of the user's app: {moved}");
+        }
         return;
     }
     // A kept catch takes a window only right after its display was driven,

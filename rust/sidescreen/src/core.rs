@@ -33,6 +33,9 @@ pub struct Core {
     /// a window such an app opens later, as TextEdit does for a second
     /// `open`, goes to the agent's display instead of the user's screen.
     pub kept_catches: Vec<(DisplayId, crate::mac::catch::Catch)>,
+    /// For apps the user took back: returns their new windows that open on
+    /// the display by themselves.
+    pub returning: Vec<(DisplayId, crate::mac::catch::Catch)>,
     /// Files a running app is still opening, by pid, each watched once.
     pub watching: HashSet<(i32, std::path::PathBuf)>,
     /// Undecided windows of the kept catches already reported to an agent.
@@ -53,6 +56,7 @@ impl Core {
             tucked: HashSet::new(),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
+            returning: Vec::new(),
             watching: HashSet::new(),
             told: HashSet::new(),
             left_alone: Vec::new(),
@@ -177,6 +181,7 @@ impl Core {
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
+            self.returning.retain(|(display, _)| *display != id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
             cx.notify();
