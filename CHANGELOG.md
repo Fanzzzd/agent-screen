@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6 (2026-10-12)
+
+### Fixes
+
+#### A running app gets asked for a window, not sent Command-N
+
+For an app you are running, `launch_app` now looks in its menus for New Window, or a document app's New, and uses that item. In Notes, Music or Calendar, where Command-N makes a note, playlist or event, it creates nothing and answers `no_new_window`. A greyed-out item answers `app_busy`. A URL that can't get its own window fails instead of opening in your window.
+
+#### Windows of an app the agent started stay on its display
+
+A later window of an app `launch_app` started, such as the extra window TextEdit opens when two sessions start it at once, now goes to the agent's display instead of your screen. `list_windows` with `strays: true` lists such windows that still landed elsewhere, and `place_window` takes only those.
+
 ## 0.1.5 (2026-10-11)
 
 ### Fixes
