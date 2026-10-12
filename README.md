@@ -52,7 +52,7 @@ Then ask your agent something like "Use Sidescreen to open Calculator on your ow
 | --- | --- |
 | `create_display`, `end_display` | Get the session's display, one per session, or finish with it. |
 | `launch_app`, `place_window`, `list_windows` | Open apps on the display and list its windows. `list_windows` with `strays: true` lists windows of the agent's apps that opened elsewhere, for `place_window`. |
-| `computer` | Anthropic-style actions on the whole display. Every action returns a screenshot. |
+| `computer` | Anthropic-style actions on the whole display. Every action except `wait` and `cursor_position` returns a screenshot. |
 | `get_window_state`, `act_on_element` | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. |
 | `set_disposition` | Keep or close a window when the user closes the display. |
 | `wait_for_control`, `request_help` | Wait out a Takeover, or ask the user to step in. |
@@ -83,7 +83,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen Recording lets it
 - Clicks on an empty part of a display reach nothing.
 - `launch_app` on a running single-window app such as Calculator gets no new window, and says so at once. Quit it first, or hand its window over.
 - When an agent opens a new window in an app that is already running, the window shows on your screen for about 30 ms before it moves, 140 ms at most in tests.
-- While an agent's display is open, a window an app the agent started opens within 3 seconds of the agent acting on that display goes to the agent's display. Windows you open in that app otherwise stay with you. Take back one of its windows and the whole app is yours; hand a window over again and the agent can use it.
+- A new window of an app the agent started goes to the agent's display if the agent acted there in the last 3 seconds and you didn't click or type in that app, Finder or the Dock meanwhile. A window you open stays on your screen. One that opens with nobody acting stays where it opened, and the agent can move it with `place_window`. Take back one of the app's windows and the whole app is yours; hand a window over again and the agent can use it.
 - A window that refuses to close, such as one with unsaved changes, is left to macOS, which moves it to your main display.
 - Canvas apps and games that filter per-process events may ignore forwarded input.
 - With the menu bar icon hidden, for example behind the notch, Peek and the Viewer drop from the top center of the screen under the pointer.

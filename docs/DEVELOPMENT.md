@@ -11,7 +11,7 @@ rust/docs/              Linux and Windows feasibility notes
 docs/                   ADRs and the AGENTS.md convention
 ```
 
-Sidescreen started as a Swift app; the Rust app replaced it ([ADR 0005](docs/adr/0005-rust-app-and-mcp.md)), and the Swift code lives on in the history.
+Sidescreen started as a Swift app; the Rust app replaced it ([ADR 0005](adr/0005-rust-app-and-mcp.md)), and the Swift code lives on in the history.
 
 ## Build
 
@@ -36,7 +36,7 @@ Development switches for the Rust app:
 ## Test
 
 ```sh
-cd rust && cargo test                 # unit tests
+cargo test --manifest-path rust/Cargo.toml   # unit tests
 bun rust/tests/mcp/control.ts         # Takeover and Help Request, needs a debug build running
 bun rust/tests/mcp/smoke.ts           # end to end with Calculator
 bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar strip, focus, permission setup
@@ -81,7 +81,7 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 
 ## Release
 
-CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, and starts a release build on macOS 15.
+CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, builds the release app on macOS 26, and starts that build on macOS 15.
 
 Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 

@@ -17,9 +17,9 @@ open_displays="$(swift -e '
 import CoreGraphics
 var ids = [CGDirectDisplayID](repeating: 0, count: 32); var n: UInt32 = 0
 CGGetOnlineDisplayList(32, &ids, &n)
-print(ids.prefix(Int(n)).filter { CGDisplayVendorNumber($0) == 0x5353 }.count)' 2>/dev/null || echo 0)"
+print(ids.prefix(Int(n)).filter { CGDisplayVendorNumber($0) == 0x5353 }.count)' 2>/dev/null || echo unknown)"
 if [[ "$open_displays" != 0 && "${SIDESCREEN_FORCE_INSTALL:-}" != 1 ]]; then
-  echo "error: $open_displays Agent Display(s) open; installing would end them. Retry when none is open, or set SIDESCREEN_FORCE_INSTALL=1." >&2
+  echo "error: $open_displays Agent Display(s) open; installing would end them. Retry when none is open, or set SIDESCREEN_FORCE_INSTALL=1. (unknown: swift, from the Command Line Tools, couldn't count them)" >&2
   exit 1
 fi
 [[ "$open_displays" != 0 ]] && echo "ending $open_displays Agent Display(s)"

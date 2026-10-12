@@ -217,10 +217,11 @@ pub fn definitions() -> Vec<Value> {
             "place_window",
             "Place a window on the display",
             &[
-                "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a second window or",
-                "a late one can. Get ids from list_windows with strays: true. Windows of such an app are yours only when they appear",
-                "within 3 s of your own input, element action or launch on the display; others are the user's. Once the user takes",
-                "back any window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
+                "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a slow or second",
+                "window can. Get ids from list_windows with strays: true. A new window of such an app moves to the display by itself",
+                "within 3 s of your input, element action or launch there, unless the user clicked or typed in the app; one the user",
+                "opened is theirs. Once the user takes back any window of the app, all its windows are theirs. You can't place the",
+                "user's windows: to work in one, ask the",
                 "user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
             ],
             object(
@@ -869,7 +870,7 @@ fn launch_output(reply: &Value) -> Value {
                 .unwrap_or("still_starting");
             let note = match reason {
                 "existing_window" => {
-                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer."
+                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu."
                 }
                 "no_new_window" => {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
@@ -884,7 +885,7 @@ fn launch_output(reply: &Value) -> Value {
                     "The app was already running and hadn't shown the file yet. When a window showing the file opens in the next 30 s, it moves onto your display; call list_windows to check. A window the user opens meanwhile stays theirs. If none comes, ask the user to hand the window over."
                 }
                 _ => {
-                    "The app is still starting. Its first window in the next 30 s moves onto the display, unless the user takes the app back first; call list_windows to check."
+                    "The app is still starting. Its first window in the next 30 s moves onto the display, unless the user opens it themselves or takes the app back; call list_windows to check, and list_windows with strays: true for a window to place_window."
                 }
             };
             json!({ "window": null, "wasRunning": was_running, "reason": reason, "note": note })
