@@ -65,18 +65,6 @@ impl Core {
         self.forwarders.entry(id).or_default().clone()
     }
 
-    /// Create a virtual display and park it out of the cursor's way.
-    pub fn create(
-        &mut self,
-        size: (f64, f64),
-        owner: Option<Owner>,
-        cx: &mut Context<Self>,
-    ) -> Option<DisplayId> {
-        let (serial, name) = self.next_name();
-        let handle = VirtualDisplay::create(&name, size.0 as u32, size.1 as u32, serial)?;
-        Some(self.adopt(handle, name, size, owner, cx))
-    }
-
     /// The serial and name for the next display. A test instance's
     /// displays must not pass for the user's.
     pub fn next_name(&mut self) -> (u32, String) {
@@ -87,7 +75,8 @@ impl Core {
         }
     }
 
-    /// Take on a display made elsewhere, as off the main thread, and park it.
+    /// Take on a display made off the main thread, as macOS takes about
+    /// half a second, and park it out of the cursor's way.
     pub fn adopt(
         &mut self,
         handle: VirtualDisplay,

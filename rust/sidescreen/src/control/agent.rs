@@ -944,6 +944,20 @@ async fn create_display(
             }
         })
         .await;
+    // The session may have closed, or got a display from a parallel call,
+    // while macOS made this one: then this one goes.
+    let key = owner.session_key.clone();
+    let raced = core.read_with(cx, |c, _| {
+        if c.closed.contains(&connection) {
+            Some(Err(ControlError::failed("the connection closed")))
+        } else {
+            c.displays.for_session(&key).map(|d| Ok(describe(d, true)))
+        }
+    });
+    if let Some(answer) = raced {
+        drop(made);
+        return answer;
+    }
     let reply = core
         .update(cx, |c, cx| {
             let id = c.adopt(made?, name, (width, height), Some(owner), cx);
@@ -1690,7 +1704,13 @@ async fn launch_now(
                     .iter()
                     .any(|w| w.target.pid == pid && w.layer == 0)
         };
-        if asked == ax::NewWindow::Missing && just_started() {
+        // Only this display's own launch has a watch that moves the window.
+        let started_here = core.read_with(cx, |c, _| {
+            c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+        });
+        // This display's own launch answers at once: its watch moves the
+        // window when it comes.
+        if asked == ax::NewWindow::Missing && !started_here && just_started() {
             for _ in 0..20 {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
@@ -1704,10 +1724,6 @@ async fn launch_now(
                 }
             }
         }
-        // Only this display's own launch has a watch that moves the window.
-        let started_here = core.read_with(cx, |c, _| {
-            c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
-        });
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
@@ -1721,8 +1737,13 @@ async fn launch_now(
         if let Some(reason) = missing {
             drop(catch);
             if is_url {
+                let next = if matches!(reason, "just_started" | "still_starting") {
+                    "wait a few seconds and call launch_app again".to_string()
+                } else {
+                    format!("ask the user to quit {name}, then call launch_app again")
+                };
                 return Err(ControlError::failed(format!(
-                    "{name} is running and can't open a new window now ({reason}), so the URL was not opened; ask the user to quit {name}, then call launch_app again"
+                    "{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}"
                 )));
             }
             return Ok(Launched {

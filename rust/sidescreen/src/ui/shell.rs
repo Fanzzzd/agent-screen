@@ -887,18 +887,38 @@ impl Shell {
     }
 
     pub fn create_display(&mut self, cx: &mut Context<Self>) {
-        let id = self
-            .core
-            .update(cx, |core, cx| core.create(DEFAULT_SIZE, None, cx));
-        let Some(id) = id else {
-            beep();
-            return;
-        };
-        // Peek stays up and grows a tile; the Viewer opens on the new
-        // display, or switches to it when already open.
-        self.after(Duration::from_millis(500), cx, move |shell, cx| {
-            shell.open_viewer(id, cx)
+        // macOS takes about half a second: off the main thread, so Peek
+        // keeps drawing.
+        let (serial, name) = self.core.update(cx, |core, _| core.next_name());
+        let made = cx.background_spawn({
+            let name = name.clone();
+            async move {
+                crate::mac::display::VirtualDisplay::create(
+                    &name,
+                    DEFAULT_SIZE.0 as u32,
+                    DEFAULT_SIZE.1 as u32,
+                    serial,
+                )
+            }
         });
+        cx.spawn(async move |shell, cx| {
+            let made = made.await;
+            let _ = shell.update(cx, |shell, cx| {
+                let Some(handle) = made else {
+                    beep();
+                    return;
+                };
+                let id = shell.core.update(cx, |core, cx| {
+                    core.adopt(handle, name, DEFAULT_SIZE, None, cx)
+                });
+                // Peek stays up and grows a tile; the Viewer opens on the
+                // new display, or switches to it when already open.
+                shell.after(Duration::from_millis(500), cx, move |shell, cx| {
+                    shell.open_viewer(id, cx)
+                });
+            });
+        })
+        .detach();
     }
 
     // MARK: Viewer
