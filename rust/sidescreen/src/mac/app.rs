@@ -30,6 +30,17 @@ pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
 /// Whether an app opens web pages, by the URL schemes its Info.plist
 /// declares.
 pub fn handles_web(bundle: &Path) -> bool {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<(PathBuf, bool)>> = Mutex::new(Vec::new());
+    if let Some((_, web)) = SEEN.lock().unwrap().iter().find(|(p, _)| p == bundle) {
+        return *web;
+    }
+    let web = read_handles_web(bundle);
+    SEEN.lock().unwrap().push((bundle.to_path_buf(), web));
+    web
+}
+
+fn read_handles_web(bundle: &Path) -> bool {
     std::process::Command::new("/usr/bin/plutil")
         .args(["-extract", "CFBundleURLTypes", "json", "-o", "-"])
         .arg(bundle.join("Contents/Info.plist"))
@@ -40,13 +51,6 @@ pub fn handles_web(bundle: &Path) -> bool {
             let text = String::from_utf8_lossy(&o.stdout);
             text.contains("\"http\"") || text.contains("\"https\"")
         })
-}
-
-/// The app in front on the user's screen.
-pub fn frontmost_pid() -> Option<i32> {
-    NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier())
 }
 
 /// Show a hidden app's windows, where they are now.

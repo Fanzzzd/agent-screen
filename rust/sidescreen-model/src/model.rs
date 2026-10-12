@@ -227,8 +227,11 @@ pub struct Display<H> {
     /// Windows the user took back. They are the user's from then on, even
     /// in an app the agent started.
     pub returned: std::collections::BTreeSet<WindowId>,
-    /// Windows the user made in an app the agent started, while using it.
+    /// Windows an app the agent started made with no agent action just
+    /// before: the user's doing.
     pub user_made: std::collections::BTreeSet<WindowId>,
+    /// Apps the agent started that the user took back a window of.
+    pub released: std::collections::BTreeSet<i32>,
     /// The user is operating the display in the Viewer; agent input is refused.
     pub takeover: bool,
     /// The reason of an open Help Request.
@@ -304,7 +307,9 @@ impl<H> Display<H> {
     pub fn give_back(&mut self, target: WindowTarget) {
         self.records.remove(&target.window_id);
         self.returned.insert(target.window_id);
-        self.started.remove(&target.pid);
+        if self.started.remove(&target.pid) {
+            self.released.insert(target.pid);
+        }
     }
 
     /// Whether a window off every display is the agent's to place: one of
@@ -397,6 +402,7 @@ impl<H> Displays<H> {
             started: Default::default(),
             returned: Default::default(),
             user_made: Default::default(),
+            released: Default::default(),
             takeover: false,
             help_request: None,
             pointer: None,
@@ -682,6 +688,7 @@ mod tests {
         display.claim(ours, Origin::Launched, None);
         display.give_back(ours);
         assert!(!display.is_stray(ours, false));
+        assert!(display.released.contains(&5));
         // The app is the user's now: its next window isn't a stray either.
         let next = WindowTarget {
             pid: 5,

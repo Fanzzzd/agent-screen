@@ -218,8 +218,10 @@ pub fn definitions() -> Vec<Value> {
             "Place a window on the display",
             &[
                 "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a second window or",
-                "a late one can. Get ids from list_windows with strays: true. You can't place the user's windows: to work in one, ask",
-                "the user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
+                "a late one can. Get ids from list_windows with strays: true. Windows of such an app are yours only when they appear",
+                "within 3 s of your own input, element action or launch on the display; others are the user's. Once the user takes",
+                "back any window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
+                "user to hand it over. They drag it onto your display in the Viewer, or choose Windows > Hand Over in Sidescreen's menu.",
             ],
             object(
                 json!({
@@ -879,10 +881,10 @@ fn launch_output(reply: &Value) -> Value {
                     "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."
                 }
                 "still_opening" => {
-                    "The app was already running and hadn't shown the file yet. When a window showing the file opens in the next 30 s, it moves onto your display; call list_windows to check. If none comes, ask the user to hand the window over."
+                    "The app was already running and hadn't shown the file yet. When a window showing the file opens in the next 30 s, it moves onto your display; call list_windows to check. A window the user opens meanwhile stays theirs. If none comes, ask the user to hand the window over."
                 }
                 _ => {
-                    "The app is still starting. A window it opens in the next 30 s moves onto the display; call list_windows to check."
+                    "The app is still starting. Its first window in the next 30 s moves onto the display, unless the user takes the app back first; call list_windows to check."
                 }
             };
             json!({ "window": null, "wasRunning": was_running, "reason": reason, "note": note })

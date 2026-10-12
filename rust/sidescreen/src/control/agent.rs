@@ -47,6 +47,26 @@ pub async fn handle(
     {
         usable(&core, connection, id as DisplayId, method, cx)?;
     }
+    // A window an app makes right after the agent drives the display is
+    // the agent's; the kept catches go by this.
+    let acting = matches!(
+        method,
+        "click"
+            | "move"
+            | "drag"
+            | "scroll"
+            | "type"
+            | "key"
+            | "holdKey"
+            | "elementAction"
+            | "launchApp"
+    )
+    .then(|| p.int("displayId"))
+    .flatten()
+    .map(|id| id as DisplayId);
+    if let Some(id) = acting {
+        crate::mac::catch::agent_acted(id);
+    }
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => create_display(&core, connection, &p, cx).await,
         "endDisplay" => {
@@ -384,6 +404,18 @@ pub async fn handle(
                     "the user took that window back; it stays theirs. Ask them to hand it over again if you need it",
                 ));
             }
+            let released = windows::find(wanted as u32).is_some_and(|w| {
+                core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .is_some_and(|d| d.released.contains(&w.target.pid))
+                })
+            });
+            if released {
+                return Err(ControlError::failed(
+                    "the user took back a window of that app, which makes the app theirs: its windows stay on their screen. Ask the user to hand over the window you need",
+                ));
+            }
             let window = strays(&core, id, cx)
                 .into_iter()
                 .find(|w| w.target.window_id as i64 == wanted)
@@ -631,6 +663,9 @@ pub async fn handle(
         }
         other => Err(ControlError::invalid(format!("unknown method {other}"))),
     };
+    if let Some(id) = acting {
+        crate::mac::catch::agent_acted(id);
+    }
     result.and_then(reply)
 }
 
@@ -859,6 +894,7 @@ fn sync_user_made(c: &mut Core, id: DisplayId) {
     let made: Vec<u32> = c
         .kept_catches
         .iter()
+        .filter(|(display, _)| *display == id)
         .flat_map(|(_, k)| k.skipped())
         .collect();
     if let Some(d) = c.displays.get_mut(id) {
@@ -866,21 +902,20 @@ fn sync_user_made(c: &mut Core, id: DisplayId) {
     }
 }
 
-/// Whether a window that opened late is still the agent's to move: its
-/// app is still the agent's, and the user isn't using it.
+/// Whether a window that opened late is still the agent's to move: the
+/// user hasn't taken its app back or made it themselves.
 fn still_agents(
     core: &Entity<Core>,
     id: DisplayId,
     target: WindowTarget,
     cx: &mut AsyncApp,
 ) -> bool {
-    app::frontmost_pid() != Some(target.pid)
-        && core.update(cx, |c, _| {
-            sync_user_made(c, id);
-            c.displays
-                .get(id)
-                .is_some_and(|d| d.is_stray(target, false))
-        })
+    core.update(cx, |c, _| {
+        sync_user_made(c, id);
+        c.displays
+            .get(id)
+            .is_some_and(|d| d.is_stray(target, false))
+    })
 }
 
 /// Keep the catch on an app this display's session started, for as long
@@ -1225,11 +1260,16 @@ async fn launch(
         .ok_or_else(|| ControlError::not_found(format!("no app named {name}")))?;
     // A plain file URL is its file, except for a browser, which opens it as
     // a page: then the URL route gives it a window of its own first.
-    let file = target
-        .filter(|t| t.starts_with("file://") && !t.contains(['?', '#']))
-        .filter(|_| !app::handles_web(&path))
-        .and_then(ax::file_url_path)
-        .map(|p| p.to_string_lossy().into_owned());
+    let browser = match target.filter(|t| t.starts_with("file://")) {
+        Some(_) => {
+            let path = path.clone();
+            cx.background_executor()
+                .spawn(async move { app::handles_web(&path) })
+                .await
+        }
+        None => false,
+    };
+    let file = file_target(target, browser)?;
     let target = file.as_deref().or(target);
     // Wait for another session's launch of the same app to finish.
     let mut free = false;
@@ -1578,19 +1618,24 @@ async fn launch_now(
         .detach();
     } else if !was_running {
         cx.spawn(async move |cx: &mut AsyncApp| {
+            let mut seen = before;
             for _ in 0..200 {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
-                if let Some(late) = windows::all().into_iter().find(|w| {
-                    w.target.pid == pid && w.layer == 0 && !before.contains(&w.target.window_id)
-                }) {
-                    // Unless the user made it: with the app in front, or
-                    // after taking one of its windows back.
-                    if still_agents(&core, id, late.target, cx) {
-                        let _ = settle(&core, late.target, id, cx).await;
+                let late: Vec<_> = windows::all()
+                    .into_iter()
+                    .filter(|w| {
+                        w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id)
+                    })
+                    .collect();
+                for window in late {
+                    seen.insert(window.target.window_id);
+                    // Unless the user took the app back or made it.
+                    if still_agents(&core, id, window.target, cx) {
+                        let _ = settle(&core, window.target, id, cx).await;
+                        return;
                     }
-                    return;
                 }
                 // Ended or removed meanwhile: the window stays where it opened.
                 if !takes_windows(&core, id, cx) {
@@ -1620,6 +1665,24 @@ async fn launch_now(
             "still_opening"
         }),
     })
+}
+
+/// What to open for a `file://` target: its path, unless the app is a
+/// browser, which opens it as a page in a window of its own. The file must
+/// exist either way.
+fn file_target(target: Option<&str>, browser: bool) -> Result<Option<String>, ControlError> {
+    let Some(url) = target.filter(|t| t.starts_with("file://")) else {
+        return Ok(None);
+    };
+    let path = ax::file_url_path(url)
+        .ok_or_else(|| ControlError::invalid(format!("{url} isn't a file URL")))?;
+    if !path.exists() {
+        return Err(ControlError::not_found(format!(
+            "no file at {}",
+            path.display()
+        )));
+    }
+    Ok((!browser).then(|| path.to_string_lossy().into_owned()))
 }
 
 /// Whether a window shows a file, by its AXDocument URL.
@@ -2113,6 +2176,33 @@ mod launch_tests {
 
     fn ago(ms: u64) -> Instant {
         Instant::now() - Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn routes_file_urls() {
+        let dir = std::env::temp_dir().join(format!("sidescreen-route-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a b.html");
+        std::fs::write(&file, "x").unwrap();
+        let url = format!("file://{}", file.to_string_lossy().replace(' ', "%20"));
+        let path = Some(file.to_string_lossy().into_owned());
+        // Not a browser: the path, with or without a fragment or query.
+        assert_eq!(file_target(Some(&url), false).unwrap(), path);
+        assert_eq!(file_target(Some(&format!("{url}#x")), false).unwrap(), path);
+        assert_eq!(
+            file_target(Some(&format!("{url}?q=1")), false).unwrap(),
+            path
+        );
+        // A browser keeps the URL.
+        assert_eq!(file_target(Some(&format!("{url}#x")), true).unwrap(), None);
+        // Missing files fail for both; other targets pass through.
+        assert!(file_target(Some("file:///no/such/file.html"), true).is_err());
+        assert_eq!(
+            file_target(Some("https://example.com"), false).unwrap(),
+            None
+        );
+        assert_eq!(file_target(None, false).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

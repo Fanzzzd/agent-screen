@@ -33,6 +33,29 @@ unsafe extern "C" {
     static kCFRunLoopDefaultMode: *const CFString;
 }
 
+/// When the Agent Session last drove each display: input, an element
+/// action or a launch.
+static ACTED: std::sync::Mutex<Vec<(DisplayId, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// How long after an agent's action a new window counts as its result.
+const ACTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Note that the agent just drove a display.
+pub fn agent_acted(display: DisplayId) {
+    let mut acted = ACTED.lock().unwrap_or_else(|e| e.into_inner());
+    acted.retain(|(d, _)| *d != display);
+    acted.push((display, std::time::Instant::now()));
+}
+
+fn acted_recently(display: DisplayId) -> bool {
+    ACTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(d, at)| *d == display && at.elapsed() < ACTION_WINDOW)
+}
+
 /// Moves each window `pid` creates onto a display while it lives. Create
 /// and drop it on the main thread, whose run loop delivers the notifications.
 pub struct Catch {
@@ -196,7 +219,9 @@ extern "C" fn created(
         return;
     }
     // A kept catch leaves alone windows the user makes while using the app.
-    if target.kept.get() && super::app::frontmost_pid() == Some(target.pid) {
+    // A kept catch takes a window only right after the agent acted on its
+    // display: anything else in the app is the user's doing.
+    if target.kept.get() && !acted_recently(target.display) {
         if let Some(id) = ax::window_id(window) {
             target.skipped.borrow_mut().push(id);
         }
