@@ -127,7 +127,7 @@ async function strip() {
 
     await control.call("launchApp", { displayId: id, app: "Calculator" })
     await settle(2500)
-    const viewer = pidOf("target/Sidescreen.app/Contents/MacOS/Sidescreen")!
+    const viewer = pidOf("target/Sidescreen Dev.app/Contents/MacOS/Sidescreen")!
     // Calculator's View menu, the third title.
     const [vx, vy] = onScreen(image, display, 150, 12)
     hid("click", vx, vy)

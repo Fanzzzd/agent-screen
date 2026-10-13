@@ -249,6 +249,8 @@ impl StatusIcon {
                     "Sidescreen：agent 在请求帮助",
                 ),
             )
+        } else if sidescreen_mcp::endpoint::is_dev_build() {
+            ("rectangle.on.rectangle", "Sidescreen Dev")
         } else {
             ("rectangle.on.rectangle", "Sidescreen")
         };
@@ -260,7 +262,13 @@ impl StatusIcon {
             image.setTemplate(true);
             button.setImage(Some(&image));
         }
-        let tint = (self.needs_setup.get() || self.asking.get()).then(NSColor::systemOrangeColor);
+        button.setToolTip(Some(&NSString::from_str(description)));
+        // A development build shows purple, to tell it from the installed app.
+        let tint = if self.needs_setup.get() || self.asking.get() {
+            Some(NSColor::systemOrangeColor())
+        } else {
+            sidescreen_mcp::endpoint::is_dev_build().then(NSColor::systemPurpleColor)
+        };
         button.setContentTintColor(tint.as_deref());
     }
 

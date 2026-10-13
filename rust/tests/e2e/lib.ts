@@ -19,7 +19,7 @@ export const out = path.join(root, "target/e2e")
 export const instance = process.env.SIDESCREEN_INSTANCE || undefined
 export const socketPath = path.join(os.homedir(), "Library/Application Support/Sidescreen",
   instance ? `control-${instance}.sock` : "control.sock")
-const debugApp = path.join(root, "target/Sidescreen.app")
+const debugApp = path.join(root, "target/Sidescreen Dev.app")
 export const installedApp = "/Applications/Sidescreen.app"
 
 /** Run a command and return its stdout; throw when it fails. */

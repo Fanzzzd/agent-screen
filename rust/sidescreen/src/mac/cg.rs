@@ -89,7 +89,10 @@ pub fn remote_panels() -> Vec<WindowInfo> {
     let mut services: Vec<(i32, bool)> = Vec::new();
     window_list(CGWindowListOption::OptionAll)
         .into_iter()
-        .filter(|w| w.layer == 0 && w.bounds.width > 100.0 && w.bounds.height > 100.0)
+        // Normal windows, and modal panels at their own level, as Firefox's.
+        .filter(|w| {
+            (0..1000).contains(&w.layer) && w.bounds.width > 100.0 && w.bounds.height > 100.0
+        })
         .filter(|w| {
             let pid = w.target.pid;
             if let Some(&(_, xpc)) = services.iter().find(|(p, _)| *p == pid) {

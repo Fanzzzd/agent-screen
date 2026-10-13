@@ -388,12 +388,22 @@ unsafe impl Send for Snapshot {}
 pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<Snapshot> {
     let window = window_or_sheet(target)?;
     // Chromium and Electron apps only publish their web content tree once a
-    // client asks for it. Other apps ignore the attribute.
-    set_attribute(
-        &application(target.pid),
-        "AXManualAccessibility",
-        CFBoolean::new(true),
-    );
+    // client asks for it, and build it over the next moment: the first
+    // read would list only the browser's toolbar. Other apps ignore the
+    // attribute, and refuse to set it.
+    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    let app = application(target.pid);
+    let first = {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let first = !asked.contains(&target.pid);
+        if first {
+            asked.push(target.pid);
+        }
+        first
+    };
+    if set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true)) && first {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+    }
     let mut walker = TreeWalker {
         origin,
         scale,

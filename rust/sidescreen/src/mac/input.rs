@@ -1110,6 +1110,7 @@ fn hits() -> Vec<Hit> {
         let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
         if let Some(panel) = panels.iter().find(|p| {
             p.target.pid != hit.target.pid
+                && p.layer == hit.layer
                 && same(p.bounds.x, hit.bounds.x)
                 && same(p.bounds.y, hit.bounds.y)
                 && same(p.bounds.width, hit.bounds.width)

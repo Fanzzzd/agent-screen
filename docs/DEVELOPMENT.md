@@ -16,9 +16,11 @@ Sidescreen started as a Swift app; the Rust app replaced it ([ADR 0005](adr/0005
 ## Build
 
 ```sh
-rust/sidescreen/scripts/bundle.sh [release]   # build rust/target/Sidescreen.app
+rust/sidescreen/scripts/bundle.sh [release]   # build rust/target/Sidescreen Dev.app (release: Sidescreen.app)
 rust/sidescreen/scripts/release.sh            # the DMG and Homebrew cask for a release
 ```
+
+A debug bundle is a separate app, "Sidescreen Dev" (`dev.sidescreen.menubar.dev`), so it runs beside an installed Sidescreen without touching it: its own privacy grants, its own control socket (instance `dev` unless `SIDESCREEN_INSTANCE` says otherwise), and its own agent registration (`sidescreen-dev`). Its menu bar icon is purple.
 
 The Rust toolchain is pinned in `rust/rust-toolchain.toml`. The bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
 
@@ -75,7 +77,7 @@ for i in $(seq 10); do SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts | ta
 
 `rust/tests/e2e` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Sidescreen back. Name cases to run some: `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `dev.sidescreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `rust/target/e2e`. `probe tap` in `tests/e2e/tools` records real trackpad events for `hid replay`, which is how `fixtures/trackpad.log` was made.
 
-The scripts start `rust/target/Sidescreen.app/Contents/MacOS/Sidescreen mcp`; `SIDESCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke.ts`: it marks the window to keep, and quitting the app would hand it back to your screen.
+The scripts start `rust/target/Sidescreen Dev.app/Contents/MacOS/Sidescreen mcp`; `SIDESCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke.ts`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
 Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, menu, hide, select, viewer, collapse, create, dismiss, answer, primary, windows, help, focus, quit, setup, setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex) or stage, and a `displayId` where one applies. `debugViewer` returns the Viewer's frame and its display image in screen points, and whether the Viewer is the key window. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 

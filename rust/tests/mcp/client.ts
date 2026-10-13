@@ -1,4 +1,5 @@
 /** Minimal MCP client over stdio for the test scripts. */
+import { fileURLToPath } from "node:url"
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { existsSync, writeFileSync } from "node:fs"
 import * as net from "node:net"
@@ -11,7 +12,7 @@ export const socketPath = path.join(os.homedir(), "Library/Application Support/S
   instance ? `control-${instance}.sock` : "control.sock")
 
 /** The server under test: the app binary's `mcp` subcommand from rust/target. */
-const defaultServer = [new URL("../../target/Sidescreen.app/Contents/MacOS/Sidescreen", import.meta.url).pathname, "mcp"]
+const defaultServer = [fileURLToPath(new URL("../../target/Sidescreen Dev.app/Contents/MacOS/Sidescreen", import.meta.url)), "mcp"]
 
 /** Wait up to 10 s for a freshly started app to listen on its socket. */
 const waitForApp = async () => {

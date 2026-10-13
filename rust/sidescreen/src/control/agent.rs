@@ -2263,7 +2263,8 @@ async fn settle_display(core: &Entity<Core>, id: DisplayId, size: (f64, f64), cx
 }
 
 /// Wait until the display stops changing after an action, so the
-/// screenshot shows its result: no new frame for 120 ms, at most 1.5 s.
+/// screenshot shows its result: no new frame for 120 ms, after the first
+/// change, or 500 ms with none; at most 1.5 s.
 /// While agents act, the display streams at 30 fps at thumbnail size, and
 /// ScreenCaptureKit only delivers a frame when something changed.
 async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
@@ -2279,6 +2280,9 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     let start = Instant::now();
     let mut last = streams.read_with(cx, |s, _| s.changes(id));
     let mut quiet_since = start;
+    // An app can take a while to show what an action opened, such as a
+    // file panel drawn by another process: give a first change longer.
+    let mut changed = false;
     while start.elapsed() < Duration::from_millis(1500) {
         cx.background_executor()
             .timer(Duration::from_millis(30))
@@ -2286,9 +2290,10 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
         let now = streams.read_with(cx, |s, _| s.changes(id));
         if now != last {
             last = now;
+            changed = true;
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= Duration::from_millis(120)
-            && start.elapsed() >= Duration::from_millis(150)
+            && start.elapsed() >= Duration::from_millis(if changed { 150 } else { 500 })
         {
             break;
         }

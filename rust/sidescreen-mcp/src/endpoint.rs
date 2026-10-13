@@ -9,10 +9,27 @@ pub type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
 /// A second app beside the user's, for tests: `SIDESCREEN_INSTANCE=e2e`
 /// gives it its own socket and display serials. Letters, digits and dashes.
+/// A development build is the `dev` instance unless told otherwise, so it
+/// never answers for the user's installed Sidescreen.
 pub fn instance() -> Option<String> {
     std::env::var("SIDESCREEN_INSTANCE")
         .ok()
         .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .or_else(|| is_dev_build().then(|| "dev".to_string()))
+}
+
+/// The bundle `scripts/bundle.sh` builds for development, beside the
+/// release one: its own name and bundle id, so macOS keeps its privacy
+/// grants and agents keep their registration apart.
+pub const DEV_BUNDLE: &str = "Sidescreen Dev.app";
+
+/// Whether this process runs from the development bundle.
+pub fn is_dev_build() -> bool {
+    std::env::current_exe().is_ok_and(|exe| is_dev_exe(&exe))
+}
+
+pub fn is_dev_exe(exe: &std::path::Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == DEV_BUNDLE)
 }
 
 /// The socket, in a directory only the user can read.

@@ -48,11 +48,22 @@ pub fn registered(exe: &Path) -> Vec<&'static str> {
     found
 }
 
+/// The server's name in the clients' configs: the development build
+/// registers beside the installed app, not over it.
+fn server_name(exe: &str) -> &'static str {
+    if crate::endpoint::is_dev_exe(Path::new(exe)) {
+        "sidescreen-dev"
+    } else {
+        "sidescreen"
+    }
+}
+
 /// Whether Claude Code's user config has a sidescreen server running `exe`.
 fn claude_runs(config: &str, exe: &str) -> bool {
+    let pointer = format!("/mcpServers/{}/command", server_name(exe));
     serde_json::from_str::<serde_json::Value>(config)
         .ok()
-        .and_then(|v| v.pointer("/mcpServers/sidescreen/command").cloned())
+        .and_then(|v| v.pointer(&pointer).cloned())
         .is_some_and(|command| command.as_str() == Some(exe))
 }
 
@@ -148,25 +159,17 @@ fn claude(cli: &Path, exe: &Path) -> Result<Done, String> {
             .map_err(|e| format!("could not run {}: {e}", cli.display()))
     };
     let exe = exe.to_string_lossy();
-    let current = run(&["mcp", "get", "sidescreen"])?;
+    let name = server_name(&exe);
+    let current = run(&["mcp", "get", name])?;
     let listed = String::from_utf8_lossy(&current.stdout).to_string();
     if current.status.success() && listed.contains(&*exe) {
         return Ok(Done::Already);
     }
     if current.status.success() {
         // Registered elsewhere, such as an older copy of the app.
-        run(&["mcp", "remove", "--scope", "user", "sidescreen"])?;
+        run(&["mcp", "remove", "--scope", "user", name])?;
     }
-    let added = run(&[
-        "mcp",
-        "add",
-        "--scope",
-        "user",
-        "sidescreen",
-        "--",
-        &exe,
-        "mcp",
-    ])?;
+    let added = run(&["mcp", "add", "--scope", "user", name, "--", &exe, "mcp"])?;
     if added.status.success() {
         Ok(Done::Connected)
     } else {
@@ -180,8 +183,6 @@ fn codex_config() -> Option<PathBuf> {
         .unwrap_or_else(|| home().join(".codex"));
     dir.is_dir().then(|| dir.join("config.toml"))
 }
-
-const HEADER: &str = "[mcp_servers.sidescreen]";
 
 fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
     let text = std::fs::read_to_string(config).unwrap_or_default();
@@ -197,10 +198,13 @@ fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
 /// The config with Sidescreen's entry pointing at `exe`, and whether it
 /// changed. Other entries and comments stay as they are.
 fn with_codex_entry(text: &str, exe: &str) -> (String, bool) {
+    let name = server_name(exe);
+    let header = format!("[mcp_servers.{name}]");
+    let header = header.as_str();
     let entry = format!(
-        "{HEADER}\ncommand = {exe:?}\nargs = [\"mcp\"]\n# wait_for_control can wait up to 10 minutes for the user.\ntool_timeout_sec = 700\n"
+        "{header}\ncommand = {exe:?}\nargs = [\"mcp\"]\n# wait_for_control can wait up to 10 minutes for the user.\ntool_timeout_sec = 700\n"
     );
-    let Some(start) = text.find(HEADER) else {
+    let Some(start) = text.find(header) else {
         let gap = if text.is_empty() || text.ends_with("\n\n") {
             ""
         } else if text.ends_with('\n') {
@@ -211,11 +215,11 @@ fn with_codex_entry(text: &str, exe: &str) -> (String, bool) {
         return (format!("{text}{gap}{entry}"), true);
     };
     // The entry runs to the next table that isn't one of its own subtables.
-    let body = &text[start + HEADER.len()..];
+    let body = &text[start + header.len()..];
     let end = body
         .match_indices("\n[")
-        .find(|(i, _)| !body[i + 1..].starts_with("[mcp_servers.sidescreen."))
-        .map_or(text.len(), |(i, _)| start + HEADER.len() + i + 1);
+        .find(|(i, _)| !body[i + 1..].starts_with(&format!("[mcp_servers.{name}.")))
+        .map_or(text.len(), |(i, _)| start + header.len() + i + 1);
     let old = &text[start..end];
     if old.contains(&format!("command = {exe:?}")) {
         return (text.to_string(), false);
@@ -253,6 +257,19 @@ mod tests {
         assert!(codex_runs(&codex, EXE));
         assert!(!codex_runs(&codex, "/Users/me/old/Sidescreen"));
         assert!(!codex_runs("", EXE));
+    }
+
+    #[test]
+    fn the_development_build_registers_beside_the_installed_app() {
+        let dev = "/Users/me/sidescreen/rust/target/Sidescreen Dev.app/Contents/MacOS/Sidescreen";
+        let (text, _) = with_codex_entry("", EXE);
+        let (both, changed) = with_codex_entry(&text, dev);
+        assert!(changed);
+        assert!(
+            both.contains("[mcp_servers.sidescreen]")
+                && both.contains("[mcp_servers.sidescreen-dev]")
+        );
+        assert!(codex_runs(&both, EXE) && codex_runs(&both, dev));
     }
 
     #[test]

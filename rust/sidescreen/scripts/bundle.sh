@@ -17,11 +17,22 @@ flags=()
 cargo build -p sidescreen ${flags[@]+"${flags[@]}"}
 
 target="$(cd .. && pwd)/target"
-app="$target/Sidescreen.app"
+# Development builds are a separate app, "Sidescreen Dev", so they never
+# take the installed app's privacy grants, socket or agent registration.
+if [[ "$config" == release ]]; then
+  app="$target/Sidescreen.app"
+else
+  app="$target/Sidescreen Dev.app"
+fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$target/$config/Sidescreen" "$app/Contents/MacOS/Sidescreen"
 cp resources/Info.plist "$app/Contents/Info.plist"
+if [[ "$config" != release ]]; then
+  plutil -replace CFBundleIdentifier -string dev.sidescreen.menubar.dev "$app/Contents/Info.plist"
+  plutil -replace CFBundleName -string "Sidescreen Dev" "$app/Contents/Info.plist"
+  plutil -replace CFBundleDisplayName -string "Sidescreen Dev" "$app/Contents/Info.plist"
+fi
 cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 identity="${SIDESCREEN_SIGN_IDENTITY:-}"
