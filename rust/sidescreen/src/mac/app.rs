@@ -3,7 +3,7 @@
 use crate::model::DisplayId;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSRunningApplication, NSScreen, NSWorkspace};
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::{NSNumber, NSObjectProtocol, NSString};
 use std::path::{Path, PathBuf};
 
 pub fn is_running(bundle_id: &str) -> bool {
@@ -149,9 +149,19 @@ pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
     };
     let url =
         objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&picture.to_string_lossy()));
+    // macOS remembers a display's picture by its serial, and serials come
+    // back: setting it again costs up to seconds for nothing.
+    let workspace = NSWorkspace::sharedWorkspace();
+    if workspace
+        .desktopImageURLForScreen(&screen)
+        .is_some_and(|now| now.isEqual(Some(&url)))
+    {
+        log::debug!("display {display}: desktop picture already set");
+        return true;
+    }
     let options = objc2_foundation::NSDictionary::new();
     unsafe {
-        NSWorkspace::sharedWorkspace()
+        workspace
             .setDesktopImageURL_forScreen_options_error(&url, &screen, &options)
             .is_ok()
     }
