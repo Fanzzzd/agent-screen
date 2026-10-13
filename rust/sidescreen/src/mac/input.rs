@@ -943,7 +943,11 @@ impl Worker {
             return None;
         };
         let held = AppKeys::hold(target.host.pid);
-        log::debug!("input: keys go to {:?} (app window {:?})", target.target, target.host);
+        log::debug!(
+            "input: keys go to {:?} (app window {:?})",
+            target.target,
+            target.host
+        );
         if target.target != target.host {
             self.wake_panel(target);
         }

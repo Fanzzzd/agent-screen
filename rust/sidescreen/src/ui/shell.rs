@@ -138,6 +138,8 @@ pub struct Shell {
     asking: bool,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
+    /// Test hook: the setup window shows both permissions missing.
+    setup_preview: bool,
     setup: Option<WindowHandle<Setup>>,
     /// The agents whose MCP servers loaded the tools, first to last.
     agent_ready: Vec<String>,
@@ -278,6 +280,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             guard_generation: 0,
             asking: false,
             permissions: permissions::status(),
+            setup_preview: false,
             setup: None,
             agent_ready: Vec::new(),
             waiting: None,
@@ -1195,6 +1198,13 @@ impl Shell {
             "peek" => self.show_peek(cx),
             "setup" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
+            // The open setup window as with both permissions missing, the
+            // first row explaining what to do in System Settings: the
+            // tallest it gets.
+            "setup-waiting" => {
+                self.setup_preview = true;
+                self.push_setup(cx);
+            }
             // The pane and its helper, without the system prompt.
             "assist-screen" | "assist-ax" => {
                 let p = if surface == "assist-screen" {
@@ -1838,6 +1848,7 @@ impl Shell {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
         self.waiting = None;
+        self.setup_preview = false;
         assist::hide();
     }
 
@@ -1958,7 +1969,15 @@ impl Shell {
     }
 
     fn push_setup(&mut self, cx: &mut Context<Self>) {
-        let (status, waiting, restart) = (self.permissions, self.waiting, self.restart);
+        let (status, waiting, restart) = if self.setup_preview {
+            let none = permissions::Status {
+                screen: false,
+                accessibility: false,
+            };
+            (none, Some(Permission::ScreenRecording), false)
+        } else {
+            (self.permissions, self.waiting, self.restart)
+        };
         let agent = self.agents_ready();
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };

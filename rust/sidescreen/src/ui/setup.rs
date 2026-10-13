@@ -16,7 +16,9 @@ use gpui::{
 };
 use std::sync::Arc;
 
-pub const WIDTH: f32 = 480.;
+pub const WIDTH: f32 = 520.;
+/// The height it opens at; it then fits its content, which grows by a
+/// line when a row explains what to do in System Settings.
 pub const HEIGHT: f32 = 496.;
 
 pub struct Setup {
@@ -98,11 +100,9 @@ impl Render for Setup {
             .collect();
         rows.push(self.agent_row(&theme).into_any_element());
         let shell = self.shell.clone();
-        div()
-            .size_full()
+        let content = div()
             .flex()
             .flex_col()
-            .bg(theme.card)
             .text_color(theme.label)
             .px(px(32.))
             .pt(px(44.))
@@ -144,9 +144,9 @@ impl Render for Setup {
                             .child(row)
                     })),
             )
-            .child(div().flex_1())
             .child(
                 div()
+                    .mt(px(22.))
                     .flex()
                     .items_center()
                     .gap(px(12.))
@@ -176,7 +176,22 @@ impl Render for Setup {
                         &theme,
                         move |cx| tell(&shell, cx, |shell, cx| shell.close_setup(cx)),
                     )),
-            )
+            );
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.card)
+            .on_children_prepainted(|bounds, window, _| {
+                let Some(content) = bounds.first() else {
+                    return;
+                };
+                let height = content.size.height.ceil();
+                if (window.viewport_size().height - height).abs() > px(1.) {
+                    window.resize(gpui::size(px(WIDTH), height));
+                }
+            })
+            .child(content)
     }
 }
 
