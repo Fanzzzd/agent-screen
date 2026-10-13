@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.1.13 (2026-10-13)
+
+### Features
+
+#### A Help Card, more notifications, and Give | Take Back in the Viewer
+
+- An agent asking for help now drops a card from the menu bar icon: the display's picture, the agent's reason, Take Over and Later. Later puts it away until the agent asks again; the icon stays orange.
+- The help notification has a Take Over button. Clicking the notification itself only opens the display; your first input there takes over.
+- Sidescreen also notifies you when an agent finishes or disconnects and leaves windows on its display.
+- The setup window asks for notifications. If you set up before, Sidescreen asks once at its next launch.
+- The Viewer's Windows button is now Give | Take Back, each opening its list of windows directly, with Close Display… under ⋯.
+
+### Fixes
+
+#### Sidescreen ignores AeroSpace's closet display
+
+The AeroSpace build for Sidescreen keeps hidden windows on a virtual display of its own, the closet. Sidescreen now leaves that display out: its panels and the Viewer never go there, a window handed back never lands there, and agent displays park as if it weren't there.
+
+#### Agent Displays are labelled in System Settings
+
+Each Agent Display gets a desktop picture that says "Sidescreen", and System Settings > Displays shows each display with a thumbnail of its desktop, so agents' displays are told apart from your monitors there. Agents don't see it: their screenshots show windows on a plain backdrop.
+
+#### Browsers take the first click, open URLs in the new window, and choose select items
+
+- `launch_app` with a URL now returns once the page has loaded, so a click right after it reaches a page whose scripts have run. An app started by `launch_app` gets a click on its top edge first, because its first click only makes its window key; the agent's first click now lands.
+- A click on an item of a web page's select menu chooses it. The menu follows the real pointer, so the click now presses the menu item through Accessibility.
+- `launch_app` starts Safari. It looked for Safari at its symlinked path and reported that it did not start.
+- A URL opened in a running Safari goes to the new window on the display, through its address field. Before, Safari opened it in the window it had last made active.
+- `get_window_state` reads web pages in Chrome. Chrome ignores the switch Dia and Electron apps answer, and builds its page tree only for the one VoiceOver uses; Sidescreen sets that one, and turns it off while it moves a Chrome window, which it slows.
+
+#### A development build no longer interferes with the installed app
+
+A debug build of Sidescreen is now its own app, "Sidescreen Dev", with its own bundle id, privacy grants, control socket and agent registration (`sidescreen-dev`), and a purple menu bar icon. Before, it shared the installed app's bundle id, which could cost the installed app its Screen Recording and Accessibility grants, and Connect in a dev build replaced the installed app's registration with Claude Code and Codex.
+
+#### New Display is made off the main thread
+
+Displays you make with **New Display** are made off the main thread too. If an agent's session ends, or a parallel call of the same session gets a display, while macOS is still making one, that one is dropped instead of left running.
+
+#### Agents can use file Open and Save panels
+
+An app's Open or Save panel is drawn by a separate macOS process, behind an empty window of the app's, so an agent's clicks and keys never reached it and the panel looked frozen. Clicks and keys now go to the process that draws the panel, and the first keys wake it the way a click would, so an agent can pick a file with Go to Folder (cmd+shift+g) and a path. `get_window_state` also reads a panel that a browser such as Dia or Chrome shows as a sheet.
+
+#### Firefox's file panel, fresher screenshots, web pages in window state
+
+- Firefox shows its file panel at the modal panel level; clicks and keys now reach it too.
+- After an action, the screenshot waits up to 500 ms for a first change, so it shows a panel or sheet the action opened instead of the moment before.
+- The first `get_window_state` of a Chromium or Electron window waits for the page's accessibility tree, instead of listing only the browser's toolbar.
+
+#### Agent Displays go back out of the way when moved
+
+An Agent Display dragged in System Settings > Displays, or pushed aside by macOS, goes back to its place off the top-right corner of your screens after the change, where the pointer doesn't wander onto it. Your own displays aren't moved. A display macOS keeps putting elsewhere gets three tries, so Sidescreen doesn't fight it.
+
+#### Keys stay on the agent's display
+
+When the window an agent was typing into leaves its display, as when you take it back, the agent's next keys go nowhere and it's told so; they used to reach that app's window on your screen. Resizing a window from its left or top edge over the Viewer no longer hands it over. A Help Request banner that arrives after the request was withdrawn only opens the display. A window returns to the main display when the monitor it came from is gone. `place_window` can be retried after a failed move, and a busy app no longer reads as a closed window.
+
+#### The setup window shows all of itself
+
+After you clicked Turn On, the setup window added a line explaining what to do in System Settings and cut off its last row. The window now grows to fit what it shows, and is a little wider, so "Screen & System Audio Recording" fits on one line.
+
+#### Agent keys never reach the app you're using
+
+When the agent's window belongs to the app you're working in and isn't that app's focused window, typing, key presses and held keys stop with a message telling the agent to set text with `act_on_element` instead: macOS would send those keys to your window. Long typing checks again every 20 characters, and Sidescreen re-focuses the agent's window when the app has moved its keys to another of its windows, then hands focus back to your window when the agent's keys are done, so your typing in that app still goes to your window. Select All only selects in the agent's window. On displays larger than 1280×800, window bounds and element positions now come in screenshot pixels, so the agent clicks where it means to. Dragging a tiled window onto the Viewer hands it over again. A takeover lets go of a button the agent held where its drag was, not where you clicked, and a held key is released in the window it was pressed in. Keys typed in the Viewer no longer follow a window you took back.
+
+#### The Viewer is sharp again
+
+Agent displays could come up at 1x and look blurry in the Viewer: macOS remembers the resolution last used for a display's serial number, and Sidescreen's serials repeat across launches, so a display could inherit another size from an earlier one. Sidescreen now sets each display to its size at 2x as it makes it. The Viewer also no longer keeps showing a small preview frame, scaled up, when the display it opens on is still.
+
+#### Your app's new windows open on your screen
+
+After you take back a window, the app is yours. Some apps, TextEdit among them, open a new document next to their main window, which could still be on the agent's display, out of your sight. Sidescreen now moves such a window back to the screen the window you took came from. It stays only if the agent was acting there at that moment and you weren't using the app. Handing the app over again ends this.
+
 ## 0.1.12 (2026-10-12)
 
 ### Fixes
