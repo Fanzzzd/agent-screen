@@ -36,6 +36,10 @@ _Avoid_: pause, lock, manual mode
 An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha). It ends when the user finishes a Takeover.
 _Avoid_: escalation, alert, ping
 
+**Help Card** (求助卡片):
+The card that drops from the menu bar icon while a Help Request is open: the display's picture, the agent's reason, and a way to take over or put it off. It stays until the Help Request ends or the user puts it off.
+_Avoid_: alert, popup, banner
+
 **Agent Pointer**:
 The marker the Viewer and Peek draw where the Agent Session last pointed or clicked. It is never part of the display itself, so the agent's screenshots do not contain it.
 _Avoid_: agent cursor, ghost cursor

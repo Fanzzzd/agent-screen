@@ -61,10 +61,14 @@ pub enum Native {
         display: u32,
         x: f64,
     },
-    /// The user clicked the help notification of a display.
-    HelpClicked {
+    /// The user clicked a notification about a display, or its Take Over
+    /// button.
+    NotificationClicked {
         display: u32,
+        take_over: bool,
     },
+    /// What macOS says about notifying, after `notify::check`.
+    NotificationAuth(super::notify::Auth),
     /// Screens were added, removed or rearranged.
     ScreensChanged,
     /// The accent color or another system color changed.

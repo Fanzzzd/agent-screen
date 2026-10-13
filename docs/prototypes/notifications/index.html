@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Sidescreen: notifications and the Windows button</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; }
+  .glass { background: rgba(246,246,248,.78); backdrop-filter: blur(30px) saturate(1.6); -webkit-backdrop-filter: blur(30px) saturate(1.6); }
+  .dark .glass { background: rgba(40,40,44,.78); }
+  .menu { background: rgba(246,246,248,.92); backdrop-filter: blur(24px); box-shadow: 0 10px 30px rgba(0,0,0,.18), 0 0 0 .5px rgba(0,0,0,.2); }
+  .desk { background: linear-gradient(160deg,#3a6b8c,#9cc3c9 55%,#d9c8a6); }
+  .capsule { border-radius: 999px; }
+</style>
+</head>
+<body class="bg-stone-100 text-slate-900">
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const T = (lang, en, zh) => (lang === "zh" ? zh : en);
+
+// ---------- icons (SF Symbol look-alikes) ----------
+const I = {
+  hand: (c = "currentColor") => <svg width="15" height="15" viewBox="0 0 24 24" fill={c}><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V11h.5V3.5a1.5 1.5 0 0 1 3 0V11h.5V5a1.5 1.5 0 0 1 3 0v8.2l1.2-1.6a1.6 1.6 0 0 1 2.5 2l-3.7 5.3A6 6 0 0 1 13 21.5h-1A6 6 0 0 1 6 15.5V8.5a1.5 1.5 0 0 1 2 0Z"/></svg>,
+  play: <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>,
+  chevronUp: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M6 15l6-6 6 6"/></svg>,
+  chevronDown: <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M6 9l6 6 6-6"/></svg>,
+  more: <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>,
+  windows: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="6" width="13" height="11" rx="2"/><path d="M8 3h11a2 2 0 0 1 2 2v9"/></svg>,
+  handOver: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><rect x="11" y="5" width="10" height="14" rx="2"/><path d="M2 12h7m-3-3 3 3-3 3"/></svg>,
+  takeBack: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="10" height="14" rx="2"/><path d="M22 12h-7m3-3-3 3 3 3"/></svg>,
+  display: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
+  bell: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>,
+  check: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>,
+};
+
+const AppIcon = ({ size = 30 }) => (
+  <div style={{ width: size, height: size, borderRadius: size * 0.23, background: "linear-gradient(145deg,#8b7cf6,#5b4bd6)" }}
+       className="flex items-center justify-center text-white shadow-sm">
+    <svg width={size * 0.6} height={size * 0.6} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.8"><rect x="2" y="5" width="13" height="10" rx="1.6"/><rect x="9" y="9" width="13" height="10" rx="1.6" fill="rgba(255,255,255,.25)"/></svg>
+  </div>
+);
+
+// A fake picture of an Agent Display waiting at a sign-in page
+const Screen = ({ h = 150, dim = false }) => (
+  <div className="relative overflow-hidden rounded-md" style={{ height: h, background: "#1e1e22" }}>
+    <div className="absolute rounded-md bg-white shadow-lg" style={{ left: "12%", top: "12%", width: "76%", height: "80%" }}>
+      <div className="h-4 border-b bg-stone-100 flex items-center gap-1 px-1.5">{["#ff5f57","#febc2e","#28c840"].map(c => <span key={c} className="w-1.5 h-1.5 rounded-full" style={{ background: c }} />)}</div>
+      <div className="flex flex-col items-center gap-1.5 pt-3">
+        <div className="text-[9px] font-semibold text-slate-700">Sign in to continue</div>
+        <div className="w-2/3 h-3 rounded border border-slate-300" />
+        <div className="w-2/3 h-3 rounded border border-slate-300" />
+        <div className="w-2/3 h-3 rounded bg-blue-500" />
+        <div className="text-[7px] text-slate-400">Verify it's you: enter the code we sent</div>
+      </div>
+    </div>
+    <div className="absolute" style={{ left: "52%", top: "58%" }}>
+      <div className="w-3 h-3 rounded-full border-2 border-orange-400 bg-orange-400/30" />
+    </div>
+    {dim && <div className="absolute inset-0 bg-black/20" />}
+  </div>
+);
+
+// ---------- the Viewer header, with the variant under test in the Windows slot ----------
+function ViewerHeader({ lang, variant, state }) {
+  const [open, setOpen] = useState(null);
+  const agent = "Claude";
+  const label = T(lang, "Claude · Book a flight", "Claude · 订机票");
+  const status = state === "help"
+    ? T(lang, "Needs your help: sign in to United", "需要你帮助：登录 United 账号")
+    : T(lang, "Working", "正在操作");
+  const handOverItems = [["Dia", "United Airlines"], ["Mail", "Inbox"], ["Notes", "Trip"]];
+  const onDisplay = [["Dia", "united.com · Sign in"]];
+
+  const Menu = ({ items, onClose, title }) => (
+    <div className="menu absolute right-0 top-9 z-20 w-64 rounded-lg py-1 text-[13px]" onMouseLeave={onClose}>
+      {title && <div className="px-3 py-1 text-[11px] text-slate-500">{title}</div>}
+      {items.map((it, i) => it === "-" ? <div key={i} className="my-1 h-px bg-black/10" /> :
+        <div key={i} className={"mx-1 flex items-center gap-2 rounded px-2 py-1 " + (it.disabled ? "text-slate-400" : "hover:bg-blue-500 hover:text-white cursor-default")}>
+          {it.icon}<span className="flex-1 truncate">{it.label}</span>{it.sub && <span className="opacity-60">›</span>}
+        </div>)}
+    </div>
+  );
+
+  const handOverMenu = handOverItems.map(([app, title]) => ({ label: `${app} — ${title}`, icon: <span className="w-3.5 h-3.5 rounded bg-slate-300" /> }));
+  const backMenu = onDisplay.map(([app, title]) => ({ label: `${app} — ${title}`, icon: <span className="w-3.5 h-3.5 rounded bg-slate-300" /> }));
+  const fullMenu = [
+    { label: T(lang, `Hand Over to ${agent}`, `交给 ${agent}`), icon: I.handOver, sub: true },
+    { label: T(lang, "Take Back Window", "取回窗口"), icon: I.takeBack, sub: true },
+    "-",
+    { label: T(lang, "Close Display…", "关闭显示器…") },
+  ];
+
+  const btn = "capsule flex items-center gap-1.5 px-3 h-7 text-[13px] font-medium border border-black/10 bg-white/70 hover:bg-white shadow-sm";
+  const iconBtn = "capsule flex items-center justify-center w-7 h-7 border border-black/10 bg-white/70 hover:bg-white shadow-sm text-slate-600";
+
+  let slot;
+  if (variant === "now") {
+    slot = <div className="relative"><button className={btn} onClick={() => setOpen(open ? null : "full")}>{I.windows}{T(lang, "Windows 0", "窗口 0")}</button>
+      {open && <Menu items={fullMenu} onClose={() => setOpen(null)} />}</div>;
+  } else if (variant === "A") {
+    slot = <div className="relative"><button className={btn} onClick={() => setOpen(open ? null : "full")}>{I.handOver}{T(lang, "Hand Over", "交接窗口")}{I.chevronDown}</button>
+      {open && <Menu items={fullMenu} onClose={() => setOpen(null)} />}</div>;
+  } else if (variant === "B") {
+    slot = <div className="relative flex gap-1.5">
+      <button className={btn} onClick={() => setOpen(open === "give" ? null : "give")}>{I.handOver}{T(lang, "Hand Over…", `交给 ${agent}…`)}</button>
+      <button className={iconBtn} title={T(lang, "More", "更多")} onClick={() => setOpen(open === "more" ? null : "more")}>{I.more}</button>
+      {open === "give" && <Menu title={T(lang, "Your windows", "你的窗口")} items={handOverMenu} onClose={() => setOpen(null)} />}
+      {open === "more" && <Menu items={[{ label: T(lang, "Take Back Window", "取回窗口"), icon: I.takeBack, sub: true }, "-", { label: T(lang, "Close Display…", "关闭显示器…") }]} onClose={() => setOpen(null)} />}
+    </div>;
+  } else if (variant === "C") {
+    slot = <div className="relative flex gap-1.5">
+      <button className={iconBtn} title={T(lang, `Hand a window over to ${agent}`, `把窗口交给 ${agent}`)} onClick={() => setOpen(open === "give" ? null : "give")}>{I.handOver}</button>
+      <button className={iconBtn} title={T(lang, "Take a window back", "取回窗口")} onClick={() => setOpen(open === "back" ? null : "back")}>{I.takeBack}</button>
+      <button className={iconBtn} title={T(lang, "More", "更多")} onClick={() => setOpen(open === "more" ? null : "more")}>{I.more}</button>
+      {open === "give" && <Menu title={T(lang, "Your windows", "你的窗口")} items={handOverMenu} onClose={() => setOpen(null)} />}
+      {open === "back" && <Menu title={T(lang, "On this display", "这块显示器上")} items={backMenu} onClose={() => setOpen(null)} />}
+      {open === "more" && <Menu items={[{ label: T(lang, "Close Display…", "关闭显示器…") }]} onClose={() => setOpen(null)} />}
+    </div>;
+  } else if (variant === "D") {
+    slot = <div className="relative flex">
+      <div className="capsule flex h-7 border border-black/10 bg-white/70 shadow-sm overflow-hidden text-[13px] font-medium">
+        <button className="flex items-center gap-1.5 px-3 hover:bg-white" onClick={() => setOpen(open === "give" ? null : "give")}>{I.handOver}{T(lang, "Give", "交给")}</button>
+        <div className="w-px bg-black/10" />
+        <button className="flex items-center gap-1.5 px-3 hover:bg-white" onClick={() => setOpen(open === "back" ? null : "back")}>{I.takeBack}{T(lang, "Take Back", "取回")}</button>
+      </div>
+      <button className={iconBtn + " ml-1.5"} title={T(lang, "More", "更多")} onClick={() => setOpen(open === "more" ? null : "more")}>{I.more}</button>
+      {open === "give" && <Menu title={T(lang, "Your windows", "你的窗口")} items={handOverMenu} onClose={() => setOpen(null)} />}
+      {open === "back" && <Menu title={T(lang, "On this display", "这块显示器上")} items={backMenu} onClose={() => setOpen(null)} />}
+      {open === "more" && <Menu items={[{ label: T(lang, "Close Display…", "关闭显示器…") }]} onClose={() => setOpen(null)} />}
+    </div>;
+  } else if (variant === "E") {
+    slot = <div className="relative"><button className={iconBtn} title={T(lang, "Windows and display", "窗口和显示器")} onClick={() => setOpen(open ? null : "full")}>{I.more}</button>
+      {open && <Menu items={fullMenu} onClose={() => setOpen(null)} />}</div>;
+  }
+
+  const main = state === "help"
+    ? <button className="capsule flex items-center gap-1.5 px-3 h-7 text-[13px] font-semibold text-white bg-orange-500 hover:bg-orange-600 shadow-sm">{I.hand("white")}{T(lang, "Take Over", "接手操作")}</button>
+    : null;
+
+  return (
+    <div className="glass rounded-xl border border-black/10 shadow-xl overflow-visible">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-semibold truncate">{label}</div>
+          <div className={"text-[11px] truncate " + (state === "help" ? "text-orange-600" : "text-slate-500")}>{status}</div>
+        </div>
+        {main}
+        {slot}
+        <button className={iconBtn} title={T(lang, "Collapse to Menu Bar", "收起到菜单栏")}>{I.chevronUp}</button>
+      </div>
+      <div className="px-2 pb-2"><Screen h={170} /></div>
+      {variant === "E" && <div className="px-3 pb-2 text-[11px] text-slate-500">{T(lang, "Drag a window from your desktop onto the picture to hand it over.", "把桌面上的窗口拖到画面上，就交给了 agent。")}</div>}
+    </div>
+  );
+}
+
+const VARIANTS = [
+  ["now", "Now", "现在", "The capsule says “Windows 0”. The number is the windows on the display; the menu hides what it does.", "胶囊上写着 “Windows 0”，数字是显示器上的窗口数，看不出能做什么。"],
+  ["A", "A · Rename", "A · 只改名", "Same menu, named after what it does. One click more than B for the common case.", "菜单不变，按它的用途命名。常用操作比 B 多点一层。"],
+  ["B", "B · Hand Over + ⋯", "B · 交给 + ⋯", "The common action is the button; Take Back and Close go in ⋯. Recommended.", "最常用的“交给”直接是按钮，取回和关闭收进 ⋯。推荐。"],
+  ["C", "C · Icons", "C · 只用图标", "Three icon buttons with tooltips. Compact, but you have to hover to learn them.", "三个图标按钮，悬停有提示。省地方，但要悬停才知道是什么。"],
+  ["D", "D · Give | Take Back", "D · 交给 | 取回", "A segmented pair shows both directions at once; Close in ⋯.", "分段按钮同时给出两个方向，关闭放在 ⋯。"],
+  ["E", "E · Only ⋯, drag to hand over", "E · 只留 ⋯，拖进来交给", "Hand over by dragging a window onto the picture, which works today; everything else in ⋯.", "靠把窗口拖到画面上来交给（现在就支持），其余都在 ⋯ 里。"],
+];
+
+// ---------- the Help Card under the menu bar icon ----------
+function HelpCard({ lang, onClose }) {
+  return (
+    <div className="glass w-80 rounded-2xl border border-black/10 shadow-2xl p-3 space-y-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-orange-500">{I.hand("#f97316")}</span>
+        <div className="flex-1 text-[13px] font-semibold">{T(lang, "Claude needs your help", "Claude 需要你帮忙")}</div>
+        <span className="text-[11px] text-slate-500">{T(lang, "now", "刚刚")}</span>
+      </div>
+      <div className="text-[12.5px] leading-snug text-slate-700">{T(lang, "“Sign in to United. It wants a code sent to your phone.”", "“请登录 United 账号，它要发到你手机上的验证码。”")}</div>
+      <div className="cursor-pointer rounded-lg ring-1 ring-black/10 hover:ring-2 hover:ring-orange-400" title={T(lang, "Open in Viewer", "在 Viewer 中打开")}><Screen h={150} /></div>
+      <div className="text-[11px] text-slate-500">{T(lang, "Claude · Book a flight", "Claude · 订机票")}</div>
+      <div className="flex gap-2">
+        <button className="flex-1 capsule h-8 text-[13px] font-semibold text-white bg-orange-500 hover:bg-orange-600 flex items-center justify-center gap-1.5">{I.hand("white")}{T(lang, "Take Over", "接手操作")}</button>
+        <button onClick={onClose} className="capsule h-8 px-4 text-[13px] font-medium border border-black/10 bg-white/70 hover:bg-white">{T(lang, "Later", "稍后")}</button>
+      </div>
+    </div>
+  );
+}
+
+function MenuBar({ help, children }) {
+  return (
+    <div className="desk relative rounded-xl overflow-hidden" style={{ height: 470 }}>
+      <div className="glass h-7 flex items-center justify-end gap-4 px-4 text-[13px]">
+        <span className="opacity-70">Wi-Fi</span>
+        <span className={"flex items-center justify-center w-6 h-5 rounded " + (help ? "bg-orange-500/20" : "")}>{help ? I.hand("#f97316") : I.display}</span>
+        <span>Tue 14:02</span>
+      </div>
+      <div className="absolute right-16 top-9">{children}</div>
+    </div>
+  );
+}
+
+// ---------- system notifications ----------
+function Banner({ lang, title, body, actions }) {
+  return (
+    <div className="glass w-96 rounded-2xl border border-black/10 shadow-xl p-3 flex gap-3">
+      <AppIcon size={34} />
+      <div className="flex-1 min-w-0">
+        <div className="flex justify-between text-[12px]"><span className="font-semibold">{title}</span><span className="text-slate-500">{T(lang, "now", "现在")}</span></div>
+        <div className="text-[12.5px] text-slate-700 leading-snug">{body}</div>
+        {actions && <div className="mt-2 flex gap-2">{actions.map(a => <span key={a} className="capsule px-2.5 py-0.5 text-[12px] bg-black/5">{a}</span>)}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ---------- setup step ----------
+function SetupStep({ lang }) {
+  const [allowed, setAllowed] = useState(false);
+  const Row = ({ done, title, body, action }) => (
+    <div className="flex items-center gap-3 py-2.5 border-b border-black/5 last:border-0">
+      <span className={"w-5 h-5 rounded-full flex items-center justify-center " + (done ? "bg-emerald-500 text-white" : "border border-slate-300")}>{done && I.check}</span>
+      <div className="flex-1"><div className="text-[13px] font-medium">{title}</div><div className="text-[11.5px] text-slate-500">{body}</div></div>
+      {action}
+    </div>
+  );
+  return (
+    <div className="glass w-[520px] rounded-2xl border border-black/10 shadow-xl p-5">
+      <div className="text-[15px] font-semibold mb-2">{T(lang, "Set Up Sidescreen", "设置 Sidescreen")}</div>
+      <Row done title={T(lang, "Screen & System Audio Recording", "录屏与系统录音")} body={T(lang, "Shows each agent's display and lets agents take screenshots.", "显示 agent 的画面，让 agent 能截图。")} />
+      <Row done title={T(lang, "Accessibility", "辅助功能")} body={T(lang, "Lets agents click and type on their display.", "让 agent 在自己的显示器上点击和输入。")} />
+      <Row done={allowed} title={T(lang, "Notifications", "通知")} body={T(lang, "Tells you when an agent needs your help or is done with its display.", "agent 需要你帮忙、或用完显示器时提醒你。")}
+        action={!allowed && <button onClick={() => setAllowed(true)} className="capsule h-7 px-3 text-[13px] font-medium text-white bg-blue-500">{T(lang, "Allow…", "允许…")}</button>} />
+    </div>
+  );
+}
+
+function Section({ n, title, note, children }) {
+  return (
+    <section className="space-y-4">
+      <div><div className="text-xs uppercase tracking-wider text-slate-500">{n}</div><h2 className="text-xl font-semibold">{title}</h2>{note && <p className="text-sm text-slate-600 mt-1 max-w-3xl">{note}</p>}</div>
+      {children}
+    </section>
+  );
+}
+
+function App() {
+  const [lang, setLang] = useState("en");
+  const [state, setState] = useState("help");
+  const [card, setCard] = useState(true);
+  return (
+    <main className="max-w-6xl mx-auto px-6 py-10 space-y-14">
+      <header className="flex items-end justify-between">
+        <div><h1 className="text-2xl font-semibold">{T(lang, "Notifications and the Windows button", "通知与 Windows 按钮")}</h1>
+          <p className="text-sm text-slate-600">{T(lang, "Prototype only. Click the buttons; menus open.", "只是原型。按钮可以点，菜单会展开。")}</p></div>
+        <div className="flex gap-2 text-sm">
+          {["en", "zh"].map(l => <button key={l} onClick={() => setLang(l)} className={"capsule px-3 py-1 border " + (lang === l ? "bg-slate-900 text-white" : "bg-white")}>{l === "en" ? "English" : "中文"}</button>)}
+        </div>
+      </header>
+
+      <Section n="1" title={T(lang, "The Windows button in the Viewer header", "Viewer 头部的 Windows 按钮")}
+        note={T(lang, "The same header in each option: display label and status, the main button, the slot under test, and Collapse. Toggle the agent's state to see it next to the orange Take Over.", "每个方案都是同一个头部：显示器名称和状态、主按钮、要比较的那个位置、收起按钮。切换 agent 状态，看它和橙色“接手操作”放在一起的样子。")}>
+        <div className="flex gap-2 text-sm">
+          {[["help", T(lang, "Asking for help", "正在求助")], ["working", T(lang, "Working", "正在操作")]].map(([k, l]) =>
+            <button key={k} onClick={() => setState(k)} className={"capsule px-3 py-1 border " + (state === k ? "bg-slate-900 text-white" : "bg-white")}>{l}</button>)}
+        </div>
+        <div className="grid md:grid-cols-2 gap-6">
+          {VARIANTS.map(([k, en, zh, den, dzh]) => (
+            <div key={k} className="space-y-2">
+              <div className="flex items-baseline gap-2"><span className="font-semibold">{T(lang, en, zh)}</span>{k === "B" && <span className="text-xs px-2 rounded bg-emerald-100 text-emerald-800">{T(lang, "recommended", "推荐")}</span>}</div>
+              <div className="text-[12.5px] text-slate-600">{T(lang, den, dzh)}</div>
+              <ViewerHeader lang={lang} variant={k} state={state} />
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section n="2" title={T(lang, "Help Card", "求助卡片")}
+        note={T(lang, "Drops from the menu bar icon when an agent asks for help, and stays until you act or the request ends. Click the picture to open the Viewer; Take Over opens it and gives you control; Later puts the card away, and the orange icon stays.", "agent 求助时从菜单栏图标下方弹出，一直留着，直到你处理或者求助结束。点画面打开 Viewer；“接手操作”打开 Viewer 并把控制交给你；“稍后”收起卡片，橙色图标还在。")}>
+        <MenuBar help>{card ? <HelpCard lang={lang} onClose={() => setCard(false)} /> :
+          <button onClick={() => setCard(true)} className="capsule bg-white px-3 py-1 text-sm shadow">{T(lang, "Show the card again", "再显示卡片")}</button>}</MenuBar>
+      </Section>
+
+      <Section n="3" title={T(lang, "System notifications", "系统通知")}
+        note={T(lang, "Notification Center banners. A click opens that display in the Viewer and starts nothing else.", "通知中心的横幅。点一下打开那块显示器的 Viewer，不做别的。")}>
+        <div className="flex flex-wrap gap-5">
+          <Banner lang={lang} title={T(lang, "Claude needs your help", "Claude 需要你帮忙")} body={T(lang, "Sign in to United. It wants a code sent to your phone.", "请登录 United 账号，它要发到你手机上的验证码。")} actions={[T(lang, "Take Over", "接手操作")]} />
+          <Banner lang={lang} title={T(lang, "Claude is done with its display", "Claude 用完了显示器")} body={T(lang, "Book a flight · 3 windows wait for your review", "订机票 · 3 个窗口等你查看")} />
+          <Banner lang={lang} title={T(lang, "Claude disconnected", "Claude 的连接断了")} body={T(lang, "Book a flight · 3 windows are still on its display", "订机票 · 3 个窗口还在它的显示器上")} />
+        </div>
+      </Section>
+
+      <Section n="4" title={T(lang, "Notifications in setup", "设置流程里的通知权限")}
+        note={T(lang, "Asked up front with the other permissions, so the first help request isn't a permission prompt. People who set up before get asked once at the next launch.", "和其他权限一起提前申请，第一次求助时就不会先弹授权框。已经装好的人，下次启动时补问一次。")}>
+        <SetupStep lang={lang} />
+      </Section>
+    </main>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

@@ -2,16 +2,18 @@
 //! Viewer, Dismissal and Handover, and the guards that keep the user's
 //! cursor and AeroSpace workspaces off Agent Displays.
 
+use super::help_card::{self, HelpCard};
 use super::peek::{self, Peek};
 use super::pointer;
 use super::setup::{self, Setup};
 use super::stream::Streams;
-use super::viewer::{self, Sheet, Viewer};
+use super::viewer::{self, Sheet, Viewer, WindowMenu};
 use crate::core::Core;
 use crate::dismissal::{self, Item};
 use crate::i18n::t;
 use crate::mac::aerospace::{self, AeroSpace};
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
+use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, cg, menubar, notify, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
@@ -27,7 +29,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Run `f` on the shell once the current update is done. Views call this
@@ -101,6 +103,11 @@ pub struct Shell {
     icon: StatusIcon,
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
     viewer: Option<(WindowHandle<Viewer>, Retained<NSWindow>)>,
+    card: Option<(WindowHandle<HelpCard>, Retained<NSWindow>)>,
+    /// The display whose Help Request the Help Card shows.
+    card_shown: Option<DisplayId>,
+    /// Help Requests the user put off with Later, by display.
+    card_later: HashMap<DisplayId, String>,
 
     peek_shown: bool,
     /// Opened by a click: stays until another click.
@@ -138,6 +145,8 @@ pub struct Shell {
     asking: bool,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
+    /// Whether macOS lets Sidescreen notify.
+    notifications: notify::Auth,
     /// Test hook: the setup window shows both permissions missing.
     setup_preview: bool,
     setup: Option<WindowHandle<Setup>>,
@@ -245,6 +254,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     super::theme::set_accent(accent);
     viewer_input::install();
     notify::install();
+    notify::check();
     native::debug_appearance();
 
     let streams = Streams::new(cx);
@@ -257,6 +267,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             icon,
             peek: None,
             viewer: None,
+            card: None,
+            card_shown: None,
+            card_later: HashMap::new(),
             peek_shown: false,
             latched: false,
             over_icon: false,
@@ -280,6 +293,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             guard_generation: 0,
             asking: false,
             permissions: permissions::status(),
+            notifications: notify::Auth::Unknown,
             setup_preview: false,
             setup: None,
             agent_ready: Vec::new(),
@@ -306,6 +320,17 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             cx.new(|cx| Viewer::new(weak, core, streams, window, cx))
         })?
     };
+    let card = {
+        let (weak, core, streams) = (weak.clone(), core.clone(), streams.clone());
+        cx.open_window(panel_options(), move |window, cx| {
+            cx.new(|cx| HelpCard::new(weak, core, streams, window, cx))
+        })?
+    };
+    let card_ns = card
+        .update(cx, |_, window, _| native::ns_window(window))?
+        .expect("Help Card window");
+    native::style_panel(&card_ns, native::LEVEL_POP_UP_MENU);
+    native::set_keyable(&card_ns, false);
     let peek_ns = peek
         .update(cx, |_, window, _| native::ns_window(window))?
         .expect("Peek window");
@@ -322,6 +347,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     shell.update(cx, |shell, cx| {
         shell.peek = Some((peek, peek_ns));
         shell.viewer = Some((viewer, viewer_ns));
+        shell.card = Some((card, card_ns));
         shell.check_aerospace(cx);
     });
 
@@ -509,20 +535,22 @@ impl Shell {
             Native::LeftDragged { x, y } => self.drag_moved((x, y), cx),
             Native::LeftUp { x, y } => self.drag_ended((x, y), cx),
             Native::Menu(action) => self.menu(action, cx),
-            // A banner that outlived its request only opens the display.
-            Native::HelpClicked { display } => {
+            // A notification only opens the display; the user's first
+            // input there, or its Take Over button, starts a Takeover.
+            Native::NotificationClicked { display, take_over } => {
                 let asking = self
                     .core
                     .read(cx)
                     .displays
                     .get(display)
-                    .is_some_and(|d| d.help_request.is_some());
-                if asking {
-                    self.open_for_help(display, cx)
-                } else {
-                    self.open_viewer(display, cx)
+                    .map(|d| d.help_request.is_some() && d.is_live());
+                match asking {
+                    Some(true) if take_over => self.open_for_help(display, cx),
+                    Some(_) => self.card_open(display, cx),
+                    None => {}
                 }
             }
+            Native::NotificationAuth(auth) => self.notification_auth(auth, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
@@ -562,15 +590,35 @@ impl Shell {
             self.icon.set_asking(asking);
         }
         for display in &core.displays.list {
-            let reason = display
+            let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
+            match display
                 .help_request
                 .as_deref()
-                .filter(|_| display.is_live());
-            notify::update(display.id, &display.label(), reason);
+                .filter(|_| display.is_live())
+            {
+                Some(reason) => notify::update(
+                    display.id,
+                    display.agent_name(),
+                    task,
+                    Some(Note::Help(reason.to_string())),
+                ),
+                None => notify::withdraw_help(display.id),
+            }
+            // An agent left windows on its display: tell the user once.
+            if display.owner.is_some() && display.is_ended() && !self.ended.contains(&display.id) {
+                let windows = windows::on_display(display.id).len();
+                let note = match display.ended {
+                    Some(EndReason::Disconnected) => Note::Disconnected { windows },
+                    _ => Note::Review { windows },
+                };
+                if windows > 0 && display.ended != Some(EndReason::ClosedByUser) {
+                    notify::update(display.id, display.agent_name(), task, Some(note));
+                }
+            }
         }
         let gone: Vec<DisplayId> = self.known.difference(&ids).copied().collect();
         for id in &gone {
-            notify::update(*id, "", None);
+            notify::update(*id, "", "", None);
         }
         let new: Vec<(DisplayId, (f64, f64))> = core
             .displays
@@ -627,6 +675,99 @@ impl Shell {
             // clicks and moves notify far more often.
             self.refresh_counts(cx);
         }
+        self.sync_card(cx);
+    }
+
+    // MARK: Help Card
+
+    /// Show the Help Card for the first open Help Request the user hasn't
+    /// put off, or hide it. It steps aside for Peek, and for the Viewer
+    /// showing that display.
+    fn sync_card(&mut self, cx: &mut Context<Self>) {
+        let Some((card, window)) = self.card.clone() else {
+            return;
+        };
+        let core = self.core.clone();
+        let core = core.read(cx);
+        self.card_later.retain(|id, reason| {
+            core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
+        });
+        let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
+        let want = core
+            .displays
+            .list
+            .iter()
+            .filter(|_| !self.peek_shown)
+            .find(|d| {
+                d.is_live()
+                    && !d.takeover
+                    && viewing != Some(d.id)
+                    && d.help_request
+                        .as_ref()
+                        .is_some_and(|r| self.card_later.get(&d.id) != Some(r))
+            })
+            .map(|d| (d.id, (d.width, d.height)));
+        if want.map(|w| w.0) == self.card_shown {
+            return;
+        }
+        if let Some(old) = self.card_shown.take() {
+            self.streams
+                .update(cx, |s, cx| s.want(old, "card", 0, (0, 0), cx));
+        }
+        let Some((id, size)) = want else {
+            native::order_out(&window);
+            return;
+        };
+        let _ = card.update(cx, |card, _, cx| {
+            card.display = Some(id);
+            cx.notify();
+        });
+        self.streams.update(cx, |s, cx| {
+            s.want(id, "card", 4, thumbnail_pixels(size), cx)
+        });
+        let Some((screen, _)) = self.host_screen() else {
+            return;
+        };
+        let (w, h) = (
+            f64::from(help_card::WIDTH),
+            f64::from(help_card::height(size)),
+        );
+        let anchor = self.anchor();
+        let (mid, top) = (
+            anchor.origin.x + anchor.size.width / 2.0,
+            anchor.origin.y - 6.0,
+        );
+        let x = (mid - w / 2.0)
+            .min(screen.origin.x + screen.size.width - w - 8.0)
+            .max(screen.origin.x + 8.0);
+        let frame = rect(x.round(), (top - h).round(), w, h);
+        native::set_alpha(&window, 0.0);
+        native::set_frame(&window, offset(frame, 10.0));
+        native::order_front(&window);
+        native::animate(&window, frame, 1.0, 0.24);
+        self.card_shown = Some(id);
+    }
+
+    /// A click on the Help Card's picture opens the display, as a
+    /// notification does.
+    pub fn card_open(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        self.hide_peek(cx);
+        self.open_viewer(id, cx);
+    }
+
+    /// Later: put this Help Request off. The orange icon and Peek still
+    /// show it; a new request from the display brings the card back.
+    pub fn card_later(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        if let Some(reason) = self
+            .core
+            .read(cx)
+            .displays
+            .get(id)
+            .and_then(|d| d.help_request.clone())
+        {
+            self.card_later.insert(id, reason);
+        }
+        self.sync_card(cx);
     }
 
     /// Window counts for the status lines.
@@ -835,6 +976,7 @@ impl Shell {
         }
         self.peek_shown = true;
         self.refresh_counts(cx);
+        self.sync_card(cx);
     }
 
     pub fn hide_peek(&mut self, cx: &mut Context<Self>) {
@@ -849,6 +991,7 @@ impl Shell {
             return;
         }
         self.peek_shown = false;
+        self.sync_card(cx);
         self.peek_generation += 1;
         let generation = self.peek_generation;
         let Some((_, window)) = self.peek.clone() else {
@@ -1056,6 +1199,7 @@ impl Shell {
             });
         }
         self.viewer_open = true;
+        self.sync_card(cx);
         // Until the open animation lands, the window's frame is in flight.
         self.resting = Some(frame);
         self.viewer_settled_at = Instant::now() + Duration::from_millis(460);
@@ -1091,6 +1235,7 @@ impl Shell {
         }
         self.remember_resting(&window);
         self.viewer_open = false;
+        self.sync_card(cx);
         viewer_input::show(None);
         if let Some(id) = self.viewer_display {
             self.streams
@@ -1228,6 +1373,10 @@ impl Shell {
                 60.0,
             ),
             "assist-hide" => assist::hide(),
+            // The Help Card's buttons, as a click would press them.
+            "card-later" => self.card_later(id, cx),
+            "card-take-over" => self.open_for_help(id, cx),
+            "card-open" => self.card_open(id, cx),
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "click" => self.native(Native::IconClicked { right: false }, cx),
             "menu" => self.status_menu(),
@@ -1236,7 +1385,9 @@ impl Shell {
             "create" => self.create_display(cx),
             "dismiss" => self.dismiss(id, cx),
             "primary" => self.primary(id, cx),
-            "windows" => self.windows_menu(id, None, cx),
+            "give" => self.window_menu(id, WindowMenu::Give, None, cx),
+            "take-back" => self.window_menu(id, WindowMenu::TakeBack, None, cx),
+            "more" => self.window_menu(id, WindowMenu::More, None, cx),
             "help" => self.open_for_help(id, cx),
             "answer" => {
                 let Some((viewer, _)) = self.viewer.clone() else {
@@ -1339,74 +1490,71 @@ impl Shell {
         self.icon.pop_up(menu.into_native());
     }
 
-    /// 窗口 menu: hand one of the user's windows over, take one back, or
-    /// close the display.
-    /// `button` is where the 窗口 button is in the Viewer; the menu drops
-    /// from its bottom-left corner, or from the pointer without one.
-    pub fn windows_menu(
+    /// One of the Viewer header's menus: the user's windows to give the
+    /// agent, the display's windows to take back, or closing the display.
+    /// `button` is where its button is in the Viewer; the menu drops from
+    /// its bottom-left corner, or from the pointer without one.
+    pub fn window_menu(
         &mut self,
         id: DisplayId,
+        which: WindowMenu,
         button: Option<gpui::Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
         let core = self.core.read(cx);
-        let Some(display) = core.displays.get(id) else {
+        if core.displays.get(id).is_none() {
             return;
-        };
-        let agent_screens: Vec<Rect> = core
-            .displays
-            .list
-            .iter()
-            .map(|d| cg::display_bounds(d.id))
-            .collect();
-        let menu = native::Menu::new(t("Windows", "窗口"));
-
-        let hand = native::Menu::new("");
-        for window in windows::all()
-            .into_iter()
-            .filter(|w| !agent_screens.iter().any(|s| s.intersects(&w.bounds)))
-        {
-            let item = hand.action(
-                &name(&window.app, &window.title),
-                MenuAction::HandOver {
-                    display: id,
-                    pid: window.target.pid,
-                    window: window.target.window_id,
-                },
-            );
-            native::set_app_icon(&item, window.target.pid);
         }
-        if hand.is_empty() {
-            hand.disabled(t("No Windows on Your Desktop", "你的桌面上没有窗口"));
+        let menu = native::Menu::new("");
+        match which {
+            WindowMenu::Give => {
+                let agent_screens: Vec<Rect> = core
+                    .displays
+                    .list
+                    .iter()
+                    .map(|d| cg::display_bounds(d.id))
+                    .collect();
+                for window in windows::all()
+                    .into_iter()
+                    .filter(|w| !agent_screens.iter().any(|s| s.intersects(&w.bounds)))
+                {
+                    let item = menu.action(
+                        &name(&window.app, &window.title),
+                        MenuAction::HandOver {
+                            display: id,
+                            pid: window.target.pid,
+                            window: window.target.window_id,
+                        },
+                    );
+                    native::set_app_icon(&item, window.target.pid);
+                }
+                if menu.is_empty() {
+                    menu.disabled(t("No Windows on Your Desktop", "你的桌面上没有窗口"));
+                }
+            }
+            WindowMenu::TakeBack => {
+                for window in windows::on_display(id) {
+                    let item = menu.action(
+                        &name(&window.app, &window.title),
+                        MenuAction::TakeBack {
+                            display: id,
+                            pid: window.target.pid,
+                            window: window.target.window_id,
+                        },
+                    );
+                    native::set_app_icon(&item, window.target.pid);
+                }
+                if menu.is_empty() {
+                    menu.disabled(t("No Windows on This Display", "这块显示器上没有窗口"));
+                }
+            }
+            WindowMenu::More => {
+                menu.action(
+                    t("Close Display…", "关闭显示器…"),
+                    MenuAction::Dismiss { display: id },
+                );
+            }
         }
-        let title = if display.owner.is_none() {
-            t("Move to This Display", "放到这块显示器上").to_string()
-        } else {
-            tf!("Hand Over to {}", "交给 {}", display.agent_name())
-        };
-        menu.submenu(&title, hand).setEnabled(!display.is_ended());
-
-        let back = native::Menu::new("");
-        for window in windows::on_display(id) {
-            let item = back.action(
-                &name(&window.app, &window.title),
-                MenuAction::TakeBack {
-                    display: id,
-                    pid: window.target.pid,
-                    window: window.target.window_id,
-                },
-            );
-            native::set_app_icon(&item, window.target.pid);
-        }
-        if back.is_empty() {
-            back.disabled(t("No Windows on This Display", "这块显示器上没有窗口"));
-        }
-        menu.submenu(t("Take Back Window", "取回窗口"), back);
-        menu.separator();
-        menu.action(
-            t("Close Display…", "关闭显示器…"),
-            MenuAction::Dismiss { display: id },
-        );
         let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
             let frame = native::frame(window);
             (
@@ -1855,6 +2003,33 @@ impl Shell {
         assist::hide();
     }
 
+    /// macOS said whether Sidescreen may notify. People who finished setup
+    /// before notifications existed get macOS's prompt once, at launch.
+    fn notification_auth(&mut self, auth: notify::Auth, cx: &mut Context<Self>) {
+        let first = self.notifications == notify::Auth::Unknown;
+        if auth == self.notifications {
+            return;
+        }
+        self.notifications = auth;
+        if first && auth == notify::Auth::NotAsked && self.permissions.complete() {
+            notify::request();
+        }
+        self.push_setup(cx);
+    }
+
+    /// The setup window's button for notifications: macOS's prompt, or its
+    /// Notifications pane once the user has answered.
+    pub fn allow_notifications(&mut self) {
+        match self.notifications {
+            notify::Auth::Denied => {
+                let _ = std::process::Command::new("/usr/bin/open")
+                    .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+                    .spawn();
+            }
+            _ => notify::request(),
+        }
+    }
+
     /// The user clicked 开启… for `p`: the system prompt when macOS still
     /// shows one, else the pane, with the helper pinned to it.
     pub fn grant(&mut self, p: Permission, cx: &mut Context<Self>) {
@@ -1985,9 +2160,11 @@ impl Shell {
         let connecting = self.connecting;
         let Some(handle) = self.setup else { return };
         let registered = self.registered.clone();
+        let notifications = self.notifications;
         if handle
             .update(cx, |setup, _, cx| {
                 setup.status = status;
+                setup.notifications = notifications;
                 setup.waiting = waiting;
                 setup.restart = restart;
                 setup.agent = agent;
@@ -2011,6 +2188,10 @@ impl Shell {
         }
         let now = permissions::status();
         let before = self.permissions;
+        if self.setup.is_some() {
+            // The user may answer in System Settings.
+            notify::check();
+        }
         if now == before {
             self.recheck_capture(cx);
             self.push_setup(cx);

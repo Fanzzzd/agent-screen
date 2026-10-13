@@ -8,6 +8,7 @@
 use super::shell::{Shell, tell};
 use super::theme::{self, Theme};
 use crate::i18n::t;
+use crate::mac::notify;
 use crate::mac::permissions::{Permission, Status};
 use gpui::{
     App, Context, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -35,6 +36,8 @@ pub struct Setup {
     pub connecting: bool,
     /// Clients whose config has Sidescreen's server.
     pub registered: Vec<&'static str>,
+    /// Whether macOS lets Sidescreen notify.
+    pub notifications: notify::Auth,
     icon: Option<Arc<gpui::Image>>,
 }
 
@@ -50,6 +53,7 @@ impl Setup {
             agent: None,
             connecting: false,
             registered: Vec::new(),
+            notifications: notify::Auth::Unknown,
             icon,
         }
     }
@@ -98,6 +102,7 @@ impl Render for Setup {
             .map(|p| self.row(p, &theme).into_any_element())
             .into_iter()
             .collect();
+        rows.push(self.notifications_row(&theme).into_any_element());
         rows.push(self.agent_row(&theme).into_any_element());
         let shell = self.shell.clone();
         let content = div()
@@ -196,6 +201,94 @@ impl Render for Setup {
 }
 
 impl Setup {
+    /// Notifications: optional, so setup is complete without them.
+    fn notifications_row(&self, theme: &Theme) -> impl IntoElement {
+        let green: Hsla = gpui::rgb(0x30d158).into();
+        let shell = self.shell.clone();
+        let on = self.notifications == notify::Auth::Allowed;
+        let action: gpui::AnyElement = match self.notifications {
+            notify::Auth::Allowed => div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(green)
+                .child(
+                    svg()
+                        .path("icons/check.svg")
+                        .size(px(14.))
+                        .text_color(green),
+                )
+                .child(t("On", "已开启"))
+                .into_any_element(),
+            notify::Auth::Unknown => div().into_any_element(),
+            auth => button(
+                "setup-notifications",
+                if auth == notify::Auth::Denied {
+                    t("Open Settings…", "打开设置…")
+                } else {
+                    t("Allow…", "允许…")
+                }
+                .into(),
+                (self.status.complete() && auth == notify::Auth::NotAsked).then_some(theme.accent),
+                theme,
+                move |cx| tell(&shell, cx, |shell, _| shell.allow_notifications()),
+            )
+            .into_any_element(),
+        };
+        let detail = if self.notifications == notify::Auth::Denied {
+            t(
+                "Off in System Settings. Turn on Allow Notifications for Sidescreen.",
+                "在系统设置里关着。打开 Sidescreen 的“允许通知”。",
+            )
+        } else {
+            t(
+                "Tells you when an agent needs your help or is done with its display",
+                "agent 需要你帮忙、或用完显示器时提醒你",
+            )
+        };
+        let color = if on { green } else { theme.accent };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .py(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(34.))
+                    .rounded(px(9.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(color.opacity(if on { 0.18 } else { 0.16 }))
+                    .child(svg().path("icons/bell.svg").size(px(18.)).text_color(color)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t("Notifications", "通知")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.secondary)
+                            .child(detail),
+                    ),
+            )
+            .child(action)
+    }
+
     /// Connecting Claude Code and Codex, the step after the permissions.
     fn agent_row(&self, theme: &Theme) -> impl IntoElement {
         let green: Hsla = gpui::rgb(0x30d158).into();

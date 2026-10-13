@@ -49,6 +49,7 @@ SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts    # Takeover through the
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/shared.ts      # an app you and an agent both use: its keys reach only its window
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/openpanel.ts   # a file Open panel: keys, clicks, window state, picking a file by path
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/browsers.ts    # Safari: the first click, URLs in a running browser, a select menu
+SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/helpcard.ts    # the Help Card: shows, Later, comes back, steps aside for the Viewer and Takeover
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_display and launch_app take
 ```
 

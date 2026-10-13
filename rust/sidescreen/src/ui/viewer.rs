@@ -42,8 +42,9 @@ pub struct Sheet {
 }
 
 thread_local! {
-    /// The 窗口 button's bounds in the window, from the last paint.
-    static WINDOWS_BUTTON: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// The header's menu buttons' bounds in the window, from the last
+    /// paint, so each menu drops from its button.
+    static MENU_BUTTONS: Cell<[Option<Bounds<Pixels>>; 3]> = const { Cell::new([None; 3]) };
     /// The display image within the screen area, from the last paint:
     /// left and top offsets and width, in window points.
     static IMAGE: Cell<Option<(f32, f32, f32)>> = const { Cell::new(None) };
@@ -208,7 +209,6 @@ impl Render for Viewer {
             status_line,
             status.kind,
             &agent,
-            self.count,
             &theme,
             &self.shell,
         );
@@ -272,7 +272,6 @@ fn header(
     status: gpui::AnyElement,
     kind: Kind,
     agent: &str,
-    count: usize,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
 ) -> impl IntoElement {
@@ -296,7 +295,6 @@ fn header(
         )),
     };
     let primary_shell = shell.clone();
-    let windows_shell = shell.clone();
     let close_shell = shell.clone();
     div()
         .id("header")
@@ -333,33 +331,35 @@ fn header(
         })
         .child(
             div()
-                .relative()
                 .flex_none()
-                .child(button(
-                    "windows",
-                    tf!("Windows {count}", "窗口 {count}"),
-                    Some("icons/windows.svg"),
-                    None,
-                    theme,
-                    move |cx| {
-                        let below = WINDOWS_BUTTON.with(Cell::get);
-                        tell(&windows_shell, cx, move |shell, cx| {
-                            shell.windows_menu(id, below, cx)
-                        })
+                .h(px(28.))
+                .flex()
+                .rounded_full()
+                .overflow_hidden()
+                .bg(theme.control)
+                .child(menu_button(
+                    id,
+                    WindowMenu::Give,
+                    match kind {
+                        Kind::Manual => t("Move Here", "放进来"),
+                        _ => t("Give", "交给"),
                     },
+                    // An ended display takes no more windows.
+                    !matches!(kind, Kind::Review | Kind::Disconnected),
+                    theme,
+                    shell,
                 ))
-                // Where the button is, so its menu drops from it.
-                .child(
-                    canvas(
-                        |bounds, _, _| WINDOWS_BUTTON.with(|b| b.set(Some(bounds))),
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full(),
-                ),
+                .child(div().w(px(1.)).my(px(6.)).bg(theme.secondary.opacity(0.25)))
+                .child(menu_button(
+                    id,
+                    WindowMenu::TakeBack,
+                    t("Take Back", "取回"),
+                    true,
+                    theme,
+                    shell,
+                )),
         )
+        .child(menu_button(id, WindowMenu::More, "", true, theme, shell))
         .child(icon_button(
             "collapse",
             "icons/chevron-up.svg",
@@ -367,6 +367,101 @@ fn header(
             theme,
             move |cx| tell(&close_shell, cx, |shell, cx| shell.close_viewer(cx)),
         ))
+}
+
+/// The header's three menus: the user's windows to give the agent, the
+/// display's windows to take back, and the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMenu {
+    Give,
+    TakeBack,
+    More,
+}
+
+impl WindowMenu {
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Where its button was at the last paint.
+    pub fn button(self) -> Option<Bounds<Pixels>> {
+        MENU_BUTTONS.with(Cell::get)[self.index()]
+    }
+}
+
+/// A button that drops `menu`: half of the Give | Take Back pair, or the
+/// round ⋯ when `title` is empty.
+fn menu_button(
+    id: DisplayId,
+    menu: WindowMenu,
+    title: &'static str,
+    enabled: bool,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> impl IntoElement {
+    let (element_id, icon, hint) = match menu {
+        WindowMenu::Give => ("give", "icons/give.svg", title),
+        WindowMenu::TakeBack => ("take-back", "icons/take-back.svg", title),
+        WindowMenu::More => ("more", "icons/more.svg", t("More", "更多")),
+    };
+    let fg = if enabled {
+        theme.label
+    } else {
+        theme.secondary.opacity(0.6)
+    };
+    let shell = shell.clone();
+    let round = title.is_empty();
+    div()
+        .id(element_id)
+        .relative()
+        .role(Role::Button)
+        .aria_label(hint)
+        .flex_none()
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .when(round, |d| {
+            d.w(px(28.))
+                .justify_center()
+                .rounded_full()
+                .bg(theme.control)
+                .tooltip(move |_, cx| super::shell::hint(hint, cx))
+                .tooltip_show_delay(super::shell::HINT_DELAY)
+        })
+        .when(!round, |d| d.px(px(12.)))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(fg)
+        .when(enabled, |d| {
+            d.hover(|s| s.bg(theme.control_hover))
+                .active(|s| s.opacity(0.7))
+                .on_click(move |_, _, cx| {
+                    let below = menu.button();
+                    tell(&shell, cx, move |shell, cx| {
+                        shell.window_menu(id, menu, below, cx)
+                    })
+                })
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(svg().path(icon).flex_none().size(px(14.)).text_color(fg))
+        .when(!round, |d| d.child(title))
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    MENU_BUTTONS.with(|b| {
+                        let mut all = b.get();
+                        all[menu.index()] = Some(bounds);
+                        b.set(all);
+                    })
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
 }
 
 /// A capsule button. `prominent` fills it with that color.

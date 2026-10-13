@@ -13,9 +13,9 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 - **A display per agent session.** Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.
 - **Peek.** Hover the menu bar icon to see every agent's screen live.
 - **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.
-- **Help Request.** An agent stuck on a login or a captcha asks for you with a notification, then waits.
+- **Help Request.** An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.
 - **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.
-- **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back from the Windows menu.
+- **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.
 
 | | Sidescreen | Built-in computer use | A virtual machine |
 | --- | --- | --- | --- |
@@ -63,9 +63,10 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 
 - **Peek.** Hover the menu bar icon, or click it to keep Peek up. Right-click it for the menu. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
 - **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
-- **Help Request.** `request_help` sends a notification and shows the reason in Peek and the Viewer. Clicking the notification opens the display in Takeover.
+- **Help Request.** `request_help` drops a card from the menu bar icon with the display's picture and the agent's reason, and posts a notification. Take Over, on the card or the notification, opens the display in Takeover. Clicking the picture or the notification only opens it. Later puts the card away; the icon stays orange.
+- **Notifications.** Besides Help Requests, Sidescreen tells you when an agent leaves windows on its display, by finishing or by disconnecting. Allow them in the setup window.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
-- **Handover.** Drag one of your windows onto the Viewer, or pick it under Windows ▸ Hand Over to … in the Viewer's header. Windows ▸ Take Back Window brings any window back. A handed-over window returns to where it was.
+- **Handover.** Drag one of your windows onto the Viewer, or pick it under Give in the Viewer's header. Take Back brings any window back. A handed-over window returns to where it was. ⋯ has Close Display….
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Closing a display** lists its windows with what the agent suggested for each, keep or close, and you can change any of them. Esc cancels, ⌘Return confirms. Quitting Sidescreen applies the same plan without asking.
 
