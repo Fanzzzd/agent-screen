@@ -89,7 +89,7 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 
 ## Release
 
-CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, runs `bun run check` (oxlint, oxfmt and `tsc` over the test scripts), builds the release app on macOS 26, and starts that build on macOS 15.
+CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, runs `pnpm run check` (oxlint, oxfmt and `tsc` over the test scripts), builds the release app on macOS 26, and starts that build on macOS 15.
 
 Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 

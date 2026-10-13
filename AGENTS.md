@@ -40,10 +40,10 @@ Before committing, run what CI runs:
 
 ```sh
 (cd rust && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
-bun install --frozen-lockfile && bun run check
+pnpm install --frozen-lockfile && pnpm run check
 ```
 
-`bun run check` is oxlint (type-aware), `oxfmt --check .` and `tsc` over `rust/tests`. `bun run fmt` formats. The lint config is the one plany and openmail use. `no-unsafe-type-assertion` warnings are allowed only where JSON comes in from the socket, an MCP reply or a child process.
+`pnpm run check` is oxlint (type-aware), `oxfmt --check .` and `tsc` over `rust/tests`. `pnpm run fmt` formats. pnpm installs the tools; the test scripts themselves run under bun, since they use its APIs. The lint config is the one plany and openmail use. `no-unsafe-type-assertion` warnings are allowed only where JSON comes in from the socket, an MCP reply or a child process.
 
 ## Delivery
 
