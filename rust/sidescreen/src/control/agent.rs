@@ -803,6 +803,21 @@ async fn handle_one(
             .map_err(ControlError::failed)?;
             Ok(json!({}))
         }
+        // Test hook: the user hands a window over from the Windows menu.
+        "debugHandOver" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let window = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            shell
+                .update(cx, |shell, cx| {
+                    shell.hand_over(window.target, Some(window.bounds), id, cx)
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({}))
+        }
         // Test hook: the user takes a window back from the Windows menu.
         "debugTakeBack" if debug_methods() => {
             let id = display(&core, &p, false, cx)?;

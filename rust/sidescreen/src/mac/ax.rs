@@ -224,6 +224,41 @@ pub fn window_element(target: WindowTarget) -> Option<Element> {
         .find(|w| window_id(w) == Some(target.window_id))
 }
 
+/// The window's element, or for one the app doesn't list, as a file panel
+/// a browser shows as a sheet of one of its windows, the sheet or window
+/// at its center. For reading and typing into it, not for moving it.
+pub fn window_or_sheet(target: WindowTarget) -> Option<Element> {
+    window_element(target).or_else(|| sheet_element(target))
+}
+
+fn sheet_element(target: WindowTarget) -> Option<Element> {
+    let bounds = super::cg::on_screen_windows()
+        .into_iter()
+        .find(|w| w.target == target)?
+        .bounds;
+    let (x, y) = bounds.mid();
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(target.pid).copy_element_at_position(
+            x as f32,
+            y as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    for _ in 0..64 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXSheet" | "AXWindow") => return Some(element),
+            _ => element = element_attribute(&element, "AXParent")?,
+        }
+    }
+    None
+}
+
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window. WindowServer moves windows for
 /// real mouse drags only, so agent drags there move it through here.
@@ -351,7 +386,7 @@ unsafe impl Send for Snapshot {}
 /// `origin` is the display's top-left corner; `scale` turns its points
 /// into screenshot pixels.
 pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<Snapshot> {
-    let window = window_element(target)?;
+    let window = window_or_sheet(target)?;
     // Chromium and Electron apps only publish their web content tree once a
     // client asks for it. Other apps ignore the attribute.
     set_attribute(
@@ -470,7 +505,7 @@ pub fn select_all(target: WindowTarget) -> bool {
                 .is_some_and(|id| id == target.window_id)
         })
         .or_else(|| {
-            let window = window_element(target)?;
+            let window = window_or_sheet(target)?;
             let field = first_text(&window, 0, &mut 0)?;
             set_attribute(&field, "AXFocused", CFBoolean::new(true));
             Some(field)

@@ -45,10 +45,11 @@ bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts      # what agents get back, and nothing on your screen
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts    # Takeover through the Viewer
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/shared.ts      # an app you and an agent both use: its keys reach only its window
+SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/openpanel.ts   # a file Open panel: keys, clicks, window state, picking a file by path
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_display and launch_app take
 ```
 
-`robust.ts`, `timing.ts` and `shared.ts` skip when TextEdit is already open, since it may be yours. `robust.ts` and `timing.ts` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust.ts` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
+`robust.ts`, `timing.ts` and `shared.ts` skip when TextEdit is already open, and `openpanel.ts` when Preview is, since it may be yours. `robust.ts` and `timing.ts` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust.ts` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
 
 `timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, two debug-build runs on 2026-10-12 at load average 33 to 50. This Mac rarely drops below 20, so the numbers include that contention:
 

@@ -78,8 +78,37 @@ pub struct WindowInfo {
 
 /// On-screen windows of other processes, front to back, desktop elements left out.
 pub fn on_screen_windows() -> Vec<WindowInfo> {
-    let options =
-        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+    window_list(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
+}
+
+/// Windows that draw another app's panel out of process, as the file Open
+/// and Save panels do. The app owns an empty window in front; WindowServer
+/// sends input to this one, which it lists as off screen, at the same
+/// place.
+pub fn remote_panels() -> Vec<WindowInfo> {
+    let mut services: Vec<(i32, bool)> = Vec::new();
+    window_list(CGWindowListOption::OptionAll)
+        .into_iter()
+        .filter(|w| w.layer == 0 && w.bounds.width > 100.0 && w.bounds.height > 100.0)
+        .filter(|w| {
+            let pid = w.target.pid;
+            if let Some(&(_, xpc)) = services.iter().find(|(p, _)| *p == pid) {
+                return xpc;
+            }
+            let xpc = is_xpc_service(pid);
+            services.push((pid, xpc));
+            xpc
+        })
+        .collect()
+}
+
+fn is_xpc_service(pid: i32) -> bool {
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    n > 0 && String::from_utf8_lossy(&path[..n as usize]).contains(".xpc/Contents/MacOS/")
+}
+
+fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
     let Some(list) = CGWindowListCopyWindowInfo(options, 0) else {
         return Vec::new();
     };

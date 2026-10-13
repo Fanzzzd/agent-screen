@@ -390,8 +390,8 @@ impl Forwarder {
         self.run(move |w| {
             let there: Vec<_> = hits()
                 .into_iter()
-                .filter(|h| h.layer == 0 && h.target.pid == pid && within.contains(h.bounds.mid()))
-                .map(|h| h.target)
+                .filter(|h| h.layer == 0 && h.host.pid == pid && within.contains(h.bounds.mid()))
+                .map(|h| h.host)
                 .collect();
             // The one last clicked, if it is still there.
             let target = w
@@ -580,6 +580,8 @@ struct Worker {
     /// The display's windows when keys last went out, to tell one a
     /// shortcut opened since.
     known: Vec<u32>,
+    /// File panels clicked since they opened: those take keys.
+    pressed_panels: Vec<u32>,
 
     gesture: Option<Gesture>,
     cache: Option<(Vec<Hit>, Instant)>,
@@ -588,7 +590,10 @@ struct Worker {
 
 #[derive(Clone, Copy)]
 struct Hit {
+    /// Where input goes: for a file panel, the process that draws it.
     target: WindowTarget,
+    /// The app's own window: for a file panel, the empty one in front.
+    host: WindowTarget,
     bounds: Rect,
     layer: i64,
 }
@@ -600,6 +605,7 @@ impl Worker {
             focused: None,
             restore: Vec::new(),
             known: Vec::new(),
+            pressed_panels: Vec::new(),
 
             gesture: None,
             cache: None,
@@ -704,6 +710,9 @@ impl Worker {
         };
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
+        if hit.target != hit.host {
+            self.pressed_panels.push(target.window_id);
+        }
         {
             let _held = AppKeys::hold(target.pid);
             self.focus(target);
@@ -713,7 +722,7 @@ impl Worker {
             self.known = hits()
                 .iter()
                 .filter(|h| h.layer == 0 && within.contains(h.bounds.mid()))
-                .map(|h| h.target.window_id)
+                .map(|h| h.host.window_id)
                 .collect();
         }
         let group = self.next_group();
@@ -896,6 +905,36 @@ impl Worker {
     /// Holds the app for this display's keys until the guard drops, so
     /// another session typing into the same app can't make its own window
     /// key in the middle.
+    /// A file panel takes keys only once clicked: no focus record makes
+    /// it key. Click the strip along its top edge, above its controls,
+    /// before its first keys.
+    fn wake_panel(&mut self, panel: Hit) {
+        let id = panel.target.window_id;
+        if self.pressed_panels.contains(&id) {
+            return;
+        }
+        let b = panel.bounds;
+        let at = (b.x + b.width / 2.0, b.y + 6.0);
+        log::debug!("input: waking file panel {:?} at {at:?}", panel.target);
+        self.send_focus(panel.target);
+        let group = self.next_group();
+        let none = CGEventFlags::empty();
+        let left = Button::Left;
+        self.post(
+            CGEventType::MouseMoved,
+            at,
+            panel.target,
+            left,
+            0,
+            group,
+            none,
+        );
+        self.post(left.down(), at, panel.target, left, 1, group, none);
+        self.post(left.up(), at, panel.target, left, 1, group, none);
+        thread::sleep(Duration::from_millis(50));
+        self.pressed_panels.push(id);
+    }
+
     fn focus_something(&mut self, within: Rect) -> Option<AppKeys> {
         let Some(target) = self.pick_for_keys(within) else {
             // The window left the display, as when the user took it back:
@@ -903,46 +942,50 @@ impl Worker {
             self.focused = None;
             return None;
         };
-        let held = AppKeys::hold(target.pid);
-        self.focus(target);
+        let held = AppKeys::hold(target.host.pid);
+        log::debug!("input: keys go to {:?} (app window {:?})", target.target, target.host);
+        if target.target != target.host {
+            self.wake_panel(target);
+        }
+        self.focus(target.target);
         Some(held)
     }
 
     /// The window on the display keys go to: the one last focused, or a
     /// window its app opened on the display since, as a shortcut such as
     /// cmd+n does, or else the topmost.
-    fn pick_for_keys(&mut self, within: Rect) -> Option<WindowTarget> {
+    fn pick_for_keys(&mut self, within: Rect) -> Option<Hit> {
         let list = hits();
+        // A panel shown again reuses its window, and needs waking again.
+        self.pressed_panels
+            .retain(|&id| list.iter().any(|h| h.target.window_id == id));
         let on: Vec<_> = list
             .iter()
             .filter(|h| within.contains(h.bounds.mid()))
             .collect();
         let cached = self
             .focused
-            .and_then(|t| list.iter().find(|h| h.target == t))
-            .filter(|h| within.intersects(&h.bounds))
-            .map(|h| h.target);
+            .and_then(|t| list.iter().find(|h| h.host == t || h.target == t))
+            .filter(|h| within.intersects(&h.bounds));
         // Documents only: a suggestions popup or panel is no new window.
         let opened = cached.and_then(|c| {
             on.iter()
                 .find(|h| {
                     h.layer == 0
-                        && h.target.pid == c.pid
-                        && !self.known.contains(&h.target.window_id)
+                        && h.host.pid == c.host.pid
+                        && !self.known.contains(&h.host.window_id)
                 })
-                .map(|h| h.target)
+                .map(|h| **h)
         });
+        let cached = cached.copied();
         self.known = on
             .iter()
             .filter(|h| h.layer == 0)
-            .map(|h| h.target.window_id)
+            .map(|h| h.host.window_id)
             .collect();
-        opened.or(cached).or_else(|| {
-            on.iter()
-                .find(|h| h.layer == 0)
-                .or(on.first())
-                .map(|h| h.target)
-        })
+        opened
+            .or(cached)
+            .or_else(|| on.iter().find(|h| h.layer == 0).or(on.first()).map(|h| **h))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1037,7 +1080,7 @@ fn wheel_steps(delta: f64) -> i32 {
 fn hits() -> Vec<Hit> {
     let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
     let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
-    cg::on_screen_windows()
+    let mut list = cg::on_screen_windows()
         .into_iter()
         .filter(|w| {
             // From 1000 up are overlays that take no clicks, such as the
@@ -1050,11 +1093,28 @@ fn hits() -> Vec<Hit> {
                 && w.alpha > 0.0
         })
         .map(|w| Hit {
+            host: w.target,
             target: w.target,
             bounds: w.bounds,
             layer: w.layer,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // An app's file panel is drawn by another process, behind an empty
+    // window of the app's: input sent to the app never reaches it.
+    let panels = cg::remote_panels();
+    for hit in &mut list {
+        let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
+        if let Some(panel) = panels.iter().find(|p| {
+            p.target.pid != hit.target.pid
+                && same(p.bounds.x, hit.bounds.x)
+                && same(p.bounds.y, hit.bounds.y)
+                && same(p.bounds.width, hit.bounds.width)
+                && same(p.bounds.height, hit.bounds.height)
+        }) {
+            hit.target = panel.target;
+        }
+    }
+    list
 }
 
 /// A key chord through the public API, for apps that need no focus
