@@ -17,12 +17,12 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 - **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.
 - **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.
 
-| | Sidescreen | Built-in computer use | A virtual machine |
-| --- | --- | --- | --- |
-| You keep your mouse and keyboard | Yes | No | Yes |
-| Works with your real apps and logins | Yes | Yes | No, set them up again |
-| Several agents at once | Yes, one display each | No | One VM each |
-| Watch and step in | Menu bar, one click | Watch your own screen | VM window |
+|                                      | Sidescreen            | Built-in computer use | A virtual machine     |
+| ------------------------------------ | --------------------- | --------------------- | --------------------- |
+| You keep your mouse and keyboard     | Yes                   | No                    | Yes                   |
+| Works with your real apps and logins | Yes                   | Yes                   | No, set them up again |
+| Several agents at once               | Yes, one display each | No                    | One VM each           |
+| Watch and step in                    | Menu bar, one click   | Watch your own screen | VM window             |
 
 ## Install
 
@@ -48,14 +48,14 @@ Then ask your agent something like "Use Sidescreen to open Calculator on your ow
 
 ## Agent tools
 
-| Tool | What it does |
-| --- | --- |
-| `create_display`, `end_display` | Get the session's display, one per session, or finish with it. |
-| `launch_app`, `place_window`, `list_windows` | Open apps on the display and list its windows. `list_windows` with `strays: true` lists windows of the agent's apps that opened elsewhere, for `place_window`. |
-| `computer` | Anthropic-style actions on the whole display. Every action except `wait` and `cursor_position` returns a screenshot. |
-| `get_window_state`, `act_on_element` | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. |
-| `set_disposition` | Keep or close a window when the user closes the display. |
-| `wait_for_control`, `request_help` | Wait out a Takeover, or ask the user to step in. |
+| Tool                                         | What it does                                                                                                                                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_display`, `end_display`              | Get the session's display, one per session, or finish with it.                                                                                                                             |
+| `launch_app`, `place_window`, `list_windows` | Open apps on the display and list its windows. `list_windows` with `strays: true` lists windows of the agent's apps that opened elsewhere, for `place_window`.                             |
+| `computer`                                   | Anthropic-style actions on the whole display. Every action except `wait` and `cursor_position` returns a screenshot.                                                                       |
+| `get_window_state`, `act_on_element`         | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. |
+| `set_disposition`                            | Keep or close a window when the user closes the display.                                                                                                                                   |
+| `wait_for_control`, `request_help`           | Wait out a Takeover, or ask the user to step in.                                                                                                                                           |
 
 A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/agents/AGENTS.md) is a convention you can paste into a project's `AGENTS.md` or `CLAUDE.md`.
 

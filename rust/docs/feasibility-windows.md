@@ -12,21 +12,21 @@ and modern apps ignore posted mouse messages.
 
 ## Capabilities
 
-| Capability | Feasibility | Mechanism |
-|---|---|---|
-| Create and remove an agent display at runtime | Works, with a driver install | Indirect Display Driver (IddCx), with IOCTL add/remove |
-| Install without test-signing | Partial | Attestation signing under our own EV cert |
-| Keep the cursor out | Partial | Corner-only placement plus a `WH_MOUSE_LL` hook |
-| Capture at 60 fps | Works | `Windows.Graphics.Capture` `CreateForMonitor` |
-| No yellow border | Works on Windows 11 | `IsBorderRequired = false` |
-| Mouse to a background window | Partial | `PostMessage`: Win32 yes, Chromium/Electron/WinUI unreliable |
-| Keyboard to a background window | Blocked in general | Keyboard input goes to the foreground window only |
-| Semantic actions | Works for many apps | UI Automation patterns (Invoke, Value, Scroll) |
-| Separate session for the agent | Blocked for third parties | Windows Agent Workspace is a private preview |
-| Move and enumerate windows | Works | `SetWindowPos`, `EnumWindows`, `MonitorFromWindow` |
-| Accessibility tree | Works | UI Automation |
-| Tray | Works | `tray-icon` crate |
-| Panel that never takes focus | Needs a GPUI patch | `PopUp` lacks `WS_EX_NOACTIVATE`; `WM_MOUSEACTIVATE` returns `MA_ACTIVATE` |
+| Capability                                    | Feasibility                  | Mechanism                                                                  |
+| --------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------- |
+| Create and remove an agent display at runtime | Works, with a driver install | Indirect Display Driver (IddCx), with IOCTL add/remove                     |
+| Install without test-signing                  | Partial                      | Attestation signing under our own EV cert                                  |
+| Keep the cursor out                           | Partial                      | Corner-only placement plus a `WH_MOUSE_LL` hook                            |
+| Capture at 60 fps                             | Works                        | `Windows.Graphics.Capture` `CreateForMonitor`                              |
+| No yellow border                              | Works on Windows 11          | `IsBorderRequired = false`                                                 |
+| Mouse to a background window                  | Partial                      | `PostMessage`: Win32 yes, Chromium/Electron/WinUI unreliable               |
+| Keyboard to a background window               | Blocked in general           | Keyboard input goes to the foreground window only                          |
+| Semantic actions                              | Works for many apps          | UI Automation patterns (Invoke, Value, Scroll)                             |
+| Separate session for the agent                | Blocked for third parties    | Windows Agent Workspace is a private preview                               |
+| Move and enumerate windows                    | Works                        | `SetWindowPos`, `EnumWindows`, `MonitorFromWindow`                         |
+| Accessibility tree                            | Works                        | UI Automation                                                              |
+| Tray                                          | Works                        | `tray-icon` crate                                                          |
+| Panel that never takes focus                  | Needs a GPUI patch           | `PopUp` lacks `WS_EX_NOACTIVATE`; `WM_MOUSEACTIVATE` returns `MA_ACTIVATE` |
 
 ## Drivers
 
@@ -126,17 +126,17 @@ https://support.microsoft.com/windows/experimental-agentic-features-a25ede8a-e4c
 
 ## Open-source building blocks (checked 2026-10-03)
 
-| Area | Choice | License | Why |
-| --- | --- | --- | --- |
-| Virtual display driver | Fork of [SudoVDA](https://github.com/SudoMaker/SudoVDA) | MIT / CC0 | The only open driver that adds and removes single monitors by IOCTL, keyed by a GUID per monitor. Inactive since 2025-04, so we would own the fork and sign it. |
-| Driver reference | [Microsoft IndirectDisplay sample](https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay) | MS-PL | The base every IddCx driver derives from. This is the lowest supported layer: write our own IddCx driver if the fork gets in the way. |
-| Driver in Rust (reading) | [virtual-display-rs](https://github.com/MolotovCherry/virtual-display-rs) | MIT | Shows an IddCx driver structured in Rust. Stale since 2024. |
-| Signing model | [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) via SignPath Foundation | MIT | Shows how an open-source driver gets signed for free. Its whole-driver reload on count changes does not fit our per-agent displays. |
-| Display topology | [libdisplaydevice](https://github.com/LizardByte/libdisplaydevice) | MIT | A C++ wrapper over the CCD API (`SetDisplayConfig`) for placing a monitor without disturbing the user's layout. |
-| Capture | [windows-capture](https://github.com/NiiightmareXD/windows-capture) | MIT | A Rust wrapper over Windows.Graphics.Capture; monitor capture works on IddCx monitors. |
-| Semantic input | [uiautomation-rs](https://github.com/leexgone/uiautomation-rs), or UIA through [windows-rs](https://github.com/microsoft/windows-rs) | Apache-2.0 / MIT | Invoke, Value, Toggle and Scroll patterns act without the cursor. |
-| Chromium and Electron input | [chromiumoxide](https://github.com/mattsse/chromiumoxide) | Apache-2.0 / MIT | CDP `Input.dispatch*`: no system cursor, no foreground needed. |
-| Tray | [tray-icon](https://github.com/tauri-apps/tray-icon) | Apache-2.0 / MIT | Shell_NotifyIcon. |
+| Area                        | Choice                                                                                                                               | License          | Why                                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Virtual display driver      | Fork of [SudoVDA](https://github.com/SudoMaker/SudoVDA)                                                                              | MIT / CC0        | The only open driver that adds and removes single monitors by IOCTL, keyed by a GUID per monitor. Inactive since 2025-04, so we would own the fork and sign it. |
+| Driver reference            | [Microsoft IndirectDisplay sample](https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay)              | MS-PL            | The base every IddCx driver derives from. This is the lowest supported layer: write our own IddCx driver if the fork gets in the way.                           |
+| Driver in Rust (reading)    | [virtual-display-rs](https://github.com/MolotovCherry/virtual-display-rs)                                                            | MIT              | Shows an IddCx driver structured in Rust. Stale since 2024.                                                                                                     |
+| Signing model               | [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) via SignPath Foundation                           | MIT              | Shows how an open-source driver gets signed for free. Its whole-driver reload on count changes does not fit our per-agent displays.                             |
+| Display topology            | [libdisplaydevice](https://github.com/LizardByte/libdisplaydevice)                                                                   | MIT              | A C++ wrapper over the CCD API (`SetDisplayConfig`) for placing a monitor without disturbing the user's layout.                                                 |
+| Capture                     | [windows-capture](https://github.com/NiiightmareXD/windows-capture)                                                                  | MIT              | A Rust wrapper over Windows.Graphics.Capture; monitor capture works on IddCx monitors.                                                                          |
+| Semantic input              | [uiautomation-rs](https://github.com/leexgone/uiautomation-rs), or UIA through [windows-rs](https://github.com/microsoft/windows-rs) | Apache-2.0 / MIT | Invoke, Value, Toggle and Scroll patterns act without the cursor.                                                                                               |
+| Chromium and Electron input | [chromiumoxide](https://github.com/mattsse/chromiumoxide)                                                                            | Apache-2.0 / MIT | CDP `Input.dispatch*`: no system cursor, no foreground needed.                                                                                                  |
+| Tray                        | [tray-icon](https://github.com/tauri-apps/tray-icon)                                                                                 | Apache-2.0 / MIT | Shell_NotifyIcon.                                                                                                                                               |
 
 Studied for design only: Sunshine and Apollo (GPL-3.0) for capture and the
 virtual display lifecycle; Apollo creates a SudoVDA display per stream, the

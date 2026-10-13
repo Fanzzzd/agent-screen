@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "ignorePatterns": [
+    "rust/target/**",
+    "CHANGELOG.md",
+    "bun.lock",
+    "**/Cargo.toml",
+    "docs/prototypes/**"
+  ]
+}

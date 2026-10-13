@@ -57,11 +57,11 @@ SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/timing.ts      # how long create_disp
 
 `timing.ts` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, two debug-build runs on 2026-10-12 at load average 33 to 50. This Mac rarely drops below 20, so the numbers include that contention:
 
-| | median | p90 |
-| --- | --- | --- |
-| `create_display` | 884 to 913 ms | 1040 to 1317 ms |
+|                                    | median          | p90             |
+| ---------------------------------- | --------------- | --------------- |
+| `create_display`                   | 884 to 913 ms   | 1040 to 1317 ms |
 | `launch_app` TextEdit, not running | 1035 to 1496 ms | 1237 to 1629 ms |
-| `launch_app` TextEdit, running | 585 to 598 ms | 673 to 1617 ms |
+| `launch_app` TextEdit, running     | 585 to 598 ms   | 673 to 1617 ms  |
 
 `create_display` breaks down in the debug log as: macOS creates the virtual display in 330 to 510 ms; WindowServer accepts its position on the first try, in 3 to 88 ms; the AeroSpace check adds 10 to 30 ms. The table's runs also lost 100 to 400 ms to the main thread, busy with what a new display sets off. Since 0.1.12 Sidescreen makes the display on a background thread, so Peek and the Viewer keep drawing, and parks it right after: the next run, at load 27, gave a 771 ms median and 1093 ms p90, with parking done on the first try every time. macOS's creation time is the floor.
 
@@ -81,7 +81,7 @@ for i in $(seq 10); do SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts | ta
 
 The scripts start `rust/target/Sidescreen Dev.app/Contents/MacOS/Sidescreen mcp`; `SIDESCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke.ts`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
-Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, menu, hide, select, viewer, collapse, create, dismiss, answer, primary, windows, help, focus, quit, setup, setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex) or stage, and a `displayId` where one applies. `debugViewer` returns the Viewer's frame and its display image in screen points, and whether the Viewer is the key window. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, menu, hide, select, viewer, collapse, create, dismiss, answer, primary, give, take-back, more, help, card-open, card-later, card-take-over, focus, quit, setup, setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex) or stage, and a `displayId` where one applies. `debugViewer` returns the Viewer's frame and its display image in screen points, and whether the Viewer is the key window. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Install a local build
 
@@ -89,7 +89,7 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQ
 
 ## Release
 
-CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, builds the release app on macOS 26, and starts that build on macOS 15.
+CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit tests on every push and pull request, runs `bun run check` (oxlint, oxfmt and `tsc` over the test scripts), builds the release app on macOS 26, and starts that build on macOS 15.
 
 Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 

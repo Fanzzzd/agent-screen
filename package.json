@@ -1,0 +1,16 @@
+{
+  "name": "sidescreen-scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "oxlint && oxfmt --check . && tsc -p rust/tests",
+    "fmt": "oxfmt --write ."
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0",
+    "oxlint-tsgolint": "^7.0.2004",
+    "typescript": "^7.0.2"
+  }
+}

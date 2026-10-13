@@ -1,8 +1,7 @@
 # Sidescreen on Linux: feasibility (2026-10-03)
 
 Desk research only; no Linux machine was available. The research read upstream mutter,
-xdg-desktop-portal-gnome, xdg-desktop-portal-kde and sway source (Sept/Oct
-2026) and the freedesktop portal specs. Unverified items say so.
+xdg-desktop-portal-gnome, xdg-desktop-portal-kde and sway source (Sept/Oct 2026) and the freedesktop portal specs. Unverified items say so.
 
 ## Main finding
 
@@ -15,17 +14,17 @@ desktop, so it is the recommendation.
 
 ## Capability × environment
 
-| Capability | GNOME 50+ | KDE Plasma 6 | Sway / Hyprland | X11 | Private headless compositor |
-|---|---|---|---|---|---|
-| Virtual display | Works: portal `VIRTUAL`, or Mutter `RecordVirtual` (no dialog) | Works: portal → `zkde_screencast.stream_virtual_output` | Works: `swaymsg create_output`, `hyprctl output create headless` | Works: xrandr VIRTUAL or Xvfb | Works |
-| Keep the cursor out | Partial: Mutter requires a shared edge (1 px minimum) | Unverified | Works: disjoint layout | Works | Works |
-| Consent dialog | Once, then `restore_token` | Once, then token | None | None | None |
-| Capture | PipeWire | PipeWire | Portal or `ext-image-copy-capture-v1` | XShm | Screencopy, no portal |
-| Input without moving the user's cursor or focus | Blocked: EIS on the single seat | Blocked | Sway: second seat works. Hyprland: blocked | Partial: XTest moves the pointer; XSendEvent is often ignored | Works: own seat |
-| Enumerate and move windows | Partial: needs a Shell extension | Works: KWin scripting | Works: IPC | Works: EWMH | Enumerate only; Wayland apps cannot be moved in |
-| AT-SPI | Partial: window-relative coordinates | Partial | Partial | Works | Works, per-agent bus |
-| Tray | Needs the AppIndicator extension | Works: SNI | Works: SNI | Works | n/a |
-| Non-activating panel | Blocked: no layer-shell | Works: layer-shell | Works: layer-shell | Works | n/a |
+| Capability                                      | GNOME 50+                                                      | KDE Plasma 6                                            | Sway / Hyprland                                                  | X11                                                           | Private headless compositor                     |
+| ----------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------- |
+| Virtual display                                 | Works: portal `VIRTUAL`, or Mutter `RecordVirtual` (no dialog) | Works: portal → `zkde_screencast.stream_virtual_output` | Works: `swaymsg create_output`, `hyprctl output create headless` | Works: xrandr VIRTUAL or Xvfb                                 | Works                                           |
+| Keep the cursor out                             | Partial: Mutter requires a shared edge (1 px minimum)          | Unverified                                              | Works: disjoint layout                                           | Works                                                         | Works                                           |
+| Consent dialog                                  | Once, then `restore_token`                                     | Once, then token                                        | None                                                             | None                                                          | None                                            |
+| Capture                                         | PipeWire                                                       | PipeWire                                                | Portal or `ext-image-copy-capture-v1`                            | XShm                                                          | Screencopy, no portal                           |
+| Input without moving the user's cursor or focus | Blocked: EIS on the single seat                                | Blocked                                                 | Sway: second seat works. Hyprland: blocked                       | Partial: XTest moves the pointer; XSendEvent is often ignored | Works: own seat                                 |
+| Enumerate and move windows                      | Partial: needs a Shell extension                               | Works: KWin scripting                                   | Works: IPC                                                       | Works: EWMH                                                   | Enumerate only; Wayland apps cannot be moved in |
+| AT-SPI                                          | Partial: window-relative coordinates                           | Partial                                                 | Partial                                                          | Works                                                         | Works, per-agent bus                            |
+| Tray                                            | Needs the AppIndicator extension                               | Works: SNI                                              | Works: SNI                                                       | Works                                                         | n/a                                             |
+| Non-activating panel                            | Blocked: no layer-shell                                        | Works: layer-shell                                      | Works: layer-shell                                               | Works                                                         | n/a                                             |
 
 GNOME 50 (March 2026) removed the X11 session, and Plasma 6.8 is Wayland-only.
 
@@ -88,14 +87,14 @@ and `docker run --rm --shm-size 1g sidescreen-spike-linux`.
 
 **App isolation, step 1.** The second launch, with the agent's own D-Bus, landed as follows.
 
-| App | Second launch | With its own profile | With its own `HOME` |
-|---|---|---|---|
-| foot (Wayland) | Agent | n/a | n/a |
-| xterm (Xwayland) | Agent | n/a | n/a |
-| GNOME Text Editor (GTK4) | Agent | n/a | n/a |
-| KWrite (Qt6) | Agent | n/a | Agent |
-| Firefox ESR | Refused: "Close Firefox" dialog on the agent | Agent (`--profile`) | Agent |
-| Chromium | Handed to the user's instance: new window on the user's compositor | Agent (`--user-data-dir`) | Agent |
+| App                      | Second launch                                                      | With its own profile      | With its own `HOME` |
+| ------------------------ | ------------------------------------------------------------------ | ------------------------- | ------------------- |
+| foot (Wayland)           | Agent                                                              | n/a                       | n/a                 |
+| xterm (Xwayland)         | Agent                                                              | n/a                       | n/a                 |
+| GNOME Text Editor (GTK4) | Agent                                                              | n/a                       | n/a                 |
+| KWrite (Qt6)             | Agent                                                              | n/a                       | Agent               |
+| Firefox ESR              | Refused: "Close Firefox" dialog on the agent                       | Agent (`--profile`)       | Agent               |
+| Chromium                 | Handed to the user's instance: new window on the user's compositor | Agent (`--user-data-dir`) | Agent               |
 
 The private D-Bus is enough for GTK and Qt apps, whose single-instance checks go through
 the session bus. Browsers lock their profile directory, so they need
@@ -113,7 +112,6 @@ the agent's Text Editor, not the user's copy.
 
 **Not covered yet.** Capture frame rate into a GPUI Viewer (step 2), the GNOME host
 UI (step 4), Electron and VS Code, and GPU renderers.
-
 
 ashpd 0.13, pipewire 0.10, reis 0.7 (libei), zbus 5.19, atspi 0.30,
 ksni 0.3.6, smithay-client-toolkit 0.21, wayland-protocols-wlr 0.3, x11rb 0.14.

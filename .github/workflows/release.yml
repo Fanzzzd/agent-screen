@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'Publish the current version, skipping what is already done'
+        description: "Publish the current version, skipping what is already done"
         type: boolean
         default: false
 
