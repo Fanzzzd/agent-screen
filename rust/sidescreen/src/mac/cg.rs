@@ -14,12 +14,21 @@ pub fn rect(r: CGRect) -> Rect {
     Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
 }
 
+unsafe extern "C" {
+    fn CGDisplayVendorNumber(display: u32) -> u32;
+    fn CGDisplayModelNumber(display: u32) -> u32;
+}
+
 /// Whether a display is one of Sidescreen's, from this app or another.
 pub fn is_sidescreen(id: DisplayId) -> bool {
-    unsafe extern "C" {
-        fn CGDisplayVendorNumber(display: u32) -> u32;
-    }
     unsafe { CGDisplayVendorNumber(id) == 0x5353 }
+}
+
+/// Whether a display is AeroSpace's closet, where it keeps the windows of
+/// invisible workspaces. Nobody looks at it: Sidescreen treats it as if it
+/// weren't there.
+pub fn is_closet(id: DisplayId) -> bool {
+    unsafe { CGDisplayVendorNumber(id) == 0x4145 && CGDisplayModelNumber(id) == 1 }
 }
 
 pub fn display_bounds(id: DisplayId) -> Rect {
@@ -34,7 +43,11 @@ pub fn active_displays() -> Vec<DisplayId> {
     let mut ids = [0u32; 32];
     let mut count = 0u32;
     unsafe { CGGetActiveDisplayList(32, ids.as_mut_ptr(), &mut count) };
-    ids[..count as usize].to_vec()
+    ids[..count as usize]
+        .iter()
+        .copied()
+        .filter(|&id| !is_closet(id))
+        .collect()
 }
 
 /// Ids of every window, hidden, minimized and on other Spaces included,

@@ -781,6 +781,9 @@ pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
                 .deviceDescription()
                 .objectForKey(&NSString::from_str("NSScreenNumber"))?;
             let number = number.downcast::<objc2_foundation::NSNumber>().ok()?;
+            if crate::mac::cg::is_closet(number.unsignedIntValue()) {
+                return None;
+            }
             Some((
                 number.unsignedIntValue(),
                 screen.frame(),
