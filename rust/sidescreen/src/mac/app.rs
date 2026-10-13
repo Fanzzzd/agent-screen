@@ -13,11 +13,21 @@ pub fn is_running(bundle_id: &str) -> bool {
 
 /// The pid of a running app at `bundle`, if any.
 pub fn running_pid(bundle: &Path) -> Option<i32> {
+    // Safari's /Applications entry is a link into a cryptex; the running
+    // app reports where it really is.
+    let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
     let apps = NSWorkspace::sharedWorkspace().runningApplications();
     apps.iter().find_map(|app| {
-        let url = app.bundleURL()?.path()?.to_string();
-        (Path::new(&url) == bundle).then(|| app.processIdentifier())
+        let url = PathBuf::from(app.bundleURL()?.path()?.to_string());
+        let url = std::fs::canonicalize(&url).unwrap_or(url);
+        (url == bundle).then(|| app.processIdentifier())
     })
+}
+
+/// Where the app with this pid is installed.
+pub fn bundle_of(pid: i32) -> Option<PathBuf> {
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    Some(PathBuf::from(app.bundleURL()?.path()?.to_string()))
 }
 
 /// Whether the app started less than `span` ago.

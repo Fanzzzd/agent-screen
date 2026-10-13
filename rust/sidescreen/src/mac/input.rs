@@ -424,6 +424,16 @@ impl Forwarder {
     }
 
     /// Send keys to `target` from now on, as a click on it would.
+    /// Make the first window of an app just started in the background
+    /// take clicks: see `Worker::wake`.
+    pub async fn wake(&self, target: WindowTarget, bounds: Rect) {
+        self.run(move |w| {
+            let _held = AppKeys::hold(target.pid);
+            w.wake(target, bounds);
+        })
+        .await;
+    }
+
     pub async fn focus(&self, target: WindowTarget) {
         self.run(move |w| {
             let _held = AppKeys::hold(target.pid);
@@ -710,6 +720,15 @@ impl Worker {
         };
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
+        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+        if hit.layer == popup_menu
+            && matches!(button, Button::Left)
+            && super::ax::press_menu_item_at(hit.host.pid, at)
+        {
+            // No gesture: the release that follows has nothing to send.
+            log::debug!("input: pressed the menu item at {at:?}");
+            return Some(target);
+        }
         if hit.target != hit.host {
             self.pressed_panels.push(target.window_id);
         }
@@ -913,26 +932,25 @@ impl Worker {
         if self.pressed_panels.contains(&id) {
             return;
         }
-        let b = panel.bounds;
-        let at = (b.x + b.width / 2.0, b.y + 6.0);
-        log::debug!("input: waking file panel {:?} at {at:?}", panel.target);
-        self.send_focus(panel.target);
+        log::debug!("input: waking file panel {:?}", panel.target);
+        self.wake(panel.target, panel.bounds);
+        self.pressed_panels.push(id);
+    }
+
+    /// Click the strip along a window's top edge, above its controls. A
+    /// window that no focus record makes key, such as a file panel or the
+    /// first window of an app just started in the background, becomes key
+    /// on a click, and drops that click.
+    fn wake(&mut self, target: WindowTarget, bounds: Rect) {
+        let at = (bounds.x + bounds.width / 2.0, bounds.y + 6.0);
+        self.send_focus(target);
         let group = self.next_group();
         let none = CGEventFlags::empty();
         let left = Button::Left;
-        self.post(
-            CGEventType::MouseMoved,
-            at,
-            panel.target,
-            left,
-            0,
-            group,
-            none,
-        );
-        self.post(left.down(), at, panel.target, left, 1, group, none);
-        self.post(left.up(), at, panel.target, left, 1, group, none);
+        self.post(CGEventType::MouseMoved, at, target, left, 0, group, none);
+        self.post(left.down(), at, target, left, 1, group, none);
+        self.post(left.up(), at, target, left, 1, group, none);
         thread::sleep(Duration::from_millis(50));
-        self.pressed_panels.push(id);
     }
 
     fn focus_something(&mut self, within: Rect) -> Option<AppKeys> {

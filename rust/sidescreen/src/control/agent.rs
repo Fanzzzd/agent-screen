@@ -1555,6 +1555,34 @@ async fn open_in_background(
         .await
 }
 
+/// Wait, at most 10 s, until the browser window's page has loaded. A
+/// window without a page, as another app's, returns at once.
+async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let page = cx
+            .background_executor()
+            .spawn(async move { ax::page(target) })
+            .await;
+        let done = match page {
+            ax::Page::Loading => false,
+            ax::Page::NoWindow | ax::Page::Blank => started.elapsed() > Duration::from_secs(3),
+            ax::Page::Loaded | ax::Page::Unknown => true,
+        };
+        if done {
+            log::debug!(
+                "launch: page {page:?} at {} ms",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    log::info!("launch: page still loading after 10 s");
+}
+
 /// What `launch_app` did.
 struct Launched {
     window: Option<windows::Window>,
@@ -1943,8 +1971,17 @@ async fn launch_now(
             {
                 // The title before the URL, to tell when it has arrived.
                 let before = windows::find(placed.target.window_id).map(|w| w.title);
-                let opened =
-                    match open_in_background(path.clone(), Some(target.to_string()), false, cx)
+                // Into the new window's address field where there is one
+                // Sidescreen knows; else the system sends the URL, and the
+                // browser opens it in its front window, the new one.
+                let (new_window, url) = (placed.target, target.to_string());
+                let in_field = cx
+                    .background_executor()
+                    .spawn(async move { ax::open_in_address_field(new_window, &url) })
+                    .await;
+                log::debug!("launch: URL through the address field: {in_field}");
+                let opened = in_field
+                    || match open_in_background(path.clone(), Some(target.to_string()), false, cx)
                         .await
                     {
                         Some(outcome) => {
@@ -1975,6 +2012,17 @@ async fn launch_now(
                         .timer(Duration::from_millis(50))
                         .await;
                 }
+            }
+            // An app started in the background drops the first click on its
+            // window, which only makes the window key: spend it here.
+            if !was_running {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                forwarder.wake(placed.target, placed.bounds).await;
+            }
+            // A page's buttons work only once its scripts have run: an
+            // agent clicking straight after would click a dead page.
+            if is_url {
+                wait_for_page(placed.target, cx).await;
             }
             keep_catch(core, id, catch, cx);
             return Ok(Launched {

@@ -146,6 +146,38 @@ pub fn try_action(element: &AXUIElement, action: &str) -> bool {
 
 /// Make `target` its app's main window, as a click on it would, without
 /// the focus event that would end the front app's text input session.
+/// Open a URL in this browser window through its address field. Safari
+/// opens a URL it is sent in the window it last had active, which a
+/// window in the background never becomes. True if the window has an
+/// address field Sidescreen knows and took the URL.
+pub fn open_in_address_field(target: WindowTarget, url: &str) -> bool {
+    // Safari's.
+    const IDS: [&str; 1] = ["WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"];
+    let Some(window) = window_element(target) else {
+        return false;
+    };
+    let mut queue = std::collections::VecDeque::from([(window, 0)]);
+    let mut visited = 0;
+    while let Some((element, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 400 {
+            return false;
+        }
+        if string_attribute(&element, "AXIdentifier").is_some_and(|id| IDS.contains(&id.as_str())) {
+            return set_attribute(&element, "AXValue", &CFString::from_str(url))
+                && perform(&element, "AXConfirm");
+        }
+        if depth < 12 {
+            queue.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|c| (c, depth + 1)),
+            );
+        }
+    }
+    false
+}
+
 pub fn make_main(target: WindowTarget) -> bool {
     window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
 }
@@ -224,6 +256,126 @@ pub fn window_element(target: WindowTarget) -> Option<Element> {
         .find(|w| window_id(w) == Some(target.window_id))
 }
 
+/// Chromium and Electron publish a page's elements only once an assistive
+/// app asks. Electron and Dia take AXManualAccessibility; Chrome refuses
+/// it and takes AXEnhancedUserInterface, as VoiceOver sets it. The page
+/// tree comes up to 2 s later: the first time per process, wait for it,
+/// at most 3 s, so the first read isn't the toolbar alone.
+fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
+    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        if asked.contains(&pid) {
+            return;
+        }
+        asked.push(pid);
+    }
+    let app = application(pid);
+    let asked = set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
+        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
+            // Chrome applies it but answers an error.
+            && {
+                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
+                true
+            });
+    if !asked {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if web_area(window).is_some_and(|area| !elements_attribute(&area, "AXChildren").is_empty())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    log::debug!(
+        "web tree of {pid} after {} ms",
+        started.elapsed().as_millis()
+    );
+}
+
+/// The window's first web area, breadth first.
+fn web_area(window: &AXUIElement) -> Option<Element> {
+    let window = unsafe { CFRetained::retain(NonNull::from(window)) };
+    let mut queue = std::collections::VecDeque::from([(window, 0)]);
+    let mut visited = 0;
+    while let Some((element, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 3000 {
+            return None;
+        }
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXWebArea") {
+            return Some(element);
+        }
+        if depth < 40 {
+            queue.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|c| (c, depth + 1)),
+            );
+        }
+    }
+    None
+}
+
+/// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates
+/// window moves and resizes, slowly. Turn it off around a move.
+fn with_moves_direct<T>(window: &AXUIElement, f: impl FnOnce() -> T) -> T {
+    let mut pid = 0;
+    let app = (unsafe { window.pid(NonNull::from(&mut pid)) } == AXError::Success)
+        .then(|| application(pid));
+    let enhanced = app.as_ref().is_some_and(|app| {
+        attribute(app, "AXEnhancedUserInterface")
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            == Some(true)
+    });
+    if let (true, Some(app)) = (enhanced, app.as_ref()) {
+        set_attribute(app, "AXEnhancedUserInterface", CFBoolean::new(false));
+    }
+    let result = f();
+    if let (true, Some(app)) = (enhanced, app.as_ref()) {
+        set_attribute(app, "AXEnhancedUserInterface", CFBoolean::new(true));
+    }
+    result
+}
+
+/// A browser window's page, by its first web area's AXLoaded, as Chromium
+/// and WebKit browsers publish it.
+#[derive(Debug, PartialEq)]
+pub enum Page {
+    Loading,
+    Loaded,
+    /// A web page that doesn't say.
+    Unknown,
+    /// No web page in the window, or none yet: Chromium builds a new
+    /// window's page tree a moment after it opens.
+    Blank,
+    /// Accessibility doesn't list the window yet, as just after it opened.
+    NoWindow,
+}
+
+pub fn page(target: WindowTarget) -> Page {
+    let Some(window) = window_element(target) else {
+        return Page::NoWindow;
+    };
+    ask_for_web_tree(target.pid, &window);
+    let Some(area) = web_area(&window) else {
+        return Page::Blank;
+    };
+    // Chromium answers a number, WebKit a boolean.
+    let loaded = attribute(&area, "AXLoaded").and_then(|v| {
+        v.downcast_ref::<CFBoolean>()
+            .map(|b| b.as_bool())
+            .or_else(|| v.downcast_ref::<CFNumber>()?.as_i64().map(|n| n != 0))
+    });
+    match loaded {
+        Some(true) => Page::Loaded,
+        Some(false) => Page::Loading,
+        None => Page::Unknown,
+    }
+}
+
 /// The window's element, or for one the app doesn't list, as a file panel
 /// a browser shows as a sheet of one of its windows, the sheet or window
 /// at its center. For reading and typing into it, not for moving it.
@@ -262,6 +414,24 @@ fn sheet_element(target: WindowTarget) -> Option<Element> {
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window. WindowServer moves windows for
 /// real mouse drags only, so agent drags there move it through here.
+/// Press the menu item at a global point of an open pop-up menu, as a
+/// web page's select shows. True if there was one to press. A menu
+/// tracks the real pointer, not the events posted to its app, so a click
+/// can't choose an item.
+pub fn press_menu_item_at(pid: i32, at: (f64, f64)) -> bool {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(pid).copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
+    };
+    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+        return false;
+    };
+    let item = unsafe { CFRetained::from_raw(raw) };
+    error == AXError::Success
+        && string_attribute(&item, "AXRole").as_deref() == Some("AXMenuItem")
+        && unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
+}
+
 pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
     // Unified toolbars are up to 52 pt tall.
     if at.1 - bounds.y > 52.0 {
@@ -331,6 +501,10 @@ pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveE
     if bounds.width <= 80.0 || bounds.height <= 80.0 {
         return Err(MoveError::Rejected);
     }
+    with_moves_direct(window, || fit_into(window, bounds))
+}
+
+fn fit_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
     let area = bounds.inset(40.0, 40.0);
     let size = attribute(window, "AXSize")
         .and_then(|v| size_value(&v))
@@ -349,11 +523,13 @@ pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveE
 /// Put a window back at an exact global frame.
 pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
-    if !set_position(&window, frame.x, frame.y) {
-        return Err(MoveError::Rejected);
-    }
-    set_size(&window, frame.width, frame.height);
-    Ok(())
+    with_moves_direct(&window, || {
+        if !set_position(&window, frame.x, frame.y) {
+            return Err(MoveError::Rejected);
+        }
+        set_size(&window, frame.width, frame.height);
+        Ok(())
+    })
 }
 
 /// Press the window's close button. The app may still keep it open, for
@@ -387,23 +563,7 @@ unsafe impl Send for Snapshot {}
 /// into screenshot pixels.
 pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<Snapshot> {
     let window = window_or_sheet(target)?;
-    // Chromium and Electron apps only publish their web content tree once a
-    // client asks for it, and build it over the next moment: the first
-    // read would list only the browser's toolbar. Other apps ignore the
-    // attribute, and refuse to set it.
-    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
-    let app = application(target.pid);
-    let first = {
-        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
-        let first = !asked.contains(&target.pid);
-        if first {
-            asked.push(target.pid);
-        }
-        first
-    };
-    if set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true)) && first {
-        std::thread::sleep(std::time::Duration::from_millis(700));
-    }
+    ask_for_web_tree(target.pid, &window);
     let mut walker = TreeWalker {
         origin,
         scale,
