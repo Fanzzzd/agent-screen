@@ -525,7 +525,10 @@ impl Shell {
             }
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
-            Native::ScreensChanged => self.schedule_guard(cx),
+            Native::ScreensChanged => {
+                self.core.update(cx, |core, _| core.repark());
+                self.schedule_guard(cx);
+            }
             Native::ColorsChanged => {
                 super::theme::set_accent(native::accent());
                 self.repaint(cx);

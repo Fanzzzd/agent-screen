@@ -112,22 +112,7 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
         .into_iter()
         .filter(|&d| d != id)
         .collect();
-    let physical: Vec<u32> = others
-        .iter()
-        .copied()
-        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
-        .collect();
-    let anchor_ids = if physical.is_empty() {
-        vec![cg::main_display()]
-    } else {
-        physical
-    };
-    let union = |ids: &[u32]| {
-        ids.iter()
-            .map(|&d| cg::display_bounds(d))
-            .reduce(|a, b| a.union(&b))
-    };
-    let Some(anchor) = union(&anchor_ids) else {
+    let Some(anchor) = physical_bounds(id, &others, virtual_ids) else {
         return false;
     };
     let occupied = others
@@ -147,6 +132,37 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     }
     let now = cg::display_bounds(id);
     (now.x as i32, now.y as i32) == origin
+}
+
+/// The union of the user's own displays, or of the main display when all
+/// are virtual.
+fn physical_bounds(id: u32, others: &[u32], virtual_ids: &[u32]) -> Option<crate::model::Rect> {
+    let physical: Vec<u32> = others
+        .iter()
+        .copied()
+        .filter(|&d| d != id && !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
+        .collect();
+    let anchor_ids = if physical.is_empty() {
+        vec![cg::main_display()]
+    } else {
+        physical
+    };
+    anchor_ids
+        .iter()
+        .map(|&d| cg::display_bounds(d))
+        .reduce(|a, b| a.union(&b))
+}
+
+/// Whether display `id` still sits where `tuck_away` parks displays: above
+/// and right of the user's displays, out of the cursor's way. The user may
+/// have dragged it elsewhere in System Settings.
+pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
+    let others = cg::active_displays();
+    let Some(anchor) = physical_bounds(id, &others, virtual_ids) else {
+        return true;
+    };
+    let bounds = cg::display_bounds(id);
+    bounds.max_y() <= anchor.y && bounds.x >= anchor.max_x()
 }
 
 /// Switch display `id` to `width` × `height` points at 2x. True once it

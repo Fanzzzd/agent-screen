@@ -26,6 +26,8 @@ pub struct Core {
     /// Displays moved to where they stay. Until then a new display can sit
     /// over one of the user's windows parked off screen.
     pub tucked: HashSet<DisplayId>,
+    /// Tries at parking a moved display again, since it was last in place.
+    reparks: HashMap<DisplayId, u8>,
     /// Apps an Agent Session is launching. Two launches of one app at once
     /// can't tell their new windows apart, so they take turns.
     pub launching: HashSet<std::path::PathBuf>,
@@ -58,6 +60,7 @@ impl Core {
             closed: HashSet::new(),
             sessions: HashMap::new(),
             tucked: HashSet::new(),
+            reparks: HashMap::new(),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
             returning: Vec::new(),
@@ -162,6 +165,27 @@ impl Core {
         id
     }
 
+    /// The displays changed. Park again any display of ours that is no
+    /// longer out of the way, as when the user dragged it in System
+    /// Settings. Each move is a display change too, so a display macOS
+    /// keeps putting elsewhere gets three tries, not a loop.
+    pub fn repark(&mut self) {
+        let virtual_ids: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
+        for &id in &virtual_ids {
+            if !self.tucked.contains(&id) || display::is_tucked(id, &virtual_ids) {
+                self.reparks.remove(&id);
+                continue;
+            }
+            let tries = self.reparks.entry(id).or_default();
+            if *tries >= 3 {
+                continue;
+            }
+            *tries += 1;
+            let parked = display::tuck_away(id, &virtual_ids);
+            log::debug!("display {id} was moved; parked again: {parked}");
+        }
+    }
+
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
         if self.displays.end(id, reason) {
             // An ended display takes no more windows, from catches either.
@@ -198,6 +222,7 @@ impl Core {
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
+            self.reparks.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
             self.returning.retain(|(display, _)| *display != id);
             self.pending_returns.retain(|(display, _)| *display != id);
