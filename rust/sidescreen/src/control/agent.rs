@@ -1098,6 +1098,11 @@ async fn create_display(
     // not reach the agent.
     let tucked = started.elapsed().as_millis();
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    if let Some(mtm) = MainThreadMarker::new()
+        && !app::label_display(id, mtm)
+    {
+        log::debug!("createDisplay {id}: no desktop picture");
+    }
     // Read AeroSpace's state now that the display exists: the user may have
     // started, quit or reconfigured it since Sidescreen last looked.
     let aerospace_takes = cx

@@ -126,6 +126,37 @@ pub fn resolve(app: &str) -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
+/// Give an Agent Display the desktop picture that names it, so System
+/// Settings, which shows each display with its desktop, tells it apart from
+/// the user's monitors. False when its screen isn't listed yet or the
+/// picture is missing, as in a bare debug binary. Main thread only.
+pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
+    let Some(picture) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/AgentDisplay.png")))
+        .filter(|path| path.exists())
+    else {
+        return false;
+    };
+    let Some(screen) = NSScreen::screens(mtm).iter().find(|screen| {
+        screen
+            .deviceDescription()
+            .objectForKey(&NSString::from_str("NSScreenNumber"))
+            .and_then(|n| n.downcast::<NSNumber>().ok())
+            .is_some_and(|n| n.unsignedIntValue() == display)
+    }) else {
+        return false;
+    };
+    let url =
+        objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&picture.to_string_lossy()));
+    let options = objc2_foundation::NSDictionary::new();
+    unsafe {
+        NSWorkspace::sharedWorkspace()
+            .setDesktopImageURL_forScreen_options_error(&url, &screen, &options)
+            .is_ok()
+    }
+}
+
 /// The localized name of the screen showing `display`. Main thread only.
 pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> {
     NSScreen::screens(mtm).iter().find_map(|screen| {

@@ -34,6 +34,7 @@ if [[ "$config" != release ]]; then
   plutil -replace CFBundleDisplayName -string "Sidescreen Dev" "$app/Contents/Info.plist"
 fi
 cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp resources/AgentDisplay.png "$app/Contents/Resources/AgentDisplay.png"
 
 identity="${SIDESCREEN_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
