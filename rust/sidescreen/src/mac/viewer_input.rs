@@ -42,6 +42,13 @@ thread_local! {
 /// Tests: a click at a point of the display image, given as fractions of
 /// its width and height, handled as if the user made it.
 pub fn inject_click(x: f64, y: f64) -> Result<(), String> {
+    inject_mouse(NSEventType::LeftMouseDown, x, y)?;
+    inject_mouse(NSEventType::LeftMouseUp, x, y)
+}
+
+/// Tests: one left-button event at a point of the display image, given as
+/// fractions of its width and height, handled as if the user made it.
+pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
     let (window, content) = STATE.with(|s| {
         let s = s.borrow();
         (s.window, s.content)
@@ -53,22 +60,19 @@ pub fn inject_click(x: f64, y: f64) -> Result<(), String> {
     let window = unsafe { &*(window as *const NSWindow) };
     let height = window.contentView().ok_or("no Viewer")?.frame().size.height;
     let at = objc2_foundation::NSPoint::new(cx + x * cw, height - (cy + y * ch));
-    for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
-        let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-            kind,
-            at,
-            objc2_app_kit::NSEventModifierFlags::empty(),
-            0.0,
-            window.windowNumber(),
-            None,
-            0,
-            1,
-            1.0,
-        )
-        .ok_or("no event")?;
-        inject(&event)?;
-    }
-    Ok(())
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,
+        at,
+        objc2_app_kit::NSEventModifierFlags::empty(),
+        0.0,
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    )
+    .ok_or("no event")?;
+    inject(&event)
 }
 
 /// Tests: press and release a key on the Viewer, as if the user typed it.

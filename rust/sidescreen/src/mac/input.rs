@@ -7,6 +7,7 @@
 //! sleeps, and window list lookups stay off the main thread.
 
 use super::cg;
+use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
 use futures::channel::oneshot;
@@ -184,16 +185,43 @@ impl Forwarder {
 
     pub fn mouse_down(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
         self.send(move |w| {
-            w.mouse_down(at, button, clicks, flags);
+            if !w.grab(at, button) {
+                let target = w.mouse_down(at, button, clicks, flags);
+                w.pressed = target.and_then(|t| held(t, at));
+            }
         });
     }
 
     pub fn mouse_dragged(&self, to: (f64, f64), button: Button, flags: CGEventFlags) {
-        self.send(move |w| w.mouse_dragged(to, button, flags));
+        self.send(move |w| match &w.grab {
+            Some(grab) => {
+                if grab.moved(to) || w.grab_moved {
+                    w.grab_moved = true;
+                    grab.drag_to(to);
+                }
+            }
+            None => w.mouse_dragged(to, button, flags),
+        });
     }
 
     pub fn mouse_up(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
-        self.send(move |w| w.mouse_up(at, button, clicks, flags));
+        self.send(move |w| match w.grab.take() {
+            Some(grab) if std::mem::take(&mut w.grab_moved) => {
+                grab.drag_to(at);
+            }
+            // Pressed and released in place: a click on the title bar,
+            // such as a double click that zooms the window.
+            Some(grab) => {
+                w.mouse_down(grab.from(), button, clicks, flags);
+                w.mouse_up(grab.from(), button, clicks, flags);
+            }
+            None => {
+                w.mouse_up(at, button, clicks, flags);
+                if let Some(press) = w.pressed.take() {
+                    keep_on_display(press, at);
+                }
+            }
+        });
     }
 
     pub fn mouse_moved(&self, to: (f64, f64), flags: CGEventFlags) {
@@ -534,6 +562,42 @@ fn display_of(id: u32) -> Option<Rect> {
         .find(|area| area.contains(window.bounds.mid()))
 }
 
+/// The window at a global point's display, held at that point.
+fn held(target: WindowTarget, at: (f64, f64)) -> Option<Grab> {
+    let window = super::windows::find(target.window_id)?;
+    let area = super::cg::active_displays()
+        .into_iter()
+        .map(super::cg::display_bounds)
+        .find(|area| area.contains(at))?;
+    Grab::held(target, window.bounds, at, area)
+}
+
+/// After the user's press and release in the Viewer: put the window back
+/// on its display if the drag carried it off. An app that draws its own
+/// title bar, as Electron apps do, has WindowServer move the window with
+/// the real pointer, onto the user's screen, where their window manager
+/// may then tile it. It lands where the drag would have taken it on the
+/// display. Checked again for a while, since the window manager may move
+/// it after the release.
+fn keep_on_display(press: Grab, at: (f64, f64)) {
+    // A click, or a drag inside the display: nothing to put back.
+    if !press.left_display() {
+        return;
+    }
+    thread::spawn(move || {
+        for wait in [0, 150, 350, 700] {
+            thread::sleep(Duration::from_millis(wait));
+            if wait == 0 || press.left_display() {
+                log::info!(
+                    "input: window {} left its display in a drag, put back",
+                    press.target.window_id
+                );
+                press.drag_to(at);
+            }
+        }
+    });
+}
+
 /// Apps whose keys a display's worker is sending: one at a time per app.
 static APPS_IN_USE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 static APP_FREED: std::sync::Condvar = std::sync::Condvar::new();
@@ -594,6 +658,12 @@ struct Worker {
     pressed_panels: Vec<u32>,
 
     gesture: Option<Gesture>,
+    /// The window the user holds by its title bar in the Viewer, and
+    /// whether it has moved since the press.
+    grab: Option<Grab>,
+    grab_moved: bool,
+    /// The window the user's press in the Viewer went to, as it was then.
+    pressed: Option<Grab>,
     cache: Option<(Vec<Hit>, Instant)>,
     seed: u64,
 }
@@ -618,6 +688,9 @@ impl Worker {
             pressed_panels: Vec::new(),
 
             gesture: None,
+            grab: None,
+            grab_moved: false,
+            pressed: None,
             cache: None,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
         }
@@ -754,6 +827,44 @@ impl Worker {
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
         Some(target)
+    }
+
+    /// Hold the window whose title bar the user pressed in the Viewer, to
+    /// move it as they drag. The window gets key focus as a click would
+    /// give it; nothing is posted until the release.
+    fn grab(&mut self, at: (f64, f64), button: Button) -> bool {
+        self.grab = None;
+        self.grab_moved = false;
+        if button != Button::Left {
+            return false;
+        }
+        self.release_agent_button();
+        let Some(hit) = self.hit(at, true) else {
+            return false;
+        };
+        let Some(area) = cg::active_displays()
+            .into_iter()
+            .map(cg::display_bounds)
+            .find(|area| area.contains(at))
+        else {
+            return false;
+        };
+        if hit.layer != 0 || hit.target != hit.host {
+            return false;
+        }
+        let Some(grab) = Grab::title_bar(hit.target, hit.bounds, at, area) else {
+            return false;
+        };
+        {
+            let _held = AppKeys::hold(hit.target.pid);
+            self.focus(hit.target);
+        }
+        log::debug!(
+            "input: holding window {} by its title bar",
+            hit.target.window_id
+        );
+        self.grab = Some(grab);
+        true
     }
 
     /// Let go of a button an agent left held, where its pointer was, not

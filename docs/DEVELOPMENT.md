@@ -46,6 +46,7 @@ bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar
 # Beside your own Sidescreen:
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts      # what agents get back, and nothing on your screen
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts    # Takeover through the Viewer
+SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/viewerdrag.ts  # a title-bar drag in the Viewer stays on the display
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/shared.ts      # an app you and an agent both use: its keys reach only its window
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/openpanel.ts   # a file Open panel: keys, clicks, window state, picking a file by path
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/browsers.ts    # Safari: the first click, URLs in a running browser, a select menu
@@ -75,7 +76,7 @@ With AeroSpace running, a window counts as placed only once AeroSpace files it u
 for i in $(seq 10); do SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts | tail -1; done
 ```
 
-`SIDESCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Sidescreen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover.ts` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks and key presses inside the app, through the Viewer's own handler. `E2E_LOG=FILE` keeps the debug app's log.
+`SIDESCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Sidescreen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover.ts` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. `E2E_LOG=FILE` keeps the debug app's log.
 
 `rust/tests/e2e` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Sidescreen back. Name cases to run some: `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `dev.sidescreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `rust/target/e2e`. `probe tap` in `tests/e2e/tools` records real trackpad events for `hid replay`, which is how `fixtures/trackpad.log` was made.
 

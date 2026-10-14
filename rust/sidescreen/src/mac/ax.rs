@@ -411,9 +411,6 @@ fn sheet_element(target: WindowTarget) -> Option<Element> {
     None
 }
 
-/// Whether a global point is on the title bar or toolbar background of a
-/// window, where a drag moves the window. WindowServer moves windows for
-/// real mouse drags only, so agent drags there move it through here.
 /// Press the menu item at a global point of an open pop-up menu, as a
 /// web page's select shows. True if there was one to press. A menu
 /// tracks the real pointer, not the events posted to its app, so a click
@@ -432,6 +429,12 @@ pub fn press_menu_item_at(pid: i32, at: (f64, f64)) -> bool {
         && unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
 }
 
+/// Whether a global point is on the title bar or toolbar background of a
+/// window, where a drag moves the window: near its top, with no control,
+/// text or web content there. Toolkits name that background differently,
+/// such as the window itself, a toolbar, or SwiftUI's hosting view.
+/// WindowServer moves a window for real mouse drags only, so drags made
+/// for an agent, or through the Viewer, move it through here.
 pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
     // Unified toolbars are up to 52 pt tall.
     if at.1 - bounds.y > 52.0 {
@@ -448,12 +451,24 @@ pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool 
     let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
         return false;
     };
-    let element = unsafe { CFRetained::from_raw(raw) };
-    error == AXError::Success
-        && matches!(
-            string_attribute(&element, "AXRole").as_deref(),
-            Some("AXWindow" | "AXToolbar")
-        )
+    if error != AXError::Success {
+        return false;
+    }
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    for _ in 0..64 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXWindow") => return true,
+            Some("AXToolbar" | "AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup") => {}
+            // A control, text, a list, a web page, or anything unknown:
+            // a drag there is the app's.
+            _ => return false,
+        }
+        let Some(parent) = element_attribute(&element, "AXParent") else {
+            return false;
+        };
+        element = parent;
+    }
+    false
 }
 
 #[derive(Debug)]

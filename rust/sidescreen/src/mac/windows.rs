@@ -36,6 +36,85 @@ impl Window {
     }
 }
 
+/// A window held by its title bar: a drag moves it, inside its display.
+/// Posted events can't move a window. WindowServer takes a title-bar drag
+/// to the real pointer, and while the user's button is down that is on
+/// their own screen.
+#[derive(Clone, Copy, Debug)]
+pub struct Grab {
+    pub target: WindowTarget,
+    frame: Rect,
+    from: (f64, f64),
+    /// The display's global bounds: the window stays inside them.
+    area: Rect,
+}
+
+impl Grab {
+    /// The window on display `id` whose title bar is at a global point,
+    /// held there. A user window that only overhangs the display is never
+    /// taken.
+    pub fn on_display(id: DisplayId, at: (f64, f64)) -> Option<Grab> {
+        let area = cg::display_bounds(id);
+        let window = on_display(id)
+            .into_iter()
+            .map(|w| Window {
+                bounds: w.bounds.offset(area.x, area.y),
+                ..w
+            })
+            .find(|w| w.bounds.contains(at))?;
+        Grab::title_bar(window.target, window.bounds, at, area)
+    }
+
+    /// `target`, at global `bounds` inside `area`, if `at` is on its title
+    /// bar.
+    pub fn title_bar(
+        target: WindowTarget,
+        bounds: Rect,
+        at: (f64, f64),
+        area: Rect,
+    ) -> Option<Grab> {
+        Grab::held(target, bounds, at, area).filter(|_| ax::on_title_bar(target, bounds, at))
+    }
+
+    /// `target`, at global `bounds` inside `area`, pressed at `at`
+    /// wherever that is on it.
+    pub fn held(target: WindowTarget, bounds: Rect, at: (f64, f64), area: Rect) -> Option<Grab> {
+        area.contains(bounds.mid()).then_some(Grab {
+            target,
+            frame: bounds,
+            from: at,
+            area,
+        })
+    }
+
+    /// Whether the window has left its display, carried off by something
+    /// other than this grab. Blocking.
+    pub fn left_display(&self) -> bool {
+        find(self.target.window_id).is_some_and(|w| !self.area.contains(w.bounds.mid()))
+    }
+
+    /// Where it was pressed.
+    pub fn from(&self) -> (f64, f64) {
+        self.from
+    }
+
+    /// Whether the pointer has gone far enough from the press to count as
+    /// a drag rather than a click.
+    pub fn moved(&self, to: (f64, f64)) -> bool {
+        (to.0 - self.from.0).hypot(to.1 - self.from.1) >= 3.0
+    }
+
+    /// Move the window as far as the pointer moved from the press.
+    /// Blocking.
+    pub fn drag_to(&self, to: (f64, f64)) -> bool {
+        let frame = self
+            .frame
+            .offset(to.0 - self.from.0, to.1 - self.from.1)
+            .kept_inside(&self.area);
+        ax::set_frame(self.target, frame).is_ok()
+    }
+}
+
 /// Other apps' windows a user can act on, front to back, global bounds:
 /// documents, floating panels such as inspectors, and modal panels and
 /// alerts (levels 0 to 8). Menus, the Dock and status items sit higher.

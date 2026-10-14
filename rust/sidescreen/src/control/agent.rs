@@ -6,6 +6,7 @@ use crate::core::Core;
 use crate::keychord::KeyChord;
 use crate::mac::input::{Button, Sent};
 use crate::mac::screenshot::{self, Format};
+use crate::mac::windows::Grab;
 use crate::mac::{app, ax, cg, windows};
 use crate::model::{
     DEFAULT_SIZE, DisplayId, Disposition, EndReason, Origin, Owner, Rect, Wait, WindowTarget,
@@ -196,7 +197,7 @@ async fn handle_one(
             let (id, point) = target(&core, &p, cx)?;
             if let Some(grab) = GRAB.with(|g| g.borrow().get(&id).copied()) {
                 show_pointer(&core, id, point, false, cx);
-                grab.drag_to(point, cx).await;
+                drag_to(grab, point, cx).await;
                 return reply(json!({}));
             }
             show_pointer(&core, id, point, false, cx)
@@ -214,7 +215,7 @@ async fn handle_one(
             // can't do.
             if let Some(grab) = title_bar_at(id, from, cx).await {
                 show_pointer(&core, id, to, false, cx);
-                if !grab.drag_to(to, cx).await {
+                if !drag_to(grab, to, cx).await {
                     return Err(ControlError::failed(
                         "the app would not let its window move",
                     ));
@@ -274,7 +275,7 @@ async fn handle_one(
             }
             if !down && let Some(grab) = grabbed {
                 show_pointer(&core, id, point, false, cx);
-                grab.drag_to(point, cx).await;
+                drag_to(grab, point, cx).await;
                 return reply(json!({ "windowId": grab.target.window_id }));
             }
             let modifiers = modifiers(&p)?;
@@ -798,7 +799,32 @@ async fn handle_one(
                     p.int("code").unwrap_or(0) as u16,
                     p.int("shift").unwrap_or(0) == 1,
                 ),
-                _ => Err("kind is click or key".into()),
+                // A press, a drag in steps and a release, as a hand on
+                // the trackpad makes them.
+                Some("drag") => {
+                    use objc2_app_kit::NSEventType;
+                    let from = (p.number("x").unwrap_or(0.5), p.number("y").unwrap_or(0.5));
+                    let to = (
+                        p.number("toX").unwrap_or(0.5),
+                        p.number("toY").unwrap_or(0.5),
+                    );
+                    viewer_input::inject_mouse(NSEventType::LeftMouseDown, from.0, from.1)
+                        .map_err(ControlError::failed)?;
+                    for step in 1..=20 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(16))
+                            .await;
+                        let t = step as f64 / 20.0;
+                        viewer_input::inject_mouse(
+                            NSEventType::LeftMouseDragged,
+                            from.0 + (to.0 - from.0) * t,
+                            from.1 + (to.1 - from.1) * t,
+                        )
+                        .map_err(ControlError::failed)?;
+                    }
+                    viewer_input::inject_mouse(NSEventType::LeftMouseUp, to.0, to.1)
+                }
+                _ => Err("kind is click, key or drag".into()),
             }
             .map_err(ControlError::failed)?;
             Ok(json!({}))
@@ -2491,50 +2517,18 @@ fn input_display(
     Ok(id)
 }
 
-/// A window an agent holds by its title bar, between left_mouse_down and
-/// left_mouse_up.
-#[derive(Clone, Copy)]
-struct Grab {
-    target: WindowTarget,
-    frame: Rect,
-    from: (f64, f64),
-    /// The display's global bounds: the window stays inside them.
-    area: Rect,
-}
-
-impl Grab {
-    /// Move the window as far as the pointer moved from the press.
-    async fn drag_to(self, to: (f64, f64), cx: &mut AsyncApp) -> bool {
-        let frame = self
-            .frame
-            .offset(to.0 - self.from.0, to.1 - self.from.1)
-            .kept_inside(&self.area);
-        cx.background_executor()
-            .spawn(async move { ax::set_frame(self.target, frame).is_ok() })
-            .await
-    }
-}
-
 /// The window on display `id` whose title bar is at a global point, held
-/// there. A user window that only overhangs the display is never taken.
+/// there, for an agent's drag.
 async fn title_bar_at(id: DisplayId, at: (f64, f64), cx: &mut AsyncApp) -> Option<Grab> {
     cx.background_executor()
-        .spawn(async move {
-            let area = cg::display_bounds(id);
-            let window = windows::on_display(id)
-                .into_iter()
-                .map(|w| windows::Window {
-                    bounds: w.bounds.offset(area.x, area.y),
-                    ..w
-                })
-                .find(|w| w.bounds.contains(at))?;
-            ax::on_title_bar(window.target, window.bounds, at).then_some(Grab {
-                target: window.target,
-                frame: window.bounds,
-                from: at,
-                area,
-            })
-        })
+        .spawn(async move { Grab::on_display(id, at) })
+        .await
+}
+
+/// Move a held window as far as the pointer moved from the press.
+async fn drag_to(grab: Grab, to: (f64, f64), cx: &mut AsyncApp) -> bool {
+    cx.background_executor()
+        .spawn(async move { grab.drag_to(to) })
         .await
 }
 

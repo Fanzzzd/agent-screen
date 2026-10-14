@@ -50,7 +50,7 @@ _Avoid_: pull, move, send back
 
 **Handover**:
 The user placing one of their own windows onto an Agent Display so the Agent Session can work in it. A handed-over window always returns to the user when its display is dismissed.
-_Avoid_: share, assign, give
+_Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.
