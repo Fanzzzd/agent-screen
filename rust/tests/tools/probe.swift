@@ -10,6 +10,7 @@
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 //   probe bounds ID           a display's frame in global points, "x y w h"
+//   probe units               every online display's unit number, "id unit" per line
 //   probe differ PNG PNG      mean RGB difference of two images, 0-255, below the menu bar
 import AppKit
 import CoreGraphics
@@ -46,6 +47,12 @@ case "pixel":
   var sum = [0, 0, 0]
   for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
   print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "units":
+  // Every online display, the closet included: "id unit" per line.
+  var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+  var count: UInt32 = 0
+  CGGetOnlineDisplayList(32, &ids, &count)
+  for id in ids[0..<Int(count)] { print("\(id) \(CGDisplayUnitNumber(id))") }
 case "bounds":
   // A display's frame in global points: x y width height.
   let b = CGDisplayBounds(CGDirectDisplayID(args[2])!)

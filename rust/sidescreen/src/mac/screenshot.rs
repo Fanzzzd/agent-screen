@@ -67,6 +67,11 @@ fn filter_counting(
     fresh: bool,
     plain: bool,
 ) -> Result<(SCContentFilter, usize), String> {
+    // ScreenCaptureKit would capture either display, maybe the other one.
+    if let Some(twin) = super::cg::unit_twin(id) {
+        log::debug!("display {id} shares its unit number with display {twin}; not capturing it");
+        return Err("macOS mixes this display up with another one right now, so Sidescreen won't capture it".into());
+    }
     let content = content(fresh)?;
     let display = content
         .displays()

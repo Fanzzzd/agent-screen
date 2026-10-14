@@ -1,21 +1,18 @@
 //! Live frames of one display through ScreenCaptureKit, as 420f
 //! CVPixelBuffers that GPUI's `surface` element draws without a copy.
 //!
-//! With several virtual displays connected, a stream started after a
-//! display change can deliver another virtual display's picture, whatever
-//! its filter says (Apple FB17797423): here, AeroSpace's closet with the
-//! user's hidden windows. Each frame says which screen it shows, so frames
-//! from the wrong one are dropped, and screenshots, which that bug spares,
-//! stand in until the stream shows the right display again.
+//! ScreenCaptureKit tells displays apart by unit number. When two share one,
+//! a capture of either can show the other: AeroSpace's closet, with the
+//! user's hidden windows. `screenshot::filter` refuses a display with a
+//! twin (`cg::unit_twin`), and each frame's screen rect is checked as well:
+//! frames of another screen are dropped.
 
 use core_foundation::base::TCFType;
 use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferRef};
 use screencapturekit::cm::{CMSampleBufferSCExt, SCFrameStatus};
 use screencapturekit::prelude::*;
-use screencapturekit::screenshot_manager::SCScreenshotManager;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// The newest frame. Older ones are dropped: the Viewer only ever shows the
 /// latest.
@@ -99,21 +96,6 @@ impl Latest {
     }
 }
 
-/// Screenshots stand in for a misrouted stream at most this often: each
-/// takes 70 to 100 ms.
-const STAND_IN_FPS: i32 = 15;
-
-/// What the stream's frame handler and the stand-in thread share.
-struct Shared {
-    display_id: u32,
-    filter: Mutex<SCContentFilter>,
-    target: Mutex<(i32, (u32, u32))>,
-    /// The stream's last frame showed another screen.
-    misrouted: AtomicBool,
-    stopped: AtomicBool,
-    deliver: Box<dyn Fn(CVPixelBuffer) + Send + Sync>,
-}
-
 /// Whether a frame shows `display_id`, by the screen rect ScreenCaptureKit
 /// attached to it. A frame without one passes.
 fn shows(sample: &CMSampleBuffer, display_id: u32) -> Result<(), CGRect> {
@@ -133,47 +115,11 @@ fn shows(sample: &CMSampleBuffer, display_id: u32) -> Result<(), CGRect> {
     }
 }
 
-/// Screenshots of the display while its stream is misrouted, paced to the
-/// wanted rate up to `STAND_IN_FPS`. Sleeps otherwise.
-fn stand_in(shared: Arc<Shared>) {
-    while !shared.stopped.load(Ordering::Relaxed) {
-        if !shared.misrouted.load(Ordering::Relaxed) {
-            std::thread::park_timeout(Duration::from_millis(500));
-            continue;
-        }
-        let started = Instant::now();
-        let (fps, pixels) = *shared.target.lock().unwrap();
-        let filter = shared.filter.lock().unwrap().clone();
-        match SCScreenshotManager::capture_sample_buffer(
-            &filter,
-            &configuration(pixels, fps.max(1)),
-        ) {
-            Ok(sample) => {
-                let raw = sample.image_buffer_ptr_borrowed();
-                // The stream may have come right meanwhile; its frames win.
-                if !raw.is_null() && shared.misrouted.load(Ordering::Relaxed) {
-                    let buffer =
-                        unsafe { CVPixelBuffer::wrap_under_get_rule(raw as CVPixelBufferRef) };
-                    (shared.deliver)(buffer);
-                }
-            }
-            Err(error) => log::debug!(
-                "stand-in screenshot of display {} failed: {error:?}",
-                shared.display_id
-            ),
-        }
-        let period = Duration::from_secs(1) / fps.clamp(1, STAND_IN_FPS) as u32;
-        if let Some(rest) = period.checked_sub(started.elapsed()) {
-            std::thread::park_timeout(rest);
-        }
-    }
-}
-
 pub struct Capture {
     stream: SCStream,
     turn: Mutex<()>,
-    shared: Arc<Shared>,
-    stand_in: std::thread::Thread,
+    /// The last frame showed another screen.
+    misrouted: Arc<AtomicBool>,
 }
 
 impl Capture {
@@ -191,42 +137,9 @@ impl Capture {
         let skip = 40.0 / super::cg::display_bounds(display_id).height.max(1.0);
         let filter =
             super::screenshot::filter(display_id, true, false).map_err(anyhow::Error::msg)?;
-        let deliver = move |buffer: CVPixelBuffer| {
-            if latest.counting.load(Ordering::Relaxed) {
-                let now = luma_grid(&buffer, skip);
-                let mut before = latest.samples.lock().unwrap();
-                if changed(&before, &now) {
-                    latest.changes.fetch_add(1, Ordering::Relaxed);
-                }
-                *before = now;
-            }
-            *latest.frame.lock().unwrap() = Some(Frame(buffer));
-            latest.delivered.fetch_add(1, Ordering::Relaxed);
-            on_frame();
-        };
-        let shared = Arc::new(Shared {
-            display_id,
-            filter: Mutex::new(filter.clone()),
-            target: Mutex::new((fps, pixels)),
-            misrouted: AtomicBool::new(false),
-            stopped: AtomicBool::new(false),
-            deliver: Box::new(deliver),
-        });
-        let stand_in = {
-            let shared = shared.clone();
-            std::thread::Builder::new()
-                .name(format!("stand-in {display_id}"))
-                .spawn(move || stand_in(shared))?
-                .thread()
-                .clone()
-        };
         let mut stream = SCStream::new(&filter, &configuration(pixels, fps))?;
-        let handler = shared.clone();
-        let waker = stand_in.clone();
-        // Tests: every frame counts as another display's, so screenshots
-        // stand in whatever the stream does.
-        let forced = cfg!(debug_assertions)
-            && std::env::var_os("SIDESCREEN_STAND_IN").is_some_and(|v| v == "1");
+        let misrouted = Arc::new(AtomicBool::new(false));
+        let flag = misrouted.clone();
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
                 // Idle frames repeat the last image: the display did not
@@ -236,22 +149,16 @@ impl Capture {
                 {
                     return;
                 }
-                let verdict = if forced {
-                    Err(None)
-                } else {
-                    shows(&sample, display_id).map_err(Some)
-                };
-                if let Err(screen) = verdict {
-                    if !handler.misrouted.swap(true, Ordering::Relaxed) {
-                        let at = screen.map(|s| (s.origin.x, s.origin.y, s.size.width, s.size.height));
+                if let Err(screen) = shows(&sample, display_id) {
+                    if !flag.swap(true, Ordering::Relaxed) {
                         log::warn!(
-                            "display {display_id}: the stream shows the screen at {at:?}; screenshots stand in"
+                            "display {display_id}: the stream shows the screen at {:?}; its frames are dropped",
+                            (screen.origin.x, screen.origin.y, screen.size.width, screen.size.height)
                         );
-                        waker.unpark();
                     }
                     return;
                 }
-                if handler.misrouted.swap(false, Ordering::Relaxed) {
+                if flag.swap(false, Ordering::Relaxed) {
                     log::info!("display {display_id}: the stream shows it again");
                 }
                 let raw = sample.image_buffer_ptr_borrowed();
@@ -260,27 +167,31 @@ impl Capture {
                 }
                 // Retain: the sample buffer goes away after this callback.
                 let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw as CVPixelBufferRef) };
-                (handler.deliver)(buffer);
+                if latest.counting.load(Ordering::Relaxed) {
+                    let now = luma_grid(&buffer, skip);
+                    let mut before = latest.samples.lock().unwrap();
+                    if changed(&before, &now) {
+                        latest.changes.fetch_add(1, Ordering::Relaxed);
+                    }
+                    *before = now;
+                }
+                *latest.frame.lock().unwrap() = Some(Frame(buffer));
+                latest.delivered.fetch_add(1, Ordering::Relaxed);
+                on_frame();
             },
             SCStreamOutputType::Screen,
         )?;
-        if let Err(error) = stream.start_capture() {
-            shared.stopped.store(true, Ordering::Relaxed);
-            stand_in.unpark();
-            return Err(error.into());
-        }
+        stream.start_capture()?;
         Ok(Self {
             stream,
             turn: Mutex::new(()),
-            shared,
-            stand_in,
+            misrouted,
         })
     }
 
-    /// Whether screenshots stand in for this stream: it last showed another
-    /// display.
+    /// Whether the stream's last frame showed another screen.
     pub fn misrouted(&self) -> bool {
-        self.shared.misrouted.load(Ordering::Relaxed)
+        self.misrouted.load(Ordering::Relaxed)
     }
 
     /// Change the rate and size to `target` without restarting the
@@ -289,7 +200,6 @@ impl Capture {
     pub fn reconfigure(&self, target: &Mutex<(i32, (u32, u32))>) -> anyhow::Result<()> {
         let _turn = self.turn.lock().unwrap();
         let (fps, pixels) = *target.lock().unwrap();
-        *self.shared.target.lock().unwrap() = (fps, pixels);
         if fps > 0 {
             self.stream
                 .update_configuration(&configuration(pixels, fps))?;
@@ -303,11 +213,10 @@ impl Capture {
     /// Blocking.
     pub fn refresh_filter(&self, display_id: u32) {
         let _turn = self.turn.lock().unwrap();
-        if let Ok(filter) = super::screenshot::filter(display_id, false, false) {
-            if let Err(error) = self.stream.update_content_filter(&filter) {
-                log::debug!("capture filter of display {display_id} stays: {error}");
-            }
-            *self.shared.filter.lock().unwrap() = filter;
+        if let Ok(filter) = super::screenshot::filter(display_id, false, false)
+            && let Err(error) = self.stream.update_content_filter(&filter)
+        {
+            log::debug!("capture filter of display {display_id} stays: {error}");
         }
     }
 }
@@ -332,8 +241,6 @@ fn configuration(pixels: (u32, u32), fps: i32) -> SCStreamConfiguration {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.shared.stopped.store(true, Ordering::Relaxed);
-        self.stand_in.unpark();
         let _ = self.stream.stop_capture();
     }
 }

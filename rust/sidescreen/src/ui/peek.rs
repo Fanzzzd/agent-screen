@@ -228,7 +228,7 @@ fn tile(
             .object_fit(ObjectFit::Contain)
             .size_full()
             .into_any_element(),
-        None => waiting(10.5).into_any_element(),
+        None => waiting(id, 10.5).into_any_element(),
     };
     // The thumbnail takes the display's shape inside the tile's box, so a
     // portrait display gets round corners and a ring of its own size.
@@ -444,15 +444,28 @@ fn add_tile(
 }
 
 /// What a screen shows before its first frame arrives.
-pub fn waiting(size: f32) -> gpui::Div {
+/// What stands where display `id`'s picture goes until a frame comes. A
+/// display that shares its unit number with another isn't captured
+/// (`cg::unit_twin`); say so rather than wait.
+pub fn waiting(id: DisplayId, size: f32) -> gpui::Div {
+    let text = if crate::mac::cg::unit_twin(id).is_some() {
+        t(
+            "macOS mixes this display up with another one, so its picture stays hidden",
+            "macOS 把这块显示器和另一块混淆了，画面先隐藏",
+        )
+    } else {
+        t("Waiting for picture…", "等待画面…")
+    };
     div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
+        .px(px(size))
+        .text_center()
         .text_size(px(size))
         .text_color(gpui::white().opacity(0.85))
-        .child(t("Waiting for picture…", "等待画面…"))
+        .child(text)
 }
 
 #[cfg(test)]

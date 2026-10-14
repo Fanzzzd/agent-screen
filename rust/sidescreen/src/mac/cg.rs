@@ -17,6 +17,24 @@ pub fn rect(r: CGRect) -> Rect {
 unsafe extern "C" {
     fn CGDisplayVendorNumber(display: u32) -> u32;
     fn CGDisplayModelNumber(display: u32) -> u32;
+    fn CGDisplayUnitNumber(display: u32) -> u32;
+    fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+}
+
+/// Another online display with the same unit number as `id`, the closet
+/// included. ScreenCaptureKit tells displays apart by unit number: streams
+/// and screenshots of either show the same one, maybe the other's.
+/// WindowServer can hand a new virtual display a unit that AeroSpace's
+/// closet already has.
+pub fn unit_twin(id: DisplayId) -> Option<DisplayId> {
+    let mut ids = [0u32; 32];
+    let mut count = 0u32;
+    unsafe { CGGetOnlineDisplayList(32, ids.as_mut_ptr(), &mut count) };
+    let unit = unsafe { CGDisplayUnitNumber(id) };
+    ids[..count as usize]
+        .iter()
+        .copied()
+        .find(|&other| other != id && unsafe { CGDisplayUnitNumber(other) } == unit)
 }
 
 /// Whether a display is one of Sidescreen's, from this app or another.

@@ -92,9 +92,8 @@ impl Streams {
         }
     }
 
-    /// Whether screenshots stand in for the display's stream, which showed
-    /// another display.
-    pub fn stand_in(&self, id: DisplayId) -> bool {
+    /// Whether the display's stream showed another display last.
+    pub fn misrouted(&self, id: DisplayId) -> bool {
         self.streams
             .get(&id)
             .and_then(|s| s.capture.as_ref())

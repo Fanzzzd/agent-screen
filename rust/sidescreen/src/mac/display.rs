@@ -43,8 +43,28 @@ pub struct VirtualDisplay {
 unsafe impl Send for VirtualDisplay {}
 
 impl VirtualDisplay {
-    /// A HiDPI display of `width` × `height` points.
+    /// A HiDPI display of `width` × `height` points, with a unit number no
+    /// other display has (`cg::unit_twin`). A display that gets a taken one
+    /// stays until another comes, so WindowServer hands that one the next
+    /// unit; up to three tries, with serials of their own.
     pub fn create(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
+        let mut twinned = Vec::new();
+        for attempt in 0..3u32 {
+            let display = Self::create_once(name, width, height, serial + attempt * 0x0100_0000)?;
+            let Some(twin) = cg::unit_twin(display.id) else {
+                return Some(display);
+            };
+            log::warn!(
+                "display {} got the unit number of display {twin}; making another",
+                display.id
+            );
+            twinned.push(display);
+        }
+        // Still twinned: capture refuses it, rather than show the other.
+        twinned.pop()
+    }
+
+    fn create_once(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
         unsafe {
             let descriptor: Retained<AnyObject> =
                 msg_send![class("CGVirtualDisplayDescriptor")?, new];

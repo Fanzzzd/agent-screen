@@ -562,7 +562,7 @@ impl Viewer {
                 .object_fit(ObjectFit::Contain)
                 .size_full()
                 .into_any_element(),
-            None => super::peek::waiting(13.).into_any_element(),
+            None => super::peek::waiting(id, 13.).into_any_element(),
         };
         // The native input monitor needs to know where the image is.
         // Without Screen Recording the picture stops; the notice over it

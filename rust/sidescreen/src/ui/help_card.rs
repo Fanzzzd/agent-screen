@@ -92,7 +92,7 @@ impl Render for HelpCard {
                 .object_fit(ObjectFit::Contain)
                 .size_full()
                 .into_any_element(),
-            None => super::peek::waiting(10.5).into_any_element(),
+            None => super::peek::waiting(id, 10.5).into_any_element(),
         };
         let (open, take_over, later) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
         let title = tf!("{agent} needs your help", "{agent} 需要你帮忙");

@@ -2,6 +2,6 @@
 default: patch
 ---
 
-# The Viewer and Peek never show another display's picture
+# The Viewer, Peek and agent screenshots never show another display
 
-With several virtual displays connected, macOS can send a display's live picture from another one, such as AeroSpace's display for hidden windows. Sidescreen now checks every frame, and when the picture comes from the wrong display it shows screenshots of the right one instead.
+macOS sometimes gives a new virtual display the same internal number as another display, such as the one AeroSpace keeps hidden windows on. Every picture of the new display then showed the other one. Sidescreen now makes the display again until its number is free. If two displays share a number later, Sidescreen shows no picture of them and says why.
