@@ -559,6 +559,7 @@ impl Shell {
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, _| core.repark());
+                self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);
             }
             Native::ColorsChanged => {
@@ -802,6 +803,11 @@ impl Shell {
                 }
             });
         }
+    }
+
+    /// The display the Viewer shows, open or not.
+    pub fn viewer_display(&self) -> Option<DisplayId> {
+        self.viewer_display
     }
 
     // MARK: Peek

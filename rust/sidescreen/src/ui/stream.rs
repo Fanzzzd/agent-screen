@@ -92,6 +92,15 @@ impl Streams {
         }
     }
 
+    /// Whether screenshots stand in for the display's stream, which showed
+    /// another display.
+    pub fn stand_in(&self, id: DisplayId) -> bool {
+        self.streams
+            .get(&id)
+            .and_then(|s| s.capture.as_ref())
+            .is_some_and(|c| c.misrouted())
+    }
+
     /// The newest frame of a display.
     pub fn frame(&self, id: DisplayId) -> Option<CVPixelBuffer> {
         self.frames.get(&id).cloned()
@@ -256,6 +265,28 @@ impl Streams {
             });
         })
         .detach();
+    }
+
+    /// Start again every stream that shows another display: after a
+    /// display change, a new stream may get the right picture.
+    pub fn restart_misrouted(&mut self, cx: &mut Context<Self>) {
+        let misrouted: Vec<DisplayId> = self
+            .streams
+            .iter()
+            .filter(|(_, s)| s.capture.as_ref().is_some_and(|c| c.misrouted()))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in misrouted {
+            let Some(stream) = self.streams.get_mut(&id) else {
+                continue;
+            };
+            if let Some(capture) = stream.capture.take() {
+                cx.background_spawn(async move { drop(capture) }).detach();
+            }
+            if !stream.starting {
+                self.start(id, cx);
+            }
+        }
     }
 
     pub fn drop_display(&mut self, id: DisplayId, cx: &mut Context<Self>) {

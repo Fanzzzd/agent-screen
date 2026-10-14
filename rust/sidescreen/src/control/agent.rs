@@ -786,7 +786,15 @@ async fn handle_one(
         "debugViewer" if debug_methods() => {
             let (frame, image, key) = crate::mac::viewer_input::debug_layout()
                 .ok_or_else(|| ControlError::not_found("the Viewer shows no display"))?;
-            Ok(json!({ "frame": frame, "image": image, "key": key }))
+            // Whether screenshots stand in for the shown display's stream.
+            let stand_in = cx.update(|cx| {
+                crate::ui::shell::current()
+                    .and_then(|shell| shell.upgrade())
+                    .and_then(|shell| shell.read(cx).viewer_display())
+                    .zip(crate::ui::stream::global())
+                    .is_some_and(|(id, streams)| streams.read(cx).stand_in(id))
+            });
+            Ok(json!({ "frame": frame, "image": image, "key": key, "standIn": stand_in }))
         }
         "debugViewerInput" if debug_methods() => {
             use crate::mac::viewer_input;

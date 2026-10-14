@@ -9,6 +9,8 @@
 //   probe front               the front app's name
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
+//   probe bounds ID           a display's frame in global points, "x y w h"
+//   probe differ PNG PNG      mean RGB difference of two images, 0-255, below the menu bar
 import AppKit
 import CoreGraphics
 import Foundation
@@ -44,6 +46,26 @@ case "pixel":
   var sum = [0, 0, 0]
   for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
   print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "bounds":
+  // A display's frame in global points: x y width height.
+  let b = CGDisplayBounds(CGDirectDisplayID(args[2])!)
+  print("\(b.origin.x) \(b.origin.y) \(b.size.width) \(b.size.height)")
+case "differ":
+  // Mean RGB difference, 0 to 255, of two images scaled to 64 × 40,
+  // leaving out the top 6%: a menu bar there differs between captures.
+  func grid(_ path: String) -> [UInt8] {
+    let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil)!
+    let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+    let ctx = CGContext(data: nil, width: 64, height: 40, bitsPerComponent: 8, bytesPerRow: 256, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: 64, height: 40))
+    // Rows run top down in memory.
+    return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: 64 * 40 * 4)[(64 * 3 * 4)...])
+  }
+  let (a, b) = (grid(args[2]), grid(args[3]))
+  var total = 0, count = 0
+  for i in 0..<a.count where i % 4 != 3 { total += abs(Int(a[i]) - Int(b[i])); count += 1 }
+  print(total / count)
 case "span":
   let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
   let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
