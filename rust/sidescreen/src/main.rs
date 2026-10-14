@@ -111,6 +111,7 @@ fn main() {
             mac::permissions::screen_recording_at_launch();
             mac::ax::set_global_timeout();
             let core = cx.new(|_| core::Core::new());
+            core::watch_alerts(core.clone(), cx);
             if let Err(error) = ui::shell::start(core.clone(), cx) {
                 eprintln!("Sidescreen: UI failed: {error}");
             }

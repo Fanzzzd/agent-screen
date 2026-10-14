@@ -44,6 +44,14 @@ _Avoid_: escalation, alert, ping
 The card that drops from the menu bar icon while a Help Request is open: the display's picture, the agent's reason, and a way to take over or put it off. It stays until the Help Request ends or the user puts it off.
 _Avoid_: alert, popup, banner
 
+**Recording** (录制):
+A video of an Agent Display that its Agent Session asked for, with a timeline of the session's actions and the Takeovers. It ends when the session stops it, when the display ends, or after 30 minutes.
+_Avoid_: capture, screencast
+
+**Keyboard Borrow** (借用键盘):
+One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008).
+_Avoid_: focus steal, IME mode
+
 **Agent Pointer**:
 The marker the Viewer and Peek draw where the Agent Session last pointed or clicked. It is never part of the display itself, so the agent's screenshots do not contain it.
 _Avoid_: agent cursor, ghost cursor

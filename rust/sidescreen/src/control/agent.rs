@@ -39,13 +39,56 @@ pub async fn handle(
     .then(|| Args(&p).int("displayId"))
     .flatten()
     .map(|id| id as DisplayId);
+    let timeline = recorded(method, &p);
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    if let Some((id, event)) = timeline
+        && reply.is_ok()
+    {
+        crate::mac::recording::note(id, event);
+    }
     if let Some(id) = pointer
         && let Some(forwarder) = core.read_with(cx, |c, _| c.existing_forwarder(id))
     {
         forwarder.keys_done().await;
     }
     reply
+}
+
+/// The timeline line an agent action adds to a recording of its display:
+/// the action and its arguments, in screenshot pixels as the agent gave them.
+fn recorded(method: &str, p: &Params) -> Option<(DisplayId, Value)> {
+    let id = Args(p).int("displayId")? as DisplayId;
+    if !crate::mac::recording::is_recording(id) {
+        return None;
+    }
+    let kept = matches!(
+        method,
+        "click"
+            | "mouseDown"
+            | "mouseUp"
+            | "move"
+            | "drag"
+            | "scroll"
+            | "type"
+            | "key"
+            | "holdKey"
+            | "elementAction"
+            | "launchApp"
+            | "placeWindow"
+            | "requestHelp"
+            | "withdrawHelp"
+    );
+    if !kept {
+        return None;
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("action".into(), json!(method));
+    for (key, value) in p {
+        if key != "displayId" && key != "sessionKey" && !value.is_null() {
+            event.insert(key.clone(), value.clone());
+        }
+    }
+    Some((id, Value::Object(event)))
 }
 
 async fn handle_one(
@@ -98,6 +141,35 @@ async fn handle_one(
     }
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => create_display(&core, connection, &p, cx).await,
+        "recordStart" => {
+            let id = display(&core, &p, true, cx)?;
+            let label = core.read_with(cx, |c, _| {
+                c.displays.get(id).map(|d| d.label()).unwrap_or_default()
+            });
+            let (video, timeline) = cx
+                .background_executor()
+                .spawn(async move { crate::mac::recording::start(id, &label) })
+                .await
+                .map_err(ControlError::failed)?;
+            core.update(cx, |_, cx| cx.notify());
+            Ok(json!({ "video": video, "timeline": timeline }))
+        }
+        "recordStop" => {
+            let id = display(&core, &p, false, cx)?;
+            let done = cx
+                .background_executor()
+                .spawn(async move { crate::mac::recording::stop(id) })
+                .await
+                .ok_or_else(|| ControlError::invalid("the display isn't being recorded"))?;
+            core.update(cx, |_, cx| cx.notify());
+            Ok(json!({
+                "video": done.video,
+                "timeline": done.timeline,
+                "seconds": (done.seconds * 10.0).round() / 10.0,
+                "actions": done.actions,
+                "problem": done.problem,
+            }))
+        }
         "endDisplay" => {
             let id = display(&core, &p, false, cx)?;
             core.update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
@@ -328,6 +400,14 @@ async fn handle_one(
             let text = p
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
+            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+                let keys = crate::keychord::keys_for_text(&text).map_err(|c| {
+                    ControlError::invalid(format!(
+                        "{c:?} has no key on a US keyboard. Through the input method, type the keys it composes from, such as pinyin letters."
+                    ))
+                })?;
+                return through_input_method(&core, id, keys, p.string("inputSource"), cx).await;
+            }
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let bounds = cg::display_bounds(id);
             let chars: Vec<char> = crate::mac::input::typed_text(&text).chars().collect();
@@ -370,6 +450,9 @@ async fn handle_one(
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
             let chords = KeyChord::parse_sequence(&keys)
                 .map_err(|e| ControlError::invalid(e.to_string()))?;
+            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+                return through_input_method(&core, id, chords, p.string("inputSource"), cx).await;
+            }
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let repeat = p.int("repeat").unwrap_or(1);
             let bounds = cg::display_bounds(id);
@@ -798,6 +881,22 @@ async fn handle_one(
                 }
             });
             Ok(json!({}))
+        }
+        // Move any window, by pid and id, to a global point: a test puts a
+        // system alert on an agent display with it.
+        "debugMoveWindow" if debug_methods() => {
+            let target = WindowTarget {
+                pid: p.int("pid").unwrap_or(0) as i32,
+                window_id: p.int("windowId").unwrap_or(0) as u32,
+            };
+            let (x, y) = (p.number("x").unwrap_or(0.0), p.number("y").unwrap_or(0.0));
+            let moved = cx
+                .background_executor()
+                .spawn(async move {
+                    ax::window_element(target).is_some_and(|w| ax::set_position(&w, x, y))
+                })
+                .await;
+            Ok(json!({ "moved": moved }))
         }
         "debugViewer" if debug_methods() => {
             let (frame, image, key) = crate::mac::viewer_input::debug_layout()
@@ -2608,6 +2707,47 @@ async fn keys_allowed(
 
 fn forwarder_stopped(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
     core.update(cx, |c, _| c.forwarder(id)).agent_stopped()
+}
+
+/// Keys through the user's input method (ADR 0008). The display says the
+/// agent has the user's keyboard while the keys go in.
+async fn through_input_method(
+    core: &Entity<Core>,
+    id: DisplayId,
+    keys: Vec<KeyChord>,
+    source: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Params, ControlError> {
+    let forwarder = core.update(cx, |c, _| c.forwarder(id));
+    let bounds = cg::display_bounds(id);
+    keys_allowed(&forwarder, bounds, cx).await?;
+    let Some(target) = forwarder.keys_target(bounds).await else {
+        forwarder.keys_done().await;
+        return Err(no_keyboard_target());
+    };
+    let borrow = |core: &Entity<Core>, on: bool, cx: &mut AsyncApp| {
+        core.update(cx, |c, cx| {
+            if let Some(display) = c.displays.get_mut(id) {
+                display.keyboard_borrowed = on;
+            }
+            cx.notify();
+        })
+    };
+    borrow(core, true, cx);
+    let total = keys.len();
+    let typed = cx
+        .background_executor()
+        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref()) })
+        .await;
+    borrow(core, false, cx);
+    forwarder.keys_done().await;
+    match typed {
+        Ok(crate::mac::ime::Typed::All) => Ok(Params::new()),
+        Ok(crate::mac::ime::Typed::Stopped(sent)) => Err(ControlError::failed(format!(
+            "the user touched the keyboard or pointer after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, then send the rest once they've stopped."
+        ))),
+        Err(reason) => Err(ControlError::failed(reason)),
+    }
 }
 
 fn no_keyboard_target() -> ControlError {

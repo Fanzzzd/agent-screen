@@ -18,6 +18,8 @@ unsafe extern "C" {
     fn CGDisplayVendorNumber(display: u32) -> u32;
     fn CGDisplayModelNumber(display: u32) -> u32;
     fn CGDisplayUnitNumber(display: u32) -> u32;
+    fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
 }
 
@@ -52,6 +54,12 @@ pub fn is_sidescreen(id: DisplayId) -> bool {
 /// weren't there.
 pub fn is_closet(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x4145 && CGDisplayModelNumber(id) == 1 }
+}
+
+/// A display's size in pixels, None when it isn't online.
+pub fn pixel_size(id: DisplayId) -> Option<(u32, u32)> {
+    let size = unsafe { (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id)) };
+    (size.0 > 0 && size.1 > 0).then_some((size.0 as u32, size.1 as u32))
 }
 
 pub fn display_bounds(id: DisplayId) -> Rect {

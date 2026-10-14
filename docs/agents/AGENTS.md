@@ -22,4 +22,6 @@ Use either toolset on windows that are on your display:
 - A `takeover` error means the user is operating the display: call `wait_for_control`.
 - An error saying the user closed your display means they want you to stop working on screen. Ask them before calling `create_display` again.
 - For a login, captcha or two-factor code, call `request_help` with the reason, and `steps` when it takes more than one thing. If you get past it yourself, call `request_help` with `withdraw: true`.
+- To show the user what you did, `record_display` with `start` before and `stop` after. It returns the video and a timeline of your actions.
+- `type` inserts finished text and skips the input method. Use `via_input_method` only to test input-method behavior: it uses the user's keyboard for the call.
 - When the GUI part of the task is finished, call `end_display`.

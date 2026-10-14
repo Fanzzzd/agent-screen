@@ -240,6 +240,9 @@ pub struct Display<H> {
     pub help_request: Option<String>,
     /// Its steps, shown in the Viewer while the user is in control.
     pub help_steps: Vec<String>,
+    /// The agent is typing through the user's input method, which takes
+    /// the user's keyboard for that time (ADR 0008).
+    pub keyboard_borrowed: bool,
     pub pointer: Option<AgentPointer>,
     waiters: Vec<oneshot::Sender<ControlWait>>,
     /// The platform display. Only held: dropping it removes the display.
@@ -442,6 +445,7 @@ impl<H> Displays<H> {
             takeover: false,
             help_request: None,
             help_steps: Vec::new(),
+            keyboard_borrowed: false,
             pointer: None,
             waiters: Vec::new(),
             handle,

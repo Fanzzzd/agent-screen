@@ -1,6 +1,7 @@
 //! macOS: CGVirtualDisplay, ScreenCaptureKit, SkyLight input, Accessibility.
 
 pub mod aerospace;
+pub mod alerts;
 pub mod app;
 pub mod assist;
 pub mod ax;
@@ -8,11 +9,13 @@ pub mod capture;
 pub mod catch;
 pub mod cg;
 pub mod display;
+pub mod ime;
 pub mod input;
 pub mod menubar;
 pub mod native;
 pub mod notify;
 pub mod permissions;
+pub mod recording;
 pub mod screenshot;
 pub mod viewer_input;
 pub mod windows;

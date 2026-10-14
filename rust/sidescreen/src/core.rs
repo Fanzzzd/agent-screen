@@ -7,7 +7,7 @@ use crate::mac::input::Forwarder;
 use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
-use gpui::Context;
+use gpui::{App, AsyncApp, Context, Entity};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -100,7 +100,7 @@ impl Core {
 
     /// Ids of every virtual display of this app, spares included: they
     /// take room where displays park.
-    fn virtual_ids(&self) -> Vec<DisplayId> {
+    pub fn virtual_ids(&self) -> Vec<DisplayId> {
         self.displays
             .list
             .iter()
@@ -286,6 +286,7 @@ impl Core {
         if self.displays.end(id, reason) {
             // An ended display takes no more windows, from catches either.
             self.kept_catches.retain(|(display, _)| *display != id);
+            stop_recording(id, cx);
             cx.notify();
             schedule_sweep(cx);
         }
@@ -294,6 +295,10 @@ impl Core {
     /// The user took the display over, or handed it back: an agent's
     /// typing or drag in flight stops while they're in control.
     pub fn stop_agent_input(&self, id: DisplayId, stop: bool) {
+        crate::mac::recording::note(
+            id,
+            serde_json::json!({ "action": if stop { "takeoverStart" } else { "takeoverEnd" } }),
+        );
         if let Some(forwarder) = self.forwarders.get(&id) {
             forwarder.stop_agent(stop);
         }
@@ -307,6 +312,9 @@ impl Core {
             // As in `end`: an ended display takes no more windows.
             self.kept_catches
                 .retain(|(display, _)| !ended.contains(display));
+            for &id in &ended {
+                stop_recording(id, cx);
+            }
             cx.notify();
             schedule_sweep(cx);
         }
@@ -315,6 +323,7 @@ impl Core {
     /// Drop a display. An empty one stays connected as a spare while there
     /// is room; otherwise macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        stop_recording(id, cx);
         if let Some(display) = self.displays.remove(id) {
             let size = (display.width, display.height);
             let keep = self.spares.len() < SPARES
@@ -373,6 +382,40 @@ fn schedule_sweep(cx: &mut Context<Core>) {
             .timer(Duration::from_millis(600))
             .await;
         let _ = this.update(cx, |core, cx| core.sweep_ended(cx));
+    })
+    .detach();
+}
+
+/// A recording ends with its Agent Session's use of the display. Writing
+/// the video out takes a moment, off the main thread.
+fn stop_recording(id: DisplayId, cx: &mut Context<Core>) {
+    if crate::mac::recording::is_recording(id) {
+        cx.background_executor()
+            .spawn(async move { crate::mac::recording::stop(id) })
+            .detach();
+    }
+}
+
+/// Once a second while this app has displays, move the system's alerts and
+/// prompts that landed on one to the user's main display.
+pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let ids = core.read_with(cx, |c, _| c.virtual_ids());
+            if ids.is_empty() {
+                continue;
+            }
+            let moved = cx
+                .background_executor()
+                .spawn(async move { crate::mac::alerts::send_home(&ids) })
+                .await;
+            for alert in moved {
+                log::info!(
+                    "moved the system alert {alert} from an agent display to the main display"
+                );
+            }
+        }
     })
     .detach();
 }

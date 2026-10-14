@@ -190,8 +190,71 @@ fn key_code(name: &str) -> Option<u16> {
     })
 }
 
+/// The key presses that type `text` on a US keyboard, as a hand types it
+/// into an input method, which composes from keys, not characters. The
+/// first character no key types is the error.
+pub fn keys_for_text(text: &str) -> Result<Vec<KeyChord>, char> {
+    const SHIFTED: [(char, char); 21] = [
+        ('!', '1'),
+        ('@', '2'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('^', '6'),
+        ('&', '7'),
+        ('*', '8'),
+        ('(', '9'),
+        (')', '0'),
+        ('_', '-'),
+        ('+', '='),
+        ('{', '['),
+        ('}', ']'),
+        ('|', '\\'),
+        (':', ';'),
+        ('"', '\''),
+        ('<', ','),
+        ('>', '.'),
+        ('?', '/'),
+        ('~', '`'),
+    ];
+    text.chars()
+        .map(|c| {
+            let (name, shift) = match c {
+                ' ' => ("space".to_string(), false),
+                '\n' | '\r' => ("return".to_string(), false),
+                '\t' => ("tab".to_string(), false),
+                c if c.is_ascii_uppercase() => (c.to_ascii_lowercase().to_string(), true),
+                c => match SHIFTED.iter().find(|(s, _)| *s == c) {
+                    Some((_, base)) => (base.to_string(), true),
+                    None => (c.to_string(), false),
+                },
+            };
+            let code = key_code(&name).ok_or(c)?;
+            Ok(KeyChord {
+                code,
+                modifiers: Modifiers {
+                    shift,
+                    ..Modifiers::default()
+                },
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn text_becomes_the_keys_a_hand_presses() {
+        let keys = super::keys_for_text("zH !").unwrap();
+        assert_eq!(
+            keys.iter()
+                .map(|k| (k.code, k.modifiers.shift))
+                .collect::<Vec<_>>(),
+            [(6, false), (4, true), (49, false), (18, true)]
+        );
+        assert_eq!(super::keys_for_text("中"), Err('中'));
+    }
+
     use super::*;
 
     #[test]

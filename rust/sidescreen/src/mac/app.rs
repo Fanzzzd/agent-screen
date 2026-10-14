@@ -51,6 +51,13 @@ pub fn launched_within(pid: i32, span: std::time::Duration) -> bool {
         .is_some_and(|date| -date.timeIntervalSinceNow() < span.as_secs_f64())
 }
 
+/// An app's name as the user sees it.
+pub fn name(pid: i32) -> Option<String> {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.localizedName())
+        .map(|name| name.to_string())
+}
+
 /// The frontmost app's pid.
 pub fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()

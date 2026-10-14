@@ -33,6 +33,18 @@ impl Status {
             (Lang::En, 1) => "1 window".to_string(),
             _ => tf!("{window_count} windows", "{window_count} 个窗口"),
         };
+        if display.keyboard_borrowed && !display.is_ended() {
+            return Status {
+                kind: Kind::Agent,
+                short: t("Using your keyboard", "正在用你的键盘").into(),
+                long: tf!(
+                    "{agent} is typing through your input method. Your keys go to its app until it’s done.",
+                    "{agent} 正在通过你的输入法打字，完成前你的按键会进入它的应用"
+                ),
+                icon: Some("icons/alert.svg"),
+                color: theme.orange,
+            };
+        }
         match display.ended {
             Some(EndReason::Disconnected) => Status {
                 kind: Kind::Disconnected,

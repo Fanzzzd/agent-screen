@@ -120,6 +120,25 @@ pub fn definitions() -> Vec<Value> {
             },
         ),
         tool(
+            "record_display",
+            "Record the display to video",
+            &[
+                "start records the display to an MP4 in ~/Movies/Sidescreen, with a timeline beside it: one JSON line per",
+                "action you take on the display (clicks with coordinates in screenshot pixels, keys, typing, launches,",
+                "element actions) and per Takeover, each with t, its seconds into the video. stop finishes both and",
+                "returns their paths. A recording also stops when the display ends, and after 30 minutes. The user sees",
+                "that the display is being recorded.",
+            ],
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "action": { "type": "string", "enum": ["start", "stop"] }
+                }),
+                &["display_id", "action"],
+            ),
+            PLAIN,
+        ),
+        tool(
             "computer",
             "Operate the display",
             &[
@@ -159,7 +178,15 @@ pub fn definitions() -> Vec<Value> {
                     "text": { "type": "string" },
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
-                    "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." }
+                    "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
+                    "via_input_method": {
+                        "type": "boolean",
+                        "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao\" then key \"space\". This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
+                    },
+                    "input_source": {
+                        "type": "string",
+                        "description": "With via_input_method: the input source to use for the call, such as com.apple.inputmethod.SCIM.ITABC; the user's own comes back after. Default: the current one."
+                    }
                 }),
                 &["display_id", "action"],
             ),
@@ -448,6 +475,20 @@ pub async fn run(
                 out["note"] = note.clone();
             }
             Ok(Output::Object(out))
+        }
+        "record_display" => {
+            let action = a
+                .one_of("action", &["start", "stop"])?
+                .ok_or_else(|| ControlError::invalid("action is required"))?;
+            let method = if action == "start" {
+                "recordStart"
+            } else {
+                "recordStop"
+            };
+            let reply = control
+                .call(method, json!({ "displayId": a.require_int("display_id")? }))
+                .await?;
+            Ok(Output::Object(Value::Object(reply)))
         }
         "end_display" => {
             control
@@ -748,6 +789,8 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         .ok_or_else(|| ControlError::invalid("action is required"))?;
     let coordinate = a.coordinate("coordinate")?;
     let text_arg = a.string("text")?;
+    let via_input_method = a.0.get("via_input_method") == Some(&Value::Bool(true));
+    let input_source = a.string("input_source")?;
     let modifiers: Vec<String> = text_arg
         .as_deref()
         .unwrap_or_default()
@@ -872,7 +915,12 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             control
                 .call(
                     "type",
-                    json!({ "displayId": display, "text": require_text(text_arg, "type")? }),
+                    json!({
+                        "displayId": display,
+                        "text": require_text(text_arg, "type")?,
+                        "viaInputMethod": via_input_method,
+                        "inputSource": input_source,
+                    }),
                 )
                 .await?;
         }
@@ -880,7 +928,12 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             control
                 .call(
                     "key",
-                    json!({ "displayId": display, "keys": require_text(text_arg, "key")? }),
+                    json!({
+                        "displayId": display,
+                        "keys": require_text(text_arg, "key")?,
+                        "viaInputMethod": via_input_method,
+                        "inputSource": input_source,
+                    }),
                 )
                 .await?;
         }
@@ -982,9 +1035,9 @@ mod tests {
     }
 
     #[test]
-    fn eleven_tools_with_object_schemas() {
+    fn twelve_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }

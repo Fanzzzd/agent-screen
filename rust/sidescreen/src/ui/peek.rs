@@ -165,6 +165,7 @@ impl Render for Peek {
             tiles.push(tile(
                 *id,
                 display.label(),
+                crate::mac::recording::is_recording(*id),
                 status,
                 streams.frame(*id),
                 pointer,
@@ -212,6 +213,7 @@ impl Render for Peek {
 fn tile(
     id: DisplayId,
     label: String,
+    recording: bool,
     status: Status,
     frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
     pointer: Option<crate::model::AgentPointer>,
@@ -351,12 +353,23 @@ fn tile(
                 .child(
                     div()
                         .max_w_full()
-                        .truncate()
-                        .text_size(px(11.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.secondary)
-                        .group_hover(group, |s| s.text_color(theme.label))
-                        .child(label),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        // Being recorded: a red dot, as in the Viewer.
+                        .when(recording, |d| {
+                            d.child(div().flex_none().size(px(6.)).rounded_full().bg(theme.red))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.secondary)
+                                .group_hover(group, |s| s.text_color(theme.label))
+                                .child(label),
+                        ),
                 )
                 .child(
                     div()

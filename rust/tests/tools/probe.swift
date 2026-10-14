@@ -13,7 +13,11 @@
 //   probe units               every online display's unit number, "id unit" per line
 //   probe reconfigurations S  how many display reconfigurations begin within S seconds
 //   probe differ PNG PNG      mean RGB difference of two images, 0-255, below the menu bar
+//   probe video FILE          a video's duration in seconds and its frame size, "s w h"
+//   probe source              the current keyboard input source's id
+import AVFoundation
 import AppKit
+import Carbon
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -74,6 +78,15 @@ case "units":
   var count: UInt32 = 0
   CGGetOnlineDisplayList(32, &ids, &count)
   for id in ids[0..<Int(count)] { print("\(id) \(CGDisplayUnitNumber(id))") }
+case "source":
+  let source = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+  print(Unmanaged<CFString>.fromOpaque(TISGetInputSourceProperty(source, kTISPropertyInputSourceID)).takeUnretainedValue())
+case "video":
+  // A video's duration and frame size, read synchronously from the file.
+  let asset = AVURLAsset(url: URL(fileURLWithPath: args[2]))
+  let duration = CMTimeGetSeconds(asset.duration)
+  let size = asset.tracks(withMediaType: .video).first?.naturalSize ?? .zero
+  print(String(format: "%.2f %d %d", duration, Int(size.width), Int(size.height)))
 case "bounds":
   // A display's frame in global points: x y width height.
   let b = CGDisplayBounds(CGDirectDisplayID(args[2])!)

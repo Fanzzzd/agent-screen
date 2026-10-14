@@ -212,6 +212,7 @@ impl Render for Viewer {
         let header = header(
             id,
             &label,
+            crate::mac::recording::is_recording(id),
             status_line,
             status.kind,
             &agent,
@@ -272,6 +273,20 @@ impl Render for Viewer {
     }
 }
 
+/// Says the agent is recording the display to video.
+pub fn recording_badge(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .text_size(px(11.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.red)
+        .child(div().size(px(7.)).rounded_full().bg(theme.red))
+        .child(t("Recording", "录制中"))
+}
+
 /// The steps of the Help Request the user is answering, numbered, between
 /// the header and the display. Not over the display: clicks there are the
 /// user's input to it.
@@ -306,6 +321,7 @@ fn steps_view(steps: &[String], theme: &Theme) -> gpui::Div {
 fn header(
     id: DisplayId,
     label: &str,
+    recording: bool,
     status: gpui::AnyElement,
     kind: Kind,
     agent: &str,
@@ -354,11 +370,19 @@ fn header(
                 .gap(px(1.))
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.label)
-                        .truncate()
-                        .child(label.to_string()),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.label)
+                                .truncate()
+                                .child(label.to_string()),
+                        )
+                        .when(recording, |d| d.child(recording_badge(theme))),
                 )
                 .child(status),
         )
