@@ -93,9 +93,6 @@ pub enum MenuAction {
         pid: i32,
         window: u32,
     },
-    Dismiss {
-        display: u32,
-    },
     /// Press an accessibility element kept by the menu bar proxy.
     PressProxy {
         index: usize,

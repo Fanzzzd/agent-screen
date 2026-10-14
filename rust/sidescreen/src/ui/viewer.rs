@@ -44,7 +44,7 @@ pub struct Sheet {
 thread_local! {
     /// The header's menu buttons' bounds in the window, from the last
     /// paint, so each menu drops from its button.
-    static MENU_BUTTONS: Cell<[Option<Bounds<Pixels>>; 3]> = const { Cell::new([None; 3]) };
+    static MENU_BUTTONS: Cell<[Option<Bounds<Pixels>>; 2]> = const { Cell::new([None; 2]) };
     /// The display image within the screen area, from the last paint:
     /// left and top offsets and width, in window points.
     static IMAGE: Cell<Option<(f32, f32, f32)>> = const { Cell::new(None) };
@@ -296,6 +296,7 @@ fn header(
     };
     let primary_shell = shell.clone();
     let close_shell = shell.clone();
+    let dismiss_shell = shell.clone();
     div()
         .id("header")
         .h(px(HEADER))
@@ -359,7 +360,13 @@ fn header(
                     shell,
                 )),
         )
-        .child(menu_button(id, WindowMenu::More, "", true, theme, shell))
+        .child(icon_button(
+            "close-display",
+            "icons/close.svg",
+            t("Close Display…", "关闭显示器…"),
+            theme,
+            move |cx| tell(&dismiss_shell, cx, move |shell, cx| shell.dismiss(id, cx)),
+        ))
         .child(icon_button(
             "collapse",
             "icons/chevron-up.svg",
@@ -369,13 +376,12 @@ fn header(
         ))
 }
 
-/// The header's three menus: the user's windows to give the agent, the
-/// display's windows to take back, and the rest.
+/// The header's two menus: the user's windows to give the agent, and the
+/// display's windows to take back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowMenu {
     Give,
     TakeBack,
-    More,
 }
 
 impl WindowMenu {
@@ -389,8 +395,7 @@ impl WindowMenu {
     }
 }
 
-/// A button that drops `menu`: half of the Give | Take Back pair, or the
-/// round ⋯ when `title` is empty.
+/// A button that drops `menu`: one half of the Give | Take Back pair.
 fn menu_button(
     id: DisplayId,
     menu: WindowMenu,
@@ -399,10 +404,9 @@ fn menu_button(
     theme: &Theme,
     shell: &WeakEntity<Shell>,
 ) -> impl IntoElement {
-    let (element_id, icon, hint) = match menu {
-        WindowMenu::Give => ("give", "icons/give.svg", title),
-        WindowMenu::TakeBack => ("take-back", "icons/take-back.svg", title),
-        WindowMenu::More => ("more", "icons/more.svg", t("More", "更多")),
+    let (element_id, icon) = match menu {
+        WindowMenu::Give => ("give", "icons/give.svg"),
+        WindowMenu::TakeBack => ("take-back", "icons/take-back.svg"),
     };
     let fg = if enabled {
         theme.label
@@ -410,26 +414,23 @@ fn menu_button(
         theme.secondary.opacity(0.6)
     };
     let shell = shell.clone();
-    let round = title.is_empty();
     div()
         .id(element_id)
         .relative()
         .role(Role::Button)
-        .aria_label(hint)
+        .aria_label(title)
         .flex_none()
         .h(px(28.))
         .flex()
         .items_center()
         .gap(px(5.))
-        .when(round, |d| {
-            d.w(px(28.))
-                .justify_center()
-                .rounded_full()
-                .bg(theme.control)
-                .tooltip(move |_, cx| super::shell::hint(hint, cx))
-                .tooltip_show_delay(super::shell::HINT_DELAY)
+        .px(px(12.))
+        // GPUI clips children to rectangles, so each half rounds its own
+        // outer side for the hover to match the capsule.
+        .map(|d| match menu {
+            WindowMenu::Give => d.rounded_l_full(),
+            WindowMenu::TakeBack => d.rounded_r_full(),
         })
-        .when(!round, |d| d.px(px(12.)))
         .text_size(px(12.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
@@ -445,7 +446,7 @@ fn menu_button(
         })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(svg().path(icon).flex_none().size(px(14.)).text_color(fg))
-        .when(!round, |d| d.child(title))
+        .child(title)
         .child(
             canvas(
                 move |bounds, _, _| {

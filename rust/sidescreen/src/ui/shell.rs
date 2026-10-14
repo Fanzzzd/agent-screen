@@ -1387,7 +1387,6 @@ impl Shell {
             "primary" => self.primary(id, cx),
             "give" => self.window_menu(id, WindowMenu::Give, None, cx),
             "take-back" => self.window_menu(id, WindowMenu::TakeBack, None, cx),
-            "more" => self.window_menu(id, WindowMenu::More, None, cx),
             "help" => self.open_for_help(id, cx),
             "answer" => {
                 let Some((viewer, _)) = self.viewer.clone() else {
@@ -1548,12 +1547,6 @@ impl Shell {
                     menu.disabled(t("No Windows on This Display", "这块显示器上没有窗口"));
                 }
             }
-            WindowMenu::More => {
-                menu.action(
-                    t("Close Display…", "关闭显示器…"),
-                    MenuAction::Dismiss { display: id },
-                );
-            }
         }
         let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
             let frame = native::frame(window);
@@ -1698,7 +1691,6 @@ impl Shell {
                 display,
                 cx,
             ),
-            MenuAction::Dismiss { display } => self.dismiss(display, cx),
             MenuAction::PressProxy { index } => {
                 let Some(element) = menubar::chosen(index) else {
                     return;

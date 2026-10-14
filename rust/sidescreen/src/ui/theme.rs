@@ -110,7 +110,6 @@ impl AssetSource for Assets {
             "icons/alert.svg" => include_bytes!("../../assets/icons/alert.svg"),
             "icons/give.svg" => include_bytes!("../../assets/icons/give.svg"),
             "icons/take-back.svg" => include_bytes!("../../assets/icons/take-back.svg"),
-            "icons/more.svg" => include_bytes!("../../assets/icons/more.svg"),
             "icons/display.svg" => include_bytes!("../../assets/icons/display.svg"),
             "icons/pointer.svg" => include_bytes!("../../assets/icons/pointer.svg"),
             "icons/check.svg" => include_bytes!("../../assets/icons/check.svg"),
