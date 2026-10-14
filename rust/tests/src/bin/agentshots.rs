@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use base64::Engine;
 use sidescreen_tests::{
-    Control, check, instance, json, probe, quit_app, run, running, skip, sleep_ms,
-    start_test_app, stop_test_app,
+    Control, check, instance, json, probe, quit_app, run, running, skip, sleep_ms, start_test_app,
+    stop_test_app,
 };
 
 const SAME: i64 = 12;
