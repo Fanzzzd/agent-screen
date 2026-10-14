@@ -1,6 +1,7 @@
 //! The Help Card: it drops from the menu bar icon for a Help Request, Later
 //! puts it away, a new request brings it back, and Take Over or the Viewer
-//! showing that display hides it. Captures the card and the Viewer header
+//! showing that display hides it. The request's steps show in the Viewer
+//! during the Takeover. Captures the card and the Viewer header
 //! under target/e2e. The card shows on the user's screen for a few seconds.
 //!
 //!     SIDESCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e helpcard
@@ -82,6 +83,11 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         json!({
             "display_id": display_id,
             "reason": "Enter the code from your phone",
+            "steps": [
+                "Click the code field",
+                "Type the six digits from the text message",
+                "Click Verify, then hand the display back",
+            ],
             "timeout_seconds": 1,
         }),
     )?;
@@ -102,6 +108,7 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         let file = capture("viewer-header", [v.x, v.y, v.width, 60.0])?;
         println!("     header: {}", file.display());
     }
+    let before = image_offset(control);
     // Tidying up only; the checks after it don't depend on it.
     let _ = show("collapse");
     sleep_ms(500);
@@ -109,6 +116,20 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
     show("card-take-over")?;
     sleep_ms(600);
     check("Take Over hides the card", card().is_none(), "");
+    // Three lines of steps push the display down in the Viewer.
+    let during = image_offset(control);
+    check(
+        "the Viewer lists the request's steps during the Takeover",
+        matches!((before, during), (Some(b), Some(d)) if d > b + 30.0),
+        format!("display image {before:?} pt below the Viewer's top, then {during:?}"),
+    );
+    if let Some(v) = windows_of(pid)
+        .into_iter()
+        .find(|w| w.width > 400.0 && w.layer > 0)
+    {
+        let file = capture("viewer-steps", [v.x, v.y, v.width, 140.0])?;
+        println!("     steps: {}", file.display());
+    }
     control.call(
         "debugTakeover",
         json!({ "displayId": display_id, "active": false }),
@@ -120,4 +141,11 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         "",
     );
     Ok(())
+}
+
+/// How far below the Viewer's top its display image starts, in points.
+fn image_offset(control: &Control) -> Option<f64> {
+    let viewer = control.call("debugViewer", json!({})).ok()?;
+    let top = |v: &serde_json::Value| v.get(1).or_else(|| v.get("y")).and_then(|y| y.as_f64());
+    Some(top(&viewer["image"])? - top(&viewer["frame"])?)
 }

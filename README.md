@@ -63,7 +63,7 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 
 - **Peek.** Hover the menu bar icon, or click it to keep Peek up. Right-click it for the menu. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
 - **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
-- **Help Request.** `request_help` drops a card from the menu bar icon with the display's picture and the agent's reason, and posts a notification. Take Over, on the card or the notification, opens the display in Takeover. Clicking the picture or the notification only opens it. Later puts the card away; the icon stays orange.
+- **Help Request.** `request_help` drops a card from the menu bar icon with the display's picture and the agent's reason, and posts a notification. Take Over, on the card or the notification, opens the display in Takeover. Clicking the picture or the notification only opens it. Later puts the card away; the icon stays orange. When the agent gives steps, the Viewer lists them under its header while you are in control.
 - **Notifications.** Besides Help Requests, Sidescreen tells you when an agent leaves windows on its display, by finishing or by disconnecting. Allow them in the setup window.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
 - **Handover.** Drag one of your windows onto the Viewer, or pick it under Give in the Viewer's header. Take Back brings any window back. A handed-over window returns to where it was. The × beside them closes the display.

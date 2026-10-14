@@ -156,7 +156,7 @@ mod tests {
         let mut d = display(true);
         assert_eq!(status(&d, 0).long, "由 Codex 控制");
 
-        d.request_help(7, "输入验证码".into());
+        d.request_help(7, "输入验证码".into(), Vec::new());
         let help = status(&d, 0);
         assert_eq!(
             (help.kind, help.short.as_str()),

@@ -192,6 +192,7 @@ pub fn definitions() -> Vec<Value> {
                 json!({
                     "display_id": display_id(),
                     "reason": { "type": "string", "description": "What you need the user to do, in one short sentence." },
+                    "steps": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 short steps, when the reason alone can't say how. The Viewer lists them while the user is in control." },
                     "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
                     "timeout_seconds": timeout()
                 }),
@@ -482,7 +483,7 @@ pub async fn run(
             control
                 .call(
                     "requestHelp",
-                    json!({ "displayId": display, "reason": reason }),
+                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps") }),
                 )
                 .await?;
             let reply = control

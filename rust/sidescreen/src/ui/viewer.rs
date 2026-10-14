@@ -166,6 +166,12 @@ impl Render for Viewer {
         let status = Status::of(display, self.count, &theme);
         let label = display.label();
         let agent = display.agent_name().to_string();
+        // The Help Request's steps, for the user to follow while in control.
+        let steps = if display.takeover {
+            display.help_steps.clone()
+        } else {
+            Vec::new()
+        };
         let size = (display.width, display.height);
         let pointer = (!display.takeover && !display.is_ended())
             .then_some(display.pointer)
@@ -232,6 +238,7 @@ impl Render for Viewer {
                     move |header, t| header.opacity(if morphing { 0. } else { t }),
                 )
             })
+            .when(!steps.is_empty(), |d| d.child(steps_view(&steps, &theme)))
             .child(
                 div()
                     .relative()
@@ -263,6 +270,36 @@ impl Render for Viewer {
             )
             .into_any_element()
     }
+}
+
+/// The steps of the Help Request the user is answering, numbered, between
+/// the header and the display. Not over the display: clicks there are the
+/// user's input to it.
+fn steps_view(steps: &[String], theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        // In line with the header's title.
+        .pl(px(16.))
+        .pr(px(12.))
+        .pb(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .children(steps.iter().enumerate().map(|(index, step)| {
+            div()
+                .flex()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .text_color(theme.accent)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(format!("{}.", index + 1)),
+                )
+                .child(div().min_w_0().text_color(theme.label).child(step.clone()))
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]

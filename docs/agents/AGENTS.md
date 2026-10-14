@@ -21,5 +21,5 @@ Use either toolset on windows that are on your display:
 - After each window's purpose is clear, call `set_disposition`: `keep` for results the user should see, `close` for scratch windows. Your session can end without warning.
 - A `takeover` error means the user is operating the display: call `wait_for_control`.
 - An error saying the user closed your display means they want you to stop working on screen. Ask them before calling `create_display` again.
-- For a login, captcha or two-factor code, call `request_help` with the reason. If you get past it yourself, call `request_help` with `withdraw: true`.
+- For a login, captcha or two-factor code, call `request_help` with the reason, and `steps` when it takes more than one thing. If you get past it yourself, call `request_help` with `withdraw: true`.
 - When the GUI part of the task is finished, call `end_display`.

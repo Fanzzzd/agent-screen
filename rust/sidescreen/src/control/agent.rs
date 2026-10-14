@@ -709,8 +709,22 @@ async fn handle_one(
                 .string("reason")
                 .filter(|r| !r.is_empty())
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            let steps = match p.0.get("steps") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .ok_or_else(|| ControlError::invalid("steps are strings"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(ControlError::invalid("steps is a list of strings")),
+            };
+            let steps =
+                sidescreen_model::model::help_steps(steps).map_err(ControlError::invalid)?;
             core.update(cx, |c, cx| {
-                if c.displays.request_help(id, reason) {
+                if c.displays.request_help(id, reason, steps) {
                     cx.notify();
                 }
             });

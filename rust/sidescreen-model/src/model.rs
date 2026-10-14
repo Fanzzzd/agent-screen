@@ -238,6 +238,8 @@ pub struct Display<H> {
     pub takeover: bool,
     /// The reason of an open Help Request.
     pub help_request: Option<String>,
+    /// Its steps, shown in the Viewer while the user is in control.
+    pub help_steps: Vec<String>,
     pub pointer: Option<AgentPointer>,
     waiters: Vec<oneshot::Sender<ControlWait>>,
     /// The platform display. Only held: dropping it removes the display.
@@ -371,6 +373,31 @@ impl<H> Default for Displays<H> {
 /// default display fits that budget, so screenshot pixels are points.
 pub const DEFAULT_SIZE: (f64, f64) = (1280.0, 800.0);
 
+/// A Help Request carries at most this many steps, each at most this long:
+/// the user reads them beside the display while doing them.
+pub const HELP_STEPS: usize = 5;
+pub const HELP_STEP_CHARS: usize = 160;
+
+/// A Help Request's steps, trimmed; why they can't be shown otherwise.
+pub fn help_steps(steps: Vec<String>) -> Result<Vec<String>, String> {
+    if steps.len() > HELP_STEPS {
+        return Err(format!("give at most {HELP_STEPS} steps"));
+    }
+    steps
+        .into_iter()
+        .map(|step| {
+            let step = step.trim();
+            if step.is_empty() {
+                Err("a step is empty".to_string())
+            } else if step.chars().count() > HELP_STEP_CHARS {
+                Err(format!("keep each step under {HELP_STEP_CHARS} characters"))
+            } else {
+                Ok(step.to_string())
+            }
+        })
+        .collect()
+}
+
 /// Screenshot pixels per display point: 1 within the image budget, less for
 /// a larger display, so the agent's coordinates and its image agree.
 pub fn shot_scale((width, height): (f64, f64)) -> f64 {
@@ -414,6 +441,7 @@ impl<H> Displays<H> {
             released: Default::default(),
             takeover: false,
             help_request: None,
+            help_steps: Vec::new(),
             pointer: None,
             waiters: Vec::new(),
             handle,
@@ -464,6 +492,7 @@ impl<H> Displays<H> {
         display.ended = Some(reason);
         display.takeover = false;
         display.help_request = None;
+        display.help_steps.clear();
         display.pointer = None;
         display.resume_waiters(ControlWait::Ended);
         true
@@ -499,6 +528,7 @@ impl<H> Displays<H> {
             Some(d) if d.takeover => {
                 d.takeover = false;
                 d.help_request = None;
+                d.help_steps.clear();
                 d.resume_waiters(ControlWait::Returned);
                 true
             }
@@ -506,10 +536,11 @@ impl<H> Displays<H> {
         }
     }
 
-    pub fn request_help(&mut self, id: DisplayId, reason: String) -> bool {
+    pub fn request_help(&mut self, id: DisplayId, reason: String, steps: Vec<String>) -> bool {
         match self.get_mut(id) {
             Some(d) if d.is_live() => {
                 d.help_request = Some(reason);
+                d.help_steps = steps;
                 true
             }
             _ => false,
@@ -523,6 +554,7 @@ impl<H> Displays<H> {
             return false;
         };
         let withdrawn = d.help_request.take().is_some();
+        d.help_steps.clear();
         if withdrawn && !d.takeover {
             d.resume_waiters(ControlWait::Returned);
         }
@@ -617,6 +649,28 @@ mod tests {
         assert!(s < 1.0 && 2560.0 * s <= 1568.0 && 2560.0 * 1600.0 * s * s <= 1_150_000.0);
     }
 
+    #[test]
+    fn help_steps_are_short_and_few() {
+        let steps = |s: &[&str]| help_steps(s.iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            steps(&[" Click the terminal ", "Type it"]).unwrap(),
+            ["Click the terminal", "Type it"]
+        );
+        assert!(steps(&["a"; HELP_STEPS + 1]).is_err());
+        assert!(steps(&["a", "  "]).is_err());
+        assert!(steps(&[&"x".repeat(HELP_STEP_CHARS + 1)]).is_err());
+    }
+
+    #[test]
+    fn steps_go_with_the_help_request() {
+        let mut d = displays();
+        assert!(d.request_help(7, "登录".into(), vec!["点终端".into()]));
+        assert!(d.begin_takeover(7));
+        assert_eq!(d.get(7).unwrap().help_steps, ["点终端"]);
+        assert!(d.end_takeover(7));
+        assert!(d.get(7).unwrap().help_steps.is_empty());
+    }
+
     fn owner(connection: u64) -> Option<Owner> {
         Some(Owner {
             session_key: "s".into(),
@@ -642,7 +696,7 @@ mod tests {
     #[test]
     fn takeover_resumes_waiters_and_clears_help() {
         let mut d = displays();
-        assert!(d.request_help(7, "登录".into()));
+        assert!(d.request_help(7, "登录".into(), Vec::new()));
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
         };
@@ -660,7 +714,7 @@ mod tests {
     fn withdrawing_help_frees_waiters() {
         let mut d = displays();
         assert!(!d.withdraw_help(7), "nothing to withdraw");
-        assert!(d.request_help(7, "登录".into()));
+        assert!(d.request_help(7, "登录".into(), Vec::new()));
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
         };

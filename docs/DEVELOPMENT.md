@@ -57,7 +57,7 @@ SIDESCREEN_INSTANCE=e2e cargo e2e viewerpicture  # new displays get unit numbers
 SIDESCREEN_INSTANCE=e2e cargo e2e shared      # an app you and an agent both use: its keys reach only its window
 SIDESCREEN_INSTANCE=e2e cargo e2e openpanel   # a file Open panel: keys, clicks, window state, picking a file by path
 SIDESCREEN_INSTANCE=e2e cargo e2e browsers    # Safari: the first click, URLs in a running browser, a select menu
-SIDESCREEN_INSTANCE=e2e cargo e2e helpcard    # the Help Card: shows, Later, comes back, steps aside for the Viewer and Takeover
+SIDESCREEN_INSTANCE=e2e cargo e2e helpcard    # the Help Card: shows, Later, comes back, steps aside for the Viewer and Takeover; the Viewer lists the request's steps
 SIDESCREEN_INSTANCE=e2e cargo e2e timing      # how long create_display and launch_app take
 SIDESCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
 ```

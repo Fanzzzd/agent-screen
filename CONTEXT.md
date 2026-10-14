@@ -37,7 +37,7 @@ A state of an Agent Display in which the user operates it and the owning Agent S
 _Avoid_: pause, lock, manual mode
 
 **Help Request**:
-An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha). It ends when the user finishes a Takeover.
+An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha) and up to five steps. It ends when the user finishes a Takeover.
 _Avoid_: escalation, alert, ping
 
 **Help Card** (求助卡片):
