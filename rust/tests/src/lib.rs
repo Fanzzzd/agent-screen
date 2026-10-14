@@ -40,9 +40,17 @@ pub fn instance() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The debug app's socket. A build in the "Sidescreen Dev" bundle is the
+/// `dev` instance unless SIDESCREEN_INSTANCE names another.
 pub fn socket_path() -> PathBuf {
+    socket_of(Some(&instance().unwrap_or_else(|| "dev".into())))
+}
+
+/// The socket of an instance; `None` is the installed app's, and that of
+/// any bundle not named "Sidescreen Dev", such as the ungranted copy.
+pub fn socket_of(instance: Option<&str>) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    let name = match instance() {
+    let name = match instance {
         Some(i) => format!("control-{i}.sock"),
         None => "control.sock".into(),
     };
@@ -438,12 +446,20 @@ pub fn stop_app(app: &Path) {
 }
 
 pub fn listening() -> bool {
-    std::os::unix::net::UnixStream::connect(socket_path()).is_ok()
+    listening_at(&socket_path())
+}
+
+fn listening_at(socket: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 fn wait_listening() -> bool {
+    wait_listening_at(&socket_path())
+}
+
+fn wait_listening_at(socket: &Path) -> bool {
     for _ in 0..60 {
-        if listening() {
+        if listening_at(socket) {
             return true;
         }
         sleep_ms(250);
@@ -576,7 +592,7 @@ pub fn start_ungranted_app() -> Result<PathBuf> {
     stop_app(&debug_app());
     // Opened by launchd, it answers for itself instead of borrowing ours.
     sh("/usr/bin/open", &[copy_str])?;
-    wait_listening();
+    wait_listening_at(&socket_of(None));
     Ok(copy)
 }
 

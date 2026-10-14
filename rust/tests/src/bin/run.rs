@@ -21,8 +21,8 @@ use serde::Deserialize;
 use sidescreen_tests::{
     Control, Frame, Rect, Window, capture, check, digest, failed, fixture, hid, json, locked,
     on_screen, osa, out, pid_of, pixel, quit_app, reopen_installed, restore, run, running,
-    sh_lenient, sleep_ms, snapshot, start_debug_app, start_ungranted_app, stop_app, stop_debug_app,
-    tool, voided, wait_for_quiet, windows_of,
+    sh_lenient, sleep_ms, snapshot, socket_of, start_debug_app, start_ungranted_app, stop_app,
+    stop_debug_app, tool, voided, wait_for_quiet, windows_of,
 };
 
 #[derive(Deserialize)]
@@ -328,7 +328,7 @@ fn permissions_of(app: &Path) -> Result<()> {
         capture("permissions-setup", [s.x, s.y, s.width, s.height])?;
     }
 
-    let control = Control::connect()?;
+    let control = Control::connect_to(&socket_of(None))?;
     let refused = control.send(
         "createDisplay",
         json!({ "sessionKey": "e2e-perm", "client": "E2E", "title": "perm" }),

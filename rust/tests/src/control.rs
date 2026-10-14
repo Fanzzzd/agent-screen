@@ -40,8 +40,12 @@ pub struct Control {
 
 impl Control {
     pub fn connect() -> Result<Control> {
-        let socket = UnixStream::connect(socket_path())
-            .with_context(|| format!("connecting to {}", socket_path().display()))?;
+        Control::connect_to(&socket_path())
+    }
+
+    pub fn connect_to(path: &std::path::Path) -> Result<Control> {
+        let socket = UnixStream::connect(path)
+            .with_context(|| format!("connecting to {}", path.display()))?;
         let pending: Pending = Arc::default();
         let reader = BufReader::new(socket.try_clone()?);
         let replies = pending.clone();
