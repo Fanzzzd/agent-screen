@@ -136,42 +136,138 @@ pub fn display(
     format: Format,
     source: Option<crate::model::Rect>,
 ) -> Result<Shot, String> {
-    let capture = |fresh: bool| -> Result<Option<CGImage>, String> {
-        let (filter, left) = filter_counting(id, fresh, true)?;
-        // Nothing but the desktop: ScreenCaptureKit refuses to capture
-        // an empty picture, and the answer is plain anyway.
-        if left == 0 {
-            return Ok(None);
+    // Pixels `size` of `source`, in the display's points (the whole display
+    // when none). None: nothing but the desktop.
+    let capture =
+        |size: (f64, f64), source: Option<crate::model::Rect>| -> Result<Option<CGImage>, String> {
+            // A fresh listing every time: a cached one misses the wallpaper and
+            // menu bar windows a new display gets, so they'd show, and names
+            // windows that closed since, which fails the capture.
+            let (filter, left) = filter_counting(id, true, true)?;
+            // Nothing but the desktop: ScreenCaptureKit refuses to capture
+            // an empty picture, and the answer is plain anyway.
+            if left == 0 {
+                return Ok(None);
+            }
+            let mut config = SCStreamConfiguration::new()
+                .with_width(size.0 as u32)
+                .with_height(size.1 as u32)
+                .with_shows_cursor(false);
+            // Where the wallpaper was: the dark gray of a window background.
+            config.set_background_color(0.13, 0.13, 0.14);
+            // Without the wallpaper, the content would shrink to the windows'
+            // bounds; pin it to the whole display. The source is in the
+            // display's points, `size` in the image's pixels.
+            let r = source.unwrap_or_else(|| {
+                let bounds = super::cg::display_bounds(id);
+                crate::model::Rect::new(0.0, 0.0, bounds.width, bounds.height)
+            });
+            config.set_source_rect(screencapturekit::cg::CGRect::new(
+                r.x, r.y, r.width, r.height,
+            ));
+            SCScreenshotManager::capture_image(&filter, &config)
+                .map(Some)
+                .map_err(|e| e.to_string())
+        };
+    let mut result = capture(size, source);
+    // ScreenCaptureKit sometimes fails to start the capture for a moment,
+    // after a window on the display was resized: try again a few times.
+    for wait in [100, 300, 700] {
+        if result.is_ok() {
+            break;
         }
-        let mut config = SCStreamConfiguration::new()
-            .with_width(size.0 as u32)
-            .with_height(size.1 as u32)
-            .with_shows_cursor(false);
-        // Where the wallpaper was: the dark gray of a window background.
-        config.set_background_color(0.13, 0.13, 0.14);
-        // Without the wallpaper, the content would shrink to the windows'
-        // bounds; pin it to the whole display.
-        let r = source.unwrap_or(crate::model::Rect::new(0.0, 0.0, size.0, size.1));
-        config.set_source_rect(screencapturekit::cg::CGRect::new(
-            r.x, r.y, r.width, r.height,
-        ));
-        SCScreenshotManager::capture_image(&filter, &config)
-            .map(Some)
-            .map_err(|e| e.to_string())
-    };
-    // A fresh listing every time: a cached one misses the wallpaper and
-    // menu bar windows a new display gets, so they'd show, and names
-    // windows that closed since, which fails the capture.
-    let image = match capture(true) {
-        Ok(image) => image,
-        Err(_) => {
-            std::thread::sleep(Duration::from_millis(100));
-            capture(true)?
+        std::thread::sleep(Duration::from_millis(wait));
+        result = capture(size, source);
+    }
+    // Still failing on a region: cut it from a whole capture instead.
+    if let (Err(error), Some(region)) = (&result, source) {
+        log::debug!("zoom of display {id} failed ({error}); cropping a whole capture");
+        let bounds = super::cg::display_bounds(id);
+        let scale = (size.0 / region.width)
+            .max(size.1 / region.height)
+            .clamp(0.5, 2.0);
+        let whole = (
+            (bounds.width * scale).round(),
+            (bounds.height * scale).round(),
+        );
+        match capture(whole, None) {
+            Ok(Some(image)) => {
+                let pixels = crate::model::Rect::new(
+                    region.x * scale,
+                    region.y * scale,
+                    region.width * scale,
+                    region.height * scale,
+                );
+                return crop(&image, pixels, size, format);
+            }
+            Ok(None) => return plain(size, format),
+            Err(_) => {}
         }
-    };
-    match image {
+    }
+    match result? {
         Some(image) => encode(&image, format),
         None => plain(size, format),
+    }
+}
+
+/// `rect` of an image, in its pixels, drawn at `size` and encoded.
+fn crop(
+    image: &CGImage,
+    rect: crate::model::Rect,
+    size: (f64, f64),
+    format: Format,
+) -> Result<Shot, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+    };
+    unsafe extern "C" {
+        fn CGImageCreateWithImageInRect(image: *const c_void, rect: CGRect) -> *const c_void;
+    }
+    let (width, height) = (size.0 as usize, size.1 as usize);
+    unsafe {
+        let cut = CGImageCreateWithImageInRect(
+            image.as_ptr().cast(),
+            CGRect::new(
+                CGPoint::new(rect.x, rect.y),
+                CGSize::new(rect.width, rect.height),
+            ),
+        );
+        if cut.is_null() {
+            return Err("could not crop the screenshot".into());
+        }
+        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
+        let context = CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            0,
+            Some(&space),
+            CGImageAlphaInfo::NoneSkipLast.0,
+        )
+        .ok_or("could not draw the screenshot")?;
+        unsafe extern "C" {
+            fn CGContextDrawImage(context: *const c_void, rect: CGRect, image: *const c_void);
+        }
+        CGContextDrawImage(
+            objc2_core_foundation::CFRetained::as_ptr(&context)
+                .as_ptr()
+                .cast(),
+            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(size.0, size.1)),
+            cut,
+        );
+        CFRelease(cut);
+        let drawn =
+            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw the screenshot")?;
+        encode_raw(
+            objc2_core_foundation::CFRetained::as_ptr(&drawn)
+                .as_ptr()
+                .cast(),
+            width,
+            height,
+            format,
+        )
     }
 }
 

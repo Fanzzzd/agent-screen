@@ -48,10 +48,15 @@ impl VirtualDisplay {
     /// stays until another comes, so WindowServer hands that one the next
     /// unit; up to three tries, with serials of their own.
     pub fn create(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
-        let mut twinned = Vec::new();
+        let mut twinned: Vec<Self> = Vec::new();
         for attempt in 0..3u32 {
-            let display = Self::create_once(name, width, height, serial + attempt * 0x0100_0000)?;
+            let serial = serial + attempt * 0x0100_0000;
+            let display = Self::create_once(name, width, height, serial)?;
+            crate::lifecycle::note("created", display.id, &format!("serial={serial}"));
             let Some(twin) = cg::unit_twin(display.id) else {
+                for twinned in &twinned {
+                    crate::lifecycle::note("released", twinned.id, "unit twin");
+                }
                 return Some(display);
             };
             log::warn!(

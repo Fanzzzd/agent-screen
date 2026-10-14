@@ -1108,20 +1108,29 @@ impl Shell {
     }
 
     pub fn create_display(&mut self, cx: &mut Context<Self>) {
-        // macOS takes about half a second: off the main thread, so Peek
-        // keeps drawing.
-        let (serial, name) = self.core.update(cx, |core, _| core.next_name());
-        let made = cx.background_spawn({
-            let name = name.clone();
-            async move {
-                crate::mac::display::VirtualDisplay::create(
-                    &name,
-                    DEFAULT_SIZE.0 as u32,
-                    DEFAULT_SIZE.1 as u32,
-                    serial,
-                )
+        // A spare of the size, or a new display: macOS takes about half a
+        // second for that, off the main thread, so Peek keeps drawing.
+        let spare = self
+            .core
+            .update(cx, |core, _| core.take_spare(DEFAULT_SIZE));
+        let (made, name) = match spare {
+            Some((handle, name)) => (gpui::Task::ready(Some(handle)), name),
+            None => {
+                let (serial, name) = self.core.update(cx, |core, _| core.next_name());
+                let made = cx.background_spawn({
+                    let name = name.clone();
+                    async move {
+                        crate::mac::display::VirtualDisplay::create(
+                            &name,
+                            DEFAULT_SIZE.0 as u32,
+                            DEFAULT_SIZE.1 as u32,
+                            serial,
+                        )
+                    }
+                });
+                (made, name)
             }
-        });
+        };
         cx.spawn(async move |shell, cx| {
             let made = made.await;
             let _ = shell.update(cx, |shell, cx| {

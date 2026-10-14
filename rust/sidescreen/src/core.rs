@@ -8,8 +8,29 @@ use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
 use gpui::Context;
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
+
+/// Adding or removing a display is a reconfiguration every app on the Mac
+/// handles, and while a virtual display is connected each one leaves
+/// ColorSync answering more requests from apps for minutes. Dozens in a
+/// short while slow the whole Mac down. So an ended, empty display stays
+/// connected as a spare for the next display of its size, up to `SPARES` of
+/// them for `SPARE_LIFE`, and new displays are limited to `MADE` per
+/// `MADE_WINDOW` for agents.
+const SPARES: usize = 2;
+const SPARE_LIFE: Duration = Duration::from_secs(10 * 60);
+const MADE: usize = 10;
+const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// An ended display kept connected for the next one of its size. Nothing
+/// shows it: it isn't an Agent Display until it's taken.
+pub struct Spare {
+    handle: VirtualDisplay,
+    name: String,
+    size: (f64, f64),
+    since: Instant,
+}
 
 pub struct Core {
     pub displays: Displays<VirtualDisplay>,
@@ -49,6 +70,10 @@ pub struct Core {
     /// Windows `adopt_opened` left on the user's screen because the user
     /// had just acted on the app, by display, until reported.
     pub left_alone: Vec<(DisplayId, u32)>,
+    /// Ended displays kept for reuse.
+    spares: Vec<Spare>,
+    /// When agents' displays were made new, within `MADE_WINDOW`.
+    made: VecDeque<Instant>,
 }
 
 impl Core {
@@ -68,6 +93,71 @@ impl Core {
             watching: HashSet::new(),
             told: HashSet::new(),
             left_alone: Vec::new(),
+            spares: Vec::new(),
+            made: VecDeque::new(),
+        }
+    }
+
+    /// Ids of every virtual display of this app, spares included: they
+    /// take room where displays park.
+    fn virtual_ids(&self) -> Vec<DisplayId> {
+        self.displays
+            .list
+            .iter()
+            .map(|d| d.id)
+            .chain(self.spares.iter().map(|s| s.handle.id))
+            .collect()
+    }
+
+    /// A spare of `size` to use instead of a new display, with its name.
+    /// One that macOS no longer shows, or that now shares its unit number,
+    /// goes instead.
+    pub fn take_spare(&mut self, size: (f64, f64)) -> Option<(VirtualDisplay, String)> {
+        while let Some(index) = self.spares.iter().position(|s| s.size == size) {
+            let spare = self.spares.remove(index);
+            let id = spare.handle.id;
+            if crate::mac::cg::active_displays().contains(&id)
+                && crate::mac::cg::unit_twin(id).is_none()
+            {
+                crate::lifecycle::note("reused", id, "");
+                return Some((spare.handle, spare.name));
+            }
+            crate::lifecycle::note("released", id, "spare unusable");
+        }
+        None
+    }
+
+    /// Whether an agent may have a new display now; otherwise how long
+    /// until it may.
+    pub fn may_make(&mut self) -> Result<(), Duration> {
+        let now = Instant::now();
+        while self
+            .made
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > MADE_WINDOW)
+        {
+            self.made.pop_front();
+        }
+        if self.made.len() < MADE {
+            return Ok(());
+        }
+        let oldest = self.made.front().copied().unwrap_or(now);
+        Err(MADE_WINDOW.saturating_sub(now.duration_since(oldest)))
+    }
+
+    /// An agent's display was made new.
+    pub fn count_made(&mut self) {
+        self.made.push_back(Instant::now());
+    }
+
+    /// Release spares kept longer than `SPARE_LIFE`.
+    fn release_old_spares(&mut self) {
+        let (old, kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
+            .into_iter()
+            .partition(|s| s.since.elapsed() >= SPARE_LIFE);
+        self.spares = kept;
+        for spare in old {
+            crate::lifecycle::note("released", spare.handle.id, "spare unused");
         }
     }
 
@@ -112,10 +202,17 @@ impl Core {
     ) -> DisplayId {
         let id = handle.id;
         self.displays.add(id, name, size, owner, handle);
+        // A reused display is already in place: moving it again would be
+        // another reconfiguration.
+        let virtual_ids = self.virtual_ids();
+        if display::is_tucked(id, &virtual_ids) {
+            self.tucked.insert(id);
+            cx.notify();
+            return id;
+        }
         // Usually WindowServer takes the position at once. Here, before the
         // main thread turns to everything a new display sets off, which
         // held a spawned first try back by up to 400 ms.
-        let virtual_ids: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
         if display::tuck_away(id, &virtual_ids) {
             self.tucked.insert(id);
             cx.notify();
@@ -136,11 +233,9 @@ impl Core {
                         .await;
                 }
                 tries += 1;
-                let Ok(placed) = this.update(cx, |core, _| {
-                    let virtual_ids: Vec<DisplayId> =
-                        core.displays.list.iter().map(|d| d.id).collect();
-                    display::tuck_away(id, &virtual_ids)
-                }) else {
+                let Ok(placed) =
+                    this.update(cx, |core, _| display::tuck_away(id, &core.virtual_ids()))
+                else {
                     return;
                 };
                 if placed {
@@ -170,8 +265,9 @@ impl Core {
     /// Settings. Each move is a display change too, so a display macOS
     /// keeps putting elsewhere gets three tries, not a loop.
     pub fn repark(&mut self) {
-        let virtual_ids: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
-        for &id in &virtual_ids {
+        let virtual_ids = self.virtual_ids();
+        let ours: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
+        for &id in &ours {
             if !self.tucked.contains(&id) || display::is_tucked(id, &virtual_ids) {
                 self.reparks.remove(&id);
                 continue;
@@ -216,9 +312,32 @@ impl Core {
         }
     }
 
-    /// Drop a display: macOS removes it with its handle.
+    /// Drop a display. An empty one stays connected as a spare while there
+    /// is room; otherwise macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        if self.displays.remove(id).is_some() {
+        if let Some(display) = self.displays.remove(id) {
+            let size = (display.width, display.height);
+            let keep = self.spares.len() < SPARES
+                && windows::on_display(id).is_empty()
+                && crate::mac::cg::unit_twin(id).is_none();
+            if keep {
+                crate::lifecycle::note("kept", id, "spare");
+                self.spares.push(Spare {
+                    handle: display.handle,
+                    name: display.name,
+                    size,
+                    since: Instant::now(),
+                });
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(SPARE_LIFE + Duration::from_secs(1))
+                        .await;
+                    let _ = this.update(cx, |core, _| core.release_old_spares());
+                })
+                .detach();
+            } else {
+                crate::lifecycle::note("released", id, "");
+            }
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);

@@ -136,7 +136,8 @@ async fn handle_one(
                     let [x0, y0, x1, y1] = n[..] else {
                         return Err(ControlError::invalid("region is [x0, y0, x1, y1]"));
                     };
-                    let (w, h) = (size.0 * scale, size.1 * scale);
+                    // The screenshot's own size, rounded the same way.
+                    let (w, h) = pixels;
                     if !(0.0 <= x0 && x0 < x1 && x1 <= w && 0.0 <= y0 && y0 < y1 && y1 <= h) {
                         return Err(ControlError::invalid(format!(
                             "region must lie within the {}×{} screenshot, x0 < x1 and y0 < y1",
@@ -1070,23 +1071,38 @@ async fn create_display(
         })
         .await;
     let started = Instant::now();
-    // macOS takes 300 to 500 ms to make the display: off the main thread,
-    // so Peek and the Viewer keep drawing meanwhile.
-    let (serial, name) = core.update(cx, |c, _| c.next_name());
-    let made = cx
-        .background_executor()
-        .spawn({
-            let name = name.clone();
-            async move {
-                crate::mac::display::VirtualDisplay::create(
-                    &name,
-                    width as u32,
-                    height as u32,
-                    serial,
-                )
+    // A spare of this size costs macOS nothing; a new display is a
+    // reconfiguration every app handles, so agents get only so many.
+    let (made, name) = match core.update(cx, |c, _| c.take_spare((width, height))) {
+        Some((handle, name)) => (Some(handle), name),
+        None => {
+            if let Err(wait) = core.update(cx, |c, _| c.may_make()) {
+                return Err(ControlError::failed(format!(
+                    "Sidescreen made many displays in the last minutes, and each one makes every app on this Mac reconfigure its screens. Keep using the display you have, or call create_display again in {} s.",
+                    wait.as_secs().max(1)
+                )));
             }
-        })
-        .await;
+            core.update(cx, |c, _| c.count_made());
+            // macOS takes 300 to 500 ms to make the display: off the main
+            // thread, so Peek and the Viewer keep drawing meanwhile.
+            let (serial, name) = core.update(cx, |c, _| c.next_name());
+            let made = cx
+                .background_executor()
+                .spawn({
+                    let name = name.clone();
+                    async move {
+                        crate::mac::display::VirtualDisplay::create(
+                            &name,
+                            width as u32,
+                            height as u32,
+                            serial,
+                        )
+                    }
+                })
+                .await;
+            (made, name)
+        }
+    };
     // The session may have closed, or got a display from a parallel call,
     // while macOS made this one: then this one goes.
     let key = owner.session_key.clone();

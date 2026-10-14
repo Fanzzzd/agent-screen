@@ -8,6 +8,10 @@ Sidescreen gives each AI agent session its own virtual display on the user's Mac
 A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen. When the session stops using it, it closes by itself if no window is left on it, and otherwise becomes a Review Display. The user can also create one from Peek; it then has no Agent Session.
 _Avoid_: Sidescreen (the app's name), virtual screen, screen, bay
 
+**Spare**:
+An Agent Display that closed while empty and stays connected, out of sight, for a few minutes, so the next display of its size reuses it instead of adding one. It belongs to no Agent Session and shows nowhere in the UI.
+_Avoid_: pooled display, idle display
+
 **Display Label**:
 How the user tells Agent Displays apart: the client's name plus a task title the agent gives when creating the display, or the project folder when it gives none.
 _Avoid_: display name, title

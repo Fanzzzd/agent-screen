@@ -21,6 +21,11 @@ unsafe extern "C" {
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
 }
 
+/// The display's unit number, which ScreenCaptureKit tells displays apart by.
+pub fn unit_number(id: DisplayId) -> u32 {
+    unsafe { CGDisplayUnitNumber(id) }
+}
+
 /// Another online display with the same unit number as `id`, the closet
 /// included. ScreenCaptureKit tells displays apart by unit number: streams
 /// and screenshots of either show the same one, maybe the other's.

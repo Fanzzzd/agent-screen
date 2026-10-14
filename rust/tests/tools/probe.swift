@@ -11,11 +11,16 @@
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 //   probe bounds ID           a display's frame in global points, "x y w h"
 //   probe units               every online display's unit number, "id unit" per line
+//   probe reconfigurations S  how many display reconfigurations begin within S seconds
 //   probe differ PNG PNG      mean RGB difference of two images, 0-255, below the menu bar
 import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+
+// Top-level globals start in order, so this one comes before any use.
+var reconfigurations = Set<Int>()
+func reconfigurationBegun(_ slot: Int) { reconfigurations.insert(slot) }
 
 let args = CommandLine.arguments
 let tapStart = Date()
@@ -47,6 +52,22 @@ case "pixel":
   var sum = [0, 0, 0]
   for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
   print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "reconfigurations":
+  // Display reconfigurations over SECONDS: one per configuration WindowServer
+  // begins, whichever displays it touches.
+  _ = NSApplication.shared
+  CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
+    if flags.contains(.beginConfigurationFlag) {
+      // Callbacks of one configuration arrive within a few milliseconds.
+      reconfigurationBegun(Int(Date().timeIntervalSince1970 * 20))
+    }
+  }, nil)
+  // Callbacks come only through the app's event loop.
+  DispatchQueue.main.asyncAfter(deadline: .now() + Double(args[2])!) {
+    print(reconfigurations.count)
+    exit(0)
+  }
+  NSApplication.shared.run()
 case "units":
   // Every online display, the closet included: "id unit" per line.
   var ids = [CGDirectDisplayID](repeating: 0, count: 32)

@@ -397,6 +397,9 @@ impl<H> Displays<H> {
         owner: Option<Owner>,
         handle: H,
     ) {
+        // A spare display comes back under its old id.
+        self.retired.remove(&id);
+        self.closed_by_user.remove(&id);
         self.list.push(Display {
             id,
             name,

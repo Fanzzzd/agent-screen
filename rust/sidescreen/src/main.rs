@@ -8,6 +8,7 @@ mod i18n;
 mod control;
 mod core;
 mod dismissal;
+mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
 mod ui;
