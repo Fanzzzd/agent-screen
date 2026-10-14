@@ -27,20 +27,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # oxlint, oxfmt and tsc over the test scripts, docs and workflows.
-  scripts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      # pnpm's version comes from packageManager in package.json.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
-
   changeset:
     # A reminder, not a gate: tests and refactors need no changeset.
     if: github.event_name == 'push'

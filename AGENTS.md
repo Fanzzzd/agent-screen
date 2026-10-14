@@ -28,7 +28,7 @@ This file is for agents working on Sidescreen's code. `docs/agents/AGENTS.md` is
 The developer's Sidescreen, AeroSpace and apps are running while you work.
 
 - Run scripts beside the user's app with `SIDESCREEN_INSTANCE=e2e`. It is a separate instance with its own socket and displays.
-- `rust/tests/e2e/run.ts` moves the real pointer. Run it only when the user is away or asks for it.
+- `cargo e2e run` moves the real pointer. Run it only when the user is away or asks for it.
 - TextEdit, Safari and Preview may be the user's. The scripts skip when they are running; don't work around that. Quit Calculator after a script that opens it.
 - Don't move the user's windows and don't switch their AeroSpace workspace. If you do, put it back and say so.
 - Create virtual displays sparingly, one at a time, and never from several agents at once. Each new display makes WindowServer and ColorSync reconfigure; dozens in a few hours once froze the machine.
@@ -40,10 +40,9 @@ Before committing, run what CI runs:
 
 ```sh
 (cd rust && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace)
-pnpm install --frozen-lockfile && pnpm run check
 ```
 
-`pnpm run check` is oxlint (type-aware), `oxfmt --check .` and `tsc` over `rust/tests`. `pnpm run fmt` formats. pnpm installs the tools; the test scripts themselves run under bun, since they use its APIs. The lint config is the one plany and openmail use. `no-unsafe-type-assertion` warnings are allowed only where JSON comes in from the socket, an MCP reply or a child process.
+The test scripts are Rust too, in `rust/tests` (see `docs/DEVELOPMENT.md`, Test). Clippy covers them; CI doesn't run them, since they need a Mac with the app's grants.
 
 ## Delivery
 

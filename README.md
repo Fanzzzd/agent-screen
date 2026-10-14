@@ -4,7 +4,7 @@ Give each AI agent its own Mac screen. Claude Code or Codex opens apps, clicks a
 
 ![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
 
-<sub>A scripted replay: [rust/tests/demo/record.ts](rust/tests/demo/record.ts) makes the same calls the MCP tools make, and draws the user's notes and pointer.</sub>
+<sub>A scripted replay: [rust/tests/src/bin/demo.rs](rust/tests/src/bin/demo.rs) makes the same calls the MCP tools make, and draws the user's notes and pointer.</sub>
 
 Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Sidescreen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.
 
