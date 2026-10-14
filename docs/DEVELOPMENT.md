@@ -47,6 +47,7 @@ bun rust/tests/e2e/run.ts             # the user's side: scrolling, the menu bar
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts      # what agents get back, and nothing on your screen
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/takeover.ts    # Takeover through the Viewer
 SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/viewerdrag.ts  # a title-bar drag in the Viewer stays on the display
+SIDESCREEN_INSTANCE=e2e bun rust/tests/e2e/peekhover.ts   # Peek opened by hover closes once the pointer leaves
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/shared.ts      # an app you and an agent both use: its keys reach only its window
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/openpanel.ts   # a file Open panel: keys, clicks, window state, picking a file by path
 SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/browsers.ts    # Safari: the first click, URLs in a running browser, a select menu
@@ -82,7 +83,7 @@ for i in $(seq 10); do SIDESCREEN_INSTANCE=e2e bun rust/tests/mcp/robust.ts | ta
 
 The scripts start `rust/target/Sidescreen Dev.app/Contents/MacOS/Sidescreen mcp`; `SIDESCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke.ts`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
-Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, menu, hide, select, viewer, collapse, create, dismiss, answer, primary, give, take-back, help, card-open, card-later, card-take-over, focus, quit, setup, setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex) or stage, and a `displayId` where one applies. `debugViewer` returns the Viewer's frame and its display image in screen points, and whether the Viewer is the key window. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput` and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, icon-hover and card-hover (the pointer entering, `displayId` 1, or leaving, 0), menu, hide, select, viewer, collapse, create, dismiss, answer, primary, give, take-back, help, card-open, card-later, card-take-over, focus, quit, setup, setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex) or stage, and a `displayId` where one applies. `debugViewer` returns the Viewer's frame and its display image in screen points, and whether the Viewer is the key window. For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `dev.sidescreen.menubar`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Install a local build
 

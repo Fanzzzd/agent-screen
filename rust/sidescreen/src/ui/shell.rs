@@ -112,10 +112,14 @@ pub struct Shell {
     peek_shown: bool,
     /// Opened by a click: stays until another click.
     latched: bool,
+    /// Hover as AppKit and GPUI report it. An exit can go unreported (Peek
+    /// ordered out under the pointer, a menu tracking), so Peek decides to
+    /// stay by where the pointer is; see `pointer_over`.
     over_icon: bool,
     over_card: bool,
     hover_generation: u64,
     peek_generation: u64,
+    watch_generation: u64,
     /// No hover Peek until then: the pointer is still on its way.
     settle_until: Option<Instant>,
 
@@ -276,6 +280,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             over_card: false,
             hover_generation: 0,
             peek_generation: 0,
+            watch_generation: 0,
             settle_until: None,
             viewer_display: None,
             viewer_settled_at: Instant::now(),
@@ -522,11 +527,10 @@ impl Shell {
                     .peek
                     .as_ref()
                     .is_some_and(|(_, w)| contains(native::frame(w), (x, y)));
+                // Under the pointer, it stays until the pointer leaves.
                 if self.latched && !on_icon && !on_card {
                     self.latched = false;
-                    if self.over_icon || self.over_card {
-                        self.hover_changed(cx);
-                    } else {
+                    if !self.pointer_over() {
                         self.hide_peek(cx);
                     }
                 }
@@ -812,27 +816,73 @@ impl Shell {
         if self.latched || self.settle_until.is_some_and(|t| t > Instant::now()) {
             return;
         }
-        let over = self.over_icon || self.over_card;
-        if over && !self.peek_shown {
+        // Peek closes by `watch_pointer`.
+        if self.over_icon && !self.peek_shown {
             self.after(Duration::from_millis(120), cx, move |shell, cx| {
-                let still =
-                    shell.hover_generation == generation && (shell.over_icon || shell.over_card);
-                // Hover only means something on a visible icon.
-                if still && shell.icon_rect().is_some() {
+                let still = shell.hover_generation == generation && shell.over_icon;
+                // Hover only means something on a visible icon. Tests hover
+                // an icon that sits off the stage.
+                if still && (shell.icon_rect().is_some() || shell.stage.is_some()) {
                     shell.show_peek(cx);
                 }
             });
-        } else if !over && self.peek_shown {
-            self.after(Duration::from_millis(280), cx, move |shell, cx| {
-                if shell.hover_generation == generation
-                    && !shell.over_icon
-                    && !shell.over_card
-                    && !shell.latched
-                {
-                    shell.hide_peek(cx);
-                }
-            });
         }
+    }
+
+    /// Whether the pointer is on the icon, on Peek, or in the gap between.
+    /// Tests on a stage report hover by hand, away from the real pointer.
+    fn pointer_over(&self) -> bool {
+        if self.stage.is_some() {
+            return self.over_icon || self.over_card;
+        }
+        let at = native::mouse_location();
+        let on_icon = self.icon.frame().is_some_and(|f| contains(f, at));
+        let on_card = self
+            .peek
+            .as_ref()
+            .filter(|_| self.peek_shown)
+            .is_some_and(|(_, w)| {
+                // Up to the menu bar: Peek hangs 6 pt below the icon.
+                let mut f = native::frame(w);
+                f.size.height += 8.0;
+                contains(f, at)
+            });
+        on_icon || on_card
+    }
+
+    /// While Peek shows without a click holding it, close it once the
+    /// pointer has been off the icon and Peek for 280 ms.
+    fn watch_pointer(&mut self, cx: &mut Context<Self>) {
+        self.watch_generation += 1;
+        let generation = self.watch_generation;
+        cx.spawn(async move |this, cx| {
+            let mut away: Option<Instant> = None;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let go_on = this.update(cx, |shell, cx| {
+                    if shell.watch_generation != generation || !shell.peek_shown {
+                        return false;
+                    }
+                    let settling = shell.settle_until.is_some_and(|t| t > Instant::now());
+                    if shell.latched || settling || shell.pointer_over() {
+                        away = None;
+                        return true;
+                    }
+                    if away.get_or_insert_with(Instant::now).elapsed() < Duration::from_millis(280)
+                    {
+                        return true;
+                    }
+                    shell.hide_peek(cx);
+                    false
+                });
+                if !matches!(go_on, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Displays appearing or going move screens under the pointer. Ignore
@@ -968,6 +1018,7 @@ impl Shell {
         if self.peek_shown {
             native::set_frame(&window, frame);
         } else {
+            self.watch_pointer(cx);
             // It slides 10 pt down out of the menu bar and fades in.
             native::set_alpha(&window, 0.0);
             native::set_frame(&window, offset(frame, 10.0));
@@ -987,6 +1038,8 @@ impl Shell {
             });
         }
         self.latched = false;
+        // Gone from under the pointer, which GPUI won't report.
+        self.over_card = false;
         if !self.peek_shown {
             return;
         }
@@ -1343,7 +1396,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         match surface {
-            "peek" => self.show_peek(cx),
+            // Held open, as a click holds it, so scripts can look at it.
+            "peek" => {
+                self.latched = true;
+                self.show_peek(cx);
+            }
             "setup" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
             // The open setup window as with both permissions missing, the
@@ -1379,6 +1436,10 @@ impl Shell {
             "card-open" => self.card_open(id, cx),
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "click" => self.native(Native::IconClicked { right: false }, cx),
+            // The pointer entering (1) or leaving (0) the icon or Peek, as
+            // AppKit and GPUI report it.
+            "icon-hover" => self.native(Native::IconHover(id != 0), cx),
+            "card-hover" => self.card_hover(id != 0, cx),
             "menu" => self.status_menu(),
             "hide" => self.hide_peek(cx),
             "collapse" => self.close_viewer(cx),
