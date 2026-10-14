@@ -12,6 +12,20 @@ pub fn is_running(bundle_id: &str) -> bool {
 }
 
 /// The pid of a running app at `bundle`, if any.
+/// Every running instance of the app at `bundle`.
+pub fn running_pids(bundle: &Path) -> Vec<i32> {
+    let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .iter()
+        .filter_map(|app| {
+            let url = PathBuf::from(app.bundleURL()?.path()?.to_string());
+            let url = std::fs::canonicalize(&url).unwrap_or(url);
+            (url == bundle).then(|| app.processIdentifier())
+        })
+        .collect()
+}
+
 pub fn running_pid(bundle: &Path) -> Option<i32> {
     // Safari's /Applications entry is a link into a cryptex; the running
     // app reports where it really is.
@@ -95,14 +109,33 @@ fn read_handles_web(bundle: &Path) -> bool {
 }
 
 /// Show a hidden app's windows, where they are now.
+pub fn is_hidden(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.isHidden())
+}
+
+/// Show a hidden app without activating it. An app that made itself an
+/// accessory after it started hidden, as Electron development builds that
+/// open windows in the background do, ignores `unhide`; it takes the
+/// accessibility attribute.
 pub fn unhide(pid: i32) {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
         app.unhide();
     }
+    super::ax::show_app(pid);
 }
 
 /// An app by bundle id or name, as an .app path.
 pub fn resolve(app: &str) -> Option<PathBuf> {
+    // A bundle by path, as a build under /tmp that Launch Services skips.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let by_path = match app.strip_prefix("~/") {
+        Some(rest) => Some(Path::new(&home).join(rest)),
+        None => app.starts_with('/').then(|| PathBuf::from(app)),
+    };
+    if let Some(path) = by_path {
+        return path.join("Contents/Info.plist").exists().then_some(path);
+    }
     if let Some(url) = NSWorkspace::sharedWorkspace()
         .URLForApplicationWithBundleIdentifier(&NSString::from_str(app))
         && let Some(path) = url.path()

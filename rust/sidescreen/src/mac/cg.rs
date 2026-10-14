@@ -147,8 +147,19 @@ fn is_xpc_service(pid: i32) -> bool {
     n > 0 && String::from_utf8_lossy(&path[..n as usize]).contains(".xpc/Contents/MacOS/")
 }
 
+/// A window's global bounds, top-left origin, points.
+pub fn window_bounds(window_id: u32) -> Option<Rect> {
+    window_list_from(CGWindowListOption::OptionIncludingWindow, window_id)
+        .first()
+        .map(|w| w.bounds)
+}
+
 fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
-    let Some(list) = CGWindowListCopyWindowInfo(options, 0) else {
+    window_list_from(options, 0)
+}
+
+fn window_list_from(options: CGWindowListOption, relative: u32) -> Vec<WindowInfo> {
+    let Some(list) = CGWindowListCopyWindowInfo(options, relative) else {
         return Vec::new();
     };
     // CFArray of CFDictionary is toll-free bridged to NSArray of NSDictionary.

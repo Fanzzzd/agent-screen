@@ -685,7 +685,8 @@ async fn handle_one(
                 .string("app")
                 .ok_or_else(|| ControlError::invalid("app is required"))?;
             let target = p.string("open").map(|t| open_target(&t)).transpose()?;
-            let launched = launch(&core, id, &name, target.as_deref(), cx).await?;
+            let start = Start::parse(&p)?;
+            let launched = launch(&core, id, &name, target.as_deref(), &start, cx).await?;
             Ok(match launched.window {
                 Some(w) => json!({
                     "window": in_shot(w.json(), display_scale(&core, id, cx)),
@@ -1577,12 +1578,22 @@ async fn open_in_background(
     app: std::path::PathBuf,
     target: Option<String>,
     hidden: bool,
+    start: &Start,
     cx: &mut AsyncApp,
 ) -> Option<std::sync::mpsc::Receiver<bool>> {
+    let new_instance = start.new_instance();
+    let arguments = start.arguments.clone();
+    let environment = start.environment.clone();
     cx.background_executor()
         .spawn(async move {
             let mut open = std::process::Command::new("/usr/bin/open");
             open.arg("-g");
+            if new_instance {
+                open.arg("-n");
+            }
+            for (name, value) in &environment {
+                open.arg("--env").arg(format!("{name}={value}"));
+            }
             // A starting app draws its first window wherever macOS puts it,
             // on the user's screen; hidden, it draws nothing until moved.
             if hidden {
@@ -1598,13 +1609,18 @@ async fn open_in_background(
             // Only a starting app reads its arguments.
             // Nor bring back windows from its last run, unsaved text
             // included, which may be the user's.
-            open.args([
-                "--args",
-                "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
-                "NO",
-                "-ApplePersistenceIgnoreState",
-                "YES",
-            ]);
+            // Given arguments, the app gets exactly those: Electron takes
+            // the first one that isn't a flag for its app folder.
+            open.arg("--args");
+            if arguments.is_empty() {
+                open.args([
+                    "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
+                    "NO",
+                    "-ApplePersistenceIgnoreState",
+                    "YES",
+                ]);
+            }
+            open.args(&arguments);
             // `open` returns once the app has finished starting, a second
             // or more; the caller watches for the process meanwhile, and
             // hears whether `open` succeeded when it ends.
@@ -1688,15 +1704,76 @@ fn running_app_turn() -> Duration {
         .map_or(RUNNING_APP_TURN, Duration::from_millis)
 }
 
+/// Arguments and environment for a new instance of an app.
+#[derive(Default)]
+struct Start {
+    arguments: Vec<String>,
+    environment: Vec<(String, String)>,
+}
+
+impl Start {
+    fn parse(p: &Args) -> Result<Start, ControlError> {
+        let arguments = match p.0.get("arguments") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| ControlError::invalid("arguments are strings"))
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(ControlError::invalid("arguments is a list of strings")),
+        };
+        let environment = match p.0.get("environment") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Object(map)) => map
+                .iter()
+                .map(|(k, v)| {
+                    v.as_str()
+                        .map(|v| (k.clone(), v.to_string()))
+                        .ok_or_else(|| ControlError::invalid("environment values are strings"))
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => {
+                return Err(ControlError::invalid(
+                    "environment maps variable names to strings",
+                ));
+            }
+        };
+        if environment
+            .iter()
+            .any(|(k, _)| k.is_empty() || k.contains('='))
+        {
+            return Err(ControlError::invalid(
+                "environment names are non-empty, without =",
+            ));
+        }
+        Ok(Start {
+            arguments,
+            environment,
+        })
+    }
+
+    /// A running instance would ignore both: a new one starts.
+    fn new_instance(&self) -> bool {
+        !self.arguments.is_empty() || !self.environment.is_empty()
+    }
+}
+
 async fn launch(
     core: &Entity<Core>,
     id: DisplayId,
     name: &str,
     target: Option<&str>,
+    start: &Start,
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
-    let path = app::resolve(name)
-        .ok_or_else(|| ControlError::not_found(format!("no app named {name}")))?;
+    let path = app::resolve(name).ok_or_else(|| {
+        ControlError::not_found(format!(
+            "no app named {name}; give its bundle id, or the absolute path of its .app bundle if Launch Services doesn't list it, as for a build under /tmp"
+        ))
+    })?;
     // A plain file URL is its file, except for a browser, which opens it as
     // a page: then the URL route gives it a window of its own first.
     let browser = match target.filter(|t| t.starts_with("file://")) {
@@ -1736,7 +1813,7 @@ async fn launch(
         }
     };
     core.update(cx, |c, _| pause(c, true));
-    let result = launch_now(core, id, name, &path, target, cx).await;
+    let result = launch_now(core, id, name, &path, target, start, cx).await;
     core.update(cx, |c, _| {
         pause(c, false);
         c.launching.remove(&path);
@@ -1750,6 +1827,7 @@ async fn launch_now(
     name: &str,
     path: &std::path::Path,
     target: Option<&str>,
+    start: &Start,
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
     let path = path.to_path_buf();
@@ -1764,7 +1842,10 @@ async fn launch_now(
             .flat_map(|d| d.records.keys().copied())
             .collect::<Vec<_>>()
     }));
-    let was_running = app::running_pid(&path).is_some();
+    // A new instance is a starting app, whatever else runs from the bundle.
+    let fresh = start.new_instance();
+    let instances_before = app::running_pids(&path);
+    let was_running = !fresh && !instances_before.is_empty();
     // New windows go straight onto the display, before the user sees them
     // or AeroSpace files them in the user's workspace.
     let bounds = cg::display_bounds(id);
@@ -1773,7 +1854,11 @@ async fn launch_now(
     // opens. A starting app's windows are all Sidescreen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
-    let mut catch = app::running_pid(&path).and_then(catch_from);
+    let mut catch = if fresh {
+        None
+    } else {
+        app::running_pid(&path).and_then(catch_from)
+    };
 
     // A starting app opens the URL or file in its first window. A running
     // one opens a file in a window of its own, but a URL as a tab of its
@@ -1795,14 +1880,14 @@ async fn launch_now(
     let requested_at = Instant::now();
     // The new window may take the app's key focus from the user's window
     // before Sidescreen sees it: note theirs now, to hand it back after.
-    if let Some(pid) = app::running_pid(&path) {
+    if let Some(pid) = app::running_pid(&path).filter(|_| !fresh) {
         core.update(cx, |c, _| c.forwarder(id))
             .remember_user_window(pid)
             .await;
     }
     let opening = if !was_running || first.is_some() {
         Some(
-            open_in_background(path.clone(), first, !was_running, cx)
+            open_in_background(path.clone(), first, !was_running, start, cx)
                 .await
                 .ok_or_else(could_not_open)?,
         )
@@ -1821,7 +1906,13 @@ async fn launch_now(
     };
     let mut pid = None;
     for _ in 0..200 {
-        pid = app::running_pid(&path);
+        pid = if fresh {
+            app::running_pids(&path)
+                .into_iter()
+                .find(|p| !instances_before.contains(p))
+        } else {
+            app::running_pid(&path)
+        };
         if pid.is_some() {
             break;
         }
@@ -2048,8 +2139,14 @@ async fn launch_now(
                     .await;
                 log::debug!("launch: URL through the address field: {in_field}");
                 let opened = in_field
-                    || match open_in_background(path.clone(), Some(target.to_string()), false, cx)
-                        .await
+                    || match open_in_background(
+                        path.clone(),
+                        Some(target.to_string()),
+                        false,
+                        &Start::default(),
+                        cx,
+                    )
+                    .await
                     {
                         Some(outcome) => {
                             cx.background_executor()
@@ -2172,6 +2269,19 @@ async fn launch_now(
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
+                // An app that finished starting after the unhide above, as
+                // an Electron development build does, is still hidden, and
+                // its windows are listed nowhere: move them in, then show.
+                if app::is_hidden(pid) {
+                    let moved = cx
+                        .background_executor()
+                        .spawn(async move { ax::move_all_into(pid, bounds) })
+                        .await;
+                    if moved > 0 {
+                        app::unhide(pid);
+                    }
+                    continue;
+                }
                 let late: Vec<_> = windows::all()
                     .into_iter()
                     .filter(|w| {

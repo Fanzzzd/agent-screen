@@ -242,13 +242,16 @@ pub fn definitions() -> Vec<Value> {
             "Launch an app on the display",
             &[
                 "Open an app in the background and put its new window on the display. If the app is already running, Sidescreen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
-                "With open, the app opens that URL or file in the window.",
+                "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
+                "the app starts with them, as a development build needs, and its windows go on the display.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
-                    "app": { "type": "string", "description": "App name (\"Safari\") or bundle id (\"com.apple.Safari\")." },
-                    "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." }
+                    "app": { "type": "string", "description": "App name (\"Safari\"), bundle id (\"com.apple.Safari\") or the absolute path of an .app bundle (\"/tmp/build/MyApp.app\")." },
+                    "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." },
+                    "arguments": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments for a new instance of the app, passed as given." },
+                    "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables for a new instance of the app." }
                 }),
                 &["display_id", "app"],
             ),
@@ -537,7 +540,13 @@ pub async fn run(
             let reply = control
                 .call(
                     "launchApp",
-                    json!({ "displayId": a.require_int("display_id")?, "app": app, "open": a.string("open")? }),
+                    json!({
+                        "displayId": a.require_int("display_id")?,
+                        "app": app,
+                        "open": a.string("open")?,
+                        "arguments": a.0.get("arguments"),
+                        "environment": a.0.get("environment"),
+                    }),
                 )
                 .await?;
             Ok(Output::Object(launch_output(&Value::Object(reply))))

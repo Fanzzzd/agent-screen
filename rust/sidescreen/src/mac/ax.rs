@@ -250,6 +250,11 @@ pub fn set_size(element: &AXUIElement, width: f64, height: f64) -> bool {
 // MARK: Windows
 
 /// The AX element of a window, matched by window id.
+/// Unhide an app, whatever its activation policy, without activating it.
+pub fn show_app(pid: i32) {
+    set_attribute(&application(pid), "AXHidden", CFBoolean::new(false));
+}
+
 pub fn window_element(target: WindowTarget) -> Option<Element> {
     elements_attribute(&application(target.pid), "AXWindows")
         .into_iter()

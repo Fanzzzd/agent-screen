@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      html, body { margin: 0; height: 100%; background: #00ff00; font: 16px -apple-system; }
+      .row { margin: 8px; padding: 14px; background: #ffffff; }
+      #later { position: fixed; right: 8px; bottom: 8px; width: 120px; height: 30px; }
+      #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
+    </style>
+  </head>
+  <body>
+    <div class="row" id="r1" draggable="true">row 1</div>
+    <div class="row" id="r2" draggable="true">row 2</div>
+    <div class="row" id="r3" draggable="true">row 3</div>
+    <button class="row" id="nav">open page</button>
+    <div id="page"></div>
+    <input id="field" />
+    <button id="later">later</button>
+    <script>
+      // The title reads "harness w=WIDTH down=N up=N click=N dbl=N drag=N
+      // nav=N ts=T", T the last click's timestamp in ms.
+      const seen = { down: 0, up: 0, click: 0, dbl: 0, drag: 0, nav: 0, ts: -1 };
+      const show = () => {
+        document.title = `harness w=${innerWidth} ` +
+          Object.entries(seen).map(([k, v]) => `${k}=${v}`).join(" ");
+      };
+      addEventListener("mousedown", () => { seen.down++; show(); });
+      addEventListener("mouseup", () => { seen.up++; show(); });
+      addEventListener("click", (e) => { seen.click++; seen.ts = Math.round(e.timeStamp); show(); });
+      // A soft navigation, as a single-page app's: the URL and the page
+      // change on a click (issue #27).
+      document.getElementById("nav").addEventListener("click", () => {
+        seen.nav++;
+        history.pushState({}, "", `#page${seen.nav}`);
+        document.getElementById("page").textContent = `page ${seen.nav}`;
+        show();
+      });
+      addEventListener("dblclick", () => { seen.dbl++; show(); });
+      addEventListener("dragstart", () => { seen.drag++; show(); });
+      addEventListener("resize", show);
+      // Turns the page red, or back, 400 ms after a click, as an app that
+      // takes a moment to show what an action did (issue #16).
+      document.getElementById("later").addEventListener("click", () => {
+        const red = document.body.style.background === "";
+        setTimeout(() => { document.body.style.background = red ? "#ff0000" : ""; }, 400);
+      });
+      document.getElementById("field").addEventListener("focus", () => { seen.focus = 1; show(); });
+      addEventListener("keydown", () => { seen.keys = (seen.keys || 0) + 1; show(); });
+      document.getElementById("field").addEventListener("input", (e) => {
+        seen.typed = e.target.value;
+        show();
+      });
+      show();
+    </script>
+  </body>
+</html>

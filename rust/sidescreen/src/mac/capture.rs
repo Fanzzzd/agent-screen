@@ -74,6 +74,12 @@ fn luma_grid(buffer: &CVPixelBuffer, skip: f64) -> Vec<u8> {
 
 /// Whether `now` differs visibly from `before`.
 fn changed(before: &[u8], now: &[u8]) -> bool {
+    // The first frame since counting began, which a stream started for the
+    // wait sends at once, is what the display looks like: no change. Else
+    // the wait ends on it, before the app draws what the action did.
+    if before.is_empty() {
+        return false;
+    }
     if before.len() != now.len() {
         return true;
     }

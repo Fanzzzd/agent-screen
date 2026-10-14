@@ -643,6 +643,8 @@ struct Gesture {
     agent: bool,
     /// Where the pointer last was in this gesture.
     at: (f64, f64),
+    /// Whether the button moved since the press.
+    moved: bool,
 }
 
 struct Worker {
@@ -787,7 +789,7 @@ impl Worker {
         // A button an agent left held is released before anyone presses
         // again, such as the user taking over.
         self.release_agent_button();
-        let Some(hit) = self.hit(at, true) else {
+        let Some(hit) = self.hit(at, true).or_else(|| self.edge_hit(at)) else {
             log::info!("input: no window at {at:?}");
             return None;
         };
@@ -823,6 +825,7 @@ impl Worker {
             group,
             agent: false,
             at,
+            moved: false,
         });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
@@ -885,8 +888,25 @@ impl Worker {
 
     fn mouse_dragged(&mut self, to: (f64, f64), button: Button, flags: CGEventFlags) {
         let Some(g) = &mut self.gesture else { return };
+        let (from, first) = (g.at, !std::mem::replace(&mut g.moved, true));
         g.at = to;
         let (target, group) = (g.target, g.group);
+        // AppKit starts a resize, or a drag in an app, once the pointer
+        // has gone 3 to 5 points from the press, and loses a move that jumps
+        // past that at once. A hand's first moves are a point or so each: so
+        // are these, up to 8 points, before the agent's move.
+        if first {
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let length = dx.hypot(dy);
+            for k in 1..(length.ceil() as i32).min(9) {
+                let t = k as f64 / length;
+                let step = (from.0 + dx * t, from.1 + dy * t);
+                self.post(button.dragged(), step, target, button, 1, group, flags);
+                thread::sleep(Duration::from_millis(16));
+            }
+            // The resize takes a moment to start: a move sent sooner is lost.
+            thread::sleep(Duration::from_millis(100));
+        }
         self.post(button.dragged(), to, target, button, 1, group, flags);
     }
 
@@ -1155,6 +1175,22 @@ impl Worker {
         deliver(&event, target.pid, false);
     }
 
+    /// The topmost resizable window whose edge is just outside a point:
+    /// macOS takes a press there as the start of a resize.
+    fn edge_hit(&mut self, at: (f64, f64)) -> Option<Hit> {
+        const MARGIN: f64 = 4.0;
+        let hit = self
+            .cache
+            .as_ref()?
+            .0
+            .iter()
+            .find(|h| h.layer == 0 && h.bounds.inset(-MARGIN, -MARGIN).contains(at))
+            .copied()?;
+        super::ax::window_element(hit.target)
+            .is_some_and(|w| super::ax::settable(&w, "AXSize"))
+            .then_some(hit)
+    }
+
     /// Topmost window at a global point. Moves and scrolls reuse a list up to
     /// 100 ms old; clicks always query WindowServer.
     fn hit(&mut self, at: (f64, f64), fresh: bool) -> Option<Hit> {
@@ -1180,19 +1216,37 @@ impl Worker {
 /// is neither key nor under the real cursor.
 fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
     let window = target.window_id as i64;
+    // The point in the window, from its top-left corner. AppKit takes it as
+    // is for an event with a time, where it would work it out for one
+    // without.
+    let origin = cg::window_bounds(target.window_id).map_or((0.0, 0.0), |b| (b.x, b.y));
     unsafe {
         SSEventSetIntegerField(event, 40, target.pid as i64); // target pid
         SSEventSetIntegerField(event, 51, window); // window number
         SSEventSetIntegerField(event, 91, window); // window under pointer
         SSEventSetIntegerField(event, 92, window); // window under pointer that can handle it
-        SSEventSetWindowLocation(event, CGPoint::new(at.0, at.1));
+        SSEventSetWindowLocation(event, CGPoint::new(at.0 - origin.0, at.1 - origin.1));
     }
 }
 
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
+    stamp_time(event);
     if !unsafe { SSPostEventToPid(pid, event, authenticate) } {
         CGEvent::post_to_pid(pid, Some(event));
     }
+}
+
+/// Give an event the time it is sent, as hardware input has. A new event's
+/// time is 0, and Chromium checks that input is newer than the page: a click
+/// that changes the URL then kills the page's renderer. AppKit reads an
+/// event with a time at the window location `stamp_routing` sets.
+fn stamp_time(event: &CGEvent) {
+    unsafe extern "C" {
+        fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64;
+    }
+    // Nanoseconds of uptime, which AppKit reads as the event's time.
+    let now = unsafe { clock_gettime_nsec_np(libc::CLOCK_UPTIME_RAW) };
+    CGEvent::set_timestamp(Some(event), now);
 }
 
 /// Whole wheel steps, at least one for any movement.
@@ -1257,6 +1311,7 @@ pub fn post_key_to_pid(pid: i32, chord: KeyChord) {
     for down in [true, false] {
         if let Some(event) = CGEvent::new_keyboard_event(None, chord.code, down) {
             CGEvent::set_flags(Some(&event), flags(chord.modifiers));
+            stamp_time(&event);
             CGEvent::post_to_pid(pid, Some(&event));
         }
     }
