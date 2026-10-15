@@ -64,6 +64,7 @@ SIDESCREEN_INSTANCE=e2e cargo e2e alerts      # a system alert put on an agent d
 SIDESCREEN_INSTANCE=e2e cargo e2e ime         # type and key through Apple's pinyin give 你好; your front app, input source and workspace stay; waits for you to be idle 3 s
 SIDESCREEN_INSTANCE=e2e cargo e2e timing      # how long create_display and launch_app take
 SIDESCREEN_INSTANCE=e2e cargo e2e pointer     # records the Agent Pointer in the Viewer through moves and quick clicks, frames at 60 fps in rust/target/e2e/pointer; needs ffmpeg
+SIDESCREEN_INSTANCE=e2e cargo e2e promo       # records the promo video's footage, an agent working Calculator in the Viewer, to promo/public/agent.mp4; skips when Calculator runs
 SIDESCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
 ```
 
