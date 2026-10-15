@@ -35,9 +35,30 @@ unsafe extern "C" {
 pub struct VirtualDisplay {
     pub id: u32,
     /// Keeps the display alive; macOS removes it when this is released.
-    _handle: Retained<AnyObject>,
-    /// Its serial, free again once the display is gone.
-    _serial: Option<Serial>,
+    handle: Option<Retained<AnyObject>>,
+    /// Its serial, free again once the display has gone.
+    serial: Option<Serial>,
+}
+
+impl Drop for VirtualDisplay {
+    fn drop(&mut self) {
+        drop(self.handle.take());
+        // WindowServer removes the display a moment later. Its serial waits
+        // for that: a display with it now would be refused, or share its
+        // identity with the one going.
+        let Some(serial) = self.serial.take() else {
+            return;
+        };
+        let id = self.id;
+        std::thread::spawn(move || {
+            let mut wait = std::time::Duration::from_millis(100);
+            while cg::is_online(id) {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_secs(5));
+            }
+            drop(serial);
+        });
+    }
 }
 
 /// Serials of this app's displays, spares included, and of displays being
@@ -45,8 +66,9 @@ pub struct VirtualDisplay {
 static SERIALS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// A serial held for one display (`lowest_free_serial` says why).
-pub struct Serial(u32);
+/// A serial held for one display (`lowest_free_serial` says why), and the
+/// first of its instance's range.
+pub struct Serial(u32, u32);
 
 impl Serial {
     /// The lowest serial from `first` no display of this app holds.
@@ -54,11 +76,16 @@ impl Serial {
         let mut taken = SERIALS.lock().unwrap_or_else(|e| e.into_inner());
         let serial = sidescreen_model::model::lowest_free_serial(first, &taken);
         taken.insert(serial);
-        Serial(serial)
+        Serial(serial, first)
     }
 
     pub fn get(&self) -> u32 {
         self.0
+    }
+
+    /// Its place in its instance's range, from 1.
+    pub fn slot(&self) -> u32 {
+        self.0 + 1 - self.1
     }
 }
 
@@ -79,18 +106,22 @@ impl VirtualDisplay {
     /// A HiDPI display of `width` × `height` points, with a unit number no
     /// other display has (`cg::unit_twin`). A display that gets a taken one
     /// stays until another comes, so WindowServer hands that one the next
-    /// unit; up to three tries, with serials of their own.
+    /// unit; up to three tries, each with the next free serial, so a retry
+    /// leaves no identity that never comes back.
     pub fn create(name: &str, width: u32, height: u32, serial: Serial) -> Option<Self> {
+        let first = serial.1;
+        let mut serial = Some(serial);
         let mut twinned: Vec<Self> = Vec::new();
-        for attempt in 0..3u32 {
-            let number = serial.get() + attempt * 0x0100_0000;
+        for _ in 0..3u32 {
+            let lease = serial.take().unwrap_or_else(|| Serial::lease(first));
+            let number = lease.get();
             let mut display = Self::create_once(name, width, height, number)?;
+            display.serial = Some(lease);
             crate::lifecycle::note("created", display.id, &format!("serial={number}"));
             let Some(twin) = cg::unit_twin(display.id) else {
                 for twinned in &twinned {
                     crate::lifecycle::note("released", twinned.id, "unit twin");
                 }
-                display._serial = Some(serial);
                 return Some(display);
             };
             log::warn!(
@@ -100,9 +131,12 @@ impl VirtualDisplay {
             twinned.push(display);
         }
         // Still twinned: capture refuses it, rather than show the other.
-        let mut display = twinned.pop()?;
-        display._serial = Some(serial);
-        Some(display)
+        twinned.pop()
+    }
+
+    /// Its serial, and the serial's place in its instance's range, from 1.
+    pub fn serial(&self) -> Option<(u32, u32)> {
+        self.serial.as_ref().map(|s| (s.get(), s.slot()))
     }
 
     fn create_once(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
@@ -139,6 +173,11 @@ impl VirtualDisplay {
                 return None;
             }
             let id: u32 = msg_send![&handle, displayID];
+            // WindowServer refused it, as it does a display whose identity
+            // another online display has.
+            if id == 0 {
+                return None;
+            }
             // macOS keeps the resolution last used for a display's serial,
             // and serials repeat across launches: a display that once ran
             // at another size comes back at it, maybe at 1x, and shows
@@ -152,8 +191,8 @@ impl VirtualDisplay {
             }
             Some(Self {
                 id,
-                _handle: handle,
-                _serial: None,
+                handle: Some(handle),
+                serial: None,
             })
         }
     }

@@ -28,7 +28,6 @@ fn path() -> Option<PathBuf> {
 /// One line: local time, the event, the display, its unit number, size and
 /// position, and `detail`.
 pub fn note(event: &str, id: DisplayId, detail: &str) {
-    let Some(path) = path() else { return };
     let bounds = crate::mac::cg::display_bounds(id);
     let line = format!(
         "{} {event} display={id} unit={} at={},{} size={}x{} {detail}\n",
@@ -39,6 +38,16 @@ pub fn note(event: &str, id: DisplayId, detail: &str) {
         bounds.width,
         bounds.height,
     );
+    append(&line);
+}
+
+/// One line that isn't about one display: local time and `text`.
+pub fn line(text: &str) {
+    append(&format!("{} {text}\n", now()));
+}
+
+fn append(line: &str) {
+    let Some(path) = path() else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

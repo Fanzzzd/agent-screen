@@ -38,6 +38,10 @@ pub struct Setup {
     pub registered: Vec<&'static str>,
     /// Whether macOS lets Sidescreen notify.
     pub notifications: notify::Auth,
+    /// The ColorSync helper (ADR 0009), a setup running, its last error.
+    pub colorsync: Option<crate::mac::colorsync::Helper>,
+    pub colorsync_busy: bool,
+    pub colorsync_error: Option<String>,
     icon: Option<Arc<gpui::Image>>,
 }
 
@@ -54,6 +58,9 @@ impl Setup {
             connecting: false,
             registered: Vec::new(),
             notifications: notify::Auth::Unknown,
+            colorsync: None,
+            colorsync_busy: false,
+            colorsync_error: None,
             icon,
         }
     }
@@ -103,6 +110,7 @@ impl Render for Setup {
             .into_iter()
             .collect();
         rows.push(self.notifications_row(&theme).into_any_element());
+        rows.push(self.colorsync_row(&theme).into_any_element());
         rows.push(self.agent_row(&theme).into_any_element());
         let shell = self.shell.clone();
         let content = div()
@@ -278,6 +286,108 @@ impl Setup {
                             .text_size(px(13.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(t("Notifications", "通知")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.secondary)
+                            .child(detail),
+                    ),
+            )
+            .child(action)
+    }
+
+    /// The ColorSync helper: optional, like notifications (ADR 0009).
+    fn colorsync_row(&self, theme: &Theme) -> impl IntoElement {
+        use crate::mac::colorsync::Helper;
+        let green: Hsla = gpui::rgb(0x30d158).into();
+        let shell = self.shell.clone();
+        let on = self.colorsync == Some(Helper::Ready);
+        let action: gpui::AnyElement = if on {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(green)
+                .child(
+                    svg()
+                        .path("icons/check.svg")
+                        .size(px(14.))
+                        .text_color(green),
+                )
+                .child(t("On", "已开启"))
+                .into_any_element()
+        } else if self.colorsync_busy {
+            div()
+                .text_size(px(12.))
+                .text_color(theme.secondary)
+                .child(t("Waiting for your password…", "等你输入密码…"))
+                .into_any_element()
+        } else {
+            button(
+                "setup-colorsync",
+                if self.colorsync == Some(Helper::Outdated) {
+                    t("Update…", "更新…")
+                } else {
+                    t("Set Up…", "设置…")
+                }
+                .into(),
+                None,
+                theme,
+                move |cx| tell(&shell, cx, |shell, cx| shell.set_up_colorsync(cx)),
+            )
+            .into_any_element()
+        };
+        let detail = match &self.colorsync_error {
+            Some(error) => tf!("Didn't work: {error}", "没有成功：{error}"),
+            None if on => t(
+                "Keeps macOS's list of displays short, so many displays don't make your Mac stutter",
+                "精简 macOS 的显示器列表，屏幕多了 Mac 也不卡",
+            )
+            .to_string(),
+            None => t(
+                "macOS rereads every display it has ever seen whenever displays change, and with many it stutters. Sidescreen keeps that list short. Asks for your administrator password once.",
+                "显示器每次变化，macOS 都会重读见过的所有显示器，屏幕多了就卡。Sidescreen 帮你精简这张表。需要输入一次管理员密码。",
+            )
+            .to_string(),
+        };
+        let color = if on { green } else { theme.accent };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .py(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(34.))
+                    .rounded(px(9.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(color.opacity(if on { 0.18 } else { 0.16 }))
+                    .child(
+                        svg()
+                            .path("icons/display.svg")
+                            .size(px(18.))
+                            .text_color(color),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t("Smooth Display Changes", "显示器切换不卡顿")),
                     )
                     .child(
                         div()

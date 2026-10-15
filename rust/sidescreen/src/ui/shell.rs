@@ -151,6 +151,12 @@ pub struct Shell {
     permissions: permissions::Status,
     /// Whether macOS lets Sidescreen notify.
     notifications: notify::Auth,
+    /// The ColorSync helper (ADR 0009), as the last run found it; None
+    /// before the first, 10 s after launch.
+    colorsync: Option<crate::mac::colorsync::Helper>,
+    /// Setting it up is running.
+    colorsync_busy: bool,
+    colorsync_error: Option<String>,
     /// Test hook: the setup window shows both permissions missing.
     setup_preview: bool,
     setup: Option<WindowHandle<Setup>>,
@@ -299,6 +305,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             asking: false,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
+            colorsync: None,
+            colorsync_busy: false,
+            colorsync_error: None,
             setup_preview: false,
             setup: None,
             agent_ready: Vec::new(),
@@ -583,6 +592,11 @@ impl Shell {
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
+        let helper = self.core.read(cx).colorsync_helper();
+        if helper.is_some() && helper != self.colorsync {
+            self.colorsync = helper;
+            self.push_setup(cx);
+        }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
         let asking = core
@@ -1506,6 +1520,16 @@ impl Shell {
             );
             menu.separator();
         }
+        if matches!(
+            self.colorsync,
+            Some(crate::mac::colorsync::Helper::Missing | crate::mac::colorsync::Helper::Outdated)
+        ) {
+            menu.action(
+                t("Keep Display Changes Smooth…", "让显示器切换不卡顿…"),
+                MenuAction::GrantPermissions,
+            );
+            menu.separator();
+        }
         // Setup worked on the agent's side too: its session has the tools.
         match self.agents_ready() {
             Some(agent) => menu.disabled(&tf!(
@@ -2085,6 +2109,47 @@ impl Shell {
         self.push_setup(cx);
     }
 
+    /// The setup window's button for the ColorSync helper: macOS's
+    /// administrator prompt, then a run (ADR 0009).
+    pub fn set_up_colorsync(&mut self, cx: &mut Context<Self>) {
+        if self.colorsync_busy {
+            return;
+        }
+        self.colorsync_busy = true;
+        self.colorsync_error = None;
+        self.push_setup(cx);
+        let prompt = t(
+            "Sidescreen wants to keep macOS's list of displays short, so your Mac doesn't stutter when displays change.",
+            "Sidescreen 要精简 macOS 的显示器列表，让 Mac 在显示器变化时不卡顿。",
+        );
+        cx.spawn(async move |shell, cx| {
+            let (result, helper) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = crate::mac::colorsync::set_up(prompt);
+                    (result, crate::mac::colorsync::helper())
+                })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.colorsync_busy = false;
+                shell.colorsync = Some(helper);
+                match result {
+                    Ok(()) => {
+                        crate::lifecycle::line("colorsync helper set up");
+                        shell.core.update(cx, |core, cx| core.reclaim_soon(cx));
+                    }
+                    Err(error) if error == "cancelled" => {}
+                    Err(error) => {
+                        log::warn!("setting up the ColorSync helper: {error}");
+                        shell.colorsync_error = Some(error);
+                    }
+                }
+                shell.push_setup(cx);
+            });
+        })
+        .detach();
+    }
+
     /// The setup window's button for notifications: macOS's prompt, or its
     /// Notifications pane once the user has answered.
     pub fn allow_notifications(&mut self) {
@@ -2229,10 +2294,16 @@ impl Shell {
         let Some(handle) = self.setup else { return };
         let registered = self.registered.clone();
         let notifications = self.notifications;
+        let colorsync = (
+            self.colorsync,
+            self.colorsync_busy,
+            self.colorsync_error.clone(),
+        );
         if handle
             .update(cx, |setup, _, cx| {
                 setup.status = status;
                 setup.notifications = notifications;
+                (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
                 setup.waiting = waiting;
                 setup.restart = restart;
                 setup.agent = agent;

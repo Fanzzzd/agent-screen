@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 config="${1:-debug}"
 flags=()
 [[ "$config" == release ]] && flags=(--release)
-cargo build -p sidescreen ${flags[@]+"${flags[@]}"}
+cargo build -p sidescreen -p sidescreen-colorsync ${flags[@]+"${flags[@]}"}
 
 target="$(cd .. && pwd)/target"
 # Development builds are a separate app, "Sidescreen Dev", so they never
@@ -27,6 +27,8 @@ fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$target/$config/Sidescreen" "$app/Contents/MacOS/Sidescreen"
+# The ColorSync helper, copied to a root-owned place when the user sets it up (ADR 0009).
+cp "$target/$config/sidescreen-colorsync" "$app/Contents/MacOS/sidescreen-colorsync"
 cp resources/Info.plist "$app/Contents/Info.plist"
 if [[ "$config" != release ]]; then
   plutil -replace CFBundleIdentifier -string dev.sidescreen.menubar.dev "$app/Contents/Info.plist"
@@ -53,5 +55,6 @@ fi
 # so the installed app behaves like the one users download.
 options=()
 [[ "$config" == release && -n "$identity" ]] && options=(--options runtime)
+codesign --force ${options[@]+"${options[@]}"} --sign "${identity:--}" "$app/Contents/MacOS/sidescreen-colorsync" >/dev/null
 codesign --force ${options[@]+"${options[@]}"} --sign "${identity:--}" "$app" >/dev/null
 echo "$app (signed: ${identity:-ad-hoc})"

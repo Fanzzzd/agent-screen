@@ -44,6 +44,19 @@ pub fn unit_twin(id: DisplayId) -> Option<DisplayId> {
         .find(|&other| other != id && unsafe { CGDisplayUnitNumber(other) } == unit)
 }
 
+/// Whether `id` is among the online displays.
+pub fn is_online(id: DisplayId) -> bool {
+    online().contains(&id)
+}
+
+/// The online displays, the closet included.
+pub fn online() -> Vec<DisplayId> {
+    let mut ids = [0u32; 64];
+    let mut count = 0u32;
+    unsafe { CGGetOnlineDisplayList(64, ids.as_mut_ptr(), &mut count) };
+    ids[..count as usize].to_vec()
+}
+
 /// Whether a display is one of Sidescreen's, from this app or another.
 pub fn is_sidescreen(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x5353 }

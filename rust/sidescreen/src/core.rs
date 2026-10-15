@@ -2,6 +2,7 @@
 //! handles, input queues and the latest element trees.
 
 use crate::mac::ax;
+use crate::mac::colorsync;
 use crate::mac::display::{self, VirtualDisplay};
 use crate::mac::input::Forwarder;
 use crate::mac::windows;
@@ -74,7 +75,27 @@ pub struct Core {
     spares: Vec<Spare>,
     /// When agents' displays were made new, within `MADE_WINDOW`.
     made: VecDeque<Instant>,
+    reclaim: Reclaim,
 }
+
+/// Runs of the ColorSync helper (ADR 0009): one at a time, those asked for
+/// meanwhile merged into one after it.
+#[derive(Default)]
+struct Reclaim {
+    due: bool,
+    running: bool,
+    again: bool,
+    /// Display records ColorSync keeps, from the last run or count.
+    records: Option<usize>,
+    helper: Option<colorsync::Helper>,
+}
+
+/// A new display waits this long for its record, and merges with others.
+const RECLAIM_DELAY: Duration = Duration::from_secs(3);
+const RECLAIM_EVERY: Duration = Duration::from_secs(30 * 60);
+/// The longest an answer to WindowServer's color request may take, against
+/// its 50 ms limit (ADR 0009).
+const BUDGET_MS: f64 = 40.0;
 
 impl Core {
     pub fn new() -> Self {
@@ -95,7 +116,107 @@ impl Core {
             left_alone: Vec::new(),
             spares: Vec::new(),
             made: VecDeque::new(),
+            reclaim: Reclaim::default(),
         }
+    }
+
+    /// Run the ColorSync helper soon. Without it, count the records.
+    pub fn reclaim_soon(&mut self, cx: &mut Context<Self>) {
+        if self.reclaim.running {
+            self.reclaim.again = true;
+            return;
+        }
+        if self.reclaim.due {
+            return;
+        }
+        self.reclaim.due = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECLAIM_DELAY).await;
+            let _ = this.update(cx, |core, _| {
+                core.reclaim.due = false;
+                core.reclaim.running = true;
+            });
+            let (helper, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let helper = colorsync::helper();
+                    let result = match helper {
+                        colorsync::Helper::Ready => colorsync::reclaim(),
+                        _ => Ok(colorsync::Report {
+                            records: colorsync::count_records(),
+                            ..Default::default()
+                        }),
+                    };
+                    (helper, result)
+                })
+                .await;
+            let _ = this.update(cx, |core, cx| {
+                core.reclaim.running = false;
+                core.reclaim.helper = Some(helper);
+                match result {
+                    Ok(report) => {
+                        core.reclaim.records = Some(report.records);
+                        if helper == colorsync::Helper::Ready {
+                            crate::lifecycle::line(&format!("colorsync {}", report.line));
+                        } else {
+                            crate::lifecycle::line(&format!(
+                                "colorsync helper {helper:?}; {} display records",
+                                report.records
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("ColorSync helper: {error}");
+                        crate::lifecycle::line(&format!("colorsync failed: {error}"));
+                    }
+                }
+                if std::mem::take(&mut core.reclaim.again) {
+                    core.reclaim_soon(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The helper's state from the last run, if one ran.
+    pub fn colorsync_helper(&self) -> Option<colorsync::Helper> {
+        self.reclaim.helper
+    }
+
+    /// How long WindowServer's color request would take with one display
+    /// more, in ms (ADR 0009).
+    fn color_request_ms(&self, online: usize) -> f64 {
+        let per_record = match self.reclaim.helper {
+            Some(colorsync::Helper::Ready) => 0.05,
+            _ => 0.2,
+        };
+        let records = self.reclaim.records.unwrap_or(0) as f64;
+        online as f64 * (1.0 + records * per_record)
+    }
+
+    /// Whether one display more keeps WindowServer's color request in
+    /// time. Releases spares when that is what it takes.
+    pub fn budget_allows(&mut self) -> Result<(), String> {
+        // Counted 10 s after launch; till then, no guess refuses a display.
+        if self.reclaim.records.is_none() {
+            return Ok(());
+        }
+        let online = crate::mac::cg::online().len() + 1;
+        if self.color_request_ms(online) <= BUDGET_MS {
+            return Ok(());
+        }
+        let spares = self.spares.len();
+        if spares > 0 && self.color_request_ms(online - spares) <= BUDGET_MS {
+            for spare in std::mem::take(&mut self.spares) {
+                crate::lifecycle::note("released", spare.handle.id, "spare over budget");
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "This Mac has {} displays online, and with another, macOS would take longer than it allows to look up their color profiles on every display change, so every app would stutter. Keep working on a display you have, or end one you no longer need with end_display.",
+            online - 1
+        ))
     }
 
     /// Ids of every virtual display of this app, spares included: they
@@ -151,11 +272,14 @@ impl Core {
     }
 
     /// Release spares kept longer than `SPARE_LIFE`.
-    fn release_old_spares(&mut self) {
+    fn release_old_spares(&mut self, cx: &mut Context<Self>) {
         let (old, kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
             .into_iter()
             .partition(|s| s.since.elapsed() >= SPARE_LIFE);
         self.spares = kept;
+        if !old.is_empty() {
+            self.reclaim_soon(cx);
+        }
         for spare in old {
             crate::lifecycle::note("released", spare.handle.id, "spare unused");
         }
@@ -205,7 +329,12 @@ impl Core {
         cx: &mut Context<Self>,
     ) -> DisplayId {
         let id = handle.id;
+        if let Some((serial, slot)) = handle.serial() {
+            colorsync::remember(serial, slot, id);
+        }
         self.displays.add(id, name, size, owner, handle);
+        // Its record is new and has all 39 names.
+        self.reclaim_soon(cx);
         // A reused display is already in place: moving it again would be
         // another reconfiguration.
         let virtual_ids = self.virtual_ids();
@@ -345,11 +474,12 @@ impl Core {
                     cx.background_executor()
                         .timer(SPARE_LIFE + Duration::from_secs(1))
                         .await;
-                    let _ = this.update(cx, |core, _| core.release_old_spares());
+                    let _ = this.update(cx, |core, cx| core.release_old_spares(cx));
                 })
                 .detach();
             } else {
                 crate::lifecycle::note("released", id, "");
+                self.reclaim_soon(cx);
             }
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
@@ -402,6 +532,20 @@ fn stop_recording(id: DisplayId, cx: &mut Context<Core>) {
 
 /// Once a second while this app has displays, move the system's alerts and
 /// prompts that landed on one to the user's main display.
+/// Run the ColorSync helper 10 s after launch and every 30 minutes
+/// (ADR 0009). Display changes run it too.
+pub fn watch_colorsync(core: Entity<Core>, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let mut wait = Duration::from_secs(10);
+        loop {
+            cx.background_executor().timer(wait).await;
+            core.update(cx, |core, cx| core.reclaim_soon(cx));
+            wait = RECLAIM_EVERY;
+        }
+    })
+    .detach();
+}
+
 pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {

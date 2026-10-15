@@ -48,83 +48,38 @@ Usage:
   Sidescreen               start the menu bar app (open Sidescreen.app instead)
   Sidescreen mcp           the MCP server, started by an agent client over stdio
   Sidescreen mcp install   register the MCP server with Claude Code and Codex
-  Sidescreen colorsync     count macOS's color records of displays
-  sudo Sidescreen colorsync clean [--all-offline]
-                           remove the records of Sidescreen displays that are gone
-                           for good (with --all-offline, of every display not
-                           connected and with no profile you chose), and keep names only
-                           in English and your languages: macOS reads them all on
-                           every display change
+  Sidescreen colorsync     whether the helper that keeps macOS's display list short is set up
+  Sidescreen colorsync setup | remove | reclaim
+                           set it up or remove it (asks for an administrator password),
+                           or run it now
   Sidescreen --version     print the version
 ";
 
-/// `Sidescreen colorsync [clean [--all-offline]]`: macOS's color records of
-/// displays, and making them cheap to read (`mac::colorsync`).
-fn colorsync(clean: bool, all_offline: bool) {
-    use mac::colorsync;
-    let records = colorsync::records();
-    let stale: Vec<_> = records.iter().filter(|r| r.is_stale()).collect();
-    println!(
-        "{} display records, {} online, {} for Sidescreen displays that are gone for good",
-        records.len(),
-        records.iter().filter(|r| r.online).count(),
-        stale.len()
-    );
-    if !clean {
-        println!(
-            "make them cheap to read with: sudo \"{}\" colorsync clean",
-            std::env::current_exe().unwrap_or_default().display()
-        );
-        return;
-    }
-    if unsafe { libc::geteuid() } != 0 {
-        eprintln!("only an administrator can change ColorSync's records: run it with sudo");
-        std::process::exit(1);
-    }
-    let gone: Vec<_> = records
-        .iter()
-        .filter(|r| {
-            r.is_stale() || (all_offline && !r.online && !colorsync::has_chosen_profile(&r.id))
-        })
-        .collect();
-    let removed = gone.iter().filter(|r| colorsync::remove(r)).count();
-    println!(
-        "removed {removed} of {} records of displays that are gone",
-        gone.len()
-    );
-    match colorsync::trim_names(&user_languages()) {
-        Ok((before, after)) => println!(
-            "kept display names in English and your languages: registry {} KB to {} KB",
-            before / 1024,
-            after / 1024
-        ),
+/// `Sidescreen colorsync [setup|remove|reclaim]`: the helper that keeps
+/// macOS's display registry short (ADR 0009, `mac::colorsync`).
+fn colorsync(command: Option<&str>) {
+    use mac::colorsync::{self, Helper};
+    let prompt = "Sidescreen wants to keep macOS's list of displays short, so the Mac doesn't stutter when displays change.";
+    let result = match command {
+        None => {
+            println!("helper: {:?}", colorsync::helper());
+            return;
+        }
+        Some("setup") => colorsync::set_up(prompt).map(|()| "set up".to_string()),
+        Some("remove") => colorsync::remove(prompt).map(|()| "removed".to_string()),
+        Some("reclaim") if colorsync::helper() == Helper::Ready => {
+            colorsync::reclaim().map(|report| report.line)
+        }
+        Some("reclaim") => Err("set the helper up first: Sidescreen colorsync setup".into()),
+        Some(other) => Err(format!("unknown command {other}")),
+    };
+    match result {
+        Ok(done) => println!("{done}"),
         Err(error) => {
-            eprintln!("couldn't rewrite ColorSync's registry: {error}");
+            eprintln!("Sidescreen colorsync: {error}");
             std::process::exit(1);
         }
     }
-}
-
-/// The languages of the user who ran sudo, from their global preferences.
-fn user_languages() -> Vec<String> {
-    let home = match std::env::var("SUDO_USER") {
-        Ok(user) => format!("/Users/{user}"),
-        Err(_) => std::env::var("HOME").unwrap_or_default(),
-    };
-    plist::Value::from_file(format!(
-        "{home}/Library/Preferences/.GlobalPreferences.plist"
-    ))
-    .ok()
-    .and_then(|p| {
-        p.as_dictionary()?
-            .get("AppleLanguages")?
-            .as_array()
-            .cloned()
-    })
-    .unwrap_or_default()
-    .iter()
-    .filter_map(|l| l.as_string().map(str::to_string))
-    .collect()
 }
 
 fn main() {
@@ -139,11 +94,7 @@ fn main() {
         }
         // --setup: reopened from the setup window, which shows again.
         Some("colorsync") => {
-            let args: Vec<String> = std::env::args().collect();
-            colorsync(
-                args.get(2).is_some_and(|a| a == "clean"),
-                args.iter().any(|a| a == "--all-offline"),
-            );
+            colorsync(std::env::args().nth(2).as_deref());
             return;
         }
         Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {
@@ -196,8 +147,7 @@ fn main() {
             mac::ax::set_global_timeout();
             let core = cx.new(|_| core::Core::new());
             core::watch_alerts(core.clone(), cx);
-            // Reading ColorSync's records takes up to a second.
-            std::thread::spawn(mac::colorsync::log_records);
+            core::watch_colorsync(core.clone(), cx);
             if let Err(error) = ui::shell::start(core.clone(), cx) {
                 eprintln!("Sidescreen: UI failed: {error}");
             }

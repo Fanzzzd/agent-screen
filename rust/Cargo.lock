@@ -4932,14 +4932,24 @@ dependencies = [
  "objc2-image-io",
  "objc2-quartz-core 0.3.2",
  "objc2-user-notifications",
- "plist",
  "raw-window-handle",
  "regex",
  "screencapturekit 11.0.0",
  "serde_json",
+ "sidescreen-colorsync",
  "sidescreen-mcp",
  "sidescreen-model",
  "tokio",
+]
+
+[[package]]
+name = "sidescreen-colorsync"
+version = "0.0.0"
+dependencies = [
+ "core-foundation 0.10.0",
+ "libc",
+ "plist",
+ "serde_json",
 ]
 
 [[package]]

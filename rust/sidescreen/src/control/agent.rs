@@ -1190,6 +1190,9 @@ async fn create_display(
     let (made, name) = match core.update(cx, |c, _| c.take_spare((width, height))) {
         Some((handle, name)) => (Some(handle), name),
         None => {
+            if let Err(why) = core.update(cx, |c, _| c.budget_allows()) {
+                return Err(ControlError::failed(why));
+            }
             if let Err(wait) = core.update(cx, |c, _| c.may_make()) {
                 return Err(ControlError::failed(format!(
                     "Sidescreen made many displays in the last minutes, and each one makes every app on this Mac reconfigure its screens. Keep using the display you have, or call create_display again in {} s.",

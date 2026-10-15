@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time"] }
 log = "0.4"
 regex = "1"
 sidescreen-mcp = { path = "../sidescreen-mcp" }
+sidescreen-colorsync = { path = "../sidescreen-colorsync" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-video = { version = "0.5.2", features = ["metal"] }
@@ -40,7 +41,6 @@ objc2-image-io = "0.3"
 libc = "0.2"
 objc2-user-notifications = "0.3"
 objc2-quartz-core = "0.3"
-plist = "1"
 
 [build-dependencies]
 cc = "1"
