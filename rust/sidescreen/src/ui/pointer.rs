@@ -4,7 +4,9 @@
 //! the Viewer and Peek only, never on the display, so agent screenshots
 //! never contain it.
 //!
-//! The look and the motion follow Codex's computer-use cursor.
+//! The look and the motion follow Codex's computer-use cursor: a drawn
+//! arrow with a shadow and a glow, quick to start and soft to land, turning
+//! a little with the way it moves.
 
 use crate::model::{AgentPointer, DisplayId};
 use gpui::{
@@ -16,13 +18,24 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
-/// A move takes longer the farther it goes, within these bounds.
-const GLIDE_MIN: f64 = 0.16;
-const GLIDE_MAX: f64 = 0.40;
+/// A move takes longer the farther it goes, within these bounds: short
+/// enough that the arrow lands before the click it leads to shows.
+const GLIDE_MIN: f64 = 0.09;
+const GLIDE_MAX: f64 = 0.22;
+/// A move that starts before the last one landed takes this share of the
+/// time, so a run of quick clicks doesn't leave the arrow behind.
+const CATCH_UP: f64 = 0.65;
 /// How far, as a share of the move, the arc bows out from a straight line.
 const BOW: f64 = 0.14;
-/// The arrow leans into a move by up to this much, in radians.
-const LEAN: f32 = 0.24;
+/// The arrow turns with a move by up to this much, in radians, as if its
+/// tail trailed behind the tip.
+const LEAN: f32 = 0.30;
+/// The speed, in display points per second, at which it turns fully.
+const LEAN_SPEED: f64 = 2400.0;
+/// The turn follows a spring of this frequency, in Hz, and damping ratio,
+/// so it settles with a small wobble when the arrow stops.
+const SPRING_HZ: f32 = 5.0;
+const SPRING_DAMPING: f32 = 0.5;
 /// A click presses the arrow in, then lets it spring back.
 const PRESS: Duration = Duration::from_millis(260);
 const RIPPLE: Duration = Duration::from_millis(480);
@@ -50,6 +63,10 @@ struct Glide {
     shown: bool,
     fade_from: f32,
     fade_start: Instant,
+    /// The turn's spring: angle, its rate, and when it was last stepped.
+    lean: f32,
+    lean_rate: f32,
+    stepped: Instant,
 }
 
 impl Glide {
@@ -95,6 +112,11 @@ thread_local! {
     static GLIDES: RefCell<HashMap<DisplayId, Glide>> = RefCell::new(HashMap::new());
 }
 
+/// Fast off the mark, soft on landing.
+fn ease_out(t: f64) -> f64 {
+    1.0 - (1.0 - t).powi(3)
+}
+
 fn ease_in_out(t: f64) -> f64 {
     if t < 0.5 {
         4.0 * t * t * t
@@ -105,7 +127,7 @@ fn ease_in_out(t: f64) -> f64 {
 
 fn glide_time(from: (f64, f64), to: (f64, f64)) -> Duration {
     let distance = (to.0 - from.0).hypot(to.1 - from.1);
-    Duration::from_secs_f64((0.18 + distance / 1200.0).clamp(GLIDE_MIN, GLIDE_MAX))
+    Duration::from_secs_f64((0.06 + distance.sqrt() * 0.006).clamp(GLIDE_MIN, GLIDE_MAX))
 }
 
 /// The arrow now. None once it has faded out.
@@ -140,15 +162,22 @@ fn advance(display: DisplayId, pointer: Option<AgentPointer>) -> Option<Frame> {
                     shown: true,
                     fade_from: 0.0,
                     fade_start: now,
+                    lean: 0.0,
+                    lean_rate: 0.0,
+                    stepped: now,
                 });
                 glide.fade(true, now);
                 if glide.seq != pointer.seq {
-                    let here = glide.at(ease_in_out(glide.progress(now)));
+                    let moving = glide.progress(now) < 1.0;
+                    let here = glide.at(ease_out(glide.progress(now)));
                     glide.seq = pointer.seq;
                     glide.from = here;
                     glide.to = target;
                     glide.start = now;
                     glide.duration = glide_time(here, target);
+                    if moving {
+                        glide.duration = glide.duration.mul_f64(CATCH_UP);
+                    }
                     glide.bow = -glide.bow;
                     glide.click = pointer.click;
                 }
@@ -167,13 +196,41 @@ fn advance(display: DisplayId, pointer: Option<AgentPointer>) -> Option<Frame> {
             return None;
         }
         let t = glide.progress(now);
-        let mut at = glide.at(ease_in_out(t));
-        // Leaning and stretching peak mid-move and settle on arrival.
-        let swing = (PI * t as f32).sin();
-        let (dx, dy) = (glide.to.0 - glide.from.0, glide.to.1 - glide.from.1);
-        let across = (dx / (dx.abs() + dy.abs()).max(1.0)) as f32;
-        let mut lean = LEAN * across * swing;
-        let stretch = 1.0 + 0.10 * swing * ((dx.hypot(dy) / 120.0).min(1.0) as f32);
+        let mut at = glide.at(ease_out(t));
+        // Velocity, from a step along the arc.
+        let step = 0.004;
+        let ahead = glide.at(ease_out((t + step / glide.duration.as_secs_f64()).min(1.0)));
+        let (vx, vy) = if t < 1.0 {
+            ((ahead.0 - at.0) / step, (ahead.1 - at.1) / step)
+        } else {
+            (0.0, 0.0)
+        };
+        let speed = vx.hypot(vy);
+        let pace = (speed / LEAN_SPEED).min(1.0) as f32;
+        // The tail swings toward where the arrow came from: the turn is
+        // the sine of the angle between the arrow's axis and the trail.
+        let target = if speed > 1.0 {
+            let axis = AXIS.1.atan2(AXIS.0);
+            let trail = (-vy as f32).atan2(-vx as f32);
+            LEAN * (trail - axis).sin() * pace
+        } else {
+            0.0
+        };
+        let dt = (now - glide.stepped).as_secs_f32().min(0.05);
+        glide.stepped = now;
+        let omega = 2.0 * PI * SPRING_HZ;
+        // Semi-implicit Euler in small steps keeps the spring stable.
+        let steps = (dt / 0.004).ceil().max(1.0) as usize;
+        let h = dt / steps as f32;
+        for _ in 0..steps {
+            let accel = omega * omega * (target - glide.lean)
+                - 2.0 * SPRING_DAMPING * omega * glide.lean_rate;
+            glide.lean_rate += accel * h;
+            glide.lean += glide.lean_rate * h;
+        }
+        let mut lean = glide.lean;
+        let settling = glide.lean.abs() > 0.002 || glide.lean_rate.abs() > 0.02;
+        let stretch = 1.0 + 0.08 * pace;
 
         let arrived = glide.start + glide.duration;
         let since = now.saturating_duration_since(arrived);
@@ -220,7 +277,7 @@ fn advance(display: DisplayId, pointer: Option<AgentPointer>) -> Option<Frame> {
             press,
             ripple,
             opacity,
-            changing: !landed || fading || swaying || since < RIPPLE.max(PRESS),
+            changing: !landed || fading || swaying || settling || since < RIPPLE.max(PRESS),
         })
     })
 }
@@ -286,6 +343,11 @@ const SHAPE: [((f32, f32), f32); 4] = [
 /// The arrow's length runs from the tip toward the notch.
 const AXIS: (f32, f32) = (13.4, 12.0);
 
+/// How far each edge bows out from a straight line, from the corner of the
+/// same index to the next: the outer edges swell a little, as a drawn
+/// arrow's do.
+const BOWS: [f32; 4] = [0.7, 0.0, 0.0, 0.7];
+
 /// The rounded outline, mapped through `map`.
 fn outline(builder: &mut PathBuilder, map: &impl Fn((f32, f32)) -> Point<Pixels>) {
     let n = SHAPE.len();
@@ -294,18 +356,37 @@ fn outline(builder: &mut PathBuilder, map: &impl Fn((f32, f32)) -> Point<Pixels>
         let len = dx.hypot(dy).max(0.001);
         (a.0 + dx / len * r, a.1 + dy / len * r)
     };
+    let center = (
+        SHAPE.iter().map(|c| c.0.0).sum::<f32>() / n as f32,
+        SHAPE.iter().map(|c| c.0.1).sum::<f32>() / n as f32,
+    );
+    let ends: Vec<((f32, f32), (f32, f32))> = (0..n)
+        .map(|i| {
+            let (corner, r) = SHAPE[i];
+            let prev = SHAPE[(i + n - 1) % n].0;
+            let next = SHAPE[(i + 1) % n].0;
+            (toward(corner, prev, r), toward(corner, next, r))
+        })
+        .collect();
+    builder.move_to(map(ends[0].0));
     for i in 0..n {
-        let (corner, r) = SHAPE[i];
-        let prev = SHAPE[(i + n - 1) % n].0;
-        let next = SHAPE[(i + 1) % n].0;
-        let enter = toward(corner, prev, r);
-        let leave = toward(corner, next, r);
-        if i == 0 {
-            builder.move_to(map(enter));
-        } else {
-            builder.line_to(map(enter));
+        let (_, leave) = ends[i];
+        builder.curve_to(map(leave), map(SHAPE[i].0));
+        let enter = ends[(i + 1) % n].0;
+        // The edge's middle, pushed along its outward normal.
+        let mid = ((leave.0 + enter.0) / 2.0, (leave.1 + enter.1) / 2.0);
+        let (dx, dy) = (enter.0 - leave.0, enter.1 - leave.1);
+        let len = dx.hypot(dy).max(0.001);
+        let mut normal = (dy / len, -dx / len);
+        if normal.0 * (mid.0 - center.0) + normal.1 * (mid.1 - center.1) < 0.0 {
+            normal = (-normal.0, -normal.1);
         }
-        builder.curve_to(map(leave), map(corner));
+        // A quadratic's control sits twice as far out as its middle.
+        let control = (
+            mid.0 + normal.0 * BOWS[i] * 2.0,
+            mid.1 + normal.1 * BOWS[i] * 2.0,
+        );
+        builder.curve_to(map(enter), map(control));
     }
     builder.close();
 }
@@ -327,17 +408,34 @@ fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, frame: &Frame
         )
     };
 
-    // A soft shadow: the shape below the arrow, then widening halos.
-    for (width, alpha) in [(0.0, 0.16), (2.0, 0.08), (4.0, 0.05), (6.5, 0.03)] {
-        let mut shadow = if width == 0.0 {
-            PathBuilder::fill()
-        } else {
-            PathBuilder::stroke(px(width * scale))
-        };
-        outline(&mut shadow, &|p| map(p, 1.6 * scale));
-        if let Ok(path) = shadow.build() {
-            window.paint_path(path, gpui::black().opacity(alpha * opacity));
+    // Layers of the shape grown about its middle, faintest and largest
+    // first: strokes would poke spikes out at the corners.
+    let center = (11.5f32, 11.0f32);
+    let grown = |window: &mut Window, by: f32, dy: f32, color: Hsla| {
+        let mut layer = PathBuilder::fill();
+        let k = 1.0 + by / 12.0;
+        outline(&mut layer, &|(x, y)| {
+            map(
+                (center.0 + (x - center.0) * k, center.1 + (y - center.1) * k),
+                dy,
+            )
+        });
+        if let Ok(path) = layer.build() {
+            window.paint_path(path, color);
         }
+    };
+    // A soft shadow below, which shows on light screens.
+    for (by, alpha) in [(4.5, 0.04), (2.8, 0.07), (1.4, 0.10), (0.4, 0.14)] {
+        grown(
+            window,
+            by,
+            2.4 * scale,
+            gpui::black().opacity(alpha * opacity),
+        );
+    }
+    // A glow in the accent color, which shows on dark ones.
+    for (by, alpha) in [(8.0, 0.05), (5.5, 0.08), (3.6, 0.12), (2.0, 0.18)] {
+        grown(window, by, 0.0, accent.opacity(alpha * opacity));
     }
 
     // Deep accent at the tip, washing toward a pale, warmer tint at the
@@ -384,7 +482,7 @@ fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, frame: &Frame
             ),
         );
     }
-    let mut rim = PathBuilder::stroke(px(1.6 * scale));
+    let mut rim = PathBuilder::stroke(px(1.9 * scale));
     outline(&mut rim, &|p| map(p, 0.0));
     if let Ok(path) = rim.build() {
         window.paint_path(path, gpui::white().opacity(0.95 * opacity));
