@@ -49,38 +49,82 @@ Usage:
   Sidescreen mcp           the MCP server, started by an agent client over stdio
   Sidescreen mcp install   register the MCP server with Claude Code and Codex
   Sidescreen colorsync     count macOS's color records of displays
-  sudo Sidescreen colorsync clean
+  sudo Sidescreen colorsync clean [--all-offline]
                            remove the records of Sidescreen displays that are gone
+                           for good (with --all-offline, of every display not
+                           connected and with no profile you chose), and keep names only
+                           in English and your languages: macOS reads them all on
+                           every display change
   Sidescreen --version     print the version
 ";
 
-/// `Sidescreen colorsync [clean]`: macOS's color records of displays, and
-/// removing those of Sidescreen displays that are gone (`mac::colorsync`).
-fn colorsync(clean: bool) {
+/// `Sidescreen colorsync [clean [--all-offline]]`: macOS's color records of
+/// displays, and making them cheap to read (`mac::colorsync`).
+fn colorsync(clean: bool, all_offline: bool) {
     use mac::colorsync;
     let records = colorsync::records();
     let stale: Vec<_> = records.iter().filter(|r| r.is_stale()).collect();
     println!(
-        "{} display records, {} online, {} for Sidescreen displays that are gone",
+        "{} display records, {} online, {} for Sidescreen displays that are gone for good",
         records.len(),
         records.iter().filter(|r| r.online).count(),
         stale.len()
     );
     if !clean {
-        if !stale.is_empty() {
-            println!(
-                "remove them with: sudo \"{}\" colorsync clean",
-                std::env::current_exe().unwrap_or_default().display()
-            );
-        }
+        println!(
+            "make them cheap to read with: sudo \"{}\" colorsync clean",
+            std::env::current_exe().unwrap_or_default().display()
+        );
         return;
     }
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("ColorSync lets only an administrator remove records: run it with sudo");
+        eprintln!("only an administrator can change ColorSync's records: run it with sudo");
         std::process::exit(1);
     }
-    let removed = stale.iter().filter(|r| colorsync::remove(r)).count();
-    println!("removed {removed} of {}", stale.len());
+    let gone: Vec<_> = records
+        .iter()
+        .filter(|r| {
+            r.is_stale() || (all_offline && !r.online && !colorsync::has_chosen_profile(&r.id))
+        })
+        .collect();
+    let removed = gone.iter().filter(|r| colorsync::remove(r)).count();
+    println!(
+        "removed {removed} of {} records of displays that are gone",
+        gone.len()
+    );
+    match colorsync::trim_names(&user_languages()) {
+        Ok((before, after)) => println!(
+            "kept display names in English and your languages: registry {} KB to {} KB",
+            before / 1024,
+            after / 1024
+        ),
+        Err(error) => {
+            eprintln!("couldn't rewrite ColorSync's registry: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The languages of the user who ran sudo, from their global preferences.
+fn user_languages() -> Vec<String> {
+    let home = match std::env::var("SUDO_USER") {
+        Ok(user) => format!("/Users/{user}"),
+        Err(_) => std::env::var("HOME").unwrap_or_default(),
+    };
+    plist::Value::from_file(format!(
+        "{home}/Library/Preferences/.GlobalPreferences.plist"
+    ))
+    .ok()
+    .and_then(|p| {
+        p.as_dictionary()?
+            .get("AppleLanguages")?
+            .as_array()
+            .cloned()
+    })
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|l| l.as_string().map(str::to_string))
+    .collect()
 }
 
 fn main() {
@@ -95,7 +139,11 @@ fn main() {
         }
         // --setup: reopened from the setup window, which shows again.
         Some("colorsync") => {
-            colorsync(std::env::args().nth(2).as_deref() == Some("clean"));
+            let args: Vec<String> = std::env::args().collect();
+            colorsync(
+                args.get(2).is_some_and(|a| a == "clean"),
+                args.iter().any(|a| a == "--all-offline"),
+            );
             return;
         }
         Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {

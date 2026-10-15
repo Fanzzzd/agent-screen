@@ -1,18 +1,24 @@
-//! ColorSync's records of Sidescreen's displays.
+//! ColorSync's records of displays, and what they cost every display change.
 //!
-//! macOS keeps a ColorSync record for every display serial it has seen, and
-//! each time displays change WindowServer asks colorsync.displayservices
-//! for every online display's profile. The service reads all records about
-//! four times per online display. WindowServer waits 50 ms for the answer;
-//! a later one is dropped, and it asks again 5 s later, until an answer
-//! comes in time. Every display change starts another such loop. With many
-//! records no answer comes in time, the loops pile up, and WindowServer
-//! and ColorSync stay busy for good.
+//! Each time displays change, WindowServer asks colorsync.displayservices
+//! for every online display's profile and waits 50 ms for the answer; a
+//! later one is dropped, and it asks again 5 s later, until an answer comes
+//! in time. Every display change starts another such loop. For each online
+//! display the service has colorsyncd read and parse the whole registry,
+//! `REGISTRY`, five times. The registry keeps a record for every display
+//! serial macOS has seen, and each record holds the display's name in 39
+//! languages: 97% of what gets parsed. So an answer takes about online
+//! displays × records × 0.2 ms. Past 50 ms the loops pile up, and
+//! WindowServer and ColorSync stay busy (issue #26).
 //!
 //! Sidescreen reuses serials (`display::Serial`), so it adds a record only
-//! per display it holds at once. Versions before that left one per display
-//! ever made; `Sidescreen colorsync clean` removes those, as root, since
-//! ColorSync asks for an administrator to remove a record.
+//! per display it holds at once. `sudo Sidescreen colorsync clean` removes
+//! the records earlier versions left for displays numbered above `REUSED`
+//! and keeps each record's name in English and the user's languages only;
+//! macOS leaves a trimmed record as it is when the display comes back. With that, 13 online
+//! displays took 29 ms where 4 took 23 ms before. Both need root:
+//! ColorSync asks for an administrator to remove a record, and the
+//! registry file is root's.
 
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -51,6 +57,9 @@ fn text_of(id: &CFUUID) -> String {
     .to_string()
 }
 
+/// ColorSync's registry of devices, a binary property list.
+const REGISTRY: &str = "/Library/Caches/ColorSync/com.apple.colorsync.devices";
+
 /// A display ColorSync has a record of.
 pub struct Record {
     pub id: CFUUID,
@@ -58,10 +67,20 @@ pub struct Record {
     pub online: bool,
 }
 
+/// Sidescreen displays numbered up to this keep their records when gone:
+/// serials are reused, and a record macOS makes anew has all 39 names.
+const REUSED: u32 = 16;
+
 impl Record {
-    /// One of Sidescreen's displays, not connected now.
+    /// One of Sidescreen's displays, not connected now, with a number
+    /// above `REUSED`: one of the many earlier versions left.
     pub fn is_stale(&self) -> bool {
-        !self.online && self.name.starts_with("Sidescreen")
+        let number = self
+            .name
+            .rsplit(' ')
+            .next()
+            .and_then(|n| n.parse::<u32>().ok());
+        !self.online && self.name.starts_with("Sidescreen") && number.is_none_or(|n| n > REUSED)
     }
 }
 
@@ -127,7 +146,7 @@ pub fn log_records() {
     let stale = records.iter().filter(|r| r.is_stale()).count();
     if stale > 10 {
         log::warn!(
-            "ColorSync keeps {} display records, {stale} of them for Sidescreen displays that are gone; they slow every display change. Remove them with: sudo \"{}\" colorsync clean",
+            "ColorSync keeps {} display records, {stale} of them for Sidescreen displays that are gone; they slow every display change. Clean them up with: sudo \"{}\" colorsync clean",
             records.len(),
             std::env::current_exe().unwrap_or_default().display()
         );
@@ -136,5 +155,164 @@ pub fn log_records() {
             "ColorSync keeps {} display records, {stale} for Sidescreen displays that are gone",
             records.len()
         );
+    }
+}
+
+/// Whether the record of display `id` holds a profile someone chose, which
+/// removing it would lose. Unknown counts as yes. Needs root.
+pub fn has_chosen_profile(id: &CFUUID) -> bool {
+    let Ok(plist::Value::Dictionary(registry)) = plist::Value::from_file(REGISTRY) else {
+        return true;
+    };
+    let key = format!("Device.mntr.{}", text_of(id));
+    match registry.get(&key) {
+        Some(plist::Value::Dictionary(record)) => record
+            .keys()
+            .any(|k| k != "DeviceDescriptions" && k != "FactoryProfiles"),
+        _ => false,
+    }
+}
+
+/// Keep each record's names only in English and `languages` ("zh-Hans"
+/// keeps every zh_ name). Returns the registry's size before and after.
+/// Needs root.
+pub fn trim_names(languages: &[String]) -> Result<(u64, u64), String> {
+    let before = std::fs::metadata(REGISTRY)
+        .map_err(|e| e.to_string())?
+        .len();
+    let mut registry = plist::Value::from_file(REGISTRY).map_err(|e| e.to_string())?;
+    let keep: Vec<String> = std::iter::once("en".to_string())
+        .chain(
+            languages
+                .iter()
+                .map(|l| l.split(['-', '_']).next().unwrap_or("").to_string()),
+        )
+        .filter(|l| !l.is_empty())
+        .collect();
+    trim(&mut registry, &keep);
+    // Beside it, then over it: colorsyncd never reads half a file.
+    let partial = format!("{REGISTRY}.sidescreen");
+    registry
+        .to_file_binary(&partial)
+        .map_err(|e| e.to_string())?;
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(REGISTRY).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(
+        &partial,
+        std::fs::Permissions::from_mode(metadata.permissions().mode()),
+    )
+    .map_err(|e| e.to_string())?;
+    use std::os::unix::fs::MetadataExt;
+    std::os::unix::fs::chown(&partial, Some(metadata.uid()), Some(metadata.gid()))
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&partial, REGISTRY).map_err(|e| e.to_string())?;
+    let after = std::fs::metadata(REGISTRY)
+        .map_err(|e| e.to_string())?
+        .len();
+    Ok((before, after))
+}
+
+fn trim(value: &mut plist::Value, keep: &[String]) {
+    let plist::Value::Dictionary(dict) = value else {
+        return;
+    };
+    for (key, child) in dict.iter_mut() {
+        match child {
+            plist::Value::Dictionary(names)
+                if key == "DeviceDescriptions" || key == "DeviceModeDescriptions" =>
+            {
+                let first = names.keys().next().cloned();
+                let wanted: Vec<String> = names
+                    .keys()
+                    .filter(|locale| {
+                        let language = locale.split('_').next().unwrap_or("");
+                        keep.iter().any(|k| k == language)
+                    })
+                    .cloned()
+                    .collect();
+                // A record keeps at least one name.
+                let wanted = if wanted.is_empty() {
+                    first.into_iter().collect()
+                } else {
+                    wanted
+                };
+                names.retain(|locale, _| wanted.contains(locale));
+            }
+            _ => trim(child, keep),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim;
+
+    #[test]
+    fn names_keep_english_and_the_users_languages() {
+        let mut registry: plist::Value = plist::Value::Dictionary(
+            [(
+                "Device.mntr.X".to_string(),
+                plist::Value::Dictionary(
+                    [
+                        (
+                            "DeviceDescriptions".to_string(),
+                            plist::Value::Dictionary(
+                                ["en_US", "en_GB", "de_DE", "zh_CN", "zh_TW", "ja_JP"]
+                                    .iter()
+                                    .map(|l| (l.to_string(), plist::Value::from("Screen")))
+                                    .collect(),
+                            ),
+                        ),
+                        (
+                            "FactoryProfiles".to_string(),
+                            plist::Value::Dictionary(
+                                [(
+                                    "1".to_string(),
+                                    plist::Value::Dictionary(
+                                        [(
+                                            "DeviceModeDescriptions".to_string(),
+                                            plist::Value::Dictionary(
+                                                [("ar", "x"), ("fr_FR", "x")]
+                                                    .iter()
+                                                    .map(|(l, n)| {
+                                                        (l.to_string(), plist::Value::from(*n))
+                                                    })
+                                                    .collect(),
+                                            ),
+                                        )]
+                                        .into_iter()
+                                        .collect(),
+                                    ),
+                                )]
+                                .into_iter()
+                                .collect(),
+                            ),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        trim(&mut registry, &["en".into(), "zh".into()]);
+        let record = registry.as_dictionary().unwrap()["Device.mntr.X"]
+            .as_dictionary()
+            .unwrap();
+        let names: Vec<_> = record["DeviceDescriptions"]
+            .as_dictionary()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(names, ["en_US", "en_GB", "zh_CN", "zh_TW"]);
+        // Neither language there: the first name stays.
+        let modes = record["FactoryProfiles"].as_dictionary().unwrap()["1"]
+            .as_dictionary()
+            .unwrap()["DeviceModeDescriptions"]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(modes.keys().collect::<Vec<_>>(), ["ar"]);
     }
 }
