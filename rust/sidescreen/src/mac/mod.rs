@@ -8,6 +8,7 @@ pub mod ax;
 pub mod capture;
 pub mod catch;
 pub mod cg;
+pub mod colorsync;
 pub mod display;
 pub mod ime;
 pub mod input;

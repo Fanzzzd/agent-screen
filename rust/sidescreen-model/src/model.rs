@@ -357,7 +357,6 @@ pub struct Displays<H> {
     /// Of those, the ones the user closed: the agent should stop, not make
     /// another display.
     pub closed_by_user: HashSet<DisplayId>,
-    next_serial: u32,
 }
 
 impl<H> Default for Displays<H> {
@@ -366,7 +365,6 @@ impl<H> Default for Displays<H> {
             list: Vec::new(),
             retired: HashSet::new(),
             closed_by_user: HashSet::new(),
-            next_serial: 1,
         }
     }
 }
@@ -401,6 +399,18 @@ pub fn help_steps(steps: Vec<String>) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// The serial for a new display: the lowest from `first` that no display
+/// holds. macOS keeps a ColorSync record for every display serial it has
+/// seen, and WindowServer reads all of them once per online display each
+/// time displays change, giving up after 50 ms and asking again every 5 s.
+/// Counting serials up grows that list without end; reusing them bounds it
+/// to the most displays held at once.
+pub fn lowest_free_serial(first: u32, taken: &std::collections::BTreeSet<u32>) -> u32 {
+    (first..)
+        .find(|serial| !taken.contains(serial))
+        .expect("a free serial")
+}
+
 /// Screenshot pixels per display point: 1 within the image budget, less for
 /// a larger display, so the agent's coordinates and its image agree.
 pub fn shot_scale((width, height): (f64, f64)) -> f64 {
@@ -412,13 +422,6 @@ pub fn shot_scale((width, height): (f64, f64)) -> f64 {
 }
 
 impl<H> Displays<H> {
-    /// The serial for the next display, and its name.
-    pub fn next_serial(&mut self) -> (u32, String) {
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        (serial, format!("Sidescreen {serial}"))
-    }
-
     pub fn add(
         &mut self,
         id: DisplayId,
@@ -642,6 +645,18 @@ mod tests {
         );
         let huge = Rect::new(-50.0, 10.0, 2000.0, 900.0);
         assert_eq!(huge.kept_inside(&area), area);
+    }
+
+    #[test]
+    fn serials_fill_the_lowest_gap() {
+        let taken = |s: &[u32]| s.iter().copied().collect();
+        assert_eq!(super::lowest_free_serial(1, &taken(&[])), 1);
+        assert_eq!(super::lowest_free_serial(1, &taken(&[1, 2, 4])), 3);
+        // A test instance's range starts higher and ignores the user's.
+        assert_eq!(
+            super::lowest_free_serial(10_001, &taken(&[1, 10_001])),
+            10_002
+        );
     }
 
     use super::*;

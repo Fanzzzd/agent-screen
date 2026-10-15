@@ -36,6 +36,39 @@ pub struct VirtualDisplay {
     pub id: u32,
     /// Keeps the display alive; macOS removes it when this is released.
     _handle: Retained<AnyObject>,
+    /// Its serial, free again once the display is gone.
+    _serial: Option<Serial>,
+}
+
+/// Serials of this app's displays, spares included, and of displays being
+/// made.
+static SERIALS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A serial held for one display (`lowest_free_serial` says why).
+pub struct Serial(u32);
+
+impl Serial {
+    /// The lowest serial from `first` no display of this app holds.
+    pub fn lease(first: u32) -> Serial {
+        let mut taken = SERIALS.lock().unwrap_or_else(|e| e.into_inner());
+        let serial = sidescreen_model::model::lowest_free_serial(first, &taken);
+        taken.insert(serial);
+        Serial(serial)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Drop for Serial {
+    fn drop(&mut self) {
+        SERIALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
 }
 
 // Made on a background thread and then only held, never messaged, on the
@@ -47,16 +80,17 @@ impl VirtualDisplay {
     /// other display has (`cg::unit_twin`). A display that gets a taken one
     /// stays until another comes, so WindowServer hands that one the next
     /// unit; up to three tries, with serials of their own.
-    pub fn create(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
+    pub fn create(name: &str, width: u32, height: u32, serial: Serial) -> Option<Self> {
         let mut twinned: Vec<Self> = Vec::new();
         for attempt in 0..3u32 {
-            let serial = serial + attempt * 0x0100_0000;
-            let display = Self::create_once(name, width, height, serial)?;
-            crate::lifecycle::note("created", display.id, &format!("serial={serial}"));
+            let number = serial.get() + attempt * 0x0100_0000;
+            let mut display = Self::create_once(name, width, height, number)?;
+            crate::lifecycle::note("created", display.id, &format!("serial={number}"));
             let Some(twin) = cg::unit_twin(display.id) else {
                 for twinned in &twinned {
                     crate::lifecycle::note("released", twinned.id, "unit twin");
                 }
+                display._serial = Some(serial);
                 return Some(display);
             };
             log::warn!(
@@ -66,7 +100,9 @@ impl VirtualDisplay {
             twinned.push(display);
         }
         // Still twinned: capture refuses it, rather than show the other.
-        twinned.pop()
+        let mut display = twinned.pop()?;
+        display._serial = Some(serial);
+        Some(display)
     }
 
     fn create_once(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
@@ -117,6 +153,7 @@ impl VirtualDisplay {
             Some(Self {
                 id,
                 _handle: handle,
+                _serial: None,
             })
         }
     }

@@ -182,12 +182,16 @@ impl Core {
 
     /// The serial and name for the next display. A test instance's
     /// displays must not pass for the user's.
-    pub fn next_name(&mut self) -> (u32, String) {
-        let (serial, name) = self.displays.next_serial();
-        match sidescreen_mcp::endpoint::instance() {
-            Some(instance) => (serial + 10_000, format!("Sidescreen {instance} {serial}")),
-            None => (serial, name),
-        }
+    pub fn next_name(&mut self) -> (display::Serial, String) {
+        let instance = sidescreen_mcp::endpoint::instance();
+        let first = if instance.is_some() { 10_001 } else { 1 };
+        let serial = display::Serial::lease(first);
+        let number = serial.get() + 1 - first;
+        let name = match instance {
+            Some(instance) => format!("Sidescreen {instance} {number}"),
+            None => format!("Sidescreen {number}"),
+        };
+        (serial, name)
     }
 
     /// Take on a display made off the main thread, as macOS takes about

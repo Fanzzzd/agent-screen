@@ -48,8 +48,40 @@ Usage:
   Sidescreen               start the menu bar app (open Sidescreen.app instead)
   Sidescreen mcp           the MCP server, started by an agent client over stdio
   Sidescreen mcp install   register the MCP server with Claude Code and Codex
+  Sidescreen colorsync     count macOS's color records of displays
+  sudo Sidescreen colorsync clean
+                           remove the records of Sidescreen displays that are gone
   Sidescreen --version     print the version
 ";
+
+/// `Sidescreen colorsync [clean]`: macOS's color records of displays, and
+/// removing those of Sidescreen displays that are gone (`mac::colorsync`).
+fn colorsync(clean: bool) {
+    use mac::colorsync;
+    let records = colorsync::records();
+    let stale: Vec<_> = records.iter().filter(|r| r.is_stale()).collect();
+    println!(
+        "{} display records, {} online, {} for Sidescreen displays that are gone",
+        records.len(),
+        records.iter().filter(|r| r.online).count(),
+        stale.len()
+    );
+    if !clean {
+        if !stale.is_empty() {
+            println!(
+                "remove them with: sudo \"{}\" colorsync clean",
+                std::env::current_exe().unwrap_or_default().display()
+            );
+        }
+        return;
+    }
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("ColorSync lets only an administrator remove records: run it with sudo");
+        std::process::exit(1);
+    }
+    let removed = stale.iter().filter(|r| colorsync::remove(r)).count();
+    println!("removed {removed} of {}", stale.len());
+}
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -62,6 +94,10 @@ fn main() {
             return;
         }
         // --setup: reopened from the setup window, which shows again.
+        Some("colorsync") => {
+            colorsync(std::env::args().nth(2).as_deref() == Some("clean"));
+            return;
+        }
         Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {
             eprint!("Sidescreen: unknown argument {other}\n\n{USAGE}");
             std::process::exit(2);
@@ -112,6 +148,8 @@ fn main() {
             mac::ax::set_global_timeout();
             let core = cx.new(|_| core::Core::new());
             core::watch_alerts(core.clone(), cx);
+            // Reading ColorSync's records takes up to a second.
+            std::thread::spawn(mac::colorsync::log_records);
             if let Err(error) = ui::shell::start(core.clone(), cx) {
                 eprintln!("Sidescreen: UI failed: {error}");
             }

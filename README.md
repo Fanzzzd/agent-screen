@@ -101,6 +101,7 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen & System Audio Re
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Sidescreen off and on.
 - **Tools say Sidescreen isn't running.** The first tool call starts it. If that fails, open `/Applications/Sidescreen.app` once yourself.
 - **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.
+- **The Mac stutters after many agent displays.** Sidescreen 0.1.13 and earlier left a macOS color record for every display they made, and with many of them macOS keeps re-reading display profiles every few seconds. Run `sudo /Applications/Sidescreen.app/Contents/MacOS/Sidescreen colorsync clean` once; it removes only the records of Sidescreen displays that are gone.
 - **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 
 ## Develop
