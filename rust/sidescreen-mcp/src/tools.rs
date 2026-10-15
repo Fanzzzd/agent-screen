@@ -126,8 +126,10 @@ pub fn definitions() -> Vec<Value> {
                 "start records the display to an MP4 in ~/Movies/Sidescreen, with a timeline beside it: one JSON line per",
                 "action you take on the display (clicks with coordinates in screenshot pixels, keys, typing, launches,",
                 "element actions) and per Takeover, each with t, its seconds into the video. stop finishes both and",
-                "returns their paths. A recording also stops when the display ends, and after 30 minutes. The user sees",
-                "that the display is being recorded.",
+                "returns their paths. The video has the sound of the apps whose every window is on your display; an app",
+                "that also has windows elsewhere, such as the user's own browser, stays silent, since macOS separates",
+                "sound by app, not by window. stop lists both under sound. A recording also stops when the display ends,",
+                "and after 30 minutes. The user sees that the display is being recorded.",
             ],
             object(
                 json!({

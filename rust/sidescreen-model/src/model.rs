@@ -399,6 +399,28 @@ pub fn help_steps(steps: Vec<String>) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// Which apps a recording of a display hears: those whose every window is
+/// on it. macOS separates audio by app, not by window, so an app with a
+/// window anywhere else, such as the user's own browser, is left out
+/// rather than let the user's sound in. A window is on the display when
+/// it is on screen and its center is there; any other window, hidden and
+/// minimized ones included, is elsewhere. `windows` is each window's app
+/// (pid), global bounds and whether it is on screen. Returns the apps heard
+/// and the apps with a window on the display that are left out.
+pub fn heard_apps(
+    windows: &[(i32, Rect, bool)],
+    display: &Rect,
+) -> (
+    std::collections::BTreeSet<i32>,
+    std::collections::BTreeSet<i32>,
+) {
+    use std::collections::BTreeSet;
+    let here = |(_, b, shown): &&(i32, Rect, bool)| *shown && display.contains(b.mid());
+    let on: BTreeSet<i32> = windows.iter().filter(here).map(|w| w.0).collect();
+    let elsewhere: BTreeSet<i32> = windows.iter().filter(|w| !here(w)).map(|w| w.0).collect();
+    on.iter().copied().partition(|pid| !elsewhere.contains(pid))
+}
+
 /// The serial for a new display: the lowest from `first` that no display
 /// holds. macOS keeps a ColorSync record for every display serial it has
 /// seen, and WindowServer reads all of them once per online display each
@@ -630,6 +652,24 @@ pub fn default_fate(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_recording_hears_only_apps_wholly_on_its_display() {
+        let display = Rect::new(5000.0, 0.0, 1280.0, 800.0);
+        let windows = [
+            (10, Rect::new(5100.0, 100.0, 300.0, 400.0), true), // agent's Calculator
+            (20, Rect::new(5200.0, 100.0, 600.0, 400.0), true), // a browser window here
+            (20, Rect::new(100.0, 100.0, 800.0, 600.0), false), // and the user's, minimized
+            (30, Rect::new(100.0, 100.0, 800.0, 600.0), true),  // the user's music app
+            // A hidden window left over where the display now is.
+            (40, Rect::new(5300.0, 200.0, 300.0, 300.0), false),
+            (40, Rect::new(200.0, 200.0, 300.0, 300.0), true),
+        ];
+        let (heard, left_out) = heard_apps(&windows, &display);
+        assert_eq!(heard.into_iter().collect::<Vec<_>>(), vec![10]);
+        assert_eq!(left_out.into_iter().collect::<Vec<_>>(), vec![20]);
+    }
+
     use super::Rect;
 
     #[test]

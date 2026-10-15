@@ -138,6 +138,16 @@ pub fn on_screen_windows() -> Vec<WindowInfo> {
     window_list(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
 }
 
+/// Every normal window of other processes, hidden, minimized and on other
+/// Spaces included.
+pub fn all_windows() -> Vec<WindowInfo> {
+    window_list(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
+        .into_iter()
+        // Each app also owns a 30-point menu bar strip on every display.
+        .filter(|w| w.layer == 0 && w.bounds.width > 40.0 && w.bounds.height > 40.0)
+        .collect()
+}
+
 /// Windows that draw another app's panel out of process, as the file Open
 /// and Save panels do. The app owns an empty window in front; WindowServer
 /// sends input to this one, which it lists as off screen, at the same

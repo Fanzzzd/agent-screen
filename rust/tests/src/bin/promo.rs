@@ -4,8 +4,9 @@
 //!
 //!     SIDESCREEN_INSTANCE=e2e cargo e2e promo
 //!
-//! Skips when Calculator is running, and quits it after. Writes
-//! promo/public/agent.mp4. Needs ffmpeg.
+//! The display wears promo/public/wallpaper.png, through the wallpaper
+//! setting, which it puts back after. Skips when Calculator is running, and
+//! quits it after. Writes promo/public/agent.mp4. Needs ffmpeg.
 
 use std::process::{Command, ExitCode, Stdio};
 
@@ -20,14 +21,49 @@ fn main() -> ExitCode {
     if running("Calculator") {
         skip("Calculator is running; quit it to record");
     }
-    run(|| {
+    let saved = wear_promo_wallpaper();
+    let code = run(|| {
         start_test_app(&[])?;
         let control = Control::connect()?;
         let result = record(&control);
         quit_app("Calculator");
         stop_test_app();
         result
-    })
+    });
+    put_back_wallpaper(saved);
+    code
+}
+
+fn support() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join("Library/Application Support/Sidescreen")
+}
+
+/// The user's chosen wallpaper, if any, moved aside, and the promo's put in
+/// its place, as the app's wallpaper setting keeps it.
+fn wear_promo_wallpaper() -> Option<(std::path::PathBuf, Vec<u8>)> {
+    let saved = std::fs::read_dir(support()).ok().and_then(|entries| {
+        entries.flatten().map(|e| e.path()).find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wallpaper-"))
+        })
+    });
+    let saved = saved.and_then(|path| {
+        let bytes = std::fs::read(&path).ok()?;
+        std::fs::remove_file(&path).ok()?;
+        Some((path, bytes))
+    });
+    let promo = root().parent().unwrap().join("promo/public/wallpaper.png");
+    let _ = std::fs::copy(promo, support().join("wallpaper-promo.png"));
+    saved
+}
+
+fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
+    let _ = std::fs::remove_file(support().join("wallpaper-promo.png"));
+    if let Some((path, bytes)) = saved {
+        let _ = std::fs::write(path, bytes);
+    }
 }
 
 /// The center of the button labeled `label` in a window state's tree.

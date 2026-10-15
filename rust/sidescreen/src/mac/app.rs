@@ -166,16 +166,70 @@ pub fn resolve(app: &str) -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
-/// Give an Agent Display the desktop picture that names it, so System
-/// Settings, which shows each display with its desktop, tells it apart from
-/// the user's monitors. False when its screen isn't listed yet or the
-/// picture is missing, as in a bare debug binary. Main thread only.
+/// Where Sidescreen keeps the picture the user chose for Agent Displays.
+fn support_folder() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join("Library/Application Support/Sidescreen"))
+}
+
+/// The picture the user chose for Agent Displays, if any: a copy, so moving
+/// or deleting the original changes nothing.
+pub fn custom_wallpaper() -> Option<std::path::PathBuf> {
+    std::fs::read_dir(support_folder()?)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wallpaper-"))
+        })
+}
+
+/// Keep a copy of `picture` as Agent Displays' desktop picture, or go back
+/// to Sidescreen's own with None. Each copy gets a new name: macOS skips
+/// setting a picture whose URL it already shows.
+pub fn set_wallpaper(picture: Option<&Path>) -> Result<(), String> {
+    let folder = support_folder().ok_or("no home folder")?;
+    if let Some(old) = custom_wallpaper() {
+        std::fs::remove_file(&old).map_err(|e| format!("{}: {e}", old.display()))?;
+    }
+    let Some(picture) = picture else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let extension = picture
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let copy = folder.join(format!("wallpaper-{stamp}.{extension}"));
+    std::fs::copy(picture, &copy).map_err(|e| format!("{}: {e}", picture.display()))?;
+    Ok(())
+}
+
+/// The picture for Agent Displays: the user's, else Sidescreen's, which
+/// names the display. None in a bare debug binary without either.
+fn wallpaper() -> Option<std::path::PathBuf> {
+    custom_wallpaper().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/AgentDisplay.png")))
+            .filter(|path| path.exists())
+    })
+}
+
+/// Give an Agent Display its desktop picture: the user's choice, or the
+/// one that names it, so System Settings, which shows each display with its
+/// desktop, tells it apart from the user's monitors. False when its screen
+/// isn't listed yet or there is no picture, as in a bare debug binary. Main
+/// thread only.
 pub fn label_display(display: DisplayId, mtm: MainThreadMarker) -> bool {
-    let Some(picture) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/AgentDisplay.png")))
-        .filter(|path| path.exists())
-    else {
+    let Some(picture) = wallpaper() else {
         return false;
     };
     let Some(screen) = NSScreen::screens(mtm).iter().find(|screen| {

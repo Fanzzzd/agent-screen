@@ -82,6 +82,8 @@ pub enum MenuAction {
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,
+    ChooseWallpaper,
+    DefaultWallpaper,
     Quit,
     HandOver {
         display: u32,

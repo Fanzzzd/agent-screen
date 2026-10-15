@@ -168,6 +168,11 @@ async fn handle_one(
                 "seconds": (done.seconds * 10.0).round() / 10.0,
                 "actions": done.actions,
                 "problem": done.problem,
+                "sound": {
+                    "apps": done.heard,
+                    "leftOut": done.left_out,
+                    "problem": done.sound_problem,
+                },
             }))
         }
         "endDisplay" => {

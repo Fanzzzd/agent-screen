@@ -1464,6 +1464,7 @@ impl Shell {
             "card-take-over" => self.open_for_help(id, cx),
             "card-open" => self.card_open(id, cx),
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
+            "wallpaper" => self.choose_wallpaper(cx),
             "click" => self.native(Native::IconClicked { right: false }, cx),
             // The pointer entering (1) or leaving (0) the icon or Peek, as
             // AppKit and GPUI report it.
@@ -1583,6 +1584,16 @@ impl Shell {
             t("Connect Claude Code and Codex", "接入 Claude Code 和 Codex"),
             MenuAction::ConnectAgents,
         );
+        menu.action(
+            t("Agent Display Wallpaper…", "Agent 显示器壁纸…"),
+            MenuAction::ChooseWallpaper,
+        );
+        if crate::mac::app::custom_wallpaper().is_some() {
+            menu.action(
+                t("Use Sidescreen's Wallpaper", "改回 Sidescreen 的壁纸"),
+                MenuAction::DefaultWallpaper,
+            );
+        }
         menu.separator();
         let quit = menu.action(t("Quit Sidescreen", "退出 Sidescreen"), MenuAction::Quit);
         native::set_key_equivalent(&quit, "q", true, false, false, false);
@@ -1765,6 +1776,8 @@ impl Shell {
             }
             MenuAction::IgnoreInAeroSpace => self.ignore_in_aerospace(cx),
             MenuAction::ConnectAgents => self.connect_agents(cx),
+            MenuAction::ChooseWallpaper => self.choose_wallpaper(cx),
+            MenuAction::DefaultWallpaper => self.set_wallpaper(None, cx),
             MenuAction::Quit => self.quit(cx),
             MenuAction::HandOver {
                 display,
@@ -2107,6 +2120,56 @@ impl Shell {
             notify::request();
         }
         self.push_setup(cx);
+    }
+
+    /// Ask for a picture for Agent Displays with an Open panel.
+    pub fn choose_wallpaper(&mut self, cx: &mut Context<Self>) {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseFiles(true);
+        panel.setCanChooseDirectories(false);
+        panel.setAllowsMultipleSelection(false);
+        panel.setMessage(Some(&objc2_foundation::NSString::from_str(t(
+            "Choose a picture for agents' displays. You see it in the Viewer and in recordings; agents' screenshots leave it out.",
+            "为 agent 的显示器选一张壁纸。它出现在 Viewer 和录屏里，agent 截图时不包含它。",
+        ))));
+        let types: Vec<objc2::rc::Retained<objc2_foundation::NSString>> =
+            ["png", "jpg", "jpeg", "heic", "tiff", "gif", "webp"]
+                .iter()
+                .map(|e| objc2_foundation::NSString::from_str(e))
+                .collect();
+        let types = objc2_foundation::NSArray::from_retained_slice(&types);
+        // allowedContentTypes needs UTType; the file-type list still works.
+        let _: () = unsafe { objc2::msg_send![&panel, setAllowedFileTypes: &*types] };
+        cx.activate(true);
+        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+            return;
+        }
+        let Some(path) = panel.URL().and_then(|url| url.path()) else {
+            return;
+        };
+        self.set_wallpaper(Some(std::path::PathBuf::from(path.to_string())), cx);
+    }
+
+    /// Keep `picture` for Agent Displays, or Sidescreen's own with None,
+    /// and show it on the displays there are.
+    pub fn set_wallpaper(&mut self, picture: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if let Err(error) = crate::mac::app::set_wallpaper(picture.as_deref()) {
+            log::warn!("wallpaper: {error}");
+            return;
+        }
+        let ids = self.core.read(cx).virtual_ids();
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            for id in ids {
+                crate::mac::app::label_display(id, mtm);
+            }
+        }
+        log::info!(
+            "Agent Display wallpaper: {}",
+            picture.map_or("Sidescreen's".into(), |p| p.display().to_string())
+        );
     }
 
     /// The setup window's button for the ColorSync helper: macOS's

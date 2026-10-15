@@ -13,6 +13,7 @@ pub mod display;
 pub mod ime;
 pub mod input;
 pub mod menubar;
+pub mod mux;
 pub mod native;
 pub mod notify;
 pub mod permissions;
