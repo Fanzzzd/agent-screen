@@ -273,6 +273,7 @@ fn crop(
 
 /// One window without what lies above or below it. Blocking.
 pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
+    let started = std::time::Instant::now();
     let content = SCShareableContent::create()
         .with_on_screen_windows_only(true)
         .get()
@@ -282,6 +283,7 @@ pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
         .into_iter()
         .find(|w| w.window_id() == target.window_id)
         .ok_or("the window is not capturable; is Screen Recording granted?")?;
+    let listed = started.elapsed();
     let filter = SCContentFilter::create()
         .with_window(&window)
         .build()
@@ -292,6 +294,12 @@ pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
         .with_shows_cursor(false);
     let _ = config.set_ignores_shadows_single_window(true);
     let image = SCScreenshotManager::capture_image(&filter, &config).map_err(|e| e.to_string())?;
+    log::debug!(
+        "window picture {}: listed in {} ms, captured by {} ms",
+        target.window_id,
+        listed.as_millis(),
+        started.elapsed().as_millis()
+    );
     encode(&image, Format::Jpeg)
 }
 

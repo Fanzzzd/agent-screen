@@ -659,6 +659,7 @@ async fn handle_one(
             let origin = (area.x, area.y);
             let scale = display_scale(&core, id, cx);
             // Walking a tree takes a round trip per element.
+            let started = Instant::now();
             let snapshot = cx
                 .background_executor()
                 .spawn(async move { ax::snapshot(target, origin, scale) })
@@ -671,6 +672,7 @@ async fn handle_one(
                     )
                 })?;
             let count = snapshot.elements.len();
+            let walked = started.elapsed();
             let tree = core.update(cx, |c, _| {
                 let numbers = c.elements.entry((id, window.target.window_id)).or_default();
                 numbers::relabel(&snapshot.tree, &numbers.renumber(snapshot.elements))
@@ -681,6 +683,12 @@ async fn handle_one(
                 .spawn(async move { screenshot::window(target, size) })
                 .await
                 .map_err(ControlError::failed)?;
+            log::debug!(
+                "windowState {}: {count} elements in {} ms, picture by {} ms",
+                target.window_id,
+                walked.as_millis(),
+                started.elapsed().as_millis()
+            );
             let mut result = shot_json(&shot);
             result["window"] = in_shot(window.json(), scale);
             result["tree"] = json!(tree);

@@ -95,5 +95,32 @@ fn measure(count: usize, seconds: u64) -> Result<()> {
     }
     sleep_ms(3000);
     sample(&format!("{count} displays, idle pages"), seconds)?;
+    // How long an agent waits to read its window, alone, then while every
+    // display records, as the fleet's do.
+    let time_state = |label: &str| -> Result<()> {
+        let mut times = vec![];
+        for (control, key, id) in agents.iter().take(3) {
+            let list =
+                control.call("listWindows", json!({ "sessionKey": key, "displayId": id }))?;
+            let window = list["windows"][0]["windowId"].as_u64().unwrap_or(0);
+            let started = std::time::Instant::now();
+            control.call(
+                "windowState",
+                json!({ "sessionKey": key, "displayId": id, "windowId": window }),
+            )?;
+            times.push(started.elapsed().as_millis());
+        }
+        println!("windowState {label}: {times:?} ms");
+        Ok(())
+    };
+    time_state("with no recording")?;
+    for (control, key, id) in &agents {
+        control.call("recordStart", json!({ "sessionKey": key, "displayId": id }))?;
+    }
+    sleep_ms(2000);
+    time_state("while every display records")?;
+    for (control, key, id) in &agents {
+        let _ = control.call("recordStop", json!({ "sessionKey": key, "displayId": id }));
+    }
     Ok(())
 }

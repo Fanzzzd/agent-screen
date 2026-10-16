@@ -536,11 +536,22 @@ fn record(specs: &[Spec]) -> Result<()> {
         quit_apps(specs);
         return Ok(());
     }
-    let mut recordings = vec![];
-    for agent in &agents {
-        let started = agent.call("recordStart", json!({}))?;
-        recordings.push(started["video"].as_str().unwrap_or_default().to_string());
-    }
+    // All at once, so the clips start together.
+    let recordings: Vec<String> = std::thread::scope(|scope| {
+        let started: Vec<_> = agents
+            .iter()
+            .map(|agent| scope.spawn(move || agent.call("recordStart", json!({}))))
+            .collect();
+        started
+            .into_iter()
+            .map(|s| {
+                let started = s
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("recordStart panicked"))??;
+                Ok(started["video"].as_str().unwrap_or_default().to_string())
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
     sleep_ms(1000);
 
     // Every agent at once, each at its own pace.
@@ -569,7 +580,13 @@ fn record(specs: &[Spec]) -> Result<()> {
         let video = Path::new(video);
         std::fs::copy(video, public.join(format!("fleet-{}.mp4", agent.name)))?;
         let _ = std::fs::remove_file(video);
-        let _ = std::fs::remove_file(video.with_extension("timeline.jsonl"));
+        // When each action came, for cutting the clips.
+        let timeline = video.with_extension("timeline.jsonl");
+        let _ = std::fs::copy(
+            &timeline,
+            out().join(format!("fleet-{}.timeline.jsonl", agent.name)),
+        );
+        let _ = std::fs::remove_file(timeline);
     }
     for (agent, spec) in agents.iter().zip(specs) {
         verify(agent, spec)?;
