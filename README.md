@@ -33,7 +33,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    brew install --cask sidescreen
    ```
 
-   Or download the DMG from the [latest release](../../releases/latest) and drag Sidescreen into Applications. Sidescreen is signed with a Developer ID but not notarized, so the first time you open the downloaded app, macOS says it can't check it: go to System Settings ▸ Privacy & Security and press **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Sidescreen.app`. Homebrew does that for you.
+   Or download the DMG from the [latest release](../../releases/latest) and drag Sidescreen into Applications. Sidescreen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
 
 2. Open Sidescreen. The setup window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
 3. Connect your agents. Press **Connect…** in the setup window, or right-click the menu bar icon and choose **Connect Claude Code and Codex**, or run:

@@ -4,14 +4,16 @@
 # Usage: scripts/release.sh
 #
 # Signs with a Developer ID Application identity under the hardened
-# runtime. Releases aren't notarized: users approve the app once in System
-# Settings. NOTARIZE=1 notarizes and staples too, given notarytool
-# credentials stored once under a keychain profile:
+# runtime, then notarizes and staples the DMG. Notarization takes an App
+# Store Connect API key: NOTARY_KEY (the .p8 file), NOTARY_KEY_ID and
+# NOTARY_ISSUER, as CI passes them, or one stored once under a keychain
+# profile:
 #
 #   xcrun notarytool store-credentials sidescreen \
-#     --apple-id <you@example.com> --team-id <TEAMID> --password <app-specific password>
+#     --key <AuthKey_ID.p8> --key-id <ID> --issuer <issuer id>
 #
-# NOTARY_PROFILE picks another profile name.
+# NOTARY_PROFILE picks another profile name. NOTARIZE=0 skips it, for a
+# local build no one downloads.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -26,8 +28,13 @@ if [[ -z "$identity" ]]; then
   exit 1
 fi
 
-if [[ "${NOTARIZE:-}" == 1 ]] && ! xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
-  echo "error: no notarytool credentials under the profile \"$profile\"; see the top of $0" >&2
+if [[ -n "${NOTARY_KEY_ID:-}" ]]; then
+  notary=(--key "$NOTARY_KEY" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER")
+else
+  notary=(--keychain-profile "$profile")
+fi
+if [[ "${NOTARIZE:-1}" != 0 ]] && ! xcrun notarytool history "${notary[@]}" >/dev/null 2>&1; then
+  echo "error: no notarytool credentials; see the top of $0" >&2
   exit 1
 fi
 
@@ -49,8 +56,8 @@ rm -f "$dmg"
 hdiutil create -quiet -volname Sidescreen -srcfolder "$stage" -format UDZO -fs HFS+ "$dmg"
 codesign --force --timestamp --sign "$identity" "$dmg"
 
-if [[ "${NOTARIZE:-}" == 1 ]]; then
-  xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait
+if [[ "${NOTARIZE:-1}" != 0 ]]; then
+  xcrun notarytool submit "$dmg" "${notary[@]}" --wait
   xcrun stapler staple "$dmg"
   spctl --assess --type open --context context:primary-signature --verbose "$dmg"
 fi
@@ -77,12 +84,6 @@ cask "sidescreen" do
   end
 
   app "Sidescreen.app"
-
-  # Releases are signed but not notarized: without this, macOS blocks the
-  # first launch until the user allows it in System Settings.
-  postflight_steps do
-    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Sidescreen.app"], must_succeed: false
-  end
 
   uninstall quit: "dev.sidescreen.menubar"
 

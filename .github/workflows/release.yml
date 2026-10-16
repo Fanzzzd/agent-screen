@@ -11,6 +11,9 @@
 # Secrets:
 # - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
 #   Application certificate and its private key.
+# - APP_STORE_CONNECT_KEY_P8, APP_STORE_CONNECT_KEY_ID,
+#   APP_STORE_CONNECT_ISSUER_ID: an App Store Connect API key of the same
+#   team, which notarizes the DMG.
 # - TAP_DEPLOY_KEY: private half of a write deploy key of
 #   Fanzzzd/homebrew-sidescreen.
 name: Release
@@ -78,8 +81,17 @@ jobs:
           security list-keychains -d user -s "$keychain" "${existing[@]}"
           security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application"
 
-      - name: Build the DMG and cask
-        run: rust/sidescreen/scripts/release.sh
+      - name: Build and notarize the DMG and cask
+        env:
+          KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          printf '%s\n' "$KEY_P8" > "$NOTARY_KEY"
+          trap 'rm -f "$NOTARY_KEY"' EXIT
+          rust/sidescreen/scripts/release.sh
 
       - name: Keep the DMG and cask
         uses: actions/upload-artifact@v4
