@@ -290,8 +290,10 @@ pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
         let mut config = std::ptr::null_mut();
         if CGBeginDisplayConfiguration(&mut config) == 0 {
             CGConfigureDisplayOrigin(config, id, origin.0, origin.1);
-            // kCGConfigureForSession
-            CGCompleteDisplayConfiguration(config, 1);
+            // kCGConfigurePermanently: macOS remembers the spot for this
+            // display's serial and puts the next display with it there at
+            // once, so it needs no move: one display change instead of two.
+            CGCompleteDisplayConfiguration(config, 2);
         }
     }
     let now = cg::display_bounds(id);
