@@ -2501,7 +2501,7 @@ fn waited_long_enough(
 /// manager may not know about a window for a moment after it appears.
 async fn settle(
     core: &Entity<Core>,
-    target: WindowTarget,
+    mut target: WindowTarget,
     id: DisplayId,
     cx: &mut AsyncApp,
 ) -> Result<windows::Window, ControlError> {
@@ -2529,6 +2529,18 @@ async fn settle(
     for _ in 0..12 {
         if !takes_windows(core, id, cx) {
             return Err(ended());
+        }
+        // An app given a file may close the window it opened first and show
+        // the document in another, as Pages does importing text: follow the
+        // app to that one.
+        if let Some(other) = replacement(core, target, cx).await {
+            log::info!(
+                "window {} closed while placing; following {} of the same app",
+                target.window_id,
+                other.window_id
+            );
+            target = other;
+            claim(core, id, target, Origin::Launched, cx);
         }
         if let Err(e) = place(target, id, cx).await {
             last_error = Some(e);
@@ -2591,6 +2603,38 @@ async fn settle(
             "it may be on the user's screen"
         }
     )))
+}
+
+/// Another window of `target`'s app, once `target` has closed: one no
+/// display has, the newest first.
+async fn replacement(
+    core: &Entity<Core>,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> Option<WindowTarget> {
+    let claimed: std::collections::HashSet<u32> = core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .flat_map(|d| d.records.keys().copied())
+            .collect()
+    });
+    cx.background_executor()
+        .spawn(async move {
+            let all = windows::all();
+            if all.iter().any(|w| w.target == target) || ax::window_element(target).is_some() {
+                return None;
+            }
+            all.into_iter()
+                .filter(|w| {
+                    w.target.pid == target.pid
+                        && w.layer == 0
+                        && !claimed.contains(&w.target.window_id)
+                })
+                .map(|w| w.target)
+                .max_by_key(|t| t.window_id)
+        })
+        .await
 }
 
 /// Watch a window just placed for 3 s more, and place it again if it leaves
