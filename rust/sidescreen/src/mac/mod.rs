@@ -10,6 +10,7 @@ pub mod catch;
 pub mod cg;
 pub mod colorsync;
 pub mod display;
+pub mod hang;
 pub mod ime;
 pub mod input;
 pub mod menubar;

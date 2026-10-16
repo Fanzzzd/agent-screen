@@ -42,6 +42,16 @@ pub fn note(event: &str, id: DisplayId, detail: &str) {
 }
 
 /// One line that isn't about one display: local time and `text`.
+/// The folder the log lives in.
+pub fn folder() -> Option<PathBuf> {
+    path()?.parent().map(PathBuf::from)
+}
+
+/// The time as log lines show it.
+pub fn stamp() -> String {
+    now()
+}
+
 pub fn line(text: &str) {
     append(&format!("{} {text}\n", now()));
 }
