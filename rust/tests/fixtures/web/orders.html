@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme Cloud · Orders</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, system-ui, sans-serif; background: #f4f5f7; color: #1d1d1f; }
+  header { background: #fff; border-bottom: 1px solid #e3e4e8; padding: 14px 32px; font-weight: 700; font-size: 18px; }
+  header span { color: #0a84ff; }
+  main { max-width: 760px; margin: 32px auto; background: #fff; border-radius: 14px; padding: 24px 32px; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }
+  input, select, textarea { width: 100%; padding: 9px 12px; font: inherit; border: 1px solid #d0d2d8; border-radius: 8px; background: #fff; }
+  input:focus, textarea:focus { outline: 2px solid #0a84ff; border-color: transparent; }
+  button { padding: 10px 18px; font: inherit; font-weight: 600; color: #fff; background: #0a84ff; border: 0; border-radius: 8px; }
+  .done { display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: #e8f8ee; color: #1a7f37; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
+  td, th { text-align: left; padding: 9px 8px; border-bottom: 1px solid #eee; }
+  th { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: .05em; }
+  tr.sel td { background: #eaf3ff; }
+  .panel { display: none; margin-top: 14px; padding: 12px; border: 1px solid #e3e4e8; border-radius: 10px; }
+</style>
+</head>
+<body>
+<header>Acme <span>Cloud</span></header>
+<main>
+  <h1>Orders</h1>
+  <input id="q" aria-label="Search orders" placeholder="Search orders" autocomplete="off" oninput="filter()">
+  <table><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>
+<tr role="button" aria-label="Order A-1041" onclick="pick(this)"><td>A-1041</td><td>Lovelace Labs</td><td>$76.80</td><td class="st">Paid</td></tr>
+<tr role="button" aria-label="Order A-1042" onclick="pick(this)"><td>A-1042</td><td>Hopper &amp; Co</td><td>$240.00</td><td class="st">Paid</td></tr>
+<tr role="button" aria-label="Order A-1043" onclick="pick(this)"><td>A-1043</td><td>Babbage Ltd</td><td>$96.00</td><td class="st">Disputed</td></tr>
+<tr role="button" aria-label="Order A-1044" onclick="pick(this)"><td>A-1044</td><td>Turing Systems</td><td>$480.00</td><td class="st">Paid</td></tr>
+<tr role="button" aria-label="Order A-1045" onclick="pick(this)"><td>A-1045</td><td>Noether Analytics</td><td>$19.20</td><td class="st">Paid</td></tr>
+<tr role="button" aria-label="Order A-1046" onclick="pick(this)"><td>A-1046</td><td>Curie Health</td><td>$96.00</td><td class="st">Paid</td></tr>
+  </tbody></table>
+  <div class="panel" id="panel"><b id="who"></b><p style="margin:6px 0 10px">The customer was charged twice.</p><button onclick="refund()">Issue refund</button></div>
+  <div class="done" id="done">✓ Refund issued.</div>
+</main>
+<script>
+  let picked = null;
+  function filter() {
+    const q = document.getElementById('q').value.toLowerCase();
+    document.querySelectorAll('tbody tr').forEach((r) => r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none');
+  }
+  function pick(r) {
+    document.querySelectorAll('tr').forEach((x) => x.classList.remove('sel'));
+    r.classList.add('sel'); picked = r;
+    document.getElementById('who').textContent = r.cells[0].textContent + ' · ' + r.cells[1].textContent;
+    document.getElementById('panel').style.display = 'block';
+  }
+  function refund() { if (picked) picked.querySelector('.st').textContent = 'Refunded'; document.getElementById('done').style.display = 'block'; }
+</script>
+</body>
+</html>

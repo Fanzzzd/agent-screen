@@ -205,6 +205,18 @@ pub fn find(window_id: u32) -> Option<Window> {
     all().into_iter().find(|w| w.target.window_id == window_id)
 }
 
+/// Whether the window sits on a virtual display of Sidescreen's, any
+/// instance's, rather than on one of the user's screens. Blocking.
+pub fn on_virtual_display(window_id: u32) -> bool {
+    let Some(window) = find(window_id) else {
+        return false;
+    };
+    let mid = window.bounds.mid();
+    cg::active_displays()
+        .into_iter()
+        .any(|id| cg::is_sidescreen(id) && cg::display_bounds(id).contains(mid))
+}
+
 /// Move a window onto a display in whatever way the user's window manager
 /// respects. AeroSpace re-tiles any window moved behind its back, so with
 /// AeroSpace running it moves the window to the workspace shown on the

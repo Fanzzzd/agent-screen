@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme Cloud · Book a demo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, system-ui, sans-serif; background: #f4f5f7; color: #1d1d1f; }
+  header { background: #fff; border-bottom: 1px solid #e3e4e8; padding: 14px 32px; font-weight: 700; font-size: 18px; }
+  header span { color: #0a84ff; }
+  main { max-width: 760px; margin: 32px auto; background: #fff; border-radius: 14px; padding: 24px 32px; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }
+  input, select, textarea { width: 100%; padding: 9px 12px; font: inherit; border: 1px solid #d0d2d8; border-radius: 8px; background: #fff; }
+  input:focus, textarea:focus { outline: 2px solid #0a84ff; border-color: transparent; }
+  button { padding: 10px 18px; font: inherit; font-weight: 600; color: #fff; background: #0a84ff; border: 0; border-radius: 8px; }
+  .done { display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: #e8f8ee; color: #1a7f37; font-weight: 600; }
+  main { max-width: 560px; }
+  .days, .slots { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 4px; }
+  .day, .slot { color: #1d1d1f; background: #f4f5f7; font-weight: 500; padding: 10px 14px; }
+  .on { background: #0a84ff; color: #fff; }
+</style>
+</head>
+<body>
+<header>Acme <span>Cloud</span></header>
+<main>
+  <h1>Book a demo</h1>
+  <label>October</label><div class="days"><button class="day" aria-label="October 19" onclick="day(this)">19</button><button class="day" aria-label="October 20" onclick="day(this)">20</button><button class="day" aria-label="October 21" onclick="day(this)">21</button><button class="day" aria-label="October 22" onclick="day(this)">22</button><button class="day" aria-label="October 23" onclick="day(this)">23</button><button class="day" aria-label="October 24" onclick="day(this)">24</button><button class="day" aria-label="October 25" onclick="day(this)">25</button></div>
+  <label>Time</label><div class="slots"><button class="slot" aria-label="9:00" onclick="pick(this)">9:00</button><button class="slot" aria-label="10:30" onclick="pick(this)">10:30</button><button class="slot" aria-label="13:00" onclick="pick(this)">13:00</button><button class="slot" aria-label="14:30" onclick="pick(this)">14:30</button><button class="slot" aria-label="16:00" onclick="pick(this)">16:00</button></div>
+  <label for="email">Your email</label>
+  <input id="email" aria-label="Your email" autocomplete="off">
+  <p><button onclick="book()">Confirm booking</button></p>
+  <div class="done" id="done"></div>
+</main>
+<script>
+  let d = null, t = null;
+  function day(b) { document.querySelectorAll('.day').forEach((x) => x.classList.remove('on')); b.classList.add('on'); d = b.textContent; }
+  function pick(b) { document.querySelectorAll('.slot').forEach((x) => x.classList.remove('on')); b.classList.add('on'); t = b.textContent; }
+  function book() {
+    if (!d || !t) return;
+    const done = document.getElementById('done');
+    done.textContent = '✓ Booked for October ' + d + ' at ' + t + '.';
+    done.style.display = 'block';
+  }
+</script>
+</body>
+</html>

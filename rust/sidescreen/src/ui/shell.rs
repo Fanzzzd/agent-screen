@@ -260,6 +260,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::watch_mouse();
     native::watch_screens();
     native::watch_activations();
+    crate::mac::cg::watch_display_changes();
     native::watch_colors();
     let accent = native::accent();
     super::theme::set_accent(accent);
@@ -571,6 +572,7 @@ impl Shell {
                 self.core.update(cx, |core, _| core.repark());
                 self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);
+                self.schedule_regather(cx);
             }
             Native::ColorsChanged => {
                 super::theme::set_accent(native::accent());
@@ -2750,6 +2752,50 @@ open -a AeroSpace";
     /// force-assigned to a monitor number cannot move; those become
     /// conflicts the menu explains. While nothing needs fixing, note where
     /// the user's workspaces are, for the next time.
+    /// The displays changed. When one comes or goes, macOS moves the others
+    /// and may drop their windows on the user's screen, where AeroSpace
+    /// tiles them in the user's workspace. Put each window of a live Agent
+    /// Display back once the displays have settled.
+    fn schedule_regather(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for wait in [500, 1500] {
+                cx.background_executor()
+                    .timer(Duration::from_millis(wait))
+                    .await;
+                let Ok(windows) = this.update(cx, |shell, cx| {
+                    shell
+                        .core
+                        .read(cx)
+                        .displays
+                        .list
+                        .iter()
+                        .filter(|d| !d.is_ended())
+                        .flat_map(|d| d.records.values().map(move |r| (d.id, r.target)))
+                        .collect::<Vec<(DisplayId, WindowTarget)>>()
+                }) else {
+                    return;
+                };
+                cx.background_executor()
+                    .spawn(async move {
+                        for (id, target) in windows {
+                            if windows::find(target.window_id).is_some()
+                                && !windows::on_virtual_display(target.window_id)
+                            {
+                                let moved = crate::mac::ax::move_into(target, cg::display_bounds(id));
+                                log::info!(
+                                    "window {} fell off display {id} as the displays changed; put back: {}",
+                                    target.window_id,
+                                    moved.is_ok()
+                                );
+                            }
+                        }
+                    })
+                    .await;
+            }
+        })
+        .detach();
+    }
+
     fn schedule_guard(&mut self, cx: &mut Context<Self>) {
         self.guard_generation += 1;
         let generation = self.guard_generation;

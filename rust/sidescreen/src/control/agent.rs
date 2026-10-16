@@ -2594,10 +2594,22 @@ async fn settle(
 fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) {
     let core = core.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
-        for _ in 0..12 {
+        // 3 s of looking, not counting while displays change, up to 10 s.
+        let mut looks = 0;
+        for _ in 0..40 {
+            if looks == 12 {
+                return;
+            }
             cx.background_executor()
                 .timer(Duration::from_millis(250))
                 .await;
+            // While another display comes or goes, this one moves and its
+            // windows follow a moment apart: the window only seems to have
+            // left. Putting it back then would put it on another display.
+            if cg::displays_changed_within(Duration::from_millis(1000)) {
+                continue;
+            }
+            looks += 1;
             // Ended, taken back by the user, or closed: no longer ours to keep.
             let recorded = core.read_with(cx, |c, _| {
                 c.displays
@@ -2609,6 +2621,19 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
                 || windows::find(target.window_id).is_none()
             {
                 return;
+            }
+            // Displays move as others come and go, and their windows a
+            // moment apart, so a window may seem to sit on the display next
+            // door. Only one on the user's screen has really left.
+            let on_virtual = cx
+                .background_executor()
+                .spawn(async move { windows::on_virtual_display(target.window_id) })
+                .await;
+            // AeroSpace that tiles agent displays may still hide it there.
+            let aerospace_tiles = !crate::mac::aerospace::ignores_now()
+                && crate::mac::aerospace::AeroSpace::current().is_some();
+            if on_virtual && !aerospace_tiles {
+                continue;
             }
             if !held(target, id, cx).await {
                 log::info!(

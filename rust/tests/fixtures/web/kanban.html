@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme Cloud · Board</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, system-ui, sans-serif; background: #f4f5f7; color: #1d1d1f; }
+  header { background: #fff; border-bottom: 1px solid #e3e4e8; padding: 14px 32px; font-weight: 700; font-size: 18px; }
+  header span { color: #0a84ff; }
+  main { max-width: 760px; margin: 32px auto; background: #fff; border-radius: 14px; padding: 24px 32px; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #555; margin: 12px 0 4px; }
+  input, select, textarea { width: 100%; padding: 9px 12px; font: inherit; border: 1px solid #d0d2d8; border-radius: 8px; background: #fff; }
+  input:focus, textarea:focus { outline: 2px solid #0a84ff; border-color: transparent; }
+  button { padding: 10px 18px; font: inherit; font-weight: 600; color: #fff; background: #0a84ff; border: 0; border-radius: 8px; }
+  .done { display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px; background: #e8f8ee; color: #1a7f37; font-weight: 600; }
+  .cols { display: flex; gap: 14px; }
+  .col { flex: 1; background: #f4f5f7; border-radius: 10px; padding: 10px; min-height: 300px; }
+  .col h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #666; margin: 2px 4px 10px; }
+  .card { background: #fff; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.12); font-size: 14px; cursor: grab; }
+  .col.over { outline: 2px dashed #0a84ff; }
+</style>
+</head>
+<body>
+<header>Acme <span>Cloud</span></header>
+<main>
+  <h1>Launch board</h1>
+  <div class="cols">
+    <div class="col" data-col="todo" role="group" aria-label="Column To do"><h2>To do</h2>
+      <div class="card" role="button" id="c1" aria-label="Card Write changelog">Write changelog</div>
+      <div class="card" role="button" id="c2" aria-label="Card Record demo">Record demo</div>
+      <div class="card" role="button" id="c3" aria-label="Card Update pricing page">Update pricing page</div>
+    </div>
+    <div class="col" data-col="doing" role="group" aria-label="Column In progress"><h2>In progress</h2>
+      <div class="card" role="button" id="c4" aria-label="Card Fix sign-up email check">Fix sign-up email check</div>
+    </div>
+    <div class="col" data-col="done" role="group" aria-label="Column Done"><h2>Done</h2>
+      <div class="card" role="button" id="c5" aria-label="Card Notarize the app">Notarize the app</div>
+    </div>
+  </div>
+  <div class="done" id="done">✓ Board updated.</div>
+</main>
+<script>
+  // Mouse-driven drag, so synthetic mouse events move cards.
+  let held = null;
+  document.addEventListener('mousedown', (e) => {
+    const card = e.target.closest('.card');
+    if (card) { held = card; e.preventDefault(); }
+  });
+  document.addEventListener('mousemove', (e) => {
+    document.querySelectorAll('.col').forEach((c) => c.classList.remove('over'));
+    if (!held) return;
+    const col = document.elementFromPoint(e.clientX, e.clientY)?.closest('.col');
+    if (col) col.classList.add('over');
+  });
+  document.addEventListener('mouseup', (e) => {
+    document.querySelectorAll('.col').forEach((c) => c.classList.remove('over'));
+    if (!held) return;
+    const col = document.elementFromPoint(e.clientX, e.clientY)?.closest('.col');
+    if (col && !col.contains(held)) col.appendChild(held);
+    held = null;
+    if (document.querySelectorAll('[data-col=done] .card').length >= 3) document.getElementById('done').style.display = 'block';
+  });
+</script>
+</body>
+</html>

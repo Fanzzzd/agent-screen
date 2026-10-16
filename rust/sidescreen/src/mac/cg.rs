@@ -21,6 +21,38 @@ unsafe extern "C" {
     fn CGDisplayPixelsWide(display: u32) -> usize;
     fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayRegisterReconfigurationCallback(
+        callback: extern "C" fn(u32, u32, *mut std::ffi::c_void),
+        user_info: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+/// When a display last began or finished changing, in ms since `SINCE`.
+static CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SINCE: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+extern "C" fn display_changed(_: u32, _: u32, _: *mut std::ffi::c_void) {
+    let now = SINCE.elapsed().as_millis() as u64;
+    CHANGED.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Start noting display changes, once. Call on the main thread, whose run
+/// loop delivers them.
+pub fn watch_display_changes() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = *SINCE;
+        unsafe { CGDisplayRegisterReconfigurationCallback(display_changed, std::ptr::null_mut()) };
+    });
+}
+
+/// Whether a display began or finished changing within `span`. Meanwhile
+/// display bounds and the window list disagree: a display has moved and
+/// its windows not yet, or the other way round.
+pub fn displays_changed_within(span: std::time::Duration) -> bool {
+    let at = CHANGED.load(std::sync::atomic::Ordering::Relaxed);
+    at != 0 && SINCE.elapsed().as_millis() as u64 <= at + span.as_millis() as u64
 }
 
 /// The display's unit number, which ScreenCaptureKit tells displays apart by.
