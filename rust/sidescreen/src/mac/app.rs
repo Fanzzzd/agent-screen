@@ -11,31 +11,81 @@ pub fn is_running(bundle_id: &str) -> bool {
         .is_empty()
 }
 
-/// The pid of a running app at `bundle`, if any.
-/// Every running instance of the app at `bundle`.
+/// Every running instance of the app at `bundle`. Reads the process table
+/// rather than asking AppKit for every running app and its bundle, which
+/// takes tens of milliseconds on a busy Mac; launch_app asks every 20 ms
+/// while an app starts, so this is safe to call off the main thread too.
 pub fn running_pids(bundle: &Path) -> Vec<i32> {
+    // Safari's /Applications entry is a link into a cryptex; the running
+    // app reports where it really is.
     let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
-    NSWorkspace::sharedWorkspace()
-        .runningApplications()
-        .iter()
-        .filter_map(|app| {
-            let url = PathBuf::from(app.bundleURL()?.path()?.to_string());
-            let url = std::fs::canonicalize(&url).unwrap_or(url);
-            (url == bundle).then(|| app.processIdentifier())
-        })
+    let Some(executable) = main_executable(&bundle) else {
+        return Vec::new();
+    };
+    process_ids()
+        .into_iter()
+        .filter(|&pid| process_path(pid).as_deref() == Some(executable.as_path()))
+        // A command-line run of the same binary isn't the app.
+        .filter(|&pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some())
         .collect()
 }
 
 pub fn running_pid(bundle: &Path) -> Option<i32> {
-    // Safari's /Applications entry is a link into a cryptex; the running
-    // app reports where it really is.
-    let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
-    let apps = NSWorkspace::sharedWorkspace().runningApplications();
-    apps.iter().find_map(|app| {
-        let url = PathBuf::from(app.bundleURL()?.path()?.to_string());
-        let url = std::fs::canonicalize(&url).unwrap_or(url);
-        (url == bundle).then(|| app.processIdentifier())
-    })
+    running_pids(bundle).into_iter().next()
+}
+
+/// The bundle's main executable, as its Info.plist names it.
+fn main_executable(bundle: &Path) -> Option<PathBuf> {
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    let name = info_value(&plist, "CFBundleExecutable")?;
+    let path = bundle.join("Contents/MacOS").join(name);
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// A string value from an Info.plist, XML or binary.
+fn info_value(plist: &[u8], key: &str) -> Option<String> {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::propertylist::{CFPropertyList, create_with_data};
+    use core_foundation::string::CFString;
+    let (list, _) = create_with_data(CFData::from_buffer(plist), 0).ok()?;
+    let list =
+        unsafe { CFPropertyList::wrap_under_create_rule(list) }.downcast_into::<CFDictionary>()?;
+    let list: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_get_rule(list.as_concrete_TypeRef()) };
+    list.find(CFString::new(key))?
+        .downcast::<CFString>()
+        .map(|s| s.to_string())
+}
+
+/// Every process id on the Mac.
+fn process_ids() -> Vec<i32> {
+    let mut pids = vec![0i32; 4096];
+    let bytes = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    pids.truncate(bytes as usize);
+    pids.retain(|&pid| pid > 0);
+    pids
+}
+
+/// The executable a process runs.
+fn process_path(pid: i32) -> Option<PathBuf> {
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
 /// Where the app with this pid is installed.

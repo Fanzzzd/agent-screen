@@ -233,6 +233,34 @@ impl VirtualDisplay {
     }
 }
 
+/// Display configuration runs on a thread of its own. Each change waits
+/// on WindowServer for 100 ms or more, which on the main thread stalls the
+/// menu bar, Peek and the Viewer. One at a time, since each picks a free
+/// spot from where the others are.
+pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
+    type Job = Box<dyn FnOnce() + Send>;
+    static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
+        std::sync::OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (send, receive) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("sidescreen-displays".into())
+            .spawn(move || {
+                for job in receive {
+                    job();
+                }
+            })
+            .expect("display thread");
+        std::sync::Mutex::new(send)
+    });
+    let (done, result) = futures::channel::oneshot::channel();
+    let job: Job = Box::new(move || {
+        let _ = done.send(job());
+    });
+    let _ = worker.lock().unwrap_or_else(|e| e.into_inner()).send(job);
+    result.await.expect("display thread ended")
+}
+
 /// Park a virtual display diagonally off the top-right corner of the
 /// physical displays, so the real cursor rarely wanders onto it. Further
 /// virtual displays stack to the right of earlier ones.

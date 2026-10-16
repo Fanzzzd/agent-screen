@@ -569,7 +569,7 @@ impl Shell {
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
-                self.core.update(cx, |core, _| core.repark());
+                self.core.update(cx, |core, cx| core.repark(cx));
                 self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);
                 self.schedule_regather(cx);

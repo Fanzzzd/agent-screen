@@ -349,22 +349,14 @@ impl Core {
         // A reused display is already in place: moving it again would be
         // another reconfiguration.
         let virtual_ids = self.virtual_ids();
-        park_fillers(&virtual_ids);
         if display::is_tucked(id, &virtual_ids) {
             self.tucked.insert(id);
             cx.notify();
             return id;
         }
-        // Usually WindowServer takes the position at once. Here, before the
-        // main thread turns to everything a new display sets off, which
-        // held a spawned first try back by up to 400 ms.
-        if display::tuck_away(id, &virtual_ids) {
-            self.tucked.insert(id);
-            cx.notify();
-            return id;
-        }
-        // Otherwise it needs a moment before it accepts configuration; try
-        // until it does.
+        // WindowServer usually takes the position at once; a display it has
+        // only just added needs a moment first, so try until it does. On
+        // the display thread: each try waits on WindowServer.
         cx.spawn(async move |this, cx| {
             let started = std::time::Instant::now();
             let mut tries = 0;
@@ -378,11 +370,14 @@ impl Core {
                         .await;
                 }
                 tries += 1;
-                let Ok(placed) =
-                    this.update(cx, |core, _| display::tuck_away(id, &core.virtual_ids()))
-                else {
+                let Ok(virtual_ids) = this.read_with(cx, |core, _| core.virtual_ids()) else {
                     return;
                 };
+                let placed = display::configure(move || {
+                    park_fillers(&virtual_ids);
+                    display::tuck_away(id, &virtual_ids)
+                })
+                .await;
                 if placed {
                     parked = true;
                     break;
@@ -409,9 +404,9 @@ impl Core {
     /// longer out of the way, as when the user dragged it in System
     /// Settings. Each move is a display change too, so a display macOS
     /// keeps putting elsewhere gets three tries, not a loop.
-    pub fn repark(&mut self) {
+    pub fn repark(&mut self, cx: &mut Context<Self>) {
         let virtual_ids = self.virtual_ids();
-        park_fillers(&virtual_ids);
+        let mut moving = Vec::new();
         let ours: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
         for &id in &ours {
             if !self.tucked.contains(&id) || display::is_tucked(id, &virtual_ids) {
@@ -423,9 +418,17 @@ impl Core {
                 continue;
             }
             *tries += 1;
-            let parked = display::tuck_away(id, &virtual_ids);
-            log::debug!("display {id} was moved; parked again: {parked}");
+            moving.push(id);
         }
+        cx.background_executor()
+            .spawn(display::configure(move || {
+                park_fillers(&virtual_ids);
+                for id in moving {
+                    let parked = display::tuck_away(id, &virtual_ids);
+                    log::debug!("display {id} was moved; parked again: {parked}");
+                }
+            }))
+            .detach();
     }
 
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
