@@ -274,10 +274,16 @@ fn crop(
 /// One window without what lies above or below it. Blocking.
 pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
     let started = std::time::Instant::now();
-    let content = SCShareableContent::create()
-        .with_on_screen_windows_only(true)
-        .get()
-        .map_err(|e| format!("could not list windows: {e}"))?;
+    // The list shared with display screenshots: while displays record,
+    // each listing waits seconds on ScreenCaptureKit.
+    let mut content = content(false)?;
+    if !content
+        .windows()
+        .iter()
+        .any(|w| w.window_id() == target.window_id)
+    {
+        content = self::content(true)?;
+    }
     let window = content
         .windows()
         .into_iter()

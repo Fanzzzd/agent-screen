@@ -23,10 +23,14 @@ fn main() -> ExitCode {
     }
     let count: usize = env("LOAD_DISPLAYS", 12);
     let seconds: u64 = env("LOAD_SECONDS", 20);
-    let pass: Vec<(String, String)> = ["SIDESCREEN_DISPLAY_HZ", "SIDESCREEN_DISPLAY_SCALE"]
-        .iter()
-        .filter_map(|n| std::env::var(n).ok().map(|v| (n.to_string(), v)))
-        .collect();
+    let pass: Vec<(String, String)> = [
+        "SIDESCREEN_DISPLAY_HZ",
+        "SIDESCREEN_DISPLAY_SCALE",
+        "SIDESCREEN_RECORD_SCALE",
+    ]
+    .iter()
+    .filter_map(|n| std::env::var(n).ok().map(|v| (n.to_string(), v)))
+    .collect();
     run(|| {
         let mut app_env: Vec<(&str, &str)> =
             vec![("SIDESCREEN_LANG", "en"), ("SIDESCREEN_NEW_DISPLAYS", "32")];

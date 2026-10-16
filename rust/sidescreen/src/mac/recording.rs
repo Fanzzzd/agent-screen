@@ -271,7 +271,12 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
     let timeline = folder.join(format!("{base}.timeline.jsonl"));
 
     let bounds = super::cg::display_bounds(id);
-    let pixels = super::cg::pixel_size(id).unwrap_or((bounds.width as u32, bounds.height as u32));
+    let mut pixels =
+        super::cg::pixel_size(id).unwrap_or((bounds.width as u32, bounds.height as u32));
+    // Test builds may record at one pixel per point, to compare the cost.
+    if cfg!(debug_assertions) && std::env::var("SIDESCREEN_RECORD_SCALE").as_deref() == Ok("1") {
+        pixels = (bounds.width as u32, bounds.height as u32);
+    }
     let filter = super::screenshot::filter(id, true, false)?;
     let configuration = SCStreamConfiguration::new()
         .with_width(pixels.0)
