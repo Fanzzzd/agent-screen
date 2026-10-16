@@ -242,6 +242,8 @@ impl AeroSpace {
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {
+        // Each command makes AeroSpace refresh every window first.
+        log::debug!("aerospace {}", args.join(" "));
         let mut child = Command::new(self.executable)
             .args(args)
             .stdout(Stdio::piped())
@@ -416,10 +418,19 @@ fn read_ignoring(display_exists: bool) -> Option<Ignoring> {
         path.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()),
     );
     let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+    // Asking AeroSpace makes it refresh every window, which takes a second
+    // under load and stalls it meanwhile. With no Agent Display online it
+    // would list none whatever its config, so the file decides; once one
+    // is online, ask once per AeroSpace process and config.
+    let display_exists = display_exists
+        || super::cg::online()
+            .into_iter()
+            .any(super::cg::is_sidescreen);
     // The file may say so before AeroSpace reloads it: an AeroSpace that
     // still lists an Agent Display hasn't.
     let ignores = configured
         && (*loaded == Some(key)
+            || !display_exists
             || !AeroSpace::current().is_some_and(|a| a.lists_agent_display().unwrap_or(true)));
     if ignores && display_exists {
         *loaded = Some(key);

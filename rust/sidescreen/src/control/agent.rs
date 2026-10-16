@@ -1184,7 +1184,9 @@ async fn create_display(
     // once it exists.
     cx.background_executor()
         .spawn(async move {
-            if let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() {
+            if !crate::mac::aerospace::ignores_now()
+                && let Some(aerospace) = crate::mac::aerospace::AeroSpace::current()
+            {
                 aerospace.remember_before_first();
             }
         })
