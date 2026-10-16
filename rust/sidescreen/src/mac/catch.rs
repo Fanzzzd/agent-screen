@@ -411,12 +411,22 @@ extern "C" fn created(
         match owner(agent, user) {
             Owner::Agent => {}
             Owner::User => {
+                log::info!(
+                    "catch: pid {} made window {:?} while the user acted on it; theirs",
+                    target.pid,
+                    ax::window_id(window)
+                );
                 if let Some(id) = ax::window_id(window) {
                     target.skipped.borrow_mut().push(id);
                 }
                 return;
             }
             Owner::Unknown => {
+                log::info!(
+                    "catch: pid {} made window {:?}; agent acted: {agent}, user acted: {user}; left where it is",
+                    target.pid,
+                    ax::window_id(window)
+                );
                 if let Some(id) = ax::window_id(window) {
                     target.undecided.borrow_mut().push(id);
                 }

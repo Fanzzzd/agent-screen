@@ -2537,8 +2537,9 @@ async fn settle(
                 .await;
             if !held(target, id, cx).await {
                 log::info!(
-                    "window {} left display {id} after placing; placing again",
-                    target.window_id
+                    "window {} left display {id} after placing, for {:?}; placing again",
+                    target.window_id,
+                    windows::find(target.window_id).map(|w| (w.app, w.bounds))
                 );
                 continue;
             }
@@ -2611,8 +2612,9 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
             }
             if !held(target, id, cx).await {
                 log::info!(
-                    "window {} left display {id} after placing; placing again",
-                    target.window_id
+                    "window {} left display {id} after placing, for {:?}; placing again",
+                    target.window_id,
+                    windows::find(target.window_id).map(|w| (w.app, w.bounds))
                 );
                 let _ = place(target, id, cx).await;
             }
