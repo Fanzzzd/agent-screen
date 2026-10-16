@@ -227,6 +227,7 @@ impl Core {
             .iter()
             .map(|d| d.id)
             .chain(self.spares.iter().map(|s| s.handle.id))
+            .chain(display::filler_ids())
             .collect()
     }
 
@@ -259,7 +260,16 @@ impl Core {
         {
             self.made.pop_front();
         }
-        if self.made.len() < MADE {
+        // Test builds may raise it, as the fleet script does for its twelve.
+        let made = if cfg!(debug_assertions) {
+            std::env::var("SIDESCREEN_NEW_DISPLAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(MADE)
+        } else {
+            MADE
+        };
+        if self.made.len() < made {
             return Ok(());
         }
         let oldest = self.made.front().copied().unwrap_or(now);
@@ -283,6 +293,7 @@ impl Core {
         for spare in old {
             crate::lifecycle::note("released", spare.handle.id, "spare unused");
         }
+        self.release_fillers_if_idle();
     }
 
     /// The user left the Viewer: each display hands key focus back to the
@@ -338,6 +349,7 @@ impl Core {
         // A reused display is already in place: moving it again would be
         // another reconfiguration.
         let virtual_ids = self.virtual_ids();
+        park_fillers(&virtual_ids);
         if display::is_tucked(id, &virtual_ids) {
             self.tucked.insert(id);
             cx.notify();
@@ -399,6 +411,7 @@ impl Core {
     /// keeps putting elsewhere gets three tries, not a loop.
     pub fn repark(&mut self) {
         let virtual_ids = self.virtual_ids();
+        park_fillers(&virtual_ids);
         let ours: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
         for &id in &ours {
             if !self.tucked.contains(&id) || display::is_tucked(id, &virtual_ids) {
@@ -490,7 +503,15 @@ impl Core {
             self.pending_returns.retain(|(display, _)| *display != id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
+            self.release_fillers_if_idle();
             cx.notify();
+        }
+    }
+
+    /// The kept twins go with the last display.
+    fn release_fillers_if_idle(&mut self) {
+        if self.displays.list.is_empty() && self.spares.is_empty() {
+            display::release_fillers();
         }
     }
 
@@ -566,4 +587,13 @@ pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Park the kept twins out of the way like any display of Sidescreen's.
+fn park_fillers(virtual_ids: &[DisplayId]) {
+    for id in display::filler_ids() {
+        if !display::is_tucked(id, virtual_ids) {
+            display::tuck_away(id, virtual_ids);
+        }
+    }
 }

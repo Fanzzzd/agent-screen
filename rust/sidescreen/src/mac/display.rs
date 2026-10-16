@@ -102,6 +102,34 @@ impl Drop for Serial {
 // main thread, until released there.
 unsafe impl Send for VirtualDisplay {}
 
+/// Displays that got a taken unit number, kept online while Sidescreen has
+/// displays. WindowServer numbers a new display by how many are online, so
+/// once a unit is gone from the middle, as when the user unplugs a monitor
+/// that came before AeroSpace's closet, every new display gets a taken one.
+/// Making it again and releasing the twin each time is two display changes
+/// more, and each change moves the other displays and may drop their
+/// windows on the user's screen. A kept twin fills the gap.
+static FILLERS: std::sync::Mutex<Vec<VirtualDisplay>> = std::sync::Mutex::new(Vec::new());
+const MAX_FILLERS: usize = 2;
+
+/// Ids of the kept twins.
+pub fn filler_ids() -> Vec<u32> {
+    FILLERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|d| d.id)
+        .collect()
+}
+
+/// Release the kept twins, once Sidescreen has no other display.
+pub fn release_fillers() {
+    let fillers = std::mem::take(&mut *FILLERS.lock().unwrap_or_else(|e| e.into_inner()));
+    for filler in fillers {
+        crate::lifecycle::note("released", filler.id, "filler");
+    }
+}
+
 impl VirtualDisplay {
     /// A HiDPI display of `width` × `height` points, with a unit number no
     /// other display has (`cg::unit_twin`). A display that gets a taken one
@@ -119,8 +147,14 @@ impl VirtualDisplay {
             display.serial = Some(lease);
             crate::lifecycle::note("created", display.id, &format!("serial={number}"));
             let Some(twin) = cg::unit_twin(display.id) else {
-                for twinned in &twinned {
-                    crate::lifecycle::note("released", twinned.id, "unit twin");
+                let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
+                for twinned in twinned {
+                    if fillers.len() < MAX_FILLERS {
+                        crate::lifecycle::note("kept", twinned.id, "filler");
+                        fillers.push(twinned);
+                    } else {
+                        crate::lifecycle::note("released", twinned.id, "unit twin");
+                    }
                 }
                 return Some(display);
             };

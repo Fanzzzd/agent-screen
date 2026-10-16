@@ -7,8 +7,8 @@
 //!     SIDESCREEN_INSTANCE=e2e cargo e2e fleet
 //!
 //! The browsers run on throwaway profiles. Creates the displays one at a
-//! time and ends them after. Sidescreen makes at most ten new displays in
-//! ten minutes, so the last two wait for that. The displays wear
+//! time and ends them after, with the test build's limit on new displays
+//! raised to sixteen. The displays wear
 //! promo/public/wallpaper.png, which it puts back after. Skips when one of
 //! the apps is running with windows. Quits what it started after,
 //! discarding the documents. Writes promo/public/fleet-<agent>.mp4, each
@@ -158,22 +158,28 @@ fn main() -> ExitCode {
         .collect();
     let saved = wear_promo_wallpaper();
     let code = run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("SIDESCREEN_LANG", "en"), ("SIDESCREEN_NEW_DISPLAYS", "16")])?;
         let result = record(&specs);
-        for spec in &specs {
-            match spec.work {
-                Work::Page(..) => quit_profile(&profile(spec.name)),
-                Work::Numbers => drop(quit_discarding("Numbers")),
-                Work::Pages => drop(quit_discarding("Pages")),
-                Work::Terminal => drop(try_osa("tell application \"Terminal\" to quit")),
-                Work::Calculator => drop(try_osa("tell application \"Calculator\" to quit")),
-            }
-        }
+        quit_apps(&specs);
         stop_test_app();
         result
     });
     put_back_wallpaper(saved);
     code
+}
+
+/// Quit what the agents started. While their displays are still theirs:
+/// an ended display gives its windows to the user's screen.
+fn quit_apps(specs: &[Spec]) {
+    for spec in specs {
+        match spec.work {
+            Work::Page(..) => quit_profile(&profile(spec.name)),
+            Work::Numbers => drop(quit_discarding("Numbers")),
+            Work::Pages => drop(quit_discarding("Pages")),
+            Work::Terminal => drop(try_osa("tell application \"Terminal\" to quit")),
+            Work::Calculator => drop(try_osa("tell application \"Calculator\" to quit")),
+        }
+    }
 }
 
 struct Agent {
@@ -527,6 +533,7 @@ fn record(specs: &[Spec]) -> Result<()> {
                 shot.to_string(),
             )?;
         }
+        quit_apps(specs);
         return Ok(());
     }
     let mut recordings = vec![];
@@ -567,6 +574,7 @@ fn record(specs: &[Spec]) -> Result<()> {
     for (agent, spec) in agents.iter().zip(specs) {
         verify(agent, spec)?;
     }
+    quit_apps(specs);
     Ok(())
 }
 
