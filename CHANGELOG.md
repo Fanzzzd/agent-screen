@@ -1,5 +1,105 @@
 # Changelog
 
+## 0.1.14 (2026-10-16)
+
+### Features
+
+#### Smooth Display Changes: a helper keeps macOS's display records short
+
+The setup window has a new optional step, Smooth Display Changes. It asks for your administrator password once and installs a small tool that Sidescreen runs as root through `sudo`. It runs after a display is created or ended, and every 30 minutes. It removes macOS's color records of displays that aren't connected, and keeps display names in English and your languages. macOS reads every record, once per display online, on each display change, so with many records the whole Mac stuttered. Profiles you chose stay. `Sidescreen colorsync remove` takes the tool away. `Sidescreen colorsync reclaim` runs it at once.
+
+When the reads would take longer than macOS waits for them, `create_display` now says so and asks the agent to use or end a display it has, instead of slowing the Mac down.
+
+#### Sidescreen changes the Mac's displays far less often
+
+Every display Sidescreen added or removed made each app on the Mac reconfigure its screens, and with a virtual display connected each change left macOS doing more color work for minutes. After many agent displays in a short while, the whole Mac could slow down or freeze. Sidescreen now keeps an emptied display for a few minutes and gives it to the next agent that needs one of the same size, adds each new display with one change, and lets agents make at most ten new displays in ten minutes. `~/Library/Logs/Sidescreen/displays.log` records every display it adds, keeps, reuses and removes.
+
+#### A Help Request can list steps
+
+`request_help` takes up to five `steps` beside its one-line reason. While you are in control, the Viewer lists them under its header, so you can follow them as you work on the display.
+
+#### Agents can type through your input method
+
+`computer` `type` and `key` take `via_input_method`, so an agent can type pinyin or another input method's keys and see the composition, as when testing an input-method bug. For the call, the agent's app gets keyboard focus and the agent uses your keyboard; the Viewer and Peek say so. Sidescreen waits until you've left the keyboard and pointer alone for 2 seconds, stops when you touch either, and sends nothing while a password field or a system prompt has the keyboard. See ADR 0008.
+
+#### launch_app starts development builds
+
+`launch_app` takes the path of an `.app` bundle, and `arguments` and `environment` for a new instance of the app, so an agent can start a development build without a wrapper bundle. An app that makes itself an accessory app after it starts, as Electron builds that open windows in the background do, now shows its windows on the display, and `list_windows` lists them. An app that takes more than a few seconds to open its first window now gets that window on the display too.
+
+#### Agents can record their display
+
+`record_display` records an Agent Display to an MP4 in ~/Movies/Sidescreen, at the display's full size, with a timeline file beside it: one line per agent action and Takeover, each with its seconds into the video. A recording stops when the agent stops it, when the display ends, or after 30 minutes. The Viewer header and Peek show a red Recording mark while it runs.
+
+#### Recordings have sound, and agent displays can wear your wallpaper
+
+A recording made with `record_display` now has the sound of the apps on the display. Only apps whose every window is on that display are heard: macOS separates sound by app, not by window, so an app you also use elsewhere, such as your browser, stays silent, and `record_display` stop lists which apps were heard and which were left out. In a test, a tone from an app on the display came through at -7.5 dB, and one from a process elsewhere at -100 dB.
+
+Agent Display Wallpaper… in the menu sets the picture agent displays show in the Viewer and in recordings; Use Sidescreen's Wallpaper puts the default back. Agents' screenshots leave the wallpaper out either way.
+
+### Fixes
+
+#### A new window stays on its agent display under AeroSpace
+
+AeroSpace sometimes moved a window back into your workspace just after Sidescreen placed it on an agent display, so a browser an agent opened could end up tiled on your screen. For 3 s after placing a window, Sidescreen puts it back on the display if it leaves.
+
+#### The Agent Pointer is a rounded arrow that arcs to each point
+
+The Agent Pointer in the Viewer and Peek is now a drawn arrow in your accent color, with a soft shadow and a glow, in the style of Codex's computer-use cursor. It travels to each point on a curve in 0.09 to 0.22 s, fast off the mark and soft on landing, and catches up when the agent clicks again before it lands, so it no longer trails the clicks. It turns a little with its speed and direction, as if its tail trailed behind, and settles with a small wobble. On a click it presses in and sends out a ripple. For a few seconds after each action it sways slightly while the agent works out its next step.
+
+#### Agents' clicks land when several apps run at once
+
+When another app came to the front, even for a moment as when a second agent started an app, Chrome on an agent display ignored every click in its page, and an app such as Numbers dropped the first click on a window it had just swapped in. A window of an app in the background takes clicks only after one click makes it key. Sidescreen now spends that click itself, on an empty spot of the window's title bar, whenever a window hasn't had one since the front app last changed. It never does this in your front app.
+
+The same goes for an app you and an agent both use: after you open a new TextEdit document, the agent's typing goes to its own window again instead of yours.
+
+#### Close Display is its own button in the Viewer
+
+The Viewer's ⋯ button held only Close Display…, so it is now an × button beside Collapse. Give and Take Back highlight in the capsule's shape on hover.
+
+#### Clicks no longer crash Electron and Chrome pages, and drags start on the first move
+
+Sidescreen posted input without a time. A click that changed a page's URL, as in most single-page apps, made Chromium kill the page. Every event now carries the time it is sent. A press just outside a resizable window's edge now resizes the window, and the first `mouse_move` after `left_mouse_down` now moves the drag. A screenshot an action returns now waits for what the app draws a moment after the action, also when the display was idle before.
+
+#### Typing through the input method works call after call
+
+Several problems with `type` and `key` with `via_input_method` are fixed:
+
+- After a call, an app that ignores the Accessibility request to come to the front, such as an Electron app, stayed behind the agent's app. Switching your input source back then committed the agent's composition as plain letters. Sidescreen now waits until your app is in front, activates it another way when it doesn't come, and only then switches your input source back.
+- A second call sent its keys nowhere: the agent's window had lost key status while your app was in front. Each call now makes the window key with a click on its title bar first.
+- A call right after another was refused as if you were typing, because the keys Sidescreen had just posted reset the idle timer. Sidescreen now tells its own events apart from yours.
+- The agent's input source takes over before the first key, so the first letter is composed too.
+- Sidescreen could crash when an input source changed during a call. It now makes input source calls on the main thread.
+
+The tool description now says to compose and commit in one call, such as "nihao " for 你好: what the input method holds is dropped when your app comes back to the front.
+
+#### Releases are notarized by Apple
+
+The downloaded app opens like any other: no more Open Anyway in System Settings or `xattr` to run first.
+
+#### Peek closes once the pointer leaves it
+
+Peek opened by hovering the menu bar icon used to stay up after it had once been closed with Escape while the pointer was on it.
+
+#### Many agent displays no longer leave macOS re-reading color profiles
+
+Every display change makes macOS read its color records of all displays ever connected, once per display online, and retry every 5 seconds until a read finishes within 50 ms. Sidescreen used to leave a new record for each display it made, so after many displays the reads stopped finishing in time, the retries piled up, and apps that ask about displays stuttered. New displays now reuse the numbers of displays that are gone. Smooth Display Changes, in the setup window, removes the records earlier versions left and keeps each record's names in English and your languages, after which 13 displays online read in 19 ms. A new agent display also gets its own color profile right away, where it used to keep sRGB.
+
+#### System prompts stay on your screen
+
+When macOS puts one of its own prompts on an Agent Display, such as a keychain password request or an Apple Account alert, Sidescreen moves it to the middle of your main display within a second. The agent can't see or answer it there.
+
+#### Dragging a window in the Viewer keeps it on the agent's display
+
+Dragging a window by its title bar in the Viewer moved it to your own screen, where your window manager could tile it. The window now moves on the agent's display, as far as you drag, and stays inside it. This also works for title bars drawn by SwiftUI, such as Calculator's. When an app draws its own title bar, as Electron apps do, a window that a drag carries off the display goes back onto it when you let go.
+
+#### The Viewer, Peek and agent screenshots never show another display
+
+macOS sometimes gives a new virtual display the same internal number as another display, such as the one AeroSpace keeps hidden windows on. Every picture of the new display then showed the other one. Sidescreen now makes the display again until its number is free. If two displays share a number later, Sidescreen shows no picture of them and says why.
+
+#### Screenshots of large displays show the whole display
+
+A `computer` screenshot of a display wider than the image limit used to show only its top-left part, while clicks and `list_windows` used the scaled-down whole. It now shows the whole display scaled down. A zoom over the full screenshot works at the size the screenshot reports, and a zoom whose capture fails for a moment, as after a window was resized, tries again and then cuts the region from a whole capture.
+
 ## 0.1.13 (2026-10-13)
 
 ### Features
