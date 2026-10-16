@@ -183,7 +183,7 @@ pub fn definitions() -> Vec<Value> {
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
                     "via_input_method": {
                         "type": "boolean",
-                        "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao\" then key \"space\". This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
+                        "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao \" for 你好. Compose and commit in one call: the user's app comes back to the front after each call, and the input method drops what it was composing. This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
                     },
                     "input_source": {
                         "type": "string",

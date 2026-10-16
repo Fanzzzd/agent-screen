@@ -16,7 +16,7 @@ export const Help: React.FC<{ lang: Lang }> = ({ lang }) => {
   return (
     <AbsoluteFill style={{ background: `radial-gradient(circle at 50% 20%, #3a2410, ${theme.bg} 70%)` }}>
       <Clip
-        trimBefore={10.7 * fps}
+        trimBefore={9.9 * fps}
         zoom={1}
         origin="50% 0%"
       >
@@ -60,7 +60,7 @@ export const Help: React.FC<{ lang: Lang }> = ({ lang }) => {
       >
         <Video
           src={staticFile("agent.mp4")}
-          trimBefore={10.7 * fps}
+          trimBefore={9.9 * fps}
           muted
           style={{ position: "absolute", left: 0, top: 0, width: 2600, height: Math.round((2600 * 1312) / 1920) }}
         />

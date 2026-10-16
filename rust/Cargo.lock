@@ -4917,6 +4917,7 @@ dependencies = [
  "cc",
  "core-foundation 0.10.0",
  "core-video",
+ "dispatch2",
  "futures",
  "gpui",
  "gpui_macos",

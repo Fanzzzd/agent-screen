@@ -517,7 +517,9 @@ impl Forwarder {
     /// The window keys would go to now, if any.
     pub async fn keys_target(&self, within: Rect) -> Option<WindowTarget> {
         self.run(move |w| {
-            w.focus_something(within)?;
+            // No wake: its click would count as the user's input and stop
+            // the borrow, which brings the app to the front itself.
+            w.focus_something_waking(within, false)?;
             w.focused
         })
         .await
@@ -650,6 +652,10 @@ struct Gesture {
 struct Worker {
     source: Option<CFRetained<CGEventSource>>,
     focused: Option<WindowTarget>,
+    /// `ACTIVATIONS` when `focused` was focused.
+    focused_at: u64,
+    /// The window that last had a click, and `ACTIVATIONS` then.
+    woken: Option<(u32, u64)>,
     /// The user's window in a shared app whose key focus the agent's keys
     /// took; handed back when they are done.
     restore: Vec<WindowTarget>,
@@ -685,6 +691,8 @@ impl Worker {
         Worker {
             source: CGEventSource::new(CGEventSourceStateID::HIDSystemState),
             focused: None,
+            focused_at: 0,
+            woken: None,
             restore: Vec::new(),
             known: Vec::new(),
             pressed_panels: Vec::new(),
@@ -709,22 +717,54 @@ impl Worker {
 
     /// Make `target` the window keys go to, without raising it.
     ///
+    /// Focused before, it is focused again once the system's front app has
+    /// changed since: the change, even a moment's while another app starts,
+    /// takes key status from it, and Chrome then ignores clicks in its page.
+    ///
     /// The app's key window may have moved to another of its windows
     /// since, as when the user clicked theirs or the agent's keys handed
     /// focus back: then focus the target again, and remember the window to
     /// hand focus back to once these keys are done.
     fn focus(&mut self, target: WindowTarget) {
+        self.focus_waking(target, true);
+    }
+
+    /// `focus`, with `wake` false where a click there would get in the way,
+    /// as in a drag by the title bar.
+    fn focus_waking(&mut self, target: WindowTarget, wake: bool) {
         let before = super::ax::focused_window_id(target.pid);
         if let Some(other) = before.filter(|&id| id != target.window_id) {
             let other = WindowTarget {
                 pid: target.pid,
                 window_id: other,
             };
+            log::debug!(
+                "input: keys in {target:?}'s app were in window {}",
+                other.window_id
+            );
             if !on_a_sidescreen(other.window_id) {
                 self.remember(other);
             }
-        } else if self.focused == Some(target) {
+            // A focus record doesn't make another window of an app in the
+            // background key again; a click does.
+            self.woken = None;
+        } else if self.focused == Some(target) && self.focused_at == activations() {
             return;
+        }
+        // A window of an app in the background becomes key on a click and
+        // drops that click: a new window, or any once the front app has
+        // changed. Spend one where nothing is pressed, unless it had one
+        // since. Never in the user's front app, where it would take keys.
+        if wake && self.woken != Some((target.window_id, activations())) && !is_front(target.pid) {
+            let empty = cg::window_bounds(target.window_id)
+                .filter(|_| on_a_sidescreen(target.window_id))
+                .and_then(|bounds| title_bar_point(target, bounds));
+            if let Some(at) = empty {
+                log::debug!("input: waking {target:?}");
+                self.wake_at(target, at);
+                return;
+            }
+            log::debug!("input: no empty title bar to wake {target:?}");
         }
         self.send_focus(target);
     }
@@ -736,6 +776,7 @@ impl Worker {
             thread::sleep(Duration::from_millis(50));
         }
         self.focused = Some(target);
+        self.focused_at = activations();
     }
 
     /// Hand key focus back to the user's window the agent's keys took it
@@ -829,6 +870,8 @@ impl Worker {
         });
         self.post(CGEventType::MouseMoved, at, target, button, 0, group, flags);
         self.post(button.down(), at, target, button, clicks, group, flags);
+        // Dropped or not, the press made the window key.
+        self.woken = Some((target.window_id, activations()));
         Some(target)
     }
 
@@ -860,7 +903,7 @@ impl Worker {
         };
         {
             let _held = AppKeys::hold(hit.target.pid);
-            self.focus(hit.target);
+            self.focus_waking(hit.target, false);
         }
         log::debug!(
             "input: holding window {} by its title bar",
@@ -1073,8 +1116,13 @@ impl Worker {
     /// first window of an app just started in the background, becomes key
     /// on a click, and drops that click.
     fn wake(&mut self, target: WindowTarget, bounds: Rect) {
-        let at = (bounds.x + bounds.width / 2.0, bounds.y + 6.0);
+        let middle = (bounds.x + bounds.width / 2.0, bounds.y + 6.0);
+        self.wake_at(target, title_bar_point(target, bounds).unwrap_or(middle));
+    }
+
+    fn wake_at(&mut self, target: WindowTarget, at: (f64, f64)) {
         self.send_focus(target);
+        self.woken = Some((target.window_id, activations()));
         let group = self.next_group();
         let none = CGEventFlags::empty();
         let left = Button::Left;
@@ -1085,6 +1133,10 @@ impl Worker {
     }
 
     fn focus_something(&mut self, within: Rect) -> Option<AppKeys> {
+        self.focus_something_waking(within, true)
+    }
+
+    fn focus_something_waking(&mut self, within: Rect, wake: bool) -> Option<AppKeys> {
         let Some(target) = self.pick_for_keys(within) else {
             // The window left the display, as when the user took it back:
             // keys must not follow it to the user's screen.
@@ -1100,7 +1152,7 @@ impl Worker {
         if target.target != target.host {
             self.wake_panel(target);
         }
-        self.focus(target.target);
+        self.focus_waking(target.target, wake);
         Some(held)
     }
 
@@ -1230,6 +1282,7 @@ fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
 }
 
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
+    super::ime::note_posted();
     stamp_time(event);
     if !unsafe { SSPostEventToPid(pid, event, authenticate) } {
         CGEvent::post_to_pid(pid, Some(event));
@@ -1312,9 +1365,39 @@ pub fn post_key_to_pid(pid: i32, chord: KeyChord) {
         if let Some(event) = CGEvent::new_keyboard_event(None, chord.code, down) {
             CGEvent::set_flags(Some(&event), flags(chord.modifiers));
             stamp_time(&event);
+            super::ime::note_posted();
             CGEvent::post_to_pid(pid, Some(&event));
         }
     }
+}
+
+/// How many times the system's front app has changed.
+static ACTIVATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The front app's pid, 0 for none.
+static FRONT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+pub fn note_activation(front: Option<i32>) {
+    FRONT.store(front.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    let n = ACTIVATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    log::debug!("input: front app changed ({n})");
+}
+
+fn is_front(pid: i32) -> bool {
+    FRONT.load(std::sync::atomic::Ordering::Relaxed) == pid
+}
+
+fn activations() -> u64 {
+    ACTIVATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A point on the strip along a window's top edge with nothing to press
+/// there, as a tab in a full tab bar would be.
+fn title_bar_point(target: WindowTarget, bounds: Rect) -> Option<(f64, f64)> {
+    [0.5, 0.6, 0.7, 0.8, 0.4, 0.3]
+        .map(|f| (bounds.x + bounds.width * f, bounds.y + 6.0))
+        .into_iter()
+        .find(|&at| super::ax::on_title_bar(target, bounds, at))
 }
 
 #[cfg(test)]

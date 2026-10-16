@@ -58,6 +58,14 @@ pub fn name(pid: i32) -> Option<String> {
         .map(|name| name.to_string())
 }
 
+/// Bring an app to the front through NSRunningApplication; false when
+/// macOS refuses.
+pub fn activate(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some_and(|app| {
+        app.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty())
+    })
+}
+
 /// The frontmost app's pid.
 pub fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()

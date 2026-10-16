@@ -44,10 +44,29 @@ unsafe extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
 }
 
+/// When Sidescreen last posted an event, and how long the user had been
+/// idle just before.
+static POSTED: std::sync::Mutex<Option<(Instant, f64)>> = std::sync::Mutex::new(None);
+
+/// Note an event Sidescreen is about to post. Posted events reset the HID
+/// idle timer as the user's do (ADR 0007), so `user_idle` tells them apart.
+pub fn note_posted() {
+    let idle = user_idle();
+    *POSTED.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), idle));
+}
+
 /// Seconds since the user last touched the keyboard, pointer or trackpad.
-/// Posted events don't count: they don't pass through the HID system.
+/// When the idle timer was last reset by an event Sidescreen posted, the
+/// user's idle time runs from before it.
 pub fn user_idle() -> f64 {
-    unsafe { CGEventSourceSecondsSinceLastEventType(CGEventSourceStateID::HIDSystemState, !0) }
+    let raw =
+        unsafe { CGEventSourceSecondsSinceLastEventType(CGEventSourceStateID::HIDSystemState, !0) };
+    match *POSTED.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some((at, before)) if raw + 0.05 >= at.elapsed().as_secs_f64() => {
+            before + at.elapsed().as_secs_f64()
+        }
+        _ => raw,
+    }
 }
 
 /// How a borrow ended.
@@ -60,6 +79,33 @@ pub enum Typed {
 /// An input source, retained.
 struct Source(*mut std::ffi::c_void);
 unsafe impl Send for Source {}
+// Only touched on the main thread, through `on_main`.
+unsafe impl Sync for Source {}
+
+/// Run `work` on the main thread and wait for it. HIToolbox aborts when an
+/// input source call races the main thread's own, as GPUI's on a source
+/// change. Never from a task the main thread waits on.
+fn on_main<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    if unsafe { libc::pthread_main_np() } == 1 {
+        return work();
+    }
+    let mut out = None;
+    let slot = &mut out;
+    dispatch2::DispatchQueue::main().exec_sync(move || *slot = Some(work()));
+    out.expect("the main queue ran it")
+}
+
+fn current_source() -> Source {
+    on_main(|| Source(unsafe { TISCopyCurrentKeyboardInputSource() }))
+}
+
+fn select(source: &Source) {
+    on_main(|| unsafe { TISSelectInputSource(source.0) });
+}
+
+fn id_of(source: &Source) -> String {
+    on_main(|| source_id(source.0))
+}
 impl Drop for Source {
     fn drop(&mut self) {
         unsafe { CFRelease(self.0) };
@@ -96,6 +142,7 @@ pub fn type_keys(
     target: WindowTarget,
     keys: &[KeyChord],
     source: Option<&str>,
+    wake: impl FnOnce(),
 ) -> Result<Typed, String> {
     if PER_KEY * keys.len() as u32 > LONGEST {
         return Err(format!(
@@ -116,20 +163,24 @@ pub fn type_keys(
         ));
     }
     let wanted = match source {
-        Some(id) => Some(find_source(id).ok_or_else(|| format!("no enabled input source {id}"))?),
+        Some(id) => Some(
+            on_main(|| find_source(id)).ok_or_else(|| format!("no enabled input source {id}"))?,
+        ),
         None => None,
     };
     let front = app::frontmost_pid();
-    let before = Source(unsafe { TISCopyCurrentKeyboardInputSource() });
+    let before = current_source();
 
+    // The source first: switching in the agent's app would commit what its
+    // input method still holds from the last call.
+    if let Some(wanted) = &wanted {
+        select(wanted);
+    }
     // The agent's app comes to the front, its window key, the pointer
     // where it is.
     let application = ax::application(target.pid);
     ax::set_attribute(&application, "AXFrontmost", CFBoolean::new(true));
     ax::make_main(target);
-    if let Some(wanted) = &wanted {
-        unsafe { TISSelectInputSource(wanted.0) };
-    }
     // Keys go to whichever app has keyboard focus. Unless it is the agent's,
     // send none: they would land in the user's app.
     let asked = Instant::now();
@@ -145,6 +196,19 @@ pub fn type_keys(
             ));
         }
         thread::sleep(Duration::from_millis(20));
+    }
+    // The window lost key status when the user's app came back after an
+    // earlier call, and keys reach it again only after a click.
+    wake();
+    // A source just selected takes the app's keys only once the input
+    // method has set up there: until then, a first letter goes in raw.
+    if let Some(wanted) = &wanted {
+        let id = id_of(wanted);
+        let asked = Instant::now();
+        while id_of(&current_source()) != id && asked.elapsed() < Duration::from_secs(1) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(250));
     }
     thread::sleep(Duration::from_millis(100));
     let started = Instant::now();
@@ -168,6 +232,7 @@ pub fn type_keys(
                 continue;
             };
             CGEvent::set_flags(Some(&event), super::input::flags(chord.modifiers));
+            note_posted();
             CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
             thread::sleep(Duration::from_millis(10));
         }
@@ -189,12 +254,28 @@ pub fn type_keys(
     })
 }
 
-/// The user's input source, if the call changed it, and their front app.
+/// The user's front app, then their input source if the call changed it.
+/// In that order: switching sources in the agent's app would commit what
+/// its input method holds. Some apps, such as Electron ones, ignore
+/// AXFrontmost; NSRunningApplication brings those.
 fn give_back(front: Option<i32>, agent: i32, source: Option<&Source>) {
-    if let Some(source) = source {
-        unsafe { TISSelectInputSource(source.0) };
-    }
     if let Some(front) = front.filter(|&p| p != agent) {
         ax::set_attribute(&ax::application(front), "AXFrontmost", CFBoolean::new(true));
+        let asked = Instant::now();
+        let mut fallback = false;
+        while app::frontmost_pid() != Some(front) && asked.elapsed() < Duration::from_secs(1) {
+            if !fallback && asked.elapsed() > Duration::from_millis(200) {
+                fallback = true;
+                log::debug!("ime: pid {front} ignored AXFrontmost; activating it");
+                app::activate(front);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if app::frontmost_pid() != Some(front) {
+            log::warn!("ime: pid {front} didn't come back to the front");
+        }
+    }
+    if let Some(source) = source {
+        select(source);
     }
 }

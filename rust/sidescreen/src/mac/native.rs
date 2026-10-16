@@ -899,6 +899,27 @@ pub fn watch_screens() {
     keep(observer);
 }
 
+/// Count the system's front app changing, even for a moment, as when an
+/// app starts: each change takes key status from the windows Sidescreen
+/// focused in background apps, so input forwarders focus them again.
+pub fn watch_activations() {
+    let center = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
+    super::input::note_activation(super::app::frontmost_pid());
+    let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
+        super::input::note_activation(super::app::frontmost_pid())
+    });
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceDidActivateApplicationNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    let observer: Retained<AnyObject> = observer.into();
+    keep(observer);
+}
+
 /// The app's own icon as PNG, for drawing it in GPUI.
 pub fn app_icon_png() -> Option<Vec<u8>> {
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};

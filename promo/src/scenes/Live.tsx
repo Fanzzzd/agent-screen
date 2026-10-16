@@ -8,7 +8,7 @@ import { OUT, theme } from "../theme";
 
 const ease = Easing.bezier(...OUT);
 
-// The agent works Calculator in the Viewer; the user's pointer rests.
+// The agent fills a checkout in Chrome in the Viewer; the user's pointer rests.
 export const Live: React.FC<{ lang: Lang }> = ({ lang }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -22,7 +22,7 @@ export const Live: React.FC<{ lang: Lang }> = ({ lang }) => {
           extrapolateRight: "clamp",
           easing: ease,
         })}
-        origin="50% 52%"
+        origin="38% 52%"
       />
       {/* The user's pointer, still, beside the agent's display. */}
       <div

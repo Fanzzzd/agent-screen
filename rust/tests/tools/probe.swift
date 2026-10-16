@@ -2,6 +2,7 @@
 //
 //   probe windows PID         on-screen windows of PID as JSON lines
 //   probe displays            how many Sidescreen virtual displays are active
+//   probe bounds ID           display ID's global bounds in points
 //   probe idle                seconds since the user last touched a key or the pointer
 //   probe locked              1 while the screen is locked, else 0
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
@@ -41,6 +42,10 @@ case "displays":
   var ids = [CGDirectDisplayID](repeating: 0, count: 32); var n: UInt32 = 0
   CGGetActiveDisplayList(32, &ids, &n)
   print(ids[0..<Int(n)].filter { CGDisplayVendorNumber($0) == 0x5353 }.count)
+case "bounds":
+  // The global bounds of display ID, in points: x y width height.
+  let b = CGDisplayBounds(CGDirectDisplayID(UInt32(args[2])!))
+  print("\(b.origin.x) \(b.origin.y) \(b.size.width) \(b.size.height)")
 case "idle":
   print(Int(CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)))
 case "locked":

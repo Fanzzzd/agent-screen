@@ -259,6 +259,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
     native::watch_screens();
+    native::watch_activations();
     native::watch_colors();
     let accent = native::accent();
     super::theme::set_accent(accent);

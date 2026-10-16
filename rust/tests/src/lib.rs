@@ -235,6 +235,29 @@ pub fn running(name: &str) -> bool {
     !sh_lenient("/usr/bin/pgrep", &["-x", name]).is_empty()
 }
 
+/// `name` is running with windows: a headless browser that a script on this
+/// Mac drives is no one's to look at.
+pub fn running_headed(name: &str) -> bool {
+    sh_lenient("/usr/bin/pgrep", &["-x", name])
+        .lines()
+        .any(|pid| !sh_lenient("/bin/ps", &["-o", "args=", "-p", pid]).contains("--headless"))
+}
+
+/// Quit the browser running on the throwaway profile `dir`, and no other
+/// copy of it.
+pub fn quit_profile(dir: &Path) {
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-TERM", "-f"])
+        .arg(dir)
+        .status();
+    for _ in 0..50 {
+        if sh_lenient("/usr/bin/pgrep", &["-f", &dir.to_string_lossy()]).is_empty() {
+            return;
+        }
+        sleep_ms(100);
+    }
+}
+
 /// The screen is locked: it shows no windows, can't be captured and takes
 /// no input.
 pub fn locked() -> bool {
@@ -606,7 +629,7 @@ pub fn reopen_installed() {
 
 /// Open the stage: a display the size of a laptop screen, where the Viewer
 /// opens out of the user's sight.
-pub fn open_stage(control: &Control) -> Result<()> {
+pub fn open_stage(control: &Control) -> Result<u64> {
     let stage = control.call(
         "createDisplay",
         json!({ "sessionKey": "stage", "title": "Stage", "width": 1728, "height": 1117 }),
@@ -615,6 +638,83 @@ pub fn open_stage(control: &Control) -> Result<()> {
         "debugShow",
         json!({ "surface": "stage", "displayId": stage["displayId"] }),
     )?;
+    stage["displayId"].as_u64().context("no stage display id")
+}
+
+/// Start recording the stage display, the stand-in for the user's screen,
+/// through Sidescreen's own recording. `stage` is the connection that opened
+/// it. Unlike `screencapture -R`, it lays no dimming veil over the other
+/// displays, which the Viewer would show.
+pub fn record_stage(stage: &Control, id: u64) -> Result<PathBuf> {
+    let started = stage.call(
+        "recordStart",
+        json!({ "sessionKey": "stage", "displayId": id }),
+    )?;
+    Ok(PathBuf::from(
+        started["video"].as_str().context("no video path")?,
+    ))
+}
+
+/// Stop the stage recording and write the part of it showing `region`, in
+/// global points, to `clip` at 30 fps, `width` pixels wide.
+pub fn cut_stage(
+    stage: &Control,
+    id: u64,
+    video: &Path,
+    region: Rect,
+    clip: &Path,
+    width: u32,
+) -> Result<()> {
+    stage.call(
+        "recordStop",
+        json!({ "sessionKey": "stage", "displayId": id }),
+    )?;
+    let bounds: Vec<f64> = probe(&["bounds", &id.to_string()])?
+        .split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    let [x, y, w, _] = bounds[..] else {
+        bail!("no bounds for display {id}");
+    };
+    let pixels: f64 = sh(
+        "ffprobe",
+        &[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width",
+            "-of",
+            "csv=p=0",
+            &video.to_string_lossy(),
+        ],
+    )?
+    .trim()
+    .parse()?;
+    let scale = pixels / w;
+    let [rx, ry, rw, rh] = region;
+    let crop = format!(
+        "crop={}:{}:{}:{},fps=30,scale={width}:-2:flags=lanczos",
+        (rw * scale).round(),
+        (rh * scale).round(),
+        ((rx - x) * scale).round(),
+        ((ry - y) * scale).round()
+    );
+    let output = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i"])
+        .arg(video)
+        .args([
+            "-vf", &crop, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+        ])
+        .arg(clip)
+        .output()
+        .context("ffmpeg can't start")?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let _ = std::fs::remove_file(video);
+    let _ = std::fs::remove_file(video.with_extension("timeline.jsonl"));
     Ok(())
 }
 
@@ -695,4 +795,37 @@ pub fn watch_flash<T>(app: &str, work: impl FnOnce() -> Result<T>) -> Result<(Fl
     let done = done?;
     let seen = serde_json::from_slice(&out.stdout).context("flash's output")?;
     Ok((seen, done))
+}
+
+fn support() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join("Library/Application Support/Sidescreen")
+}
+
+/// For promo footage: the user's chosen agent display wallpaper, if any,
+/// moved aside, and promo/public/wallpaper.png put in its place, as the
+/// app's wallpaper setting keeps it. Give the result to `put_back_wallpaper`.
+pub fn wear_promo_wallpaper() -> Option<(std::path::PathBuf, Vec<u8>)> {
+    let saved = std::fs::read_dir(support()).ok().and_then(|entries| {
+        entries.flatten().map(|e| e.path()).find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wallpaper-"))
+        })
+    });
+    let saved = saved.and_then(|path| {
+        let bytes = std::fs::read(&path).ok()?;
+        std::fs::remove_file(&path).ok()?;
+        Some((path, bytes))
+    });
+    let promo = root().parent().unwrap().join("promo/public/wallpaper.png");
+    let _ = std::fs::copy(promo, support().join("wallpaper-promo.png"));
+    saved
+}
+
+pub fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
+    let _ = std::fs::remove_file(support().join("wallpaper-promo.png"));
+    if let Some((path, bytes)) = saved {
+        let _ = std::fs::write(path, bytes);
+    }
 }

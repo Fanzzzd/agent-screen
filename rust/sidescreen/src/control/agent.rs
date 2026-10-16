@@ -2502,14 +2502,16 @@ async fn settle(
         return Err(ended());
     }
     claim(core, id, target, Origin::Launched, cx);
-    // Stock AeroSpace may take a placed window back to its own layout a
-    // moment later; then look twice, a while apart. Otherwise a window
-    // placed is a window held.
-    let aerospace_takes = !crate::mac::aerospace::ignores_now()
-        && cx
-            .background_executor()
-            .spawn(async { crate::mac::aerospace::AeroSpace::current().is_some() })
-            .await;
+    // AeroSpace may take a placed window back to its own layout a moment
+    // later; then look twice, a while apart. Even one that ignores Agent
+    // Displays does: it files a new window that opened on the user's screen
+    // in their workspace, and a layout pass begun before the window moved
+    // puts it back there. Without AeroSpace a window placed is a window
+    // held.
+    let aerospace_takes = cx
+        .background_executor()
+        .spawn(async { crate::mac::aerospace::AeroSpace::current().is_some() })
+        .await;
     let (first_look, second_look) = if aerospace_takes {
         (200, Some(300))
     } else {
@@ -2545,6 +2547,9 @@ async fn settle(
             .into_iter()
             .find(|w| w.target == target)
         {
+            if aerospace_takes {
+                guard_placed(core, target, id, cx);
+            }
             // The new app's window takes the keys, not the last one clicked.
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             forwarder.focus(target).await;
@@ -2577,6 +2582,43 @@ async fn settle(
             "it may be on the user's screen"
         }
     )))
+}
+
+/// Watch a window just placed for 3 s more, and place it again if it leaves
+/// the display. AeroSpace files a window that opened on the user's screen in
+/// their workspace, and a layout pass that began before the window moved
+/// puts it back there, a second or more later when the pass is slow. Nothing
+/// moves it again after that, so it would stay on the user's screen. Stops
+/// once the user takes the window back.
+fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) {
+    let core = core.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for _ in 0..12 {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            // Ended, taken back by the user, or closed: no longer ours to keep.
+            let recorded = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.records.contains_key(&target.window_id))
+            });
+            if !recorded
+                || !takes_windows(&core, id, cx)
+                || windows::find(target.window_id).is_none()
+            {
+                return;
+            }
+            if !held(target, id, cx).await {
+                log::info!(
+                    "window {} left display {id} after placing; placing again",
+                    target.window_id
+                );
+                let _ = place(target, id, cx).await;
+            }
+        }
+    })
+    .detach();
 }
 
 /// Wait for the display to stop changing after an action, then bring back
@@ -2743,9 +2785,15 @@ async fn through_input_method(
     };
     borrow(core, true, cx);
     let total = keys.len();
+    let waker = forwarder.clone();
+    let wake = move || {
+        if let Some(bounds) = cg::window_bounds(target.window_id) {
+            futures::executor::block_on(waker.wake(target, bounds));
+        }
+    };
     let typed = cx
         .background_executor()
-        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref()) })
+        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake) })
         .await;
     borrow(core, false, cx);
     forwarder.keys_done().await;

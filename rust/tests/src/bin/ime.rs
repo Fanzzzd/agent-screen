@@ -1,6 +1,7 @@
 //! type and key with via_input_method go through the input method (issue
 //! #23, ADR 0008). In a text field on the display, Apple's pinyin turns
-//! "nihao" and space into 你好, where plain typing gives the letters. The
+//! "nihao" and space into 你好, where plain typing gives the letters, and a
+//! key through it starts a composition. The
 //! user's front app, input source and AeroSpace workspace are the same
 //! after. It waits for the user to leave the keyboard and pointer alone for
 //! 3 s, since the call borrows their keyboard, and skips after 60 s, or
@@ -122,7 +123,7 @@ fn test(field: &Path) -> Result<()> {
     );
     let typed = control.call(
         "type",
-        json!({ "sessionKey": key, "displayId": id, "text": "nihao", "viaInputMethod": true, "inputSource": PINYIN }),
+        json!({ "sessionKey": key, "displayId": id, "text": "nihao ", "viaInputMethod": true, "inputSource": PINYIN }),
     );
     if let Err(e) = &typed
         && e.to_string().contains("secure input")
@@ -140,25 +141,24 @@ fn test(field: &Path) -> Result<()> {
         format!("{typed:?}"),
     );
     sleep_ms(300);
-    let after_type = read();
     check(
-        "the input method leaves nihao marked, not committed",
-        after_type.starts_with("ab\t") && after_type.replace(' ', "").ends_with("nihao"),
-        &after_type,
+        "the input method composes nihao and space into 你好",
+        read() == "ab你好\t",
+        read(),
     );
     let pressed = control.call(
         "key",
-        json!({ "sessionKey": key, "displayId": id, "keys": "space", "viaInputMethod": true, "inputSource": PINYIN }),
+        json!({ "sessionKey": key, "displayId": id, "keys": "n", "viaInputMethod": true, "inputSource": PINYIN }),
     );
     check(
-        "space through the input method succeeds",
+        "a key through the input method succeeds",
         pressed.is_ok(),
         format!("{pressed:?}"),
     );
     sleep_ms(300);
     check(
-        "space commits the first candidate, 你好",
-        read() == "ab你好\t",
+        "the key starts a composition, left marked",
+        read() == "ab你好n\tn",
         read(),
     );
 

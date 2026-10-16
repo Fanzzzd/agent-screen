@@ -123,17 +123,30 @@ fn test(control: &Control) -> Result<()> {
         json!({ "kind": "click", "x": 0.5, "y": 0.7 }),
     )?;
     type_in_viewer(control, " User added this.", 0)?;
-    sleep_ms(400);
+    // An input method such as pinyin composes the letters in the Viewer
+    // and holds the last ones until the user picks: the text can't match.
+    let source = probe(&["source"]).unwrap_or_default();
+    let typed_at = std::time::Instant::now();
+    while !document_text().contains("User added this.") && typed_at.elapsed().as_secs() < 3 {
+        sleep_ms(100);
+    }
     watch_front(&mut stolen)?;
     // SIGTERM lets screencapture end the recording itself.
     Command::new("/bin/kill")
         .args(["-TERM", &recording.id().to_string()])
         .status()?;
-    check(
-        "the user's keys reach the agent's app, while the screen is recorded",
-        document_text().contains("User added this."),
-        quoted(&document_text()),
-    );
+    if source.starts_with("com.apple.keylayout.") {
+        check(
+            "the user's keys reach the agent's app, while the screen is recorded",
+            document_text().contains("User added this."),
+            quoted(&document_text()),
+        );
+    } else {
+        println!(
+            "skip the user's keys reach the agent's app: {source} composes them; got {}",
+            quoted(&document_text())
+        );
+    }
 
     let resumed = control.begin(
         "waitForControl",
