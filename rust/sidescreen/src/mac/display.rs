@@ -174,6 +174,7 @@ impl VirtualDisplay {
     }
 
     fn create_once(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
+        let (hz, scale) = mode_settings();
         unsafe {
             let descriptor: Retained<AnyObject> =
                 msg_send![class("CGVirtualDisplayDescriptor")?, new];
@@ -181,8 +182,8 @@ impl VirtualDisplay {
             let main_queue = &*(&raw const _dispatch_main_q).cast::<AnyObject>();
             let _: () = msg_send![&descriptor, setQueue: main_queue];
             let _: () = msg_send![&descriptor, setName: &*NSString::from_str(name)];
-            let _: () = msg_send![&descriptor, setMaxPixelsWide: width * 2];
-            let _: () = msg_send![&descriptor, setMaxPixelsHigh: height * 2];
+            let _: () = msg_send![&descriptor, setMaxPixelsWide: width * scale];
+            let _: () = msg_send![&descriptor, setMaxPixelsHigh: height * scale];
             // A ~110 ppi panel, so macOS picks sensible default scaling.
             let mm = 25.4 / 110.0;
             let physical = CGSize::new(width as f64 * mm, height as f64 * mm);
@@ -196,10 +197,10 @@ impl VirtualDisplay {
 
             let mode: Retained<AnyObject> = msg_send![
                 msg_send![class("CGVirtualDisplayMode")?, alloc],
-                initWithWidth: width, height: height, refreshRate: 60.0f64
+                initWithWidth: width, height: height, refreshRate: hz
             ];
             let settings: Retained<AnyObject> = msg_send![class("CGVirtualDisplaySettings")?, new];
-            let _: () = msg_send![&settings, setHiDPI: 1u32];
+            let _: () = msg_send![&settings, setHiDPI: u32::from(scale == 2)];
             let modes = NSArray::from_retained_slice(&[mode]);
             let _: () = msg_send![&settings, setModes: &*modes];
             let applied: Bool = msg_send![&handle, applySettings: &*settings];
@@ -218,7 +219,7 @@ impl VirtualDisplay {
             // blurry. Ask for this size at 2x. A display WindowServer has
             // only just added may ignore it, so try for a moment.
             for _ in 0..25 {
-                if use_hidpi_mode(id, width, height) {
+                if scale == 1 || use_hidpi_mode(id, width, height) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -298,6 +299,25 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
     };
     let bounds = cg::display_bounds(id);
     bounds.max_y() <= anchor.y && bounds.x >= anchor.max_x()
+}
+
+/// Refresh rate and backing scale of new displays. Test builds read them
+/// from SIDESCREEN_DISPLAY_HZ and SIDESCREEN_DISPLAY_SCALE, to measure
+/// what each costs.
+fn mode_settings() -> (f64, u32) {
+    let read = |name: &str| {
+        cfg!(debug_assertions)
+            .then(|| std::env::var(name).ok())
+            .flatten()
+    };
+    let hz = read("SIDESCREEN_DISPLAY_HZ")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60.0);
+    let scale = read("SIDESCREEN_DISPLAY_SCALE")
+        .and_then(|v| v.parse().ok())
+        .filter(|s| *s == 1 || *s == 2)
+        .unwrap_or(2);
+    (hz, scale)
 }
 
 /// Switch display `id` to `width` × `height` points at 2x. True once it

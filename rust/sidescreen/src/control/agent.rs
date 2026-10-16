@@ -2086,6 +2086,12 @@ async fn launch_now(
     // Started hidden: once its windows sit on the display, show them there.
     if !was_running {
         for _ in 0..150 {
+            // Browsers show themselves as they start, which draws their
+            // first window on the user's screen: hide them again until it
+            // sits on the display.
+            if !app::is_hidden(pid) {
+                app::hide(pid);
+            }
             let moved = cx
                 .background_executor()
                 .spawn(async move { ax::move_all_into(pid, bounds) })

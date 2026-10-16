@@ -129,6 +129,13 @@ pub fn is_hidden(pid: i32) -> bool {
         .is_some_and(|app| app.isHidden())
 }
 
+/// Hide an app, as Command-H would, without touching the front app.
+pub fn hide(pid: i32) {
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        app.hide();
+    }
+}
+
 /// Show a hidden app without activating it. An app that made itself an
 /// accessory after it started hidden, as Electron development builds that
 /// open windows in the background do, ignores `unhide`; it takes the
