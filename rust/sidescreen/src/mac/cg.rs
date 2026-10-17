@@ -3,12 +3,12 @@
 use crate::model::{DisplayId, Rect, WindowTarget};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_core_foundation::{CFArray, CGRect};
+use objc2_core_foundation::CGRect;
 use objc2_core_graphics::{
     CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID, CGWindowListCopyWindowInfo,
     CGWindowListCreate, CGWindowListOption,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
 pub fn rect(r: CGRect) -> Rect {
     Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
@@ -139,17 +139,13 @@ pub fn on_screen_ids() -> std::collections::HashSet<u32> {
 }
 
 fn window_ids(option: CGWindowListOption) -> std::collections::HashSet<u32> {
-    unsafe extern "C" {
-        fn CFArrayGetCount(array: &CFArray) -> isize;
-        fn CFArrayGetValueAtIndex(array: &CFArray, index: isize) -> *const std::ffi::c_void;
-    }
     let Some(list) = CGWindowListCreate(option, 0) else {
         return Default::default();
     };
     // The array holds the CGWindowIDs themselves, not CFNumbers.
-    let count = unsafe { CFArrayGetCount(&list) };
+    let count = unsafe { cf::CFArrayGetCount(&list) };
     (0..count)
-        .map(|i| unsafe { CFArrayGetValueAtIndex(&list, i) } as usize as u32)
+        .map(|i| unsafe { cf::CFArrayGetValueAtIndex(&list, i) } as usize as u32)
         .collect()
 }
 
@@ -173,11 +169,12 @@ pub fn on_screen_windows() -> Vec<WindowInfo> {
 /// Every normal window of other processes, hidden, minimized and on other
 /// Spaces included.
 pub fn all_windows() -> Vec<WindowInfo> {
-    window_list(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
-        .into_iter()
-        // Each app also owns a 30-point menu bar strip on every display.
-        .filter(|w| w.layer == 0 && w.bounds.width > 40.0 && w.bounds.height > 40.0)
-        .collect()
+    // Each app also owns a 30-point menu bar strip on every display.
+    window_list_where(
+        CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        |_, layer, b| layer == 0 && b.width > 40.0 && b.height > 40.0,
+    )
 }
 
 /// Windows that draw another app's panel out of process, as the file Open
@@ -185,92 +182,173 @@ pub fn all_windows() -> Vec<WindowInfo> {
 /// sends input to this one, which it lists as off screen, at the same
 /// place.
 pub fn remote_panels() -> Vec<WindowInfo> {
-    let mut services: Vec<(i32, bool)> = Vec::new();
-    window_list(CGWindowListOption::OptionAll)
-        .into_iter()
+    // The full list runs to a couple of thousand windows: the pid, layer and
+    // size sort out all but a few before anything else is read.
+    window_list_where(CGWindowListOption::OptionAll, 0, |pid, layer, b| {
         // Normal windows, and modal panels at their own level, as Firefox's.
-        .filter(|w| {
-            (0..1000).contains(&w.layer) && w.bounds.width > 100.0 && w.bounds.height > 100.0
-        })
-        .filter(|w| {
-            let pid = w.target.pid;
-            if let Some(&(_, xpc)) = services.iter().find(|(p, _)| *p == pid) {
-                return xpc;
-            }
-            let xpc = is_xpc_service(pid);
-            services.push((pid, xpc));
-            xpc
-        })
-        .collect()
+        (0..1000).contains(&layer) && b.width > 100.0 && b.height > 100.0 && is_xpc_service(pid)
+    })
 }
 
+/// Whether a process runs from an XPC service bundle. A process's path
+/// stays for its life, so each answer is kept while the pid lives on.
 fn is_xpc_service(pid: i32) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static KNOWN: Mutex<Option<HashMap<i32, bool>>> = Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let known = known.get_or_insert_with(HashMap::new);
+    if let Some(&xpc) = known.get(&pid) {
+        return xpc;
+    }
     let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-    n > 0 && String::from_utf8_lossy(&path[..n as usize]).contains(".xpc/Contents/MacOS/")
+    if n <= 0 {
+        // Gone, or not ours to read: ask again next time.
+        return false;
+    }
+    let xpc = String::from_utf8_lossy(&path[..n as usize]).contains(".xpc/Contents/MacOS/");
+    // A reused pid is a new process: forget the lot now and then.
+    if known.len() > 4096 {
+        known.clear();
+    }
+    known.insert(pid, xpc);
+    xpc
 }
 
-/// A window's global bounds, top-left origin, points.
+/// A window's global bounds, while it exists.
 pub fn window_bounds(window_id: u32) -> Option<Rect> {
-    window_list_from(CGWindowListOption::OptionIncludingWindow, window_id)
-        .first()
-        .map(|w| w.bounds)
+    window_list_where(
+        CGWindowListOption::OptionIncludingWindow,
+        window_id,
+        |_, _, _| true,
+    )
+    .first()
+    .map(|w| w.bounds)
 }
 
 fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
-    window_list_from(options, 0)
+    window_list_where(options, 0, |_, _, _| true)
 }
 
-fn window_list_from(options: CGWindowListOption, relative: u32) -> Vec<WindowInfo> {
+mod cf {
+    use std::ffi::c_void;
+    pub type Ref = *const c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        pub fn CFArrayGetCount(array: &objc2_core_foundation::CFArray) -> isize;
+        pub fn CFArrayGetValueAtIndex(array: &objc2_core_foundation::CFArray, index: isize) -> Ref;
+        pub fn CFDictionaryGetValue(dict: Ref, key: Ref) -> Ref;
+        pub fn CFNumberGetValue(number: Ref, kind: isize, out: *mut c_void) -> bool;
+        pub fn CFStringGetCStringPtr(string: Ref, encoding: u32) -> *const std::ffi::c_char;
+        pub fn CFStringGetCString(
+            string: Ref,
+            buffer: *mut std::ffi::c_char,
+            size: isize,
+            encoding: u32,
+        ) -> bool;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        pub static kCGWindowNumber: Ref;
+        pub static kCGWindowOwnerPID: Ref;
+        pub static kCGWindowOwnerName: Ref;
+        pub static kCGWindowName: Ref;
+        pub static kCGWindowBounds: Ref;
+        pub static kCGWindowLayer: Ref;
+        pub static kCGWindowAlpha: Ref;
+        pub fn CGRectMakeWithDictionaryRepresentation(
+            dict: Ref,
+            rect: *mut objc2_core_foundation::CGRect,
+        ) -> bool;
+    }
+    const SINT64: isize = 4;
+    const FLOAT64: isize = 6;
+    const UTF8: u32 = 0x0800_0100;
+
+    pub unsafe fn int(dict: Ref, key: Ref) -> Option<i64> {
+        let value = unsafe { CFDictionaryGetValue(dict, key) };
+        let mut out = 0i64;
+        (!value.is_null() && unsafe { CFNumberGetValue(value, SINT64, (&raw mut out).cast()) })
+            .then_some(out)
+    }
+
+    pub unsafe fn float(dict: Ref, key: Ref) -> Option<f64> {
+        let value = unsafe { CFDictionaryGetValue(dict, key) };
+        let mut out = 0f64;
+        (!value.is_null() && unsafe { CFNumberGetValue(value, FLOAT64, (&raw mut out).cast()) })
+            .then_some(out)
+    }
+
+    pub unsafe fn string(dict: Ref, key: Ref) -> String {
+        let value = unsafe { CFDictionaryGetValue(dict, key) };
+        if value.is_null() {
+            return String::new();
+        }
+        let fast = unsafe { CFStringGetCStringPtr(value, UTF8) };
+        if !fast.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(fast) }
+                .to_string_lossy()
+                .into_owned();
+        }
+        let mut buffer = [0 as std::ffi::c_char; 1024];
+        if unsafe { CFStringGetCString(value, buffer.as_mut_ptr(), buffer.len() as isize, UTF8) } {
+            unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// The window list, read straight from CoreFoundation with the framework's
+/// own keys: nothing is allocated for a window `keep` turns down, given its
+/// pid, layer and bounds.
+fn window_list_where(
+    options: CGWindowListOption,
+    relative: u32,
+    keep: impl Fn(i32, i64, Rect) -> bool,
+) -> Vec<WindowInfo> {
     let Some(list) = CGWindowListCopyWindowInfo(options, relative) else {
         return Vec::new();
     };
-    // CFArray of CFDictionary is toll-free bridged to NSArray of NSDictionary.
-    let list: &NSArray<NSDictionary<NSString, AnyObject>> = unsafe {
-        &*(&*list as *const CFArray as *const NSArray<NSDictionary<NSString, AnyObject>>)
-    };
     let me = std::process::id() as i32;
-    list.iter()
-        .filter_map(|info| {
-            let pid = number(&info, "kCGWindowOwnerPID")?.intValue();
-            if pid == me {
-                return None;
-            }
-            let window_id = number(&info, "kCGWindowNumber")?.unsignedIntValue();
-            let bounds = info.objectForKey(&NSString::from_str("kCGWindowBounds"))?;
-            let bounds: &NSDictionary<NSString, NSNumber> =
-                unsafe { &*(&*bounds as *const AnyObject).cast() };
-            let get = |key: &str| {
-                bounds
-                    .objectForKey(&NSString::from_str(key))
-                    .map(|n| n.doubleValue())
-                    .unwrap_or(0.0)
+    let count = unsafe { cf::CFArrayGetCount(&list) };
+    let mut out = Vec::new();
+    for i in 0..count {
+        unsafe {
+            let info = cf::CFArrayGetValueAtIndex(&list, i);
+            let Some(pid) = cf::int(info, cf::kCGWindowOwnerPID).map(|p| p as i32) else {
+                continue;
             };
-            Some(WindowInfo {
+            if pid == me {
+                continue;
+            }
+            let Some(window_id) = cf::int(info, cf::kCGWindowNumber).map(|n| n as u32) else {
+                continue;
+            };
+            let layer = cf::int(info, cf::kCGWindowLayer).unwrap_or(0);
+            let mut r = CGRect::default();
+            let dict = cf::CFDictionaryGetValue(info, cf::kCGWindowBounds);
+            if !dict.is_null() {
+                cf::CGRectMakeWithDictionaryRepresentation(dict, &mut r);
+            }
+            let bounds = rect(r);
+            if !keep(pid, layer, bounds) {
+                continue;
+            }
+            out.push(WindowInfo {
                 target: WindowTarget { pid, window_id },
-                owner_name: string(&info, "kCGWindowOwnerName").unwrap_or_default(),
-                title: string(&info, "kCGWindowName").unwrap_or_default(),
-                bounds: Rect::new(get("X"), get("Y"), get("Width"), get("Height")),
-                layer: number(&info, "kCGWindowLayer").map_or(0, |n| n.longLongValue()),
-                alpha: number(&info, "kCGWindowAlpha").map_or(1.0, |n| n.doubleValue()),
-            })
-        })
-        .collect()
-}
-
-fn number(info: &NSDictionary<NSString, AnyObject>, key: &str) -> Option<Retained<NSNumber>> {
-    info.objectForKey(&NSString::from_str(key))?
-        .downcast::<NSNumber>()
-        .ok()
-}
-
-fn string(info: &NSDictionary<NSString, AnyObject>, key: &str) -> Option<String> {
-    Some(
-        info.objectForKey(&NSString::from_str(key))?
-            .downcast::<NSString>()
-            .ok()?
-            .to_string(),
-    )
+                owner_name: cf::string(info, cf::kCGWindowOwnerName),
+                title: cf::string(info, cf::kCGWindowName),
+                bounds,
+                layer,
+                alpha: cf::float(info, cf::kCGWindowAlpha).unwrap_or(1.0),
+            });
+        }
+    }
+    out
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]

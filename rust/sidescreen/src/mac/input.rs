@@ -854,7 +854,9 @@ impl Worker {
         }
         // Keys go to the window clicked, not to one that opened earlier.
         if let Some(within) = display_of(target.window_id) {
-            self.known = hits()
+            // The list the press was hit-tested in, taken a moment ago.
+            let list = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+            self.known = list
                 .iter()
                 .filter(|h| h.layer == 0 && within.contains(h.bounds.mid()))
                 .map(|h| h.host.window_id)
