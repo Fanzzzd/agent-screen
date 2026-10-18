@@ -1236,19 +1236,31 @@ async fn create_display(
             }
             core.update(cx, |c, _| c.count_made());
             // macOS takes 300 to 500 ms to make the display: off the main
-            // thread, so Peek and the Viewer keep drawing meanwhile.
+            // thread, so Peek and the Viewer keep drawing meanwhile. Parked
+            // right away from there too: the new display stalls the main
+            // thread for a while, and parking after it would wait that out.
             let (serial, name) = core.update(cx, |c, _| c.next_name());
+            let others = core.read_with(cx, |c, _| c.virtual_ids());
             let made = cx
                 .background_executor()
                 .spawn({
                     let name = name.clone();
                     async move {
-                        crate::mac::display::VirtualDisplay::create(
+                        let made = crate::mac::display::VirtualDisplay::create(
                             &name,
                             width as u32,
                             height as u32,
                             serial,
-                        )
+                        )?;
+                        let id = made.id;
+                        let mut ids = others;
+                        ids.push(id);
+                        crate::mac::display::configure(move || {
+                            crate::core::park_fillers(&ids);
+                            crate::mac::display::tuck_away(id, &ids)
+                        })
+                        .await;
+                        Some(made)
                     }
                 })
                 .await;
