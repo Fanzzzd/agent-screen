@@ -1920,6 +1920,7 @@ async fn launch(
     start: &Start,
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
+    let resolving = Instant::now();
     let path = app::resolve(name).ok_or_else(|| {
         ControlError::not_found(format!(
             "no app named {name}; give its bundle id, or the absolute path of its .app bundle if Launch Services doesn't list it, as for a build under /tmp"
@@ -1938,6 +1939,10 @@ async fn launch(
     };
     let file = file_target(target, browser)?;
     let target = file.as_deref().or(target);
+    log::debug!(
+        "launch: {name} found in {} ms",
+        resolving.elapsed().as_millis()
+    );
     // Wait for another session's launch of the same app to finish.
     let mut free = false;
     for _ in 0..450 {
@@ -2337,8 +2342,8 @@ async fn launch_now(
             // An app started in the background drops the first click on its
             // window, which only makes the window key: spend it here.
             if !was_running {
-                let forwarder = core.update(cx, |c, _| c.forwarder(id));
-                forwarder.wake(placed.target, placed.bounds).await;
+                core.update(cx, |c, _| c.forwarder(id))
+                    .wake(placed.target, placed.bounds);
             }
             // A page's buttons work only once its scripts have run: an
             // agent clicking straight after would click a dead page.
@@ -2346,6 +2351,10 @@ async fn launch_now(
                 wait_for_page(placed.target, cx).await;
             }
             keep_catch(core, id, catch, cx);
+            log::debug!(
+                "launch: {name} answered at {} ms",
+                started.elapsed().as_millis()
+            );
             return Ok(Launched {
                 window: Some(placed),
                 was_running,
@@ -2539,20 +2548,16 @@ async fn settle(
     }
     claim(core, id, target, Origin::Launched, cx);
     // AeroSpace may take a placed window back to its own layout a moment
-    // later; then look twice, a while apart. Even one that ignores Agent
-    // Displays does: it files a new window that opened on the user's screen
-    // in their workspace, and a layout pass begun before the window moved
-    // puts it back there. Without AeroSpace a window placed is a window
-    // held.
+    // later; then look again a while after, and `guard_placed` keeps
+    // looking for 3 s past the answer. Even one that ignores Agent Displays
+    // does: it files a new window that opened on the user's screen in their
+    // workspace, and a layout pass begun before the window moved puts it
+    // back there. Without AeroSpace a window placed is a window held.
     let aerospace_takes = cx
         .background_executor()
         .spawn(async { crate::mac::aerospace::AeroSpace::current().is_some() })
         .await;
-    let (first_look, second_look) = if aerospace_takes {
-        (200, Some(300))
-    } else {
-        (30, None)
-    };
+    let look = if aerospace_takes { 200 } else { 30 };
     let mut last_error = None;
     for _ in 0..12 {
         if !takes_windows(core, id, cx) {
@@ -2574,23 +2579,10 @@ async fn settle(
             last_error = Some(e);
         }
         cx.background_executor()
-            .timer(Duration::from_millis(first_look))
+            .timer(Duration::from_millis(look))
             .await;
         if !held(target, id, cx).await {
             continue;
-        }
-        if let Some(wait) = second_look {
-            cx.background_executor()
-                .timer(Duration::from_millis(wait))
-                .await;
-            if !held(target, id, cx).await {
-                log::info!(
-                    "window {} left display {id} after placing, for {:?}; placing again",
-                    target.window_id,
-                    windows::find(target.window_id).map(|w| (w.app, w.bounds))
-                );
-                continue;
-            }
         }
         if let Some(placed) = windows::on_display(id)
             .into_iter()
@@ -2895,7 +2887,7 @@ async fn through_input_method(
     let waker = forwarder.clone();
     let wake = move || {
         if let Some(bounds) = cg::window_bounds(target.window_id) {
-            futures::executor::block_on(waker.wake(target, bounds));
+            futures::executor::block_on(waker.wake_now(target, bounds));
         }
     };
     let typed = cx

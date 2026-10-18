@@ -454,7 +454,18 @@ impl Forwarder {
     /// Send keys to `target` from now on, as a click on it would.
     /// Make the first window of an app just started in the background
     /// take clicks: see `Worker::wake`.
-    pub async fn wake(&self, target: WindowTarget, bounds: Rect) {
+    /// Spend the click a new window drops, without waiting for it: finding
+    /// an empty spot asks the app, which takes a while just after it
+    /// starts. Input sent after it on this display waits its turn.
+    pub fn wake(&self, target: WindowTarget, bounds: Rect) {
+        self.send(move |w| {
+            let _held = AppKeys::hold(target.pid);
+            w.wake(target, bounds);
+        });
+    }
+
+    /// `wake`, waiting for it, for input that doesn't pass through here.
+    pub async fn wake_now(&self, target: WindowTarget, bounds: Rect) {
         self.run(move |w| {
             let _held = AppKeys::hold(target.pid);
             w.wake(target, bounds);
