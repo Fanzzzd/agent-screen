@@ -28,14 +28,12 @@ unsafe extern "C" {
     fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
 }
 
-unsafe extern "C" {
-    static _dispatch_main_q: c_void;
-}
-
 pub struct VirtualDisplay {
     pub id: u32,
     /// Keeps the display alive; macOS removes it when this is released.
     handle: Option<Retained<AnyObject>>,
+    /// The size it runs at, in points.
+    size: (u32, u32),
     /// Its serial, free again once the display has gone.
     serial: Option<Serial>,
 }
@@ -173,17 +171,36 @@ impl VirtualDisplay {
         self.serial.as_ref().map(|s| (s.get(), s.slot()))
     }
 
+    /// Run at `width` × `height` points from now on: one display change,
+    /// where a new display would be one more display online for every
+    /// later change to cost. False when it can't, as for a display made
+    /// with less room.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        if !unsafe { apply_mode(handle, width, height) } {
+            return false;
+        }
+        settle_mode(self.id, width, height);
+        let now = cg::display_bounds(self.id);
+        self.size = (width, height);
+        (now.width as u32, now.height as u32) == (width, height)
+    }
+
     fn create_once(name: &str, width: u32, height: u32, serial: u32) -> Option<Self> {
-        let (hz, scale) = mode_settings();
+        let (_, scale) = mode_settings();
         unsafe {
             let descriptor: Retained<AnyObject> =
                 msg_send![class("CGVirtualDisplayDescriptor")?, new];
-            // The main dispatch queue is an object; pass it as one.
-            let main_queue = &*(&raw const _dispatch_main_q).cast::<AnyObject>();
-            let _: () = msg_send![&descriptor, setQueue: main_queue];
+            // The display's own callbacks run on a queue of Sidescreen's,
+            // not the main one, which draws the menu bar icon and Viewer.
+            let _: () = msg_send![&descriptor, setQueue: callback_queue()];
             let _: () = msg_send![&descriptor, setName: &*NSString::from_str(name)];
-            let _: () = msg_send![&descriptor, setMaxPixelsWide: width * scale];
-            let _: () = msg_send![&descriptor, setMaxPixelsHigh: height * scale];
+            // Room for the largest size an agent may ask for, so a spare
+            // can take any size later: a mode change, not a new display.
+            let _: () = msg_send![&descriptor, setMaxPixelsWide: LARGEST.0.max(width) * scale];
+            let _: () = msg_send![&descriptor, setMaxPixelsHigh: LARGEST.1.max(height) * scale];
             // A ~110 ppi panel, so macOS picks sensible default scaling.
             let mm = 25.4 / 110.0;
             let physical = CGSize::new(width as f64 * mm, height as f64 * mm);
@@ -195,16 +212,7 @@ impl VirtualDisplay {
             let handle: Option<Retained<AnyObject>> = msg_send![msg_send![class("CGVirtualDisplay")?, alloc], initWithDescriptor: &*descriptor];
             let handle = handle?;
 
-            let mode: Retained<AnyObject> = msg_send![
-                msg_send![class("CGVirtualDisplayMode")?, alloc],
-                initWithWidth: width, height: height, refreshRate: hz
-            ];
-            let settings: Retained<AnyObject> = msg_send![class("CGVirtualDisplaySettings")?, new];
-            let _: () = msg_send![&settings, setHiDPI: u32::from(scale == 2)];
-            let modes = NSArray::from_retained_slice(&[mode]);
-            let _: () = msg_send![&settings, setModes: &*modes];
-            let applied: Bool = msg_send![&handle, applySettings: &*settings];
-            if !applied.as_bool() {
+            if !apply_mode(&handle, width, height) {
                 return None;
             }
             let id: u32 = msg_send![&handle, displayID];
@@ -216,20 +224,65 @@ impl VirtualDisplay {
             // macOS keeps the resolution last used for a display's serial,
             // and serials repeat across launches: a display that once ran
             // at another size comes back at it, maybe at 1x, and shows
-            // blurry. Ask for this size at 2x. A display WindowServer has
-            // only just added may ignore it, so try for a moment.
-            for _ in 0..25 {
-                if scale == 1 || use_hidpi_mode(id, width, height) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            // blurry. Ask for this size at 2x.
+            settle_mode(id, width, height);
             Some(Self {
                 id,
                 handle: Some(handle),
+                size: (width, height),
                 serial: None,
             })
         }
+    }
+}
+
+/// The largest size create_display gives, in points.
+const LARGEST: (u32, u32) = (2560, 1600);
+
+/// The serial queue virtual displays call back on.
+fn callback_queue() -> &'static AnyObject {
+    static QUEUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let queue = *QUEUE.get_or_init(|| {
+        let queue = dispatch2::DispatchQueue::new("dev.sidescreen.virtual-displays", None);
+        // Kept for the app's life.
+        dispatch2::DispatchRetained::into_raw(queue).as_ptr() as usize
+    });
+    unsafe { &*(queue as *const AnyObject) }
+}
+
+/// Give the display one mode, `width` × `height` points at the build's
+/// refresh rate and scale.
+unsafe fn apply_mode(handle: &AnyObject, width: u32, height: u32) -> bool {
+    let (hz, scale) = mode_settings();
+    let Some((mode_class, settings_class)) =
+        class("CGVirtualDisplayMode").zip(class("CGVirtualDisplaySettings"))
+    else {
+        return false;
+    };
+    unsafe {
+        let mode: Retained<AnyObject> = msg_send![
+            msg_send![mode_class, alloc],
+            initWithWidth: width, height: height, refreshRate: hz
+        ];
+        let settings: Retained<AnyObject> = msg_send![settings_class, new];
+        let _: () = msg_send![&settings, setHiDPI: u32::from(scale == 2)];
+        let modes = NSArray::from_retained_slice(&[mode]);
+        let _: () = msg_send![&settings, setModes: &*modes];
+        let applied: Bool = msg_send![handle, applySettings: &*settings];
+        applied.as_bool()
+    }
+}
+
+/// Wait for the display to run at its size at 2x, asking for it if macOS
+/// picked another mode. A display WindowServer has only just added may
+/// ignore the request, so try for a moment.
+fn settle_mode(id: u32, width: u32, height: u32) {
+    let (_, scale) = mode_settings();
+    for _ in 0..25 {
+        if scale == 1 || use_hidpi_mode(id, width, height) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 

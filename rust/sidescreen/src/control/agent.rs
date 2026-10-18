@@ -1202,7 +1202,27 @@ async fn create_display(
     let started = Instant::now();
     // A spare of this size costs macOS nothing; a new display is a
     // reconfiguration every app handles, so agents get only so many.
-    let (made, name) = match core.update(cx, |c, _| c.take_spare((width, height))) {
+    // A spare of another size takes this one: a mode change, where a new
+    // display would add one more for every later display change to cost.
+    let spare = match core.update(cx, |c, _| c.take_spare((width, height))) {
+        Some((mut handle, name, true)) => {
+            let (w, h) = (width as u32, height as u32);
+            let (handle, resized) = crate::mac::display::configure(move || {
+                let resized = handle.resize(w, h);
+                (handle, resized)
+            })
+            .await;
+            if resized {
+                Some((handle, name))
+            } else {
+                crate::lifecycle::note("released", handle.id, "spare could not resize");
+                None
+            }
+        }
+        Some((handle, name, false)) => Some((handle, name)),
+        None => None,
+    };
+    let (made, name) = match spare {
         Some((handle, name)) => (Some(handle), name),
         None => {
             if let Err(why) = core.update(cx, |c, _| c.budget_allows()) {
@@ -1985,10 +2005,9 @@ async fn launch_now(
     // opens. A starting app's windows are all Sidescreen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
-    let mut catch = if fresh {
-        None
-    } else {
-        app::running_pid(&path).and_then(catch_from)
+    let mut catch = match app::running_pid(&path).filter(|_| !fresh) {
+        Some(pid) => catch_from(pid).await,
+        None => None,
     };
 
     // A starting app opens the URL or file in its first window. A running
@@ -2071,7 +2090,7 @@ async fn launch_now(
         if catch.is_some() {
             break;
         }
-        catch = catch_from(pid);
+        catch = catch_from(pid).await;
         let seen = before.clone();
         cx.background_executor()
             .spawn(async move {
@@ -2240,9 +2259,10 @@ async fn launch_now(
                 opened.map(|(_, at)| at),
             )
         {
-            document_catch = document
-                .clone()
-                .and_then(|d| crate::mac::catch::Catch::for_document(pid, id, screen.clone(), d));
+            document_catch = match document.clone() {
+                Some(d) => crate::mac::catch::Catch::for_document(pid, id, screen.clone(), d).await,
+                None => None,
+            };
             log::debug!(
                 "launch: {name} file catch armed: {}",
                 document_catch.is_some()

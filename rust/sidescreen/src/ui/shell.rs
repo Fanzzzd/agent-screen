@@ -1132,7 +1132,16 @@ impl Shell {
             .core
             .update(cx, |core, _| core.take_spare(DEFAULT_SIZE));
         let (made, name) = match spare {
-            Some((handle, name)) => (gpui::Task::ready(Some(handle)), name),
+            Some((handle, name, false)) => (gpui::Task::ready(Some(handle)), name),
+            // A spare of another size, resized on the display thread.
+            Some((mut handle, name, true)) => (
+                cx.background_spawn(async move {
+                    let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
+                    crate::mac::display::configure(move || handle.resize(w, h).then_some(handle))
+                        .await
+                }),
+                name,
+            ),
             None => {
                 let (serial, name) = self.core.update(cx, |core, _| core.next_name());
                 let made = cx.background_spawn({
@@ -1971,21 +1980,22 @@ impl Shell {
             cx.background_executor()
                 .spawn(async move { dismissal::give_back(target, home.as_ref(), main_name.as_deref()) })
                 .await;
+            // Armed once the window is back, on the catch thread:
+            // registering asks the app, which may be slow.
+            let Some(catch) = crate::mac::catch::Catch::returning(target.pid, id, screen).await
+            else {
+                return;
+            };
             let _ = this.update(cx, |shell, cx| {
-                // Armed once the window is back: registering asks the app,
-                // which may be slow.
                 shell.core.update(cx, |core, _| {
                     // Still wanted: no Handover of the app and the display
-                    // still there.
+                    // still there. Otherwise the catch drops here.
                     let wanted = core.pending_returns.remove(&(id, target.pid))
                         && !core
                             .returning
                             .iter()
                             .any(|(d, k)| *d == id && k.pid() == target.pid);
-                    if wanted
-                        && let Some(catch) =
-                            crate::mac::catch::Catch::returning(target.pid, id, screen)
-                    {
+                    if wanted {
                         core.returning.push((id, catch));
                     }
                 });

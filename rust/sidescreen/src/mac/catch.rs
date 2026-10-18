@@ -9,6 +9,12 @@ use crate::model::{DisplayId, Rect, WindowTarget};
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 type Observer = *mut c_void;
 
@@ -26,7 +32,15 @@ unsafe extern "C" {
         refcon: *mut c_void,
     ) -> i32;
     fn AXObserverGetRunLoopSource(observer: Observer) -> *mut c_void;
-    fn CFRunLoopGetMain() -> *mut c_void;
+    fn CFRunLoopGetCurrent() -> *mut c_void;
+    fn CFRunLoopRun();
+    fn CFRunLoopWakeUp(run_loop: *mut c_void);
+    fn CFRunLoopSourceCreate(
+        allocator: *const c_void,
+        order: isize,
+        context: *mut SourceContext,
+    ) -> *mut c_void;
+    fn CFRunLoopSourceSignal(source: *mut c_void);
     fn CFRunLoopAddSource(run_loop: *mut c_void, source: *mut c_void, mode: *const CFString);
     fn CFRunLoopRemoveSource(run_loop: *mut c_void, source: *mut c_void, mode: *const CFString);
     fn CFRelease(object: *const c_void);
@@ -204,12 +218,123 @@ fn owner(agent: bool, user: bool) -> Owner {
     }
 }
 
-/// Moves each window `pid` creates onto a display while it lives. Create
-/// and drop it on the main thread, whose run loop delivers the notifications.
+/// CFRunLoopSourceContext, version 0.
+#[repr(C)]
+struct SourceContext {
+    version: isize,
+    info: *mut c_void,
+    retain: *const c_void,
+    release: *const c_void,
+    copy_description: *const c_void,
+    equal: *const c_void,
+    hash: *const c_void,
+    schedule: *const c_void,
+    cancel: *const c_void,
+    perform: extern "C" fn(*mut c_void),
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The thread whose run loop holds every catch's observer. Registering an
+/// observer waits on the app, a quarter second or more for one that is
+/// starting or busy, and each notification asks the app about the window:
+/// none of it holds up the main thread, which draws the menu bar icon and
+/// the Viewer.
+struct Runner {
+    jobs: std::sync::Mutex<std::sync::mpsc::Sender<Job>>,
+    run_loop: usize,
+    source: usize,
+}
+
+static RUNNER: std::sync::OnceLock<Runner> = std::sync::OnceLock::new();
+static JOBS: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Job>>> = std::sync::Mutex::new(None);
+
+extern "C" fn perform(_: *mut c_void) {
+    loop {
+        let job = JOBS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        match job {
+            Some(job) => job(),
+            None => break,
+        }
+    }
+}
+
+fn runner() -> &'static Runner {
+    RUNNER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        *JOBS.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
+        let (ready, started) = std::sync::mpsc::channel::<(usize, usize)>();
+        std::thread::Builder::new()
+            .name("sidescreen-catch".into())
+            .spawn(move || unsafe {
+                let mut context = SourceContext {
+                    version: 0,
+                    info: std::ptr::null_mut(),
+                    retain: std::ptr::null(),
+                    release: std::ptr::null(),
+                    copy_description: std::ptr::null(),
+                    equal: std::ptr::null(),
+                    hash: std::ptr::null(),
+                    schedule: std::ptr::null(),
+                    cancel: std::ptr::null(),
+                    perform,
+                };
+                let source = CFRunLoopSourceCreate(std::ptr::null(), 0, &mut context);
+                let run_loop = CFRunLoopGetCurrent();
+                CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
+                let _ = ready.send((run_loop as usize, source as usize));
+                // The source keeps the loop running for good.
+                CFRunLoopRun();
+            })
+            .expect("catch thread");
+        let (run_loop, source) = started.recv().expect("catch thread started");
+        Runner {
+            jobs: std::sync::Mutex::new(tx),
+            run_loop,
+            source,
+        }
+    })
+}
+
+/// Run `job` on the catch thread.
+fn on_catch_thread(job: impl FnOnce() + Send + 'static) {
+    let runner = runner();
+    let _ = runner
+        .jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .send(Box::new(job));
+    unsafe {
+        CFRunLoopSourceSignal(runner.source as *mut c_void);
+        CFRunLoopWakeUp(runner.run_loop as *mut c_void);
+    }
+}
+
+/// `job`'s answer from the catch thread.
+async fn from_catch_thread<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    on_catch_thread(move || {
+        let _ = tx.send(job());
+    });
+    rx.await.ok()
+}
+
+/// Moves each window `pid` creates onto a display while it lives. Its
+/// observer lives on the catch thread, which gets the notifications.
 pub struct Catch {
     observer: Observer,
     target: *mut Target,
 }
+
+// The observer and target are used on the catch thread, apart from the
+// target's fields, which are atomics and mutexes.
+unsafe impl Send for Catch {}
 
 /// Where caught windows go.
 struct Target {
@@ -219,20 +344,20 @@ struct Target {
     /// The display's screen name, for AeroSpace.
     screen: Option<String>,
     /// How many more windows to take; None for every one.
-    left: std::cell::Cell<Option<usize>>,
+    left: Mutex<Option<usize>>,
     /// The last window taken.
-    taken: std::cell::Cell<Option<u32>>,
+    taken: Mutex<Option<u32>>,
     /// Set while a launch of the same app runs its own catch.
-    paused: std::cell::Cell<bool>,
+    paused: AtomicBool,
     /// Take only a window that shows this file.
     document: Option<std::path::PathBuf>,
     /// Kept while the display lives, past the launch.
-    kept: std::cell::Cell<bool>,
+    kept: AtomicBool,
     /// Windows left alone because the user made them.
-    skipped: std::cell::RefCell<Vec<u32>>,
+    skipped: Mutex<Vec<u32>>,
     /// Windows left where they opened because both the agent and the user
     /// had just acted, or neither: the agent may place them.
-    undecided: std::cell::RefCell<Vec<u32>>,
+    undecided: Mutex<Vec<u32>>,
     /// For an app the user took back: where to return a new window that
     /// opens on the display without the agent acting, as an app does next
     /// to its main window.
@@ -253,97 +378,102 @@ impl Catch {
     /// `limit` caps how many windows it takes: an app the user runs too
     /// makes windows of the user's in the meantime, so take only the one
     /// Sidescreen asks for.
-    pub fn start(
+    pub async fn start(
         pid: i32,
         display: DisplayId,
         screen: Option<String>,
         limit: Option<usize>,
     ) -> Option<Catch> {
-        Self::start_with(pid, display, screen, limit, None)
+        Self::start_with(pid, display, screen, limit, None, None).await
     }
 
     /// A catch for an app the user took back: it returns to `home` each new
     /// window that opens on the display while the agent isn't acting there.
-    pub fn returning(pid: i32, display: DisplayId, home: Rect) -> Option<Catch> {
-        let catch = Self::start_with(pid, display, None, None, None)?;
-        unsafe { (*catch.target).home = Some(home) };
-        Some(catch)
+    pub async fn returning(pid: i32, display: DisplayId, home: Rect) -> Option<Catch> {
+        Self::start_with(pid, display, None, None, None, Some(home)).await
     }
 
     /// A catch for the one window that shows `document`, for a running app
     /// still opening a file: no window of the user's can match it.
-    pub fn for_document(
+    pub async fn for_document(
         pid: i32,
         display: DisplayId,
         screen: Option<String>,
         document: std::path::PathBuf,
     ) -> Option<Catch> {
-        Self::start_with(pid, display, screen, Some(1), Some(document))
+        Self::start_with(pid, display, screen, Some(1), Some(document), None).await
     }
 
-    fn start_with(
+    async fn start_with(
         pid: i32,
         display: DisplayId,
         screen: Option<String>,
         limit: Option<usize>,
         document: Option<std::path::PathBuf>,
+        home: Option<Rect>,
     ) -> Option<Catch> {
-        let mut observer: Observer = std::ptr::null_mut();
-        if unsafe { AXObserverCreate(pid, created, &mut observer) } != 0 || observer.is_null() {
-            return None;
-        }
-        let target = Box::into_raw(Box::new(Target {
-            pid,
-            display,
-            bounds: super::cg::display_bounds(display),
-            screen,
-            left: std::cell::Cell::new(limit),
-            taken: std::cell::Cell::new(None),
-            paused: std::cell::Cell::new(false),
-            document,
-            kept: std::cell::Cell::new(false),
-            skipped: std::cell::RefCell::new(Vec::new()),
-            undecided: std::cell::RefCell::new(Vec::new()),
-            home: None,
-        }));
-        let app = ax::application(pid);
-        let name = CFString::from_static_str("AXWindowCreated");
-        let added = unsafe { AXObserverAddNotification(observer, &*app, &*name, target.cast()) };
-        if added != 0 {
-            unsafe {
-                CFRelease(observer);
-                drop(Box::from_raw(target));
+        let bounds = super::cg::display_bounds(display);
+        from_catch_thread(move || {
+            let mut observer: Observer = std::ptr::null_mut();
+            if unsafe { AXObserverCreate(pid, created, &mut observer) } != 0 || observer.is_null() {
+                return None;
             }
-            return None;
-        }
-        unsafe {
-            CFRunLoopAddSource(
-                CFRunLoopGetMain(),
-                AXObserverGetRunLoopSource(observer),
-                kCFRunLoopDefaultMode,
-            );
-        }
-        Some(Catch { observer, target })
+            let target = Box::into_raw(Box::new(Target {
+                pid,
+                display,
+                bounds,
+                screen,
+                left: Mutex::new(limit),
+                taken: Mutex::new(None),
+                paused: AtomicBool::new(false),
+                document,
+                kept: AtomicBool::new(false),
+                skipped: Mutex::new(Vec::new()),
+                undecided: Mutex::new(Vec::new()),
+                home,
+            }));
+            let app = ax::application(pid);
+            let name = CFString::from_static_str("AXWindowCreated");
+            let added =
+                unsafe { AXObserverAddNotification(observer, &*app, &*name, target.cast()) };
+            if added != 0 {
+                unsafe {
+                    CFRelease(observer);
+                    drop(Box::from_raw(target));
+                }
+                return None;
+            }
+            unsafe {
+                CFRunLoopAddSource(
+                    CFRunLoopGetCurrent(),
+                    AXObserverGetRunLoopSource(observer),
+                    kCFRunLoopDefaultMode,
+                );
+            }
+            Some(Catch { observer, target })
+        })
+        .await
+        .flatten()
     }
 
     /// From now on, take only windows the agent's actions make.
     pub fn keep(&self) {
-        unsafe { (*self.target).kept.set(true) }
+        unsafe { (*self.target).kept.store(true, Ordering::Relaxed) }
     }
 
     /// Windows the user made in the app.
     pub fn skipped(&self) -> Vec<u32> {
-        unsafe { (*self.target).skipped.borrow().clone() }
+        lock(unsafe { &(*self.target).skipped }).clone()
     }
 
     /// Windows left where they opened, nobody's for sure.
     pub fn undecided(&self) -> Vec<u32> {
-        unsafe { (*self.target).undecided.borrow().clone() }
+        lock(unsafe { &(*self.target).undecided }).clone()
     }
 
     /// Let a launch of the same app take its window alone.
     pub fn pause(&self, paused: bool) {
-        unsafe { (*self.target).paused.set(paused) }
+        unsafe { (*self.target).paused.store(paused, Ordering::Relaxed) }
     }
 
     pub fn pid(&self) -> i32 {
@@ -352,21 +482,24 @@ impl Catch {
 
     /// The window id of the last window taken, if any.
     pub fn taken(&self) -> Option<u32> {
-        unsafe { (*self.target).taken.get() }
+        *lock(unsafe { &(*self.target).taken })
     }
 }
 
 impl Drop for Catch {
+    /// On the catch thread, between notifications, which use the target.
     fn drop(&mut self) {
-        unsafe {
+        let (observer, target) = (self.observer as usize, self.target as usize);
+        on_catch_thread(move || unsafe {
+            let observer = observer as Observer;
             CFRunLoopRemoveSource(
-                CFRunLoopGetMain(),
-                AXObserverGetRunLoopSource(self.observer),
+                CFRunLoopGetCurrent(),
+                AXObserverGetRunLoopSource(observer),
                 kCFRunLoopDefaultMode,
             );
-            CFRelease(self.observer);
-            drop(Box::from_raw(self.target));
-        }
+            CFRelease(observer);
+            drop(Box::from_raw(target as *mut Target));
+        });
     }
 }
 
@@ -380,7 +513,7 @@ extern "C" fn created(
         return;
     }
     let (window, target) = unsafe { (&*element, &*refcon.cast::<Target>()) };
-    if target.paused.get() {
+    if target.paused.load(Ordering::Relaxed) {
         return;
     }
     // Panels and sheets stay where the app puts them; Sidescreen places
@@ -402,7 +535,7 @@ extern "C" fn created(
     }
     // A kept catch takes a window only right after its display was driven,
     // and records one the user made so nothing moves it later.
-    if target.kept.get() {
+    if target.kept.load(Ordering::Relaxed) {
         // Another session with a window of this app, driving its display
         // just now, may have made it: then it's nobody's for sure.
         let agent = acted_recently(target.display, target.pid)
@@ -417,7 +550,7 @@ extern "C" fn created(
                     ax::window_id(window)
                 );
                 if let Some(id) = ax::window_id(window) {
-                    target.skipped.borrow_mut().push(id);
+                    lock(&target.skipped).push(id);
                 }
                 return;
             }
@@ -428,7 +561,7 @@ extern "C" fn created(
                     ax::window_id(window)
                 );
                 if let Some(id) = ax::window_id(window) {
-                    target.undecided.borrow_mut().push(id);
+                    lock(&target.undecided).push(id);
                 }
                 return;
             }
@@ -437,7 +570,7 @@ extern "C" fn created(
     // A window that doesn't name its document yet may be the file's: look
     // again when its title changes, as it does once the file loads.
     if let Some(document) = &target.document {
-        if target.taken.get().is_some() {
+        if lock(&target.taken).is_some() {
             return;
         }
         match ax::document_path(window) {
@@ -450,8 +583,8 @@ extern "C" fn created(
             }
         }
     }
-    let (taken, left) = take(target.left.get());
-    target.left.set(left);
+    let (taken, left) = take(*lock(&target.left));
+    *lock(&target.left) = left;
     if !taken {
         log::info!(
             "catch: pid {} made another window, {:?}, after the one Sidescreen asked for; left where it is",
@@ -460,7 +593,7 @@ extern "C" fn created(
         );
         return;
     }
-    target.taken.set(ax::window_id(window));
+    *lock(&target.taken) = ax::window_id(window);
     let moved = ax::move_element_into(window, target.bounds).is_ok();
     log::debug!("catch: a new window, moved onto the display: {moved}");
     // AeroSpace registers the window a moment later, in the user's focused

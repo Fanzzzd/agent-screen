@@ -231,22 +231,35 @@ impl Core {
             .collect()
     }
 
-    /// A spare of `size` to use instead of a new display, with its name.
-    /// One that macOS no longer shows, or that now shares its unit number,
-    /// goes instead.
-    pub fn take_spare(&mut self, size: (f64, f64)) -> Option<(VirtualDisplay, String)> {
-        while let Some(index) = self.spares.iter().position(|s| s.size == size) {
+    /// A spare to use instead of a new display, with its name: one of
+    /// `size`, or else the newest, which the caller resizes. One that macOS
+    /// no longer shows, or that now shares its unit number, goes instead.
+    pub fn take_spare(&mut self, size: (f64, f64)) -> Option<(VirtualDisplay, String, bool)> {
+        loop {
+            let index = self
+                .spares
+                .iter()
+                .position(|s| s.size == size)
+                .or_else(|| self.spares.len().checked_sub(1))?;
             let spare = self.spares.remove(index);
             let id = spare.handle.id;
             if crate::mac::cg::active_displays().contains(&id)
                 && crate::mac::cg::unit_twin(id).is_none()
             {
-                crate::lifecycle::note("reused", id, "");
-                return Some((spare.handle, spare.name));
+                let resize = spare.size != size;
+                crate::lifecycle::note(
+                    "reused",
+                    id,
+                    &if resize {
+                        format!("resizing to {}x{}", size.0, size.1)
+                    } else {
+                        String::new()
+                    },
+                );
+                return Some((spare.handle, spare.name, resize));
             }
             crate::lifecycle::note("released", id, "spare unusable");
         }
-        None
     }
 
     /// Whether an agent may have a new display now; otherwise how long
