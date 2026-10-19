@@ -8,9 +8,7 @@
 //! with the user's administrator password, running it, and the identities of
 //! Agent Screen's serials it keeps.
 
-use agent_screen_colorsync::{
-    INSTALLED, OLD_INSTALLED, VERSION, is_plain_user, old_sudoers_path, sudoers_line, sudoers_path,
-};
+use agent_screen_colorsync::{INSTALLED, VERSION, is_plain_user, sudoers_line, sudoers_path};
 use core_foundation::base::TCFType;
 use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::uuid::{CFUUID, CFUUIDRef};
@@ -77,8 +75,7 @@ unsafe extern "C" {
 pub enum Helper {
     /// Set up, this version, and sudo lets this user run it.
     Ready,
-    /// Set up with another version, or only Sidescreen's, from before the
-    /// app's new name: setting it up again replaces it.
+    /// Set up with another version: setting it up again replaces it.
     Outdated,
     Missing,
 }
@@ -88,11 +85,7 @@ pub enum Helper {
 /// sudo would still ask for the password.
 pub fn helper() -> Helper {
     let Ok(meta) = std::fs::symlink_metadata(INSTALLED) else {
-        return if std::path::Path::new(OLD_INSTALLED).exists() {
-            Helper::Outdated
-        } else {
-            Helper::Missing
-        };
+        return Helper::Missing;
     };
     if meta.uid() != 0 || meta.mode() & 0o022 != 0 || !meta.is_file() {
         return Helper::Missing;
@@ -177,18 +170,7 @@ pub fn set_up(prompt: &str) -> Result<(), String> {
         return Err(format!("the user name {user} can't go in a sudoers file"));
     }
     let source = bundled()?;
-    as_administrator(&setup_script(&source.to_string_lossy(), &user), prompt)?;
-    match helper() {
-        Helper::Ready => Ok(()),
-        other => Err(format!("set up, but the helper is {other:?}")),
-    }
-}
-
-/// The root shell script that sets the helper up from `source` for `user`.
-/// Once the new rule is in place, it also removes Sidescreen's: the app's
-/// former name, with its own helper and sudoers file.
-fn setup_script(source: &str, user: &str) -> String {
-    format!(
+    let script = format!(
         "set -e; umask 077; \
          /usr/bin/install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools; \
          /usr/bin/install -o root -g wheel -m 755 {source} {helper}.new; \
@@ -197,50 +179,34 @@ fn setup_script(source: &str, user: &str) -> String {
          /usr/bin/printf %s {line} > \"$t\"; \
          /usr/sbin/visudo -cqf \"$t\"; \
          /usr/sbin/chown root:wheel \"$t\"; /bin/chmod 440 \"$t\"; \
-         /bin/mv -f \"$t\" {rule}; \
-         {old}",
-        source = shell_word(source),
+         /bin/mv -f \"$t\" {rule}",
+        source = shell_word(&source.to_string_lossy()),
         helper = shell_word(INSTALLED),
-        line = shell_word(&sudoers_line(user)),
-        rule = shell_word(&sudoers_path(user)),
-        old = remove_old_script(user),
-    )
+        line = shell_word(&sudoers_line(&user)),
+        rule = shell_word(&sudoers_path(&user)),
+    );
+    as_administrator(&script, prompt)?;
+    match helper() {
+        Helper::Ready => Ok(()),
+        other => Err(format!("set up, but the helper is {other:?}")),
+    }
 }
 
 /// Remove this user's sudoers file, and the helper when no user's is left,
-/// with the password. Sidescreen's are removed the same way.
+/// with the password.
 pub fn remove(prompt: &str) -> Result<(), String> {
     let user = user().ok_or("no user name")?;
     if !is_plain_user(&user) {
         return Err(format!("the user name {user} can't go in a sudoers file"));
     }
-    as_administrator(&remove_script(&user), prompt)
-}
-
-fn remove_script(user: &str) -> String {
-    format!(
+    let script = format!(
         "/bin/rm -f {rule}; \
-         /bin/ls {prefix}* >/dev/null 2>&1 || /bin/rm -f {helper}; \
-         {old}",
-        rule = shell_word(&sudoers_path(user)),
+         /bin/ls {prefix}* >/dev/null 2>&1 || /bin/rm -f {helper}",
+        rule = shell_word(&sudoers_path(&user)),
         prefix = agent_screen_colorsync::SUDOERS_PREFIX,
         helper = shell_word(INSTALLED),
-        old = remove_old_script(user),
-    )
-}
-
-/// Remove `user`'s sudoers file from when the app was Sidescreen, and that
-/// helper once no user's old file is left. Ends with a command that
-/// succeeds, so a `set -e` script goes on.
-fn remove_old_script(user: &str) -> String {
-    format!(
-        "/bin/rm -f {rule}; \
-         /bin/ls {prefix}* >/dev/null 2>&1 || /bin/rm -f {helper}; \
-         true",
-        rule = shell_word(&old_sudoers_path(user)),
-        prefix = agent_screen_colorsync::OLD_SUDOERS_PREFIX,
-        helper = shell_word(OLD_INSTALLED),
-    )
+    );
+    as_administrator(&script, prompt)
 }
 
 /// A run takes a second or two; one that hangs is killed, so the next can
@@ -384,50 +350,5 @@ mod tests {
         assert_eq!(shell_word("Agent Screen Dev.app"), "'Agent Screen Dev.app'");
         assert_eq!(shell_word("it's"), r"'it'\''s'");
         assert_eq!(applescript_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
-    }
-
-    #[test]
-    fn setting_up_removes_sidescreens_helper_after_the_new_rule() {
-        let script = setup_script(
-            "/Applications/Agent Screen.app/Contents/MacOS/agent-screen-colorsync",
-            "first.last",
-        );
-        let new_rule = script
-            .find("/bin/mv -f \"$t\" '/etc/sudoers.d/agent-screen-colorsync-first_last'")
-            .expect("the new rule goes in place");
-        let old_rule = script
-            .find("/bin/rm -f '/etc/sudoers.d/sidescreen-colorsync-first_last'")
-            .expect("the old rule goes");
-        assert!(
-            new_rule < old_rule,
-            "the old rule goes only once the new one is in"
-        );
-        assert!(script.contains(
-            "/bin/ls /etc/sudoers.d/sidescreen-colorsync-* >/dev/null 2>&1 || /bin/rm -f '/Library/PrivilegedHelperTools/dev.sidescreen.colorsync'"
-        ));
-        assert!(script.trim_end().ends_with("true"));
-        assert!(
-            !script.contains("rm -f /etc/sudoers.d/sidescreen-colorsync-*"),
-            "no rule of another user goes"
-        );
-        let parsed = std::process::Command::new("/bin/sh")
-            .args(["-n", "-c", &script])
-            .status()
-            .unwrap();
-        assert!(parsed.success(), "the shell parses it");
-    }
-
-    #[test]
-    fn removing_removes_both_helpers() {
-        let script = remove_script("me");
-        assert!(script.contains("/bin/rm -f '/etc/sudoers.d/agent-screen-colorsync-me'"));
-        assert!(script.contains("/bin/rm -f '/etc/sudoers.d/sidescreen-colorsync-me'"));
-        assert!(
-            script
-                .contains("/bin/rm -f '/Library/PrivilegedHelperTools/app.agentscreen.colorsync'")
-        );
-        assert!(
-            script.contains("/bin/rm -f '/Library/PrivilegedHelperTools/dev.sidescreen.colorsync'")
-        );
     }
 }

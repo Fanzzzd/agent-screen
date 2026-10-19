@@ -237,44 +237,6 @@ fn support_folder() -> Option<std::path::PathBuf> {
     Some(Path::new(&home).join("Library/Application Support/Agent Screen"))
 }
 
-/// Copy what the app kept under its former name, Sidescreen, into its
-/// folder: the user's wallpaper and the identities of display serials. Only
-/// while the new folder has neither, so it runs once. Copies, so a copy of
-/// Sidescreen still running keeps its own. What it copied, for the log.
-pub fn carry_over_sidescreen_folder() -> Vec<std::path::PathBuf> {
-    let (Some(new), Some(home)) = (support_folder(), std::env::var_os("HOME")) else {
-        return Vec::new();
-    };
-    let old = Path::new(&home).join("Library/Application Support/Sidescreen");
-    carry_over(&old, &new)
-}
-
-fn carry_over(old: &Path, new: &Path) -> Vec<std::path::PathBuf> {
-    let worth = |name: &str| name == "identities.json" || name.starts_with("wallpaper-");
-    let has = |folder: &Path| {
-        std::fs::read_dir(folder).is_ok_and(|entries| {
-            entries
-                .flatten()
-                .any(|e| e.file_name().to_str().is_some_and(worth))
-        })
-    };
-    if has(new) || !has(old) || std::fs::create_dir_all(new).is_err() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(old) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(worth))
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let to = new.join(e.file_name());
-            std::fs::copy(e.path(), &to).ok().map(|_| to)
-        })
-        .collect()
-}
-
 /// The picture the user chose for Agent Displays, if any: a copy, so moving
 /// or deleting the original changes nothing.
 pub fn custom_wallpaper() -> Option<std::path::PathBuf> {
@@ -373,33 +335,4 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
         let number = number.downcast::<NSNumber>().ok()?;
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn carries_over_the_wallpaper_and_identities_once() {
-        let root = std::env::temp_dir().join(format!("agent-screen-carry-{}", std::process::id()));
-        let (old, new) = (root.join("Sidescreen"), root.join("Agent Screen"));
-        std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("identities.json"), "{}").unwrap();
-        std::fs::write(old.join("wallpaper-1.png"), "picture").unwrap();
-        std::fs::write(old.join("control.sock"), "").unwrap();
-        let mut copied = carry_over(&old, &new);
-        copied.sort();
-        assert_eq!(
-            copied,
-            vec![new.join("identities.json"), new.join("wallpaper-1.png")]
-        );
-        assert!(!new.join("control.sock").exists());
-        assert!(old.join("wallpaper-1.png").exists(), "the old folder stays");
-        std::fs::write(old.join("wallpaper-2.png"), "newer").unwrap();
-        assert!(
-            carry_over(&old, &new).is_empty(),
-            "only into a folder without them"
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-    }
 }
