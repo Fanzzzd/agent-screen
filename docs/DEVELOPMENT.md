@@ -124,27 +124,3 @@ Releases follow the changesets model, with [knope](https://knope.tech) (`knope.t
 Running **Release** from the Actions tab is a dry run: checks, signing and the DMG, kept as an artifact, and nothing published.
 
 Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`), an App Store Connect API key of the same team for notarization (`APP_STORE_CONNECT_KEY_P8`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`), `TAP_DEPLOY_KEY`, a write deploy key of the tap, and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. To build a notarized DMG locally, store the key once with `xcrun notarytool store-credentials agent-screen` (see the top of `release.sh`). Commit messages stay plain sentences: knope ignores conventional commits here.
-
-### The rename from Sidescreen
-
-Agent Screen was called Sidescreen up to 0.1.14. The repository moved from `Fanzzzd/sidescreen` to `Fanzzzd/agent-screen` and the tap from `Fanzzzd/homebrew-sidescreen` to `Fanzzzd/homebrew-agent-screen`; GitHub redirects the old URLs, so existing tap clones keep fetching. The cask `sidescreen` became `agent-screen`. Before the first release under the new name, in the tap repository:
-
-1. Delete `Casks/sidescreen.rb`. `release.yml` adds `Casks/agent-screen.rb` with the release.
-2. Add `cask_renames.json` at the tap's root, so `brew` moves installed copies to the new cask:
-
-   ```json
-   {
-     "sidescreen": "agent-screen"
-   }
-   ```
-
-3. Keep `Casks/aerospace-sidescreen.rb`: the AeroSpace fork's release job in `Fanzzzd/AeroSpace` pushes it under that name.
-
-`TAP_DEPLOY_KEY` must be a deploy key of the renamed tap. A notarytool profile stored as `sidescreen` needs storing again as `agent-screen`, or `NOTARY_PROFILE=sidescreen`.
-
-The app takes over what Sidescreen left on a Mac, and each step names the old identifiers on purpose:
-
-- Connect (`install.rs`) removes a Claude Code or Codex entry named `sidescreen` (`sidescreen-dev` for the debug build) when its command runs `Sidescreen.app/Contents/MacOS/Sidescreen` or the `Sidescreen Dev.app` one. An entry pointing elsewhere stays.
-- At launch, an AeroSpace config whose `ignored-monitors` matches `Sidescreen 1` and not `Agent Screen 1` gets `'^Agent Screen'` added before the old pattern (`aerospace::migrate_renamed_pattern`), once per launch, with a backup and a reload.
-- The ColorSync helper's setup and `AgentScreen colorsync remove` also remove `/Library/PrivilegedHelperTools/dev.sidescreen.colorsync` and the user's `/etc/sudoers.d/sidescreen-colorsync-USER`. While only the old helper is installed, the helper counts as outdated, so the setup window offers Update….
-- At launch, `identities.json` and the wallpaper are copied from `~/Library/Application Support/Sidescreen` while the new folder has neither.
