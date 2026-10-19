@@ -98,25 +98,44 @@ pub fn needs_confirmation(items: &[Item], display: &Display<VirtualDisplay>) -> 
     !items.is_empty() || display.is_live()
 }
 
-/// Close and return windows. Blocking. Returns how many windows refused to
-/// close, for example because they ask about unsaved changes; macOS moves
-/// those to the main display when the virtual one disappears.
+/// Close and return windows. Blocking. Returns the windows still open a
+/// moment after their close button was pressed: an app asking whether to
+/// save shows a sheet on the window and waits. Removing the display then
+/// would make macOS move the question onto the user's screen.
 ///
 /// `main_name` is the main screen's name, read on the main thread.
-pub fn execute(items: &[Item], main_name: Option<&str>) -> usize {
-    let mut stubborn = 0;
-    for item in items.iter().filter(|i| i.fate == Fate::Close) {
-        if ax::close(item.target).is_err() {
-            stubborn += 1;
-        }
-    }
+pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
+    let closing: Vec<WindowTarget> = items
+        .iter()
+        .filter(|i| i.fate == Fate::Close)
+        .map(|i| i.target)
+        .filter(|&target| {
+            let pressed = ax::close(target).is_ok();
+            if !pressed {
+                log::warn!("window {} has no close button that works", target.window_id);
+            }
+            pressed
+        })
+        .collect();
     for item in items.iter().filter(|i| i.fate == Fate::GiveBack) {
         give_back(item.target, item.home.as_ref(), main_name);
     }
-    if stubborn > 0 {
-        log::warn!("{stubborn} window(s) did not close on dismissal");
+    // Most windows go within a few hundred milliseconds.
+    let mut open = closing;
+    for _ in 0..15 {
+        open.retain(|t| windows::find(t.window_id).is_some());
+        if open.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    stubborn
+    if !open.is_empty() {
+        log::info!(
+            "{} window(s) still open after closing, maybe asking to save",
+            open.len()
+        );
+    }
+    open
 }
 
 /// A window returns to where it came from when we know that, otherwise to
