@@ -302,6 +302,9 @@ impl McpClient {
 
     /// Write a tools/call and go on; its result comes with [`Call::wait`].
     pub fn begin(&self, name: &str, args: Value) -> Result<Call<'_>> {
+        if name == "create_display" {
+            crate::spend_display()?;
+        }
         Ok(Call {
             client: self,
             name: name.into(),

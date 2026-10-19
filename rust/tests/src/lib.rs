@@ -168,6 +168,38 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Test displays made in the last hour, across every script and agent on
+/// this Mac. Each new display makes WindowServer and ColorSync reconfigure,
+/// and about 60 in 11 minutes froze the Mac on 2026-10-20.
+const DISPLAYS_PER_HOUR: usize = 24;
+
+/// Count one display against the hourly budget, or fail once it is spent.
+/// A reused spare counts too: a script can't tell beforehand.
+pub fn spend_display() -> Result<()> {
+    let ledger = Path::new("/tmp/agent-screen-test-displays");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut times: Vec<u64> = std::fs::read_to_string(ledger)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .filter(|&t: &u64| now.saturating_sub(t) < 3600)
+        .collect();
+    if times.len() >= DISPLAYS_PER_HOUR {
+        let wait = 3600 - now.saturating_sub(times[0]);
+        bail!(
+            "test scripts made {} displays in the last hour, the most this Mac takes safely; try again in {} min",
+            times.len(),
+            wait / 60 + 1
+        );
+    }
+    times.push(now);
+    let text: String = times.iter().map(|t| format!("{t}\n")).collect();
+    std::fs::write(ledger, text)?;
+    Ok(())
+}
+
 /// A Swift helper from `tools/`, built into target/e2e when its source is
 /// newer than the binary.
 pub fn tool(name: &str) -> Result<PathBuf> {

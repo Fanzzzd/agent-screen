@@ -207,6 +207,13 @@ fn intersects(a: NSRect, b: NSRect) -> bool {
         && b.origin.y < a.origin.y + a.size.height
 }
 
+/// Back to a menu bar app, out of the Dock. A regular app also takes part
+/// in each display's menu bar: with six displays, display changes kept its
+/// main thread busy in AppKit's menu bar code too, up to 880 ms at a time.
+fn leave_dock(cx: &mut App) {
+    cx.set_activation_policy(gpui::ActivationPolicy::Accessory);
+}
+
 /// `card` scaled down to fit inside `target`, centered on it: where a
 /// morph starts or ends.
 fn fit_into(card: NSRect, target: NSRect) -> NSRect {
@@ -322,6 +329,14 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             registered: Vec::new(),
         }
     });
+    // The Dock icon goes with the setup window.
+    cx.on_window_closed({
+        let shell = shell.downgrade();
+        move |cx, id| {
+            let _ = shell.update(cx, |shell, cx| shell.window_closed(id, cx));
+        }
+    })
+    .detach();
     let weak = shell.downgrade();
     CURRENT.with(|c| *c.borrow_mut() = Some(shell.clone()));
 
@@ -2069,6 +2084,9 @@ impl Shell {
             cx.activate(true);
             return;
         }
+        // In the Dock and the app switcher while the window is open, so it
+        // can be found behind other windows.
+        cx.set_activation_policy(gpui::ActivationPolicy::Regular);
         let weak = cx.entity().downgrade();
         let status = self.permissions;
         let bounds = Bounds::centered(None, size(px(setup::WIDTH), px(setup::HEIGHT)), cx);
@@ -2168,6 +2186,17 @@ impl Shell {
         self.waiting = None;
         self.setup_preview = false;
         assist::hide();
+        leave_dock(cx);
+    }
+
+    /// The setup window closed with its close button.
+    fn window_closed(&mut self, id: gpui::WindowId, cx: &mut Context<Self>) {
+        if self.setup.is_some_and(|h| h.window_id() == id) {
+            self.setup = None;
+            self.waiting = None;
+            assist::hide();
+            leave_dock(cx);
+        }
     }
 
     /// macOS said whether Agent Screen may notify. People who finished setup

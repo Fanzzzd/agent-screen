@@ -84,8 +84,8 @@ fn colorsync(command: Option<&str>) {
 
 gpui::actions!(agent_screen, [OpenSetup, HideApp, QuitApp]);
 
-/// The menu bar macOS shows while Agent Screen is the active app, as after
-/// a click on its Dock icon. No shortcuts: keys typed in the Viewer go to
+/// The menu bar macOS shows while Agent Screen is the active app, as with
+/// the setup window in front. No shortcuts: keys typed in the Viewer go to
 /// the agent's app, and Command-Q there must not quit Agent Screen.
 fn app_menu(cx: &mut App) {
     use gpui::{Menu, MenuItem};
@@ -164,12 +164,12 @@ fn main() {
     log::set_max_level(log::LevelFilter::Debug);
     log::debug!("language: {:?}", i18n::lang());
     let platform = gpui_platform::current_platform(false);
-    // A regular app, in the Dock and the app switcher, so the user can find
-    // it beside the menu bar icon. Starting it doesn't activate it.
-    platform.set_activation_policy(ActivationPolicy::Regular);
+    // A menu bar app: in the Dock only while the setup window is open
+    // (`Shell::open_setup`). Starting it doesn't activate it.
+    platform.set_activation_policy(ActivationPolicy::Accessory);
     let app = gpui::Application::with_platform(platform).with_assets(ui::theme::Assets);
-    // A click on the Dock icon opens the setup window: permissions, the
-    // agents it is connected to, and the AeroSpace options.
+    // A click on the Dock icon, or opening the app again, shows the setup
+    // window: permissions, the agents it is connected to, and AeroSpace.
     app.on_reopen(|_| {
         mac::native::send(mac::native::Native::Menu(
             mac::native::MenuAction::GrantPermissions,

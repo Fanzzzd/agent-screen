@@ -71,6 +71,9 @@ impl Control {
 
     /// Write a request and go on; its reply comes with [`ControlCall::wait`].
     pub fn begin(&self, method: &str, params: Value) -> Result<ControlCall> {
+        if method == "createDisplay" {
+            crate::spend_display()?;
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (to, from) = channel();
         self.pending.lock().unwrap().insert(id, to);
