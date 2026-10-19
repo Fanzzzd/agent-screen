@@ -314,6 +314,30 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
     result.await.expect("display thread ended")
 }
 
+/// A new display, parked from here as soon as macOS has made it, with the
+/// displays macOS moved for it put back. `others` are the app's other
+/// virtual displays. The main thread isn't involved: each new display
+/// stalls it for a while, and parking after that would wait it out.
+pub async fn create_parked(
+    name: String,
+    width: u32,
+    height: u32,
+    serial: Serial,
+    others: Vec<u32>,
+) -> Option<VirtualDisplay> {
+    let before = origins();
+    let made = VirtualDisplay::create(&name, width, height, serial)?;
+    let id = made.id;
+    let mut ids = others;
+    ids.push(id);
+    configure(move || {
+        crate::core::park_fillers(&ids);
+        tuck_away_restoring(id, &ids, &before)
+    })
+    .await;
+    Some(made)
+}
+
 /// Park a virtual display diagonally off the top-right corner of the
 /// physical displays, so the real cursor rarely wanders onto it. Further
 /// virtual displays stack to the right of earlier ones.
@@ -325,24 +349,67 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
 /// True once the display sits there. A display WindowServer has only just
 /// added ignores the configuration, so callers try again.
 pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
-    let others: Vec<u32> = cg::active_displays()
+    tuck_away_restoring(id, virtual_ids, &[])
+}
+
+/// Where every display is now, to put back with `tuck_away_restoring`.
+pub fn origins() -> Vec<(u32, (f64, f64))> {
+    cg::active_displays()
         .into_iter()
-        .filter(|&d| d != id)
+        .map(|d| {
+            let b = cg::display_bounds(d);
+            (d, (b.x, b.y))
+        })
+        .collect()
+}
+
+/// `tuck_away` for a display just made, putting the other displays back
+/// where `before` had them in the same change. macOS adds a display beside
+/// the main one and moves a display already there out of its way, then
+/// remembers that arrangement for this set of displays: without this, the
+/// user's monitor would stay moved, and move again each time.
+pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f64))]) -> bool {
+    let online = cg::active_displays();
+    let restore: Vec<(u32, (f64, f64))> = before
+        .iter()
+        .copied()
+        .filter(|&(d, (x, y))| {
+            let now = cg::display_bounds(d);
+            d != id && online.contains(&d) && (now.x, now.y) != (x, y)
+        })
         .collect();
-    let Some(anchor) = physical_bounds(id, &others, virtual_ids) else {
-        return false;
+    let bounds_of = |d: u32| {
+        let now = cg::display_bounds(d);
+        match restore.iter().find(|(r, _)| *r == d) {
+            Some(&(_, (x, y))) => crate::model::Rect::new(x, y, now.width, now.height),
+            None => now,
+        }
     };
+    let others: Vec<u32> = online.into_iter().filter(|&d| d != id).collect();
+    let anchor = others
+        .iter()
+        .copied()
+        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
+        .map(bounds_of)
+        .reduce(|a, b| a.union(&b))
+        .unwrap_or_else(|| cg::display_bounds(cg::main_display()));
     let occupied = others
         .iter()
         .filter(|&&d| virtual_ids.contains(&d) || cg::is_sidescreen(d))
-        .map(|&d| cg::display_bounds(d))
+        .map(|&d| bounds_of(d))
         .fold(anchor, |a, b| a.union(&b));
     let height = cg::display_bounds(id).height;
     let origin = (occupied.max_x() as i32, (anchor.y - height) as i32);
+    if !restore.is_empty() {
+        log::info!("display {id}: putting back displays macOS moved for it: {restore:?}");
+    }
     unsafe {
         let mut config = std::ptr::null_mut();
         if CGBeginDisplayConfiguration(&mut config) == 0 {
             CGConfigureDisplayOrigin(config, id, origin.0, origin.1);
+            for &(d, (x, y)) in &restore {
+                CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
+            }
             // For this session only. Made permanent, macOS took a second
             // longer to finish, 2.3 s against 1.3 s, and still showed the
             // next display with the serial at its default spot first.

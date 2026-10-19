@@ -1144,17 +1144,14 @@ impl Shell {
             ),
             None => {
                 let (serial, name) = self.core.update(cx, |core, _| core.next_name());
-                let made = cx.background_spawn({
-                    let name = name.clone();
-                    async move {
-                        crate::mac::display::VirtualDisplay::create(
-                            &name,
-                            DEFAULT_SIZE.0 as u32,
-                            DEFAULT_SIZE.1 as u32,
-                            serial,
-                        )
-                    }
-                });
+                let others = self.core.read(cx).virtual_ids();
+                let made = cx.background_spawn(crate::mac::display::create_parked(
+                    name.clone(),
+                    DEFAULT_SIZE.0 as u32,
+                    DEFAULT_SIZE.1 as u32,
+                    serial,
+                    others,
+                ));
                 (made, name)
             }
         };
