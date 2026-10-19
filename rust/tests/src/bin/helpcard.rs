@@ -9,7 +9,7 @@
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, DEBUG_BINARY, Frame, McpClient, capture, check, instance, json, now_ms, pid_of, run,
     sleep_ms, start_test_app, windows_of,
 };

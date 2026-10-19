@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use sidescreen_tests::{
+use agent_screen_tests::{
     McpClient, Window, check, cut, in_test_app, instance, json, now_ms, quit_app, run, running,
     skip, sleep_ms, wait_for_idle,
 };

@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use base64::Engine;
 use serde_json::Value;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, fixture, instance, json, out, probe, run, skip, sleep_ms, start_test_app,
     stop_test_app,
 };

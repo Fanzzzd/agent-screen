@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use sidescreen_tests::{McpClient, ToolResult, fail, json, now_ms, run, sleep_ms};
+use agent_screen_tests::{McpClient, ToolResult, fail, json, now_ms, run, sleep_ms};
 
 /// "ok" or "FAIL"; a FAIL counts toward the exit code.
 fn verdict(ok: bool) -> &'static str {

@@ -17,7 +17,7 @@
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     McpClient, check, cut, in_test_app, instance, json, now_ms, quit_discarding, quoted, run,
     running, skip, sleep_ms, try_osa, wait_for_idle,
 };

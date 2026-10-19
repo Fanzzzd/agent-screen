@@ -17,7 +17,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, Rect, capture, document_text, json, open_stage, out, probe, quit_discarding, quoted,
     root, run, running, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, tool,
     type_in_viewer, wait_for_unlocked,

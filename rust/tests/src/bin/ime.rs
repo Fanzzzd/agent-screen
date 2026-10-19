@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, instance, json, out, probe, run, sh, sh_lenient, skip, sleep_ms,
     start_test_app, stop_test_app, tool,
 };

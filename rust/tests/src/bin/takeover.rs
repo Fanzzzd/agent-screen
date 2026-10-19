@@ -8,7 +8,7 @@
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, Rect, check, document_text, instance, json, open_stage, probe, quit_discarding,
     quoted, run, running, skip, sleep_ms, start_test_app, stop_test_app, type_in_viewer,
     wait_for_unlocked,

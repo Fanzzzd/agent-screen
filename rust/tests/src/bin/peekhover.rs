@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, DEBUG_BINARY, check, instance, json, open_stage, pid_of, run, start_test_app,
     stop_test_app, windows_of,
 };

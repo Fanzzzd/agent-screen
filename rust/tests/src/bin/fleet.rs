@@ -27,7 +27,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::Value;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, fixture, json, osa, out, put_back_wallpaper, quit_discarding, quit_profile,
     root, run, running_headed, skip, sleep_ms, start_test_app, stop_test_app, try_osa,
     wear_promo_wallpaper,
@@ -456,7 +456,7 @@ fn steps(work: &Work) -> Vec<Step> {
         Work::Terminal => vec![
             ClickAt(550.0, 400.0),
             t(&format!(
-                "cd {} && cargo test -q -p sidescreen-model --lib 2>&1 | tail -n 12",
+                "cd {} && cargo test -q -p agent-screen-model --lib 2>&1 | tail -n 12",
                 root().display()
             )),
             Key("return"),

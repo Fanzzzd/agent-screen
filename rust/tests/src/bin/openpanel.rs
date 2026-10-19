@@ -8,7 +8,7 @@
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     McpClient, Value, Window, check, cut, in_test_app, instance, json, now_ms, quit_app, run,
     running, sh, skip, sleep_ms, wait_for_idle,
 };

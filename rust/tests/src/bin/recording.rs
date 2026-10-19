@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, instance, json, probe, quit_app, run, running, skip, sleep_ms, start_test_app,
     stop_test_app,
 };

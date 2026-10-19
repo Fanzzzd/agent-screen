@@ -4,12 +4,12 @@
 
 [package]
 versioned_files = [
-  "rust/sidescreen/Cargo.toml",
-  "rust/sidescreen-mcp/Cargo.toml",
-  "rust/sidescreen-model/Cargo.toml",
-  { path = "rust/Cargo.lock", dependency = "sidescreen" },
-  { path = "rust/Cargo.lock", dependency = "sidescreen-mcp" },
-  { path = "rust/Cargo.lock", dependency = "sidescreen-model" },
+  "rust/agent-screen/Cargo.toml",
+  "rust/agent-screen-mcp/Cargo.toml",
+  "rust/agent-screen-model/Cargo.toml",
+  { path = "rust/Cargo.lock", dependency = "agent-screen" },
+  { path = "rust/Cargo.lock", dependency = "agent-screen-mcp" },
+  { path = "rust/Cargo.lock", dependency = "agent-screen-model" },
 ]
 changelog = "CHANGELOG.md"
 assets = "rust/target/Sidescreen-*.dmg"

@@ -1,3 +1,3 @@
 # `cargo e2e <name> [args]` runs a script from tests/src/bin.
 [alias]
-e2e = "run --quiet --package sidescreen-tests --bin"
+e2e = "run --quiet --package agent-screen-tests --bin"

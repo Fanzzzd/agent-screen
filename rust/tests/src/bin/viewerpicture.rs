@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, Rect, capture, check, instance, json, open_stage, probe, run, sleep_ms,
     start_test_app, stop_test_app,
 };

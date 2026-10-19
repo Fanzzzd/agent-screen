@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, Rect, check, cut_stage, fixture, json, open_stage, out, put_back_wallpaper,
     quit_profile, record_stage, root, run, running_headed, skip, sleep_ms, start_test_app,
     stop_test_app, wear_promo_wallpaper,

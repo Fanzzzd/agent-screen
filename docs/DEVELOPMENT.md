@@ -3,9 +3,9 @@
 ## Layout
 
 ```
-rust/sidescreen/        the app: GPUI UI, control socket, `Sidescreen mcp`
-rust/sidescreen-mcp/    the MCP server (rmcp), built into the app binary
-rust/sidescreen-model/  domain rules with no OS calls: displays, windows, key chords
+rust/agent-screen/        the app: GPUI UI, control socket, `Sidescreen mcp`
+rust/agent-screen-mcp/    the MCP server (rmcp), built into the app binary
+rust/agent-screen-model/  domain rules with no OS calls: displays, windows, key chords
 rust/tests/             MCP scripts, user-side e2e tests and the demo recorder
 rust/docs/              Linux and Windows feasibility notes
 docs/                   ADRs and the AGENTS.md convention
@@ -16,8 +16,8 @@ Sidescreen started as a Swift app; the Rust app replaced it ([ADR 0005](adr/0005
 ## Build
 
 ```sh
-rust/sidescreen/scripts/bundle.sh [release]   # build rust/target/Sidescreen Dev.app (release: Sidescreen.app)
-rust/sidescreen/scripts/release.sh            # the DMG and Homebrew cask for a release
+rust/agent-screen/scripts/bundle.sh [release]   # build rust/target/Sidescreen Dev.app (release: Sidescreen.app)
+rust/agent-screen/scripts/release.sh            # the DMG and Homebrew cask for a release
 ```
 
 A debug bundle is a separate app, "Sidescreen Dev" (`dev.sidescreen.menubar.dev`), so it runs beside an installed Sidescreen without touching it: its own privacy grants, its own control socket (instance `dev` unless `SIDESCREEN_INSTANCE` says otherwise), and its own agent registration (`sidescreen-dev`). Its menu bar icon is purple.
@@ -73,7 +73,7 @@ SIDESCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an 
 SIDESCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
 ```
 
-The scripts live in `rust/tests/src/bin`, one file each, with the helpers they share in `rust/tests/src/lib.rs`. `cargo e2e` is an alias in `rust/.cargo/config.toml` for `cargo run --quiet --package sidescreen-tests --bin`. The Swift helpers they call (`probe`, `hid`, `flash`, …) are in `rust/tests/tools` and build into `rust/target/e2e` on first use.
+The scripts live in `rust/tests/src/bin`, one file each, with the helpers they share in `rust/tests/src/lib.rs`. `cargo e2e` is an alias in `rust/.cargo/config.toml` for `cargo run --quiet --package agent-screen-tests --bin`. The Swift helpers they call (`probe`, `hid`, `flash`, …) are in `rust/tests/tools` and build into `rust/target/e2e` on first use.
 
 `robust`, `timing` and `shared` skip when TextEdit is already open, `openpanel` when Preview is, and `browsers` when Safari is, since it may be yours. `robust` and `timing` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
 
@@ -107,7 +107,7 @@ Debug builds accept `debugTakeover`, `debugShow`, `debugViewerInput`, `debugMove
 
 ## Install a local build
 
-`rust/sidescreen/scripts/install.sh` builds a release app, quits any running Sidescreen, installs it as `/Applications/Sidescreen.app` and opens it. Debug builds in `rust/target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
+`rust/agent-screen/scripts/install.sh` builds a release app, quits any running Sidescreen, installs it as `/Applications/Sidescreen.app` and opens it. Debug builds in `rust/target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
 
 ## Release
 

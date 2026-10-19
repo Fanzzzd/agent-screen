@@ -107,4 +107,4 @@ Sidescreen runs on your Mac and sends nothing anywhere. Screen & System Audio Re
 
 ## Develop
 
-To build and install from source instead of the DMG, with Rust installed: `rust/sidescreen/scripts/install.sh`. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for testing and how it works. Sidescreen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+To build and install from source instead of the DMG, with Rust installed: `rust/agent-screen/scripts/install.sh`. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for testing and how it works. Sidescreen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

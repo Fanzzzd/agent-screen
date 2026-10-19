@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, env_count, instance, json, quit_discarding, reopen_installed, restore, run, running,
     sleep_ms, snapshot, start_debug_app, start_test_app, stop_debug_app, stop_test_app,
     wait_for_quiet, wait_for_unlocked,

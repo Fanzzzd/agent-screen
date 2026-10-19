@@ -49,7 +49,7 @@ jobs:
 
       - name: Version
         id: version
-        run: echo "version=$(awk -F'"' '/^version/ { print $2; exit }' rust/sidescreen/Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(awk -F'"' '/^version/ { print $2; exit }' rust/agent-screen/Cargo.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -91,7 +91,7 @@ jobs:
           export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
           printf '%s\n' "$KEY_P8" > "$NOTARY_KEY"
           trap 'rm -f "$NOTARY_KEY"' EXIT
-          rust/sidescreen/scripts/release.sh
+          rust/agent-screen/scripts/release.sh
 
       - name: Keep the DMG and cask
         uses: actions/upload-artifact@v4

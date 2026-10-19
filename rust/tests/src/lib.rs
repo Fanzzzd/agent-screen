@@ -491,7 +491,7 @@ fn wait_listening_at(socket: &Path) -> bool {
 }
 
 fn bundle_debug() -> Result<()> {
-    sh(root().join("sidescreen/scripts/bundle.sh"), &["debug"]).map(|_| ())
+    sh(root().join("agent-screen/scripts/bundle.sh"), &["debug"]).map(|_| ())
 }
 
 /// Start the debug app's binary. Started from here, it borrows this

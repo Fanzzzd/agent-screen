@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, env_count, instance, json, now_ms, out, probe, run, running_headed, sh_lenient, skip,
     sleep_ms, start_test_app, stop_test_app, tool, try_osa,
 };

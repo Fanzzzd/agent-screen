@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, fixture, json, out, quit_profile, run, running_headed, skip, sleep_ms,
     start_test_app, stop_test_app,
 };

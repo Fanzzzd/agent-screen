@@ -14,7 +14,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, McpClient, ToolResult, Value, Window, check, cut, in_test_app, instance, json, now_ms,
     quit_app, quit_discarding, quoted, run, running, sh, sh_lenient, skip, sleep_ms, tool, try_osa,
     wait_for_idle, watch_flash,

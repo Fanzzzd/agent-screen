@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, instance, json, probe, quit_app, run, running, skip, sleep_ms, start_test_app,
     stop_test_app,
 };
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
 fn save(reply: &serde_json::Value, name: &str) -> Result<String> {
     let data = base64::engine::general_purpose::STANDARD
         .decode(reply["data"].as_str().context("image data")?)?;
-    let path = sidescreen_tests::out().join(format!("{name}.png"));
+    let path = agent_screen_tests::out().join(format!("{name}.png"));
     std::fs::write(&path, data)?;
     Ok(path.to_string_lossy().into_owned())
 }

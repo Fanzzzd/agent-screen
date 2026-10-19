@@ -10,7 +10,7 @@
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
-use sidescreen_tests::{
+use agent_screen_tests::{
     Control, check, fixture, json, out, run, skip, sleep_ms, start_test_app, stop_test_app,
 };
 

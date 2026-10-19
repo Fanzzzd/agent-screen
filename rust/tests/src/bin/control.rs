@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use anyhow::Result;
-use sidescreen_tests::{Control, McpClient, Value, check, json, now_ms, run, sleep_ms};
+use agent_screen_tests::{Control, McpClient, Value, check, json, now_ms, run, sleep_ms};
 
 /// A second control connection standing in for the user's Viewer.
 fn debug(method: &str, params: Value) -> Result<Value> {
