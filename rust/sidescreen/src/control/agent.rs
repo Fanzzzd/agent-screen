@@ -138,6 +138,9 @@ async fn handle_one(
     .map(|id| id as DisplayId);
     if let Some(id) = acting {
         crate::mac::catch::agent_acted(id);
+        if method != "launchApp" {
+            watch_for_changes(&core, id, cx);
+        }
     }
     let result: Result<Value, ControlError> = match method {
         "createDisplay" => create_display(&core, connection, &p, cx).await,
@@ -2751,43 +2754,39 @@ async fn settle_display(core: &Entity<Core>, id: DisplayId, size: (f64, f64), cx
 /// change, or 500 ms with none; at most 1.5 s.
 /// While agents act, the display streams at 30 fps at thumbnail size, and
 /// ScreenCaptureKit only delivers a frame when something changed.
-async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
-    use std::time::Instant;
+/// The small stream that counts a display's changes, at the size it runs.
+fn change_pixels(size: (f64, f64)) -> (u32, u32) {
+    (416, (416.0 * size.1 / size.0) as u32)
+}
+
+/// Before an action: have the display's changes counted, so the stream is
+/// running by the time the screenshot after it waits for the display to
+/// settle. A stream started only then misses changes while it starts.
+fn watch_for_changes(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
     let Some(streams) = crate::ui::stream::global() else {
-        cx.background_executor()
-            .timer(Duration::from_millis(350))
-            .await;
         return;
     };
-    let pixels = (416, (416.0 * size.1 / size.0) as u32);
-    streams.update(cx, |s, cx| s.want(id, "agent", 30, pixels, cx));
-    let start = Instant::now();
-    let mut last = streams.read_with(cx, |s, _| s.changes(id));
-    let mut quiet_since = start;
-    // An app can take a while to show what an action opened, such as a
-    // file panel drawn by another process: give a first change longer.
-    let mut changed = false;
-    while start.elapsed() < Duration::from_millis(1500) {
-        cx.background_executor()
-            .timer(Duration::from_millis(30))
-            .await;
-        let now = streams.read_with(cx, |s, _| s.changes(id));
-        if now != last {
-            last = now;
-            changed = true;
-            quiet_since = Instant::now();
-        } else if quiet_since.elapsed() >= Duration::from_millis(120)
-            && start.elapsed() >= Duration::from_millis(if changed { 150 } else { 500 })
-        {
-            break;
-        }
-    }
-    // Keep the fast stream for a moment: the next action usually follows.
+    let size = core
+        .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+        .unwrap_or(DEFAULT_SIZE);
+    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
+    ACTION_BASE.with(|b| b.borrow_mut().insert(id, Instant::now()));
+    keep_counting(id, cx);
+}
+
+/// Keep the display's change count running for a while: the next action
+/// usually follows, and a stream that is already counting sees its change.
+fn keep_counting(id: DisplayId, cx: &mut AsyncApp) {
+    let Some(streams) = crate::ui::stream::global() else {
+        return;
+    };
     let wanted = Instant::now();
     AGENT_ACTIVE.with(|a| a.borrow_mut().insert(id, wanted));
     let streams = streams.downgrade();
     cx.spawn(async move |cx: &mut AsyncApp| {
-        cx.background_executor().timer(Duration::from_secs(5)).await;
+        cx.background_executor()
+            .timer(Duration::from_secs(30))
+            .await;
         let latest = AGENT_ACTIVE.with(|a| a.borrow().get(&id).copied());
         if latest == Some(wanted) {
             AGENT_ACTIVE.with(|a| a.borrow_mut().remove(&id));
@@ -2797,9 +2796,50 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     .detach();
 }
 
+async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+    let Some(streams) = crate::ui::stream::global() else {
+        cx.background_executor()
+            .timer(Duration::from_millis(350))
+            .await;
+        return;
+    };
+    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
+    let start = Instant::now();
+    // The stream has been counting since the action, so no change after it
+    // is lost to a stream still starting. An app may draw what an action
+    // did a moment after its first change, as a page that turns red 400 ms
+    // after a click whose counter updates at once (issue #16): so whatever
+    // changed, the wait lasts half a second from the action, then until
+    // the display has been still for 120 ms.
+    let since = ACTION_BASE
+        .with(|b| b.borrow_mut().remove(&id))
+        .filter(|at| at.elapsed() < Duration::from_secs(5))
+        .unwrap_or(start);
+    let mut last = streams.read_with(cx, |s, _| s.changes(id));
+    let mut quiet_since = start;
+    while start.elapsed() < Duration::from_millis(1500) {
+        let now = streams.read_with(cx, |s, _| s.changes(id));
+        if now != last {
+            last = now;
+            quiet_since = Instant::now();
+        } else if quiet_since.elapsed() >= Duration::from_millis(120)
+            && since.elapsed() >= Duration::from_millis(500)
+        {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(30))
+            .await;
+    }
+    keep_counting(id, cx);
+}
+
 thread_local! {
     /// When each display last settled after an action.
     static AGENT_ACTIVE: std::cell::RefCell<std::collections::HashMap<DisplayId, std::time::Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// When each display's last action began.
+    static ACTION_BASE: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
