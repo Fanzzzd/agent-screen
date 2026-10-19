@@ -1,4 +1,4 @@
-//! A minimal MCP client over stdio: JSON-RPC lines to `Agent Screen mcp`.
+//! A minimal MCP client over stdio: JSON-RPC lines to `AgentScreen mcp`.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

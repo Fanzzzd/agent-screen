@@ -2,6 +2,8 @@
 
 Give each AI agent its own Mac screen. Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.
 
+[agentscreen.app](https://agentscreen.app)
+
 ![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
 
 <sub>A scripted replay: [rust/tests/src/bin/demo.rs](rust/tests/src/bin/demo.rs) makes the same calls the MCP tools make, and draws the user's notes and pointer.</sub>
@@ -102,7 +104,7 @@ Agent Screen runs on your Mac and sends nothing anywhere. Screen & System Audio 
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on.
 - **Tools say Agent Screen isn't running.** The first tool call starts it. If that fails, open `/Applications/Agent Screen.app` once yourself.
 - **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.
-- **The Mac stutters with many agent displays.** On every display change macOS reads its color records of every display ever connected, once per display online, and retries every 5 s until a read finishes within 50 ms. Turn on **Smooth Display Changes** in Agent Screen's setup window (or run `Agent Screen colorsync setup`). It asks for your administrator password once and installs a small tool that Agent Screen runs as root, through `sudo`, after displays change and every 30 minutes. The tool removes the records of displays that aren't connected and hold only what macOS made for them, and keeps display names in English and your languages, which makes the reads about five times faster. Profiles you chose for a display stay, and macOS makes a record again when you plug that display in. `Agent Screen colorsync remove` takes the tool away. Without it, Agent Screen refuses a new display when the reads would take too long.
+- **The Mac stutters with many agent displays.** On every display change macOS reads its color records of every display ever connected, once per display online, and retries every 5 s until a read finishes within 50 ms. Turn on **Smooth Display Changes** in Agent Screen's setup window (or run `AgentScreen colorsync setup`). It asks for your administrator password once and installs a small tool that Agent Screen runs as root, through `sudo`, after displays change and every 30 minutes. The tool removes the records of displays that aren't connected and hold only what macOS made for them, and keeps display names in English and your languages, which makes the reads about five times faster. Profiles you chose for a display stay, and macOS makes a record again when you plug that display in. `AgentScreen colorsync remove` takes the tool away. Without it, Agent Screen refuses a new display when the reads would take too long.
 - **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 
 ## Develop

@@ -1,5 +1,5 @@
 //! The MCP server on its own, for development. The app ships the same
-//! server as `Agent Screen mcp`.
+//! server as `AgentScreen mcp`.
 
 fn main() -> anyhow::Result<()> {
     agent_screen_mcp::run()

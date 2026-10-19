@@ -16,7 +16,7 @@ This file is for agents working on Agent Screen's code. `docs/agents/AGENTS.md` 
 ## Constraints
 
 - Agent Screen exists so agents never take the user's pointer, keyboard or focus. Agent input goes to the target process through SkyLight (ADR 0001). Nothing in the app warps the cursor, activates an app, or raises a window on the user's screen to get a job done.
-- Displays are addressed by the handle `create_display` returns (ADR 0002). The control socket's NDJSON protocol is the contract between `Agent Screen mcp` and the app (ADR 0005).
+- Displays are addressed by the handle `create_display` returns (ADR 0002). The control socket's NDJSON protocol is the contract between `AgentScreen mcp` and the app (ADR 0005).
 - `rust/agent-screen-model` holds domain rules with no OS calls. Put a rule there when it can be tested without macOS.
 - A display ends in review, and a Takeover ends only when the user hands control back (ADR 0004). A new window belongs to the agent only under ADR 0007's rule.
 - Agent Screen ignores AeroSpace's closet display (vendor 0x4145, model 1) everywhere it lists displays (`mac::cg::is_closet`).

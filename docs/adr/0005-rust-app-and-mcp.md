@@ -1,6 +1,6 @@
 # The app and its MCP server are one Rust binary
 
-Agent Screen is being rewritten in Rust so it can later run on Windows and Linux. The UI uses GPUI (Zed's UI framework, pinned to a main-branch commit for AccessKit support and accessory launch), and the MCP server uses rmcp. `Agent Screen mcp` runs the MCP server from the app binary itself, so a client registers one path and the server and the app it talks to always come from the same build. The server still only talks to the running app through the control socket, whose NDJSON protocol is the contract every platform implements.
+Agent Screen is being rewritten in Rust so it can later run on Windows and Linux. The UI uses GPUI (Zed's UI framework, pinned to a main-branch commit for AccessKit support and accessory launch), and the MCP server uses rmcp. `AgentScreen mcp` runs the MCP server from the app binary itself, so a client registers one path and the server and the app it talks to always come from the same build. The server still only talks to the running app through the control socket, whose NDJSON protocol is the contract every platform implements.
 
 This supersedes [ADR 0003](0003-upstream-effect-mcpserver.md): the TypeScript server in `packages/mcp` is gone. Its test scripts live on in `rust/tests/mcp` and drive the Rust server by default.
 
