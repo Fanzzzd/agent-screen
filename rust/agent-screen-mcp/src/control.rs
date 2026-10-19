@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, oneshot};
 
 pub type Object = Map<String, Value>;
 
-/// A request the Sidescreen app refused or could not serve.
+/// A request the Agent Screen app refused or could not serve.
 #[derive(Debug, Clone)]
 pub struct ControlError {
     /// `invalid`, `not_found`, `ended`, `takeover`, `failed`, or
@@ -160,7 +160,7 @@ impl Control {
                 return Err(ControlError::new(
                     "unavailable",
                     format!(
-                        "The Sidescreen app is not running ({error}). Ask the user to start it."
+                        "The Agent Screen app is not running ({error}). Ask the user to start it."
                     ),
                 ));
             }
@@ -188,7 +188,7 @@ fn attach(reader: Reader, writer: Writer) -> Arc<Connection> {
 }
 
 #[cfg(target_os = "macos")]
-/// Start the Sidescreen app in the background and connect once it listens.
+/// Start the Agent Screen app in the background and connect once it listens.
 /// The server is the app's own binary, so it opens the bundle around
 /// itself; a bare build opens the installed app by bundle id.
 async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlError> {
@@ -196,7 +196,7 @@ async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlErr
         ControlError::new(
             "unavailable",
             format!(
-                "The Sidescreen app is not running and could not be started ({detail}). Ask the user to open Sidescreen."
+                "The Agent Screen app is not running and could not be started ({detail}). Ask the user to open Agent Screen."
             ),
         )
     };
@@ -209,7 +209,7 @@ async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlErr
     open.arg("-g");
     match &bundle {
         Some(app) => open.arg(app),
-        None => open.args(["-b", "dev.sidescreen.menubar"]),
+        None => open.args(["-b", "app.agentscreen.AgentScreen"]),
     };
     let status = open.status().map_err(|e| unavailable(e.to_string()))?;
     if !status.success() {
@@ -265,7 +265,7 @@ async fn receive(
     }
     open.store(false, Ordering::Relaxed);
     for (_, settle) in pending.lock().unwrap().drain() {
-        let _ = settle.send(Err(closed("The Sidescreen app closed the connection.")));
+        let _ = settle.send(Err(closed("The Agent Screen app closed the connection.")));
     }
 }
 

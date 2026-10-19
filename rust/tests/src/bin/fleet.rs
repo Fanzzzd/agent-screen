@@ -4,7 +4,7 @@
 //! release notes in Pages, run the tests in Terminal and add up in
 //! Calculator. Checks that each app got all of its input.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e fleet
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e fleet
 //!
 //! The browsers run on throwaway profiles. Creates the displays one at a
 //! time and ends them after, with the test build's limit on new displays
@@ -12,7 +12,7 @@
 //! promo/public/wallpaper.png, which it puts back after. Skips when one of
 //! the apps is running with windows. Quits what it started after,
 //! discarding the documents. Writes promo/public/fleet-<agent>.mp4, each
-//! display through Sidescreen's recording.
+//! display through Agent Screen's recording.
 //!
 //! FLEET_ONLY=chrome,kanban runs only those agents. FLEET_CALIBRATE=1 stops
 //! before recording and writes each window's tree and a screenshot to
@@ -24,14 +24,14 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
-use regex::Regex;
-use serde_json::Value;
 use agent_screen_tests::{
     Control, check, fixture, json, osa, out, put_back_wallpaper, quit_discarding, quit_profile,
     root, run, running_headed, skip, sleep_ms, start_test_app, stop_test_app, try_osa,
     wear_promo_wallpaper,
 };
+use anyhow::{Context, Result, bail};
+use regex::Regex;
+use serde_json::Value;
 
 const APPS: [&str; 7] = [
     "Google Chrome",
@@ -158,7 +158,10 @@ fn main() -> ExitCode {
         .collect();
     let saved = wear_promo_wallpaper();
     let code = run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en"), ("SIDESCREEN_NEW_DISPLAYS", "16")])?;
+        start_test_app(&[
+            ("AGENTSCREEN_LANG", "en"),
+            ("AGENTSCREEN_NEW_DISPLAYS", "16"),
+        ])?;
         let result = record(&specs);
         quit_apps(&specs);
         stop_test_app();
@@ -290,7 +293,7 @@ fn browser_arguments(browser: Browser, dir: &Path, url: &str) -> Result<Vec<Stri
     })
 }
 
-/// A new display, waiting out Sidescreen's limit on new displays.
+/// A new display, waiting out Agent Screen's limit on new displays.
 fn create_display(control: &Control, params: &Value) -> Result<Value> {
     let wait = Regex::new(r"again in (\d+) s")?;
     loop {

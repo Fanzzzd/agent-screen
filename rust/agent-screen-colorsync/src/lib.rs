@@ -1,4 +1,4 @@
-//! Keeps ColorSync's display registry short: Sidescreen's root helper and
+//! Keeps ColorSync's display registry short: Agent Screen's root helper and
 //! the rules it follows (ADR 0009).
 
 pub mod policy;
@@ -11,7 +11,7 @@ pub mod reclaim;
 pub const VERSION: &str = "1";
 
 /// Where setup puts the helper, root's and not writable by the user.
-pub const INSTALLED: &str = "/Library/PrivilegedHelperTools/dev.sidescreen.colorsync";
+pub const INSTALLED: &str = "/Library/PrivilegedHelperTools/app.agentscreen.colorsync";
 
 /// The sudoers file that lets `user` run the helper as root. sudo skips
 /// files in sudoers.d whose name has a `.`, so the user's dots become `_`.
@@ -54,7 +54,7 @@ mod tests {
         );
         assert_eq!(
             sudoers_line("fanzhende"),
-            "fanzhende ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/dev.sidescreen.colorsync\n"
+            "fanzhende ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/app.agentscreen.colorsync\n"
         );
     }
 }

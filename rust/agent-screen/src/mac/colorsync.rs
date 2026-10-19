@@ -6,12 +6,12 @@
 //! The helper removes records of displays that aren't connected and keeps
 //! names in the Mac's languages. Here: whether it is set up, setting it up
 //! with the user's administrator password, running it, and the identities of
-//! Sidescreen's serials it keeps.
+//! Agent Screen's serials it keeps.
 
+use agent_screen_colorsync::{INSTALLED, VERSION, is_plain_user, sudoers_line, sudoers_path};
 use core_foundation::base::TCFType;
 use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::uuid::{CFUUID, CFUUIDRef};
-use agent_screen_colorsync::{INSTALLED, VERSION, is_plain_user, sudoers_line, sudoers_path};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::os::unix::fs::MetadataExt;
@@ -175,7 +175,7 @@ pub fn set_up(prompt: &str) -> Result<(), String> {
          /usr/bin/install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools; \
          /usr/bin/install -o root -g wheel -m 755 {source} {helper}.new; \
          /bin/mv -f {helper}.new {helper}; \
-         t=$(/usr/bin/mktemp /etc/sudoers.d/.sidescreen.XXXXXX); \
+         t=$(/usr/bin/mktemp /etc/sudoers.d/.agent-screen.XXXXXX); \
          /usr/bin/printf %s {line} > \"$t\"; \
          /usr/sbin/visudo -cqf \"$t\"; \
          /usr/sbin/chown root:wheel \"$t\"; /bin/chmod 440 \"$t\"; \
@@ -296,10 +296,10 @@ pub fn uuid_of(display: u32) -> Option<String> {
 }
 
 /// Identities of serials, shared by every instance of the app, in
-/// `~/Library/Application Support/Sidescreen/identities.json`.
+/// `~/Library/Application Support/Agent Screen/identities.json`.
 fn identities_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Sidescreen/identities.json"))
+    Some(PathBuf::from(home).join("Library/Application Support/Agent Screen/identities.json"))
 }
 
 fn identities() -> BTreeMap<String, String> {
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn quoting_survives_quotes_and_spaces() {
-        assert_eq!(shell_word("Sidescreen Dev.app"), "'Sidescreen Dev.app'");
+        assert_eq!(shell_word("Agent Screen Dev.app"), "'Agent Screen Dev.app'");
         assert_eq!(shell_word("it's"), r"'it'\''s'");
         assert_eq!(applescript_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
     }

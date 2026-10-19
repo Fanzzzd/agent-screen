@@ -5,7 +5,7 @@
 //! late its main thread runs, as the user's apps would, and the test app's
 //! own stall lines come from its displays log.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e perf
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e perf
 //!
 //! Prints one line per measure and writes them all as JSON to
 //! target/e2e/perf/PERF_LABEL-TIME.json (PERF_LABEL defaults to the commit).
@@ -15,22 +15,22 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, env_count, instance, json, now_ms, out, probe, run, running_headed, sh_lenient, skip,
     sleep_ms, start_test_app, stop_test_app, tool, try_osa,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     if running_headed("Calculator") {
         skip("Calculator is running; quit it to measure");
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = measure();
         drop(try_osa("tell application \"Calculator\" to quit"));
         stop_test_app();
@@ -55,7 +55,7 @@ fn spread(values: &[f64]) -> serde_json::Value {
 
 fn log_path() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(format!(
-        "Library/Logs/Sidescreen/displays-{}.log",
+        "Library/Logs/Agent Screen/displays-{}.log",
         instance().unwrap_or_default()
     ))
 }

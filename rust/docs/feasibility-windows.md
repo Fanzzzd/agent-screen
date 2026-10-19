@@ -1,4 +1,4 @@
-# Sidescreen on Windows: feasibility (2026-10-03)
+# Agent Screen on Windows: feasibility (2026-10-03)
 
 Desk research only; no Windows machine was available. The research read the source of the
 open-source virtual display drivers and of GPUI's Windows backend.

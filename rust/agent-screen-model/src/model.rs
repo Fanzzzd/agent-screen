@@ -1,4 +1,4 @@
-//! Agent Displays and what Sidescreen knows about them, independent of the
+//! Agent Displays and what Agent Screen knows about them, independent of the
 //! platform. The vocabulary follows CONTEXT.md.
 //!
 //! `H` is the platform's handle that keeps a display alive. Tests use `()`.
@@ -221,7 +221,7 @@ pub struct Display<H> {
     pub owner: Option<Owner>,
     /// Set once the owning Agent Session stopped using the display.
     pub ended: Option<EndReason>,
-    /// Windows Sidescreen put on this display, by id.
+    /// Windows Agent Screen put on this display, by id.
     pub records: BTreeMap<WindowId, Record>,
     /// Processes launch_app started for this display. Their windows are
     /// the Agent Session's wherever they open; other apps' may be the user's.
@@ -281,7 +281,7 @@ impl<H> Display<H> {
         self.owner.is_some() && !self.is_ended()
     }
 
-    /// Record a window Sidescreen put here. A Handover stays a Handover even
+    /// Record a window Agent Screen put here. A Handover stays a Handover even
     /// if the agent places the same window again.
     pub fn claim(&mut self, target: WindowTarget, origin: Origin, home: Option<Home>) {
         if self
@@ -625,7 +625,7 @@ pub enum Fate {
     Close,
 }
 
-/// The default for one window. `origin` is None for a window Sidescreen
+/// The default for one window. `origin` is None for a window Agent Screen
 /// never tracked.
 pub fn default_fate(
     origin: Option<Origin>,
@@ -741,7 +741,7 @@ mod tests {
 
     fn displays() -> Displays<()> {
         let mut d = Displays::default();
-        d.add(7, "Sidescreen 1".into(), DEFAULT_SIZE, owner(1), ());
+        d.add(7, "Agent Screen 1".into(), DEFAULT_SIZE, owner(1), ());
         d
     }
 

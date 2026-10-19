@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Sidescreen.app from the Rust binary.
+# Build Agent Screen.app from the Rust binary.
 #
 # Usage: scripts/bundle.sh [debug|release]
 #
@@ -7,7 +7,7 @@
 # signature and bundle id. This bundle signs with the first Apple
 # Development identity, else Developer ID Application, so
 # builds keep the grants.
-# Override with SIDESCREEN_SIGN_IDENTITY (use "-" for ad-hoc).
+# Override with AGENTSCREEN_SIGN_IDENTITY (use "-" for ad-hoc).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -17,28 +17,28 @@ flags=()
 cargo build -p agent-screen -p agent-screen-colorsync ${flags[@]+"${flags[@]}"}
 
 target="$(cd .. && pwd)/target"
-# Development builds are a separate app, "Sidescreen Dev", so they never
+# Development builds are a separate app, "Agent Screen Dev", so they never
 # take the installed app's privacy grants, socket or agent registration.
 if [[ "$config" == release ]]; then
-  app="$target/Sidescreen.app"
+  app="$target/Agent Screen.app"
 else
-  app="$target/Sidescreen Dev.app"
+  app="$target/Agent Screen Dev.app"
 fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$target/$config/Sidescreen" "$app/Contents/MacOS/Sidescreen"
+cp "$target/$config/AgentScreen" "$app/Contents/MacOS/AgentScreen"
 # The ColorSync helper, copied to a root-owned place when the user sets it up (ADR 0009).
 cp "$target/$config/agent-screen-colorsync" "$app/Contents/MacOS/agent-screen-colorsync"
 cp resources/Info.plist "$app/Contents/Info.plist"
 if [[ "$config" != release ]]; then
-  plutil -replace CFBundleIdentifier -string dev.sidescreen.menubar.dev "$app/Contents/Info.plist"
-  plutil -replace CFBundleName -string "Sidescreen Dev" "$app/Contents/Info.plist"
-  plutil -replace CFBundleDisplayName -string "Sidescreen Dev" "$app/Contents/Info.plist"
+  plutil -replace CFBundleIdentifier -string app.agentscreen.AgentScreen.dev "$app/Contents/Info.plist"
+  plutil -replace CFBundleName -string "Agent Screen Dev" "$app/Contents/Info.plist"
+  plutil -replace CFBundleDisplayName -string "Agent Screen Dev" "$app/Contents/Info.plist"
 fi
 cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp resources/AgentDisplay.png "$app/Contents/Resources/AgentDisplay.png"
 
-identity="${SIDESCREEN_SIGN_IDENTITY:-}"
+identity="${AGENTSCREEN_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
   identities="$(security find-identity -v -p codesigning)"
   for kind in "Apple Development" "Developer ID Application"; do

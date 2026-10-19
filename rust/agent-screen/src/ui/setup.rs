@@ -30,13 +30,13 @@ pub struct Setup {
     /// Screen Recording came on while running, and capture still fails:
     /// macOS applies it to a new process.
     pub restart: bool,
-    /// The last agent that loaded Sidescreen's tools, if any did.
+    /// The last agent that loaded Agent Screen's tools, if any did.
     pub agent: Option<String>,
     /// A Connect is running.
     pub connecting: bool,
-    /// Clients whose config has Sidescreen's server.
+    /// Clients whose config has Agent Screen's server.
     pub registered: Vec<&'static str>,
-    /// Whether macOS lets Sidescreen notify.
+    /// Whether macOS lets Agent Screen notify.
     pub notifications: notify::Auth,
     /// The ColorSync helper (ADR 0009), a setup running, its last error.
     pub colorsync: Option<crate::mac::colorsync::Helper>,
@@ -77,11 +77,11 @@ impl Render for Setup {
         let ready = self.status.complete() && !self.restart;
         let (title, subtitle) = if ready {
             (
-                t("Sidescreen is ready", "Sidescreen 可以用了"),
+                t("Agent Screen is ready", "Agent Screen 可以用了"),
                 match self.agent.clone() {
                     Some(agent) => tf!(
-                        "{agent} loaded Sidescreen's tools. Ask your agent to create a display: its apps run there, off your screen.",
-                        "{agent} 已加载 Sidescreen 的工具。让 agent 创建显示器，它的 app 会在旁边运行，不占你的屏幕。"
+                        "{agent} loaded Agent Screen's tools. Ask your agent to create a display: its apps run there, off your screen.",
+                        "{agent} 已加载 Agent Screen 的工具。让 agent 创建显示器，它的 app 会在旁边运行，不占你的屏幕。"
                     ),
                     None if !self.registered.is_empty() => t(
                         "Start a new agent session and ask it to create a display. Its apps run there, off your screen.",
@@ -97,10 +97,10 @@ impl Render for Setup {
             )
         } else {
             (
-                t("Get Sidescreen working", "让 Sidescreen 开始工作"),
+                t("Get Agent Screen working", "让 Agent Screen 开始工作"),
                 t(
-                    "Agents use apps on a display beside yours. Sidescreen needs to see that display and to click and type for the agent.",
-                    "Agent 在旁边的显示器上操作 app。Sidescreen 要看到那块显示器，也要替 agent 点击和输入。",
+                    "Agents use apps on a display beside yours. Agent Screen needs to see that display and to click and type for the agent.",
+                    "Agent 在旁边的显示器上操作 app。Agent Screen 要看到那块显示器，也要替 agent 点击和输入。",
                 )
                 .to_string(),
             )
@@ -247,8 +247,8 @@ impl Setup {
         };
         let detail = if self.notifications == notify::Auth::Denied {
             t(
-                "Off in System Settings. Turn on Allow Notifications for Sidescreen.",
-                "在系统设置里关着。打开 Sidescreen 的“允许通知”。",
+                "Off in System Settings. Turn on Allow Notifications for Agent Screen.",
+                "在系统设置里关着。打开 Agent Screen 的“允许通知”。",
             )
         } else {
             t(
@@ -348,8 +348,8 @@ impl Setup {
             )
             .to_string(),
             None => t(
-                "macOS rereads every display it has ever seen whenever displays change, and with many it stutters. Sidescreen keeps that list short. Asks for your administrator password once.",
-                "显示器每次变化，macOS 都会重读见过的所有显示器，屏幕多了就卡。Sidescreen 帮你精简这张表。需要输入一次管理员密码。",
+                "macOS rereads every display it has ever seen whenever displays change, and with many it stutters. Agent Screen keeps that list short. Asks for your administrator password once.",
+                "显示器每次变化，macOS 都会重读见过的所有显示器，屏幕多了就卡。Agent Screen 帮你精简这张表。需要输入一次管理员密码。",
             )
             .to_string(),
         };
@@ -445,8 +445,8 @@ impl Setup {
         let detail = match (&self.agent, self.registered.as_slice()) {
             (Some(agent), _) => tf!("{agent} loaded the tools", "{agent} 已加载工具"),
             (None, []) => t(
-                "Add Sidescreen to Claude Code and Codex, then start a new session",
-                "把 Sidescreen 加到 Claude Code 和 Codex，再开一个新会话",
+                "Add Agent Screen to Claude Code and Codex, then start a new session",
+                "把 Agent Screen 加到 Claude Code 和 Codex，再开一个新会话",
             )
             .to_string(),
             (None, clients) => tf!(
@@ -521,7 +521,7 @@ impl Setup {
         let action: gpui::AnyElement = if restart_here {
             button(
                 "setup-restart",
-                t("Reopen Sidescreen", "重新打开 Sidescreen").into(),
+                t("Reopen Agent Screen", "重新打开 Agent Screen").into(),
                 Some(theme.accent),
                 theme,
                 move |cx| tell(&shell, cx, |shell, cx| shell.relaunch(cx)),
@@ -565,8 +565,8 @@ impl Setup {
         let note = if restart_here {
             Some((
                 t(
-                    "macOS applies this after Sidescreen reopens",
-                    "macOS 要重新打开 Sidescreen 才能录屏",
+                    "macOS applies this after Agent Screen reopens",
+                    "macOS 要重新打开 Agent Screen 才能录屏",
                 )
                 .to_string(),
                 theme.orange,
@@ -574,8 +574,8 @@ impl Setup {
         } else if waiting {
             Some((
                 t(
-                    "Turn on Sidescreen in System Settings. This row updates by itself.",
-                    "在系统设置里打开 Sidescreen 的开关，这里会自动更新",
+                    "Turn on Agent Screen in System Settings. This row updates by itself.",
+                    "在系统设置里打开 Agent Screen 的开关，这里会自动更新",
                 )
                 .to_string(),
                 theme.secondary,

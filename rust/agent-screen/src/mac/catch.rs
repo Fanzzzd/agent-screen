@@ -54,8 +54,8 @@ unsafe extern "C" {
 static ACTED: std::sync::Mutex<Vec<(DisplayId, Option<i32>, std::time::Instant)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// The user's clicks and key presses outside Sidescreen in the last few
-/// seconds, and where each went. Events Sidescreen posts to an app's pid
+/// The user's clicks and key presses outside Agent Screen in the last few
+/// seconds, and where each went. Events Agent Screen posts to an app's pid
 /// never reach the global monitors that note these.
 static USER_INPUT: std::sync::Mutex<Vec<(std::time::Instant, Towards)>> =
     std::sync::Mutex::new(Vec::new());
@@ -100,7 +100,7 @@ fn drive(display: DisplayId, pid: Option<i32>, span: std::time::Duration) {
     }
 }
 
-/// Note a click or key press of the user's outside Sidescreen.
+/// Note a click or key press of the user's outside Agent Screen.
 pub fn user_acted(towards: Towards) {
     let now = std::time::Instant::now();
     let mut input = USER_INPUT.lock().unwrap_or_else(|e| e.into_inner());
@@ -269,7 +269,7 @@ fn runner() -> &'static Runner {
         *JOBS.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
         let (ready, started) = std::sync::mpsc::channel::<(usize, usize)>();
         std::thread::Builder::new()
-            .name("sidescreen-catch".into())
+            .name("agent-screen-catch".into())
             .spawn(move || unsafe {
                 let mut context = SourceContext {
                     version: 0,
@@ -377,7 +377,7 @@ impl Catch {
     /// None while the app doesn't take observers yet, as just after launch.
     /// `limit` caps how many windows it takes: an app the user runs too
     /// makes windows of the user's in the meantime, so take only the one
-    /// Sidescreen asks for.
+    /// Agent Screen asks for.
     pub async fn start(
         pid: i32,
         display: DisplayId,
@@ -516,7 +516,7 @@ extern "C" fn created(
     if target.paused.load(Ordering::Relaxed) {
         return;
     }
-    // Panels and sheets stay where the app puts them; Sidescreen places
+    // Panels and sheets stay where the app puts them; Agent Screen places
     // those through the usual path.
     if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
         return;
@@ -587,7 +587,7 @@ extern "C" fn created(
     *lock(&target.left) = left;
     if !taken {
         log::info!(
-            "catch: pid {} made another window, {:?}, after the one Sidescreen asked for; left where it is",
+            "catch: pid {} made another window, {:?}, after the one Agent Screen asked for; left where it is",
             target.pid,
             ax::window_id(window)
         );

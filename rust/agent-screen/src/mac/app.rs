@@ -231,10 +231,10 @@ pub fn resolve(app: &str) -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
-/// Where Sidescreen keeps the picture the user chose for Agent Displays.
+/// Where Agent Screen keeps the picture the user chose for Agent Displays.
 fn support_folder() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Sidescreen"))
+    Some(Path::new(&home).join("Library/Application Support/Agent Screen"))
 }
 
 /// The picture the user chose for Agent Displays, if any: a copy, so moving
@@ -252,7 +252,7 @@ pub fn custom_wallpaper() -> Option<std::path::PathBuf> {
 }
 
 /// Keep a copy of `picture` as Agent Displays' desktop picture, or go back
-/// to Sidescreen's own with None. Each copy gets a new name: macOS skips
+/// to Agent Screen's own with None. Each copy gets a new name: macOS skips
 /// setting a picture whose URL it already shows.
 pub fn set_wallpaper(picture: Option<&Path>) -> Result<(), String> {
     let folder = support_folder().ok_or("no home folder")?;
@@ -277,7 +277,7 @@ pub fn set_wallpaper(picture: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-/// The picture for Agent Displays: the user's, else Sidescreen's, which
+/// The picture for Agent Displays: the user's, else Agent Screen's, which
 /// names the display. None in a bare debug binary without either.
 fn wallpaper() -> Option<std::path::PathBuf> {
     custom_wallpaper().or_else(|| {

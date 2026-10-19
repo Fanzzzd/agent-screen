@@ -5,13 +5,13 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.sidescreen.menubar</string>
+    <string>app.agentscreen.AgentScreen</string>
     <key>CFBundleName</key>
-    <string>Sidescreen</string>
+    <string>Agent Screen</string>
     <key>CFBundleDisplayName</key>
-    <string>Sidescreen</string>
+    <string>Agent Screen</string>
     <key>CFBundleExecutable</key>
-    <string>Sidescreen</string>
+    <string>AgentScreen</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

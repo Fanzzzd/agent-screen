@@ -3,7 +3,7 @@
 //! display. Clicking one opens that display in the Viewer; a Help Request's
 //! Take Over button also starts a Takeover.
 //!
-//! Sidescreen asks for permission from the setup window, or once at launch
+//! Agent Screen asks for permission from the setup window, or once at launch
 //! for people who set up before notifications existed; never while posting,
 //! when an agent is already waiting.
 
@@ -24,7 +24,7 @@ use objc2_user_notifications::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// Whether macOS lets Sidescreen notify.
+/// Whether macOS lets Agent Screen notify.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Auth {
     /// Not known yet.
@@ -60,7 +60,7 @@ impl Note {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = AnyThread]
-    #[name = "SidescreenNotificationDelegate"]
+    #[name = "AgentScreenNotificationDelegate"]
     struct Delegate;
 
     unsafe impl NSObjectProtocol for Delegate {}
@@ -73,7 +73,7 @@ define_class!(
             _notification: &UNNotification,
             handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Show the banner even though Sidescreen is the sender.
+            // Show the banner even though Agent Screen is the sender.
             handler.call((UNNotificationPresentationOptions::Banner
                 | UNNotificationPresentationOptions::List
                 | UNNotificationPresentationOptions::Sound,));
@@ -141,7 +141,7 @@ pub fn install() {
     DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
 }
 
-/// Ask macOS whether Sidescreen may notify; the answer arrives as
+/// Ask macOS whether Agent Screen may notify; the answer arrives as
 /// `Native::NotificationAuth`.
 pub fn check() {
     let done = RcBlock::new(|settings: core::ptr::NonNull<UNNotificationSettings>| {

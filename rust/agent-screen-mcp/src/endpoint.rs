@@ -7,12 +7,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
 pub type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// A second app beside the user's, for tests: `SIDESCREEN_INSTANCE=e2e`
+/// A second app beside the user's, for tests: `AGENTSCREEN_INSTANCE=e2e`
 /// gives it its own socket and display serials. Letters, digits and dashes.
 /// A development build is the `dev` instance unless told otherwise, so it
-/// never answers for the user's installed Sidescreen.
+/// never answers for the user's installed Agent Screen.
 pub fn instance() -> Option<String> {
-    std::env::var("SIDESCREEN_INSTANCE")
+    std::env::var("AGENTSCREEN_INSTANCE")
         .ok()
         .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         .or_else(|| is_dev_build().then(|| "dev".to_string()))
@@ -21,7 +21,7 @@ pub fn instance() -> Option<String> {
 /// The bundle `scripts/bundle.sh` builds for development, beside the
 /// release one: its own name and bundle id, so macOS keeps its privacy
 /// grants and agents keep their registration apart.
-pub const DEV_BUNDLE: &str = "Sidescreen Dev.app";
+pub const DEV_BUNDLE: &str = "Agent Screen Dev.app";
 
 /// Whether this process runs from the development bundle.
 pub fn is_dev_build() -> bool {
@@ -40,12 +40,12 @@ pub fn socket_path() -> std::path::PathBuf {
         .map(PathBuf::from)
         .unwrap_or_default();
     #[cfg(target_os = "macos")]
-    let base = home.join("Library/Application Support/Sidescreen");
+    let base = home.join("Library/Application Support/Agent Screen");
     // XDG_RUNTIME_DIR is per user and mode 0700 by the spec.
     #[cfg(not(target_os = "macos"))]
     let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|dir| PathBuf::from(dir).join("sidescreen"))
-        .unwrap_or_else(|| home.join(".local/state/sidescreen"));
+        .map(|dir| PathBuf::from(dir).join("agent-screen"))
+        .unwrap_or_else(|| home.join(".local/state/agent-screen"));
     match instance() {
         Some(instance) => base.join(format!("control-{instance}.sock")),
         None => base.join("control.sock"),
@@ -58,8 +58,8 @@ pub fn socket_path() -> std::path::PathBuf {
 pub fn pipe_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_default();
     match instance() {
-        Some(instance) => format!(r"\\.\pipe\sidescreen-control-{user}-{instance}"),
-        None => format!(r"\\.\pipe\sidescreen-control-{user}"),
+        Some(instance) => format!(r"\\.\pipe\agent-screen-control-{user}-{instance}"),
+        None => format!(r"\\.\pipe\agent-screen-control-{user}"),
     }
 }
 

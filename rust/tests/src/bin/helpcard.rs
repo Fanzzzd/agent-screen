@@ -4,19 +4,19 @@
 //! during the Takeover. Captures the card and the Viewer header
 //! under target/e2e. The card shows on the user's screen for a few seconds.
 //!
-//!     SIDESCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e helpcard
+//!     AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e helpcard
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, DEBUG_BINARY, Frame, McpClient, capture, check, instance, json, now_ms, pid_of, run,
     sleep_ms, start_test_app, windows_of,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("set SIDESCREEN_INSTANCE");
+        eprintln!("set AGENTSCREEN_INSTANCE");
         return ExitCode::FAILURE;
     }
     run(|| {

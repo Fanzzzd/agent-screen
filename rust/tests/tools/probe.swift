@@ -1,7 +1,7 @@
 // Read-only lookups for the end-to-end tests.
 //
 //   probe windows PID         on-screen windows of PID as JSON lines
-//   probe displays            how many Sidescreen virtual displays are active
+//   probe displays            how many Agent Screen virtual displays are active
 //   probe bounds ID           display ID's global bounds in points
 //   probe idle                seconds since the user last touched a key or the pointer
 //   probe locked              1 while the screen is locked, else 0

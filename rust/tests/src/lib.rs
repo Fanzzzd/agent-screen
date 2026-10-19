@@ -3,7 +3,7 @@
 //!
 //! Some scripts drive the real cursor, so they wait for the user to leave
 //! the keyboard and pointer alone, and put everything back: the cursor, the
-//! front app, the AeroSpace workspace and the installed Sidescreen.
+//! front app, the AeroSpace workspace and the installed Agent Screen.
 
 pub mod control;
 pub mod mcp;
@@ -32,22 +32,22 @@ pub fn out() -> PathBuf {
     root().join("target/e2e")
 }
 
-/// `SIDESCREEN_INSTANCE=e2e` talks to a test app beside the user's, on its
+/// `AGENTSCREEN_INSTANCE=e2e` talks to a test app beside the user's, on its
 /// own socket.
 pub fn instance() -> Option<String> {
-    std::env::var("SIDESCREEN_INSTANCE")
+    std::env::var("AGENTSCREEN_INSTANCE")
         .ok()
         .filter(|s| !s.is_empty())
 }
 
-/// The debug app's socket. A build in the "Sidescreen Dev" bundle is the
-/// `dev` instance unless SIDESCREEN_INSTANCE names another.
+/// The debug app's socket. A build in the "Agent Screen Dev" bundle is the
+/// `dev` instance unless AGENTSCREEN_INSTANCE names another.
 pub fn socket_path() -> PathBuf {
     socket_of(Some(&instance().unwrap_or_else(|| "dev".into())))
 }
 
 /// The socket of an instance; `None` is the installed app's, and that of
-/// any bundle not named "Sidescreen Dev", such as the ungranted copy.
+/// any bundle not named "Agent Screen Dev", such as the ungranted copy.
 pub fn socket_of(instance: Option<&str>) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     let name = match instance {
@@ -55,18 +55,18 @@ pub fn socket_of(instance: Option<&str>) -> PathBuf {
         None => "control.sock".into(),
     };
     Path::new(&home)
-        .join("Library/Application Support/Sidescreen")
+        .join("Library/Application Support/Agent Screen")
         .join(name)
 }
 
 pub fn debug_app() -> PathBuf {
-    root().join("target/Sidescreen Dev.app")
+    root().join("target/Agent Screen Dev.app")
 }
 
-pub const INSTALLED_APP: &str = "/Applications/Sidescreen.app";
+pub const INSTALLED_APP: &str = "/Applications/Agent Screen.app";
 
 /// The pid pattern of the debug app's main binary.
-pub const DEBUG_BINARY: &str = "Sidescreen Dev.app/Contents/MacOS/Sidescreen";
+pub const DEBUG_BINARY: &str = "Agent Screen Dev.app/Contents/MacOS/AgentScreen";
 
 pub fn env_is(name: &str, value: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == value)
@@ -393,7 +393,7 @@ pub fn wait_for_quiet() -> bool {
 
 /// Wait until the user has been idle for 45 s with the screen unlocked.
 /// Tests beside the user's app that open windows need it: macOS shows a new
-/// window on the user's screen for a moment before Sidescreen moves it.
+/// window on the user's screen for a moment before Agent Screen moves it.
 pub fn wait_for_idle() -> bool {
     if env_is("E2E_NOW", "1") {
         return !locked();
@@ -449,7 +449,7 @@ pub fn restore(before: &Snapshot) {
 // MARK: The app
 
 fn binary_of(app: &Path) -> String {
-    format!("{}/Contents/MacOS/Sidescreen", app.display())
+    format!("{}/Contents/MacOS/AgentScreen", app.display())
 }
 
 /// A normal quit hands each display's windows back; a kill leaves them to
@@ -529,13 +529,13 @@ pub fn stop_debug_app() {
     stop_app(&debug_app());
 }
 
-/// The debug app as a second instance beside the user's Sidescreen, which
-/// keeps running with its displays. Needs SIDESCREEN_INSTANCE. Agent-side
+/// The debug app as a second instance beside the user's Agent Screen, which
+/// keeps running with its displays. Needs AGENTSCREEN_INSTANCE. Agent-side
 /// tests run this way at any time: their input goes to app processes, not
 /// to the user's pointer and keyboard.
 pub fn start_test_app(env: &[(&str, &str)]) -> Result<()> {
     if instance().is_none() {
-        bail!("set SIDESCREEN_INSTANCE to run beside the user's app");
+        bail!("set AGENTSCREEN_INSTANCE to run beside the user's app");
     }
     bundle_debug()?;
     if listening() {
@@ -548,7 +548,7 @@ pub fn start_test_app(env: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// With SIDESCREEN_INSTANCE, run `body` in the test app beside the user's,
+/// With AGENTSCREEN_INSTANCE, run `body` in the test app beside the user's,
 /// started for it and quit after it; without, in the app that runs.
 pub fn in_test_app(body: impl FnOnce() -> Result<()>) -> Result<()> {
     if instance().is_some() {
@@ -590,7 +590,7 @@ pub fn start_ungranted_app() -> Result<PathBuf> {
         "/usr/libexec/PlistBuddy",
         &[
             "-c",
-            "Set :CFBundleIdentifier dev.sidescreen.e2e-ungranted",
+            "Set :CFBundleIdentifier app.agentscreen.e2e-ungranted",
             &format!("{copy_str}/Contents/Info.plist"),
         ],
     )?;
@@ -609,7 +609,7 @@ pub fn start_ungranted_app() -> Result<PathBuf> {
     // Each run starts with no grants and no entries in the lists.
     sh_lenient(
         "/usr/bin/tccutil",
-        &["reset", "All", "dev.sidescreen.e2e-ungranted"],
+        &["reset", "All", "app.agentscreen.e2e-ungranted"],
     );
     stop_app(Path::new(INSTALLED_APP));
     stop_app(&debug_app());
@@ -642,7 +642,7 @@ pub fn open_stage(control: &Control) -> Result<u64> {
 }
 
 /// Start recording the stage display, the stand-in for the user's screen,
-/// through Sidescreen's own recording. `stage` is the connection that opened
+/// through Agent Screen's own recording. `stage` is the connection that opened
 /// it. Unlike `screencapture -R`, it lays no dimming veil over the other
 /// displays, which the Viewer would show.
 pub fn record_stage(stage: &Control, id: u64) -> Result<PathBuf> {
@@ -799,7 +799,7 @@ pub fn watch_flash<T>(app: &str, work: impl FnOnce() -> Result<T>) -> Result<(Fl
 
 fn support() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join("Library/Application Support/Sidescreen")
+        .join("Library/Application Support/Agent Screen")
 }
 
 /// For promo footage: the user's chosen agent display wallpaper, if any,

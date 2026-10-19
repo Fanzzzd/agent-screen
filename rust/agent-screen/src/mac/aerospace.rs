@@ -300,7 +300,7 @@ pub struct Layout {
 static REMEMBERED: std::sync::Mutex<Option<Layout>> = std::sync::Mutex::new(None);
 
 fn is_agent_display(monitor: &str) -> bool {
-    monitor.starts_with("Sidescreen")
+    monitor.starts_with("Agent Screen")
 }
 
 /// `now`, except that what sits on Agent Displays keeps its place in
@@ -365,8 +365,8 @@ pub enum Ignoring {
 }
 
 /// What every Agent Display's name starts with.
-const DISPLAY_NAME: &str = "Sidescreen 1";
-const PATTERN: &str = "'^Sidescreen'";
+const DISPLAY_NAME: &str = "Agent Screen 1";
+const PATTERN: &str = "'^Agent Screen'";
 
 /// None while AeroSpace isn't running. Reads AeroSpace's binary once per
 /// build, about 20 MB: run it off the main thread.
@@ -425,7 +425,7 @@ fn read_ignoring(display_exists: bool) -> Option<Ignoring> {
     let display_exists = display_exists
         || super::cg::online()
             .into_iter()
-            .any(super::cg::is_sidescreen);
+            .any(super::cg::is_agent_screen);
     // The file may say so before AeroSpace reloads it: an AeroSpace that
     // still lists an Agent Display hasn't.
     let ignores = configured
@@ -599,7 +599,7 @@ pub fn with_agent_displays_ignored(text: &str) -> String {
     }
     // A top-level key: before any table, so at the top.
     format!(
-        "# Sidescreen's virtual displays are for AI agents: leave them alone.\n\
+        "# Agent Screen's virtual displays are for AI agents: leave them alone.\n\
          ignored-monitors = [{PATTERN}]\n\n{text}"
     )
 }
@@ -631,7 +631,7 @@ fn not_written(reason: impl Into<String>) -> NotIgnored {
 fn replace(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary = path.with_file_name(format!(".{name}.sidescreen"));
+    let temporary = path.with_file_name(format!(".{name}.agent-screen"));
     std::fs::write(&temporary, text)?;
     std::fs::rename(&temporary, path)
 }
@@ -669,10 +669,10 @@ pub fn ignore_agent_displays() -> Result<Ignored, NotIgnored> {
     let backup = match &old {
         Some(old) => {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let mut backup = path.with_file_name(format!("{name}.before-sidescreen"));
+            let mut backup = path.with_file_name(format!("{name}.before-agent-screen"));
             let mut n = 2;
             while backup.exists() {
-                backup = path.with_file_name(format!("{name}.before-sidescreen-{n}"));
+                backup = path.with_file_name(format!("{name}.before-agent-screen-{n}"));
                 n += 1;
             }
             std::fs::write(&backup, old).map_err(|e| not_written(e.to_string()))?;
@@ -687,7 +687,7 @@ pub fn ignore_agent_displays() -> Result<Ignored, NotIgnored> {
     };
     replace(&path, &with_agent_displays_ignored(&base)).map_err(|e| {
         not_written(format!(
-            "{} can't be written ({e}); if your dotfiles manage it, add ignored-monitors = ['^Sidescreen'] there",
+            "{} can't be written ({e}); if your dotfiles manage it, add ignored-monitors = ['^Agent Screen'] there",
             path.display()
         ))
     })?;
@@ -716,14 +716,14 @@ mod tests {
     #[test]
     fn finds_agent_displays_in_ignored_monitors() {
         assert!(ignores_agent_displays(
-            "ignored-monitors = ['^Sidescreen']\n"
+            "ignored-monitors = ['^Agent Screen']\n"
         ));
         assert!(ignores_agent_displays(
-            "ignored-monitors = [\n  'dummy',\n  \"sidescreen\",\n]\n"
+            "ignored-monitors = [\n  'dummy',\n  \"agent screen\",\n]\n"
         ));
         assert!(!ignores_agent_displays("ignored-monitors = ['dummy']\n"));
         assert!(!ignores_agent_displays(
-            "# ignored-monitors = ['^Sidescreen']\n"
+            "# ignored-monitors = ['^Agent Screen']\n"
         ));
         assert!(!ignores_agent_displays("gaps.inner.horizontal = 8\n"));
     }
@@ -762,7 +762,7 @@ mod tests {
             &[
                 ("1", "Built-in", true),
                 ("10", "Studio", true),
-                ("11", "Sidescreen 1", true),
+                ("11", "Agent Screen 1", true),
             ],
             "1",
         );
@@ -772,7 +772,7 @@ mod tests {
             kept.shown["Studio"], "10",
             "what the user's monitor shows now"
         );
-        assert!(!kept.shown.contains_key("Sidescreen 1"));
+        assert!(!kept.shown.contains_key("Agent Screen 1"));
 
         // Moved back, 11 is on the Studio again but hidden behind 10.
         let back = layout(
@@ -789,13 +789,13 @@ mod tests {
 
     #[test]
     fn skips_comments_in_the_list() {
-        let text = "ignored-monitors = [\n  'dummy', # don't touch\n  '^Sidescreen',\n]\n";
+        let text = "ignored-monitors = [\n  'dummy', # don't touch\n  '^Agent Screen',\n]\n";
         assert!(ignores_agent_displays(text));
     }
 
     #[test]
     fn writes_through_a_symlink() {
-        let dir = std::env::temp_dir().join(format!("sidescreen-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agent-screen-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (real, link) = (dir.join("real.toml"), dir.join("aerospace.toml"));
@@ -823,22 +823,22 @@ mod tests {
     fn adds_agent_displays_to_a_config() {
         let fresh =
             with_agent_displays_ignored("start-at-login = true\n\n[gaps]\ninner.horizontal = 8\n");
-        assert!(fresh.contains("ignored-monitors = ['^Sidescreen']\n\nstart-at-login"));
+        assert!(fresh.contains("ignored-monitors = ['^Agent Screen']\n\nstart-at-login"));
         assert!(ignores_agent_displays(&fresh));
 
         let listed = with_agent_displays_ignored("ignored-monitors = ['dummy']\n");
-        assert_eq!(listed, "ignored-monitors = ['^Sidescreen', 'dummy']\n");
+        assert_eq!(listed, "ignored-monitors = ['^Agent Screen', 'dummy']\n");
 
         let bracket = with_agent_displays_ignored("ignored-monitors = ['DELL [0-9]']\n");
         assert_eq!(
             bracket,
-            "ignored-monitors = ['^Sidescreen', 'DELL [0-9]']\n"
+            "ignored-monitors = ['^Agent Screen', 'DELL [0-9]']\n"
         );
         assert!(!ignores_agent_displays(
             "ignored-monitors = ['DELL [0-9]']\n"
         ));
 
         let empty = with_agent_displays_ignored("ignored-monitors = []\n");
-        assert_eq!(empty, "ignored-monitors = ['^Sidescreen']\n");
+        assert_eq!(empty, "ignored-monitors = ['^Agent Screen']\n");
     }
 }

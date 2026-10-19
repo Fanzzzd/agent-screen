@@ -1082,15 +1082,15 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     if missing.is_empty() {
         return Err(ControlError {
             code: "permission",
-            message: "The user turned on Screen Recording, and macOS applies it only once Sidescreen reopens. Sidescreen has put its setup window on the user's screen: tell the user to press Reopen Sidescreen there, then retry.".into(),
+            message: "The user turned on Screen Recording, and macOS applies it only once Agent Screen reopens. Agent Screen has put its setup window on the user's screen: tell the user to press Reopen Agent Screen there, then retry.".into(),
         });
     }
     let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
     Err(ControlError {
         code: "permission",
         message: format!(
-            "Sidescreen is missing the macOS {} permission, and only the user can grant it. \
-             Sidescreen has put its setup window on the user's screen (also reachable from its \
+            "Agent Screen is missing the macOS {} permission, and only the user can grant it. \
+             Agent Screen has put its setup window on the user's screen (also reachable from its \
              menu bar icon). Tell the user to turn it on there, then retry; until then every call \
              fails the same way.",
             names.join(" and ")
@@ -1230,7 +1230,7 @@ async fn create_display(
             }
             if let Err(wait) = core.update(cx, |c, _| c.may_make()) {
                 return Err(ControlError::failed(format!(
-                    "Sidescreen made many displays in the last minutes, and each one makes every app on this Mac reconfigure its screens. Keep using the display you have, or call create_display again in {} s.",
+                    "Agent Screen made many displays in the last minutes, and each one makes every app on this Mac reconfigure its screens. Keep using the display you have, or call create_display again in {} s.",
                     wait.as_secs().max(1)
                 )));
             }
@@ -1315,7 +1315,7 @@ async fn create_display(
     })
     .detach();
     // Read AeroSpace's state now that the display exists: the user may have
-    // started, quit or reconfigured it since Sidescreen last looked.
+    // started, quit or reconfigured it since Agent Screen last looked.
     let aerospace_takes = cx
         .background_executor()
         .spawn(async move {
@@ -1530,7 +1530,7 @@ fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows:
     })
 }
 
-/// Record a window Sidescreen put on a display.
+/// Record a window Agent Screen put on a display.
 fn claim(
     core: &Entity<Core>,
     id: DisplayId,
@@ -1818,7 +1818,7 @@ async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
 struct Launched {
     window: Option<windows::Window>,
     was_running: bool,
-    /// Why there is no window. For an app Sidescreen started:
+    /// Why there is no window. For an app Agent Screen started:
     /// `still_starting`, none yet; one it opens soon moves onto the display.
     /// For a running app: `existing_window`, the file shows in a window it
     /// had; `still_opening`, the file's window hasn't come yet;
@@ -1832,20 +1832,20 @@ struct Launched {
 /// How long a launch watches for a window that comes after it gave up.
 const LATE_WINDOW_WAIT: Duration = Duration::from_secs(30);
 
-/// How long a running app may take to make the window Sidescreen asked
+/// How long a running app may take to make the window Agent Screen asked
 /// for. A window it makes later may be the user's.
 const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
 /// The same, counted from when `open` returns: it returns once the app has
 /// the file.
 const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
 /// However long `open` takes, a running app's turn ends this long after
-/// Sidescreen's request.
+/// Agent Screen's request.
 const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);
 
-/// RUNNING_APP_TURN, or in test builds SIDESCREEN_RUNNING_TURN_MS, which
+/// RUNNING_APP_TURN, or in test builds AGENTSCREEN_RUNNING_TURN_MS, which
 /// sends every file down the path of one that opens late.
 fn running_app_turn() -> Duration {
-    std::env::var("SIDESCREEN_RUNNING_TURN_MS")
+    std::env::var("AGENTSCREEN_RUNNING_TURN_MS")
         .ok()
         .filter(|_| debug_methods())
         .and_then(|ms| ms.parse().ok())
@@ -2003,8 +2003,8 @@ async fn launch_now(
     // or AeroSpace files them in the user's workspace.
     let bounds = cg::display_bounds(id);
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
-    // A running app may be the user's: take only the window Sidescreen
-    // opens. A starting app's windows are all Sidescreen's.
+    // A running app may be the user's: take only the window Agent Screen
+    // opens. A starting app's windows are all Agent Screen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
     let mut catch = match app::running_pid(&path).filter(|_| !fresh) {
@@ -2031,7 +2031,7 @@ async fn launch_now(
     let could_not_open = || ControlError::failed(format!("could not open {name}"));
     let requested_at = Instant::now();
     // The new window may take the app's key focus from the user's window
-    // before Sidescreen sees it: note theirs now, to hand it back after.
+    // before Agent Screen sees it: note theirs now, to hand it back after.
     if let Some(pid) = app::running_pid(&path).filter(|_| !fresh) {
         core.update(cx, |c, _| c.forwarder(id))
             .remember_user_window(pid)
@@ -2217,7 +2217,7 @@ async fn launch_now(
 
     // A running app may be the user's: its new window is the one the catch
     // took, never one the user opens meanwhile. A starting app's windows
-    // are all Sidescreen's.
+    // are all Agent Screen's.
     // Off the main thread: reading a window's document asks the app, which
     // may be busy.
     let find_ours = |taken: Option<u32>| {
@@ -2289,7 +2289,7 @@ async fn launch_now(
                 // The title before the URL, to tell when it has arrived.
                 let before = windows::find(placed.target.window_id).map(|w| w.title);
                 // Into the new window's address field where there is one
-                // Sidescreen knows; else the system sends the URL, and the
+                // Agent Screen knows; else the system sends the URL, and the
                 // browser opens it in its front window, the new one.
                 let (new_window, url) = (placed.target, target.to_string());
                 let in_field = cx
@@ -2360,9 +2360,9 @@ async fn launch_now(
         }
     }
     keep_catch(core, id, catch, cx);
-    log::debug!("launch: {name} made no window of Sidescreen's (gave up early: {gave_up})");
+    log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
     // A slow launch can open its window after we stop waiting. Keep watching
-    // so it does not stay on the user's screen: for an app Sidescreen
+    // so it does not stay on the user's screen: for an app Agent Screen
     // started, any new window; for a running app, the one showing the file.
     let core = core.clone();
     // The app showed the file in a window it had before; otherwise its
@@ -2514,7 +2514,7 @@ fn shows_document(target: WindowTarget, path: &std::path::Path) -> bool {
         .is_some_and(|p| p == path)
 }
 
-/// Whether a running app has had its time to make the window Sidescreen
+/// Whether a running app has had its time to make the window Agent Screen
 /// asked for: counted from Command-N, or from when `open` returned, and
 /// never longer than RUNNING_APP_TURN from the request.
 fn waited_long_enough(
@@ -3202,10 +3202,10 @@ impl Args<'_> {
     }
 }
 
-/// Test hooks: in debug builds, or with SIDESCREEN_DEBUG=1 for measuring a
+/// Test hooks: in debug builds, or with AGENTSCREEN_DEBUG=1 for measuring a
 /// release build.
 fn debug_methods() -> bool {
-    cfg!(debug_assertions) || std::env::var_os("SIDESCREEN_DEBUG").is_some_and(|v| v == "1")
+    cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }
 
 #[cfg(test)]
@@ -3218,7 +3218,7 @@ mod launch_tests {
 
     #[test]
     fn routes_file_urls() {
-        let dir = std::env::temp_dir().join(format!("sidescreen-route-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agent-screen-route-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a b.html");
         std::fs::write(&file, "x").unwrap();

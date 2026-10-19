@@ -1,27 +1,27 @@
 //! A system alert that lands on an Agent Display goes to the main display
 //! (issue #22). The script shows its own alert, drawn by
 //! UserNotificationCenter as macOS's prompts are, and moves it onto the
-//! display; Sidescreen moves it back within 2 s. The alert shows on the
+//! display; Agent Screen moves it back within 2 s. The alert shows on the
 //! user's screen for a moment at the start and the end.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e alerts
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e alerts
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
-use serde_json::Value;
 use agent_screen_tests::{
     Control, check, instance, json, pid_of, probe, run, sleep_ms, start_test_app, stop_test_app,
     tool,
 };
+use anyhow::{Context, Result};
+use serde_json::Value;
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let mut alert = std::process::Command::new(tool("alert")?)
             .arg("20")
             .spawn()?;
@@ -94,7 +94,7 @@ fn test() -> Result<()> {
         .collect();
     let after = alert_window();
     check(
-        "Sidescreen moved the alert to the main display",
+        "Agent Screen moved the alert to the main display",
         after.is_some_and(|w| {
             let (x, y) = (w.2 + w.4 / 2.0, w.3 + w.5 / 2.0);
             x >= 0.0 && x < main[0] && y >= 0.0 && y < main[1]

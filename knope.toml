@@ -1,6 +1,6 @@
 # Releases: see docs/DEVELOPMENT.md. Each user-facing change adds a file to
 # .changeset (`knope document-change`); every push to main refreshes a
-# "Release Sidescreen x.y.z" pull request, and merging it releases.
+# "Release Agent Screen x.y.z" pull request, and merging it releases.
 
 [package]
 versioned_files = [
@@ -12,7 +12,7 @@ versioned_files = [
   { path = "rust/Cargo.lock", dependency = "agent-screen-model" },
 ]
 changelog = "CHANGELOG.md"
-assets = "rust/target/Sidescreen-*.dmg"
+assets = "rust/target/AgentScreen-*.dmg"
 
 # Commit messages here are plain sentences, not conventional commits:
 # versions and notes come from changesets only.
@@ -37,7 +37,7 @@ type = "PrepareRelease"
 
 [[workflows.steps]]
 type = "Command"
-command = "git commit -m \"Release Sidescreen $version\""
+command = "git commit -m \"Release Agent Screen $version\""
 
 [[workflows.steps]]
 type = "Command"
@@ -48,10 +48,10 @@ type = "CreatePullRequest"
 base = "main"
 
 [workflows.steps.title]
-template = "Release Sidescreen $version"
+template = "Release Agent Screen $version"
 
 [workflows.steps.body]
-template = "Merging this releases Sidescreen $version: a signed DMG on GitHub and the Homebrew cask.\n\n$changelog"
+template = "Merging this releases Agent Screen $version: a signed DMG on GitHub and the Homebrew cask.\n\n$changelog"
 
 [[workflows]]
 name = "release"
@@ -61,4 +61,4 @@ type = "Release"
 
 [github]
 owner = "Fanzzzd"
-repo = "sidescreen"
+repo = "agent-screen"

@@ -2,29 +2,29 @@
 //! scaled down whole, not cropped (issue #13), and a zoom over the whole
 //! screenshot, at its reported size, shows the same picture.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e agentshots
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e agentshots
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
-use base64::Engine;
 use agent_screen_tests::{
     Control, check, instance, json, probe, quit_app, run, running, skip, sleep_ms, start_test_app,
     stop_test_app,
 };
+use anyhow::{Context, Result};
+use base64::Engine;
 
 const SAME: i64 = 12;
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     if running("Calculator") {
         skip("Calculator is running, and may be the user's");
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         quit_app("Calculator");
         stop_test_app();

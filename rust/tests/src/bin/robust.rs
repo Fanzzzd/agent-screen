@@ -4,21 +4,21 @@
 //!
 //!     cargo e2e robust
 //!
-//! With SIDESCREEN_INSTANCE=e2e it starts the debug app beside the user's
+//! With AGENTSCREEN_INSTANCE=e2e it starts the debug app beside the user's
 //! and quits it afterwards, so it can run while the user works.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
-use regex::Regex;
-use serde::Deserialize;
 use agent_screen_tests::{
     Control, McpClient, ToolResult, Value, Window, check, cut, in_test_app, instance, json, now_ms,
     quit_app, quit_discarding, quoted, run, running, sh, sh_lenient, skip, sleep_ms, tool, try_osa,
     wait_for_idle, watch_flash,
 };
+use anyhow::{Context, Result};
+use regex::Regex;
+use serde::Deserialize;
 
 /// An on-screen window, as tools/onscreen.swift lists it.
 #[derive(Debug, Default, Deserialize)]
@@ -402,7 +402,7 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
     );
 
     // A file opened in the running app: the window showing it is the agent's.
-    let file = format!("/tmp/sidescreen robust {}.txt", now_ms());
+    let file = format!("/tmp/agent-screen robust {}.txt", now_ms());
     std::fs::write(&file, "robust\n")?;
     let opened = client.tool(
         "launch_app",
@@ -412,7 +412,7 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         "a file opened in a running app lands on the display",
         opened
             .window()
-            .is_some_and(|w| w.title.starts_with("sidescreen robust")),
+            .is_some_and(|w| w.title.starts_with("agent-screen robust")),
         cut(opened.text(), 160),
     );
     check(
@@ -422,7 +422,7 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
     );
     temporary.push(file);
     // The same with a file URL.
-    let url_file = format!("/tmp/sidescreen url {}.txt", now_ms());
+    let url_file = format!("/tmp/agent-screen url {}.txt", now_ms());
     std::fs::write(&url_file, "robust\n")?;
     let by_url = client.tool(
         "launch_app",
@@ -436,7 +436,7 @@ fn body(r: &Robust, temporary: &mut Vec<String>) -> Result<()> {
         "a file:// URL opens like its path",
         by_url
             .window()
-            .is_some_and(|w| w.title.starts_with("sidescreen url")),
+            .is_some_and(|w| w.title.starts_with("agent-screen url")),
         cut(by_url.text(), 160),
     );
     temporary.push(url_file);

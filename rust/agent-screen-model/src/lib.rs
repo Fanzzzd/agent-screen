@@ -1,4 +1,4 @@
-//! Sidescreen's domain rules, shared by the app on every platform: Agent
+//! Agent Screen's domain rules, shared by the app on every platform: Agent
 //! Displays and their lifecycle, window records and fates, and key chords.
 //! Nothing here touches the OS.
 

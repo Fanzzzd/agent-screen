@@ -3,24 +3,24 @@
 //! the way AppKit and GPUI report it, so the user's pointer is untouched
 //! and this runs at any time. Peek opens on a stage display.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e peekhover
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover
 
 use std::collections::HashSet;
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
 use agent_screen_tests::{
     Control, DEBUG_BINARY, check, instance, json, open_stage, pid_of, run, start_test_app,
     stop_test_app, windows_of,
 };
+use anyhow::{Result, bail};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         stop_test_app();
         result

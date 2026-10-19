@@ -7,7 +7,7 @@
 //!   Safari had active;
 //! - a click on an item of a page's select menu chooses it.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e browsers
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e browsers
 
 use std::hash::{BuildHasher, RandomState};
 use std::io::{BufRead, BufReader, Write};
@@ -17,12 +17,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
-use regex::Regex;
 use agent_screen_tests::{
     McpClient, Window, check, cut, in_test_app, instance, json, now_ms, quit_app, run, running,
     skip, sleep_ms, wait_for_idle,
 };
+use anyhow::{Context, Result};
+use regex::Regex;
 
 fn quit_safari() {
     // When Safari isn't running, the loop below returns at once.
@@ -113,7 +113,7 @@ fn main() -> ExitCode {
     }
     run(|| {
         let server = Server::start()?;
-        let dir = std::env::temp_dir().join(format!("sidescreen-browsers-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("agent-screen-browsers-{}", now_ms()));
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
             dir.join("select.html"),

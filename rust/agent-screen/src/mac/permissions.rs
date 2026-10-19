@@ -1,4 +1,4 @@
-//! Screen Recording and Accessibility: whether Sidescreen has them, asking
+//! Screen Recording and Accessibility: whether Agent Screen has them, asking
 //! for them, and the System Settings panes where the user turns them on.
 //!
 //! macOS shows each permission's prompt only while the app has no entry in
@@ -108,7 +108,7 @@ pub fn last() -> Status {
 /// Whether Screen Recording is on now.
 ///
 /// CGPreflightScreenCaptureAccess answers for the whole life of the
-/// process, so a grant made while Sidescreen runs only shows another way:
+/// process, so a grant made while Agent Screen runs only shows another way:
 /// WindowServer hands out other apps' window titles only to processes that
 /// may record the screen.
 pub fn screen_recording() -> bool {
@@ -121,11 +121,11 @@ pub fn screen_recording() -> bool {
         .any(|w| w.target.pid != me && w.layer == 0 && !w.title.is_empty())
 }
 
-/// Set while Screen Recording is on but capture fails until Sidescreen
+/// Set while Screen Recording is on but capture fails until Agent Screen
 /// reopens.
 pub static NEEDS_REOPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether Screen Recording was on when Sidescreen started. Off then,
+/// Whether Screen Recording was on when Agent Screen started. Off then,
 /// capture may need a fresh process even after the user turns it on.
 pub fn screen_recording_at_launch() -> bool {
     static AT_LAUNCH: OnceLock<bool> = OnceLock::new();
@@ -133,7 +133,7 @@ pub fn screen_recording_at_launch() -> bool {
 }
 
 /// Whether the permission's list in System Settings has an entry for
-/// Sidescreen, on or off. None when macOS doesn't say.
+/// Agent Screen, on or off. None when macOS doesn't say.
 pub fn listed(p: Permission) -> Option<bool> {
     type Preflight = unsafe extern "C" fn(*const c_void, *const c_void) -> i32;
     static PREFLIGHT: OnceLock<Option<Preflight>> = OnceLock::new();
@@ -153,7 +153,7 @@ pub fn listed(p: Permission) -> Option<bool> {
     Some(answer != 2)
 }
 
-/// Ask for the permission. Shows the system prompt while Sidescreen has no
+/// Ask for the permission. Shows the system prompt while Agent Screen has no
 /// entry in the list and returns true; otherwise opens the pane and returns
 /// false, since the prompt would not come up.
 pub fn request(p: Permission) -> bool {

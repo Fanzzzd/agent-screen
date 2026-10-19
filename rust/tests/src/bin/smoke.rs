@@ -3,13 +3,13 @@
 //!
 //!     cargo e2e smoke [app]
 //!
-//! Saves each screenshot to /tmp/sidescreen-smoke-N.jpg.
+//! Saves each screenshot to /tmp/agent-screen-smoke-N.jpg.
 
 use std::process::ExitCode;
 
+use agent_screen_tests::{McpClient, ToolResult, fail, json, now_ms, run, sleep_ms};
 use anyhow::{Context, Result};
 use regex::Regex;
-use agent_screen_tests::{McpClient, ToolResult, fail, json, now_ms, run, sleep_ms};
 
 /// "ok" or "FAIL"; a FAIL counts toward the exit code.
 fn verdict(ok: bool) -> &'static str {

@@ -1,23 +1,23 @@
-# Sidescreen with AeroSpace
+# Agent Screen with AeroSpace
 
 Only for AeroSpace users. Without a window manager, nothing here applies.
 
-Stock AeroSpace treats agent displays as monitors. It shows one of your workspaces on each new agent display, and it files an agent's new window in your focused workspace, so the window can pass over your screen for a frame or two before Sidescreen moves it. Sidescreen moves your workspaces back to the monitors they were on.
+Stock AeroSpace treats agent displays as monitors. It shows one of your workspaces on each new agent display, and it files an agent's new window in your focused workspace, so the window can pass over your screen for a frame or two before Agent Screen moves it. Agent Screen moves your workspaces back to the monitors they were on.
 
 To stop this at the source, AeroSpace needs an `ignored-monitors` option, [proposed upstream](https://github.com/nikitabobko/AeroSpace/pull/2306). Until it lands, install our build of AeroSpace, which is AeroSpace plus that one patch. Your config stays as it is.
 
 ```sh
-brew tap fanzzzd/sidescreen
+brew tap fanzzzd/agent-screen
 brew uninstall --cask aerospace
 brew install --cask aerospace-sidescreen
 tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace
 ```
 
-Then choose **Keep AeroSpace Off Sidescreen's Displays…** in Sidescreen's menu, or add this line to your AeroSpace config yourself:
+Then choose **Keep AeroSpace Off Agent Screen's Displays…** in Agent Screen's menu, or add this line to your AeroSpace config yourself:
 
 ```toml
-ignored-monitors = ['^Sidescreen']
+ignored-monitors = ['^Agent Screen']
 ```
 
 macOS keeps Accessibility permission per app signature, so the old AeroSpace's entry doesn't work for this build. `tccutil reset` clears it, and macOS asks again when AeroSpace starts.

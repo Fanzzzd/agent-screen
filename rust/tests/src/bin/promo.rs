@@ -2,7 +2,7 @@
 //! an agent applies a coupon and fills a checkout page in Chrome on its own
 //! display, seen in the Viewer, then asks for help with the card number.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e promo
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e promo
 //!
 //! The display wears promo/public/wallpaper.png, through the wallpaper
 //! setting, which it puts back after. Chrome runs on a throwaway profile.
@@ -11,13 +11,13 @@
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
-use regex::Regex;
 use agent_screen_tests::{
     Control, Rect, check, cut_stage, fixture, json, open_stage, out, put_back_wallpaper,
     quit_profile, record_stage, root, run, running_headed, skip, sleep_ms, start_test_app,
     stop_test_app, wear_promo_wallpaper,
 };
+use anyhow::{Context, Result};
+use regex::Regex;
 
 fn main() -> ExitCode {
     if running_headed("Google Chrome") {

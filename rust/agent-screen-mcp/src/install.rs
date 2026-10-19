@@ -1,4 +1,4 @@
-//! Register Sidescreen's MCP server with the agent clients on this Mac:
+//! Register Agent Screen's MCP server with the agent clients on this Mac:
 //! Claude Code through its own CLI, Codex through its config file.
 
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ impl std::fmt::Display for Done {
     }
 }
 
-/// The clients whose config runs `exe` as Sidescreen's server, by reading
+/// The clients whose config runs `exe` as Agent Screen's server, by reading
 /// their files: Claude Code's ~/.claude.json and Codex's config.toml. An
 /// entry for another copy, moved or deleted since, doesn't count.
 pub fn registered(exe: &Path) -> Vec<&'static str> {
@@ -52,13 +52,13 @@ pub fn registered(exe: &Path) -> Vec<&'static str> {
 /// registers beside the installed app, not over it.
 fn server_name(exe: &str) -> &'static str {
     if crate::endpoint::is_dev_exe(Path::new(exe)) {
-        "sidescreen-dev"
+        "agent-screen-dev"
     } else {
-        "sidescreen"
+        "agent-screen"
     }
 }
 
-/// Whether Claude Code's user config has a sidescreen server running `exe`.
+/// Whether Claude Code's user config has a agent-screen server running `exe`.
 fn claude_runs(config: &str, exe: &str) -> bool {
     let pointer = format!("/mcpServers/{}/command", server_name(exe));
     serde_json::from_str::<serde_json::Value>(config)
@@ -100,7 +100,7 @@ fn user_path() -> Option<std::ffi::OsString> {
     static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
-        let marker = "__SIDESCREEN_PATH__";
+        let marker = "__AGENTSCREEN_PATH__";
         let mut child = Command::new(shell)
             .args(["-ilc", &format!("printf '\\n{marker}%s' \"$PATH\"")])
             .stdin(std::process::Stdio::null())
@@ -195,7 +195,7 @@ fn codex(config: &Path, exe: &Path) -> Result<Done, String> {
     Ok(Done::AddedTo(config.to_path_buf()))
 }
 
-/// The config with Sidescreen's entry pointing at `exe`, and whether it
+/// The config with Agent Screen's entry pointing at `exe`, and whether it
 /// changed. Other entries and comments stay as they are.
 fn with_codex_entry(text: &str, exe: &str) -> (String, bool) {
     let name = server_name(exe);
@@ -235,39 +235,40 @@ fn with_codex_entry(text: &str, exe: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
-    const EXE: &str = "/Applications/Sidescreen.app/Contents/MacOS/Sidescreen";
+    const EXE: &str = "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen";
 
     #[test]
     fn counts_only_an_entry_that_runs_this_copy() {
         let claude = |command: &str| {
             format!(
-                r#"{{"projects":{{"/x":{{"disabledMcpServers":["sidescreen"]}}}},"mcpServers":{{"sidescreen":{{"command":"{command}","args":["mcp"]}}}}}}"#
+                r#"{{"projects":{{"/x":{{"disabledMcpServers":["agent-screen"]}}}},"mcpServers":{{"agent-screen":{{"command":"{command}","args":["mcp"]}}}}}}"#
             )
         };
         assert!(claude_runs(&claude(EXE), EXE));
-        assert!(!claude_runs(&claude("/Users/me/old/Sidescreen"), EXE));
+        assert!(!claude_runs(&claude("/Users/me/old/Agent Screen"), EXE));
         assert!(
             !claude_runs(
-                r#"{"projects":{"/x":{"disabledMcpServers":["sidescreen"]}}}"#,
+                r#"{"projects":{"/x":{"disabledMcpServers":["agent-screen"]}}}"#,
                 EXE
             ),
             "a project list naming it isn't a registration"
         );
         let (codex, _) = with_codex_entry("", EXE);
         assert!(codex_runs(&codex, EXE));
-        assert!(!codex_runs(&codex, "/Users/me/old/Sidescreen"));
+        assert!(!codex_runs(&codex, "/Users/me/old/Agent Screen"));
         assert!(!codex_runs("", EXE));
     }
 
     #[test]
     fn the_development_build_registers_beside_the_installed_app() {
-        let dev = "/Users/me/sidescreen/rust/target/Sidescreen Dev.app/Contents/MacOS/Sidescreen";
+        let dev =
+            "/Users/me/agent-screen/rust/target/Agent Screen Dev.app/Contents/MacOS/AgentScreen";
         let (text, _) = with_codex_entry("", EXE);
         let (both, changed) = with_codex_entry(&text, dev);
         assert!(changed);
         assert!(
-            both.contains("[mcp_servers.sidescreen]")
-                && both.contains("[mcp_servers.sidescreen-dev]")
+            both.contains("[mcp_servers.agent-screen]")
+                && both.contains("[mcp_servers.agent-screen-dev]")
         );
         assert!(codex_runs(&both, EXE) && codex_runs(&both, dev));
     }
@@ -276,7 +277,7 @@ mod tests {
     fn appends_to_a_config_without_it() {
         let (text, changed) = with_codex_entry("model = \"o3\"\n", EXE);
         assert!(changed);
-        assert!(text.starts_with("model = \"o3\"\n\n[mcp_servers.sidescreen]\n"));
+        assert!(text.starts_with("model = \"o3\"\n\n[mcp_servers.agent-screen]\n"));
         assert!(text.contains(&format!("command = {EXE:?}")));
     }
 
@@ -288,10 +289,10 @@ mod tests {
 
     #[test]
     fn replaces_an_entry_pointing_elsewhere_and_keeps_the_rest() {
-        let before = "[a]\nx = 1\n\n[mcp_servers.sidescreen]\ncommand = \"/old\"\n\n[mcp_servers.sidescreen.env]\nA = \"1\"\n\n[b]\ny = 2\n";
+        let before = "[a]\nx = 1\n\n[mcp_servers.agent-screen]\ncommand = \"/old\"\n\n[mcp_servers.agent-screen.env]\nA = \"1\"\n\n[b]\ny = 2\n";
         let (text, changed) = with_codex_entry(before, EXE);
         assert!(changed);
-        assert!(text.starts_with("[a]\nx = 1\n\n[mcp_servers.sidescreen]\n"));
+        assert!(text.starts_with("[a]\nx = 1\n\n[mcp_servers.agent-screen]\n"));
         assert!(!text.contains("/old") && !text.contains("A = \"1\""));
         assert!(text.ends_with("tool_timeout_sec = 700\n\n[b]\ny = 2\n"));
     }

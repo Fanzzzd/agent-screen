@@ -63,8 +63,8 @@ jobs:
         working-directory: rust
       - uses: actions/upload-artifact@v4
         with:
-          name: sidescreen-binary
-          path: rust/target/release/Sidescreen
+          name: agent-screen-binary
+          path: rust/target/release/AgentScreen
           if-no-files-found: error
 
   starts-on-macos-15:
@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: sidescreen-binary
+          name: agent-screen-binary
       - run: |
-          chmod +x Sidescreen
-          ./Sidescreen --version
+          chmod +x AgentScreen
+          ./AgentScreen --version

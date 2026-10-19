@@ -89,13 +89,13 @@ pub fn online() -> Vec<DisplayId> {
     ids[..count as usize].to_vec()
 }
 
-/// Whether a display is one of Sidescreen's, from this app or another.
-pub fn is_sidescreen(id: DisplayId) -> bool {
+/// Whether a display is one of Agent Screen's, from this app or another.
+pub fn is_agent_screen(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x5353 }
 }
 
 /// Whether a display is AeroSpace's closet, where it keeps the windows of
-/// invisible workspaces. Nobody looks at it: Sidescreen treats it as if it
+/// invisible workspaces. Nobody looks at it: Agent Screen treats it as if it
 /// weren't there.
 pub fn is_closet(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x4145 && CGDisplayModelNumber(id) == 1 }

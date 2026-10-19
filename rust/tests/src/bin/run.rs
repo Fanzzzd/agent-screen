@@ -7,7 +7,7 @@
 //!
 //! They move the real cursor, so they wait until the user has been idle for
 //! 45 s and has no Agent Display open, then put the cursor, the front app,
-//! the workspace and the installed Sidescreen back. Captures land in
+//! the workspace and the installed Agent Screen back. Captures land in
 //! rust/target/e2e. Cases skip when an app they use is already the user's.
 
 use std::io::Read;
@@ -15,15 +15,15 @@ use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
-use regex::Regex;
-use serde::Deserialize;
 use agent_screen_tests::{
     Control, Frame, Rect, Window, capture, check, digest, failed, fixture, hid, json, locked,
     on_screen, osa, out, pid_of, pixel, quit_app, reopen_installed, restore, run, running,
     sh_lenient, sleep_ms, snapshot, socket_of, start_debug_app, start_ungranted_app, stop_app,
     stop_debug_app, tool, voided, wait_for_quiet, windows_of,
 };
+use anyhow::{Context, Result};
+use regex::Regex;
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,7 +202,7 @@ fn strip_on(control: &Control) -> Result<()> {
 
     control.call("launchApp", json!({ "displayId": id, "app": "Calculator" }))?;
     sleep_ms(2500);
-    let viewer = pid_of("target/Sidescreen Dev.app/Contents/MacOS/Sidescreen")
+    let viewer = pid_of("target/Agent Screen Dev.app/Contents/MacOS/AgentScreen")
         .context("the debug app isn't running")?;
     // Calculator's View menu, the third title.
     let (vx, vy) = on_screen(image, size, 150.0, 12.0);
@@ -305,13 +305,13 @@ fn permissions() -> Result<()> {
     stop_app(&app);
     sh_lenient(
         "/usr/bin/tccutil",
-        &["reset", "All", "dev.sidescreen.e2e-ungranted"],
+        &["reset", "All", "app.agentscreen.e2e-ungranted"],
     );
     result
 }
 
 fn permissions_of(app: &Path) -> Result<()> {
-    let pid = pid_of(&format!("{}/Contents/MacOS/Sidescreen", app.display()))
+    let pid = pid_of(&format!("{}/Contents/MacOS/AgentScreen", app.display()))
         .context("the ungranted app isn't running")?;
     let mut setup = None;
     for _ in 0..50 {

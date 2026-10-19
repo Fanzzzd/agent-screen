@@ -130,7 +130,7 @@ impl Default for Forwarder {
     fn default() -> Self {
         let (jobs, rx) = mpsc::channel::<Job>();
         thread::Builder::new()
-            .name("sidescreen-input".into())
+            .name("agent-screen-input".into())
             .spawn(move || {
                 let mut worker = Worker::new();
                 while let Ok(job) = rx.recv() {
@@ -443,7 +443,7 @@ impl Forwarder {
     pub async fn remember_user_window(&self, pid: i32) {
         self.run(move |w| {
             if let Some(id) = super::ax::focused_window_id(pid)
-                && !on_a_sidescreen(id)
+                && !on_agent_display(id)
             {
                 w.remember(WindowTarget { pid, window_id: id });
             }
@@ -555,13 +555,13 @@ impl Forwarder {
     }
 }
 
-/// Whether window `id` is on one of Sidescreen's displays: an agent's,
+/// Whether window `id` is on one of Agent Screen's displays: an agent's,
 /// never the user's to hand focus back to.
-fn on_a_sidescreen(id: u32) -> bool {
+fn on_agent_display(id: u32) -> bool {
     super::windows::find(id).is_some_and(|w| {
         super::cg::active_displays()
             .into_iter()
-            .filter(|&d| super::cg::is_sidescreen(d))
+            .filter(|&d| super::cg::is_agent_screen(d))
             .any(|d| super::cg::display_bounds(d).contains(w.bounds.mid()))
     })
 }
@@ -753,7 +753,7 @@ impl Worker {
                 "input: keys in {target:?}'s app were in window {}",
                 other.window_id
             );
-            if !on_a_sidescreen(other.window_id) {
+            if !on_agent_display(other.window_id) {
                 self.remember(other);
             }
             // A focus record doesn't make another window of an app in the
@@ -768,7 +768,7 @@ impl Worker {
         // since. Never in the user's front app, where it would take keys.
         if wake && self.woken != Some((target.window_id, activations())) && !is_front(target.pid) {
             let empty = cg::window_bounds(target.window_id)
-                .filter(|_| on_a_sidescreen(target.window_id))
+                .filter(|_| on_agent_display(target.window_id))
                 .and_then(|bounds| title_bar_point(target, bounds));
             if let Some(at) = empty {
                 log::debug!("input: waking {target:?}");
@@ -819,7 +819,7 @@ impl Worker {
                 self.restore.push(window);
                 continue;
             }
-            if !now.is_some_and(on_a_sidescreen) {
+            if !now.is_some_and(on_agent_display) {
                 continue;
             }
             // The app came to the front meanwhile: the focus record is

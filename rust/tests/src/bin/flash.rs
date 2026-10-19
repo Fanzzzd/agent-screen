@@ -2,16 +2,16 @@
 //! moves: TextEdit launched again RUNS times (default 15), with the
 //! distribution. TextEdit must not be in use.
 //!
-//!     SIDESCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e flash
-//!     FILES=1 SIDESCREEN_RUNNING_TURN_MS=0 ...   a file window that comes late
+//!     AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e flash
+//!     FILES=1 AGENTSCREEN_RUNNING_TURN_MS=0 ...   a file window that comes late
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     McpClient, env_count, env_is, in_test_app, instance, json, now_ms, quit_discarding, run,
     running, sh, skip, sleep_ms, tool, wait_for_idle, watch_flash,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if running("TextEdit") {
@@ -58,10 +58,10 @@ fn test(times: &mut Vec<i64>) -> Result<()> {
         let runs = env_count("RUNS", 15.0);
         let mut i = 0;
         while f64::from(i) < runs {
-            // FILES=1: open a new file each time. With SIDESCREEN_RUNNING_TURN_MS=0
+            // FILES=1: open a new file each time. With AGENTSCREEN_RUNNING_TURN_MS=0
             // each one takes the path of a file that opens after the 4 s turn.
             let file =
-                env_is("FILES", "1").then(|| format!("/tmp/sidescreen flash {}.txt", now_ms()));
+                env_is("FILES", "1").then(|| format!("/tmp/agent-screen flash {}.txt", now_ms()));
             if let Some(file) = &file {
                 std::fs::write(file, "flash\n")?;
             }

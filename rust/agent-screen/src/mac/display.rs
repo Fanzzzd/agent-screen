@@ -100,7 +100,7 @@ impl Drop for Serial {
 // main thread, until released there.
 unsafe impl Send for VirtualDisplay {}
 
-/// Displays that got a taken unit number, kept online while Sidescreen has
+/// Displays that got a taken unit number, kept online while Agent Screen has
 /// displays. WindowServer numbers a new display by how many are online, so
 /// once a unit is gone from the middle, as when the user unplugs a monitor
 /// that came before AeroSpace's closet, every new display gets a taken one.
@@ -120,7 +120,7 @@ pub fn filler_ids() -> Vec<u32> {
         .collect()
 }
 
-/// Release the kept twins, once Sidescreen has no other display.
+/// Release the kept twins, once Agent Screen has no other display.
 pub fn release_fillers() {
     let fillers = std::mem::take(&mut *FILLERS.lock().unwrap_or_else(|e| e.into_inner()));
     for filler in fillers {
@@ -193,7 +193,7 @@ impl VirtualDisplay {
         unsafe {
             let descriptor: Retained<AnyObject> =
                 msg_send![class("CGVirtualDisplayDescriptor")?, new];
-            // The display's own callbacks run on a queue of Sidescreen's,
+            // The display's own callbacks run on a queue of Agent Screen's,
             // not the main one, which draws the menu bar icon and Viewer.
             let _: () = msg_send![&descriptor, setQueue: callback_queue()];
             let _: () = msg_send![&descriptor, setName: &*NSString::from_str(name)];
@@ -243,7 +243,7 @@ const LARGEST: (u32, u32) = (2560, 1600);
 fn callback_queue() -> &'static AnyObject {
     static QUEUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let queue = *QUEUE.get_or_init(|| {
-        let queue = dispatch2::DispatchQueue::new("dev.sidescreen.virtual-displays", None);
+        let queue = dispatch2::DispatchQueue::new("app.agentscreen.virtual-displays", None);
         // Kept for the app's life.
         dispatch2::DispatchRetained::into_raw(queue).as_ptr() as usize
     });
@@ -297,7 +297,7 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
     let worker = WORKER.get_or_init(|| {
         let (send, receive) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()
-            .name("sidescreen-displays".into())
+            .name("agent-screen-displays".into())
             .spawn(move || {
                 for job in receive {
                     job();
@@ -389,13 +389,13 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
     let anchor = others
         .iter()
         .copied()
-        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
+        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_agent_screen(d))
         .map(bounds_of)
         .reduce(|a, b| a.union(&b))
         .unwrap_or_else(|| cg::display_bounds(cg::main_display()));
     let occupied = others
         .iter()
-        .filter(|&&d| virtual_ids.contains(&d) || cg::is_sidescreen(d))
+        .filter(|&&d| virtual_ids.contains(&d) || cg::is_agent_screen(d))
         .map(|&d| bounds_of(d))
         .fold(anchor, |a, b| a.union(&b));
     let height = cg::display_bounds(id).height;
@@ -426,7 +426,7 @@ fn physical_bounds(id: u32, others: &[u32], virtual_ids: &[u32]) -> Option<crate
     let physical: Vec<u32> = others
         .iter()
         .copied()
-        .filter(|&d| d != id && !virtual_ids.contains(&d) && !cg::is_sidescreen(d))
+        .filter(|&d| d != id && !virtual_ids.contains(&d) && !cg::is_agent_screen(d))
         .collect();
     let anchor_ids = if physical.is_empty() {
         vec![cg::main_display()]
@@ -452,7 +452,7 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
 }
 
 /// Refresh rate and backing scale of new displays. Test builds read them
-/// from SIDESCREEN_DISPLAY_HZ and SIDESCREEN_DISPLAY_SCALE, to measure
+/// from AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE, to measure
 /// what each costs.
 fn mode_settings() -> (f64, u32) {
     let read = |name: &str| {
@@ -460,10 +460,10 @@ fn mode_settings() -> (f64, u32) {
             .then(|| std::env::var(name).ok())
             .flatten()
     };
-    let hz = read("SIDESCREEN_DISPLAY_HZ")
+    let hz = read("AGENTSCREEN_DISPLAY_HZ")
         .and_then(|v| v.parse().ok())
         .unwrap_or(60.0);
-    let scale = read("SIDESCREEN_DISPLAY_SCALE")
+    let scale = read("AGENTSCREEN_DISPLAY_SCALE")
         .and_then(|v| v.parse().ok())
         .filter(|s| *s == 1 || *s == 2)
         .unwrap_or(2);

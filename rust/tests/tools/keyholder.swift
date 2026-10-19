@@ -10,7 +10,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
                       styleMask: [.titled], backing: .buffered, defer: false)
-window.title = "Sidescreen E2E: the user's app"
+window.title = "Agent Screen E2E: the user's app"
 let field = NSTextField(frame: NSRect(x: 20, y: 24, width: 280, height: 24))
 window.contentView?.addSubview(field)
 window.center()

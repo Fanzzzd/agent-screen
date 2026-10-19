@@ -156,7 +156,7 @@ pub fn main_async(f: impl FnOnce() + 'static) {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "SidescreenIconTarget"]
+    #[name = "AgentScreenIconTarget"]
     struct IconTarget;
 
     impl IconTarget {
@@ -242,20 +242,20 @@ impl StatusIcon {
         let (symbol, description) = if self.needs_setup.get() {
             (
                 "rectangle.on.rectangle.slash",
-                t("Sidescreen: needs permissions", "Sidescreen：需要权限"),
+                t("Agent Screen: needs permissions", "Agent Screen：需要权限"),
             )
         } else if self.asking.get() {
             (
                 "hand.raised.fill",
                 t(
-                    "Sidescreen: an agent is asking for help",
-                    "Sidescreen：agent 在请求帮助",
+                    "Agent Screen: an agent is asking for help",
+                    "Agent Screen：agent 在请求帮助",
                 ),
             )
         } else if agent_screen_mcp::endpoint::is_dev_build() {
-            ("rectangle.on.rectangle", "Sidescreen Dev")
+            ("rectangle.on.rectangle", "Agent Screen Dev")
         } else {
-            ("rectangle.on.rectangle", "Sidescreen")
+            ("rectangle.on.rectangle", "Agent Screen")
         };
         let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str(symbol),
@@ -303,7 +303,7 @@ impl StatusIcon {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "SidescreenMenuTarget"]
+    #[name = "AgentScreenMenuTarget"]
     #[ivars = MenuAction]
     struct MenuTarget;
 
@@ -594,7 +594,7 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
     }
     let base = window.class();
     let name = format!(
-        "Sidescreen{}{}",
+        "AgentScreen{}{}",
         if keyable { "Keyable" } else { "Unkeyable" },
         base.name().to_string_lossy()
     );
@@ -651,7 +651,7 @@ pub fn intercept_terminate(mtm: objc2::MainThreadMarker, hold: impl Fn() -> bool
     };
     let delegate: &AnyObject = delegate.as_ref();
     let base = delegate.class();
-    let name = format!("SidescreenQuitting{}", base.name().to_string_lossy());
+    let name = format!("AgentScreenQuitting{}", base.name().to_string_lossy());
     let name = std::ffi::CString::new(name).expect("class name");
     let class = AnyClass::get(&name).or_else(|| {
         let mut builder = ClassBuilder::new(&name, base)?;
@@ -821,12 +821,12 @@ pub fn menu_bar_height(display: u32) -> f64 {
 }
 
 /// Force light or dark for screenshots in debug builds:
-/// SIDESCREEN_APPEARANCE=light|dark. The system setting stays untouched.
+/// AGENTSCREEN_APPEARANCE=light|dark. The system setting stays untouched.
 pub fn debug_appearance() {
     if !cfg!(debug_assertions) {
         return;
     }
-    let name = match std::env::var("SIDESCREEN_APPEARANCE").as_deref() {
+    let name = match std::env::var("AGENTSCREEN_APPEARANCE").as_deref() {
         Ok("light") => "NSAppearanceNameAqua",
         Ok("dark") => "NSAppearanceNameDarkAqua",
         _ => return,
@@ -900,7 +900,7 @@ pub fn watch_screens() {
 }
 
 /// Count the system's front app changing, even for a moment, as when an
-/// app starts: each change takes key status from the windows Sidescreen
+/// app starts: each change takes key status from the windows Agent Screen
 /// focused in background apps, so input forwarders focus them again.
 pub fn watch_activations() {
     let center = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();

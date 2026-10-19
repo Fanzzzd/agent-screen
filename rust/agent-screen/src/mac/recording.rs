@@ -12,13 +12,13 @@
 //! silent. The stream follows apps as they come and go; at the end the
 //! sound goes into the video (`mux`).
 
+use agent_screen_model::model::DisplayId;
 use screencapturekit::prelude::*;
 use screencapturekit::recording_output::{
     RecordingCallbacks, SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration,
     SCRecordingOutputFileType,
 };
 use serde_json::{Value, json};
-use agent_screen_model::model::DisplayId;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -229,10 +229,10 @@ fn start_sound(id: DisplayId, file: &Path) -> Result<Sound, String> {
     })
 }
 
-/// The folder recordings go to: ~/Movies/Sidescreen.
+/// The folder recordings go to: ~/Movies/Agent Screen.
 pub fn folder() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    Path::new(&home).join("Movies").join("Sidescreen")
+    Path::new(&home).join("Movies").join("Agent Screen")
 }
 
 pub fn is_recording(id: DisplayId) -> bool {
@@ -274,7 +274,7 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
     let mut pixels =
         super::cg::pixel_size(id).unwrap_or((bounds.width as u32, bounds.height as u32));
     // Test builds may record at one pixel per point, to compare the cost.
-    if cfg!(debug_assertions) && std::env::var("SIDESCREEN_RECORD_SCALE").as_deref() == Ok("1") {
+    if cfg!(debug_assertions) && std::env::var("AGENTSCREEN_RECORD_SCALE").as_deref() == Ok("1") {
         pixels = (bounds.width as u32, bounds.height as u32);
     }
     let filter = super::screenshot::filter(id, true, false)?;

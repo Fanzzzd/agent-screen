@@ -5,7 +5,7 @@
 //!
 //!     cargo e2e demo
 //!
-//! Runs beside the user's Sidescreen (SIDESCREEN_INSTANCE=demo). The Viewer
+//! Runs beside the user's Agent Screen (AGENTSCREEN_INSTANCE=demo). The Viewer
 //! opens on a stage display that stands in for the user's screen; the
 //! user's notes, pointer, clicks and keys there are made by the script, so
 //! the real pointer and keyboard stay with the user. Writes
@@ -16,12 +16,12 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
 use agent_screen_tests::{
     Control, Rect, capture, document_text, json, open_stage, out, probe, quit_discarding, quoted,
     root, run, running, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, tool,
     type_in_viewer, wait_for_unlocked,
 };
+use anyhow::{Context, Result, bail};
 
 /// What `kill` does without a signal: SIGTERM, not `Child::kill`'s SIGKILL.
 fn terminate(child: &Child) {
@@ -54,12 +54,12 @@ impl Notes {
 }
 
 fn main() -> ExitCode {
-    if std::env::var("SIDESCREEN_INSTANCE")
+    if std::env::var("AGENTSCREEN_INSTANCE")
         .unwrap_or_default()
         .is_empty()
     {
         // SAFETY: no other thread runs yet.
-        unsafe { std::env::set_var("SIDESCREEN_INSTANCE", "demo") };
+        unsafe { std::env::set_var("AGENTSCREEN_INSTANCE", "demo") };
     }
     if running("TextEdit") {
         skip("TextEdit is the user's");
@@ -69,7 +69,7 @@ fn main() -> ExitCode {
         if !wait_for_unlocked() {
             std::process::exit(1);
         }
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = Control::connect().and_then(|control| {
             let mut recorder = None;
             let mut notes = None;
@@ -169,7 +169,7 @@ fn record(
 
     // Both type at once: the agent in its TextEdit, the user in their notes.
     notes.begin("type Reply to Sam, lunch at 1pm works for me.")?;
-    for word in "Launch note: Sidescreen gives each agent a screen of its own, so you keep your mouse and keyboard.".split(' ') {
+    for word in "Launch note: Agent Screen gives each agent a screen of its own, so you keep your mouse and keyboard.".split(' ') {
         control.call("type", json!({ "displayId": id, "text": format!("{word} ") }))?;
         pause(110);
     }

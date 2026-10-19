@@ -3,23 +3,23 @@
 //! reconfigures its screens. Each reconfiguration with a virtual display
 //! connected leaves ColorSync answering more requests for minutes.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e spares
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e spares
 
 use std::process::ExitCode;
 use std::thread;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, check, instance, json, probe, run, sleep_ms, start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         stop_test_app();
         result
@@ -80,7 +80,7 @@ fn test() -> Result<()> {
     );
     let log = std::fs::read_to_string(
         std::path::PathBuf::from(std::env::var("HOME")?)
-            .join("Library/Logs/Sidescreen/displays-e2e.log"),
+            .join("Library/Logs/Agent Screen/displays-e2e.log"),
     )?;
     let mentions = |event: &str| log.contains(&format!("{event} display={first} "));
     check(

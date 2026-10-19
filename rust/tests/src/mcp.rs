@@ -1,4 +1,4 @@
-//! A minimal MCP client over stdio: JSON-RPC lines to `Sidescreen mcp`.
+//! A minimal MCP client over stdio: JSON-RPC lines to `Agent Screen mcp`.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -179,7 +179,7 @@ impl Call<'_> {
                 } else {
                     "jpg"
                 };
-                let file = format!("/tmp/sidescreen-smoke-{n}.{ext}");
+                let file = format!("/tmp/agent-screen-smoke-{n}.{ext}");
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(item.data.as_deref().unwrap_or(""))
                     .unwrap_or_default();
@@ -201,7 +201,7 @@ fn wait_for_app() -> Result<()> {
         }
         sleep_ms(200);
     }
-    bail!("the Sidescreen app is not listening on its control socket")
+    bail!("the Agent Screen app is not listening on its control socket")
 }
 
 impl McpClient {
@@ -213,15 +213,15 @@ impl McpClient {
             skip("the screen is locked");
         }
         wait_for_app()?;
-        // SIDESCREEN_MCP="<binary> [args]" runs another server build.
-        let (command, args) = match std::env::var("SIDESCREEN_MCP") {
+        // AGENTSCREEN_MCP="<binary> [args]" runs another server build.
+        let (command, args) = match std::env::var("AGENTSCREEN_MCP") {
             Ok(custom) => {
                 let mut parts = custom.split(' ').map(String::from);
                 let command = parts.next().unwrap_or_default();
                 (command, parts.collect::<Vec<_>>())
             }
             Err(_) => (
-                format!("{}/Contents/MacOS/Sidescreen", debug_app().display()),
+                format!("{}/Contents/MacOS/AgentScreen", debug_app().display()),
                 vec!["mcp".to_string()],
             ),
         };

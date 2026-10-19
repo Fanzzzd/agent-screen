@@ -3,15 +3,15 @@
 //! empty window in front of it. The agent's keys, clicks and window state
 //! must reach the panel. Opens Preview on the agent's display and quits it.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e openpanel
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e openpanel
 
 use std::process::{Command, ExitCode};
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     McpClient, Value, Window, check, cut, in_test_app, instance, json, now_ms, quit_app, run,
     running, sh, skip, sleep_ms, wait_for_idle,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if running("Preview") {

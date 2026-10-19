@@ -1,4 +1,4 @@
-//! Sidescreen's MCP server. A client (Claude Code, Codex) starts it over
+//! Agent Screen's MCP server. A client (Claude Code, Codex) starts it over
 //! stdio; it serves the tools and forwards them to the menu bar app.
 
 mod control;
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tools::{Output, text};
 
 const INSTRUCTIONS: &[&str] = &[
-    "Sidescreen gives this session its own virtual display for operating GUI apps in the background.",
+    "Agent Screen gives this session its own virtual display for operating GUI apps in the background.",
     "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
     "Mark each window with set_disposition so the user knows what to keep.",
@@ -28,17 +28,17 @@ const INSTRUCTIONS: &[&str] = &[
 ];
 
 #[derive(Default)]
-struct Sidescreen {
+struct AgentScreen {
     control: std::sync::Arc<Control>,
     /// Whether the app has heard that this client loaded the tools.
     announced: std::sync::atomic::AtomicBool,
 }
 
-impl ServerHandler for Sidescreen {
+impl ServerHandler for AgentScreen {
     fn get_info(&self) -> InitializeResult {
         let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info = serde_json::from_value(
-            json!({ "name": "sidescreen", "version": env!("CARGO_PKG_VERSION") }),
+            json!({ "name": "agent-screen", "version": env!("CARGO_PKG_VERSION") }),
         )
         .expect("implementation info");
         info.instructions = Some(INSTRUCTIONS.join(" "));
@@ -119,7 +119,7 @@ fn from_json<T: serde::de::DeserializeOwned>(value: Value) -> T {
 pub fn run() -> anyhow::Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async {
         // stdout carries the protocol; anything else goes to stderr.
-        let service = Sidescreen::default()
+        let service = AgentScreen::default()
             .serve(rmcp::transport::stdio())
             .await?;
         service.waiting().await?;

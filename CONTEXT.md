@@ -1,12 +1,12 @@
-# Sidescreen
+# Agent Screen
 
-Sidescreen gives each AI agent session its own virtual display on the user's Mac, so the agent can operate GUI apps without taking over the user's screen, cursor or keyboard. The user can watch any agent's display and step in.
+Agent Screen gives each AI agent session its own virtual display on the user's Mac, so the agent can operate GUI apps without taking over the user's screen, cursor or keyboard. The user can watch any agent's display and step in.
 
 ## Language
 
 **Agent Display**:
 A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen. When the session stops using it, it closes by itself if no window is left on it, and otherwise becomes a Review Display. The user can also create one from Peek; it then has no Agent Session.
-_Avoid_: Sidescreen (the app's name), virtual screen, screen, bay
+_Avoid_: Agent Screen (the app's name), virtual screen, screen, bay
 
 **Spare**:
 An Agent Display that closed while empty and stays connected, out of sight, for a few minutes, so the next display of its size reuses it instead of adding one. It belongs to no Agent Session and shows nowhere in the UI.
@@ -21,7 +21,7 @@ An Agent Display whose Agent Session stopped using it, by `end_display` or a clo
 _Avoid_: Ended Display, finished display, orphaned display, dead display
 
 **Agent Session**:
-One run of one agent (a Claude Code or Codex conversation, for example) connected to Sidescreen. It has at most one Agent Display, and many sessions never get one.
+One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. It has at most one Agent Display, and many sessions never get one.
 _Avoid_: agent, client, worker
 
 **Viewer**:

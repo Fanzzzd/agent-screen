@@ -2,17 +2,17 @@
 //! its look and motion frame by frame: long and short moves, a run of quick
 //! clicks, and the rest after them.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e pointer
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e pointer
 //!
 //! The Viewer opens on a stage display. Writes rust/target/e2e/pointer.mov
 //! and, with ffmpeg, its frames at 60 fps to rust/target/e2e/pointer/.
 
 use std::process::{Command, ExitCode, Stdio};
 
-use anyhow::{Context, Result, bail};
 use agent_screen_tests::{
     Control, Rect, json, open_stage, out, run, sleep_ms, start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result, bail};
 
 fn main() -> ExitCode {
     run(|| {

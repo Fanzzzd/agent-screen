@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Sidescreen: notifications and the Windows button</title>
+<title>Agent Screen: notifications and the Windows button</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -227,7 +227,7 @@ function SetupStep({ lang }) {
   );
   return (
     <div className="glass w-[520px] rounded-2xl border border-black/10 shadow-xl p-5">
-      <div className="text-[15px] font-semibold mb-2">{T(lang, "Set Up Sidescreen", "设置 Sidescreen")}</div>
+      <div className="text-[15px] font-semibold mb-2">{T(lang, "Set Up Agent Screen", "设置 Agent Screen")}</div>
       <Row done title={T(lang, "Screen & System Audio Recording", "录屏与系统录音")} body={T(lang, "Shows each agent's display and lets agents take screenshots.", "显示 agent 的画面，让 agent 能截图。")} />
       <Row done title={T(lang, "Accessibility", "辅助功能")} body={T(lang, "Lets agents click and type on their display.", "让 agent 在自己的显示器上点击和输入。")} />
       <Row done={allowed} title={T(lang, "Notifications", "通知")} body={T(lang, "Tells you when an agent needs your help or is done with its display.", "agent 需要你帮忙、或用完显示器时提醒你。")}

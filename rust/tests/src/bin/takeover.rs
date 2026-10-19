@@ -1,23 +1,23 @@
-//! Takeover through the Viewer, beside the user's Sidescreen and out of
+//! Takeover through the Viewer, beside the user's Agent Screen and out of
 //! their sight: the Viewer opens on a stage display, and the user's clicks
 //! and keys are made inside the app, through the Viewer's own handler. The
 //! user's pointer and keyboard stay untouched, so this runs at any time.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e takeover
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e takeover
 
 use std::process::{Command, ExitCode, Stdio};
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, Rect, check, document_text, instance, json, open_stage, probe, quit_discarding,
     quoted, run, running, skip, sleep_ms, start_test_app, stop_test_app, type_in_viewer,
     wait_for_unlocked,
 };
+use anyhow::{Context, Result};
 
 /// The user may switch apps meanwhile; the test's own apps must never come forward.
 fn watch_front(stolen: &mut Vec<String>) -> Result<()> {
     let now = probe(&["front"])?;
-    if now == "TextEdit" || now == "Sidescreen" {
+    if now == "TextEdit" || now.starts_with("Agent Screen") {
         stolen.push(now);
     }
     Ok(())
@@ -25,7 +25,7 @@ fn watch_front(stolen: &mut Vec<String>) -> Result<()> {
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     if running("TextEdit") {
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let control = Control::connect()?;
         let result = test(&control);
         quit_discarding("TextEdit");
@@ -97,7 +97,7 @@ fn test(control: &Control) -> Result<()> {
             "30",
             "-R",
             &format!("{fx},{fy},40,40"),
-            "/tmp/sidescreen-takeover.mov",
+            "/tmp/agent-screen-takeover.mov",
         ])
         // screencapture -v reads its stdin for a key to stop on; an open,
         // empty pipe keeps it recording.

@@ -15,7 +15,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 pub const REGISTRY: &str = "/Library/Caches/ColorSync/com.apple.colorsync.devices";
-const LOCK: &str = "/var/run/dev.sidescreen.colorsync.lock";
+const LOCK: &str = "/var/run/app.agentscreen.colorsync.lock";
 /// Rewrites tried before a run gives up because colorsyncd keeps writing.
 const TRIES: usize = 3;
 const UNREGISTER_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -223,7 +223,7 @@ fn write_over(
         .and_then(|mut f| f.read_exact(&mut name))
         .map_err(|e| e.to_string())?;
     let temp = dir.join(format!(
-        ".sidescreen-{}",
+        ".agent-screen-{}",
         name.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
     let temp = temp.to_str().unwrap().to_string();

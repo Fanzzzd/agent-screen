@@ -149,7 +149,7 @@ pub fn try_action(element: &AXUIElement, action: &str) -> bool {
 /// Open a URL in this browser window through its address field. Safari
 /// opens a URL it is sent in the window it last had active, which a
 /// window in the background never becomes. True if the window has an
-/// address field Sidescreen knows and took the URL.
+/// address field Agent Screen knows and took the URL.
 pub fn open_in_address_field(target: WindowTarget, url: &str) -> bool {
     // Safari's.
     const IDS: [&str; 1] = ["WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"];

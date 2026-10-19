@@ -7,21 +7,21 @@
 //!
 //! Needs an Electron.app: `rust/target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e electron
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e electron
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
-use base64::Engine;
-use serde_json::Value;
 use agent_screen_tests::{
     Control, check, fixture, instance, json, out, probe, run, skip, sleep_ms, start_test_app,
     stop_test_app,
 };
+use anyhow::{Context, Result};
+use base64::Engine;
+use serde_json::Value;
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     let electron = std::env::var("E2E_ELECTRON")
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         skip("no Electron.app; copy one to rust/target/e2e or set E2E_ELECTRON");
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&electron);
         quit_harness();
         stop_test_app();

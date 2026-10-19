@@ -7,22 +7,22 @@
 //! 3 s, since the call borrows their keyboard, and skips after 60 s, or
 //! when a password field on the user's screen has the keyboard.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e ime
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e ime
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, check, instance, json, out, probe, run, sh, sh_lenient, skip, sleep_ms,
     start_test_app, stop_test_app, tool,
 };
+use anyhow::{Context, Result};
 
 const PINYIN: &str = "com.apple.inputmethod.SCIM.ITABC";
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             waited += 1;
         }
         let field = field_app()?;
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&field);
         let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
         stop_test_app();
@@ -60,7 +60,7 @@ fn field_app() -> Result<PathBuf> {
         app.join("Contents/Info.plist"),
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>dev.sidescreen.e2e.field</string>
+<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.field</string>
 <key>CFBundleExecutable</key><string>Field</string>
 <key>CFBundleName</key><string>Field</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -132,7 +132,7 @@ fn test(field: &Path) -> Result<()> {
         let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
         stop_test_app();
         skip(
-            "a password field on the user's screen has the keyboard; Sidescreen refused, as it should",
+            "a password field on the user's screen has the keyboard; Agent Screen refused, as it should",
         );
     }
     check(

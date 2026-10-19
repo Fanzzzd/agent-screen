@@ -1,9 +1,9 @@
-//! `dev.sidescreen.colorsync`: the root helper Sidescreen runs with
+//! `app.agentscreen.colorsync`: the root helper Agent Screen runs with
 //! `sudo -n` (ADR 0009). sudo lets the user run it with any arguments, so it
 //! takes only these, reads no environment and starts no program:
 //!
-//!     dev.sidescreen.colorsync --version
-//!     dev.sidescreen.colorsync reclaim [--keep UUID]...
+//!     app.agentscreen.colorsync --version
+//!     app.agentscreen.colorsync reclaim [--keep UUID]...
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: dev.sidescreen.colorsync --version | reclaim [--keep UUID]...");
+    eprintln!("usage: app.agentscreen.colorsync --version | reclaim [--keep UUID]...");
     ExitCode::from(2)
 }
 

@@ -44,11 +44,11 @@ unsafe extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
 }
 
-/// When Sidescreen last posted an event, and how long the user had been
+/// When Agent Screen last posted an event, and how long the user had been
 /// idle just before.
 static POSTED: std::sync::Mutex<Option<(Instant, f64)>> = std::sync::Mutex::new(None);
 
-/// Note an event Sidescreen is about to post. Posted events reset the HID
+/// Note an event Agent Screen is about to post. Posted events reset the HID
 /// idle timer as the user's do (ADR 0007), so `user_idle` tells them apart.
 pub fn note_posted() {
     let idle = user_idle();
@@ -56,7 +56,7 @@ pub fn note_posted() {
 }
 
 /// Seconds since the user last touched the keyboard, pointer or trackpad.
-/// When the idle timer was last reset by an event Sidescreen posted, the
+/// When the idle timer was last reset by an event Agent Screen posted, the
 /// user's idle time runs from before it.
 pub fn user_idle() -> f64 {
     let raw =

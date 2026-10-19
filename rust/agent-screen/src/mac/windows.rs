@@ -205,7 +205,7 @@ pub fn find(window_id: u32) -> Option<Window> {
     all().into_iter().find(|w| w.target.window_id == window_id)
 }
 
-/// Whether the window sits on a virtual display of Sidescreen's, any
+/// Whether the window sits on a virtual display of Agent Screen's, any
 /// instance's, rather than on one of the user's screens. Blocking.
 pub fn on_virtual_display(window_id: u32) -> bool {
     let Some(window) = find(window_id) else {
@@ -214,7 +214,7 @@ pub fn on_virtual_display(window_id: u32) -> bool {
     let mid = window.bounds.mid();
     cg::active_displays()
         .into_iter()
-        .any(|id| cg::is_sidescreen(id) && cg::display_bounds(id).contains(mid))
+        .any(|id| cg::is_agent_screen(id) && cg::display_bounds(id).contains(mid))
 }
 
 /// Move a window onto a display in whatever way the user's window manager

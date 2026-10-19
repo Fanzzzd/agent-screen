@@ -123,7 +123,7 @@ pub fn definitions() -> Vec<Value> {
             "record_display",
             "Record the display to video",
             &[
-                "start records the display to an MP4 in ~/Movies/Sidescreen, with a timeline beside it: one JSON line per",
+                "start records the display to an MP4 in ~/Movies/Agent Screen, with a timeline beside it: one JSON line per",
                 "action you take on the display (clicks with coordinates in screenshot pixels, keys, typing, launches,",
                 "element actions) and per Takeover, each with t, its seconds into the video. stop finishes both and",
                 "returns their paths. The video has the sound of the apps whose every window is on your display; an app",
@@ -271,7 +271,7 @@ pub fn definitions() -> Vec<Value> {
             "launch_app",
             "Launch an app on the display",
             &[
-                "Open an app in the background and put its new window on the display. If the app is already running, Sidescreen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
+                "Open an app in the background and put its new window on the display. If the app is already running, Agent Screen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
                 "the app starts with them, as a development build needs, and its windows go on the display.",
             ],
@@ -991,7 +991,7 @@ fn launch_output(reply: &Value) -> Value {
                     "The app was already running and its menus have no command that opens a plain new window, as in Calculator or Notes; nothing was created or moved. Ask the user to quit it and call launch_app again, or to hand its window over."
                 }
                 "menus_unreadable" => {
-                    "The app was already running and Sidescreen couldn't read or use its menus, so it didn't ask for a window; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
+                    "The app was already running and Agent Screen couldn't read or use its menus, so it didn't ask for a window; nothing moved. Ask the user to quit it and call launch_app again, or to hand its window over."
                 }
                 "app_busy" => {
                     "The app was already running and its New Window command is greyed out, as while it shows a dialog; nothing moved. Ask the user to finish what the app is showing, then call launch_app again."

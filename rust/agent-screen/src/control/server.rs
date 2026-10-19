@@ -83,10 +83,10 @@ pub fn socket_path() -> PathBuf {
 /// Start listening. Events arrive on the returned receiver.
 pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
     let path = socket_path();
-    // A live socket belongs to another running Sidescreen; replacing it
+    // A live socket belongs to another running Agent Screen; replacing it
     // would cut that one off from every agent.
     if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-        anyhow::bail!("another Sidescreen is listening on {}", path.display());
+        anyhow::bail!("another Agent Screen is listening on {}", path.display());
     }
     let _ = std::fs::remove_file(&path);
     let std_listener = std::os::unix::net::UnixListener::bind(&path)?;
@@ -94,7 +94,7 @@ pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
     std_listener.set_nonblocking(true)?;
     let (events, rx) = mpsc::unbounded();
     std::thread::Builder::new()
-        .name("sidescreen-control".into())
+        .name("agent-screen-control".into())
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

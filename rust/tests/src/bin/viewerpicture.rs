@@ -5,27 +5,27 @@
 //! until it gets a unit of its own. On this Mac the second display after
 //! the stage used to get the closet's unit, so the test makes two.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e viewerpicture
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e viewerpicture
 
 use std::collections::HashMap;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, Rect, capture, check, instance, json, open_stage, probe, run, sleep_ms,
     start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
 
 /// Mean RGB difference below which two captures show the same picture.
 const SAME: i64 = 12;
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         stop_test_app();
         result

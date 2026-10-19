@@ -2,17 +2,17 @@
 //! an Electron window on the display plays 440 Hz while a windowless
 //! process plays 2000 Hz, and the video has the first and not the second.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e sound
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e sound
 //!
 //! Mutes the Mac's output while it runs and puts it back. Needs ffmpeg,
 //! and an Electron.app as `cargo e2e electron` does.
 
 use std::process::{Command, ExitCode};
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, check, fixture, json, out, run, skip, sleep_ms, start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     let electron = std::env::var("E2E_ELECTRON")

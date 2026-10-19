@@ -1,4 +1,4 @@
-//! Sidescreen: gives each AI agent session its own virtual display, so the
+//! Agent Screen: gives each AI agent session its own virtual display, so the
 //! agent can operate GUI apps without taking over the user's screen, cursor
 //! or keyboard.
 
@@ -34,32 +34,32 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) && record.target().starts_with("Sidescreen") {
-            eprintln!("Sidescreen {}: {}", record.level(), record.args());
+        if self.enabled(record.metadata()) && record.target().starts_with("AgentScreen") {
+            eprintln!("Agent Screen {}: {}", record.level(), record.args());
         }
     }
 
     fn flush(&self) {}
 }
 
-const USAGE: &str = "Sidescreen gives AI agents their own virtual displays.
+const USAGE: &str = "Agent Screen gives AI agents their own virtual displays.
 
 Usage:
-  Sidescreen               start the menu bar app (open Sidescreen.app instead)
-  Sidescreen mcp           the MCP server, started by an agent client over stdio
-  Sidescreen mcp install   register the MCP server with Claude Code and Codex
-  Sidescreen colorsync     whether the helper that keeps macOS's display list short is set up
-  Sidescreen colorsync setup | remove | reclaim
-                           set it up or remove it (asks for an administrator password),
-                           or run it now
-  Sidescreen --version     print the version
+  AgentScreen               start the menu bar app (open Agent Screen.app instead)
+  AgentScreen mcp           the MCP server, started by an agent client over stdio
+  AgentScreen mcp install   register the MCP server with Claude Code and Codex
+  AgentScreen colorsync     whether the helper that keeps macOS's display list short is set up
+  AgentScreen colorsync setup | remove | reclaim
+                          set it up or remove it (asks for an administrator password),
+                          or run it now
+  AgentScreen --version     print the version
 ";
 
-/// `Sidescreen colorsync [setup|remove|reclaim]`: the helper that keeps
+/// `AgentScreen colorsync [setup|remove|reclaim]`: the helper that keeps
 /// macOS's display registry short (ADR 0009, `mac::colorsync`).
 fn colorsync(command: Option<&str>) {
     use mac::colorsync::{self, Helper};
-    let prompt = "Sidescreen wants to keep macOS's list of displays short, so the Mac doesn't stutter when displays change.";
+    let prompt = "Agent Screen wants to keep macOS's list of displays short, so the Mac doesn't stutter when displays change.";
     let result = match command {
         None => {
             println!("helper: {:?}", colorsync::helper());
@@ -70,13 +70,13 @@ fn colorsync(command: Option<&str>) {
         Some("reclaim") if colorsync::helper() == Helper::Ready => {
             colorsync::reclaim().map(|report| report.line)
         }
-        Some("reclaim") => Err("set the helper up first: Sidescreen colorsync setup".into()),
+        Some("reclaim") => Err("set the helper up first: AgentScreen colorsync setup".into()),
         Some(other) => Err(format!("unknown command {other}")),
     };
     match result {
         Ok(done) => println!("{done}"),
         Err(error) => {
-            eprintln!("Sidescreen colorsync: {error}");
+            eprintln!("Agent Screen colorsync: {error}");
             std::process::exit(1);
         }
     }
@@ -89,7 +89,7 @@ fn main() {
             return;
         }
         Some("--version" | "-V") => {
-            println!("Sidescreen {}", env!("CARGO_PKG_VERSION"));
+            println!("Agent Screen {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         // --setup: reopened from the setup window, which shows again.
@@ -98,12 +98,12 @@ fn main() {
             return;
         }
         Some(other) if other != "mcp" && other != "--setup" && !other.starts_with("-psn") => {
-            eprint!("Sidescreen: unknown argument {other}\n\n{USAGE}");
+            eprint!("Agent Screen: unknown argument {other}\n\n{USAGE}");
             std::process::exit(2);
         }
         _ => {}
     }
-    // `Sidescreen mcp`: the MCP server a client starts over stdio. It only
+    // `AgentScreen mcp`: the MCP server a client starts over stdio. It only
     // talks to the running app through the control socket.
     if std::env::args().nth(1).as_deref() == Some("mcp")
         && std::env::args().nth(2).as_deref() == Some("install")
@@ -120,7 +120,7 @@ fn main() {
     }
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         if let Err(error) = agent_screen_mcp::run() {
-            eprintln!("Sidescreen mcp: {error}");
+            eprintln!("Agent Screen mcp: {error}");
             std::process::exit(1);
         }
         return;
@@ -129,7 +129,7 @@ fn main() {
     // the displays and the menu bar icon.
     #[cfg(unix)]
     if std::os::unix::net::UnixStream::connect(agent_screen_mcp::endpoint::socket_path()).is_ok() {
-        eprintln!("Sidescreen is already running.");
+        eprintln!("Agent Screen is already running.");
         return;
     }
     log::set_logger(&Logger).ok();
@@ -149,7 +149,7 @@ fn main() {
             core::watch_alerts(core.clone(), cx);
             core::watch_colorsync(core.clone(), cx);
             if let Err(error) = ui::shell::start(core.clone(), cx) {
-                eprintln!("Sidescreen: UI failed: {error}");
+                eprintln!("Agent Screen: UI failed: {error}");
             }
             match server::start() {
                 Ok(mut events) => {
@@ -183,7 +183,7 @@ fn main() {
                     })
                     .detach();
                 }
-                Err(error) => eprintln!("Sidescreen: control socket failed: {error}"),
+                Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
             }
         });
 }

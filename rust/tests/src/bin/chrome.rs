@@ -2,22 +2,22 @@
 //! starts on another display: a click on a page's text field focuses it,
 //! typed text lands in it, and a click on a button runs the page's script.
 //! An app starting makes the system's front app change for a moment, which
-//! takes key status from Chrome's window; unless Sidescreen makes it key
+//! takes key status from Chrome's window; unless Agent Screen makes it key
 //! again, Chrome ignores the clicks in its page.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e chrome
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e chrome
 //!
 //! Skips when Chrome or Firefox is running with windows. Quits the copies it
 //! started, on throwaway profiles.
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
-use regex::Regex;
 use agent_screen_tests::{
     Control, check, fixture, json, out, quit_profile, run, running_headed, skip, sleep_ms,
     start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
+use regex::Regex;
 
 const KEY: &str = "chrome";
 

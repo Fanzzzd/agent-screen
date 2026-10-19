@@ -1,18 +1,18 @@
 //! How long createDisplay takes to answer, median and p90 over 10 displays,
 //! and launchApp for TextEdit, cold and already running, over 5 launches.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e timing    beside the user's app
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e timing    beside the user's app
 //!     cargo e2e timing                            in its place, once the user is idle
 
 use std::process::ExitCode;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, env_count, instance, json, quit_discarding, reopen_installed, restore, run, running,
     sleep_ms, snapshot, start_debug_app, start_test_app, stop_debug_app, stop_test_app,
     wait_for_quiet, wait_for_unlocked,
 };
+use anyhow::{Context, Result};
 
 fn report(what: &str, values: &[i64]) {
     let mut sorted = values.to_vec();

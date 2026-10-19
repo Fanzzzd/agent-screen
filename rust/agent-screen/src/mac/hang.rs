@@ -23,7 +23,7 @@ const SAMPLES_KEPT: usize = 20;
 pub fn watch() {
     let Some(main) = Main::here() else { return };
     let _ = std::thread::Builder::new()
-        .name("sidescreen-hang-watch".into())
+        .name("agent-screen-hang-watch".into())
         .spawn(move || {
             let mut samples: Vec<[usize; DEPTH]> = Vec::with_capacity(MAX_SAMPLES);
             loop {
@@ -194,7 +194,7 @@ fn profile(samples: &[[usize; DEPTH]]) -> (String, String) {
         .collect();
     let ours = top
         .iter()
-        .find(|f| f.starts_with("sidescreen::") || f.starts_with("<sidescreen::"))
+        .find(|f| f.starts_with("AgentScreen::") || f.starts_with("<AgentScreen::"))
         .map_or("", String::as_str);
     let summary = format!(
         "{} of {} samples: {} | ours: {}",

@@ -12,15 +12,15 @@
 //! click makes a background app's other window key (AXRaise doesn't), and
 //! that click would bring TextEdit to the front, taking the user's focus.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e shared
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e shared
 
 use std::process::{Command, ExitCode};
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     McpClient, check, cut, in_test_app, instance, json, now_ms, quit_discarding, quoted, run,
     running, skip, sleep_ms, try_osa, wait_for_idle,
 };
+use anyhow::{Context, Result};
 
 fn text_of(name: &str) -> Result<String> {
     try_osa(&format!(

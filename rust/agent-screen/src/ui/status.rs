@@ -147,7 +147,7 @@ mod tests {
             title: "订机票".into(),
             connection: 1,
         });
-        d.add(7, "Sidescreen 1".into(), DEFAULT_SIZE, owner, ());
+        d.add(7, "Agent Screen 1".into(), DEFAULT_SIZE, owner, ());
         d
     }
 

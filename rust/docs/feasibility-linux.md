@@ -1,4 +1,4 @@
-# Sidescreen on Linux: feasibility (2026-10-03)
+# Agent Screen on Linux: feasibility (2026-10-03)
 
 Desk research only; no Linux machine was available. The research read upstream mutter,
 xdg-desktop-portal-gnome, xdg-desktop-portal-kde and sway source (Sept/Oct 2026) and the freedesktop portal specs. Unverified items say so.
@@ -38,7 +38,7 @@ GNOME 50 (March 2026) removed the X11 session, and Plasma 6.8 is Wayland-only.
      session, which also gives each agent its own AT-SPI bus.
 2. **Capture.** The compositor hands frames straight to the GPUI Viewer. No
    portal, no PipeWire, no consent dialog.
-3. **Input.** Sidescreen injects into the compositor's own seat, so the user's cursor and
+3. **Input.** Agent Screen injects into the compositor's own seat, so the user's cursor and
    focus never move.
 4. **Host UI.**
    - The Viewer is a GPUI window, and the tray uses `ksni`.
@@ -82,8 +82,8 @@ UI. The nested engine does not depend on the desktop.
 `$HOME` in a Debian trixie container (aarch64, pixman renderer, no GPU). One
 stands in for the user's desktop, the other for an Agent Display with its own
 D-Bus session. Each app starts on the user's compositor first, then again on
-the agent's. Run it with `docker build -t sidescreen-spike-linux rust/spike-linux`
-and `docker run --rm --shm-size 1g sidescreen-spike-linux`.
+the agent's. Run it with `docker build -t agent-screen-spike-linux rust/spike-linux`
+and `docker run --rm --shm-size 1g agent-screen-spike-linux`.
 
 **App isolation, step 1.** The second launch, with the agent's own D-Bus, landed as follows.
 

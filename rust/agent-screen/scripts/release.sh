@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Sidescreen-<version>.dmg and its Homebrew cask for a GitHub release.
+# Build AgentScreen-<version>.dmg and its Homebrew cask for a GitHub release.
 #
 # Usage: scripts/release.sh
 #
@@ -9,7 +9,7 @@
 # NOTARY_ISSUER, as CI passes them, or one stored once under a keychain
 # profile:
 #
-#   xcrun notarytool store-credentials sidescreen \
+#   xcrun notarytool store-credentials agent-screen \
 #     --key <AuthKey_ID.p8> --key-id <ID> --issuer <issuer id>
 #
 # NOTARY_PROFILE picks another profile name. NOTARIZE=0 skips it, for a
@@ -19,9 +19,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 target="$(cd .. && pwd)/target"
 version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
-profile="${NOTARY_PROFILE:-sidescreen}"
+profile="${NOTARY_PROFILE:-agent-screen}"
 
-identity="${SIDESCREEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
+identity="${AGENTSCREEN_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
   awk -F'"' 'index($2, "Developer ID Application") == 1 { print $2; exit }')}"
 if [[ -z "$identity" ]]; then
   echo "error: no Developer ID Application identity; notarization needs one" >&2
@@ -38,8 +38,8 @@ if [[ "${NOTARIZE:-1}" != 0 ]] && ! xcrun notarytool history "${notary[@]}" >/de
   exit 1
 fi
 
-SIDESCREEN_SIGN_IDENTITY="$identity" scripts/bundle.sh release >/dev/null
-app="$target/Sidescreen.app"
+AGENTSCREEN_SIGN_IDENTITY="$identity" scripts/bundle.sh release >/dev/null
+app="$target/Agent Screen.app"
 plist="$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$plist"
@@ -47,13 +47,13 @@ plist="$app/Contents/Info.plist"
 codesign --force --options runtime --timestamp --sign "$identity" "$app" 2>/dev/null
 codesign --verify --strict "$app"
 
-dmg="$target/Sidescreen-$version.dmg"
+dmg="$target/AgentScreen-$version.dmg"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-ditto "$app" "$stage/Sidescreen.app"
+ditto "$app" "$stage/Agent Screen.app"
 ln -s /Applications "$stage/Applications"
 rm -f "$dmg"
-hdiutil create -quiet -volname Sidescreen -srcfolder "$stage" -format UDZO -fs HFS+ "$dmg"
+hdiutil create -quiet -volname "Agent Screen" -srcfolder "$stage" -format UDZO -fs HFS+ "$dmg"
 codesign --force --timestamp --sign "$identity" "$dmg"
 
 if [[ "${NOTARIZE:-1}" != 0 ]]; then
@@ -64,17 +64,17 @@ fi
 sha="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"
 
 # The Homebrew cask for this release, for a tap repo's Casks folder.
-repo="${SIDESCREEN_REPO:-fanzzzd/sidescreen}"
-cask="$target/sidescreen.rb"
+repo="${AGENTSCREEN_REPO:-fanzzzd/agent-screen}"
+cask="$target/agent-screen.rb"
 cat >"$cask" <<CASK
-cask "sidescreen" do
+cask "agent-screen" do
   version "$version"
   sha256 "$sha"
 
-  url "https://github.com/$repo/releases/download/v#{version}/Sidescreen-#{version}.dmg"
-  name "Sidescreen"
+  url "https://github.com/$repo/releases/download/v#{version}/AgentScreen-#{version}.dmg"
+  name "Agent Screen"
   desc "Virtual displays for AI agents, so they work without taking your mouse"
-  homepage "https://github.com/$repo"
+  homepage "https://agentscreen.app"
 
   depends_on macos: :sequoia
 
@@ -83,11 +83,14 @@ cask "sidescreen" do
     strategy :github_latest
   end
 
-  app "Sidescreen.app"
+  app "Agent Screen.app"
 
-  uninstall quit: "dev.sidescreen.menubar"
+  uninstall quit: "app.agentscreen.AgentScreen"
 
-  zap trash: "~/Library/Application Support/Sidescreen"
+  zap trash: [
+    "~/Library/Application Support/Agent Screen",
+    "~/Library/Logs/Agent Screen",
+  ]
 end
 CASK
 echo "$dmg"

@@ -1,6 +1,6 @@
 # GUI apps go on your Agent Display
 
-The user works on the same Mac. Operate GUI apps on your own Agent Display from the `sidescreen` MCP server so their screen, cursor and keyboard stay theirs.
+The user works on the same Mac. Operate GUI apps on your own Agent Display from the `agent-screen` MCP server so their screen, cursor and keyboard stay theirs.
 
 ## Before any GUI work
 
@@ -13,7 +13,7 @@ The step is done when `list_windows` shows each window you will touch.
 
 Use either toolset on windows that are on your display:
 
-- **Sidescreen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window.
+- **Agent Screen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window.
 - **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
 
 ## While you work

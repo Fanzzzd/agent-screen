@@ -275,7 +275,7 @@ impl Core {
         }
         // Test builds may raise it, as the fleet script does for its twelve.
         let made = if cfg!(debug_assertions) {
-            std::env::var("SIDESCREEN_NEW_DISPLAYS")
+            std::env::var("AGENTSCREEN_NEW_DISPLAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(MADE)
@@ -336,8 +336,8 @@ impl Core {
         let serial = display::Serial::lease(first);
         let number = serial.get() + 1 - first;
         let name = match instance {
-            Some(instance) => format!("Sidescreen {instance} {number}"),
-            None => format!("Sidescreen {number}"),
+            Some(instance) => format!("Agent Screen {instance} {number}"),
+            None => format!("Agent Screen {number}"),
         };
         (serial, name)
     }
@@ -605,7 +605,7 @@ pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
     .detach();
 }
 
-/// Park the kept twins out of the way like any display of Sidescreen's.
+/// Park the kept twins out of the way like any display of Agent Screen's.
 pub fn park_fillers(virtual_ids: &[DisplayId]) {
     for id in display::filler_ids() {
         if !display::is_tucked(id, virtual_ids) {

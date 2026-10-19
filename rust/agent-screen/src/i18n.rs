@@ -1,6 +1,6 @@
 //! The language of the app's own words: Simplified Chinese when the user's
 //! most preferred macOS language is Chinese, English otherwise.
-//! `SIDESCREEN_LANG=en|zh` overrides it.
+//! `AGENTSCREEN_LANG=en|zh` overrides it.
 //!
 //! Each string keeps its two forms at the call site:
 //! `t("New Display", "新建显示器")`, or with arguments
@@ -29,7 +29,7 @@ pub fn lang() -> Lang {
         return lang;
     }
     *LANG.get_or_init(|| {
-        let forced = std::env::var("SIDESCREEN_LANG").ok();
+        let forced = std::env::var("AGENTSCREEN_LANG").ok();
         forced
             .as_deref()
             .and_then(parse)
@@ -43,7 +43,7 @@ pub fn set_for_test(lang: Lang) {
     TEST_LANG.with(|l| l.set(Some(lang)));
 }
 
-/// `SIDESCREEN_LANG`: `en` or `zh`.
+/// `AGENTSCREEN_LANG`: `en` or `zh`.
 fn parse(value: &str) -> Option<Lang> {
     match value.trim().to_ascii_lowercase().as_str() {
         "en" => Some(Lang::En),

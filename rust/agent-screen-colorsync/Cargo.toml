@@ -2,7 +2,7 @@
 name = "agent-screen-colorsync"
 version = "0.0.0"
 edition = "2024"
-description = "Reclaims ColorSync's display registry: the root helper Sidescreen runs with sudo (ADR 0009)"
+description = "Reclaims ColorSync's display registry: the root helper Agent Screen runs with sudo (ADR 0009)"
 license = "MIT"
 publish = false
 

@@ -149,7 +149,7 @@ pub struct Shell {
     asking: bool,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
-    /// Whether macOS lets Sidescreen notify.
+    /// Whether macOS lets Agent Screen notify.
     notifications: notify::Auth,
     /// The ColorSync helper (ADR 0009), as the last run found it; None
     /// before the first, 10 s after launch.
@@ -173,7 +173,7 @@ pub struct Shell {
     /// The missing permissions and reopen state an agent's call last
     /// opened the setup window for.
     setup_shown_for: Option<(Vec<Permission>, bool)>,
-    /// Clients whose config runs this copy of Sidescreen, read when the
+    /// Clients whose config runs this copy of Agent Screen, read when the
     /// setup window opens and after a Connect: not on every tick.
     registered: Vec<&'static str>,
 }
@@ -1508,7 +1508,7 @@ impl Shell {
     // MARK: Menus
 
     fn status_menu(&self) {
-        let menu = native::Menu::new("Sidescreen");
+        let menu = native::Menu::new("Agent Screen");
         let missing = self.permissions.missing();
         if !missing.is_empty() {
             let names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
@@ -1524,8 +1524,8 @@ impl Shell {
         } else if self.restart {
             menu.action(
                 t(
-                    "Finish Setup: Reopen Sidescreen…",
-                    "完成设置：重新打开 Sidescreen…",
+                    "Finish Setup: Reopen Agent Screen…",
+                    "完成设置：重新打开 Agent Screen…",
                 ),
                 MenuAction::GrantPermissions,
             );
@@ -1544,8 +1544,8 @@ impl Shell {
         // Setup worked on the agent's side too: its session has the tools.
         match self.agents_ready() {
             Some(agent) => menu.disabled(&tf!(
-                "{agent} loaded Sidescreen's tools",
-                "{agent} 已加载 Sidescreen 的工具"
+                "{agent} loaded Agent Screen's tools",
+                "{agent} 已加载 Agent Screen 的工具"
             )),
             None => menu.disabled(t(
                 "No agent has loaded the tools yet",
@@ -1579,8 +1579,8 @@ impl Shell {
         ) {
             let item = menu.action(
                 t(
-                    "Keep AeroSpace Off Sidescreen's Displays…",
-                    "让 AeroSpace 不管 Sidescreen 的显示器…",
+                    "Keep AeroSpace Off Agent Screen's Displays…",
+                    "让 AeroSpace 不管 Agent Screen 的显示器…",
                 ),
                 MenuAction::IgnoreInAeroSpace,
             );
@@ -1600,12 +1600,15 @@ impl Shell {
         );
         if crate::mac::app::custom_wallpaper().is_some() {
             menu.action(
-                t("Use Sidescreen's Wallpaper", "改回 Sidescreen 的壁纸"),
+                t("Use Agent Screen's Wallpaper", "改回 Agent Screen 的壁纸"),
                 MenuAction::DefaultWallpaper,
             );
         }
         menu.separator();
-        let quit = menu.action(t("Quit Sidescreen", "退出 Sidescreen"), MenuAction::Quit);
+        let quit = menu.action(
+            t("Quit Agent Screen", "退出 Agent Screen"),
+            MenuAction::Quit,
+        );
         native::set_key_equivalent(&quit, "q", true, false, false, false);
         self.icon.pop_up(menu.into_native());
     }
@@ -1772,8 +1775,8 @@ impl Shell {
                         "有工作区被固定到了显示器编号",
                     ),
                     &tf!(
-                        "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Sidescreen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Sidescreen's AeroSpace and add ignored-monitors.",
-                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 Agent 的显示器上，Sidescreen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Sidescreen 版 AeroSpace 并加上 ignored-monitors。",
+                        "Your AeroSpace config assigns workspace {} to a monitor by number, in workspace-to-monitor-force-assignment. Agent displays count as monitors and take those numbers, so the workspace lands on an agent's display and Agent Screen can't move it. Use the monitor's name instead, like 2 = 'DELL', or install Agent Screen's AeroSpace and add ignored-monitors.",
+                        "你的 AeroSpace 配置在 workspace-to-monitor-force-assignment 里按编号把工作区 {} 分给了某块显示器。Agent 显示器也算显示器，会占用这些编号，所以这个工作区落到了 Agent 的显示器上，Agent Screen 挪不动它。改用显示器名称，例如 2 = 'DELL'；或者安装 Agent Screen 版 AeroSpace 并加上 ignored-monitors。",
                         pinned.join(", ")
                     ),
                     t("Open Config", "打开配置"),
@@ -2024,7 +2027,7 @@ impl Shell {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some(t("Set Up Sidescreen", "设置 Sidescreen").into()),
+                title: Some(t("Set Up Agent Screen", "设置 Agent Screen").into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),
@@ -2119,7 +2122,7 @@ impl Shell {
         assist::hide();
     }
 
-    /// macOS said whether Sidescreen may notify. People who finished setup
+    /// macOS said whether Agent Screen may notify. People who finished setup
     /// before notifications existed get macOS's prompt once, at launch.
     fn notification_auth(&mut self, auth: notify::Auth, cx: &mut Context<Self>) {
         let first = self.notifications == notify::Auth::Unknown;
@@ -2164,7 +2167,7 @@ impl Shell {
         self.set_wallpaper(Some(std::path::PathBuf::from(path.to_string())), cx);
     }
 
-    /// Keep `picture` for Agent Displays, or Sidescreen's own with None,
+    /// Keep `picture` for Agent Displays, or Agent Screen's own with None,
     /// and show it on the displays there are.
     pub fn set_wallpaper(&mut self, picture: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
         if let Err(error) = crate::mac::app::set_wallpaper(picture.as_deref()) {
@@ -2179,7 +2182,7 @@ impl Shell {
         }
         log::info!(
             "Agent Display wallpaper: {}",
-            picture.map_or("Sidescreen's".into(), |p| p.display().to_string())
+            picture.map_or("Agent Screen's".into(), |p| p.display().to_string())
         );
     }
 
@@ -2193,8 +2196,8 @@ impl Shell {
         self.colorsync_error = None;
         self.push_setup(cx);
         let prompt = t(
-            "Sidescreen wants to keep macOS's list of displays short, so your Mac doesn't stutter when displays change.",
-            "Sidescreen 要精简 macOS 的显示器列表，让 Mac 在显示器变化时不卡顿。",
+            "Agent Screen wants to keep macOS's list of displays short, so your Mac doesn't stutter when displays change.",
+            "Agent Screen 要精简 macOS 的显示器列表，让 Mac 在显示器变化时不卡顿。",
         );
         cx.spawn(async move |shell, cx| {
             let (result, helper) = cx
@@ -2241,7 +2244,7 @@ impl Shell {
     /// shows one, else the pane, with the helper pinned to it.
     pub fn grant(&mut self, p: Permission, cx: &mut Context<Self>) {
         permissions::request(p);
-        // Asking puts Sidescreen in the list, switched off.
+        // Asking puts Agent Screen in the list, switched off.
         let listed = permissions::listed(p).unwrap_or(true);
         assist::show(p, listed);
         self.waiting = Some(p);
@@ -2297,15 +2300,15 @@ impl Shell {
             let none = outcomes.iter().all(|o| o.result.is_none());
             let next = if none {
                 tf!(
-                    "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n{} mcp install",
-                    "其他 MCP 客户端：添加一个 stdio 服务器，命令是\n{}\n参数是 [\"mcp\"]。装了 Claude Code 的话，在终端里运行：\n{} mcp install",
+                    "For another MCP client, add a stdio server with command\n{}\nand arguments [\"mcp\"]. If Claude Code is installed, run in Terminal:\n\"{}\" mcp install",
+                    "其他 MCP 客户端：添加一个 stdio 服务器，命令是\n{}\n参数是 [\"mcp\"]。装了 Claude Code 的话，在终端里运行：\n\"{}\" mcp install",
                     exe.display(),
                     exe.display()
                 )
             } else if failed {
                 tf!(
-                    "To try in Terminal, where your agents' PATH is set:\n{} mcp install",
-                    "可以在终端里重试，那里有 agent 需要的 PATH：\n{} mcp install",
+                    "To try in Terminal, where your agents' PATH is set:\n\"{}\" mcp install",
+                    "可以在终端里重试，那里有 agent 需要的 PATH：\n\"{}\" mcp install",
                     exe.display()
                 )
             } else {
@@ -2324,7 +2327,7 @@ impl Shell {
                 shell.push_setup(cx);
             });
             native::alert(
-                t("Sidescreen and your agents", "Sidescreen 与 agent"),
+                t("Agent Screen and your agents", "Agent Screen 与 agent"),
                 &format!("{}\n\n{next}", lines.join("\n")),
             );
         })
@@ -2335,7 +2338,7 @@ impl Shell {
         self.agents_ready()
     }
 
-    /// The agents that loaded the tools since Sidescreen started, by name.
+    /// The agents that loaded the tools since Agent Screen started, by name.
     fn agents_ready(&self) -> Option<String> {
         match self.agent_ready.as_slice() {
             [] => None,
@@ -2629,11 +2632,11 @@ impl Shell {
     /// AeroSpace that can (docs/adr/0006).
     fn ignore_in_aerospace(&mut self, cx: &mut Context<Self>) {
         let why = t(
-            "AeroSpace manages every display, Sidescreen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
-            "AeroSpace 会管理所有显示器，包括 Sidescreen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 Agent 的截图里。Agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
+            "AeroSpace manages every display, Agent Screen's too. It shows one of your workspaces on each new display, which takes those windows off your screen and into the agent's screenshots, and it files the agents' new windows in your workspace, so they pass over your screen first.",
+            "AeroSpace 会管理所有显示器，包括 Agent Screen 的。每建一块显示器，它就把你的一个工作区放上去，那些窗口会从你屏幕上消失，出现在 Agent 的截图里。Agent 打开的新窗口也会被它登记到你的工作区，先在你屏幕上闪一下。",
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
-            let commands = "brew tap fanzzzd/sidescreen
+            let commands = "brew tap fanzzzd/agent-screen
 brew uninstall --cask aerospace
 brew install --cask aerospace-sidescreen
 tccutil reset Accessibility bobko.aerospace
@@ -2646,8 +2649,8 @@ open -a AeroSpace";
                 &format!(
                     "{why}\n\n{}",
                     t(
-                        "Sidescreen's build of AeroSpace adds the option it needs and keeps your config. The guide shows the five Terminal commands; they're on your clipboard.",
-                        "Sidescreen 提供的 AeroSpace 加上了需要的选项，你的配置不变。说明页里有 5 条终端命令，已经复制到剪贴板。",
+                        "Agent Screen's build of AeroSpace adds the option it needs and keeps your config. The guide shows the five Terminal commands; they're on your clipboard.",
+                        "Agent Screen 提供的 AeroSpace 加上了需要的选项，你的配置不变。说明页里有 5 条终端命令，已经复制到剪贴板。",
                     ),
                 ),
                 t("Copy Commands and Open Guide", "复制命令并打开说明"),
@@ -2655,7 +2658,7 @@ open -a AeroSpace";
             if go {
                 native::copy(commands);
                 let _ = std::process::Command::new("/usr/bin/open")
-                    .arg("https://github.com/Fanzzzd/sidescreen/blob/main/docs/aerospace.md")
+                    .arg("https://github.com/Fanzzzd/agent-screen/blob/main/docs/aerospace.md")
                     .spawn();
             }
             return;
@@ -2669,16 +2672,16 @@ open -a AeroSpace";
             .unwrap_or_else(|| "~/.config/aerospace/aerospace.toml".into());
         let go = native::confirm(
             t(
-                "Let AeroSpace leave Sidescreen's displays alone?",
-                "让 AeroSpace 不管 Sidescreen 的显示器？",
+                "Let AeroSpace leave Agent Screen's displays alone?",
+                "让 AeroSpace 不管 Agent Screen 的显示器？",
             ),
             &format!(
                 "{why}
 
 {}",
                 tf!(
-                    "Sidescreen adds ignored-monitors = ['^Sidescreen'] to {}, keeps the old file beside it as .before-sidescreen, and reloads AeroSpace's config.",
-                    "Sidescreen 会在 {} 里加上 ignored-monitors = ['^Sidescreen']，旧文件另存为 .before-sidescreen，然后让 AeroSpace 重新加载配置。",
+                    "Agent Screen adds ignored-monitors = ['^Agent Screen'] to {}, keeps the old file beside it as .before-agent-screen, and reloads AeroSpace's config.",
+                    "Agent Screen 会在 {} 里加上 ignored-monitors = ['^Agent Screen']，旧文件另存为 .before-agent-screen，然后让 AeroSpace 重新加载配置。",
                     path
                 )
             ),
@@ -2714,14 +2717,14 @@ open -a AeroSpace";
                     };
                     native::alert(
                         t(
-                            "AeroSpace now leaves Sidescreen's displays alone",
-                            "AeroSpace 不再管 Sidescreen 的显示器了",
+                            "AeroSpace now leaves Agent Screen's displays alone",
+                            "AeroSpace 不再管 Agent Screen 的显示器了",
                         ),
                         &format!(
                             "{}\n\n{old}",
                             tf!(
-                                "Added ignored-monitors = ['^Sidescreen'] to {}.",
-                                "已在 {} 里加上 ignored-monitors = ['^Sidescreen']。",
+                                "Added ignored-monitors = ['^Agent Screen'] to {}.",
+                                "已在 {} 里加上 ignored-monitors = ['^Agent Screen']。",
                                 short(&done.config)
                             )
                         ),
@@ -2733,8 +2736,8 @@ open -a AeroSpace";
                         t("Your config is as it was.", "你的配置没有变。")
                     } else {
                         t(
-                            "Sidescreen couldn't put your old config back; it's in the .before-sidescreen file beside it.",
-                            "Sidescreen 没能把旧配置放回去；它在旁边的 .before-sidescreen 文件里。",
+                            "Agent Screen couldn't put your old config back; it's in the .before-agent-screen file beside it.",
+                            "Agent Screen 没能把旧配置放回去；它在旁边的 .before-agent-screen 文件里。",
                         )
                     };
                     native::alert(

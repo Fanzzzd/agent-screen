@@ -5,26 +5,26 @@
 //! and the drag is made through its own handler, so the user's pointer is
 //! untouched and this runs at any time.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e viewerdrag
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, Window, check, instance, json, open_stage, quit_app, run, running, skip, sleep_ms,
     start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     if running("Calculator") {
         skip("Calculator is running, and may be the user's");
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         quit_app("Calculator");
         stop_test_app();

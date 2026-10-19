@@ -1,5 +1,5 @@
 //! The helper pinned to System Settings while the user grants a permission:
-//! Sidescreen's icon, which drags into the permission's list, and one line
+//! Agent Screen's icon, which drags into the permission's list, and one line
 //! on what to do.
 //!
 //! A non-activating panel, so System Settings stays the active app. It
@@ -39,7 +39,7 @@ const GAP: f64 = 3.0;
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
-    #[name = "SidescreenDragTile"]
+    #[name = "AgentScreenDragTile"]
     #[ivars = ()]
     struct DragTile;
 
@@ -212,7 +212,7 @@ fn build(mtm: MainThreadMarker) -> Assist {
     }
 }
 
-/// Show the helper for `p`. `listed`: Sidescreen already has an entry in
+/// Show the helper for `p`. `listed`: Agent Screen already has an entry in
 /// the list, so the user only flips its switch.
 pub fn show(p: super::permissions::Permission, listed: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -223,10 +223,10 @@ pub fn show(p: super::permissions::Permission, listed: bool) {
         let assist = a.get_or_insert_with(|| build(mtm));
         let (title, detail) = if listed {
             (
-                t("Turn on Sidescreen in the list", "打开列表里 Sidescreen 的开关").to_string(),
+                t("Turn on Agent Screen in the list", "打开列表里 Agent Screen 的开关").to_string(),
                 tf!(
-                    "Find Sidescreen in the “{}” list.\nNot there? Drag the icon at left into the list.",
-                    "在“{}”列表里找到 Sidescreen。\n没有的话，把左边的图标拖进列表。",
+                    "Find Agent Screen in the “{}” list.\nNot there? Drag the icon at left into the list.",
+                    "在“{}”列表里找到 Agent Screen。\n没有的话，把左边的图标拖进列表。",
                     p.name()
                 ),
             )
@@ -234,8 +234,8 @@ pub fn show(p: super::permissions::Permission, listed: bool) {
             (
                 t("Drag the icon into the list above", "把左边的图标拖进上面的列表").to_string(),
                 tf!(
-                    "Then turn on Sidescreen in the “{}” list.",
-                    "拖进“{}”列表后，打开 Sidescreen 的开关。",
+                    "Then turn on Agent Screen in the “{}” list.",
+                    "拖进“{}”列表后，打开 Agent Screen 的开关。",
                     p.name()
                 ),
             )

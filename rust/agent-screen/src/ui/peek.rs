@@ -185,7 +185,7 @@ impl Render for Peek {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|peek: &mut Peek, e: &KeyDownEvent, _, cx| peek.key(e, cx)))
             .role(Role::Group)
-            .aria_label("Sidescreen")
+            .aria_label("Agent Screen")
             .size_full()
             .flex()
             .gap(px(SPACING))

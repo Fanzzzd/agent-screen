@@ -1,5 +1,5 @@
-//! A record of every virtual display Sidescreen adds, keeps, reuses and
-//! removes, in `~/Library/Logs/Sidescreen/displays.log` (`displays-NAME.log`
+//! A record of every virtual display Agent Screen adds, keeps, reuses and
+//! removes, in `~/Library/Logs/Agent Screen/displays.log` (`displays-NAME.log`
 //! for a test instance). Each of these is a display reconfiguration every
 //! app on the Mac handles, and while a virtual display is connected each one
 //! leaves ColorSync answering more requests for minutes. The file survives
@@ -20,7 +20,7 @@ fn path() -> Option<PathBuf> {
     };
     Some(
         PathBuf::from(home)
-            .join("Library/Logs/Sidescreen")
+            .join("Library/Logs/Agent Screen")
             .join(name),
     )
 }

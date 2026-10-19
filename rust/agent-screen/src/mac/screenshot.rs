@@ -92,7 +92,7 @@ fn filter_counting(
     // ScreenCaptureKit would capture either display, maybe the other one.
     if let Some(twin) = super::cg::unit_twin(id) {
         log::debug!("display {id} shares its unit number with display {twin}; not capturing it");
-        return Err("macOS mixes this display up with another one right now, so Sidescreen won't capture it".into());
+        return Err("macOS mixes this display up with another one right now, so Agent Screen won't capture it".into());
     }
     let content = content(fresh)?;
     let display = content

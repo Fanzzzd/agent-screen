@@ -8,22 +8,22 @@
 //! new sizes take the spares, resized; the next display must get the third
 //! one's serial.
 //!
-//!     SIDESCREEN_INSTANCE=e2e cargo e2e serials
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e serials
 
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use agent_screen_tests::{
     Control, check, instance, json, probe, run, sleep_ms, start_test_app, stop_test_app,
 };
+use anyhow::{Context, Result};
 
 fn main() -> ExitCode {
     if instance().is_none() {
-        eprintln!("run with SIDESCREEN_INSTANCE=e2e");
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
     run(|| {
-        start_test_app(&[("SIDESCREEN_LANG", "en")])?;
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         stop_test_app();
         result
@@ -42,7 +42,7 @@ fn create(control: &Control, key: &str, width: u32, height: u32) -> Result<u64> 
 fn display_log() -> Result<String> {
     Ok(std::fs::read_to_string(
         std::path::PathBuf::from(std::env::var("HOME")?)
-            .join("Library/Logs/Sidescreen/displays-e2e.log"),
+            .join("Library/Logs/Agent Screen/displays-e2e.log"),
     )?)
 }
 
