@@ -231,6 +231,17 @@ fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
     window_list_where(options, 0, |_, _, _| true)
 }
 
+/// Id, layer and bounds of every on-screen window, this app's included.
+pub fn on_screen_frames() -> Vec<(u32, i64, Rect)> {
+    let mut out = Vec::new();
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        |_, window_id, layer, bounds, _| out.push((window_id, layer, bounds)),
+    );
+    out
+}
+
 mod cf {
     use std::ffi::c_void;
     pub type Ref = *const c_void;
@@ -304,27 +315,46 @@ mod cf {
 
 /// The window list, read straight from CoreFoundation with the framework's
 /// own keys: nothing is allocated for a window `keep` turns down, given its
-/// pid, layer and bounds.
+/// pid, layer and bounds. This app's own windows are left out.
 fn window_list_where(
     options: CGWindowListOption,
     relative: u32,
     keep: impl Fn(i32, i64, Rect) -> bool,
 ) -> Vec<WindowInfo> {
-    let Some(list) = CGWindowListCopyWindowInfo(options, relative) else {
-        return Vec::new();
-    };
     let me = std::process::id() as i32;
-    let count = unsafe { cf::CFArrayGetCount(&list) };
     let mut out = Vec::new();
+    list_raw(options, relative, |pid, window_id, layer, bounds, info| {
+        if pid == me || !keep(pid, layer, bounds) {
+            return;
+        }
+        out.push(WindowInfo {
+            target: WindowTarget { pid, window_id },
+            owner_name: unsafe { cf::string(info, cf::kCGWindowOwnerName) },
+            title: unsafe { cf::string(info, cf::kCGWindowName) },
+            bounds,
+            layer,
+            alpha: unsafe { cf::float(info, cf::kCGWindowAlpha) }.unwrap_or(1.0),
+        });
+    });
+    out
+}
+
+/// Each window's pid, id, layer and bounds, and its description for more.
+fn list_raw(
+    options: CGWindowListOption,
+    relative: u32,
+    mut each: impl FnMut(i32, u32, i64, Rect, cf::Ref),
+) {
+    let Some(list) = CGWindowListCopyWindowInfo(options, relative) else {
+        return;
+    };
+    let count = unsafe { cf::CFArrayGetCount(&list) };
     for i in 0..count {
         unsafe {
             let info = cf::CFArrayGetValueAtIndex(&list, i);
             let Some(pid) = cf::int(info, cf::kCGWindowOwnerPID).map(|p| p as i32) else {
                 continue;
             };
-            if pid == me {
-                continue;
-            }
             let Some(window_id) = cf::int(info, cf::kCGWindowNumber).map(|n| n as u32) else {
                 continue;
             };
@@ -334,21 +364,9 @@ fn window_list_where(
             if !dict.is_null() {
                 cf::CGRectMakeWithDictionaryRepresentation(dict, &mut r);
             }
-            let bounds = rect(r);
-            if !keep(pid, layer, bounds) {
-                continue;
-            }
-            out.push(WindowInfo {
-                target: WindowTarget { pid, window_id },
-                owner_name: cf::string(info, cf::kCGWindowOwnerName),
-                title: cf::string(info, cf::kCGWindowName),
-                bounds,
-                layer,
-                alpha: cf::float(info, cf::kCGWindowAlpha).unwrap_or(1.0),
-            });
+            each(pid, window_id, layer, rect(r), info);
         }
     }
-    out
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]

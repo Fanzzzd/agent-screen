@@ -26,30 +26,52 @@ pub struct Shot {
 
 /// Shareable content listed before, and when. Listing costs tens of
 /// milliseconds, more than a capture; status items come and go rarely.
-static CONTENT: Mutex<Option<(Arc<SCShareableContent>, Instant)>> = Mutex::new(None);
+/// The last listing, when it was made, and the ids of the windows on screen
+/// then.
+type Listing = (
+    Arc<SCShareableContent>,
+    Instant,
+    std::collections::HashSet<u32>,
+);
+static CONTENT: Mutex<Option<Listing>> = Mutex::new(None);
 const CONTENT_AGE: Duration = Duration::from_secs(2);
 
+/// What ScreenCaptureKit can capture. A listing takes ScreenCaptureKit about
+/// 20 ms; a fresh one is only needed once a window has come or gone, which
+/// the window server's list of ids, at well under a millisecond, tells.
 fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
     let mut cache = CONTENT.lock().unwrap();
-    if !fresh
-        && let Some((content, at)) = &*cache
-        && at.elapsed() < CONTENT_AGE
-    {
-        return Ok(content.clone());
+    let ids = fresh.then(super::cg::on_screen_ids);
+    if let Some((content, at, then)) = &*cache {
+        let current = match &ids {
+            Some(now) => now == then,
+            None => at.elapsed() < CONTENT_AGE,
+        };
+        if current {
+            return Ok(content.clone());
+        }
     }
+    let ids = ids.unwrap_or_else(super::cg::on_screen_ids);
     let content = Arc::new(
         SCShareableContent::create()
             .with_on_screen_windows_only(true)
             .get()
             .map_err(|e| format!("could not list displays: {e}"))?,
     );
-    *cache = Some((content.clone(), Instant::now()));
+    *cache = Some((content.clone(), Instant::now(), ids));
     Ok(content)
 }
 
 /// Whether ScreenCaptureKit lets this process list the screen. Blocking.
 pub fn can_capture() -> bool {
+    forget();
     content(true).is_ok()
+}
+
+/// Drop the kept listing: the next one is made anew. A window that moved
+/// keeps its id, so a capture that failed may have used its old place.
+fn forget() {
+    *CONTENT.lock().unwrap() = None;
 }
 
 /// What a display shows, without the menu bar macOS draws on it: that bar,
@@ -103,20 +125,19 @@ fn filter_counting(
         .collect();
     // What an agent could see: app windows, panels and menus. The cursor,
     // the recording indicator and other overlays from layer 1000 up, and
-    // 1-point status windows, don't make a picture.
-    let left = content
-        .windows()
+    // 1-point status windows, don't make a picture. Where windows are now,
+    // from the window server: the listing may be older than a window's move.
+    let left = super::cg::on_screen_frames()
         .into_iter()
-        .filter(|w| {
-            let f = w.frame();
-            (0..1000).contains(&w.window_layer())
-                && f.size.width > 1.0
-                && f.size.height > 1.0
-                && f.origin.x < area.max_x()
-                && f.origin.x + f.size.width > area.x
-                && f.origin.y < area.max_y()
-                && f.origin.y + f.size.height > area.y
-                && !bar.iter().any(|b| b.window_id() == w.window_id())
+        .filter(|&(window_id, layer, f)| {
+            (0..1000).contains(&layer)
+                && f.width > 1.0
+                && f.height > 1.0
+                && f.x < area.max_x()
+                && f.max_x() > area.x
+                && f.y < area.max_y()
+                && f.max_y() > area.y
+                && !bar.iter().any(|b| b.window_id() == window_id)
         })
         .count();
     let refs: Vec<&SCWindow> = bar.iter().collect();
@@ -176,6 +197,7 @@ pub fn display(
         if result.is_ok() {
             break;
         }
+        forget();
         std::thread::sleep(Duration::from_millis(wait));
         result = capture(size, source);
     }
