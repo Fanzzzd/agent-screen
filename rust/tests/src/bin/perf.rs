@@ -1,6 +1,8 @@
 //! What agents and the user wait for, in numbers a change can be judged by.
 //! ROUNDS times (3): a new display of a size no spare has, a reused spare,
-//! Calculator launched on it, 10 clicks, 5 screenshots and 3 window states,
+//! Calculator launched on it, 10 clicks, 5 screenshots, 8 steps (a digit
+//! typed or a click on the title bar, then a screenshot once the display is
+//! still) and 3 window states,
 //! then the display ends. Meanwhile `lag`, a plain AppKit app, records how
 //! late its main thread runs, as the user's apps would, and the test app's
 //! own stall lines come from its displays log.
@@ -78,6 +80,7 @@ fn measure() -> Result<()> {
     let control = Control::connect()?;
     let (mut fresh, mut reused, mut cold, mut warm) = (vec![], vec![], vec![], vec![]);
     let (mut clicks, mut shots, mut states, mut ends) = (vec![], vec![], vec![], vec![]);
+    let (mut steps, mut quiet_steps) = (vec![], vec![]);
     for round in 0..rounds {
         let key = format!("perf-{round}");
         // A size no spare has, so the display is new.
@@ -126,6 +129,36 @@ fn measure() -> Result<()> {
                 json!({ "sessionKey": key, "displayId": again }),
             )?;
             shots.push(ms(at));
+        }
+        // What an agent waits for per step: an action, then the screenshot
+        // once the display stops changing. Typing a digit changes
+        // Calculator's number; a click on its title bar changes nothing.
+        for changes in [true, false] {
+            for _ in 0..4 {
+                let at = Instant::now();
+                if changes {
+                    control.call(
+                        "type",
+                        json!({ "sessionKey": key, "displayId": again, "text": "7" }),
+                    )?;
+                } else {
+                    control.call(
+                        "click",
+                        json!({ "sessionKey": key, "displayId": again, "x": x, "y": num("y") + 8.0 }),
+                    )?;
+                }
+                control.call(
+                    "screenshot",
+                    json!({ "sessionKey": key, "displayId": again, "settle": true }),
+                )?;
+                if changes {
+                    &mut steps
+                } else {
+                    &mut quiet_steps
+                }
+                .push(ms(at));
+                sleep_ms(300);
+            }
         }
         for _ in 0..3 {
             let at = Instant::now();
@@ -182,6 +215,8 @@ fn measure() -> Result<()> {
         "launchCold": spread(&cold),
         "launchRunning": spread(&warm),
         "click": spread(&clicks),
+        "stepChange": spread(&steps),
+        "stepNoChange": spread(&quiet_steps),
         "screenshot": spread(&shots),
         "windowState": spread(&states),
         "appMainBusy": { "count": main_busy.len(), "sum": main_busy.iter().sum::<f64>(), "max": main_busy.iter().cloned().fold(0.0, f64::max), "all": main_busy },

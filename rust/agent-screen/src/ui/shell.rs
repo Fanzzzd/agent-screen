@@ -1485,6 +1485,17 @@ impl Shell {
             "collapse" => self.close_viewer(cx),
             "create" => self.create_display(cx),
             "dismiss" => self.dismiss(id, cx),
+            // The Dismiss sheet's confirm, with the plan as it stands.
+            "dismiss-confirm" => {
+                let items = self
+                    .core
+                    .read(cx)
+                    .displays
+                    .get(id)
+                    .map(dismissal::plan)
+                    .ok_or("no such display")?;
+                self.dismiss_now(id, items, cx);
+            }
             "primary" => self.primary(id, cx),
             "give" => self.window_menu(id, WindowMenu::Give, None, cx),
             "take-back" => self.window_menu(id, WindowMenu::TakeBack, None, cx),
@@ -1934,9 +1945,46 @@ impl Shell {
         };
         let main_name = main_screen_name();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
+            let asking = cx
+                .background_executor()
                 .spawn(async move { dismissal::execute(&items, main_name.as_deref()) })
                 .await;
+            // A window asking whether to save keeps the display: the
+            // question stays on it, in the Viewer, instead of landing on the
+            // user's screen once the display goes. The display goes once
+            // those windows have closed. One left open without a sheet, as
+            // after Cancel, stays on the display, which waits for review.
+            if !asking.is_empty() {
+                let _ = this.update(cx, |shell, cx| shell.open_viewer(id, cx));
+                let mut calm = 0;
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(500))
+                        .await;
+                    let left = asking.clone();
+                    let (open, sheets) = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let open: Vec<WindowTarget> = left
+                                .into_iter()
+                                .filter(|t| windows::find(t.window_id).is_some())
+                                .collect();
+                            let sheets = open.iter().any(|&t| crate::mac::ax::has_sheet(t));
+                            (open, sheets)
+                        })
+                        .await;
+                    if open.is_empty() {
+                        break;
+                    }
+                    calm = if sheets { 0 } else { calm + 1 };
+                    if calm >= 6 {
+                        log::info!(
+                            "display {id}: a window stayed open without asking; keeping the display"
+                        );
+                        return;
+                    }
+                }
+            }
             let _ = this.update(cx, |shell, cx| {
                 shell.core.update(cx, |core, cx| core.remove(id, cx))
             });

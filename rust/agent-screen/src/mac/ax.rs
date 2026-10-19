@@ -554,6 +554,15 @@ pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
 
 /// Press the window's close button. The app may still keep it open, for
 /// example to ask about unsaved changes.
+/// Whether the window shows a sheet, such as one asking whether to save.
+pub fn has_sheet(target: WindowTarget) -> bool {
+    window_element(target).is_some_and(|window| {
+        elements_attribute(&window, "AXChildren")
+            .iter()
+            .any(|child| string_attribute(child, "AXRole").as_deref() == Some("AXSheet"))
+    })
+}
+
 pub fn close(target: WindowTarget) -> Result<(), MoveError> {
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
     let button = element_attribute(&window, "AXCloseButton").ok_or(MoveError::Rejected)?;
