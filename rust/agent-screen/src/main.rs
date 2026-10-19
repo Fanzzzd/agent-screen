@@ -82,6 +82,34 @@ fn colorsync(command: Option<&str>) {
     }
 }
 
+gpui::actions!(agent_screen, [OpenSetup, HideApp, QuitApp]);
+
+/// The menu bar macOS shows while Agent Screen is the active app, as after
+/// a click on its Dock icon. No shortcuts: keys typed in the Viewer go to
+/// the agent's app, and Command-Q there must not quit Agent Screen.
+fn app_menu(cx: &mut App) {
+    use gpui::{Menu, MenuItem};
+    use i18n::t;
+    cx.on_action(|_: &OpenSetup, _| {
+        mac::native::send(mac::native::Native::Menu(
+            mac::native::MenuAction::GrantPermissions,
+        ))
+    });
+    cx.on_action(|_: &HideApp, cx| cx.hide());
+    cx.on_action(|_: &QuitApp, cx| cx.quit());
+    cx.set_menus(vec![Menu {
+        name: "Agent Screen".into(),
+        items: vec![
+            MenuItem::action(t("Set Up Agent Screen…", "设置 Agent Screen…"), OpenSetup),
+            MenuItem::separator(),
+            MenuItem::action(t("Hide Agent Screen", "隐藏 Agent Screen"), HideApp),
+            MenuItem::separator(),
+            MenuItem::action(t("Quit Agent Screen", "退出 Agent Screen"), QuitApp),
+        ],
+        disabled: false,
+    }]);
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("--help" | "-h" | "help") => {
@@ -136,54 +164,60 @@ fn main() {
     log::set_max_level(log::LevelFilter::Debug);
     log::debug!("language: {:?}", i18n::lang());
     let platform = gpui_platform::current_platform(false);
-    // An accessory from launch: no Dock icon, never activated by starting.
-    platform.set_activation_policy(ActivationPolicy::Accessory);
-    gpui::Application::with_platform(platform)
-        .with_assets(ui::theme::Assets)
-        .run(|cx: &mut App| {
-            // No permission prompts at launch: the setup window asks when
-            // the user clicks, so each prompt comes with its reason.
-            mac::permissions::screen_recording_at_launch();
-            mac::ax::set_global_timeout();
-            let core = cx.new(|_| core::Core::new());
-            core::watch_alerts(core.clone(), cx);
-            core::watch_colorsync(core.clone(), cx);
-            if let Err(error) = ui::shell::start(core.clone(), cx) {
-                eprintln!("Agent Screen: UI failed: {error}");
-            }
-            match server::start() {
-                Ok(mut events) => {
-                    let core = core.clone();
-                    cx.spawn(async move |cx: &mut AsyncApp| {
-                        while let Some(event) = events.next().await {
-                            match event {
-                                Event::Request {
-                                    connection,
-                                    method,
-                                    params,
-                                    reply,
-                                } => {
-                                    let core = core.clone();
-                                    cx.spawn(async move |cx: &mut AsyncApp| {
-                                        let result = control::agent::handle(
-                                            core, connection, &method, params, cx,
-                                        )
-                                        .await;
-                                        let _ = reply.send(result);
-                                    })
-                                    .detach();
-                                }
-                                Event::Closed { connection } => {
-                                    core.update(cx, |core, cx| {
-                                        core.connection_closed(connection, cx)
-                                    });
-                                }
+    // A regular app, in the Dock and the app switcher, so the user can find
+    // it beside the menu bar icon. Starting it doesn't activate it.
+    platform.set_activation_policy(ActivationPolicy::Regular);
+    let app = gpui::Application::with_platform(platform).with_assets(ui::theme::Assets);
+    // A click on the Dock icon opens the setup window: permissions, the
+    // agents it is connected to, and the AeroSpace options.
+    app.on_reopen(|_| {
+        mac::native::send(mac::native::Native::Menu(
+            mac::native::MenuAction::GrantPermissions,
+        ))
+    });
+    app.run(|cx: &mut App| {
+        // No permission prompts at launch: the setup window asks when
+        // the user clicks, so each prompt comes with its reason.
+        mac::permissions::screen_recording_at_launch();
+        mac::ax::set_global_timeout();
+        let core = cx.new(|_| core::Core::new());
+        core::watch_alerts(core.clone(), cx);
+        core::watch_colorsync(core.clone(), cx);
+        if let Err(error) = ui::shell::start(core.clone(), cx) {
+            eprintln!("Agent Screen: UI failed: {error}");
+        }
+        app_menu(cx);
+        match server::start() {
+            Ok(mut events) => {
+                let core = core.clone();
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    while let Some(event) = events.next().await {
+                        match event {
+                            Event::Request {
+                                connection,
+                                method,
+                                params,
+                                reply,
+                            } => {
+                                let core = core.clone();
+                                cx.spawn(async move |cx: &mut AsyncApp| {
+                                    let result = control::agent::handle(
+                                        core, connection, &method, params, cx,
+                                    )
+                                    .await;
+                                    let _ = reply.send(result);
+                                })
+                                .detach();
+                            }
+                            Event::Closed { connection } => {
+                                core.update(cx, |core, cx| core.connection_closed(connection, cx));
                             }
                         }
-                    })
-                    .detach();
-                }
-                Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
+                    }
+                })
+                .detach();
             }
-        });
+            Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
+        }
+    });
 }

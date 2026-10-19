@@ -24,6 +24,8 @@ pub const HEIGHT: f32 = 496.;
 
 pub struct Setup {
     shell: WeakEntity<Shell>,
+    /// Centered once its height fits the content.
+    centered: std::rc::Rc<std::cell::Cell<bool>>,
     pub status: Status,
     /// The permission whose pane the user was sent to.
     pub waiting: Option<Permission>,
@@ -51,6 +53,7 @@ impl Setup {
             .map(|png| Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png)));
         Setup {
             shell,
+            centered: Default::default(),
             status,
             waiting: None,
             restart: false,
@@ -195,17 +198,41 @@ impl Render for Setup {
             .flex()
             .flex_col()
             .bg(theme.card)
-            .on_children_prepainted(|bounds, window, _| {
-                let Some(content) = bounds.first() else {
-                    return;
-                };
-                let height = content.size.height.ceil();
-                if (window.viewport_size().height - height).abs() > px(1.) {
-                    window.resize(gpui::size(px(WIDTH), height));
+            .on_children_prepainted({
+                let centered = self.centered.clone();
+                move |bounds, window, _| {
+                    let Some(content) = bounds.first() else {
+                        return;
+                    };
+                    let height = content.size.height.ceil();
+                    if (window.viewport_size().height - height).abs() > px(1.) {
+                        window.resize(gpui::size(px(WIDTH), height));
+                        return;
+                    }
+                    // It opens at a guessed height and then fits its
+                    // content: once it has, center it on its screen.
+                    if !centered.replace(true) {
+                        center(window);
+                    }
                 }
             })
             .child(content)
     }
+}
+
+/// Center the window on its screen, below the menu bar.
+fn center(window: &Window) {
+    let Some(ns) = crate::mac::native::ns_window(window) else {
+        return;
+    };
+    let Some(screen) = ns.screen() else {
+        return;
+    };
+    let area = screen.visibleFrame();
+    let mut frame = crate::mac::native::frame(&ns);
+    frame.origin.x = area.origin.x + (area.size.width - frame.size.width) / 2.0;
+    frame.origin.y = area.origin.y + ((area.size.height - frame.size.height) / 2.0).max(0.0);
+    crate::mac::native::set_frame(&ns, frame);
 }
 
 impl Setup {
