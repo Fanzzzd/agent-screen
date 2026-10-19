@@ -2621,7 +2621,17 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let ignoring = cx
                 .background_executor()
-                .spawn(async { aerospace::ignoring() })
+                .spawn(async {
+                    match aerospace::migrate_renamed_pattern() {
+                        Ok(Some(config)) => log::warn!(
+                            "aerospace: added '^Agent Screen' beside '^Sidescreen' to ignored-monitors in {}",
+                            config.display()
+                        ),
+                        Ok(None) => {}
+                        Err(error) => log::warn!("aerospace: config not migrated: {error}"),
+                    }
+                    aerospace::ignoring()
+                })
                 .await;
             let _ = this.update(cx, |shell, _| shell.aerospace = ignoring);
         })

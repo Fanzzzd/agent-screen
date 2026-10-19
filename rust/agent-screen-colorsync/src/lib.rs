@@ -21,6 +21,19 @@ pub fn sudoers_path(user: &str) -> String {
 
 pub const SUDOERS_PREFIX: &str = "/etc/sudoers.d/agent-screen-colorsync-";
 
+/// Where Sidescreen, Agent Screen's former name, put the helper. Setting up
+/// and removing the helper remove this copy once no user's old sudoers file
+/// is left.
+pub const OLD_INSTALLED: &str = "/Library/PrivilegedHelperTools/dev.sidescreen.colorsync";
+
+/// The start of Sidescreen's sudoers files, named like ours.
+pub const OLD_SUDOERS_PREFIX: &str = "/etc/sudoers.d/sidescreen-colorsync-";
+
+/// Sidescreen's sudoers file for `user`.
+pub fn old_sudoers_path(user: &str) -> String {
+    format!("{OLD_SUDOERS_PREFIX}{}", user.replace('.', "_"))
+}
+
 /// Whether `user` can go in a sudoers line as it is.
 pub fn is_plain_user(user: &str) -> bool {
     !user.is_empty()
@@ -55,6 +68,10 @@ mod tests {
         assert_eq!(
             sudoers_line("fanzhende"),
             "fanzhende ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/app.agentscreen.colorsync\n"
+        );
+        assert_eq!(
+            old_sudoers_path("first.last"),
+            "/etc/sudoers.d/sidescreen-colorsync-first_last"
         );
     }
 }

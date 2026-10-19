@@ -367,6 +367,9 @@ pub enum Ignoring {
 /// What every Agent Display's name starts with.
 const DISPLAY_NAME: &str = "Agent Screen 1";
 const PATTERN: &str = "'^Agent Screen'";
+/// Agent Screen was called Sidescreen, and named its displays so. A config
+/// it set up then ignores these names and not the new ones.
+const OLD_DISPLAY_NAME: &str = "Sidescreen 1";
 
 /// None while AeroSpace isn't running. Reads AeroSpace's binary once per
 /// build, about 20 MB: run it off the main thread.
@@ -568,6 +571,10 @@ fn without_comments(text: &str) -> String {
 /// Whether a config's `ignored-monitors` matches Agent Displays. AeroSpace
 /// takes each entry as a case-insensitive regex searched in the name.
 pub fn ignores_agent_displays(text: &str) -> bool {
+    ignores_monitor(text, DISPLAY_NAME)
+}
+
+fn ignores_monitor(text: &str, name: &str) -> bool {
     let Some(list) = ignored_monitors_list(text) else {
         return false;
     };
@@ -579,7 +586,7 @@ pub fn ignores_agent_displays(text: &str) -> bool {
             regex::RegexBuilder::new(pattern)
                 .case_insensitive(true)
                 .build()
-                .is_ok_and(|r| r.is_match(DISPLAY_NAME))
+                .is_ok_and(|r| r.is_match(name))
         })
 }
 
@@ -602,6 +609,67 @@ pub fn with_agent_displays_ignored(text: &str) -> String {
         "# Agent Screen's virtual displays are for AI agents: leave them alone.\n\
          ignored-monitors = [{PATTERN}]\n\n{text}"
     )
+}
+
+/// A config that ignores the displays of Sidescreen, Agent Screen's former
+/// name, and not Agent Screen's, with Agent Screen's pattern added before the
+/// old one; None for any other config. The old pattern stays: it costs
+/// nothing, and the user may still run a copy of Sidescreen.
+pub fn with_renamed_pattern(text: &str) -> Option<String> {
+    (!ignores_agent_displays(text) && ignores_monitor(text, OLD_DISPLAY_NAME))
+        .then(|| with_agent_displays_ignored(text))
+}
+
+/// Give a config that ignores Sidescreen's displays Agent Screen's pattern
+/// too, keeping the old file beside it, and reload AeroSpace's config if it
+/// runs. Puts the old file back if AeroSpace refuses the new one. Does
+/// nothing for any other config, and runs once per launch, so a user who
+/// takes the pattern out again keeps it out. Some(path) when it changed a
+/// config. Blocking.
+pub fn migrate_renamed_pattern() -> Result<Option<std::path::PathBuf>, String> {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let present = configs();
+    let [path] = present.as_slice() else {
+        return Ok(None);
+    };
+    let old = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let Some(new) = with_renamed_pattern(&old) else {
+        return Ok(None);
+    };
+    keep_backup(path, &old).map_err(|e| e.to_string())?;
+    replace(path, &new).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some(aerospace) = AeroSpace::current()
+        && let Err(refused) = aerospace.run(&["reload-config", "--no-gui"])
+    {
+        let restored = replace(path, &old);
+        let _ = aerospace.run(&["reload-config", "--no-gui"]);
+        return Err(match restored {
+            Ok(()) => {
+                format!("AeroSpace refused the new config, so the old one is back: {refused}")
+            }
+            Err(e) => format!(
+                "AeroSpace refused the new config ({refused}) and the old one couldn't go back: {e}"
+            ),
+        });
+    }
+    Ok(Some(path.clone()))
+}
+
+/// Keep `old`, the text of config `path`, beside it, under a name no file
+/// has yet.
+fn keep_backup(path: &std::path::Path, old: &str) -> std::io::Result<std::path::PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut backup = path.with_file_name(format!("{name}.before-agent-screen"));
+    let mut n = 2;
+    while backup.exists() {
+        backup = path.with_file_name(format!("{name}.before-agent-screen-{n}"));
+        n += 1;
+    }
+    std::fs::write(&backup, old)?;
+    Ok(backup)
 }
 
 /// What `ignore_agent_displays` did.
@@ -667,17 +735,7 @@ pub fn ignore_agent_displays() -> Result<Ignored, NotIgnored> {
         }
     };
     let backup = match &old {
-        Some(old) => {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let mut backup = path.with_file_name(format!("{name}.before-agent-screen"));
-            let mut n = 2;
-            while backup.exists() {
-                backup = path.with_file_name(format!("{name}.before-agent-screen-{n}"));
-                n += 1;
-            }
-            std::fs::write(&backup, old).map_err(|e| not_written(e.to_string()))?;
-            Some(backup)
-        }
+        Some(old) => Some(keep_backup(&path, old).map_err(|e| not_written(e.to_string()))?),
         None => {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| not_written(e.to_string()))?;
@@ -712,6 +770,29 @@ pub fn ignore_agent_displays() -> Result<Ignored, NotIgnored> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_config_for_sidescreen_gets_the_new_pattern_beside_the_old() {
+        assert_eq!(
+            with_renamed_pattern("ignored-monitors = ['^Sidescreen']\n").as_deref(),
+            Some("ignored-monitors = ['^Agent Screen', '^Sidescreen']\n")
+        );
+        let commented = "# Sidescreen's virtual displays are for AI agents: leave them alone.\n\
+                         ignored-monitors = ['^Sidescreen']\n\n[gaps]\ninner.horizontal = 8\n";
+        let migrated = with_renamed_pattern(commented).unwrap();
+        assert!(migrated.contains("ignored-monitors = ['^Agent Screen', '^Sidescreen']\n\n[gaps]"));
+        assert!(ignores_agent_displays(&migrated));
+        assert!(
+            with_renamed_pattern(&migrated).is_none(),
+            "a migrated config stays as it is"
+        );
+        assert!(
+            with_renamed_pattern("ignored-monitors = ['^Sidescreen', '^Agent Screen']\n").is_none()
+        );
+        assert!(with_renamed_pattern("ignored-monitors = ['dummy']\n").is_none());
+        assert!(with_renamed_pattern("# ignored-monitors = ['^Sidescreen']\n").is_none());
+        assert!(with_renamed_pattern("start-at-login = true\n").is_none());
+    }
 
     #[test]
     fn finds_agent_displays_in_ignored_monitors() {

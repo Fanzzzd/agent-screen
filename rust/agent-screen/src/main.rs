@@ -135,6 +135,12 @@ fn main() {
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
     log::debug!("language: {:?}", i18n::lang());
+    for copied in mac::app::carry_over_sidescreen_folder() {
+        log::warn!(
+            "carried over from Sidescreen's folder: {}",
+            copied.display()
+        );
+    }
     let platform = gpui_platform::current_platform(false);
     // An accessory from launch: no Dock icon, never activated by starting.
     platform.set_activation_policy(ActivationPolicy::Accessory);
