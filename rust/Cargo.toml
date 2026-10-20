@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["agent-screen-model", "agent-screen-mcp", "agent-screen-colorsync", "agent-screen", "tests"]
+# Zed's code, patched in below; linted upstream, not here.
+exclude = ["vendor"]
+
+# Frames present off the main thread; see vendor/gpui_apple/Cargo.toml.
+[patch."https://github.com/zed-industries/zed"]
+gpui_apple = { path = "vendor/gpui_apple" }

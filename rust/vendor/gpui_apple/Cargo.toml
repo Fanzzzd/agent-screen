@@ -1,0 +1,48 @@
+# Agent Screen: Zed's gpui_apple at c83abe7d0e060de08db386fbf86f7e95bfe6cb09,
+# patched so a window's frames present on a thread of their own (see
+# `Presenter` in src/metal_renderer.rs). Dependencies are Zed's workspace
+# ones, written out.
+[package]
+name = "gpui_apple"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_apple.rs"
+doctest = false
+
+[features]
+default = []
+bench-support = ["gpui/bench-support"]
+test-support = ["gpui/test-support"]
+runtime_shaders = []
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08db386fbf86f7e95bfe6cb09", default-features = false }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+anyhow = "1.0.86"
+async-task = "4.7"
+block2 = "0.6"
+core-foundation = "0.10"
+core-graphics = "0.24"
+core-video = { version = "0.5.2", features = ["metal"] }
+derive_more = { version = "2.1.1", features = ["add", "add_assign", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+dispatch2 = "0.3.1"
+etagere = "0.2"
+foreign-types = "0.5"
+gpui_util = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08db386fbf86f7e95bfe6cb09" }
+image = { version = "0.25.1", default-features = false, features = ["png"] }
+libc = "0.2"
+log = "0.4.16"
+mach2 = "0.5"
+metal = "0.33"
+objc2 = "0.6"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSThread"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
+parking_lot = "0.12.1"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies]
+cbindgen = { version = "0.28.0", default-features = false }
