@@ -783,10 +783,13 @@ impl Shell {
             .min(screen.origin.x + screen.size.width - w - 8.0)
             .max(screen.origin.x + 8.0);
         let frame = rect(x.round(), (top - h).round(), w, h);
-        native::set_alpha(&window, 0.0);
-        native::set_frame(&window, offset(frame, 10.0));
-        native::order_front(&window);
-        native::animate(&window, frame, 1.0, 0.24);
+        let shown = window.clone();
+        native::later(move || {
+            native::set_alpha(&shown, 0.0);
+            native::set_frame(&shown, offset(frame, 10.0));
+            native::order_front(&shown);
+            native::animate(&shown, frame, 1.0, 0.24);
+        });
         self.card_shown = Some(id);
     }
 
@@ -1073,14 +1076,16 @@ impl Shell {
         }
         self.peek_generation += 1;
         if self.peek_shown {
-            native::set_frame(&window, frame);
+            native::set_frame_later(&window, frame);
         } else {
             self.watch_pointer(cx);
             // It slides 10 pt down out of the menu bar and fades in.
-            native::set_alpha(&window, 0.0);
-            native::set_frame(&window, offset(frame, 10.0));
-            native::order_front(&window);
-            native::animate(&window, frame, 1.0, 0.24);
+            native::later(move || {
+                native::set_alpha(&window, 0.0);
+                native::set_frame(&window, offset(frame, 10.0));
+                native::order_front(&window);
+                native::animate(&window, frame, 1.0, 0.24);
+            });
         }
         self.peek_shown = true;
         self.refresh_counts(cx);
@@ -1299,7 +1304,7 @@ impl Shell {
         };
         self.viewer_generation += 1;
         if self.viewer_open {
-            native::set_frame(&window, frame);
+            native::set_frame_later(&window, frame);
             // A switch can cut an open morph short, whose timer then bails.
             self.set_morphing(false, cx);
         } else {
@@ -1310,11 +1315,14 @@ impl Shell {
                 "viewer opens at {frame:?} from {from:?}, resting {:?}",
                 self.resting
             );
-            native::set_alpha(&window, 0.0);
-            native::set_frame(&window, fit_into(frame, from));
-            native::order_front(&window);
-            native::animate_frame(&window, frame, 0.45, native::Curve::Spring);
-            native::animate_alpha(&window, 1.0, 0.16, native::Curve::Settle);
+            let shown = window.clone();
+            native::later(move || {
+                native::set_alpha(&shown, 0.0);
+                native::set_frame(&shown, fit_into(frame, from));
+                native::order_front(&shown);
+                native::animate_frame(&shown, frame, 0.45, native::Curve::Spring);
+                native::animate_alpha(&shown, 1.0, 0.16, native::Curve::Settle);
+            });
             self.set_morphing(true, cx);
             let generation = self.viewer_generation;
             self.after(Duration::from_millis(450), cx, move |shell, cx| {

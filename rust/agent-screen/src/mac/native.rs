@@ -700,6 +700,36 @@ pub fn set_frame(window: &NSWindow, frame: NSRect) {
     window.invalidateShadow();
 }
 
+/// Resize a GPUI window that is showing, once the GPUI update in progress
+/// has returned. Resizing redraws the window at its new size on the spot,
+/// and inside an update GPUI can't draw, so the window would show its old
+/// picture in its new frame, with an empty strip, until its next frame:
+/// hundreds of ms while displays change.
+pub fn set_frame_later(window: &NSWindow, frame: NSRect) {
+    let window: Retained<NSWindow> = window.retain();
+    later(move || set_frame(&window, frame));
+}
+
+/// Run `f` on the main thread once the GPUI update in progress has
+/// returned: for showing or resizing a GPUI window, which draws on the spot.
+pub fn later(f: impl FnOnce() + 'static) {
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopCommonModes};
+    let Some(main) = CFRunLoop::main() else {
+        f();
+        return;
+    };
+    let f = Cell::new(Some(f));
+    let block = RcBlock::new(move || {
+        if let Some(f) = f.take() {
+            f();
+        }
+    });
+    unsafe {
+        main.perform_block(kCFRunLoopCommonModes.map(|m| m.as_ref()), Some(&block));
+    }
+    main.wake_up();
+}
+
 /// Show without taking the keyboard from the user's app.
 pub fn order_front(window: &NSWindow) {
     window.orderFrontRegardless();

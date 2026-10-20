@@ -146,6 +146,11 @@ impl Presenter {
         self.wake.notify_one();
     }
 
+    fn replace(&self, frame: &metal::Texture) {
+        let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
+        shown.frame = Some(frame.clone());
+    }
+
     fn close(&self) {
         let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
         shown.closed = true;
@@ -647,6 +652,11 @@ impl MetalRenderer {
             command_buffer.commit();
             command_buffer.wait_until_scheduled();
             drawable.present();
+            // The presenter may still hold the frame of the old size; give
+            // it this one, so it never shows that after this.
+            if let Some(presenter) = &self.presenter {
+                presenter.replace(&frame);
+            }
         } else if let Some(presenter) = &self.presenter {
             presenter.show(&frame);
         }

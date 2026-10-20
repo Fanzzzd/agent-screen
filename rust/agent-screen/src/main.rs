@@ -34,7 +34,11 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) && record.target().starts_with("AgentScreen") {
+        // AGENTSCREEN_LOG_ALL=1 adds the libraries' lines, GPUI's errors
+        // among them.
+        static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all = *ALL.get_or_init(|| std::env::var_os("AGENTSCREEN_LOG_ALL").is_some());
+        if self.enabled(record.metadata()) && (all || record.target().starts_with("AgentScreen")) {
             eprintln!("Agent Screen {}: {}", record.level(), record.args());
         }
     }
