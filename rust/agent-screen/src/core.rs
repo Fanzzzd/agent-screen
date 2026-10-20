@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 /// connected as a spare for the next display of its size, up to `SPARES` of
 /// them for `SPARE_LIFE`, and new displays are limited to `MADE` per
 /// `MADE_WINDOW` for agents.
-const SPARES: usize = 2;
+const SPARES: usize = 3;
 const SPARE_LIFE: Duration = Duration::from_secs(10 * 60);
 const MADE: usize = 10;
 /// Each display added or removed stops every window on the Mac from
@@ -30,8 +30,10 @@ const MADE: usize = 10;
 /// every `TIDY_EVERY`.
 const IDLE: Duration = Duration::from_secs(60);
 const TIDY_EVERY: Duration = Duration::from_secs(15);
-/// One spare stays ready while displays were used within `WARM`.
+/// `READY` spares stay ready while displays were used within `WARM`, so
+/// that many "+" in a row add no display.
 const WARM: Duration = Duration::from_secs(60 * 60);
+const READY: usize = 2;
 const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// An ended display kept connected for the next one of its size. Nothing
@@ -316,8 +318,8 @@ impl Core {
     }
 
     /// While the user is idle: release what waited for it, spares kept
-    /// longer than `SPARE_LIFE` among them, and make a spare when displays
-    /// were used lately and none is ready.
+    /// longer than `SPARE_LIFE` among them, and make spares when displays
+    /// were used lately and fewer than `READY` are ready.
     fn tidy(&mut self, cx: &mut Context<Self>) {
         if crate::mac::ime::user_idle() < idle().as_secs_f64() {
             return;
@@ -331,9 +333,12 @@ impl Core {
         let (mut old, mut kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
             .into_iter()
             .partition(|s| s.since.elapsed() >= SPARE_LIFE);
-        // The newest stays as the ready one.
-        if warm && kept.is_empty() {
-            kept.extend(old.pop());
+        // The newest stay as the ready ones.
+        while warm
+            && kept.len() < READY
+            && let Some(spare) = old.pop()
+        {
+            kept.push(spare);
         }
         self.spares = kept;
         for spare in old {
@@ -347,7 +352,8 @@ impl Core {
         if released {
             self.reclaim_soon(cx);
         }
-        if warm && self.spares.is_empty() && !self.warming && self.budget_allows().is_ok() {
+        // One at a time, a tidy apart.
+        if warm && self.spares.len() < READY && !self.warming && self.budget_allows().is_ok() {
             self.make_spare(cx);
         }
     }

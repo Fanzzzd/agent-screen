@@ -1,11 +1,11 @@
-//! While the user is idle, Agent Screen makes the spare the next "+" or
-//! create_display of the default size takes, so that one adds no display
+//! While the user is idle, Agent Screen makes the two spares the next two
+//! "+" or create_display of the default size take, so those add no display
 //! and nothing on the Mac stops drawing. The test build counts the user as
 //! idle at once (AGENTSCREEN_IDLE_SECS=0) and tidies every 15 s.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare
 //!
-//! Makes 2 displays: one in use, and the spare the app makes.
+//! Makes 3 displays: one in use, and the two spares the app makes.
 
 use std::process::ExitCode;
 use std::thread;
@@ -64,30 +64,33 @@ fn test() -> Result<()> {
     let control = Control::connect()?;
     let from = log().len();
     let first = create(&control, "first")?;
-    // The next tidy after the display was used makes the spare.
-    let mut spare = None;
-    for _ in 0..40 {
+    // The tidies after the display was used make the spares, one each.
+    let mut spares = Vec::new();
+    for _ in 0..60 {
         sleep_ms(1000);
-        spare = log()[from..]
+        spares = log()[from..]
             .lines()
-            .find(|l| l.contains("spare made while idle"))
-            .map(String::from);
-        if spare.is_some() {
+            .filter(|l| l.contains("spare made while idle"))
+            .map(String::from)
+            .collect::<Vec<_>>();
+        if spares.len() >= 2 {
             break;
         }
     }
     check(
-        "an idle user gets a spare made while displays are in use",
-        spare.is_some(),
-        format!("{spare:?}"),
+        "an idle user gets two spares made while displays are in use",
+        spares.len() == 2,
+        format!("{spares:#?}"),
     );
-    // Let it settle in place before counting.
+    // Let them settle in place before counting.
     sleep_ms(3000);
-    let (second, added) = reconfigurations(5, || create(&control, "second"))?;
-    check(
-        "the next display takes the spare: no display change",
-        second != first && added == 0,
-        format!("display {second}, {added} reconfigurations"),
-    );
+    for key in ["second", "third"] {
+        let (id, added) = reconfigurations(5, || create(&control, key))?;
+        check(
+            &format!("the {key} display takes a spare: no display change"),
+            id != first && added == 0,
+            format!("display {id}, {added} reconfigurations"),
+        );
+    }
     Ok(())
 }
