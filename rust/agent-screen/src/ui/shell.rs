@@ -500,6 +500,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             if counted
                 .update(cx, |shell, cx| {
                     shell.refresh_counts(cx);
+                    if shell.icon_rect().is_some() {
+                        shell.icon.keep_place();
+                    }
                     // A Review Display closes once its last window goes,
                     // whenever that happens.
                     if shell

@@ -203,8 +203,20 @@ fn template_svg(svg: &str) -> Option<Retained<NSImage>> {
     Some(image)
 }
 
+/// Where AppKit keeps the icon's place in the menu bar, and Agent Screen's
+/// copy of a place where it showed on the user's screen: reinstalling
+/// leaves AppKit's value off every screen, among the icons a full menu bar
+/// hides.
+const ICON_PLACE: &str = "NSStatusItem Preferred Position Item-0";
+const ICON_PLACE_SHOWN: &str = "AgentScreen Icon Position Shown";
+
 impl StatusIcon {
     pub fn install(mtm: MainThreadMarker) -> StatusIcon {
+        // Back where the user last saw it, before AppKit places it.
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        if let Some(shown) = defaults.objectForKey(&NSString::from_str(ICON_PLACE_SHOWN)) {
+            unsafe { defaults.setObject_forKey(Some(&shown), &NSString::from_str(ICON_PLACE)) };
+        }
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(-2.0); // NSSquareStatusItemLength
         let target: Retained<IconTarget> = unsafe { msg_send![IconTarget::alloc(mtm), init] };
         if let Some(button) = item.button(mtm) {
@@ -242,6 +254,23 @@ impl StatusIcon {
     pub fn set_asking(&self, asking: bool) {
         self.asking.set(asking);
         self.redraw();
+    }
+
+    /// The icon shows on the user's screen: keep AppKit's place for it, to
+    /// restore at the next launch.
+    pub fn keep_place(&self) {
+        let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        let (place, shown) = (
+            NSString::from_str(ICON_PLACE),
+            NSString::from_str(ICON_PLACE_SHOWN),
+        );
+        if defaults.objectForKey(&place).is_none() {
+            return;
+        }
+        let now = defaults.doubleForKey(&place);
+        if defaults.objectForKey(&shown).is_none() || defaults.doubleForKey(&shown) != now {
+            defaults.setDouble_forKey(now, &shown);
+        }
     }
 
     /// Which picture shows: idle, working, asking or setup.

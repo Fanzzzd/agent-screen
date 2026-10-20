@@ -11,8 +11,8 @@ from pathops import Path, PathOp, LineCap, LineJoin, op
 
 K = 0.5523
 out = sys.argv[1]
-W = 1.5          # stroke, as SF Symbols' regular weight at this size
-GAP = 1.3        # clearance around a badge
+W = 1.7          # stroke: as heavy as the Wi-Fi and battery glyphs beside it
+GAP = 1.4        # clearance around a badge
 
 def rrect(x, y, w, h, r):
     p = Path(); pen = p.getPen()
@@ -91,6 +91,39 @@ def svg_path(p):
         elif name == "CLOSE": d.append("Z")
         elif name == "CONIC": d.append("Q" + f(pts[0]) + " " + f(pts[1]))
     return "".join(d)
+
+def ink_centroid(p, size=180):
+    """The center of the glyph's ink, from a raster of it: where the eye
+    puts the middle, unlike the bounding box, which the pointer drags."""
+    import subprocess, io
+    from PIL import Image
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="{svg_path(p)}"/></svg>'
+    png = subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size)], input=svg.encode(), capture_output=True, check=True).stdout
+    alpha = Image.open(io.BytesIO(png)).getchannel("A")
+    total = sx = sy = 0
+    for y in range(size):
+        for x in range(size):
+            a = alpha.getpixel((x, y))
+            total += a; sx += a * x; sy += a * y
+    k = 18 / size
+    return (sx / total + 0.5) * k, (sy / total + 0.5) * k
+
+# One fit for every state, from idle, so switching states moves nothing:
+# the glyph's ink centers on the middle, where the eye puts it (two screens
+# above, a thin pointer below: the bounding box would sit high), and it is
+# as large as that leaves room for inside the 18 pt box, 0.25 pt to spare.
+from fontTools.pens.transformPen import TransformPen
+def place(p, scale, dx, dy):
+    q = Path(); pen = q.getPen()
+    p.draw(TransformPen(pen, (scale, 0, 0, scale, dx, dy)))
+    return q
+cx, cy = ink_centroid(icons["idle"])
+x0, y0, x1, y1 = icons["idle"].bounds
+reach = max(cx - x0, x1 - cx, cy - y0, y1 - cy)
+scale = 8.75 / reach
+dx, dy = 9 - cx * scale, 9 - cy * scale
+icons = {name: place(p, scale, dx, dy) for name, p in icons.items()}
+print(f"ink center {cx:.2f} {cy:.2f}, scale {scale:.3f}")
 
 for name, p in icons.items():
     p.simplify()
