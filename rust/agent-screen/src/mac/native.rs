@@ -185,6 +185,22 @@ pub struct StatusIcon {
     item: Retained<NSStatusItem>,
     asking: Cell<bool>,
     needs_setup: Cell<bool>,
+    working: Cell<bool>,
+}
+
+/// The icon's pictures, made by assets/status/make.py.
+const ICON_IDLE: &str = include_str!("../../assets/status/idle.svg");
+const ICON_WORKING: &str = include_str!("../../assets/status/working.svg");
+const ICON_ASKING: &str = include_str!("../../assets/status/asking.svg");
+const ICON_SETUP: &str = include_str!("../../assets/status/setup.svg");
+
+/// An 18 pt template image from SVG source.
+fn template_svg(svg: &str) -> Option<Retained<NSImage>> {
+    let data = objc2_foundation::NSData::with_bytes(svg.as_bytes());
+    let image = NSImage::initWithData(<NSImage as objc2::AnyThread>::alloc(), &data)?;
+    image.setSize(NSSize::new(18.0, 18.0));
+    image.setTemplate(true);
+    Some(image)
 }
 
 impl StatusIcon {
@@ -216,6 +232,7 @@ impl StatusIcon {
             item,
             asking: Cell::new(false),
             needs_setup: Cell::new(false),
+            working: Cell::new(false),
         };
         icon.redraw();
         icon
@@ -224,6 +241,25 @@ impl StatusIcon {
     /// A raised hand while any Help Request is open.
     pub fn set_asking(&self, asking: bool) {
         self.asking.set(asking);
+        self.redraw();
+    }
+
+    /// Which picture shows: idle, working, asking or setup.
+    pub fn state(&self) -> &'static str {
+        if self.needs_setup.get() {
+            "setup"
+        } else if self.asking.get() {
+            "asking"
+        } else if self.working.get() {
+            "working"
+        } else {
+            "idle"
+        }
+    }
+
+    /// The front screen filled while any display is in use.
+    pub fn set_working(&self, working: bool) {
+        self.working.set(working);
         self.redraw();
     }
 
@@ -239,30 +275,34 @@ impl StatusIcon {
         let Some(button) = self.item.button(mtm) else {
             return;
         };
-        let (symbol, description) = if self.needs_setup.get() {
+        let (svg, description) = if self.needs_setup.get() {
             (
-                "rectangle.on.rectangle.slash",
+                ICON_SETUP,
                 t("Agent Screen: needs permissions", "Agent Screen：需要权限"),
             )
         } else if self.asking.get() {
             (
-                "hand.raised.fill",
+                ICON_ASKING,
                 t(
                     "Agent Screen: an agent is asking for help",
                     "Agent Screen：agent 在请求帮助",
                 ),
             )
+        } else if self.working.get() {
+            (
+                ICON_WORKING,
+                t(
+                    "Agent Screen: displays in use",
+                    "Agent Screen：有显示器在用",
+                ),
+            )
         } else if agent_screen_mcp::endpoint::is_dev_build() {
-            ("rectangle.on.rectangle", "Agent Screen Dev")
+            (ICON_IDLE, "Agent Screen Dev")
         } else {
-            ("rectangle.on.rectangle", "Agent Screen")
+            (ICON_IDLE, "Agent Screen")
         };
-        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str(symbol),
-            Some(&NSString::from_str(description)),
-        );
-        if let Some(image) = image {
-            image.setTemplate(true);
+        if let Some(image) = template_svg(svg) {
+            image.setAccessibilityDescription(Some(&NSString::from_str(description)));
             button.setImage(Some(&image));
         }
         button.setToolTip(Some(&NSString::from_str(description)));

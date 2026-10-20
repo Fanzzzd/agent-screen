@@ -1027,6 +1027,14 @@ async fn handle_one(
             .detach();
             Ok(json!({}))
         }
+        // Which picture the menu bar icon shows: idle, working, asking or setup.
+        "debugIcon" if debug_methods() => {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let state = shell
+                .update(cx, |shell, _| shell.icon_state())
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "state": state }))
+        }
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;

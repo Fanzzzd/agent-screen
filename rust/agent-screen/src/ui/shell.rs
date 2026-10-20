@@ -110,6 +110,8 @@ pub struct Shell {
     card_later: HashMap<DisplayId, String>,
 
     peek_shown: bool,
+    /// Some display is in use: the icon's front screen is filled.
+    working: bool,
     /// Displays being made for "+", each a waiting tile in Peek.
     creating: usize,
     /// Peek's card while it slides: where it ends, and which slide.
@@ -299,6 +301,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             card_shown: None,
             card_later: HashMap::new(),
             peek_shown: false,
+            working: false,
             creating: 0,
             slide_card: None,
             peek_slides: 0,
@@ -641,6 +644,11 @@ impl Shell {
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
+        }
+        let working = core.displays.list.iter().any(|d| !d.is_ended());
+        if working != self.working {
+            self.working = working;
+            self.icon.set_working(working);
         }
         for display in &core.displays.list {
             let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
@@ -1000,6 +1008,11 @@ impl Shell {
     /// such as Ice park hidden items far off-screen, the notch hides
     /// overflowing ones, and while an app on an Agent Display is frontmost,
     /// macOS draws the icon in that display's menu bar.
+    /// Which picture the menu bar icon shows.
+    pub fn icon_state(&self) -> &'static str {
+        self.icon.state()
+    }
+
     fn icon_rect(&self) -> Option<NSRect> {
         let icon = self.icon.frame()?;
         self.user_screens()
