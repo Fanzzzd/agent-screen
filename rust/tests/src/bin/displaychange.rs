@@ -124,10 +124,24 @@ fn test(app_log: &Path) -> Result<()> {
             app_log.display()
         ),
     );
+    // The new display's card shows its picture, the blue of the wallpaper:
+    // a window frozen on the frame it drew while resizing still says
+    // "Waiting for picture…" on gray.
+    let card = pixel(&shot, grown.width * 0.5, grown.height * 0.3);
+    check(
+        "Peek keeps drawing after it resized: the new display's card shows its picture",
+        card.len() >= 3 && card[2] - card[0] > 20.0,
+        format!("pixel {card:?} in {}", shot.display()),
+    );
     let right = pixel(&shot, grown.width - 40.0, grown.height / 2.0);
     check(
         "Peek grew and draws out to its right edge",
-        grown.width > peek.width && right.iter().take(3).any(|&c| c > 8.0),
+        // Peek's gray, not black and not the wallpaper behind an empty
+        // window.
+        grown.width > peek.width
+            && right.len() >= 3
+            && right[0] > 25.0
+            && (right[2] - right[0]).abs() < 10.0,
         format!(
             "Peek {} wide, then {}; pixel {right:?} in {}",
             peek.width,

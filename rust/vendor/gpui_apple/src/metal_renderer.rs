@@ -123,6 +123,67 @@ struct Shown {
 struct Presenter {
     shown: std::sync::Mutex<Shown>,
     wake: std::sync::Condvar,
+    /// A layer over the Metal layer that shows a frame drawn inside AppKit's
+    /// transaction, until a drawable with that frame or a newer one is on
+    /// screen.
+    still: Arc<StillLayer>,
+    /// Counts the frames `still` was given; a drawable hides it only if
+    /// none came after the drawable's frame.
+    stills: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Agent Screen: a sublayer, owned, used from the main thread and from the
+/// thread Metal calls presented handlers on.
+struct StillLayer(*mut AnyObject);
+// SAFETY: its properties are set inside a transaction of their own, which
+// Core Animation allows on any thread.
+unsafe impl Send for StillLayer {}
+unsafe impl Sync for StillLayer {}
+
+impl StillLayer {
+    fn new(over: &metal::MetalLayerRef) -> Self {
+        unsafe {
+            let layer: *mut AnyObject = objc2::msg_send![objc2::class!(CALayer), new];
+            let _: () = objc2::msg_send![layer, setHidden: true];
+            let over: *mut AnyObject = over.as_ptr().cast();
+            let _: () = objc2::msg_send![over, addSublayer: layer];
+            Self(layer)
+        }
+    }
+
+    /// Show `surface` over all of `over`, or hide with None.
+    fn set(&self, shown: Option<(&AnyObject, &metal::MetalLayerRef)>) {
+        unsafe {
+            let transaction = objc2::class!(CATransaction);
+            let _: () = objc2::msg_send![transaction, begin];
+            let _: () = objc2::msg_send![transaction, setDisableActions: true];
+            match shown {
+                Some((surface, over)) => {
+                    let over: *mut AnyObject = over.as_ptr().cast();
+                    let bounds: objc2_core_foundation::CGRect = objc2::msg_send![over, bounds];
+                    let scale: f64 = objc2::msg_send![over, contentsScale];
+                    let _: () = objc2::msg_send![self.0, setFrame: bounds];
+                    let _: () = objc2::msg_send![self.0, setContentsScale: scale];
+                    let _: () = objc2::msg_send![self.0, setContents: surface];
+                    let _: () = objc2::msg_send![self.0, setHidden: false];
+                }
+                None => {
+                    let _: () = objc2::msg_send![self.0, setHidden: true];
+                    let _: () = objc2::msg_send![self.0, setContents: ptr::null_mut::<AnyObject>()];
+                }
+            }
+            let _: () = objc2::msg_send![transaction, commit];
+        }
+    }
+}
+
+impl Drop for StillLayer {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = objc2::msg_send![self.0, removeFromSuperlayer];
+            let _: () = objc2::msg_send![self.0, release];
+        }
+    }
 }
 
 impl Presenter {
@@ -130,6 +191,8 @@ impl Presenter {
         let presenter = Arc::new(Self {
             shown: std::sync::Mutex::new(Shown::default()),
             wake: std::sync::Condvar::new(),
+            still: Arc::new(StillLayer::new(&layer)),
+            stills: Arc::default(),
         });
         let this = presenter.clone();
         std::thread::Builder::new()
@@ -144,6 +207,15 @@ impl Presenter {
         shown.frame = Some(frame.clone());
         shown.pending = true;
         self.wake.notify_one();
+    }
+
+    /// Show `surface`, which has `frame` in it, at once, over the
+    /// drawable shown last. Main thread, in AppKit's transaction.
+    fn show_still(&self, surface: &AnyObject, layer: &metal::MetalLayerRef, frame: &metal::Texture) {
+        self.stills
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.still.set(Some((surface, layer)));
+        self.show(frame);
     }
 
     fn close(&self) {
@@ -183,6 +255,20 @@ impl Presenter {
                 else {
                     return;
                 };
+                // Once this drawable is on screen, the still shown before
+                // it goes, unless a newer one came meanwhile.
+                let shown = self.stills.load(std::sync::atomic::Ordering::SeqCst);
+                if shown > 0 {
+                    let stills = self.stills.clone();
+                    let still = self.still.clone();
+                    let hide = block2::RcBlock::new(move |_: *mut AnyObject| {
+                        if stills.load(std::sync::atomic::Ordering::SeqCst) == shown {
+                            still.set(None);
+                        }
+                    });
+                    let drawable: *const AnyObject = drawable.as_ptr().cast();
+                    let _: () = unsafe { objc2::msg_send![drawable, addPresentedHandler: &*hide] };
+                }
                 let command_buffer = queue.new_command_buffer();
                 copy_frame(command_buffer, &frame, drawable.texture());
                 command_buffer.present_drawable(drawable);
@@ -286,7 +372,7 @@ pub struct MetalRenderer {
     frame: Option<metal::Texture>,
     presenter: Option<Arc<Presenter>>,
     /// Agent Screen: IOSurfaces a frame drawn inside AppKit's transaction
-    /// goes into, shown as the layer's contents.
+    /// goes into, shown by the presenter's still layer.
     stills: Vec<Still>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
@@ -694,21 +780,19 @@ impl MetalRenderer {
             // AppKit asked for this frame inside its transaction, as when
             // the window resizes: show it in this transaction. A drawable
             // can take a second to come while displays change, so the
-            // frame goes in as the layer's contents, an IOSurface, which
-            // takes no wait.
+            // frame goes into an IOSurface shown by a layer over this one,
+            // which takes no wait.
             let still = self.still(viewport_size);
             let command_buffer = self.command_queue.new_command_buffer();
             copy_frame(command_buffer, &frame, &still.texture);
             command_buffer.commit();
             command_buffer.wait_until_completed();
-            let objc2_layer: &objc2_quartz_core::CAMetalLayer =
-                unsafe { &*layer.as_ptr().cast() };
             let surface: *const objc2_io_surface::IOSurfaceRef = &*still.surface;
-            let contents: &AnyObject = unsafe { &*surface.cast::<AnyObject>() };
-            unsafe { objc2_layer.setContents(Some(contents)) };
-            // A drawable follows when there is one, from the presenter.
+            let surface: &AnyObject = unsafe { &*surface.cast::<AnyObject>() };
+            // A drawable follows when there is one, from the presenter,
+            // and hides the still once it shows.
             if let Some(presenter) = &self.presenter {
-                presenter.show(&frame);
+                presenter.show_still(surface, &layer, &frame);
             }
         } else if let Some(presenter) = &self.presenter {
             presenter.show(&frame);
