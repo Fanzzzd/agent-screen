@@ -199,8 +199,13 @@ impl VirtualDisplay {
             let _: () = msg_send![&descriptor, setName: &*NSString::from_str(name)];
             // Room for the largest size an agent may ask for, so a spare
             // can take any size later: a mode change, not a new display.
-            let _: () = msg_send![&descriptor, setMaxPixelsWide: LARGEST.0.max(width) * scale];
-            let _: () = msg_send![&descriptor, setMaxPixelsHigh: LARGEST.1.max(height) * scale];
+            let largest = if knob("AGENTSCREEN_MAX_PIXELS").as_deref() == Some("fit") {
+                (width, height)
+            } else {
+                LARGEST
+            };
+            let _: () = msg_send![&descriptor, setMaxPixelsWide: largest.0.max(width) * scale];
+            let _: () = msg_send![&descriptor, setMaxPixelsHigh: largest.1.max(height) * scale];
             // A ~110 ppi panel, so macOS picks sensible default scaling.
             let mm = 25.4 / 110.0;
             let physical = CGSize::new(width as f64 * mm, height as f64 * mm);
@@ -349,6 +354,9 @@ pub async fn create_parked(
 /// True once the display sits there. A display WindowServer has only just
 /// added ignores the configuration, so callers try again.
 pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
+    if knob("AGENTSCREEN_NO_PARK").is_some() {
+        return true;
+    }
     tuck_away_restoring(id, virtual_ids, &[])
 }
 
@@ -369,6 +377,9 @@ pub fn origins() -> Vec<(u32, (f64, f64))> {
 /// remembers that arrangement for this set of displays: without this, the
 /// user's monitor would stay moved, and move again each time.
 pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f64))]) -> bool {
+    if knob("AGENTSCREEN_NO_PARK").is_some() {
+        return true;
+    }
     let online = cg::active_displays();
     let restore: Vec<(u32, (f64, f64))> = before
         .iter()
@@ -454,6 +465,14 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
 /// Refresh rate and backing scale of new displays. Test builds read them
 /// from AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE, to measure
 /// what each costs.
+/// A setting a test build takes from the environment, to measure what a
+/// choice costs (`cargo e2e changecost`). None in a release build.
+fn knob(name: &str) -> Option<String> {
+    cfg!(debug_assertions)
+        .then(|| std::env::var(name).ok())
+        .flatten()
+}
+
 fn mode_settings() -> (f64, u32) {
     let read = |name: &str| {
         cfg!(debug_assertions)
