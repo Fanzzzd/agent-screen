@@ -259,8 +259,8 @@ pub fn show(p: super::permissions::Permission, listed: bool) {
             NSSize::new(width, title_h),
         ));
     });
+    // The permission check's next look, within 400 ms, places it.
     SHOWN.set(true);
-    tick();
 }
 
 /// Show the helper at a point, global top-left, without following System
@@ -290,16 +290,29 @@ pub fn is_shown() -> bool {
     SHOWN.get()
 }
 
-/// The System Settings window, in global top-left points.
-fn settings_window() -> Option<crate::model::Rect> {
+/// What `tick` follows: whether System Settings runs, its window in global
+/// top-left points, and whether it is the front app.
+pub struct Settings {
+    running: bool,
+    window: Option<crate::model::Rect>,
+    front: bool,
+}
+
+/// Find the Settings window. Off the main thread: the window list can
+/// wait on WindowServer for a second when displays change.
+pub fn look() -> Settings {
     let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
         SETTINGS,
     ));
     let pids: Vec<i32> = apps.iter().map(|a| a.processIdentifier()).collect();
     if pids.is_empty() {
-        return None;
+        return Settings {
+            running: false,
+            window: None,
+            front: false,
+        };
     }
-    cg::on_screen_windows()
+    let window = cg::on_screen_windows()
         .into_iter()
         .find(|w| {
             pids.contains(&w.target.pid)
@@ -307,7 +320,12 @@ fn settings_window() -> Option<crate::model::Rect> {
                 && w.bounds.width > 520.0
                 && w.bounds.height > 360.0
         })
-        .map(|w| w.bounds)
+        .map(|w| w.bounds);
+    Settings {
+        running: true,
+        window,
+        front: pids.iter().any(|&pid| super::input::is_front(pid)),
+    }
 }
 
 /// Where the helper goes, Cocoa coordinates: just below the Settings
@@ -329,28 +347,16 @@ fn place(w: crate::model::Rect) -> NSPoint {
     NSPoint::new(x, primary_height() - top - HEIGHT)
 }
 
-fn settings_frontmost() -> bool {
-    NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .and_then(|a| a.bundleIdentifier())
-        .is_some_and(|id| id.to_string() == SETTINGS)
-}
-
 /// Follow the Settings window. False once System Settings is gone, so the
 /// caller can stop.
-pub fn tick() -> bool {
+pub fn tick(settings: Settings) -> bool {
     if !SHOWN.get() {
         return false;
     }
-    let running = !NSRunningApplication::runningApplicationsWithBundleIdentifier(
-        &NSString::from_str(SETTINGS),
-    )
-    .is_empty();
-    let window = settings_window();
     ASSIST.with(|a| {
         let a = a.borrow();
         let Some(a) = a.as_ref() else { return };
-        match window.filter(|_| settings_frontmost()) {
+        match settings.window.filter(|_| settings.front) {
             Some(w) => {
                 a.panel.setFrameOrigin(place(w));
                 a.panel.orderFrontRegardless();
@@ -358,5 +364,5 @@ pub fn tick() -> bool {
             None => a.panel.orderOut(None),
         }
     });
-    running
+    settings.running
 }

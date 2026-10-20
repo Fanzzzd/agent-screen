@@ -1396,8 +1396,13 @@ pub fn note_activation(front: Option<i32>) {
     log::debug!("input: front app changed ({n})");
 }
 
-fn is_front(pid: i32) -> bool {
+pub fn is_front(pid: i32) -> bool {
     FRONT.load(std::sync::atomic::Ordering::Relaxed) == pid
+}
+
+/// The front app as the last activation named it, without asking.
+pub fn front() -> Option<i32> {
+    Some(FRONT.load(std::sync::atomic::Ordering::Relaxed)).filter(|&pid| pid != 0)
 }
 
 fn activations() -> u64 {

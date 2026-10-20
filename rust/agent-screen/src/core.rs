@@ -532,17 +532,38 @@ impl Core {
     }
 
     /// Ended displays with no window left close by themselves.
+    /// The window lists run off the UI thread.
     pub fn sweep_ended(&mut self, cx: &mut Context<Self>) {
-        let empty: Vec<DisplayId> = self
+        let ended: Vec<DisplayId> = self
             .displays
             .list
             .iter()
-            .filter(|d| d.is_ended() && windows::on_display(d.id).is_empty())
+            .filter(|d| d.is_ended())
             .map(|d| d.id)
             .collect();
-        for id in empty {
-            self.remove(id, cx);
+        if ended.is_empty() {
+            return;
         }
+        cx.spawn(async move |this, cx| {
+            let empty: Vec<DisplayId> = cx
+                .background_executor()
+                .spawn(async move {
+                    ended
+                        .into_iter()
+                        .filter(|&id| windows::on_display(id).is_empty())
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |core, cx| {
+                for id in empty {
+                    // Still ended: the user may have taken it back meanwhile.
+                    if core.displays.get(id).is_some_and(|d| d.is_ended()) {
+                        core.remove(id, cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 }
 

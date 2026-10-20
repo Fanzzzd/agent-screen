@@ -101,7 +101,11 @@ async fn handle_one(
     let p = Args(&p);
     if needs_permissions(method) {
         permitted(cx).await?;
-        if cg::screen_locked() {
+        if cx
+            .background_executor()
+            .spawn(async { cg::screen_locked() })
+            .await
+        {
             return Err(ControlError {
                 code: "locked",
                 message: "The Mac's screen is locked, so macOS blocks input and screenshots on \
@@ -251,7 +255,7 @@ async fn handle_one(
             Ok(result)
         }
         "click" => {
-            let (id, point) = target(&core, &p, cx)?;
+            let (id, point) = target(&core, &p, cx).await?;
             outside_menu_bar(id, point)?;
             let button = Button::parse(p.string("button").as_deref().unwrap_or("left"))
                 .ok_or_else(|| {
@@ -275,7 +279,7 @@ async fn handle_one(
             }
         }
         "move" => {
-            let (id, point) = target(&core, &p, cx)?;
+            let (id, point) = target(&core, &p, cx).await?;
             if let Some(grab) = GRAB.with(|g| g.borrow().get(&id).copied()) {
                 show_pointer(&core, id, point, false, cx);
                 drag_to(grab, point, cx).await;
@@ -287,7 +291,7 @@ async fn handle_one(
             Ok(json!({}))
         }
         "drag" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let from = global(&core, id, p.require("fromX")?, p.require("fromY")?, cx)?;
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
             outside_menu_bar(id, from)?;
@@ -326,7 +330,7 @@ async fn handle_one(
         }
         "mouseDown" | "mouseUp" => {
             let down = method == "mouseDown";
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             // Without a point the button acts where the Agent Pointer is.
             let point = match (p.number("x"), p.number("y")) {
                 (Some(x), Some(y)) => global(&core, id, x, y, cx)?,
@@ -392,7 +396,7 @@ async fn handle_one(
             })
         }
         "scroll" => {
-            let (id, point) = target(&core, &p, cx)?;
+            let (id, point) = target(&core, &p, cx).await?;
             let delta = (
                 p.number("deltaX").unwrap_or(0.0),
                 p.number("deltaY").unwrap_or(0.0),
@@ -404,7 +408,7 @@ async fn handle_one(
             Ok(json!({}))
         }
         "type" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let text = p
                 .string("text")
                 .ok_or_else(|| ControlError::invalid("text is required"))?;
@@ -452,7 +456,7 @@ async fn handle_one(
             typed
         }
         "key" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let keys = p
                 .string("keys")
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
@@ -503,7 +507,7 @@ async fn handle_one(
             pressed
         }
         "holdKey" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let keys = p
                 .string("keys")
                 .ok_or_else(|| ControlError::invalid("keys is required"))?;
@@ -552,7 +556,8 @@ async fn handle_one(
                     .unwrap_or_default()
             });
             let scale = display_scale(&core, id, cx);
-            let list: Vec<Value> = windows::on_display(id)
+            let list: Vec<Value> = off(cx, move || windows::on_display(id))
+                .await
                 .iter()
                 .map(|w| {
                     let mut json = in_shot(w.json(), scale);
@@ -574,16 +579,17 @@ async fn handle_one(
         }
         "setDisposition" => {
             let id = display(&core, &p, true, cx)?;
-            let window = p
-                .int("windowId")
-                .and_then(|w| {
-                    windows::on_display(id)
-                        .into_iter()
-                        .find(|x| x.target.window_id as i64 == w)
-                })
-                .ok_or_else(|| {
-                    ControlError::not_found(format!("no window with that id on display {id}"))
-                })?;
+            let wanted = p.int("windowId");
+            let window = off(cx, move || {
+                let w = wanted?;
+                windows::on_display(id)
+                    .into_iter()
+                    .find(|x| x.target.window_id as i64 == w)
+            })
+            .await
+            .ok_or_else(|| {
+                ControlError::not_found(format!("no window with that id on display {id}"))
+            })?;
             let disposition = p
                 .string("disposition")
                 .and_then(|d| Disposition::parse(&d))
@@ -597,7 +603,7 @@ async fn handle_one(
             Ok(json!({ "handedOver": handed_over.unwrap_or(false) }))
         }
         "placeWindow" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let wanted = p.int("windowId").unwrap_or(-1);
             let returned = core.read_with(cx, |c, _| {
                 c.displays
@@ -609,13 +615,15 @@ async fn handle_one(
                     "the user took that window back; it stays theirs. Ask them to hand it over again if you need it",
                 ));
             }
-            let released = windows::find(wanted as u32).is_some_and(|w| {
-                core.read_with(cx, |c, _| {
-                    c.displays
-                        .get(id)
-                        .is_some_and(|d| d.released.contains(&w.target.pid))
-                })
-            });
+            let released = off(cx, move || windows::find(wanted as u32))
+                .await
+                .is_some_and(|w| {
+                    core.read_with(cx, |c, _| {
+                        c.displays
+                            .get(id)
+                            .is_some_and(|d| d.released.contains(&w.target.pid))
+                    })
+                });
             if released {
                 return Err(ControlError::failed(
                     "the user took back a window of that app, which makes the app theirs: its windows stay on their screen. Ask the user to hand over the window you need",
@@ -656,7 +664,7 @@ async fn handle_one(
         }
         "windowState" => {
             let id = display(&core, &p, false, cx)?;
-            let window = window_on(id, &p)?;
+            let window = window_on(id, &p, cx).await?;
             let target = window.target;
             let area = cg::display_bounds(id);
             let origin = (area.x, area.y);
@@ -701,8 +709,8 @@ async fn handle_one(
             Ok(result)
         }
         "elementAction" => {
-            let id = input_display(&core, &p, cx)?;
-            let window = window_on(id, &p)?;
+            let id = input_display(&core, &p, cx).await?;
+            let window = window_on(id, &p, cx).await?;
             let index = p
                 .int("element")
                 .ok_or_else(|| ControlError::invalid("element is required"))?;
@@ -779,7 +787,7 @@ async fn handle_one(
             Ok(json!({}))
         }
         "launchApp" => {
-            let id = input_display(&core, &p, cx)?;
+            let id = input_display(&core, &p, cx).await?;
             let name = p
                 .string("app")
                 .ok_or_else(|| ControlError::invalid("app is required"))?;
@@ -1058,7 +1066,16 @@ fn needs_permissions(method: &str) -> bool {
 /// the setup window in front of them once for each state.
 async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     use std::sync::atomic::Ordering;
-    let missing = crate::mac::permissions::status().missing();
+    // The permission check's last answer, at most 2 s old. When it says
+    // something is missing, look again off the UI thread: the user may have
+    // just granted it, and the look can cost a window list.
+    let mut missing = crate::mac::permissions::last().missing();
+    if !missing.is_empty() {
+        missing = cx
+            .background_executor()
+            .spawn(async { crate::mac::permissions::status().missing() })
+            .await;
+    }
     let mut reopen = crate::mac::permissions::NEEDS_REOPEN.load(Ordering::Relaxed);
     // macOS can apply the grant a moment after the first probe failed: look
     // again before sending the agent to the user.
@@ -1912,6 +1929,11 @@ impl Start {
     }
 }
 
+/// Run `f`, which waits on another process, off the UI thread.
+async fn off<R: Send + 'static>(cx: &AsyncApp, f: impl FnOnce() -> R + Send + 'static) -> R {
+    cx.background_executor().spawn(async move { f() }).await
+}
+
 async fn launch(
     core: &Entity<Core>,
     id: DisplayId,
@@ -1921,7 +1943,8 @@ async fn launch(
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
     let resolving = Instant::now();
-    let path = app::resolve(name).ok_or_else(|| {
+    let asked = name.to_string();
+    let path = off(cx, move || app::resolve(&asked)).await.ok_or_else(|| {
         ControlError::not_found(format!(
             "no app named {name}; give its bundle id, or the absolute path of its .app bundle if Launch Services doesn't list it, as for a build under /tmp"
         ))
@@ -1960,7 +1983,11 @@ async fn launch(
         )));
     }
     // A catch kept on this app would race the launch's own for its window.
-    let pid = app::running_pid(&path);
+    let pid = off(cx, {
+        let path = path.clone();
+        move || app::running_pid(&path)
+    })
+    .await;
     let pause = |c: &mut Core, on: bool| {
         for (_, kept) in &c.kept_catches {
             if Some(kept.pid()) == pid {
@@ -1989,8 +2016,10 @@ async fn launch_now(
     let path = path.to_path_buf();
     let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
-    let mut before: std::collections::HashSet<u32> =
-        windows::all().iter().map(|w| w.target.window_id).collect();
+    let mut before: std::collections::HashSet<u32> = off(cx, || {
+        windows::all().iter().map(|w| w.target.window_id).collect()
+    })
+    .await;
     before.extend(core.read_with(cx, |c, _| {
         c.displays
             .list
@@ -2000,7 +2029,11 @@ async fn launch_now(
     }));
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
-    let instances_before = app::running_pids(&path);
+    let pids = {
+        let path = path.clone();
+        move || app::running_pids(&path)
+    };
+    let instances_before = off(cx, pids.clone()).await;
     let was_running = !fresh && !instances_before.is_empty();
     // New windows go straight onto the display, before the user sees them
     // or AeroSpace files them in the user's workspace.
@@ -2010,7 +2043,8 @@ async fn launch_now(
     // opens. A starting app's windows are all Agent Screen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
-    let mut catch = match app::running_pid(&path).filter(|_| !fresh) {
+    let running = off(cx, pids.clone()).await.into_iter().next();
+    let mut catch = match running.filter(|_| !fresh) {
         Some(pid) => catch_from(pid).await,
         None => None,
     };
@@ -2035,7 +2069,7 @@ async fn launch_now(
     let requested_at = Instant::now();
     // The new window may take the app's key focus from the user's window
     // before Agent Screen sees it: note theirs now, to hand it back after.
-    if let Some(pid) = app::running_pid(&path).filter(|_| !fresh) {
+    if let Some(pid) = running.filter(|_| !fresh) {
         core.update(cx, |c, _| c.forwarder(id))
             .remember_user_window(pid)
             .await;
@@ -2061,12 +2095,11 @@ async fn launch_now(
     };
     let mut pid = None;
     for _ in 0..200 {
+        let now = off(cx, pids.clone()).await;
         pid = if fresh {
-            app::running_pids(&path)
-                .into_iter()
-                .find(|p| !instances_before.contains(p))
+            now.into_iter().find(|p| !instances_before.contains(p))
         } else {
-            app::running_pid(&path)
+            now.into_iter().next()
         };
         if pid.is_some() {
             break;
@@ -2123,13 +2156,13 @@ async fn launch_now(
             // Browsers show themselves as they start, which draws their
             // first window on the user's screen: hide them again until it
             // sits on the display.
-            if !app::is_hidden(pid) {
-                app::hide(pid);
-            }
-            let moved = cx
-                .background_executor()
-                .spawn(async move { ax::move_all_into(pid, bounds) })
-                .await;
+            let moved = off(cx, move || {
+                if !app::is_hidden(pid) {
+                    app::hide(pid);
+                }
+                ax::move_all_into(pid, bounds)
+            })
+            .await;
             if moved > 0 {
                 break;
             }
@@ -2137,7 +2170,7 @@ async fn launch_now(
                 .timer(Duration::from_millis(20))
                 .await;
         }
-        app::unhide(pid);
+        off(cx, move || app::unhide(pid)).await;
     }
 
     // A running app opens no window on launch; ask it for a new one through
@@ -2162,10 +2195,12 @@ async fn launch_now(
         // Just started and no window yet: its menus may not have the item
         // yet. Give them up to 3 s.
         let just_started = || {
-            app::launched_within(pid, LATE_WINDOW_WAIT)
-                && !windows::all()
-                    .iter()
-                    .any(|w| w.target.pid == pid && w.layer == 0)
+            off(cx, move || {
+                app::launched_within(pid, LATE_WINDOW_WAIT)
+                    && !windows::all()
+                        .iter()
+                        .any(|w| w.target.pid == pid && w.layer == 0)
+            })
         };
         // Only this display's own launch has a watch that moves the window.
         let started_here = core.read_with(cx, |c, _| {
@@ -2173,7 +2208,7 @@ async fn launch_now(
         });
         // This display's own launch answers at once: its watch moves the
         // window when it comes.
-        if asked == ax::NewWindow::Missing && !started_here && just_started() {
+        if asked == ax::NewWindow::Missing && !started_here && just_started().await {
             for _ in 0..20 {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
@@ -2187,13 +2222,14 @@ async fn launch_now(
                 }
             }
         }
+        let starting = asked == ax::NewWindow::Missing && just_started().await;
         let missing = match asked {
             ax::NewWindow::Pressed => None,
             ax::NewWindow::Disabled => Some("app_busy"),
             // The first launch's watch moves its window when it comes.
-            ax::NewWindow::Missing if started_here && just_started() => Some("still_starting"),
+            ax::NewWindow::Missing if started_here && starting => Some("still_starting"),
             // Started by the user or another session moments ago.
-            ax::NewWindow::Missing if just_started() => Some("just_started"),
+            ax::NewWindow::Missing if starting => Some("just_started"),
             ax::NewWindow::Missing => Some("no_new_window"),
             ax::NewWindow::NotReady => Some("menus_unreadable"),
         };
@@ -2290,7 +2326,8 @@ async fn launch_now(
                 && let Some(target) = target
             {
                 // The title before the URL, to tell when it has arrived.
-                let before = windows::find(placed.target.window_id).map(|w| w.title);
+                let window_id = placed.target.window_id;
+                let before = off(cx, move || windows::find(window_id).map(|w| w.title)).await;
                 // Into the new window's address field where there is one
                 // Agent Screen knows; else the system sends the URL, and the
                 // browser opens it in its front window, the new one.
@@ -2331,7 +2368,12 @@ async fn launch_now(
                 // after doesn't make the app open it in the user's window.
                 let (window_id, title) = (placed.target.window_id, before);
                 for _ in 0..40 {
-                    if windows::find(window_id).is_none_or(|w| Some(w.title) != title) {
+                    let title = title.clone();
+                    if off(cx, move || {
+                        windows::find(window_id).is_none_or(|w| Some(w.title) != title)
+                    })
+                    .await
+                    {
                         break;
                     }
                     cx.background_executor()
@@ -2438,22 +2480,30 @@ async fn launch_now(
                 // An app that finished starting after the unhide above, as
                 // an Electron development build does, is still hidden, and
                 // its windows are listed nowhere: move them in, then show.
-                if app::is_hidden(pid) {
-                    let moved = cx
-                        .background_executor()
-                        .spawn(async move { ax::move_all_into(pid, bounds) })
-                        .await;
-                    if moved > 0 {
-                        app::unhide(pid);
+                let hidden = off(cx, move || {
+                    app::is_hidden(pid) && {
+                        if ax::move_all_into(pid, bounds) > 0 {
+                            app::unhide(pid);
+                        }
+                        true
                     }
+                })
+                .await;
+                if hidden {
                     continue;
                 }
-                let late: Vec<_> = windows::all()
-                    .into_iter()
-                    .filter(|w| {
-                        w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id)
-                    })
-                    .collect();
+                let listed = seen.clone();
+                let late: Vec<_> = off(cx, move || {
+                    windows::all()
+                        .into_iter()
+                        .filter(|w| {
+                            w.target.pid == pid
+                                && w.layer == 0
+                                && !listed.contains(&w.target.window_id)
+                        })
+                        .collect()
+                })
+                .await;
                 for window in late {
                     seen.insert(window.target.window_id);
                     // Unless the user took the app back or made it.
@@ -2584,10 +2634,12 @@ async fn settle(
         if !held(target, id, cx).await {
             continue;
         }
-        if let Some(placed) = windows::on_display(id)
-            .into_iter()
-            .find(|w| w.target == target)
-        {
+        let on_display = move || {
+            windows::on_display(id)
+                .into_iter()
+                .find(|w| w.target == target)
+        };
+        if let Some(placed) = off(cx, on_display).await {
             if aerospace_takes {
                 guard_placed(core, target, id, cx);
             }
@@ -2599,11 +2651,7 @@ async fn settle(
                 .background_executor()
                 .spawn(async move { windows::keep_inside(id) })
                 .await;
-            if moved
-                && let Some(kept) = windows::on_display(id)
-                    .into_iter()
-                    .find(|w| w.target == target)
-            {
+            if moved && let Some(kept) = off(cx, on_display).await {
                 return Ok(kept);
             }
             return Ok(placed);
@@ -2690,28 +2738,33 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
             });
             if !recorded
                 || !takes_windows(&core, id, cx)
-                || windows::find(target.window_id).is_none()
+                || off(cx, move || windows::find(target.window_id).is_none()).await
             {
                 return;
             }
             // Displays move as others come and go, and their windows a
             // moment apart, so a window may seem to sit on the display next
             // door. Only one on the user's screen has really left.
-            let on_virtual = cx
-                .background_executor()
-                .spawn(async move { windows::on_virtual_display(target.window_id) })
-                .await;
             // AeroSpace that tiles agent displays may still hide it there.
-            let aerospace_tiles = !crate::mac::aerospace::ignores_now()
-                && crate::mac::aerospace::AeroSpace::current().is_some();
+            let (on_virtual, aerospace_tiles) = off(cx, move || {
+                (
+                    windows::on_virtual_display(target.window_id),
+                    !crate::mac::aerospace::ignores_now()
+                        && crate::mac::aerospace::AeroSpace::current().is_some(),
+                )
+            })
+            .await;
             if on_virtual && !aerospace_tiles {
                 continue;
             }
             if !held(target, id, cx).await {
-                log::info!(
-                    "window {} left display {id} after placing, for {:?}; placing again",
-                    target.window_id,
+                let now = off(cx, move || {
                     windows::find(target.window_id).map(|w| (w.app, w.bounds))
+                })
+                .await;
+                log::info!(
+                    "window {} left display {id} after placing, for {now:?}; placing again",
+                    target.window_id,
                 );
                 let _ = place(target, id, cx).await;
             }
@@ -2876,7 +2929,7 @@ async fn keys_allowed(
     // In front with the agent's window focused, as when an app it started
     // activates itself, keys go to that window: fine.
     let pid = target.pid;
-    let elsewhere = app::frontmost_pid() == Some(pid)
+    let elsewhere = crate::mac::input::front() == Some(pid)
         && cx
             .background_executor()
             .spawn(async move { ax::focused_window_id(pid) })
@@ -2979,9 +3032,9 @@ fn display(
 }
 
 /// A display the Agent Session may send input to right now.
-fn input_display(
+async fn input_display(
     core: &Entity<Core>,
-    p: &Args,
+    p: &Args<'_>,
     cx: &mut AsyncApp,
 ) -> Result<DisplayId, ControlError> {
     let id = display(core, p, true, cx)?;
@@ -2992,7 +3045,10 @@ fn input_display(
     }
     // Remember the windows before the action, so the settle after it can
     // tell which windows the action opened.
-    let before = cg::all_ids();
+    let before = cx
+        .background_executor()
+        .spawn(async { cg::all_ids() })
+        .await;
     BEFORE.with(|b| b.borrow_mut().insert(id, (before, Instant::now())));
     Ok(id)
 }
@@ -3034,7 +3090,8 @@ async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
         return;
     };
     // Most actions open nothing; the id list is cheap to compare.
-    if cg::on_screen_ids().is_subset(&before) {
+    let shown = off(cx, cg::on_screen_ids).await;
+    if shown.is_subset(&before) {
         return;
     }
     let agent_areas: Vec<Rect> = core.read_with(cx, |c, _| {
@@ -3133,12 +3190,12 @@ fn ended_error(id: DisplayId, by_user: bool) -> ControlError {
     })
 }
 
-fn target(
+async fn target(
     core: &Entity<Core>,
-    p: &Args,
+    p: &Args<'_>,
     cx: &mut AsyncApp,
 ) -> Result<(DisplayId, (f64, f64)), ControlError> {
-    let id = input_display(core, p, cx)?;
+    let id = input_display(core, p, cx).await?;
     Ok((id, global(core, id, p.require("x")?, p.require("y")?, cx)?))
 }
 
@@ -3197,11 +3254,16 @@ fn show_pointer(
     })
 }
 
-fn window_on(id: DisplayId, p: &Args) -> Result<windows::Window, ControlError> {
+async fn window_on(
+    id: DisplayId,
+    p: &Args<'_>,
+    cx: &AsyncApp,
+) -> Result<windows::Window, ControlError> {
     let window = p
         .int("windowId")
         .ok_or_else(|| ControlError::invalid("windowId is required"))?;
-    windows::on_display(id)
+    off(cx, move || windows::on_display(id))
+        .await
         .into_iter()
         .find(|w| w.target.window_id as i64 == window)
         .ok_or_else(|| {

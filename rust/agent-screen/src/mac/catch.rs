@@ -119,7 +119,7 @@ pub fn user_acted(towards: Towards) {
 /// such as Spotlight takes keys without coming to the front.
 pub fn user_pressed_key() {
     static FOCUS: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
-    if let Some(pid) = super::app::frontmost_pid() {
+    if let Some(pid) = super::input::front() {
         user_acted(Towards::App(pid));
     }
     let focus = FOCUS.get_or_init(|| {

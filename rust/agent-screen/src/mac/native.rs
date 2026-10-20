@@ -519,7 +519,7 @@ pub fn watch_mouse() {
                 0,
                 mtm,
             );
-            let front = super::app::frontmost_pid();
+            let front = super::input::front();
             u32::try_from(number).map_or(Towards::Unknown, |n| Towards::Window(n, front))
         };
         super::catch::user_acted(towards);
@@ -905,8 +905,16 @@ pub fn watch_screens() {
 pub fn watch_activations() {
     let center = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
     super::input::note_activation(super::app::frontmost_pid());
-    let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
-        super::input::note_activation(super::app::frontmost_pid())
+    // The notification names the app, so no question goes to WindowServer;
+    // frontmostApplication asks it synchronously and can wait seconds.
+    let block = RcBlock::new(|note: NonNull<objc2_foundation::NSNotification>| {
+        let app = unsafe { note.as_ref() }.userInfo().and_then(|info| {
+            info.objectForKey(unsafe { objc2_app_kit::NSWorkspaceApplicationKey })
+        });
+        let pid = app
+            .and_then(|app| app.downcast::<NSRunningApplication>().ok())
+            .map(|app| app.processIdentifier());
+        super::input::note_activation(pid.or_else(super::app::frontmost_pid))
     });
     let observer = unsafe {
         center.addObserverForName_object_queue_usingBlock(

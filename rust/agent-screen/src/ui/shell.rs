@@ -464,8 +464,12 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             cx.background_executor()
                 .timer(Duration::from_millis(wait))
                 .await;
+            // Both ask WindowServer, which can keep them waiting a second.
+            let (now, settings) = cx
+                .background_spawn(async move { (permissions::status(), fast.then(assist::look)) })
+                .await;
             if checked
-                .update(cx, |shell, cx| shell.check_permissions(cx))
+                .update(cx, |shell, cx| shell.check_permissions(now, settings, cx))
                 .is_err()
             {
                 break;
@@ -814,7 +818,21 @@ impl Shell {
             return;
         }
         let ids: Vec<DisplayId> = self.known.iter().copied().collect();
-        let counts = windows::counts(&ids);
+        // The window list can wait on WindowServer; count off the UI thread.
+        cx.spawn(async move |shell, cx| {
+            let counts = cx
+                .background_spawn(async move { windows::counts(&ids) })
+                .await;
+            let _ = shell.update(cx, |shell, cx| shell.show_counts(counts, cx));
+        })
+        .detach();
+    }
+
+    fn show_counts(
+        &mut self,
+        counts: std::collections::HashMap<DisplayId, usize>,
+        cx: &mut Context<Self>,
+    ) {
         let viewer_count = self
             .viewer_display
             .and_then(|id| counts.get(&id).copied())
@@ -2474,12 +2492,19 @@ impl Shell {
         }
     }
 
-    fn check_permissions(&mut self, cx: &mut Context<Self>) {
-        if assist::is_shown() && !assist::tick() {
+    fn check_permissions(
+        &mut self,
+        now: permissions::Status,
+        settings: Option<assist::Settings>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(settings) = settings
+            && assist::is_shown()
+            && !assist::tick(settings)
+        {
             // System Settings quit.
             assist::hide();
         }
-        let now = permissions::status();
         let before = self.permissions;
         if self.setup.is_some() {
             // The user may answer in System Settings.
@@ -2615,7 +2640,9 @@ impl Shell {
     }
 
     /// Find the window the drag started on.
-    fn drag_candidate(&mut self, at: (f64, f64)) {
+    /// The user's window under a drag that began at `at`, found off the UI
+    /// thread: the window list can wait on WindowServer.
+    fn drag_candidate(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
         let point = (at.0, native::primary_height() - at.1);
         let agent: Vec<Rect> = self
             .known
@@ -2626,25 +2653,32 @@ impl Shell {
             return;
         }
         let own = std::process::id() as i32;
-        if let Some(hit) = windows::all()
-            .into_iter()
-            .find(|w| w.bounds.contains(point) && w.target.pid != own)
-        {
-            self.drag = Some(Drag {
-                target: hit.target,
-                frame: hit.bounds,
-                last_check: Instant::now(),
+        cx.spawn(async move |shell, cx| {
+            let hit = cx
+                .background_spawn(async move {
+                    windows::all()
+                        .into_iter()
+                        .find(|w| w.bounds.contains(point) && w.target.pid != own)
+                })
+                .await;
+            let _ = shell.update(cx, |shell, _| {
+                shell.drag = hit.map(|hit| Drag {
+                    target: hit.target,
+                    frame: hit.bounds,
+                    last_check: Instant::now(),
+                });
             });
-        }
+        })
+        .detach();
     }
 
-    fn dragging(&self) -> bool {
-        let Some(drag) = &self.drag else { return false };
-        // Moved, not resized: a resize from the left or top edge keeps the
-        // opposite edge still. A tiled window that grows back to its old
-        // size as it's dragged away still moves both.
-        windows::find(drag.target.window_id).is_some_and(|w| {
-            let (b, f) = (&w.bounds, &drag.frame);
+    /// Whether the dragged window has moved from where the drag began.
+    /// Moved, not resized: a resize from the left or top edge keeps the
+    /// opposite edge still. A tiled window that grows back to its old size
+    /// as it's dragged away still moves both. Blocking.
+    fn dragged(target: WindowTarget, frame: Rect) -> bool {
+        windows::find(target.window_id).is_some_and(|w| {
+            let (b, f) = (&w.bounds, &frame);
             let moved_x = (b.x - f.x).abs() > 4.0 && (b.max_x() - f.max_x()).abs() > 4.0;
             let moved_y = (b.y - f.y).abs() > 4.0 && (b.max_y() - f.max_y()).abs() > 4.0;
             moved_x || moved_y
@@ -2653,30 +2687,58 @@ impl Shell {
 
     fn drag_moved(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
         if let Some(from) = self.drag_from.take() {
-            self.drag_candidate(from);
+            self.drag_candidate(from, cx);
         }
         let Some(drag) = &mut self.drag else { return };
         if drag.last_check.elapsed() < Duration::from_millis(50) {
             return;
         }
         drag.last_check = Instant::now();
-        let over = self.drop_rect(cx).is_some_and(|r| contains(r, at)) && self.dragging();
-        self.set_drop_hover(over, cx);
+        let (target, frame) = (drag.target, drag.frame);
+        if !self.drop_rect(cx).is_some_and(|r| contains(r, at)) {
+            self.set_drop_hover(false, cx);
+            return;
+        }
+        cx.spawn(async move |shell, cx| {
+            let moved = cx
+                .background_spawn(async move { Self::dragged(target, frame) })
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                // Unless the drag ended meanwhile.
+                if shell.drag.as_ref().is_some_and(|d| d.target == target) {
+                    shell.set_drop_hover(moved, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn drag_ended(&mut self, at: (f64, f64), cx: &mut Context<Self>) {
         self.drag_from = None;
         let over = self.drop_rect(cx).is_some_and(|r| contains(r, at));
-        let dropped = over && self.dragging();
         let drag = self.drag.take();
         self.set_drop_hover(false, cx);
-        if let (true, Some(drag), Some(id)) = (dropped, drag, self.viewer_display) {
+        let (Some(drag), Some(id), true) = (drag, self.viewer_display, over) else {
+            return;
+        };
+        cx.spawn(async move |shell, cx| {
+            let (target, frame) = (drag.target, drag.frame);
+            let dropped = cx
+                .background_spawn(async move { Self::dragged(target, frame) })
+                .await;
+            if !dropped {
+                return;
+            }
             // Let the window manager finish its own drop handling first, or
             // it re-tiles the window after we move it.
-            self.after(Duration::from_millis(150), cx, move |shell, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
                 shell.hand_over(drag.target, Some(drag.frame), id, cx)
             });
-        }
+        })
+        .detach();
     }
 
     fn set_drop_hover(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -3049,24 +3111,33 @@ fn cursor_guard(core: Entity<Core>, cx: &mut App) {
             if idle {
                 continue;
             }
-            let Some(event) = objc2_core_graphics::CGEvent::new(None) else {
-                continue;
-            };
-            let at = objc2_core_graphics::CGEvent::location(Some(&event));
-            let at = (at.x, at.y);
-            if !ids.iter().any(|&id| cg::display_bounds(id).contains(at)) {
-                last_good = Some(at);
-                continue;
-            }
-            let back = last_good.unwrap_or_else(|| cg::display_bounds(cg::main_display()).mid());
-            log::debug!("cursor pulled back from {at:?} to {back:?}");
-            objc2_core_graphics::CGWarpMouseCursorPosition(objc2_core_foundation::CGPoint::new(
-                back.0, back.1,
-            ));
-            objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(true);
+            // Reading the cursor asks WindowServer: off the UI thread.
+            last_good = cx
+                .background_spawn(async move { pull_cursor_back(&ids, last_good) })
+                .await;
         }
     })
     .detach();
+}
+
+/// Put the cursor back where it last was off `ids`, if it is on one of
+/// them. Where it is now when that is a good place.
+fn pull_cursor_back(ids: &[DisplayId], last_good: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    let Some(event) = objc2_core_graphics::CGEvent::new(None) else {
+        return last_good;
+    };
+    let at = objc2_core_graphics::CGEvent::location(Some(&event));
+    let at = (at.x, at.y);
+    if !ids.iter().any(|&id| cg::display_bounds(id).contains(at)) {
+        return Some(at);
+    }
+    let back = last_good.unwrap_or_else(|| cg::display_bounds(cg::main_display()).mid());
+    log::debug!("cursor pulled back from {at:?} to {back:?}");
+    objc2_core_graphics::CGWarpMouseCursorPosition(objc2_core_foundation::CGPoint::new(
+        back.0, back.1,
+    ));
+    objc2_core_graphics::CGAssociateMouseAndMouseCursorPosition(true);
+    last_good
 }
 
 #[cfg(test)]
