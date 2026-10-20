@@ -54,6 +54,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes onc
 AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from rust/tests/fixtures/electron: launch with arguments, clicks, typing, edge resize, late redraws; needs rust/target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e agentshots     # a screenshot is the whole display scaled down; a zoom over all of it works
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change
+AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes a spare, and the next display takes it with no display change; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the serial a released one freed
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerpicture  # new displays get unit numbers of their own, and the Viewer shows each
 AGENTSCREEN_INSTANCE=e2e cargo e2e shared      # an app you and an agent both use: its keys reach only its window
@@ -76,7 +77,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an
 AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
 ```
 
-Test scripts share a budget of 24 new displays an hour, kept in `/tmp/agent-screen-test-displays`: past it, `createDisplay` fails in the script itself. About 60 displays in 11 minutes froze this Mac once. Compare builds with few rounds instead of raising it.
+Test scripts count the displays they make in `/tmp/agent-screen-test-displays`. `E2E_DISPLAYS_PER_HOUR=N` makes `createDisplay` fail in the script past N in an hour; there is no limit by default. About 60 displays in 11 minutes froze this Mac once, so compare builds with few rounds rather than loops.
 
 The scripts live in `rust/tests/src/bin`, one file each, with the helpers they share in `rust/tests/src/lib.rs`. `cargo e2e` is an alias in `rust/.cargo/config.toml` for `cargo run --quiet --package agent-screen-tests --bin`. The Swift helpers they call (`probe`, `hid`, `flash`, …) are in `rust/tests/tools` and build into `rust/target/e2e` on first use.
 

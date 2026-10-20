@@ -187,6 +187,7 @@ fn main() {
         let core = cx.new(|_| core::Core::new());
         core::watch_alerts(core.clone(), cx);
         core::watch_colorsync(core.clone(), cx);
+        core::watch_idle(core.clone(), cx);
         if let Err(error) = ui::shell::start(core.clone(), cx) {
             eprintln!("Agent Screen: UI failed: {error}");
         }

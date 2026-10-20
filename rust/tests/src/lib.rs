@@ -169,9 +169,15 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 /// Test displays made in the last hour, across every script and agent on
-/// this Mac. Each new display makes WindowServer and ColorSync reconfigure,
-/// and about 60 in 11 minutes froze the Mac on 2026-10-20.
-const DISPLAYS_PER_HOUR: usize = 24;
+/// this Mac, when E2E_DISPLAYS_PER_HOUR sets a limit; none by default.
+/// Each new display makes WindowServer and ColorSync reconfigure, and about
+/// 60 in 11 minutes froze the Mac on 2026-10-20.
+fn displays_per_hour() -> usize {
+    std::env::var("E2E_DISPLAYS_PER_HOUR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX)
+}
 
 /// Count one display against the hourly budget, or fail once it is spent.
 /// A reused spare counts too: a script can't tell beforehand.
@@ -186,7 +192,7 @@ pub fn spend_display() -> Result<()> {
         .filter_map(|l| l.trim().parse().ok())
         .filter(|&t: &u64| now.saturating_sub(t) < 3600)
         .collect();
-    if times.len() >= DISPLAYS_PER_HOUR {
+    if times.len() >= displays_per_hour() {
         let wait = 3600 - now.saturating_sub(times[0]);
         bail!(
             "test scripts made {} displays in the last hour, the most this Mac takes safely; try again in {} min",

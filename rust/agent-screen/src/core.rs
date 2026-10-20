@@ -22,6 +22,16 @@ use std::time::{Duration, Instant};
 const SPARES: usize = 2;
 const SPARE_LIFE: Duration = Duration::from_secs(10 * 60);
 const MADE: usize = 10;
+/// Each display added or removed stops every window on the Mac from
+/// drawing for 0.2 to 0.9 s, Core Animation's own animations too; keeping
+/// or reusing a spare stops nothing. So displays are released, and the
+/// spare that keeps the next "+" from adding one is made, only once the
+/// user has been away from the keyboard and pointer for `IDLE`, checked
+/// every `TIDY_EVERY`.
+const IDLE: Duration = Duration::from_secs(60);
+const TIDY_EVERY: Duration = Duration::from_secs(15);
+/// One spare stays ready while displays were used within `WARM`.
+const WARM: Duration = Duration::from_secs(60 * 60);
 const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// An ended display kept connected for the next one of its size. Nothing
@@ -73,6 +83,12 @@ pub struct Core {
     pub left_alone: Vec<(DisplayId, u32)>,
     /// Ended displays kept for reuse.
     spares: Vec<Spare>,
+    /// Ended displays to release once the user is idle.
+    retiring: Vec<VirtualDisplay>,
+    /// When a display was last taken on, new or spare.
+    last_used: Option<Instant>,
+    /// A spare is being made while the user is idle.
+    warming: bool,
     /// When agents' displays were made new, within `MADE_WINDOW`.
     made: VecDeque<Instant>,
     reclaim: Reclaim,
@@ -115,6 +131,9 @@ impl Core {
             told: HashSet::new(),
             left_alone: Vec::new(),
             spares: Vec::new(),
+            retiring: Vec::new(),
+            last_used: None,
+            warming: false,
             made: VecDeque::new(),
             reclaim: Reclaim::default(),
         }
@@ -227,6 +246,7 @@ impl Core {
             .iter()
             .map(|d| d.id)
             .chain(self.spares.iter().map(|s| s.handle.id))
+            .chain(self.retiring.iter().map(|d| d.id))
             .chain(display::filler_ids())
             .collect()
     }
@@ -247,6 +267,7 @@ impl Core {
                 && crate::mac::cg::unit_twin(id).is_none()
             {
                 let resize = spare.size != size;
+                self.last_used = Some(Instant::now());
                 crate::lifecycle::note(
                     "reused",
                     id,
@@ -294,19 +315,79 @@ impl Core {
         self.made.push_back(Instant::now());
     }
 
-    /// Release spares kept longer than `SPARE_LIFE`.
-    fn release_old_spares(&mut self, cx: &mut Context<Self>) {
-        let (old, kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
+    /// While the user is idle: release what waited for it, spares kept
+    /// longer than `SPARE_LIFE` among them, and make a spare when displays
+    /// were used lately and none is ready.
+    fn tidy(&mut self, cx: &mut Context<Self>) {
+        if crate::mac::ime::user_idle() < idle().as_secs_f64() {
+            return;
+        }
+        let mut released = false;
+        for display in std::mem::take(&mut self.retiring) {
+            crate::lifecycle::note("released", display.id, "ended, released while idle");
+            released = true;
+        }
+        let warm = self.last_used.is_some_and(|t| t.elapsed() < WARM);
+        let (mut old, mut kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
             .into_iter()
             .partition(|s| s.since.elapsed() >= SPARE_LIFE);
-        self.spares = kept;
-        if !old.is_empty() {
-            self.reclaim_soon(cx);
+        // The newest stays as the ready one.
+        if warm && kept.is_empty() {
+            kept.extend(old.pop());
         }
+        self.spares = kept;
         for spare in old {
             crate::lifecycle::note("released", spare.handle.id, "spare unused");
+            released = true;
         }
-        self.release_fillers_if_idle();
+        if !warm && self.displays.list.is_empty() && self.spares.is_empty() {
+            released |= !display::filler_ids().is_empty();
+            display::release_fillers();
+        }
+        if released {
+            self.reclaim_soon(cx);
+        }
+        if warm && self.spares.is_empty() && !self.warming && self.budget_allows().is_ok() {
+            self.make_spare(cx);
+        }
+    }
+
+    /// Make a spare of the size "+" makes, parked like any display.
+    fn make_spare(&mut self, cx: &mut Context<Self>) {
+        self.warming = true;
+        let (serial, name) = self.next_name();
+        let others = self.virtual_ids();
+        let size = crate::model::DEFAULT_SIZE;
+        cx.spawn(async move |this, cx| {
+            let made = cx
+                .background_executor()
+                .spawn(display::create_parked(
+                    name.clone(),
+                    size.0 as u32,
+                    size.1 as u32,
+                    serial,
+                    others,
+                ))
+                .await;
+            let _ = this.update(cx, |core, cx| {
+                core.warming = false;
+                let Some(handle) = made else {
+                    return;
+                };
+                crate::lifecycle::note("kept", handle.id, "spare made while idle");
+                if let Some((serial, slot)) = handle.serial() {
+                    colorsync::remember(serial, slot, handle.id);
+                }
+                core.spares.push(Spare {
+                    handle,
+                    name,
+                    size,
+                    since: Instant::now(),
+                });
+                core.reclaim_soon(cx);
+            });
+        })
+        .detach();
     }
 
     /// The user left the Viewer: each display hands key focus back to the
@@ -357,6 +438,7 @@ impl Core {
             colorsync::remember(serial, slot, id);
         }
         self.displays.add(id, name, size, owner, handle);
+        self.last_used = Some(Instant::now());
         // Its record is new and has all 39 names.
         self.reclaim_soon(cx);
         label_soon(id, cx);
@@ -500,14 +582,13 @@ impl Core {
                     size,
                     since: Instant::now(),
                 });
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(SPARE_LIFE + Duration::from_secs(1))
-                        .await;
-                    let _ = this.update(cx, |core, cx| core.release_old_spares(cx));
-                })
-                .detach();
+            } else if windows::on_display(id).is_empty() {
+                // Released once the user is idle, so the Mac doesn't stop
+                // drawing while they look.
+                crate::lifecycle::note("kept", id, "retiring");
+                self.retiring.push(display.handle);
             } else {
+                // Windows left on it go to the user's screen now.
                 crate::lifecycle::note("released", id, "");
                 self.reclaim_soon(cx);
             }
@@ -520,15 +601,7 @@ impl Core {
             self.pending_returns.retain(|(display, _)| *display != id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
-            self.release_fillers_if_idle();
             cx.notify();
-        }
-    }
-
-    /// The kept twins go with the last display.
-    fn release_fillers_if_idle(&mut self) {
-        if self.displays.list.is_empty() && self.spares.is_empty() {
-            display::release_fillers();
         }
     }
 
@@ -600,6 +673,30 @@ pub fn watch_colorsync(core: Entity<Core>, cx: &mut App) {
             cx.background_executor().timer(wait).await;
             core.update(cx, |core, cx| core.reclaim_soon(cx));
             wait = RECLAIM_EVERY;
+        }
+    })
+    .detach();
+}
+
+/// How long the user must be away before displays change: `IDLE`, or
+/// AGENTSCREEN_IDLE_SECS in a test build.
+fn idle() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(secs) = std::env::var("AGENTSCREEN_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    IDLE
+}
+
+/// Releases and the ready spare wait for the user to be idle (`tidy`).
+pub fn watch_idle(core: Entity<Core>, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(TIDY_EVERY).await;
+            core.update(cx, |core, cx| core.tidy(cx));
         }
     })
     .detach();
