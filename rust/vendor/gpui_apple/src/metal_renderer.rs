@@ -107,10 +107,11 @@ impl InstanceBufferPool {
 }
 
 /// Agent Screen: the frame GPUI drew last, waiting for the presenter
-/// thread to show it.
+/// thread to show it, numbered.
 #[derive(Default)]
 struct Shown {
     frame: Option<metal::Texture>,
+    number: u64,
     pending: bool,
     closed: bool,
 }
@@ -123,67 +124,10 @@ struct Shown {
 struct Presenter {
     shown: std::sync::Mutex<Shown>,
     wake: std::sync::Condvar,
-    /// A layer over the Metal layer that shows a frame drawn inside AppKit's
-    /// transaction, until a drawable with that frame or a newer one is on
-    /// screen.
-    still: Arc<StillLayer>,
-    /// Counts the frames `still` was given; a drawable hides it only if
-    /// none came after the drawable's frame.
-    stills: Arc<std::sync::atomic::AtomicU64>,
-}
-
-/// Agent Screen: a sublayer, owned, used from the main thread and from the
-/// thread Metal calls presented handlers on.
-struct StillLayer(*mut AnyObject);
-// SAFETY: its properties are set inside a transaction of their own, which
-// Core Animation allows on any thread.
-unsafe impl Send for StillLayer {}
-unsafe impl Sync for StillLayer {}
-
-impl StillLayer {
-    fn new(over: &metal::MetalLayerRef) -> Self {
-        unsafe {
-            let layer: *mut AnyObject = objc2::msg_send![objc2::class!(CALayer), new];
-            let _: () = objc2::msg_send![layer, setHidden: true];
-            let over: *mut AnyObject = over.as_ptr().cast();
-            let _: () = objc2::msg_send![over, addSublayer: layer];
-            Self(layer)
-        }
-    }
-
-    /// Show `surface` over all of `over`, or hide with None.
-    fn set(&self, shown: Option<(&AnyObject, &metal::MetalLayerRef)>) {
-        unsafe {
-            let transaction = objc2::class!(CATransaction);
-            let _: () = objc2::msg_send![transaction, begin];
-            let _: () = objc2::msg_send![transaction, setDisableActions: true];
-            match shown {
-                Some((surface, over)) => {
-                    let over: *mut AnyObject = over.as_ptr().cast();
-                    let bounds: objc2_core_foundation::CGRect = objc2::msg_send![over, bounds];
-                    let scale: f64 = objc2::msg_send![over, contentsScale];
-                    let _: () = objc2::msg_send![self.0, setFrame: bounds];
-                    let _: () = objc2::msg_send![self.0, setContentsScale: scale];
-                    let _: () = objc2::msg_send![self.0, setContents: surface];
-                    let _: () = objc2::msg_send![self.0, setHidden: false];
-                }
-                None => {
-                    let _: () = objc2::msg_send![self.0, setHidden: true];
-                    let _: () = objc2::msg_send![self.0, setContents: ptr::null_mut::<AnyObject>()];
-                }
-            }
-            let _: () = objc2::msg_send![transaction, commit];
-        }
-    }
-}
-
-impl Drop for StillLayer {
-    fn drop(&mut self) {
-        unsafe {
-            let _: () = objc2::msg_send![self.0, removeFromSuperlayer];
-            let _: () = objc2::msg_send![self.0, release];
-        }
-    }
+    /// The number of the frame presented last, held while presenting, by
+    /// this thread or by the main thread for a frame AppKit asked for
+    /// inside its transaction: no frame is presented after a newer one.
+    presented: std::sync::Mutex<u64>,
 }
 
 impl Presenter {
@@ -191,8 +135,7 @@ impl Presenter {
         let presenter = Arc::new(Self {
             shown: std::sync::Mutex::new(Shown::default()),
             wake: std::sync::Condvar::new(),
-            still: Arc::new(StillLayer::new(&layer)),
-            stills: Arc::default(),
+            presented: std::sync::Mutex::new(0),
         });
         let this = presenter.clone();
         std::thread::Builder::new()
@@ -202,20 +145,12 @@ impl Presenter {
         presenter
     }
 
-    fn show(&self, frame: &metal::Texture) {
+    fn show(&self, frame: &metal::Texture, number: u64) {
         let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
         shown.frame = Some(frame.clone());
+        shown.number = number;
         shown.pending = true;
         self.wake.notify_one();
-    }
-
-    /// Show `surface`, which has `frame` in it, at once, over the
-    /// drawable shown last. Main thread, in AppKit's transaction.
-    fn show_still(&self, surface: &AnyObject, layer: &metal::MetalLayerRef, frame: &metal::Texture) {
-        self.stills
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.still.set(Some((surface, layer)));
-        self.show(frame);
     }
 
     fn close(&self) {
@@ -245,90 +180,23 @@ impl Presenter {
                     shown.pending = true;
                     return;
                 };
+                let mut presented = self.presented.lock().unwrap_or_else(|e| e.into_inner());
                 // The newest frame, which may be newer than the one that woke us.
-                let Some(frame) = self
-                    .shown
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .frame
-                    .clone()
-                else {
+                let (frame, number) = {
+                    let shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
+                    (shown.frame.clone(), shown.number)
+                };
+                // The main thread presented this one or a newer one itself.
+                let Some(frame) = frame.filter(|_| number > *presented) else {
                     return;
                 };
-                // Once this drawable is on screen, the still shown before
-                // it goes, unless a newer one came meanwhile.
-                let shown = self.stills.load(std::sync::atomic::Ordering::SeqCst);
-                if shown > 0 {
-                    let stills = self.stills.clone();
-                    let still = self.still.clone();
-                    let hide = block2::RcBlock::new(move |_: *mut AnyObject| {
-                        if stills.load(std::sync::atomic::Ordering::SeqCst) == shown {
-                            still.set(None);
-                        }
-                    });
-                    let drawable: *const AnyObject = drawable.as_ptr().cast();
-                    let _: () = unsafe { objc2::msg_send![drawable, addPresentedHandler: &*hide] };
-                }
                 let command_buffer = queue.new_command_buffer();
                 copy_frame(command_buffer, &frame, drawable.texture());
                 command_buffer.present_drawable(drawable);
                 command_buffer.commit();
+                *presented = number;
             });
         }
-    }
-}
-
-/// Agent Screen: an IOSurface and the texture that draws into it.
-#[derive(Clone)]
-struct Still {
-    surface: objc2_core_foundation::CFRetained<objc2_io_surface::IOSurfaceRef>,
-    texture: metal::Texture,
-}
-
-impl Still {
-    fn new(device: &metal::Device, width: u64, height: u64) -> Self {
-        use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
-        use objc2_io_surface::{
-            IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceHeight, kIOSurfacePixelFormat,
-            kIOSurfaceWidth,
-        };
-        let number = |n: i64| CFNumber::new_i64(n);
-        // 'BGRA', as the frames are.
-        let (keys, values): (Vec<&CFString>, Vec<_>) = unsafe {
-            [
-                (kIOSurfaceWidth, number(width as i64)),
-                (kIOSurfaceHeight, number(height as i64)),
-                (kIOSurfaceBytesPerElement, number(4)),
-                (kIOSurfacePixelFormat, number(0x4247_5241)),
-            ]
-        }
-        .into_iter()
-        .unzip();
-        let values: Vec<&CFType> = values.iter().map(|v| v.as_ref()).collect();
-        let properties = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
-        let surface = unsafe { IOSurfaceRef::new(properties.as_opaque()) }.expect("an IOSurface");
-        let descriptor = metal::TextureDescriptor::new();
-        descriptor.set_width(width);
-        descriptor.set_height(height);
-        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        descriptor.set_storage_mode(metal::MTLStorageMode::Shared);
-        descriptor.set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
-        let surface_ptr: *const IOSurfaceRef = &*surface;
-        let texture: *mut AnyObject = unsafe {
-            objc2::msg_send![
-                device.as_ptr().cast::<AnyObject>(),
-                newTextureWithDescriptor: descriptor.as_ptr().cast::<AnyObject>(),
-                iosurface: surface_ptr,
-                plane: 0usize
-            ]
-        };
-        let texture = unsafe { metal::Texture::from_ptr(texture.cast()) };
-        Self { surface, texture }
-    }
-
-    /// The window server still shows it.
-    fn in_use(&self) -> bool {
-        self.surface.is_in_use()
     }
 }
 
@@ -371,9 +239,8 @@ pub struct MetalRenderer {
     /// Agent Screen: what the window shows, drawn on the main thread.
     frame: Option<metal::Texture>,
     presenter: Option<Arc<Presenter>>,
-    /// Agent Screen: IOSurfaces a frame drawn inside AppKit's transaction
-    /// goes into, shown by the presenter's still layer.
-    stills: Vec<Still>,
+    /// Agent Screen: frames drawn so far, to number them.
+    frames: u64,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -643,7 +510,7 @@ impl MetalRenderer {
             frame: None,
             presenter,
             presents_with_transaction: false,
-            stills: Vec::new(),
+            frames: 0,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -776,45 +643,33 @@ impl MetalRenderer {
         };
         command_buffer.commit();
 
+        self.frames += 1;
+        let number = self.frames;
+        let Some(presenter) = self.presenter.clone() else {
+            return;
+        };
         if self.presents_with_transaction {
             // AppKit asked for this frame inside its transaction, as when
-            // the window resizes: show it in this transaction. A drawable
-            // can take a second to come while displays change, so the
-            // frame goes into an IOSurface shown by a layer over this one,
-            // which takes no wait.
-            let still = self.still(viewport_size);
+            // the window resizes: show it now, in that transaction, as GPUI
+            // does. Taking a drawable may wait while displays change, but
+            // then every window on the Mac stops drawing anyway.
+            let mut presented = presenter.presented.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(drawable) = layer.next_drawable() else {
+                log::error!(
+                    "failed to retrieve next drawable, drawable size: {:?}",
+                    viewport_size
+                );
+                return;
+            };
             let command_buffer = self.command_queue.new_command_buffer();
-            copy_frame(command_buffer, &frame, &still.texture);
+            copy_frame(command_buffer, &frame, drawable.texture());
             command_buffer.commit();
-            command_buffer.wait_until_completed();
-            let surface: *const objc2_io_surface::IOSurfaceRef = &*still.surface;
-            let surface: &AnyObject = unsafe { &*surface.cast::<AnyObject>() };
-            // A drawable follows when there is one, from the presenter,
-            // and hides the still once it shows.
-            if let Some(presenter) = &self.presenter {
-                presenter.show_still(surface, &layer, &frame);
-            }
-        } else if let Some(presenter) = &self.presenter {
-            presenter.show(&frame);
+            command_buffer.wait_until_scheduled();
+            drawable.present();
+            *presented = number;
+        } else {
+            presenter.show(&frame, number);
         }
-    }
-
-    /// Agent Screen: an IOSurface of `size` the window server isn't
-    /// showing, for a frame shown as the layer's contents.
-    fn still(&mut self, size: Size<DevicePixels>) -> Still {
-        let (width, height) = (size.width.0 as u64, size.height.0 as u64);
-        self.stills
-            .retain(|s| s.texture.width() == width && s.texture.height() == height);
-        if let Some(free) = self.stills.iter().find(|s| !s.in_use()) {
-            return free.clone();
-        }
-        let still = Still::new(&self.device, width, height);
-        // Two at once at most: one shown, one being drawn.
-        if self.stills.len() >= 2 {
-            self.stills.remove(0);
-        }
-        self.stills.push(still.clone());
-        still
     }
 
     /// Agent Screen: the texture frames are drawn into, at `size`.

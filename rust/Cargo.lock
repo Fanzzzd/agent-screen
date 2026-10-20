@@ -2106,9 +2106,7 @@ dependencies = [
  "mach2",
  "metal",
  "objc2 0.6.4",
- "objc2-core-foundation",
  "objc2-foundation 0.3.2",
- "objc2-io-surface",
  "objc2-quartz-core 0.3.2",
  "parking_lot",
 ]
@@ -3670,10 +3668,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d"
 dependencies = [
  "bitflags 2.13.2",
- "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
- "objc2-foundation 0.3.2",
 ]
 
 [[package]]

@@ -14,8 +14,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, DEBUG_BINARY, check, instance, json, now_ms, open_stage, out, pid_of, record_stage,
-    run, sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, DEBUG_BINARY, capture, check, instance, json, now_ms, open_stage, out, pid_of,
+    record_stage, run, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -162,6 +162,20 @@ fn test(log: &Path) -> Result<()> {
             shrinking.len(),
             longest_wait(&shrank)
         ),
+    );
+    sleep_ms(1000);
+    let after = windows_of(pid)
+        .into_iter()
+        .find(|w| w.id == peek.id)
+        .context("Peek closed")?;
+    let shot = capture(
+        "peekanim-after",
+        [after.x, after.y, after.width, after.height],
+    )?;
+    println!(
+        "     after: Peek {} wide, in {}",
+        after.width,
+        shot.display()
     );
     control.call(
         "debugShow",
