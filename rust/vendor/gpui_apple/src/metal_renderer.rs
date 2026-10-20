@@ -146,11 +146,6 @@ impl Presenter {
         self.wake.notify_one();
     }
 
-    fn replace(&self, frame: &metal::Texture) {
-        let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
-        shown.frame = Some(frame.clone());
-    }
-
     fn close(&self) {
         let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
         shown.closed = true;
@@ -197,6 +192,60 @@ impl Presenter {
     }
 }
 
+/// Agent Screen: an IOSurface and the texture that draws into it.
+#[derive(Clone)]
+struct Still {
+    surface: objc2_core_foundation::CFRetained<objc2_io_surface::IOSurfaceRef>,
+    texture: metal::Texture,
+}
+
+impl Still {
+    fn new(device: &metal::Device, width: u64, height: u64) -> Self {
+        use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
+        use objc2_io_surface::{
+            IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceHeight, kIOSurfacePixelFormat,
+            kIOSurfaceWidth,
+        };
+        let number = |n: i64| CFNumber::new_i64(n);
+        // 'BGRA', as the frames are.
+        let (keys, values): (Vec<&CFString>, Vec<_>) = unsafe {
+            [
+                (kIOSurfaceWidth, number(width as i64)),
+                (kIOSurfaceHeight, number(height as i64)),
+                (kIOSurfaceBytesPerElement, number(4)),
+                (kIOSurfacePixelFormat, number(0x4247_5241)),
+            ]
+        }
+        .into_iter()
+        .unzip();
+        let values: Vec<&CFType> = values.iter().map(|v| v.as_ref()).collect();
+        let properties = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+        let surface = unsafe { IOSurfaceRef::new(properties.as_opaque()) }.expect("an IOSurface");
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(width);
+        descriptor.set_height(height);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(metal::MTLStorageMode::Shared);
+        descriptor.set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        let surface_ptr: *const IOSurfaceRef = &*surface;
+        let texture: *mut AnyObject = unsafe {
+            objc2::msg_send![
+                device.as_ptr().cast::<AnyObject>(),
+                newTextureWithDescriptor: descriptor.as_ptr().cast::<AnyObject>(),
+                iosurface: surface_ptr,
+                plane: 0usize
+            ]
+        };
+        let texture = unsafe { metal::Texture::from_ptr(texture.cast()) };
+        Self { surface, texture }
+    }
+
+    /// The window server still shows it.
+    fn in_use(&self) -> bool {
+        self.surface.is_in_use()
+    }
+}
+
 /// Copy as much of `frame` as fits into `target`, from the top left.
 fn copy_frame(
     command_buffer: &metal::CommandBufferRef,
@@ -236,6 +285,9 @@ pub struct MetalRenderer {
     /// Agent Screen: what the window shows, drawn on the main thread.
     frame: Option<metal::Texture>,
     presenter: Option<Arc<Presenter>>,
+    /// Agent Screen: IOSurfaces a frame drawn inside AppKit's transaction
+    /// goes into, shown as the layer's contents.
+    stills: Vec<Still>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -505,6 +557,7 @@ impl MetalRenderer {
             frame: None,
             presenter,
             presents_with_transaction: false,
+            stills: Vec::new(),
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -639,27 +692,45 @@ impl MetalRenderer {
 
         if self.presents_with_transaction {
             // AppKit asked for this frame inside its transaction, as when
-            // the window resizes: show it now, on this thread.
-            let Some(drawable) = layer.next_drawable() else {
-                log::error!(
-                    "failed to retrieve next drawable, drawable size: {:?}",
-                    viewport_size
-                );
-                return;
-            };
+            // the window resizes: show it in this transaction. A drawable
+            // can take a second to come while displays change, so the
+            // frame goes in as the layer's contents, an IOSurface, which
+            // takes no wait.
+            let still = self.still(viewport_size);
             let command_buffer = self.command_queue.new_command_buffer();
-            copy_frame(command_buffer, &frame, drawable.texture());
+            copy_frame(command_buffer, &frame, &still.texture);
             command_buffer.commit();
-            command_buffer.wait_until_scheduled();
-            drawable.present();
-            // The presenter may still hold the frame of the old size; give
-            // it this one, so it never shows that after this.
+            command_buffer.wait_until_completed();
+            let objc2_layer: &objc2_quartz_core::CAMetalLayer =
+                unsafe { &*layer.as_ptr().cast() };
+            let surface: *const objc2_io_surface::IOSurfaceRef = &*still.surface;
+            let contents: &AnyObject = unsafe { &*surface.cast::<AnyObject>() };
+            unsafe { objc2_layer.setContents(Some(contents)) };
+            // A drawable follows when there is one, from the presenter.
             if let Some(presenter) = &self.presenter {
-                presenter.replace(&frame);
+                presenter.show(&frame);
             }
         } else if let Some(presenter) = &self.presenter {
             presenter.show(&frame);
         }
+    }
+
+    /// Agent Screen: an IOSurface of `size` the window server isn't
+    /// showing, for a frame shown as the layer's contents.
+    fn still(&mut self, size: Size<DevicePixels>) -> Still {
+        let (width, height) = (size.width.0 as u64, size.height.0 as u64);
+        self.stills
+            .retain(|s| s.texture.width() == width && s.texture.height() == height);
+        if let Some(free) = self.stills.iter().find(|s| !s.in_use()) {
+            return free.clone();
+        }
+        let still = Still::new(&self.device, width, height);
+        // Two at once at most: one shown, one being drawn.
+        if self.stills.len() >= 2 {
+            self.stills.remove(0);
+        }
+        self.stills.push(still.clone());
+        still
     }
 
     /// Agent Screen: the texture frames are drawn into, at `size`.

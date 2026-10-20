@@ -1317,23 +1317,6 @@ async fn create_display(
     // not reach the agent.
     let tucked = started.elapsed().as_millis();
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
-    // Off the reply's path: macOS takes up to seconds the first time.
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(300))
-            .await;
-        let _ = cx.update(|_| {
-            let mtm = MainThreadMarker::new()?;
-            let labelling = std::time::Instant::now();
-            let labelled = app::label_display(id, mtm);
-            log::debug!(
-                "display {id}: desktop picture {labelled} in {} ms",
-                labelling.elapsed().as_millis()
-            );
-            Some(())
-        });
-    })
-    .detach();
     // Read AeroSpace's state now that the display exists: the user may have
     // started, quit or reconfigured it since Agent Screen last looked.
     let aerospace_takes = cx

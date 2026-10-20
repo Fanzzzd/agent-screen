@@ -40,6 +40,8 @@ log = "0.4.16"
 mach2 = "0.5"
 metal = "0.33"
 objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-io-surface = "=0.3.2"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSThread"] }
 objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
 parking_lot = "0.12.1"

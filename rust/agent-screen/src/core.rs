@@ -359,6 +359,7 @@ impl Core {
         self.displays.add(id, name, size, owner, handle);
         // Its record is new and has all 39 names.
         self.reclaim_soon(cx);
+        label_soon(id, cx);
         // A reused display is already in place: moving it again would be
         // another reconfiguration.
         let virtual_ids = self.virtual_ids();
@@ -633,4 +634,34 @@ pub fn park_fillers(virtual_ids: &[DisplayId]) {
             display::tuck_away(id, virtual_ids);
         }
     }
+}
+
+/// Give a new display its desktop picture, whoever made it: the user with
+/// "+" or an agent. Off the moment it is made, as macOS lists its screen a
+/// little later and takes up to seconds the first time for a serial.
+fn label_soon(id: DisplayId, cx: &mut Context<Core>) {
+    cx.spawn(async move |this, cx| {
+        for _ in 0..10 {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let Ok(Some(labelled)) = this.update(cx, |core, _| {
+                core.displays.get(id)?;
+                let mtm = objc2::MainThreadMarker::new()?;
+                let labelling = std::time::Instant::now();
+                let labelled = crate::mac::app::label_display(id, mtm);
+                log::debug!(
+                    "display {id}: desktop picture {labelled} in {} ms",
+                    labelling.elapsed().as_millis()
+                );
+                Some(labelled)
+            }) else {
+                return;
+            };
+            if labelled {
+                return;
+            }
+        }
+    })
+    .detach();
 }

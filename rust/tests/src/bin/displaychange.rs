@@ -5,7 +5,8 @@
 //! window that waited for a drawable on the main thread froze the UI. Peek
 //! is open on a stage display while a display is made and ended; the test
 //! app's log must show no draw GPUI skipped and no main-thread stall waiting
-//! for a drawable, and Peek must still draw.
+//! for a drawable, and Peek must still draw. The new display must get the
+//! Agent Display wallpaper.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange
 //!
@@ -112,6 +113,16 @@ fn test(app_log: &Path) -> Result<()> {
         "the main thread never waits for a drawable while displays change",
         waited == 0,
         format!("{} stalls: {stalls:#?}", stalls.len()),
+    );
+    // Every new display gets its desktop picture, whichever way it came.
+    let labelled = read_from(app_log, 0).contains(&format!("display {id}: desktop picture true"));
+    check(
+        "the new display gets the Agent Display wallpaper",
+        labelled,
+        format!(
+            "no desktop picture line for display {id} in {}",
+            app_log.display()
+        ),
     );
     let right = pixel(&shot, grown.width - 40.0, grown.height / 2.0);
     check(
