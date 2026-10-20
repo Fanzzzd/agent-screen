@@ -194,11 +194,11 @@ const ICON_WORKING: &str = include_str!("../../assets/status/working.svg");
 const ICON_ASKING: &str = include_str!("../../assets/status/asking.svg");
 const ICON_SETUP: &str = include_str!("../../assets/status/setup.svg");
 
-/// An 18 pt template image from SVG source.
+/// A template image from SVG source, at the size the SVG gives: 20 by 18
+/// pt, wider than tall, as the glyph is.
 fn template_svg(svg: &str) -> Option<Retained<NSImage>> {
     let data = objc2_foundation::NSData::with_bytes(svg.as_bytes());
     let image = NSImage::initWithData(<NSImage as objc2::AnyThread>::alloc(), &data)?;
-    image.setSize(NSSize::new(18.0, 18.0));
     image.setTemplate(true);
     Some(image)
 }

@@ -11,6 +11,7 @@ from pathops import Path, PathOp, LineCap, LineJoin, op
 
 K = 0.5523
 out = sys.argv[1]
+BOX_W, BOX_H = 20.0, 18.0
 W = 1.7          # stroke: as heavy as the Wi-Fi and battery glyphs beside it
 GAP = 1.4        # clearance around a badge
 
@@ -60,7 +61,7 @@ def hand(x, y, s):
     return union(*parts, thumb)
 
 BACK = rrect(1.25, 2.25, 10.0, 7.5, 1.6)
-FRONT = rrect(4.25, 5.0, 11.0, 8.0, 1.9)
+FRONT = rrect(4.0, 5.0, 12.0, 8.0, 1.9)
 front_solid = union(FRONT, stroked(FRONT))          # its outer edge, filled
 back = minus(stroked(BACK), grown(front_solid, GAP - W/2 + 0.2))
 front_line = stroked(FRONT)
@@ -70,9 +71,9 @@ def badge(screens, mark):
 
 icons = {
     # No agent display open: two screens, a pointer at the front one's corner.
-    "idle": badge(union(back, front_line), pointer(10.4, 7.8, 0.72)),
+    "idle": badge(union(back, front_line), pointer(9.9, 6.6, 0.84)),
     # Agents at work: idle with the front screen lit.
-    "working": badge(union(back, front_solid), pointer(10.4, 7.8, 0.72)),
+    "working": badge(union(back, front_solid), pointer(9.9, 6.6, 0.84)),
     # An agent asks for help: a raised hand at the corner.
     "asking": badge(union(back, front_line), hand(10.0, 7.2, 0.82)),
     # Permissions missing: a slash through both screens.
@@ -108,10 +109,13 @@ def ink_centroid(p, size=180):
     k = 18 / size
     return (sx / total + 0.5) * k, (sy / total + 0.5) * k
 
-# One fit for every state, from idle, so switching states moves nothing:
-# the glyph's ink centers on the middle, where the eye puts it (two screens
-# above, a thin pointer below: the bounding box would sit high), and it is
-# as large as that leaves room for inside the 18 pt box, 0.25 pt to spare.
+# One fit for every state, from idle, so switching states moves nothing.
+# Up and down, the glyph's ink centers on the middle, where the eye puts it:
+# two screens above and a thin pointer below would sit high by the bounding
+# box. Across, the bounding box centers: centered on its ink, the pointer's
+# open corner leaves the right looking empty. It is as large as that leaves
+# room for inside the BOX_W x BOX_H pt box, 0.25 pt to spare: wider than
+# tall, as the glyph is, and as Wi-Fi and the battery are.
 from fontTools.pens.transformPen import TransformPen
 def place(p, scale, dx, dy):
     q = Path(); pen = q.getPen()
@@ -119,14 +123,13 @@ def place(p, scale, dx, dy):
     return q
 cx, cy = ink_centroid(icons["idle"])
 x0, y0, x1, y1 = icons["idle"].bounds
-reach = max(cx - x0, x1 - cx, cy - y0, y1 - cy)
-scale = 8.75 / reach
-dx, dy = 9 - cx * scale, 9 - cy * scale
+scale = min((BOX_W / 2 - 0.25) / ((x1 - x0) / 2), (BOX_H / 2 - 0.25) / max(cy - y0, y1 - cy))
+dx, dy = BOX_W / 2 - (x0 + x1) / 2 * scale, BOX_H / 2 - cy * scale
 icons = {name: place(p, scale, dx, dy) for name, p in icons.items()}
 print(f"ink center {cx:.2f} {cy:.2f}, scale {scale:.3f}")
 
 for name, p in icons.items():
     p.simplify()
     with open(f"{out}/{name}.svg", "w") as fh:
-        fh.write(f'<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="{svg_path(p)}"/></svg>\n')
+        fh.write(f'<svg xmlns="http://www.w3.org/2000/svg" width="{BOX_W:g}" height="{BOX_H:g}" viewBox="0 0 {BOX_W:g} {BOX_H:g}"><path d="{svg_path(p)}"/></svg>\n')
 print("wrote", list(icons))
