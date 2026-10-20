@@ -110,6 +110,11 @@ pub struct Shell {
     card_later: HashMap<DisplayId, String>,
 
     peek_shown: bool,
+    /// Displays being made for "+", each a waiting tile in Peek.
+    creating: usize,
+    /// Peek's card while it slides: where it ends, and which slide.
+    slide_card: Option<NSRect>,
+    peek_slides: u64,
     /// Opened by a click: stays until another click.
     latched: bool,
     /// Hover as AppKit and GPUI report it. An exit can go unreported (Peek
@@ -254,6 +259,9 @@ fn panel_options() -> WindowOptions {
         show: false,
         is_movable: true,
         window_background: WindowBackgroundAppearance::Transparent,
+        // Panels are never the key window, and GPUI holds an inactive
+        // window's animations to 30 fps.
+        inactive_frame_interval: None,
         ..Default::default()
     }
 }
@@ -291,6 +299,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             card_shown: None,
             card_later: HashMap::new(),
             peek_shown: false,
+            creating: 0,
+            slide_card: None,
+            peek_slides: 0,
             latched: false,
             over_icon: false,
             over_card: false,
@@ -1043,7 +1054,7 @@ impl Shell {
         let Some((screen, _)) = self.host_screen() else {
             return;
         };
-        let (w, h, tile) = Peek::size(ids.len(), screen.size.width - 16.0);
+        let (w, h, tile) = Peek::size(ids.len() + self.creating, screen.size.width - 16.0);
         let anchor = self.anchor();
         let (mid, top) = (
             anchor.origin.x + anchor.size.width / 2.0,
@@ -1057,10 +1068,12 @@ impl Shell {
         let frame = rect(x.round(), (top - h).round(), w, h);
 
         let active = self.viewer_open.then_some(self.viewer_display).flatten();
+        let creating = self.creating;
         let _ = peek.update(cx, |peek, _, cx| {
             peek.shown = true;
             peek.active = active;
             peek.tile = tile;
+            peek.pending = creating;
             cx.notify();
         });
         for id in &ids {
@@ -1076,7 +1089,12 @@ impl Shell {
         }
         self.peek_generation += 1;
         if self.peek_shown {
-            native::set_frame_later(&window, frame);
+            let now = native::frame(&window);
+            if now.size.width != frame.size.width && now.size.height == frame.size.height {
+                self.slide_peek(now, frame, cx);
+            } else {
+                native::set_frame_later(&window, frame);
+            }
         } else {
             self.watch_pointer(cx);
             // It slides 10 pt down out of the menu bar and fades in.
@@ -1092,11 +1110,59 @@ impl Shell {
         self.sync_card(cx);
     }
 
+    /// A tile grows in or shrinks out, and the card follows it from `from`
+    /// to `to`: the window spans both while the card slides inside it,
+    /// then takes `to`, where the card then stands.
+    fn slide_peek(&mut self, from: NSRect, to: NSRect, cx: &mut Context<Self>) {
+        let Some((peek, window)) = self.peek.clone() else {
+            return;
+        };
+        // A slide still going: it starts where the card stands now.
+        let from = self.slide_card.unwrap_or(from);
+        let left = from.origin.x.min(to.origin.x);
+        let right = (from.origin.x + from.size.width).max(to.origin.x + to.size.width);
+        let span = rect(left, to.origin.y, right - left, to.size.height);
+        self.peek_slides += 1;
+        let generation = self.peek_slides;
+        self.slide_card = Some(to);
+        let slide = peek::Slide {
+            from: ((from.origin.x - left) as f32, from.size.width as f32),
+            to: ((to.origin.x - left) as f32, to.size.width as f32),
+            generation,
+        };
+        let _ = peek.update(cx, |peek, _, cx| {
+            peek.slide = Some(slide);
+            cx.notify();
+        });
+        native::set_frame_later(&window, span);
+        self.after(
+            peek::RESIZE + Duration::from_millis(30),
+            cx,
+            move |shell, cx| {
+                if shell.peek_slides != generation || !shell.peek_shown {
+                    return;
+                }
+                shell.slide_card = None;
+                if let Some((peek, window)) = shell.peek.clone() {
+                    let _ = peek.update(cx, |peek, _, cx| {
+                        peek.slide = None;
+                        cx.notify();
+                    });
+                    native::set_frame_later(&window, to);
+                }
+            },
+        );
+    }
+
     pub fn hide_peek(&mut self, cx: &mut Context<Self>) {
+        // A slide going stops where it is; the next show sizes afresh.
+        self.peek_slides += 1;
+        self.slide_card = None;
         if let Some((peek, _)) = &self.peek {
             let _ = peek.update(cx, |peek, _, _| {
                 peek.keys = false;
                 peek.focused = None;
+                peek.slide = None;
             });
         }
         self.latched = false;
@@ -1164,45 +1230,79 @@ impl Shell {
     }
 
     pub fn create_display(&mut self, cx: &mut Context<Self>) {
+        // A tile says so at once, whatever macOS takes.
+        self.creating += 1;
+        if self.peek_shown {
+            self.show_peek(cx);
+        }
         // A spare of the size, or a new display: macOS takes about half a
         // second for that, off the main thread, so Peek keeps drawing.
         let spare = self
             .core
             .update(cx, |core, _| core.take_spare(DEFAULT_SIZE));
+        // A new display stops every window on the Mac from drawing for a
+        // moment: start it once the waiting tile has grown in.
+        let grown = peek::RESIZE + Duration::from_millis(40);
         let (made, name) = match spare {
             Some((handle, name, false)) => (gpui::Task::ready(Some(handle)), name),
             // A spare of another size, resized on the display thread.
             Some((mut handle, name, true)) => (
-                cx.background_spawn(async move {
-                    let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
-                    crate::mac::display::configure(move || handle.resize(w, h).then_some(handle))
+                cx.background_spawn({
+                    let executor = cx.background_executor().clone();
+                    async move {
+                        executor.timer(grown).await;
+                        let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
+                        crate::mac::display::configure(move || {
+                            handle.resize(w, h).then_some(handle)
+                        })
                         .await
+                    }
                 }),
                 name,
             ),
             None => {
                 let (serial, name) = self.core.update(cx, |core, _| core.next_name());
                 let others = self.core.read(cx).virtual_ids();
-                let made = cx.background_spawn(crate::mac::display::create_parked(
-                    name.clone(),
-                    DEFAULT_SIZE.0 as u32,
-                    DEFAULT_SIZE.1 as u32,
-                    serial,
-                    others,
-                ));
+                let executor = cx.background_executor().clone();
+                let made = cx.background_spawn({
+                    let name = name.clone();
+                    async move {
+                        executor.timer(grown).await;
+                        crate::mac::display::create_parked(
+                            name,
+                            DEFAULT_SIZE.0 as u32,
+                            DEFAULT_SIZE.1 as u32,
+                            serial,
+                            others,
+                        )
+                        .await
+                    }
+                });
                 (made, name)
             }
         };
         cx.spawn(async move |shell, cx| {
             let made = made.await;
             let _ = shell.update(cx, |shell, cx| {
+                shell.creating = shell.creating.saturating_sub(1);
                 let Some(handle) = made else {
                     beep();
+                    if shell.peek_shown {
+                        shell.show_peek(cx);
+                    }
                     return;
                 };
                 let id = shell.core.update(cx, |core, cx| {
                     core.adopt(handle, name, DEFAULT_SIZE, None, cx)
                 });
+                // Its tile takes the waiting one's place.
+                if let Some((peek, _)) = &shell.peek {
+                    let creating = shell.creating;
+                    let _ = peek.update(cx, |peek, _, _| {
+                        peek.arrived.insert(id);
+                        peek.pending = creating;
+                    });
+                }
                 // Peek stays up and grows a tile; the Viewer opens on the
                 // new display, or switches to it when already open.
                 shell.after(Duration::from_millis(500), cx, move |shell, cx| {

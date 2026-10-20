@@ -9,11 +9,12 @@ use crate::core::Core;
 use crate::i18n::t;
 use crate::model::DisplayId;
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled, WeakEntity, Window,
-    div, prelude::FluentBuilder, px, surface, svg,
+    AnimationExt, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
+    WeakEntity, Window, div, prelude::FluentBuilder, px, surface, svg,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 pub const TILE_WIDTH: f32 = 208.;
 pub const THUMB_HEIGHT: f32 = 130.;
@@ -30,6 +31,21 @@ pub const SPACING: f32 = 10.;
 /// With displays around, adding one is a narrow "+" at the end.
 pub const NARROW: f32 = 44.;
 pub const RADIUS: f32 = 18.;
+/// A tile grows in or shrinks out over this, as Peek's frame changes with
+/// it (`Shell::show_peek`).
+pub const RESIZE: Duration = Duration::from_millis(260);
+
+/// The card sliding to a new width inside Peek's window, which spans both
+/// the card's old and new frames meanwhile: resizing the window itself
+/// every frame costs WindowServer a new backing store each time, about
+/// 40 ms a step, where GPUI redraws at the display's rate. Left edge and
+/// width, in the window.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Slide {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    pub generation: u64,
+}
 
 pub struct Peek {
     shell: WeakEntity<Shell>,
@@ -48,6 +64,24 @@ pub struct Peek {
     pub focused: Option<usize>,
     /// Opened by a click, so the keyboard drives it.
     pub keys: bool,
+    /// Displays being made for "+": a tile each, waiting.
+    pub pending: usize,
+    /// The card is sliding to a new width.
+    pub slide: Option<Slide>,
+    /// Displays that take the place of a pending tile: they show without
+    /// growing in again.
+    pub arrived: HashSet<DisplayId>,
+    /// The displays the last render showed, while Peek was up.
+    known: Vec<DisplayId>,
+    /// Peek was up for the last render too.
+    following: bool,
+    /// The width the last render drew at, for the log.
+    drawn: Option<f32>,
+    /// Displays that came while Peek was up, which grow in.
+    entering: HashSet<DisplayId>,
+    /// Displays that went while Peek was up, by where their tile stood,
+    /// shrinking out.
+    leaving: Vec<(DisplayId, usize)>,
 }
 
 impl Peek {
@@ -79,6 +113,14 @@ impl Peek {
             focus: cx.focus_handle(),
             focused: None,
             keys: false,
+            pending: 0,
+            slide: None,
+            arrived: HashSet::new(),
+            known: Vec::new(),
+            following: false,
+            drawn: None,
+            entering: HashSet::new(),
+            leaving: Vec::new(),
         }
     }
 
@@ -123,6 +165,45 @@ impl Peek {
         cx.notify();
     }
 
+    /// Which displays grow in and which shrink out: those that came or went
+    /// since the last render while Peek was up.
+    fn follow(&mut self, ids: &[DisplayId], cx: &mut Context<Self>) {
+        if !self.shown {
+            self.known.clear();
+            self.entering.clear();
+            self.leaving.clear();
+            self.arrived.clear();
+            self.following = false;
+            return;
+        }
+        if self.following {
+            for id in ids.iter().filter(|id| !self.known.contains(id)) {
+                if !self.arrived.remove(id) {
+                    self.entering.insert(*id);
+                }
+            }
+        }
+        for (index, id) in self.known.iter().enumerate() {
+            if !ids.contains(id) && !self.leaving.iter().any(|(l, _)| l == id) {
+                let id = *id;
+                self.leaving.push((id, index));
+                self.entering.remove(&id);
+                cx.spawn(async move |peek, cx| {
+                    cx.background_executor()
+                        .timer(RESIZE + Duration::from_millis(40))
+                        .await;
+                    let _ = peek.update(cx, |peek, cx| {
+                        peek.leaving.retain(|(l, _)| *l != id);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+        self.known = ids.to_vec();
+        self.following = true;
+    }
+
     /// Card size and tile width for `displays` tiles plus the "+", no
     /// wider than `room`: tiles shrink down to MIN_TILE to fit.
     pub fn size(displays: usize, room: f64) -> (f64, f64, f32) {
@@ -149,10 +230,18 @@ pub fn ordered(core: &Core) -> Vec<DisplayId> {
 impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
+        if self.shown && self.slide.is_none() {
+            let width = f32::from(window.viewport_size().width);
+            if self.drawn != Some(width) {
+                self.drawn = Some(width);
+                log_card(width);
+            }
+        }
+        let ids = ordered(self.core.read(cx));
+        self.follow(&ids, cx);
         let core = self.core.read(cx);
         let streams = self.streams.read(cx);
-        let ids = ordered(core);
-        let mut tiles = Vec::new();
+        let mut tiles: Vec<gpui::AnyElement> = Vec::new();
         for (index, id) in ids.iter().enumerate() {
             let Some(display) = core.displays.get(*id) else {
                 continue;
@@ -162,7 +251,7 @@ impl Render for Peek {
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();
-            tiles.push(tile(
+            let built = tile(
                 *id,
                 display.label(),
                 crate::mac::recording::is_recording(*id),
@@ -175,18 +264,54 @@ impl Render for Peek {
                 self.tile,
                 &theme,
                 &self.shell,
-            ));
+            );
+            tiles.push(if self.entering.contains(id) {
+                grow(("tile-in", *id), self.tile, true, built).into_any_element()
+            } else {
+                built.into_any_element()
+            });
         }
-        let narrow = !ids.is_empty();
+        for (id, index) in &self.leaving {
+            let ghost = div()
+                .w(px(self.tile))
+                .h(px(thumb_height(self.tile)))
+                .rounded(px(9.))
+                .bg(theme.screen_empty);
+            let at = (*index).min(tiles.len());
+            tiles.insert(
+                at,
+                grow(("tile-out", *id), self.tile, false, ghost).into_any_element(),
+            );
+        }
+        for index in 0..self.pending {
+            let waiting = div().w(px(self.tile)).flex().flex_col().child(
+                div()
+                    .h(px(thumb_height(self.tile)))
+                    .rounded(px(9.))
+                    .overflow_hidden()
+                    .bg(theme.screen_empty)
+                    .child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.5))
+                            .text_color(theme.secondary)
+                            .child(t("Preparing…", "准备中…")),
+                    ),
+            );
+            tiles
+                .push(grow(("pending", index as u32), self.tile, true, waiting).into_any_element());
+        }
+        let narrow = !ids.is_empty() || self.pending > 0;
         let shell = self.shell.clone();
         let add_focused = self.focused == Some(ids.len());
-        div()
-            .id("peek")
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|peek: &mut Peek, e: &KeyDownEvent, _, cx| peek.key(e, cx)))
-            .role(Role::Group)
-            .aria_label("Agent Screen")
-            .size_full()
+        let card = div()
+            .id("card")
+            .absolute()
+            .top_0()
+            .bottom_0()
             .flex()
             .gap(px(SPACING))
             .p(px(PADDING))
@@ -205,8 +330,70 @@ impl Render for Peek {
                 add_focused,
                 &theme,
                 &self.shell,
-            ))
+            ));
+        let card = match self.slide {
+            Some(slide) => {
+                // The system shadow follows the card's shape as it slides.
+                if let Some(ns) = crate::mac::native::ns_window(window) {
+                    crate::mac::native::later(move || ns.invalidateShadow());
+                }
+                card.with_animation(
+                    gpui::ElementId::NamedInteger("slide".into(), slide.generation),
+                    gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
+                    move |card, t| {
+                        let mix = |a: f32, b: f32| a + (b - a) * t;
+                        let width = mix(slide.from.1, slide.to.1);
+                        log_card(width);
+                        card.left(px(mix(slide.from.0, slide.to.0))).w(px(width))
+                    },
+                )
+                .into_any_element()
+            }
+            None => card.left_0().right_0().into_any_element(),
+        };
+        div()
+            .id("peek")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|peek: &mut Peek, e: &KeyDownEvent, _, cx| peek.key(e, cx)))
+            .role(Role::Group)
+            .aria_label("Agent Screen")
+            .size_full()
+            .relative()
+            .child(card)
     }
+}
+
+/// For peekanim, in test builds: the card's width as a frame draws it.
+fn log_card(width: f32) {
+    if cfg!(debug_assertions) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        log::debug!("peek drawn {width} at {ms}");
+    }
+}
+
+/// `content`, `width` wide, growing in from nothing, or shrinking out to
+/// nothing, over `RESIZE`, as Peek's frame follows.
+fn grow(
+    key: (&'static str, DisplayId),
+    width: f32,
+    entering: bool,
+    content: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .overflow_hidden()
+        .child(content)
+        .with_animation(
+            gpui::ElementId::NamedInteger(key.0.into(), key.1 as u64),
+            gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
+            move |d, t| {
+                let t = if entering { t } else { 1. - t };
+                // The gap beside it closes with it.
+                d.w(px(width * t)).mr(px((t - 1.) * SPACING)).opacity(t)
+            },
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
