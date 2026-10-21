@@ -50,6 +50,7 @@ cargo e2e run                 # the user's side: scrolling, the menu bar strip, 
 AGENTSCREEN_INSTANCE=e2e cargo e2e robust      # what agents get back, and nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e takeover    # Takeover through the Viewer
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag  # a title-bar drag in the Viewer stays on the display
+AGENTSCREEN_INSTANCE=e2e cargo e2e viewerkey  # a click that makes the Viewer key again keeps the app running
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves
 AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from rust/tests/fixtures/electron: launch with arguments, clicks, typing, edge resize, late redraws; needs rust/target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e agentshots     # a screenshot is the whole display scaled down; a zoom over all of it works
@@ -107,7 +108,7 @@ With AeroSpace running, a window counts as placed only once AeroSpace files it u
 for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 ```
 
-`AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. `E2E_LOG=FILE` keeps the debug app's log.
+`AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. A click with `key` 1 takes the keyboard as the user's click does. `E2E_LOG=FILE` keeps the debug app's log.
 
 `cargo e2e run` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `rust/target/e2e`. `probe tap` (`rust/tests/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `rust/tests/fixtures/trackpad.log` was made.
 

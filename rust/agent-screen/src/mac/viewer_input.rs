@@ -37,12 +37,26 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     /// Handling an event a test made: the Viewer must not take the keyboard.
     static INJECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Except this one, which takes it as the user's click does.
+    static TAKE_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Tests: a click at a point of the display image, given as fractions of
-/// its width and height, handled as if the user made it.
-pub fn inject_click(x: f64, y: f64) -> Result<(), String> {
-    inject_mouse(NSEventType::LeftMouseDown, x, y)?;
+/// its width and height, handled as if the user made it. With `key`, the
+/// Viewer first gives up the keyboard and the click takes it back, as the
+/// user's click on a Viewer behind another window does.
+pub fn inject_click(x: f64, y: f64, key: bool) -> Result<(), String> {
+    if key {
+        let window = STATE.with(|s| s.borrow().window);
+        if window == 0 {
+            return Err("no Viewer".into());
+        }
+        unsafe { &*(window as *const NSWindow) }.resignKeyWindow();
+        TAKE_KEY.with(|k| k.set(true));
+    }
+    let down = inject_mouse(NSEventType::LeftMouseDown, x, y);
+    TAKE_KEY.with(|k| k.set(false));
+    down?;
     inject_mouse(NSEventType::LeftMouseUp, x, y)
 }
 
@@ -219,6 +233,21 @@ fn remote(
 
 /// Handle one event; false lets it go on to GPUI.
 fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
+    let mut take_key = None;
+    let handled = handle_in(event, mtm, &mut take_key);
+    // Outside the state: a window becoming key draws at once, and its
+    // paint reports the layout here.
+    if let Some(window) = take_key {
+        native::make_key(&window);
+    }
+    handled
+}
+
+fn handle_in(
+    event: &NSEvent,
+    mtm: MainThreadMarker,
+    take_key: &mut Option<objc2::rc::Retained<NSWindow>>,
+) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
         let Some(window) = event.window(mtm) else {
@@ -247,8 +276,8 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
                 let Some(at) = remote(event, &window, content, display, false) else {
                     return false;
                 };
-                if !INJECTING.with(|i| i.get()) {
-                    native::make_key(&window);
+                if !INJECTING.with(|i| i.get()) || TAKE_KEY.with(|k| k.get()) {
+                    *take_key = Some(window.clone());
                 }
                 // The menu bar strip: only a click that opens a menu takes
                 // the display over, which the shell decides.

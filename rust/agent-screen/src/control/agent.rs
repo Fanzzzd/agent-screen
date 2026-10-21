@@ -937,10 +937,16 @@ async fn handle_one(
         }
         "debugViewerInput" if debug_methods() => {
             use crate::mac::viewer_input;
+            // A frame from the display's stream leaves the Viewer to draw,
+            // as it nearly always is while the user works in it.
+            if p.int("key") == Some(1) {
+                cx.update(|cx| cx.refresh_windows());
+            }
             match p.string("kind").as_deref() {
                 Some("click") => viewer_input::inject_click(
                     p.number("x").unwrap_or(0.5),
                     p.number("y").unwrap_or(0.5),
+                    p.int("key").unwrap_or(0) == 1,
                 ),
                 Some("key") => viewer_input::inject_key(
                     p.int("code").unwrap_or(0) as u16,
