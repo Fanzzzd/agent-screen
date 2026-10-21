@@ -140,6 +140,19 @@ pub fn opens_things(pid: i32) -> bool {
         })
 }
 
+/// Whether `pid` is a launcher, which opens apps from keys typed in a panel
+/// that doesn't bring it to the front.
+pub fn is_launcher(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.bundleIdentifier())
+        .is_some_and(|id| {
+            matches!(
+                id.to_string().as_str(),
+                "com.apple.Spotlight" | "com.raycast.macos" | "com.runningwithcrayons.Alfred"
+            )
+        })
+}
+
 /// The bundle of a running app, by bundle id.
 pub fn running_bundle(bundle_id: &str) -> Option<PathBuf> {
     NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))

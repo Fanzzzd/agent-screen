@@ -145,3 +145,28 @@ bool SSAXWindowID(AXUIElementRef element, CGWindowID *outWindowID) {
     if (SS.axGetWindow == NULL) return false;
     return SS.axGetWindow(element, outWindowID) == kAXErrorSuccess;
 }
+
+// The pid of WindowServer's front process, -1 if it can't say.
+int SSFrontPid(void) {
+    SSResolve();
+    SSProcessSerialNumber front = {0, 0};
+    if (SS.getFrontProcess == NULL || SS.getFrontProcess(&front) != 0) return -1;
+    typedef int32_t (*GetPIDFn)(const SSProcessSerialNumber *, pid_t *);
+    GetPIDFn getPID = (GetPIDFn)dlsym(RTLD_DEFAULT, "GetProcessPID");
+    pid_t pid = -2;
+    if (getPID != NULL) getPID(&front, &pid);
+    return pid;
+}
+
+// Make this process WindowServer's front process, with `windowID` its
+// key window: a click in the Viewer activates Agent Screen, a menu bar
+// app, without taking that from the app that had it.
+bool SSMakeSelfFront(CGWindowID windowID) {
+    SSResolve();
+    typedef int32_t (*SetFrontFn)(SSProcessSerialNumber *, CGWindowID, uint32_t);
+    SetFrontFn setFront = (SetFrontFn)dlsym(RTLD_DEFAULT, "_SLPSSetFrontProcessWithOptions");
+    SSProcessSerialNumber own = {0, 0};
+    if (setFront == NULL || SS.getProcessForPID == NULL || SS.getProcessForPID(getpid(), &own) != 0) return false;
+    // 0x200: user generated.
+    return setFront(&own, windowID, 0x200) == 0;
+}

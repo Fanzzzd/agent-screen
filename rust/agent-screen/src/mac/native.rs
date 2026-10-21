@@ -51,6 +51,8 @@ pub enum Native {
     },
     /// A menu item was chosen.
     Menu(MenuAction),
+    /// The user typed in a launcher such as Raycast.
+    LauncherTyped,
     /// The user clicked, scrolled or typed on the Viewer's display image.
     ScreenTouched {
         display: u32,

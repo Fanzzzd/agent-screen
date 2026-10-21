@@ -40,6 +40,7 @@ pub struct VirtualDisplay {
 
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
+        super::claims::remove_display(self.id);
         drop(self.handle.take());
         // WindowServer removes the display a moment later. Its serial waits
         // for that: a display with it now would be refused, or share its
@@ -231,6 +232,7 @@ impl VirtualDisplay {
             // at another size comes back at it, maybe at 1x, and shows
             // blurry. Ask for this size at 2x.
             settle_mode(id, width, height);
+            super::claims::add_display(id);
             Some(Self {
                 id,
                 handle: Some(handle),

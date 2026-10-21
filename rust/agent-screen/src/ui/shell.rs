@@ -131,6 +131,9 @@ pub struct Shell {
     settle_until: Option<Instant>,
 
     viewer_display: Option<DisplayId>,
+    /// The display new windows go to after the user typed in a launcher
+    /// while working in the Viewer, and until when.
+    launch_here: Option<(DisplayId, std::time::Instant)>,
     /// When the Viewer's open animation lands.
     viewer_settled_at: Instant,
     /// Displays known to have ended, to notice one ending.
@@ -313,6 +316,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             watch_generation: 0,
             settle_until: None,
             viewer_display: None,
+            launch_here: None,
             viewer_settled_at: Instant::now(),
             ended: HashSet::new(),
             viewer_open: false,
@@ -451,6 +455,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             if !plans.is_empty() && !TIDIED.with(Cell::get) {
                 dismissal::execute(&plans, main_screen_name().as_deref());
             }
+            crate::mac::claims::delete();
             async {}
         })
         .detach();
@@ -604,6 +609,7 @@ impl Shell {
             }
             Native::NotificationAuth(auth) => self.notification_auth(auth, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
+            Native::LauncherTyped => self.launcher_typed(cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, cx| core.repark(cx));
@@ -2671,6 +2677,94 @@ impl Shell {
             log::info!("permission turned off: {:?}", now.missing());
         }
         self.push_setup(cx);
+    }
+
+    // MARK: Launcher
+
+    /// The user typed in a launcher such as Raycast while working in the
+    /// Viewer: its panel takes keys without coming to the front, so Agent
+    /// Screen still is. The first new window in the next 10 s, and the
+    /// windows its app makes in the 2 s after it, go to the Viewer's
+    /// display as a Handover (ADR 0007). Typed in after a click on their
+    /// own screen, the launcher's apps open there.
+    fn launcher_typed(&mut self, cx: &mut Context<Self>) {
+        const SPAN: Duration = Duration::from_secs(10);
+        let Some(display) = self.viewer.as_ref().and(self.viewer_display) else {
+            return;
+        };
+        if crate::mac::input::front() != Some(std::process::id() as i32) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let watching = self
+            .launch_here
+            .is_some_and(|(d, until)| d == display && until > now);
+        self.launch_here = Some((display, now + SPAN));
+        if watching {
+            return;
+        }
+        log::info!(
+            "launcher typed in from the Viewer of display {display}: its new windows go there"
+        );
+        let ids = || -> std::collections::HashSet<u32> {
+            windows::all()
+                .into_iter()
+                .map(|w| w.target.window_id)
+                .collect()
+        };
+        cx.spawn(async move |this, cx| {
+            let mut known = cx.background_executor().spawn(async move { ids() }).await;
+            // The app the launcher opened, once its first window came.
+            let mut opened: Option<i32> = None;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let Ok(Some((d, until))) = this.read_with(cx, |shell, _| shell.launch_here) else {
+                    return;
+                };
+                if d != display || std::time::Instant::now() > until {
+                    return;
+                }
+                let seen = known.clone();
+                let fresh: Vec<windows::Window> = cx
+                    .background_executor()
+                    .spawn(async move {
+                        windows::all()
+                            .into_iter()
+                            .filter(|w| {
+                                w.layer == 0
+                                    && !seen.contains(&w.target.window_id)
+                                    && !windows::on_virtual_display(w.target.window_id)
+                                    && !app::is_launcher(w.target.pid)
+                            })
+                            .collect()
+                    })
+                    .await;
+                for window in fresh {
+                    known.insert(window.target.window_id);
+                    if opened.is_some_and(|pid| pid != window.target.pid) {
+                        continue;
+                    }
+                    if opened.is_none() {
+                        opened = Some(window.target.pid);
+                        let _ = this.update(cx, |shell, _| {
+                            shell.launch_here =
+                                Some((display, std::time::Instant::now() + Duration::from_secs(2)));
+                        });
+                    }
+                    log::info!(
+                        "window {} of {} opened from the launcher: to display {display}",
+                        window.target.window_id,
+                        window.app
+                    );
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.hand_over(window.target, Some(window.bounds), display, cx)
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     // MARK: Handover

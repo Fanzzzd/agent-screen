@@ -443,6 +443,20 @@ fn require_text(value: Option<String>, action: &str) -> Result<String, ControlEr
         .ok_or_else(|| ControlError::invalid(format!("text is required for {action}")))
 }
 
+/// create_display's note after the app quit and took the session's
+/// display with it.
+const RESTARTED: &str = "Agent Screen quit since your last call and restarted; your earlier display ended with it, and macOS moved its windows to the user's screen. Windows of apps you launched there are strays now: list_windows with strays: true, then place_window.";
+
+/// What a call naming a display that ended when the app quit gets back.
+pub fn ended_with_app(id: i64) -> ControlError {
+    ControlError::new(
+        "ended",
+        format!(
+            "display {id} ended when the Agent Screen app quit; it has restarted. macOS moved the display's windows to the user's screen. Call create_display, then list_windows with strays: true and place_window to bring back windows of apps you launched there."
+        ),
+    )
+}
+
 // MARK: Handlers
 
 pub async fn run(
@@ -455,6 +469,9 @@ pub async fn run(
     match name {
         "create_display" => {
             let title = a.string("title")?.unwrap_or_else(|| session.folder.clone());
+            // A display ended by the app quitting hands its apps on, so
+            // their windows, now on the user's screen, are strays here.
+            let orphans = control.orphans();
             let reply = control
                 .call(
                     "createDisplay",
@@ -463,10 +480,14 @@ pub async fn run(
                         "client": session.client,
                         "title": title,
                         "width": a.int("width")?,
-                        "height": a.int("height")?
+                        "height": a.int("height")?,
+                        "adopt": orphans
                     }),
                 )
                 .await?;
+            if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
+                control.made_display(id);
+            }
             let mut out = json!({
                 "display_id": reply.get("displayId"),
                 "width": reply.get("width"),
@@ -475,6 +496,8 @@ pub async fn run(
             });
             if let Some(note) = reply.get("note") {
                 out["note"] = note.clone();
+            } else if orphans.is_some() {
+                out["note"] = json!(RESTARTED);
             }
             Ok(Output::Object(out))
         }
@@ -581,11 +604,12 @@ pub async fn run(
             let app = a
                 .string("app")?
                 .ok_or_else(|| ControlError::invalid("app is required"))?;
+            let display = a.require_int("display_id")?;
             let reply = control
                 .call(
                     "launchApp",
                     json!({
-                        "displayId": a.require_int("display_id")?,
+                        "displayId": display,
                         "app": app,
                         "open": a.string("open")?,
                         "arguments": a.0.get("arguments"),
@@ -593,6 +617,9 @@ pub async fn run(
                     }),
                 )
                 .await?;
+            if let Some(pid) = reply.get("pid").and_then(Value::as_i64) {
+                control.started_app(display as u64, pid);
+            }
             Ok(Output::Object(launch_output(&Value::Object(reply))))
         }
         "get_window_state" => window_state(

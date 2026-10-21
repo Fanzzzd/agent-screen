@@ -544,7 +544,11 @@ async fn handle_one(
         }
         "listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => {
             let id = display(&core, &p, false, cx)?;
-            let list: Vec<Value> = strays(&core, id, cx).iter().map(|w| w.json()).collect();
+            let list: Vec<Value> = strays(&core, id, cx)
+                .await
+                .iter()
+                .map(|w| w.json())
+                .collect();
             Ok(json!({ "windows": list }))
         }
         "listWindows" => {
@@ -641,6 +645,7 @@ async fn handle_one(
                 ));
             }
             let window = strays(&core, id, cx)
+                .await
                 .into_iter()
                 .find(|w| w.target.window_id as i64 == wanted)
                 .ok_or_else(|| {
@@ -649,7 +654,32 @@ async fn handle_one(
                     )
                 })?;
             claim(&core, id, window.target, Origin::Placed, cx);
-            if let Err(e) = place(window.target, id, cx).await {
+            // AeroSpace can lay the window out again in the user's
+            // workspace right after a display appears (`windows::kept_on`):
+            // watch it for 1.5 s and move it back each time.
+            let mut outcome = place(window.target, id, cx).await;
+            let mut moves = 1;
+            for _ in 0..6 {
+                if outcome.is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                if !held(window.target, id, cx).await {
+                    if moves == 4 {
+                        outcome = Err("AeroSpace kept putting it back on the user's screen".into());
+                        break;
+                    }
+                    log::info!(
+                        "window {} left display {id} after place_window; placing again",
+                        window.target.window_id
+                    );
+                    moves += 1;
+                    outcome = place(window.target, id, cx).await;
+                }
+            }
+            if let Err(e) = outcome {
                 // Still a stray, so the agent can try again.
                 core.update(cx, |c, _| {
                     if let Some(d) = c.displays.get_mut(id) {
@@ -794,13 +824,23 @@ async fn handle_one(
             let target = p.string("open").map(|t| open_target(&t)).transpose()?;
             let start = Start::parse(&p)?;
             let launched = launch(&core, id, &name, target.as_deref(), &start, cx).await?;
-            Ok(match launched.window {
+            let mut reply = match launched.window {
                 Some(w) => json!({
                     "window": in_shot(w.json(), display_scale(&core, id, cx)),
                     "wasRunning": launched.was_running
                 }),
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
-            })
+            };
+            // The app this display started, which the MCP server hands to
+            // the session's next display if this app quits.
+            if let Some(pid) = launched.pid.filter(|pid| {
+                core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| d.started.contains(pid))
+                })
+            }) {
+                reply["pid"] = json!(pid);
+            }
+            Ok(reply)
         }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
@@ -1022,6 +1062,33 @@ async fn handle_one(
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({ "agent": agent }))
         }
+        // Test hook: macOS last named `pid` the front app, as when the user
+        // had just used it, without making it active.
+        "debugFront" if debug_methods() => {
+            crate::mac::input::note_activation(p.int("pid").map(|pid| pid as i32));
+            Ok(json!({}))
+        }
+        // Test hook: a key press of the user's that went to `pid`, as the
+        // global key monitor reports one typed into Spotlight.
+        "debugUserKey" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            cx.background_executor()
+                .spawn(async move { crate::mac::catch::user_key_to(pid) })
+                .await;
+            Ok(json!({}))
+        }
+        // A panic on the main thread after the reply, as one in an AppKit
+        // callback: the app aborts.
+        "debugPanic" if debug_methods() => {
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                panic!("debugPanic");
+            })
+            .detach();
+            Ok(json!({}))
+        }
         "debugQuit" if debug_methods() => {
             // Quits the way the menu does, after this reply goes out.
             cx.spawn(async |cx| {
@@ -1187,6 +1254,16 @@ async fn create_display(
         c.sessions.insert(connection, session_key.clone());
     });
     let asked = (p.number("width"), p.number("height"));
+    let adopt: Vec<i32> =
+        p.0.get("adopt")
+            .and_then(Value::as_array)
+            .map(|pids| {
+                pids.iter()
+                    .filter_map(Value::as_i64)
+                    .filter_map(|pid| i32::try_from(pid).ok().filter(|p| *p > 0))
+                    .collect()
+            })
+            .unwrap_or_default();
     if let Some(mut existing) = core.read_with(cx, |c, _| {
         c.displays.for_session(&session_key).map(|d| {
             let size = (d.width, d.height);
@@ -1300,9 +1377,24 @@ async fn create_display(
         drop(made);
         return answer;
     }
+    let adopted = adopt.clone();
     let reply = core
         .update(cx, |c, cx| {
             let id = c.adopt(made?, name, (width, height), Some(owner), cx);
+            // Apps the session's displays started before this app quit:
+            // their windows, which macOS moved to the user's screen, are
+            // strays of this display. A pid another display holds, or one
+            // no longer running, stays out.
+            for pid in adopt {
+                let held = c.displays.list.iter().any(|d| d.started.contains(&pid));
+                let alive = unsafe { libc::kill(pid, 0) } == 0;
+                if !held
+                    && alive
+                    && let Some(d) = c.displays.get_mut(id)
+                {
+                    d.started.insert(pid);
+                }
+            }
             c.displays.get(id).map(|d| {
                 let mut reply = describe(d, false);
                 if clamped {
@@ -1318,6 +1410,24 @@ async fn create_display(
     // shows only the display.
     let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
     let created = started.elapsed().as_millis();
+    // Windows macOS put back on the display, of apps adopted above: claimed
+    // before AeroSpace takes them for the user's, a second after they show.
+    if !adopted.is_empty() {
+        let started = core.read_with(cx, |c, _| {
+            c.displays
+                .get(id)
+                .map(|d| d.started.clone())
+                .unwrap_or_default()
+        });
+        off(cx, move || {
+            for w in windows::on_display(id) {
+                if started.contains(&w.target.pid) {
+                    crate::mac::claims::claim(w.target.window_id, id);
+                }
+            }
+        })
+        .await;
+    }
     for _ in 0..100 {
         if core.read_with(cx, |c, _| c.tucked.contains(&id)) {
             break;
@@ -1516,19 +1626,19 @@ fn keep_catch(
 /// Windows of the apps launch_app started for this display that sit on no
 /// Agent Display and no display's records, such as one that opened on the
 /// user's screen before its catch was ready.
-fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
+async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
     let displays = core.read_with(cx, |c, _| {
         c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>()
     });
-    let placed: std::collections::HashSet<u32> = displays
-        .into_iter()
-        .flat_map(windows::on_display)
-        .map(|w| w.target.window_id)
-        .collect();
-    let off_displays: Vec<windows::Window> = windows::all()
-        .into_iter()
-        .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
-        .collect();
+    // AeroSpace may answer late: off the main thread.
+    let off_displays: Vec<windows::Window> = off(cx, move || {
+        let placed = windows::kept_on(&displays);
+        windows::all()
+            .into_iter()
+            .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
+            .collect()
+    })
+    .await;
     core.update(cx, |c, _| {
         sync_user_made(c, id);
         let recorded: std::collections::HashSet<u32> = c
@@ -1844,6 +1954,8 @@ struct Launched {
     /// `app_busy`, that item is greyed out; `menus_unreadable`, its menus
     /// can't be read or used.
     reason: Option<&'static str>,
+    /// The process, when this launch started it.
+    pid: Option<i32>,
 }
 
 /// How long a launch watches for a window that comes after it gave up.
@@ -2246,6 +2358,7 @@ async fn launch_now(
                 window: None,
                 was_running,
                 reason: Some(reason),
+                pid: None,
             });
         }
     }
@@ -2398,6 +2511,7 @@ async fn launch_now(
                 window: Some(placed),
                 was_running,
                 reason: None,
+                pid: (!was_running).then_some(pid),
             });
         }
     }
@@ -2527,6 +2641,7 @@ async fn launch_now(
     Ok(Launched {
         window: None,
         was_running,
+        pid: (!was_running).then_some(pid),
         reason: Some(if !was_running {
             "still_starting"
         } else if asked_for_window {

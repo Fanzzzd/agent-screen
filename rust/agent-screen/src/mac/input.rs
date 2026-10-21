@@ -25,6 +25,8 @@ unsafe extern "C" {
     fn SSEventSetWindowLocation(event: &CGEvent, point: CGPoint) -> bool;
     fn SSEventSetIntegerField(event: &CGEvent, field: u32, value: i64) -> bool;
     fn SSFocusWithoutRaise(pid: i32, window: u32) -> bool;
+    fn SSFrontPid() -> i32;
+    fn SSMakeSelfFront(window: u32) -> bool;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1391,9 +1393,35 @@ static ACTIVATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 static FRONT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 pub fn note_activation(front: Option<i32>) {
+    // Already noted at the user's press in the Viewer.
+    let own = std::process::id() as i32;
+    if front == Some(own) && FRONT.load(std::sync::atomic::Ordering::Relaxed) == own {
+        return;
+    }
     FRONT.store(front.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     let n = ACTIVATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    log::debug!("input: front app changed ({n})");
+    log::debug!("input: front app changed ({n}): {front:?}");
+}
+
+/// The user pressed in the Viewer, window number `viewer`, which brings
+/// Agent Screen to the front with the press (issue #41).
+///
+/// macOS says so only after the press is on its way: until then the app
+/// the press goes to still counts as the front one, which gets no wake
+/// click. And Agent Screen, a menu bar app, becomes active without
+/// becoming WindowServer's front process: an app that made itself active
+/// before, as aTrust does when it shows its login window, stays that, and
+/// a Chromium window of it then drops every press. So Agent Screen takes
+/// that too, as the app the user is clicking.
+pub fn note_viewer_press(viewer: u32) {
+    let own = std::process::id() as i32;
+    if front() != Some(own) {
+        note_activation(Some(own));
+    }
+    let server = unsafe { SSFrontPid() };
+    if server != own && !unsafe { SSMakeSelfFront(viewer) } {
+        log::warn!("input: WindowServer's front process stays {server}");
+    }
 }
 
 pub fn is_front(pid: i32) -> bool {

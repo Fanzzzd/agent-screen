@@ -129,13 +129,24 @@ pub fn user_pressed_key() {
                 // A burst of keys needs one lookup.
                 while rx.try_recv().is_ok() {}
                 if let Some(pid) = ax::focused_app_pid() {
-                    user_acted(Towards::App(pid));
+                    user_key_to(pid);
                 }
             }
         });
         tx
     });
     let _ = focus.send(());
+}
+
+/// A key press of the user's that went to `pid`, the app with keyboard
+/// focus.
+pub fn user_key_to(pid: i32) {
+    user_acted(Towards::App(pid));
+    if super::app::is_launcher(pid) {
+        // Called off the main thread, where the shell hears events.
+        dispatch2::DispatchQueue::main()
+            .exec_async(|| super::native::send(super::native::Native::LauncherTyped));
+    }
 }
 
 fn acted_recently(display: DisplayId, pid: i32) -> bool {
@@ -562,6 +573,9 @@ extern "C" fn created(
                 );
                 if let Some(id) = ax::window_id(window) {
                     lock(&target.undecided).push(id);
+                    if ax::frame(window).is_some_and(|f| target.bounds.contains(f.mid())) {
+                        super::claims::claim(id, target.display);
+                    }
                 }
                 return;
             }

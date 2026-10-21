@@ -230,6 +230,48 @@ pub fn probe(args: &[&str]) -> Result<String> {
     sh(tool("probe")?, args)
 }
 
+/// A sign in the middle of the user's screen while a test moves their
+/// pointer or takes the keyboard (`tools/overlay.swift`): a count from 3
+/// first, then each step, and "可以操作了" once it drops, test passed or not.
+pub struct HandsOff {
+    child: std::process::Child,
+}
+
+impl HandsOff {
+    /// Count down from 3 and return when the count is over.
+    pub fn start(what: &str) -> Result<HandsOff> {
+        let child = std::process::Command::new(tool("overlay")?)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        let mut sign = HandsOff { child };
+        sign.say(&format!(
+            "count 3 {what}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
+        ));
+        sleep_ms(3000);
+        Ok(sign)
+    }
+
+    /// What the test does now.
+    pub fn step(&mut self, text: &str) {
+        self.say(&format!("step {text}"));
+    }
+
+    fn say(&mut self, line: &str) {
+        use std::io::Write;
+        if let Some(stdin) = self.child.stdin.as_mut() {
+            let _ = writeln!(stdin, "{line}");
+        }
+    }
+}
+
+impl Drop for HandsOff {
+    fn drop(&mut self) {
+        self.say("done Test over: the mouse and keyboard are yours / 测试结束");
+        // The sign stays 2 s, then quits by itself.
+        drop(self.child.stdin.take());
+    }
+}
+
 pub fn hid(args: &[&str]) -> Result<String> {
     sh(tool("hid")?, args)
 }

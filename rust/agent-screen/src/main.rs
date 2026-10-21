@@ -166,6 +166,17 @@ fn main() {
     }
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
+    // A panic in an AppKit callback can't unwind and aborts the app, and
+    // the crash report keeps no message: the log keeps it, and where.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        lifecycle::line(&format!(
+            "panic: {info}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
+        report(info);
+        mac::claims::delete();
+    }));
     log::debug!("language: {:?}", i18n::lang());
     let platform = gpui_platform::current_platform(false);
     // A menu bar app: in the Dock only while the setup window is open

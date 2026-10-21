@@ -8,6 +8,7 @@ pub mod ax;
 pub mod capture;
 pub mod catch;
 pub mod cg;
+pub mod claims;
 pub mod colorsync;
 pub mod display;
 pub mod hang;

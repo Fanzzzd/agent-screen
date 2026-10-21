@@ -94,7 +94,25 @@ impl ServerHandler for AgentScreen {
         let session = session::identify(&meta, client.as_deref());
         let args = request.arguments.unwrap_or_default();
 
-        let result = match tools::run(&request.name, &args, &session, &self.control).await {
+        let outcome = tools::run(&request.name, &args, &session, &self.control)
+            .await
+            .map_err(|error| {
+                // The restarted app doesn't know the display: whatever it
+                // says, "not_found", or "locked" before it looks, the
+                // display ended when the app quit. "unavailable": it
+                // hasn't restarted yet.
+                let display = args.get("display_id").and_then(Value::as_i64);
+                match display {
+                    Some(id)
+                        if error.code != "unavailable"
+                            && self.control.ended_with_app(id as u64) =>
+                    {
+                        tools::ended_with_app(id)
+                    }
+                    _ => error,
+                }
+            });
+        let result = match outcome {
             Ok(Output::Content(content)) => json!({ "content": content }),
             Ok(Output::Object(object)) => json!({
                 "content": [text(object.to_string())],

@@ -43,6 +43,16 @@ impl AeroSpace {
         .map(|_| ())
     }
 
+    /// Every window AeroSpace files in a workspace, in one call. With
+    /// `ignored-monitors`, windows on an Agent Display aren't among them.
+    pub fn managed_windows(&self) -> Result<std::collections::HashSet<u32>, String> {
+        Ok(self
+            .run(&["list-windows", "--all", "--format", "%{window-id}"])?
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect())
+    }
+
     /// The workspace a window belongs to.
     pub fn workspace_of(&self, window: u32) -> Result<Option<String>, String> {
         let id = window.to_string();
@@ -405,7 +415,13 @@ static LOADED: std::sync::Mutex<Option<(i32, Option<std::time::SystemTime>)>> =
 
 fn read_ignoring(display_exists: bool) -> Option<Ignoring> {
     let bundle = super::app::running_bundle("bobko.aerospace")?;
-    if !supports_ignored_monitors(&bundle.join("Contents/MacOS/AeroSpace")) {
+    let binary = bundle.join("Contents/MacOS/AeroSpace");
+    // It leaves the displays in Agent Screen's claim file alone, whatever
+    // its config says.
+    if contains(&binary, b"aerospace-claims-v1") {
+        return Some(Ignoring::Yes);
+    }
+    if !supports_ignored_monitors(&binary) {
         return Some(Ignoring::Unsupported);
     }
     let path = config_path();
@@ -445,22 +461,32 @@ fn read_ignoring(display_exists: bool) -> Option<Ignoring> {
 }
 
 fn supports_ignored_monitors(binary: &std::path::Path) -> bool {
-    use std::sync::Mutex;
-    static SEEN: Mutex<Option<(std::path::PathBuf, std::time::SystemTime, bool)>> =
-        Mutex::new(None);
+    contains(binary, b"ignored-monitors")
+}
+
+/// Whether a binary holds `needle`, remembered per build.
+fn contains(binary: &std::path::Path, needle: &'static [u8]) -> bool {
+    type Seen = Vec<(
+        &'static [u8],
+        std::path::PathBuf,
+        std::time::SystemTime,
+        bool,
+    )>;
+    static SEEN: std::sync::Mutex<Seen> = std::sync::Mutex::new(Vec::new());
     let modified = std::fs::metadata(binary).and_then(|m| m.modified()).ok();
-    let mut seen = SEEN.lock().unwrap();
-    if let (Some((path, at, answer)), Some(modified)) = (seen.as_ref(), modified)
-        && path == binary
-        && *at == modified
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(modified) = modified
+        && let Some((.., answer)) = seen
+            .iter()
+            .find(|(n, path, at, _)| *n == needle && path == binary && *at == modified)
     {
         return *answer;
     }
-    let needle = b"ignored-monitors";
     let answer =
         std::fs::read(binary).is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle));
     if let Some(modified) = modified {
-        *seen = Some((binary.to_path_buf(), modified, answer));
+        seen.retain(|(n, ..)| *n != needle);
+        seen.push((needle, binary.to_path_buf(), modified, answer));
     }
     answer
 }

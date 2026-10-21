@@ -279,6 +279,10 @@ fn handle_in(
                 if !INJECTING.with(|i| i.get()) || TAKE_KEY.with(|k| k.get()) {
                     *take_key = Some(window.clone());
                 }
+                // A test's press never takes the user's keyboard.
+                if !INJECTING.with(|i| i.get()) {
+                    super::input::note_viewer_press(window.windowNumber() as u32);
+                }
                 // The menu bar strip: only a click that opens a menu takes
                 // the display over, which the shell decides.
                 if button == Button::Left

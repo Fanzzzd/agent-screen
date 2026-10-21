@@ -217,6 +217,28 @@ pub fn on_virtual_display(window_id: u32) -> bool {
         .any(|id| cg::is_agent_screen(id) && cg::display_bounds(id).contains(mid))
 }
 
+/// Windows on any of `displays` that AeroSpace leaves there. With
+/// `ignored-monitors` it lets go of a window that lands on an Agent Display
+/// only once its own list of screens has the display, which comes late
+/// after a display appears: a window macOS puts back on a new display that
+/// took an old one's place, and AeroSpace still files in the user's
+/// workspace, goes back there. A new window it files for a few seconds
+/// and then lets go. Blocking.
+pub fn kept_on(displays: &[DisplayId]) -> std::collections::HashSet<u32> {
+    let mut on: std::collections::HashSet<u32> = displays
+        .iter()
+        .flat_map(|&d| on_display(d))
+        .map(|w| w.target.window_id)
+        .collect();
+    if super::aerospace::ignores_now()
+        && let Some(aerospace) = AeroSpace::current()
+        && let Ok(managed) = aerospace.managed_windows()
+    {
+        on.retain(|w| !managed.contains(w));
+    }
+    on
+}
+
 /// Move a window onto a display in whatever way the user's window manager
 /// respects. AeroSpace re-tiles any window moved behind its back, so with
 /// AeroSpace running it moves the window to the workspace shown on the

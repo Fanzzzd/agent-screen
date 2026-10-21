@@ -2,6 +2,7 @@
 //! Displays and their lifecycle, window records and fates, and key chords.
 //! Nothing here touches the OS.
 
+pub mod claims;
 pub mod keychord;
 pub mod model;
 pub mod numbers;

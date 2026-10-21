@@ -141,6 +141,7 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
 /// A window returns to where it came from when we know that, otherwise to
 /// the main display. Blocking.
 pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) {
+    crate::mac::claims::release(target.window_id);
     if let Some(home) = home {
         if let Some(workspace) = &home.workspace
             && let Some(aerospace) = AeroSpace::current()

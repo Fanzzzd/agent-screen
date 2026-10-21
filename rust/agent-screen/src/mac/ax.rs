@@ -521,6 +521,9 @@ pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveE
     if bounds.width <= 80.0 || bounds.height <= 80.0 {
         return Err(MoveError::Rejected);
     }
+    if let Some(id) = window_id(window) {
+        super::claims::moving_into(id, bounds);
+    }
     with_moves_direct(window, || fit_into(window, bounds))
 }
 

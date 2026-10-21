@@ -63,9 +63,63 @@ pub struct Control {
     /// Sent first on every connection, so an app that starts or restarts
     /// later still hears it.
     greeting: std::sync::Mutex<Option<(String, Value)>>,
+    /// Connections opened so far. The app ends its displays when it quits,
+    /// so one made on an earlier connection is gone.
+    connections: AtomicU64,
+    /// Displays this session made, by id: the connection each was made on,
+    /// and the apps launch_app started there.
+    made: std::sync::Mutex<HashMap<u64, Made>>,
+}
+
+#[derive(Default)]
+struct Made {
+    connection: u64,
+    started: Vec<i64>,
+    /// Its apps were handed to a later display.
+    adopted: bool,
 }
 
 impl Control {
+    /// Note a display this session made on the current connection.
+    pub fn made_display(&self, id: u64) {
+        let connection = self.connections.load(Ordering::Relaxed);
+        self.made.lock().unwrap().entry(id).or_default().connection = connection;
+    }
+
+    /// Note an app launch_app started for a display.
+    pub fn started_app(&self, display: u64, pid: i64) {
+        if let Some(made) = self.made.lock().unwrap().get_mut(&display) {
+            made.started.push(pid);
+        }
+    }
+
+    /// Whether a display this session made ended when the app quit.
+    pub fn ended_with_app(&self, id: u64) -> bool {
+        let connection = self.connections.load(Ordering::Relaxed);
+        self.made
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|m| m.connection < connection)
+    }
+
+    /// The apps started for displays that ended when the app quit, taken
+    /// once, for the next display to adopt.
+    pub fn orphans(&self) -> Option<Vec<i64>> {
+        let connection = self.connections.load(Ordering::Relaxed);
+        let mut made = self.made.lock().unwrap();
+        let mut any = false;
+        let mut pids = Vec::new();
+        for m in made.values_mut() {
+            if m.connection < connection && !m.adopted {
+                m.adopted = true;
+                any = true;
+                pids.append(&mut m.started);
+            }
+        }
+        any.then_some(pids)
+    }
+
     pub async fn call(&self, method: &str, params: Value) -> Result<Object, ControlError> {
         let connection = self.open().await?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -138,6 +192,7 @@ impl Control {
             return Some(connection.clone());
         }
         let (reader, writer) = endpoint::connect().await.ok()?;
+        self.connections.fetch_add(1, Ordering::Relaxed);
         let connection = attach(reader, writer);
         self.send_greeting(&connection).await;
         *slot = Some(connection.clone());
@@ -165,6 +220,7 @@ impl Control {
                 ));
             }
         };
+        self.connections.fetch_add(1, Ordering::Relaxed);
         let connection = attach(reader, writer);
         self.send_greeting(&connection).await;
         *slot = Some(connection.clone());
@@ -271,4 +327,47 @@ async fn receive(
 
 fn closed(detail: &str) -> ControlError {
     ControlError::new("unavailable", detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a restart does to the counter: the next call opens a new
+    /// connection.
+    fn reconnect(control: &Control) {
+        control.connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_display_ends_with_the_connection_it_was_made_on() {
+        let control = Control::default();
+        reconnect(&control);
+        control.made_display(7);
+        assert!(!control.ended_with_app(7));
+        reconnect(&control);
+        assert!(control.ended_with_app(7));
+        // Not this session's: the app's own answer stands.
+        assert!(!control.ended_with_app(8));
+    }
+
+    #[test]
+    fn the_next_display_adopts_the_apps_started_on_ended_ones_once() {
+        let control = Control::default();
+        reconnect(&control);
+        assert_eq!(control.orphans(), None);
+        control.made_display(7);
+        control.started_app(7, 100);
+        control.started_app(7, 101);
+        // An app for a display this session didn't make isn't kept.
+        control.started_app(9, 102);
+        assert_eq!(control.orphans(), None);
+        reconnect(&control);
+        assert_eq!(control.orphans(), Some(vec![100, 101]));
+        assert_eq!(control.orphans(), None);
+        // A display with no apps still says the app quit.
+        control.made_display(8);
+        reconnect(&control);
+        assert_eq!(control.orphans(), Some(vec![]));
+    }
 }
