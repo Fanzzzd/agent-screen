@@ -3,8 +3,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const onWww = url.hostname === "www.agentscreen.app";
-    const onApex = url.hostname === "agentscreen.app";
-    if (onWww || (onApex && url.protocol === "http:")) {
+    // Cloudflare's edge reports the visitor's scheme here; wrangler dev doesn't.
+    const plainHttp = (request.headers.get("cf-visitor") || "").includes('"http"');
+    if (onWww || plainHttp) {
       url.hostname = "agentscreen.app";
       url.protocol = "https:";
       return Response.redirect(url.toString(), 301);
