@@ -236,7 +236,7 @@ pub fn definitions() -> Vec<Value> {
                 "List app windows on the display, front to back, with ids and bounds in screenshot pixels. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
                 "set_disposition verdict or null. With strays: true it lists instead the windows of apps launch_app started",
-                "for you that opened off your display, for place_window. It never lists the user's windows.",
+                "for you that opened off your display, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
             ],
             object(
                 json!({
@@ -251,19 +251,22 @@ pub fn definitions() -> Vec<Value> {
             "place_window",
             "Place a window on the display",
             &[
-                "Move a window of an app launch_app started for you onto the display, when it opened elsewhere, as a slow or second",
-                "window can. Get ids from list_windows with strays: true. A new window of such an app moves to the display by itself",
-                "within 3 s of your input, element action or launch there, unless the user meanwhile clicked or typed in the app,",
-                "Finder, the Dock or a launcher such as Spotlight; one the user opened is theirs. Once the user takes back any",
-                "window of the app, all its windows are theirs. You can't place the user's windows: to work in one, ask the",
-                "user to hand it over. They drag it onto your display in the Viewer, or click Windows in the Viewer's header and choose Hand Over.",
+                "Move a window onto the display, by window_id or by app name. A window of an app launch_app started for you",
+                "moves at once: get ids from list_windows with strays: true. Any other window is the user's, such as one an app",
+                "opened that you started with a shell command like open -a: Agent Screen asks the user, and the call waits for",
+                "their answer, up to timeout_seconds. Handed over, the window is on the display as a Handover; turned down, it stays",
+                "theirs. Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
+                "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
+                "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
-                    "window_id": { "type": "integer", "description": "The window to move." }
+                    "window_id": { "type": "integer", "description": "The window to move." },
+                    "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name, e.g. \"UTM\"." },
+                    "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." }
                 }),
-                &["display_id", "window_id"],
+                &["display_id"],
             ),
             PLAIN,
         ),
@@ -573,7 +576,12 @@ pub async fn run(
             control
                 .call(
                     "placeWindow",
-                    json!({ "displayId": a.require_int("display_id")?, "windowId": a.require_int("window_id")? }),
+                    json!({
+                        "displayId": a.require_int("display_id")?,
+                        "windowId": a.int("window_id")?,
+                        "app": a.string("app")?,
+                        "timeoutSeconds": a.number("timeout_seconds")?,
+                    }),
                 )
                 .await?;
             Ok(Output::Object(json!({ "placed": true })))
@@ -746,7 +754,7 @@ fn strayed_note(result: &serde_json::Map<String, Value>) -> String {
         let next = if w.get("placeable") == Some(&Value::Bool(true)) {
             "If your action opened it, call place_window with that id."
         } else {
-            "If you need it, ask the user to hand it over."
+            "If you need it, call place_window with that id: Agent Screen asks the user for it."
         };
         note.push_str(&format!(
             " A new {app} window, {id}, opened on the user's screen and stayed there: the user was using the app too, or it opened long after your last action. {next}"
@@ -1009,7 +1017,7 @@ fn launch_output(reply: &Value) -> Value {
                 .unwrap_or("still_starting");
             let note = match reason {
                 "existing_window" => {
-                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, ask the user to hand it over: they drag it onto your display in the Viewer, or click Windows in the Viewer's header and choose Hand Over."
+                    "The app was already running and opened the file in a window it already had, which may be the user's; nothing moved. If you need that window, call place_window with its id: Agent Screen asks the user for it."
                 }
                 "just_started" => {
                     "The app started moments ago, by the user or another agent, and isn't ready to open a window yet; nothing moved. Wait a few seconds and call launch_app again. Don't ask the user to quit it: its first window may be someone's work."

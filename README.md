@@ -76,6 +76,7 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
 - **Wallpaper.** Agent Display Wallpaper… in the menu sets the picture agent displays show in the Viewer and in recordings. Use Agent Screen's Wallpaper puts back the default, which names each display in System Settings. Agents' screenshots leave the wallpaper out either way.
 - **Handover.** Drag one of your windows onto the Viewer, or pick it under Give in the Viewer's header. Take Back brings any window back. A handed-over window returns to where it was. The × beside them closes the display.
+- **Window Requests.** An agent can ask for one of your windows, such as an app it opened with a script. A card drops from the menu bar icon, with a notification, naming the window. Hand Over gives it the window as a Handover; Keep leaves it with you.
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Closing a display** lists its windows with what the agent suggested for each, keep or close, and you can change any of them. Esc cancels, ⌘Return confirms. Quitting Agent Screen applies the same plan without asking.
 

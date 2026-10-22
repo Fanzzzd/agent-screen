@@ -101,6 +101,16 @@ pub struct Owner {
     pub connection: u64,
 }
 
+/// The agent asks for one of the user's windows, one it didn't start
+/// (ADR 0007). The user hands it over or turns the request down.
+#[derive(Debug)]
+pub struct WindowRequest {
+    pub target: WindowTarget,
+    pub app: String,
+    pub title: String,
+    answer: Option<oneshot::Sender<bool>>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndReason {
     /// The agent called end_display.
@@ -240,6 +250,8 @@ pub struct Display<H> {
     pub help_request: Option<String>,
     /// Its steps, shown in the Viewer while the user is in control.
     pub help_steps: Vec<String>,
+    /// An open Window Request: the agent asks for a window it didn't start.
+    pub window_request: Option<WindowRequest>,
     /// The agent is typing through the user's input method, which takes
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
@@ -470,6 +482,7 @@ impl<H> Displays<H> {
             takeover: false,
             help_request: None,
             help_steps: Vec::new(),
+            window_request: None,
             keyboard_borrowed: false,
             pointer: None,
             waiters: Vec::new(),
@@ -522,6 +535,8 @@ impl<H> Displays<H> {
         display.takeover = false;
         display.help_request = None;
         display.help_steps.clear();
+        // Its waiter hears the request went unanswered.
+        display.window_request = None;
         display.pointer = None;
         display.resume_waiters(ControlWait::Ended);
         true
@@ -588,6 +603,37 @@ impl<H> Displays<H> {
             d.resume_waiters(ControlWait::Returned);
         }
         withdrawn
+    }
+
+    /// Ask the user for a window, replacing an earlier request, whose
+    /// waiter then hears nothing. The receiver gets the user's answer:
+    /// true to hand the window over.
+    pub fn request_window(
+        &mut self,
+        id: DisplayId,
+        target: WindowTarget,
+        app: String,
+        title: String,
+    ) -> Option<oneshot::Receiver<bool>> {
+        let d = self.get_mut(id).filter(|d| d.is_live())?;
+        let (tx, rx) = oneshot::channel();
+        d.window_request = Some(WindowRequest {
+            target,
+            app,
+            title,
+            answer: Some(tx),
+        });
+        Some(rx)
+    }
+
+    /// The user answered the display's Window Request. Returns the window
+    /// to hand over when they gave it.
+    pub fn answer_window(&mut self, id: DisplayId, give: bool) -> Option<WindowTarget> {
+        let mut request = self.get_mut(id)?.window_request.take()?;
+        if let Some(answer) = request.answer.take() {
+            let _ = answer.send(give);
+        }
+        give.then_some(request.target)
     }
 
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {
@@ -728,6 +774,46 @@ mod tests {
         assert_eq!(d.get(7).unwrap().help_steps, ["点终端"]);
         assert!(d.end_takeover(7));
         assert!(d.get(7).unwrap().help_steps.is_empty());
+    }
+
+    #[test]
+    fn a_window_request_hears_the_users_answer() {
+        let mut d = displays();
+        let target = WindowTarget {
+            pid: 40,
+            window_id: 9,
+        };
+        let mut no = d
+            .request_window(7, target, "UTM".into(), "Ubuntu".into())
+            .unwrap();
+        assert_eq!(d.answer_window(7, false), None);
+        assert_eq!(no.try_recv(), Ok(Some(false)));
+        assert!(d.get(7).unwrap().window_request.is_none());
+
+        let mut yes = d
+            .request_window(7, target, "UTM".into(), "Ubuntu".into())
+            .unwrap();
+        assert_eq!(d.answer_window(7, true), Some(target));
+        assert_eq!(yes.try_recv(), Ok(Some(true)));
+        assert_eq!(d.answer_window(7, true), None);
+    }
+
+    #[test]
+    fn a_window_request_ends_with_its_display() {
+        let mut d = displays();
+        let target = WindowTarget {
+            pid: 40,
+            window_id: 9,
+        };
+        let mut rx = d
+            .request_window(7, target, "UTM".into(), "".into())
+            .unwrap();
+        d.end(7, EndReason::Finished);
+        assert!(rx.try_recv().is_err());
+        assert!(
+            d.request_window(7, target, "UTM".into(), "".into())
+                .is_none()
+        );
     }
 
     fn owner(connection: u64) -> Option<Owner> {

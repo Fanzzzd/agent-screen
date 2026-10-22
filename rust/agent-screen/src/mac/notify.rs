@@ -42,6 +42,8 @@ pub enum Auth {
 pub enum Note {
     /// The agent asks for help, with its reason.
     Help(String),
+    /// The agent asks for a window of this app.
+    Window(String),
     /// The agent stopped using its display and left windows on it.
     Review { windows: usize },
     /// The agent's connection closed and its windows stayed.
@@ -52,6 +54,7 @@ impl Note {
     fn prefix(&self) -> &'static str {
         match self {
             Note::Help(_) => "help",
+            Note::Window(_) => "window",
             Note::Review { .. } | Note::Disconnected { .. } => "review",
         }
     }
@@ -179,7 +182,7 @@ pub fn request() {
 /// `task` is the rest of the Display Label.
 pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     let Some(note) = note else {
-        for prefix in ["help", "review"] {
+        for prefix in ["help", "window", "review"] {
             withdraw(display, prefix);
         }
         return;
@@ -194,6 +197,17 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
         Note::Help(reason) => (
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason.clone(),
+        ),
+        Note::Window(app) => (
+            tf!(
+                "{agent} asks for your {app} window",
+                "{agent} 想要你的 {app} 窗口"
+            ),
+            t(
+                "Hand it over or keep it from the card under the menu bar icon.",
+                "在菜单栏图标下的卡片里交给它，或者留着。",
+            )
+            .to_string(),
         ),
         Note::Review { windows } => (
             tf!("{agent} is done with its display", "{agent} 用完了显示器"),
@@ -211,6 +225,9 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     content.setTitle(&NSString::from_str(&title));
     content.setSubtitle(&NSString::from_str(task));
     content.setBody(&NSString::from_str(&body));
+    if matches!(note, Note::Window(_)) {
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+    }
     if matches!(note, Note::Help(_)) {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
         content.setCategoryIdentifier(&NSString::from_str(HELP_CATEGORY));
@@ -239,6 +256,11 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
 /// Withdraw only the Help Request's notification of a display.
 pub fn withdraw_help(display: u32) {
     withdraw(display, "help");
+}
+
+/// Withdraw only the Window Request's notification of a display.
+pub fn withdraw_window(display: u32) {
+    withdraw(display, "window");
 }
 
 fn withdraw(display: u32, prefix: &str) {

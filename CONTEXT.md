@@ -64,6 +64,10 @@ _Avoid_: pull, move, send back
 The user placing one of their own windows onto an Agent Display so the Agent Session can work in it. A handed-over window always returns to the user when its display is dismissed.
 _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
+**Window Request**:
+The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs.
+_Avoid_: window permission, borrow
+
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.
 _Avoid_: cleanup flag, keep/delete mark

@@ -608,51 +608,43 @@ async fn handle_one(
         }
         "placeWindow" => {
             let id = input_display(&core, &p, cx).await?;
-            let wanted = p.int("windowId").unwrap_or(-1);
-            let returned = core.read_with(cx, |c, _| {
-                c.displays
-                    .get(id)
-                    .is_some_and(|d| d.returned.contains(&(wanted as u32)))
-            });
-            if returned {
-                return Err(ControlError::failed(
-                    "the user took that window back; it stays theirs. Ask them to hand it over again if you need it",
-                ));
+            let wanted = p.int("windowId");
+            let app = p.string("app").filter(|a| !a.is_empty());
+            if wanted.is_none() && app.is_none() {
+                return Err(ControlError::invalid("window_id or app is required"));
             }
-            let released = off(cx, move || windows::find(wanted as u32))
+            let matches = |w: &windows::Window| match (wanted, &app) {
+                (Some(wanted), _) => w.target.window_id as i64 == wanted,
+                (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
+                (None, None) => false,
+            };
+            // A window of an app the agent started is its own to place.
+            let stray = strays(&core, id, cx).await.into_iter().find(|w| matches(w));
+            let Some(window) = stray else {
+                // Any other window is the user's until they hand it over.
+                let theirs = off(cx, {
+                    let app = app.clone();
+                    move || {
+                        windows::all().into_iter().find(|w| {
+                            w.layer == 0
+                                && match (wanted, &app) {
+                                    (Some(wanted), _) => w.target.window_id as i64 == wanted,
+                                    (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
+                                    (None, None) => false,
+                                }
+                                && !windows::on_virtual_display(w.target.window_id)
+                        })
+                    }
+                })
                 .await
-                .is_some_and(|w| {
-                    core.read_with(cx, |c, _| {
-                        c.displays
-                            .get(id)
-                            .is_some_and(|d| d.released.contains(&w.target.pid))
-                    })
-                });
-            if released {
-                return Err(ControlError::failed(
-                    "the user took back a window of that app, which makes the app theirs: its windows stay on their screen. Ask the user to hand over the window you need",
-                ));
-            }
-            let made = core.update(cx, |c, _| {
-                sync_user_made(c, id);
-                c.displays
-                    .get(id)
-                    .is_some_and(|d| d.user_made.contains(&(wanted as u32)))
-            });
-            if made {
-                return Err(ControlError::failed(
-                    "the user opened that window themselves, so it stays on their screen. Ask them to hand it over if you need it",
-                ));
-            }
-            let window = strays(&core, id, cx)
-                .await
-                .into_iter()
-                .find(|w| w.target.window_id as i64 == wanted)
                 .ok_or_else(|| {
-                    ControlError::not_found(
-                        "that window isn't a stray of an app you started: call list_windows with strays: true. For one of the user's windows, ask the user to hand it over",
-                    )
+                    ControlError::not_found(match &app {
+                        Some(app) => format!("no {app} window on the user's screen"),
+                        None => "no window with that id on the user's screen".into(),
+                    })
                 })?;
+                return request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await;
+            };
             claim(&core, id, window.target, Origin::Placed, cx);
             // AeroSpace can lay the window out again in the user's
             // workspace right after a display appears (`windows::kept_on`):
@@ -1036,6 +1028,30 @@ async fn handle_one(
                 })
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({}))
+        }
+        // Test hook: the user answers the display's Window Request, as the
+        // card's buttons do, once one is open.
+        "debugAnswerWindow" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let give = p.0.get("give") == Some(&Value::Bool(true));
+            for _ in 0..50 {
+                let open = core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .is_some_and(|d| d.window_request.is_some())
+                });
+                if open {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let answered = shell
+                .update(cx, |shell, cx| shell.answer_window(id, give, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "answered": answered }))
         }
         // Test hook: the user takes a window back from the Windows menu.
         "debugTakeBack" if debug_methods() => {
@@ -1655,6 +1671,77 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
             .filter(|w| display.is_stray(w.target, recorded.contains(&w.target.window_id)))
             .collect()
     })
+}
+
+/// Ask the user for one of their windows with a Window Request, and wait
+/// for the answer. Granted, the window goes over as a Handover.
+async fn request_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let target = window.target;
+    let app = window.app.clone();
+    let answer = core
+        .update(cx, |c, cx| {
+            let rx = c
+                .displays
+                .request_window(id, target, window.app, window.title);
+            cx.notify();
+            rx
+        })
+        .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
+    let seconds = timeout.unwrap_or(120.0).clamp(1.0, 600.0);
+    let timer = cx
+        .background_executor()
+        .timer(Duration::from_secs_f64(seconds));
+    let given = futures::select! {
+        given = answer.fuse() => given.ok(),
+        _ = FutureExt::fuse(timer) => {
+            core.update(cx, |c, cx| {
+                if let Some(d) = c.displays.get_mut(id)
+                    && d.window_request.as_ref().is_some_and(|r| r.target == target)
+                {
+                    d.window_request = None;
+                    cx.notify();
+                }
+            });
+            return Err(ControlError::failed(format!(
+                "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+            )));
+        }
+    };
+    match given {
+        Some(true) => {}
+        Some(false) => {
+            return Err(ControlError::failed(format!(
+                "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
+            )));
+        }
+        None => {
+            return Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: the display ended or you asked for another window"
+            )));
+        }
+    }
+    // The Handover moves it off the main thread; wait until it is there.
+    for _ in 0..30 {
+        let there = off(cx, move || {
+            windows::on_display(id).iter().any(|w| w.target == target)
+        })
+        .await;
+        if there {
+            return Ok(Map::from_iter([("handedOver".into(), Value::Bool(true))]));
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    Err(ControlError::failed(format!(
+        "the user handed over the {app} window, but it didn't reach the display"
+    )))
 }
 
 /// Record a window Agent Screen put on a display.

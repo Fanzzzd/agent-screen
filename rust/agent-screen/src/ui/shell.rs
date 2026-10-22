@@ -105,7 +105,8 @@ pub struct Shell {
     viewer: Option<(WindowHandle<Viewer>, Retained<NSWindow>)>,
     card: Option<(WindowHandle<HelpCard>, Retained<NSWindow>)>,
     /// The display whose Help Request the Help Card shows.
-    card_shown: Option<DisplayId>,
+    /// The display the Help Card shows, and whether for a Window Request.
+    card_shown: Option<(DisplayId, bool)>,
     /// Help Requests the user put off with Later, by display.
     card_later: HashMap<DisplayId, String>,
 
@@ -649,7 +650,7 @@ impl Shell {
             .displays
             .list
             .iter()
-            .any(|d| d.help_request.is_some() && !d.is_ended());
+            .any(|d| (d.help_request.is_some() || d.window_request.is_some()) && !d.is_ended());
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
@@ -673,6 +674,19 @@ impl Shell {
                     Some(Note::Help(reason.to_string())),
                 ),
                 None => notify::withdraw_help(display.id),
+            }
+            match display
+                .window_request
+                .as_ref()
+                .filter(|_| display.is_live())
+            {
+                Some(request) => notify::update(
+                    display.id,
+                    display.agent_name(),
+                    task,
+                    Some(Note::Window(request.app.clone())),
+                ),
+                None => notify::withdraw_window(display.id),
             }
             // An agent left windows on its display: tell the user once.
             if display.owner.is_some() && display.is_ended() && !self.ended.contains(&display.id) {
@@ -763,12 +777,18 @@ impl Shell {
             core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
         });
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
-        let want = core
+        // A Window Request waits for an answer even beside the Viewer.
+        let requests = core
             .displays
             .list
             .iter()
-            .filter(|_| !self.peek_shown)
-            .find(|d| {
+            .filter(|d| d.is_live() && d.window_request.is_some())
+            .map(|d| (d.id, true, (d.width, d.height)));
+        let helps = core
+            .displays
+            .list
+            .iter()
+            .filter(|d| {
                 d.is_live()
                     && !d.takeover
                     && viewing != Some(d.id)
@@ -776,15 +796,16 @@ impl Shell {
                         .as_ref()
                         .is_some_and(|r| self.card_later.get(&d.id) != Some(r))
             })
-            .map(|d| (d.id, (d.width, d.height)));
-        if want.map(|w| w.0) == self.card_shown {
+            .map(|d| (d.id, false, (d.width, d.height)));
+        let want = requests.chain(helps).find(|_| !self.peek_shown);
+        if want.map(|w| (w.0, w.1)) == self.card_shown {
             return;
         }
-        if let Some(old) = self.card_shown.take() {
+        if let Some((old, _)) = self.card_shown.take() {
             self.streams
                 .update(cx, |s, cx| s.want(old, "card", 0, (0, 0), cx));
         }
-        let Some((id, size)) = want else {
+        let Some((id, request, size)) = want else {
             native::order_out(&window);
             return;
         };
@@ -800,7 +821,11 @@ impl Shell {
         };
         let (w, h) = (
             f64::from(help_card::WIDTH),
-            f64::from(help_card::height(size)),
+            f64::from(if request {
+                help_card::REQUEST_HEIGHT
+            } else {
+                help_card::height(size)
+            }),
         );
         let anchor = self.anchor();
         let (mid, top) = (
@@ -818,7 +843,28 @@ impl Shell {
             native::order_front(&shown);
             native::animate(&shown, frame, 1.0, 0.24);
         });
-        self.card_shown = Some(id);
+        self.card_shown = Some((id, request));
+    }
+
+    /// The user answers a Window Request from the card: a window given
+    /// goes over as a Handover. False when there was no request.
+    pub fn answer_window(&mut self, id: DisplayId, give: bool, cx: &mut Context<Self>) -> bool {
+        let answered = self.core.update(cx, |core, cx| {
+            let open = core
+                .displays
+                .get(id)
+                .is_some_and(|d| d.window_request.is_some());
+            let target = core.displays.answer_window(id, give);
+            cx.notify();
+            open.then_some(target)
+        });
+        let Some(target) = answered else {
+            return false;
+        };
+        if let Some(target) = target {
+            self.hand_over(target, None, id, cx);
+        }
+        true
     }
 
     /// A click on the Help Card's picture opens the display, as a
@@ -1636,6 +1682,12 @@ impl Shell {
             "card-later" => self.card_later(id, cx),
             "card-take-over" => self.open_for_help(id, cx),
             "card-open" => self.card_open(id, cx),
+            "card-give" => {
+                self.answer_window(id, true, cx);
+            }
+            "card-keep" => {
+                self.answer_window(id, false, cx);
+            }
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "wallpaper" => self.choose_wallpaper(cx),
             "click" => self.native(Native::IconClicked { right: false }, cx),
