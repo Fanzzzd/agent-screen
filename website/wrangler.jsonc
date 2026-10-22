@@ -1,0 +1,11 @@
+{
+  "name": "agent-screen-website",
+  "account_id": "02f00bd6bcd6b515d4dac565f620d92c",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": true
+}

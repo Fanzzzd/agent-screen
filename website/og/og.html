@@ -1,0 +1,35 @@
+<!doctype html>
+<!-- Source of public/og.png. Render at 1200x630: see website/README.md. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="/styles.css">
+<style>
+  html, body { width: 1200px; height: 630px; overflow: hidden; margin: 0; }
+  .og { position: relative; width: 1200px; height: 630px; padding: 92px 72px; }
+  .og .brand { font-size: 26px; gap: 14px; }
+  .og .brand img { width: 44px; height: 44px; }
+  .og h1 { font-size: 64px; line-height: 0.98; letter-spacing: -0.045em; font-weight: 800; margin-top: 44px; max-width: 470px; }
+  .og > p { font-size: 25px; line-height: 1.4; color: #2a303b; margin-top: 26px; max-width: 430px; }
+  .og .stage { position: absolute; right: 48px; top: 200px; width: 620px; border-radius: 22px; }
+  .og .display .label { display: none; }
+</style>
+</head>
+<body>
+<div class="og">
+  <div class="brand"><img src="/media/icon.png" alt=""><span>Agent Screen</span></div>
+  <h1>Give each AI agent its own Mac screen.</h1>
+  <p>Your cursor, keyboard and windows stay yours.</p>
+  <div class="stage">
+    <div class="display agent a1" style="animation:none"><img class="screen" src="/media/fleet-chrome.jpg" alt=""></div>
+    <div class="display agent a2" style="animation:none"><img class="screen" src="/media/fleet-numbers.jpg" alt=""></div>
+    <div class="display agent a3" style="animation:none"><img class="screen" src="/media/fleet-pages.jpg" alt=""></div>
+    <div class="display mine">
+      <div class="menubar"><b>Notes</b><span>File</span><span>Edit</span><span class="status"><span>9:41</span></span></div>
+      <div class="note"><div class="note-title">Your notes</div><p class="typing" style="animation:none;clip-path:none">Reply to Sam, lunch at 1pm works for me.</p></div>
+      <svg class="mac-pointer" viewBox="0 0 24 24"><path d="M5.2 2.6a.8.8 0 0 1 1.1-.7l13.4 6.3a.8.8 0 0 1-.1 1.5l-5.6 1.7 4.2 6.6a.8.8 0 0 1-.3 1.1l-2.1 1.2a.8.8 0 0 1-1.1-.3l-4.1-6.6-4 4.3a.8.8 0 0 1-1.4-.5z"/></svg>
+    </div>
+  </div>
+</div>
+</body>
+</html>
