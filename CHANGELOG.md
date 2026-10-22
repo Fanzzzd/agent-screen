@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.1.15 (2026-10-22)
+
+### Features
+
+#### Sidescreen is now Agent Screen
+
+The app has a new name and a website, [agentscreen.app](https://agentscreen.app). It installs as Agent Screen.app from the tap `fanzzzd/agent-screen`: `brew tap fanzzzd/agent-screen && brew trust fanzzzd/agent-screen && brew install --cask agent-screen`. Agent Displays are named "Agent Screen 1", "Agent Screen 2" and so on, and the agents' MCP server is `agent-screen`.
+
+### Fixes
+
+- With the AeroSpace build from Fanzzzd/AeroSpace, Agent Screen tells AeroSpace which displays and windows are the agents'. AeroSpace no longer moves an agent's window into your workspace when the window's app comes to the front by itself, as a VPN app does to show its login window. It also leaves alone the windows macOS puts back on a display after Agent Screen restarts.
+- If Agent Screen quits while an agent works, the agent's next call says the app quit instead of "does not exist". After create_display, the windows of apps it launched on the old display are listed as strays, and place_window brings them back. A crash leaves its message and backtrace in displays.log.
+- Launching an app no longer stalls the menu bar icon, Peek and the Viewer for a quarter second or more: Agent Screen watches for the app's new windows on a thread of its own, since registering that watch waits on the app.
+- Adding or removing a display stops every window on the Mac from drawing for a moment, so Agent Screen now does it while you are away. Displays you end are released once you have been idle for a minute, and while you use Agent Screen a spare display waits ready, made while you are idle, so the next + shows a display without that stop.
+- The setup window opens centered on the screen, after it has grown to fit its content. While it is open, Agent Screen shows in the Dock and the app switcher, so you can find the window behind others, and its menu has Set Up, Hide and Quit. Once it closes, Agent Screen is a menu bar app again: a regular app also takes part in each display's menu bar, which keeps it busier on every display change when many displays are open.
+- An agent's click answers in about 75 ms instead of about 450 ms. Agent Screen read the full window list twice per click, about 1,900 windows each time; it now reads it once, with CoreFoundation directly, and skips windows that can't be the target.
+- launch_app answers about 0.8 s sooner, 1.3 to 1.4 s instead of about 2.2 s for Calculator started cold. The click that makes a new window key goes ahead of the agent's next input instead of holding up the answer, and a placed window is checked once before the answer, with the watch that follows for 3 s catching a later move.
+- A new display is ready about a second sooner. Agent Screen parks it right after macOS makes it, without waiting for the app's main thread, which every new display stalls for a while, and parks it for the session only: made permanent, macOS took 2.3 s instead of 1.3 s and still showed the next display at its default spot first.
+- Screenshots answer in about half the time, 26 ms instead of 50 ms in the median. Agent Screen asked ScreenCaptureKit to list every window before each one, about 20 ms. It now asks only when a window has come or gone since, which the window server tells in under a millisecond, and reads where windows are now from the window server.
+- Agent Screen's windows keep responding while a display is added or removed. Each window now draws into a texture of its own, and a separate thread hands finished frames to macOS. Before, waiting on macOS for a frame could freeze the Viewer and Peek for up to a second.
+- The menu bar icon is a little heavier and sits in the middle of its space, and it stays where you put it in the menu bar after an update instead of being pushed out of sight.
+- An app you open with Spotlight, Raycast or Alfred while you work in a Viewer opens its window on that Viewer's display, as a window you handed over. After a click on your own screen, it opens there as before.
+- The menu bar icon is new: two screens and a pointer, as the app icon, so it no longer looks like macOS's own screen icons. Its front screen fills while a display is in use, a raised hand takes the pointer's place while an agent asks for help, and a slash crosses it while a permission is missing.
+- Your monitors stay where you arranged them when Agent Screen adds a display. macOS adds a display beside the main one and moves a monitor already there out of its way, then remembers that arrangement. Agent Screen now puts such a monitor back in the same change that parks the new display, for displays you add from the menu bar too.
+- Peek, the Viewer and the Help Card no longer show an empty, see-through strip when they resize while a display is added or removed. They now draw at their new size in the same step that resizes them.
+- Peek no longer shows an older picture of itself over the current one after several displays come in a row.
+- One click in the Viewer on a text field of an app that brought itself to the front before, such as aTrust's login window, puts the caret in the field. It used to take two clicks, or the clicks were dropped.
+- In Peek, + shows a tile for the new display at once and grows it in, and a closed display's tile shrinks out, while the card follows smoothly at the screen's refresh rate. Peek, the Viewer and the Help Card animate at the screen's full rate instead of 30 fps.
+- A display you make with + gets the Agent Display wallpaper, as one an agent makes does. A window that resizes while displays change shows its new frame at once, without the UI waiting for macOS.
+- Closing an Agent Display whose app asks whether to save no longer drops that question on your screen. The display stays and the Viewer opens on it, so you answer there; the display goes once the window has closed. After Cancel, the window and the display stay for you to review.
+- The screenshot after an action no longer shows the display too early when the agent works quickly. Agent Screen now counts the display's changes from the action on, and waits half a second from the action, then until the display has been still for 120 ms. Before, an app that drew its result a moment after a first quick change, such as a page that updates a counter at once and redraws 400 ms later, could be caught before the redraw.
+- A kept spare display now takes any size an agent asks for, with one mode change, instead of Agent Screen adding another display. Fewer displays stay online, so each later display change stalls apps for less time. In a three-round test with a new size each round, display changes went from 9 to 4.
+- The displays log names where each main-thread stall of 150 ms or more went: while the main thread is late, Agent Screen reads its stack every 10 ms, and the full counts go to a `hang` file beside the log.
+- Two spare displays wait ready instead of one, so two + in a row show displays without the Mac stopping to draw, and up to three ended displays stay as spares.
+- Agent Screen's menu bar icon, Peek and Viewer no longer freeze for up to a second and a half while the setup window is open. Checking permissions, following System Settings, counting windows, guarding the cursor and the window lookups behind agents' requests now wait on WindowServer off the UI thread.
+- Clicking the Viewer while another window had the keyboard could quit Agent Screen. It doesn't anymore.
+- An agent can ask for one of your windows, such as one of an app it opened with a script instead of launch_app. A card drops from the menu bar icon and a notification names the window: Hand Over gives it to the agent as a Handover, and Keep leaves it with you. Before, the agent could only ask you in words to drag the window over, and some agents quit the app to start it again.
+
+#### Browsers an agent starts no longer flash on your screen
+
+Agent Screen starts an app hidden so its first window opens out of sight, but Chrome, Firefox and Brave show themselves as they start, so their first window appeared on your screen for up to half a second. Agent Screen now hides such an app again until its window sits on the agent's display.
+
+#### Agent Screen asks AeroSpace far less often
+
+Every command makes AeroSpace refresh all of your windows first, which takes up to two seconds on a busy Mac and stalls AeroSpace meanwhile. Agent Screen asked it on every display change, up to 25 times a minute while agents worked. It now asks once, when the first agent display appears, and not at all when no agent display is online.
+
+#### A new display no longer makes every other display move
+
+When a monitor you unplugged left a gap in macOS's display numbers, every new agent display came out with a number another display had, so Agent Screen made it twice and removed the first. Each of those changes moved all the other displays and could drop their windows on your screen. Agent Screen now keeps that first display, out of the way, until its last display goes, so each new display is one change.
+
+#### launch_app follows an app to its document window
+
+Pages, given a text file, closes the window it opened first and shows the document in another. launch_app kept trying to place the closed one and failed. It now places the app's new window instead.
+
+#### Agent Screen logs when it stops responding
+
+When Agent Screen's main thread, which draws the menu bar icon, Peek and the Viewer, doesn't answer for 150 ms or more, `~/Library/Logs/Agent Screen/displays.log` says so beside the display changes. A stall still going at 300 ms also saves a one-second sample of Agent Screen to that folder, at most once every ten minutes, keeping the last five.
+
+#### A new agent display is one display change instead of two
+
+Agent Screen moved every new display out of the way after macOS added it, and each move is another change every app on the Mac handles. macOS now remembers where each display goes, so the next display with the same slot appears there at once.
+
+#### Peek and the Viewer keep responding while agents make displays and start apps
+
+Parking a new display waited on macOS for 100 ms or more on Agent Screen's main thread, and finding a starting app asked macOS about every running app 50 times a second. Both stalled the menu bar icon, Peek and the Viewer. Display changes now run on a thread of their own, one at a time, and Agent Screen finds a starting app in the process table.
+
+#### Agents' windows stay on their displays while other agents add or end displays
+
+Each display that comes or goes makes macOS move the others, and it could drop their windows on your screen, where AeroSpace tiled them among yours. Agent Screen puts such a window back as soon as the displays settle, and no longer mistakes a display that is moving for its window leaving.
+
 ## 0.1.14 (2026-10-16)
 
 ### Features
