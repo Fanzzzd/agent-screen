@@ -1,6 +1,6 @@
 # agentscreen.app
 
-The landing page for Agent Screen: static files in `public/`, served by a Cloudflare Worker with static assets. There is no build step.
+The landing page for Agent Screen: static files in `public/`, served by a Cloudflare Worker with static assets. There is no build step. `src/index.js` sends www.agentscreen.app to agentscreen.app and serves everything else from `public/`; `wrangler.jsonc` attaches both hostnames as custom domains.
 
 - Preview: `wrangler dev` (from this folder), then open http://localhost:8787.
 - Deploy: `wrangler deploy`.
