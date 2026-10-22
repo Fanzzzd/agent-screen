@@ -1,6 +1,6 @@
 //! What Agent Screen tells a window manager is its own: the displays it made
 //! and the windows on them that are the agents'. AeroSpace leaves both alone
-//! while the claim is live (the fork's SIDESCREEN.md, Claims).
+//! while the claim is live (the fork's AGENT-SCREEN.md, Claims).
 
 use std::collections::{BTreeMap, BTreeSet};
 

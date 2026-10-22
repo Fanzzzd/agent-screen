@@ -1,6 +1,6 @@
 //! The claim file: tells AeroSpace which displays Agent Screen made and which
 //! windows on them are the agents', so it leaves them alone (the fork's
-//! SIDESCREEN.md, Claims). A window is claimed before it moves onto a display
+//! AGENT-SCREEN.md, Claims). A window is claimed before it moves onto a display
 //! and released before it moves off, so AeroSpace never lays it out between.
 //! Without the file, AeroSpace guesses from where windows are.
 

@@ -2994,8 +2994,9 @@ impl Shell {
         );
         if self.aerospace == Some(aerospace::Ignoring::Unsupported) {
             let commands = "brew tap fanzzzd/agent-screen
+brew trust fanzzzd/agent-screen
 brew uninstall --cask aerospace
-brew install --cask aerospace-sidescreen
+brew install --cask aerospace-agent-screen
 tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace";
             let go = native::confirm(

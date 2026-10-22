@@ -1,5 +1,5 @@
 //! Agent Screen's claim file tells AeroSpace which displays and windows are
-//! the agents' (the fork's SIDESCREEN.md, Claims), so AeroSpace leaves a
+//! the agents' (the fork's AGENT-SCREEN.md, Claims), so AeroSpace leaves a
 //! window on an Agent Display alone when its app activates itself, and
 //! leaves restored windows on a display made again after a restart. The
 //! file lists a display from its creation, a window once it is placed

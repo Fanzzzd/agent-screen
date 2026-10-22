@@ -32,8 +32,11 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    ```sh
    brew tap fanzzzd/agent-screen
+   brew trust fanzzzd/agent-screen
    brew install --cask agent-screen
    ```
+
+   Homebrew loads casks from a tap outside its own only once you trust it, which `brew trust` does.
 
    Or download the DMG from the [latest release](../../releases/latest) and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
 

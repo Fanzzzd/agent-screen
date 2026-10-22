@@ -8,8 +8,9 @@ To stop this at the source, AeroSpace needs an `ignored-monitors` option, [propo
 
 ```sh
 brew tap fanzzzd/agent-screen
+brew trust fanzzzd/agent-screen
 brew uninstall --cask aerospace
-brew install --cask aerospace-sidescreen
+brew install --cask aerospace-agent-screen
 tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace
 ```
@@ -24,14 +25,14 @@ macOS keeps Accessibility permission per app signature, so the old AeroSpace's e
 
 ## What you install
 
-The build follows AeroSpace's releases. Each one is built, tested and signed in [CI](https://github.com/Fanzzzd/AeroSpace/actions/workflows/sidescreen-release.yml). [Compare it with upstream](https://github.com/Fanzzzd/AeroSpace/compare/v0.21.3-Beta...sidescreen) to see the patch: 168 lines added and 20 removed across 26 files, most of them tests and docs. Why a fork: [ADR 0006](adr/0006-aerospace-ignores-agent-displays.md).
+The build follows AeroSpace's releases. Each one is built, tested and signed in [CI](https://github.com/Fanzzzd/AeroSpace/actions/workflows/agent-screen-release.yml). [Compare it with upstream](https://github.com/Fanzzzd/AeroSpace/compare/v0.21.3-Beta...agent-screen) to see the patch: 168 lines added and 20 removed across 26 files, most of them tests and docs. Why a fork: [ADR 0006](adr/0006-aerospace-ignores-agent-displays.md).
 
 ## Going back
 
 Remove the `ignored-monitors` line from your config first: stock AeroSpace doesn't know the option and refuses the config. Then:
 
 ```sh
-brew uninstall --cask aerospace-sidescreen
+brew uninstall --cask aerospace-agent-screen
 brew install --cask nikitabobko/tap/aerospace
 tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace

@@ -1,1 +1,1 @@
-Install or update with Homebrew: `brew tap fanzzzd/agent-screen && brew install --cask agent-screen`, or `brew upgrade --cask agent-screen`. Or download the DMG below. It's signed with a Developer ID and notarized by Apple.
+Install or update with Homebrew: `brew tap fanzzzd/agent-screen && brew trust fanzzzd/agent-screen && brew install --cask agent-screen`, or `brew upgrade --cask agent-screen`. Or download the DMG below. It's signed with a Developer ID and notarized by Apple.
