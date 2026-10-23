@@ -1,8 +1,28 @@
-# Agent Screen
+<div align="center">
 
-Give each AI agent its own Mac screen. Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.svg">
+  <img src="docs/media/logo.svg" alt="" width="72">
+</picture>
 
-[agentscreen.app](https://agentscreen.app)
+<h1>Agent Screen</h1>
+
+<p><strong>Give each AI agent its own Mac screen.</strong><br>
+Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.</p>
+
+<p>
+<a href="https://agentscreen.app">Website</a> ·
+<a href="#install">Install</a> ·
+<a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download</a> ·
+<a href="docs/DEVELOPMENT.md">Develop</a>
+</p>
+
+[![Latest release](https://img.shields.io/github/v/release/Fanzzzd/agent-screen?label=release)](https://github.com/Fanzzzd/agent-screen/releases/latest)
+[![CI](https://github.com/Fanzzzd/agent-screen/actions/workflows/ci.yml/badge.svg)](https://github.com/Fanzzzd/agent-screen/actions/workflows/ci.yml)
+[![macOS 15 or later](https://img.shields.io/badge/macOS-15%2B-lightgrey)](#install)
+[![MIT license](https://img.shields.io/github/license/Fanzzzd/agent-screen)](LICENSE)
+
+</div>
 
 ![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
 
@@ -38,7 +58,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Homebrew loads casks from a tap outside its own only once you trust it, which `brew trust` does.
 
-   Or download the DMG from the [latest release](../../releases/latest) and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
+   Or download the DMG from the [latest release](https://github.com/Fanzzzd/agent-screen/releases/latest) and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
 
 2. Open Agent Screen. The setup window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
 3. Connect your agents. Press **Connect…** in the setup window, or right-click the menu bar icon and choose **Connect Claude Code and Codex**, or run:
