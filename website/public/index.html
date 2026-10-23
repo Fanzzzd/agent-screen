@@ -26,8 +26,8 @@
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="preload" as="image" href="/media/hero.jpg" media="(min-width: 601px)">
-<link rel="preload" as="image" href="/media/hero-m.jpg" media="(max-width: 600px)">
+<link rel="preload" as="image" href="/media/hero.jpg" media="(min-width: 601px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero-m.jpg" media="(max-width: 600px)" fetchpriority="high">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -38,7 +38,19 @@
     <nav>
       <a href="#features">Features</a>
       <a href="#install">Install</a>
-      <a class="gh" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+      <div class="peek-wrap">
+        <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" aria-label="Peek: see what the agents are doing"><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="ping" aria-hidden="true"></span></button>
+        <div class="peek" id="peek" role="dialog" aria-label="Peek">
+          <div class="tiles">
+            <figure><video muted loop playsinline preload="none" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" data-src="/media/tile-booking.mp4"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure class="asks"><img src="/media/tile-help.jpg" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
+          </div>
+          <p class="peek-note">This is Peek. In the app it drops from the menu bar icon, live.</p>
+        </div>
+      </div>
+      <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
     </nav>
   </div>
 </header>
@@ -55,10 +67,11 @@
   </section>
 
   <figure class="film">
-    <video id="hero" muted loop playsinline preload="none" poster="/media/hero.jpg"
-      data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
+    <video id="hero" muted loop playsinline preload="none"
+      data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
       aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
     <figcaption>An animation of Agent Screen's behavior, built from its interface and recordings of test sessions.</figcaption>
+    <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
   </figure>
 
   <section class="compare" aria-labelledby="compare-h">
@@ -102,7 +115,7 @@
         <h2>Every agent's screen, one hover away.</h2>
         <p>Hover the menu bar icon to see every agent's screen live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
       </div>
-      <video class="f-video" muted loop playsinline preload="none" poster="/media/peek.jpg" data-src="/media/peek.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
     </div>
 
     <div class="feature flip">
@@ -111,7 +124,7 @@
         <h2>It asks when it's stuck. You take the wheel.</h2>
         <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it, and Let … Continue hands the screen back.</p>
       </div>
-      <video class="f-video" muted loop playsinline preload="none" poster="/media/help.jpg" data-src="/media/help.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-src="/media/help.mp4" data-src-m="/media/help-m.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
 
     <div class="feature">
@@ -120,7 +133,7 @@
         <h2>Hand a window over. Take it back.</h2>
         <p>Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back. A handed-over window returns to where it was.</p>
       </div>
-      <video class="f-video" muted loop playsinline preload="none" poster="/media/handover.jpg" data-src="/media/handover.mp4" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
+      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/handover.jpg" data-src="/media/handover.mp4" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
     </div>
   </section>
 
@@ -129,12 +142,7 @@
       <h2>One display per agent session.</h2>
       <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
     </div>
-    <div class="grid">
-      <video muted loop playsinline preload="none" poster="/media/fleet-checkout.jpg" data-src="/media/fleet-checkout.mp4" aria-label="An agent fills in a checkout form."></video>
-      <video muted loop playsinline preload="none" poster="/media/fleet-kanban.jpg" data-src="/media/fleet-kanban.mp4" aria-label="An agent moves cards on a launch board."></video>
-      <video muted loop playsinline preload="none" poster="/media/fleet-booking.jpg" data-src="/media/fleet-booking.mp4" aria-label="An agent books a demo slot."></video>
-      <video muted loop playsinline preload="none" poster="/media/fleet-bugreport.jpg" data-src="/media/fleet-bugreport.mp4" aria-label="An agent files a bug report."></video>
-    </div>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-src="/media/fleet.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
       <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p></li>
       <li><h3>Agent Pointer</h3><p>The Viewer and Peek draw an arrow where the agent last acted. Agent screenshots don't contain it.</p></li>
@@ -166,9 +174,9 @@ brew install --cask agent-screen</code></pre>
         <p>Press <strong>Connect…</strong> in the setup window, or right-click the menu bar icon and choose <strong>Connect Claude Code and Codex</strong>, or run:</p>
         <div class="code">
           <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
-          <pre><code>"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install</code></pre>
+          <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
         </div>
-        <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. For any other MCP client, add a stdio server with the command <code>/Applications/Agent Screen.app/Contents/MacOS/AgentScreen</code> and the argument <code>mcp</code>.</p>
+        <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command <code>/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen</code> and the argument <code>mcp</code>.</p>
       </li>
       <li>
         <h3>Ask for something</h3>
@@ -216,21 +224,40 @@ brew install --cask agent-screen</code></pre>
 </footer>
 
 <script>
-  // Videos load and play only while on screen; the hero picks its cut by width.
+  // Films load as they come near the viewport; phones get their own cut where there is one.
   const small = matchMedia('(max-width: 600px)').matches;
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const hero = document.getElementById('hero');
-  if (small) hero.poster = hero.dataset.posterM;
-  const io = new IntersectionObserver((entries) => {
+  const pick = (v) => (small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src);
+  const near = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting && !e.target.poster) e.target.poster = e.target.dataset.poster;
+  }, { rootMargin: '900px' });
+  const play = new IntersectionObserver((entries) => {
     for (const e of entries) {
       const v = e.target;
       if (e.isIntersecting) {
-        if (!v.src) v.src = small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src;
+        if (!v.src) v.src = pick(v);
         if (!still) v.play().catch(() => {});
       } else v.pause();
     }
   }, { rootMargin: '200px' });
-  document.querySelectorAll('video[data-src]').forEach((v) => io.observe(v));
+  document.querySelectorAll('main video[data-src]').forEach((v) => { near.observe(v); play.observe(v); });
+
+  // Peek in the header: hover, focus or click the icon.
+  const wrap = document.querySelector('.peek-wrap');
+  const btn = wrap.querySelector('.peek-btn');
+  const tiles = wrap.querySelectorAll('video');
+  const show = (on) => {
+    wrap.classList.toggle('open', on);
+    btn.setAttribute('aria-expanded', on);
+    tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still) v.play().catch(() => {}); } else v.pause(); });
+  };
+  if (matchMedia('(hover: hover)').matches) {
+    wrap.addEventListener('mouseenter', () => show(true));
+    wrap.addEventListener('mouseleave', () => show(false));
+  }
+  btn.addEventListener('click', () => show(!wrap.classList.contains('open')));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') show(false); });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) show(false); });
 
   for (const b of document.querySelectorAll('.copy')) {
     b.addEventListener('click', async () => {
