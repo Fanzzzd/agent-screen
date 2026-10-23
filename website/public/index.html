@@ -57,23 +57,30 @@
 
 <main>
   <section class="hero">
-    <h1>Give each AI agent its own Mac&nbsp;screen.</h1>
-    <p class="lede">Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.</p>
-    <div class="actions">
-      <a class="button primary" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download for macOS</a>
-      <a class="button" href="#install">Install with Homebrew</a>
+    <div class="hero-copy">
+      <h1>Give each AI agent its own Mac&nbsp;screen.</h1>
+      <p class="lede">Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.</p>
+      <div class="code hero-code">
+        <div class="code-bar"><span>Install with Homebrew</span><button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button></div>
+        <pre><code>brew tap fanzzzd/agent-screen
+brew trust fanzzzd/agent-screen
+brew install --cask agent-screen</code></pre>
+      </div>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download the DMG</a>
+        <a class="button" href="https://github.com/Fanzzzd/agent-screen">View on GitHub</a>
+      </div>
+      <p class="fine">macOS 15 or later. Open source under the MIT license. Try <button class="try" type="button">Peek</button> in the top bar.</p>
     </div>
-    <p class="fine">macOS 15 or later. Open source under the MIT license. Try <button class="try" type="button">Peek</button> in the top bar.</p>
+    <figure class="film">
+      <div class="backscreen" aria-hidden="true"></div>
+      <video id="hero" muted loop playsinline preload="none"
+        data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
+        aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
+      <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
+      <figcaption>An animation of Agent Screen's behavior, built from its interface and recordings of test sessions.</figcaption>
+    </figure>
   </section>
-
-  <figure class="film">
-    <div class="backscreen" aria-hidden="true"></div>
-    <video id="hero" muted loop playsinline preload="none"
-      data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
-      aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
-    <figcaption>An animation of Agent Screen's behavior, built from its interface and recordings of test sessions.</figcaption>
-    <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
-  </figure>
 
   <section class="compare" aria-labelledby="compare-h">
     <h2 id="compare-h">Built-in computer use takes your Mac. A&nbsp;VM&nbsp;takes your apps.</h2>
@@ -236,11 +243,7 @@ brew install --cask agent-screen</code></pre>
     for (const e of entries) {
       const v = e.target;
       if (e.isIntersecting) {
-        if (!v.src) {
-          // The hero opens on the twelve displays, then loops the story from the top.
-          if (v.id === 'hero') v.addEventListener('loadedmetadata', () => { v.currentTime = 13.4; }, { once: true });
-          v.src = pick(v);
-        }
+        if (!v.src) v.src = pick(v);
         if (!still) v.play().catch(() => {});
       } else v.pause();
     }

@@ -61,7 +61,7 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
   -webkit-backdrop-filter: saturate(180%) blur(18px);
   border-bottom: 1px solid var(--line);
 }
-.top-in { max-width: var(--wrap); margin: 0 auto; padding: 14px var(--gutter); display: flex; align-items: center; justify-content: space-between; }
+.top-in { max-width: 1360px; margin: 0 auto; padding: 14px var(--gutter); display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--label); text-decoration: none; font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
 .brand:hover { color: var(--label); }
 .top nav { display: flex; align-items: center; gap: 28px; font-size: 15px; }
@@ -115,7 +115,8 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
 
 /* Hero */
 
-main > .hero { padding-top: 64px; text-align: center; }
+main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
+.hero-copy { max-width: 780px; margin: 0 auto; }
 .try { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .hero h1 {
   font-size: clamp(44px, 5.2vw, 72px);
@@ -130,6 +131,8 @@ main > .hero { padding-top: 64px; text-align: center; }
 }
 .lede { font-size: clamp(18px, 2vw, 22px); line-height: 1.45; color: var(--body); max-width: 680px; margin: 22px auto 28px; text-wrap: pretty; }
 .actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.hero-code { max-width: 460px; margin: 0 auto 24px; text-align: left; }
+.hero-code pre { font-size: 13.5px; padding: 12px 16px 14px; }
 .button {
   display: inline-flex; align-items: center; justify-content: center;
   height: 50px; padding: 0 26px; border-radius: 25px;
@@ -144,16 +147,24 @@ main > .hero { padding-top: 64px; text-align: center; }
 
 /* Hero film: lit from behind */
 
-.film { position: relative; isolation: isolate; max-width: 1360px; margin: 48px auto 0; padding: 0 var(--gutter); }
+.film { position: relative; isolation: isolate; margin: 48px 0 0; }
 .film::before {
   content: ""; position: absolute; left: 10%; right: 10%; top: 8%; bottom: 0;
   background: radial-gradient(50% 50% at 50% 50%, rgba(10, 132, 255, 0.28), rgba(10, 132, 255, 0) 70%);
   filter: blur(40px); z-index: -1;
 }
 .backscreen {
-  position: absolute; left: calc(var(--gutter) - 3.5%); top: -26px; width: 60%; aspect-ratio: 21 / 15;
-  border-radius: 28px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
-  border: 1px solid rgba(255, 255, 255, 0.08); z-index: -1;
+  position: absolute; left: -2.5%; top: -7%; width: 62%; aspect-ratio: 21 / 15; z-index: -1;
+  border-radius: 26px; overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 0% 0%, rgba(10, 132, 255, 0.34), rgba(10, 132, 255, 0) 55%),
+    linear-gradient(180deg, #2b2c32, #151518);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), -24px -24px 90px rgba(10, 132, 255, 0.2), 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+.backscreen::after {
+  content: ""; position: absolute; inset: 0; opacity: 0.35; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence baseFrequency='.85' numOctaves='2'/></filter><rect width='200' height='200' filter='url(%23n)'/></svg>");
 }
 .film video {
   display: block; width: 100%; height: auto; aspect-ratio: 16 / 9;
@@ -162,6 +173,20 @@ main > .hero { padding-top: 64px; text-align: center; }
 }
 
 .film figcaption { text-align: center; color: var(--secondary); font-size: 13px; margin-top: 16px; }
+
+@media (min-width: 1100px) {
+  main > .hero {
+    display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr); gap: 72px; align-items: center;
+    text-align: left; min-height: calc(100svh - 61px); padding-top: 32px; padding-bottom: 32px;
+  }
+  .hero-copy { margin: 0; }
+  .hero h1 { font-size: clamp(46px, 4.3vw, 64px); margin: 0; }
+  .lede { font-size: 19px; margin: 20px 0 26px; }
+  .hero-code { margin: 0 0 22px; }
+  .hero .actions { justify-content: flex-start; }
+  .film { margin: 0; }
+  .film figcaption { text-align: left; }
+}
 
 /* Comparison */
 
@@ -282,7 +307,12 @@ footer { border-top: 1px solid var(--line); }
   body { font-size: 16px; }
   .top nav { gap: 18px; }
   .top nav > a:first-child, .gh span { display: none; }
-  main > .hero { padding-top: 64px; }
+  main > .hero { padding-top: 48px; display: flex; flex-direction: column; }
+  /* Phones: the film right under the buttons, the install lines after it. */
+  .hero-copy { display: contents; }
+  .hero h1 { order: 1; } .lede { order: 2; } .hero .actions { order: 3; } .hero .fine { order: 4; }
+  .film { order: 5; } .hero-code { order: 6; width: 100%; margin: 28px 0 0; }
+  .lede { margin: 18px auto 24px; }
   .button { flex: 1 1 auto; }
   .film { margin-top: 48px; padding: 0 12px; }
   .backscreen {
