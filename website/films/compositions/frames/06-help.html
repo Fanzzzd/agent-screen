@@ -119,7 +119,7 @@
         top: 0;
         width: 1920px;
         height: 1080px;
-        transform-origin: 1350px 520px;
+        transform-origin: 1130px 520px;
       }
       [data-composition-id="06-help"] .h06-vwrap {
         position: absolute;
@@ -130,7 +130,7 @@
         filter: drop-shadow(0 40px 60px rgba(0, 0, 0, 0.55));
       }
       [data-composition-id="06-help"] .h06-viewer {
-        left: 560px;
+        left: 340px;
         top: 150px;
         width: 1580px;
         height: 740px;
@@ -165,8 +165,8 @@
       [data-composition-id="06-help"] .h06-vstatus {
         position: absolute;
         left: 40px;
-        top: 82px;
-        font-size: 27px;
+        top: 84px;
+        font-size: 24px;
         line-height: 34px;
         white-space: nowrap;
       }
@@ -177,21 +177,27 @@
         color: #8e8e94;
       }
       [data-composition-id="06-help"] .h06-continue {
-        left: 830px;
+        left: 700px;
         top: 44px;
         width: 460px;
         background: #0a84ff;
         color: #fff;
       }
       [data-composition-id="06-help"] .h06-vtake {
-        left: 1120px;
+        left: 990px;
         top: 44px;
         width: 170px;
       }
-      [data-composition-id="06-help"] .h06-windows {
-        left: 1306px;
+      /* Give | Take Back, as in the app's Viewer header */
+      [data-composition-id="06-help"] .h06-give {
+        left: 1176px;
         top: 44px;
-        width: 180px;
+        width: 116px;
+      }
+      [data-composition-id="06-help"] .h06-windows {
+        left: 1300px;
+        top: 44px;
+        width: 186px;
       }
       [data-composition-id="06-help"] .h06-chev {
         left: 1500px;
@@ -342,7 +348,8 @@
               <div data-hf-id="hf-82kg" class="h06-vstatus h06-vstatus-grey">Controlled by Claude Code</div>
               <div data-hf-id="hf-6v1q" class="h06-btn h06-vtake">Take Over</div>
               <div data-hf-id="hf-6jee" class="h06-btn h06-continue">▶ Let Claude Code Continue</div>
-              <div data-hf-id="hf-nxdv" class="h06-btn h06-windows">Windows 1</div>
+              <div data-hf-id="hf-gv01" class="h06-btn h06-give">Give</div>
+              <div data-hf-id="hf-nxdv" class="h06-btn h06-windows">Take Back</div>
               <div data-hf-id="hf-ig1t" class="h06-btn h06-chev">⌃</div>
             </div>
           </div>
@@ -400,10 +407,10 @@
         var HS = 6;
         var P_OFF = { x: 2050, y: 1180 }; // off-stage, bottom right
         var P_TAKE = { x: 966 - HS, y: 727 - HS }; // Take Over, a few px off centre
-        var P_USER = { x: 1188 - HS, y: 592 - HS }; // Username field
-        var P_CONT = { x: 1628 - HS, y: 229 - HS }; // Let Claude Code Continue
+        var P_USER = { x: 968 - HS, y: 592 - HS }; // Username field
+        var P_CONT = { x: 1278 - HS, y: 229 - HS }; // Let Claude Code Continue
 
-        // morph geometry. Card 900x620 centred (650,500); Viewer 1580x740 centred (1350,520).
+        // morph geometry. Card 900x620 centred (650,500); Viewer 1580x740 centred (1130,520), its right edge inside the frame.
         // The Viewer starts uniformly scaled to the card's height (S0) and cropped to its width,
         // centred on the card, so it is the card's box exactly. Both then grow with one ease.
         var S0 = 620 / 740;
@@ -473,11 +480,11 @@
         tl.fromTo(viewer, { opacity: 0 }, { opacity: 1, duration: 0.08, ease: "none" }, M0);
         tl.fromTo(
           viewer,
-          { x: -700, y: -20, scale: S0, clipPath: CLIP0 },
+          { x: -480, y: -20, scale: S0, clipPath: CLIP0 },
           { x: 0, y: 0, scale: 1, clipPath: CLIP1, duration: MD, ease: "expo.inOut" },
           M0
         );
-        tl.to(card, { x: 700, y: 20, scale: 1 / S0, duration: MD, ease: "expo.inOut" }, M0);
+        tl.to(card, { x: 480, y: 20, scale: 1 / S0, duration: MD, ease: "expo.inOut" }, M0);
         tl.to(card, { opacity: 0, duration: 0.22, ease: "power1.inOut" }, M0 + 0.13);
         // blur only through the fast middle of the morph
         tl.fromTo(viewer, { filter: "blur(0px)" }, { filter: "blur(5px)", duration: 0.11, ease: "power1.in" }, M0 + 0.15);

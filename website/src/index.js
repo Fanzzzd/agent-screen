@@ -13,7 +13,10 @@ export default {
     }
     const range = request.headers.get("range");
     if (!url.pathname.startsWith("/media/")) return env.ASSETS.fetch(request);
-    const full = await env.ASSETS.fetch(new Request(request.url, { method: request.method }));
+    // Ask for the whole file, but keep the revalidation headers so a repeat visit gets a 304.
+    const ask = new Headers(request.headers);
+    ask.delete("range");
+    const full = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: ask }));
     if (full.status !== 200) return full;
     const headers = new Headers(full.headers);
     headers.set("accept-ranges", "bytes");

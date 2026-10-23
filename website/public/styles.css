@@ -62,6 +62,7 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
   border-bottom: 1px solid var(--line);
 }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 14px var(--gutter); display: flex; align-items: center; justify-content: space-between; }
+.brand span { white-space: nowrap; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--label); text-decoration: none; font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
 .brand:hover { color: var(--label); }
 .top nav { display: flex; align-items: center; gap: 28px; font-size: 15px; }
@@ -153,7 +154,7 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
   filter: blur(40px); z-index: -1;
 }
 .backscreen {
-  position: absolute; left: -2.5%; top: -7%; width: 62%; aspect-ratio: 21 / 15; z-index: -1;
+  position: absolute; left: 0; top: -7%; width: 62%; aspect-ratio: 21 / 15; z-index: -1;
   border-radius: 26px; overflow: hidden;
   background:
     radial-gradient(120% 90% at 0% 0%, rgba(10, 132, 255, 0.34), rgba(10, 132, 255, 0) 55%),
@@ -183,6 +184,7 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
   .lede { font-size: 19px; margin: 20px 0 26px; }
   main > .hero .hero-code { margin: 0 0 22px; }
   .hero .actions { justify-content: flex-start; }
+  .backscreen { left: -2.5%; }
   .film { margin: 0; }
   .film figcaption { text-align: left; }
 }
@@ -206,10 +208,10 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
 /* Features */
 
 .features { display: grid; gap: 140px; }
-.feature { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); gap: 64px; align-items: center; }
-.feature.flip { grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); }
+.feature { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
+.feature.flip { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
 .feature.flip .f-text { order: 2; }
-.f-text h2 { font-size: clamp(30px, 3.4vw, 44px); margin-bottom: 18px; }
+.f-text h2 { font-size: clamp(30px, 3.4vw, 44px); margin-bottom: 18px; text-wrap: balance; }
 .f-text p { color: var(--body); font-size: 18px; }
 .tag { display: inline-block; font-size: 14px !important; font-weight: 600; color: var(--label) !important; padding: 5px 12px; border-radius: 99px; background: rgba(255, 255, 255, 0.08); margin-bottom: 18px !important; }
 .tag.help { background: rgba(255, 159, 10, 0.16); color: var(--orange) !important; }

@@ -148,7 +148,7 @@ brew install --cask agent-screen</code></pre>
   <section class="fleet">
     <div class="fleet-head">
       <h2>One display per agent session.</h2>
-      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
+      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move. With many displays, turn on Smooth Display Changes in the setup window.</p>
     </div>
     <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
@@ -248,7 +248,11 @@ brew install --cask agent-screen</code></pre>
       } else v.pause();
     }
   }, { rootMargin: '200px' });
-  document.querySelectorAll('main video[data-src]').forEach((v) => { near.observe(v); play.observe(v); });
+  document.querySelectorAll('main video[data-src]').forEach((v) => {
+    near.observe(v);
+    // With reduced motion nothing plays by itself; each film gets controls and loads on demand.
+    if (still) { v.controls = true; v.preload = 'none'; v.src = pick(v); } else play.observe(v);
+  });
 
   // Peek in the header: hover, focus or click the icon.
   const wrap = document.querySelector('.peek-wrap');
