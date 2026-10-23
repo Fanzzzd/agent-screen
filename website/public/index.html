@@ -39,15 +39,15 @@
       <a href="#features">Features</a>
       <a href="#install">Install</a>
       <div class="peek-wrap">
-        <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" aria-label="Peek: see what the agents are doing"><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="ping" aria-hidden="true"></span></button>
-        <div class="peek" id="peek" role="dialog" aria-label="Peek">
+        <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
+        <div class="peek" id="peek">
           <div class="tiles">
             <figure><video muted loop playsinline preload="none" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
             <figure><video muted loop playsinline preload="none" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
             <figure><video muted loop playsinline preload="none" data-src="/media/tile-booking.mp4"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
             <figure class="asks"><img src="/media/tile-help.jpg" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
           </div>
-          <p class="peek-note">This is Peek. In the app it drops from the menu bar icon, live.</p>
+          <p class="peek-note">In the app, Peek drops from the menu bar icon.</p>
         </div>
       </div>
       <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
@@ -63,7 +63,7 @@
       <a class="button primary" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download for macOS</a>
       <a class="button" href="#install">Install with Homebrew</a>
     </div>
-    <p class="fine">macOS 15 or later. Open source under the MIT license.</p>
+    <p class="fine">macOS 15 or later. Open source under the MIT license. Try <button class="try" type="button">Peek</button> in the top bar.</p>
   </section>
 
   <figure class="film">
@@ -115,7 +115,7 @@
         <h2>Every agent's screen, one hover away.</h2>
         <p>Hover the menu bar icon to see every agent's screen live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-poster-m="/media/peek-m.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
     </div>
 
     <div class="feature flip">
@@ -124,7 +124,7 @@
         <h2>It asks when it's stuck. You take the wheel.</h2>
         <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it, and Let … Continue hands the screen back.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-src="/media/help.mp4" data-src-m="/media/help-m.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-poster-m="/media/help-m.jpg" data-src="/media/help.mp4" data-src-m="/media/help-m.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
 
     <div class="feature">
@@ -229,7 +229,7 @@ brew install --cask agent-screen</code></pre>
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const pick = (v) => (small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src);
   const near = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting && !e.target.poster) e.target.poster = e.target.dataset.poster;
+    for (const e of entries) if (e.isIntersecting && !e.target.poster) e.target.poster = small && e.target.dataset.posterM ? e.target.dataset.posterM : e.target.dataset.poster;
   }, { rootMargin: '900px' });
   const play = new IntersectionObserver((entries) => {
     for (const e of entries) {
@@ -251,13 +251,20 @@ brew install --cask agent-screen</code></pre>
     btn.setAttribute('aria-expanded', on);
     tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still) v.play().catch(() => {}); } else v.pause(); });
   };
+  let pinned = false;
   if (matchMedia('(hover: hover)').matches) {
     wrap.addEventListener('mouseenter', () => show(true));
-    wrap.addEventListener('mouseleave', () => show(false));
+    wrap.addEventListener('mouseleave', () => { if (!pinned) show(false); });
   }
-  btn.addEventListener('click', () => show(!wrap.classList.contains('open')));
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') show(false); });
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) show(false); });
+  // With a mouse, hover shows Peek and a click keeps it up; on touch or keyboard a click toggles it.
+  btn.addEventListener('click', () => {
+    if (wrap.matches(':hover') && matchMedia('(hover: hover)').matches) { pinned = !pinned; show(true); }
+    else { pinned = !wrap.classList.contains('open'); show(pinned); }
+  });
+  document.querySelector('.try').addEventListener('click', (e) => { e.stopPropagation(); pinned = true; show(true); btn.focus(); });
+  wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget)) { pinned = false; show(false); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { pinned = false; show(false); } });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { pinned = false; show(false); } });
 
   for (const b of document.querySelectorAll('.copy')) {
     b.addEventListener('click', async () => {

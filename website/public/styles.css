@@ -74,13 +74,13 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
 
 .peek-wrap { position: relative; display: flex; }
 .peek-btn {
-  position: relative; display: grid; place-items: center;
-  width: 40px; height: 30px; border: 0; border-radius: 8px; cursor: pointer;
-  background: transparent; color: var(--label);
+  position: relative; display: flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 12px 0 9px; border: 0; border-radius: 9px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.08); color: var(--label); font: 500 15px var(--sans);
 }
 .peek-btn:hover, .open .peek-btn { background: rgba(255, 255, 255, 0.16); }
 .peek-btn svg { width: 22px; height: 20px; fill: currentColor; }
-.ping { position: absolute; right: 4px; top: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.ping { position: absolute; right: -2px; top: -2px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .open .ping { display: none; }
 @media (prefers-reduced-motion: no-preference) {
   .ping { animation: ping 1.8s ease-out infinite; }
@@ -90,7 +90,7 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
   position: absolute; right: -8px; top: calc(100% + 12px);
   width: min(882px, calc(100vw - 24px));
   padding: 10px; border-radius: 18px;
-  background: rgba(30, 30, 33, 0.94); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+  background: #1e1e21;
   border: 1px solid rgba(255, 255, 255, 0.15);
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
   opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.98); transform-origin: calc(100% - 28px) 0;
@@ -114,13 +114,14 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
 
 /* Hero */
 
-main > .hero { padding-top: 72px; text-align: center; }
+main > .hero { padding-top: 64px; text-align: center; }
+.try { font: inherit; color: var(--link); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .hero h1 {
-  font-size: clamp(44px, 6.4vw, 80px);
+  font-size: clamp(44px, 5.2vw, 72px);
   line-height: 1;
   font-weight: 700;
   letter-spacing: -0.045em;
-  max-width: 980px;
+  max-width: 1200px;
   margin: 0 auto;
   text-wrap: balance;
   background: linear-gradient(180deg, #ffffff 30%, #a9a9b0 110%);
@@ -290,6 +291,7 @@ footer { border-top: 1px solid var(--line); }
   .features { gap: 96px; }
   .f-text p, .sub, .fleet-head p { font-size: 17px; }
   .f-video { border-radius: 12px; }
+  .f-video.cut { aspect-ratio: 4 / 3; }
   .world { border-radius: 12px; }
   .steps > li { padding-left: 46px; }
   .code pre { font-size: 12.5px; white-space: pre-wrap; overflow-wrap: break-word; }
