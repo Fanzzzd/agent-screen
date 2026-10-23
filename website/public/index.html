@@ -42,9 +42,9 @@
         <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
         <div class="peek" id="peek" tabindex="-1">
           <div class="tiles">
-            <figure><video muted loop playsinline preload="none" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" data-src="/media/tile-booking.mp4"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.jpg" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.jpg" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.jpg" data-src="/media/tile-booking.mp4"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
             <figure class="asks"><img src="/media/tile-help.jpg" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
           </div>
           <p class="peek-note">In the app, Peek drops from the menu bar icon.</p>
@@ -132,7 +132,7 @@ brew install --cask agent-screen</code></pre>
         <h2>It asks when it's stuck. You take the wheel.</h2>
         <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it, and Let … Continue hands the screen back.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-poster-m="/media/help-m.jpg" data-src="/media/help.mp4" data-src-m="/media/help-m.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
+      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-src="/media/help.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
 
     <div class="feature">

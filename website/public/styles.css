@@ -348,3 +348,10 @@ footer { border-top: 1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
 }
+
+/* The smallest phones: logo, Peek and GitHub only. */
+@media (max-width: 380px) {
+  .top nav { gap: 12px; }
+  .top nav > a[href="#install"] { display: none; }
+  .brand { gap: 8px; font-size: 16px; }
+}
