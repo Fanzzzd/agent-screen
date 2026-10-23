@@ -6,7 +6,7 @@
 <title>Agent Screen: give each AI agent its own Mac screen</title>
 <meta name="description" content="Agent Screen is a macOS menu bar app that gives each Claude Code or Codex session its own virtual display. The agent opens apps, clicks and types there while your cursor, keyboard and windows stay yours.">
 <link rel="canonical" href="https://agentscreen.app/">
-<meta name="theme-color" content="#eef0f3">
+<meta name="theme-color" content="#2b2c31">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Agent Screen">
@@ -29,9 +29,10 @@
 </head>
 <body>
 
+<div class="band">
 <header class="top">
   <a class="brand" href="/">
-    <img src="/media/icon.png" alt="" width="32" height="32">
+    <img src="/media/icon.png" alt="" width="30" height="30">
     <span>Agent Screen</span>
   </a>
   <nav>
@@ -40,7 +41,6 @@
   </nav>
 </header>
 
-<main>
   <section class="hero">
     <div class="hero-copy">
       <h1>Give each AI agent its own Mac&nbsp;screen.</h1>
@@ -85,9 +85,11 @@
       <figcaption>Three of the twelve scripted sessions in the repo's fleet test, sped up 8×. Each runs on its own display while the one in the middle stays yours.</figcaption>
     </figure>
   </section>
+</div>
 
+<main>
   <section class="demo">
-    <div class="demo-copy">
+    <div class="intro">
       <h2>Keep working while the agent works</h2>
       <p>Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves the agent onto a display of its own.</p>
       <p>You watch it from the menu bar, step in when it asks, and hand the screen back with one click.</p>
@@ -102,34 +104,32 @@
     <h2>What you get</h2>
     <ul>
       <li>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8.5 21h7M12 17v4"/></svg>
         <h3>A display per agent session</h3>
         <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
       </li>
       <li>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="3" width="8" height="6" rx="1.2"/><rect x="13.5" y="3" width="8" height="6" rx="1.2"/><rect x="2.5" y="12" width="8" height="6" rx="1.2"/><rect x="13.5" y="12" width="8" height="6" rx="1.2"/></svg>
         <h3>Peek</h3>
         <p>Hover the menu bar icon to see every agent's screen live.</p>
+        <div class="ui"><span class="chip menu-icon"><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg></span></div>
       </li>
       <li>
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.5 3a1.5 1.5 0 0 1 1.5 1.5V11h.5V3.5a1.5 1.5 0 0 1 3 0V11h.5V5.5a1.5 1.5 0 0 1 3 0V14a8 8 0 0 1-8 8h-.6a7 7 0 0 1-5.6-2.8l-3-4a1.5 1.5 0 0 1 2.3-1.9L6 15V6.5a1.5 1.5 0 0 1 3 0V11h0V4.5A1.5 1.5 0 0 1 10.5 3z"/></svg>
         <h3>Takeover</h3>
         <p>Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.</p>
-      </li>
-      <li class="help">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16v-5a6 6 0 1 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>
-        <h3>Help Request</h3>
-        <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.</p>
+        <div class="ui"><span class="chip">Take Over</span><span class="chip accent"><svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>Let … Continue</span></div>
       </li>
       <li>
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.2 2.6a.8.8 0 0 1 1.1-.7l13.4 6.3a.8.8 0 0 1-.1 1.5l-5.6 1.7 4.2 6.6a.8.8 0 0 1-.3 1.1l-2.1 1.2a.8.8 0 0 1-1.1-.3l-4.1-6.6-4 4.3a.8.8 0 0 1-1.4-.5z"/></svg>
+        <h3>Help Request</h3>
+        <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.</p>
+        <div class="ui"><span class="chip orange"><svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M10.5 3a1.5 1.5 0 0 1 1.5 1.5V11h.5V3.5a1.5 1.5 0 0 1 3 0V11h.5V5.5a1.5 1.5 0 0 1 3 0V14a8 8 0 0 1-8 8h-.6a7 7 0 0 1-5.6-2.8l-3-4a1.5 1.5 0 0 1 2.3-1.9L6 15V6.5a1.5 1.5 0 0 1 3 0V11h0V4.5A1.5 1.5 0 0 1 10.5 3z"/></svg>Take Over</span><span class="chip">Later</span></div>
+      </li>
+      <li>
         <h3>Menus and controls through accessibility</h3>
         <p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p>
       </li>
       <li>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="12" y="5" width="9" height="14" rx="2"/><path d="M2.5 12h7m-3-3 3 3-3 3"/></svg>
         <h3>Handover</h3>
         <p>Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.</p>
+        <div class="ui"><span class="chip"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="12" y="5" width="9" height="14" rx="2"/><path d="M2.5 12h7m-3-3 3 3-3 3"/></svg>Give</span><span class="chip"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="9" height="14" rx="2"/><path d="M21.5 12h-7m3-3-3 3 3 3"/></svg>Take Back</span></div>
       </li>
     </ul>
   </section>
@@ -158,10 +158,10 @@
         <h3>Install with Homebrew</h3>
         <p>It needs macOS 15 or later.</p>
         <div class="code">
+          <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button></div>
           <pre><code>brew tap fanzzzd/agent-screen
 brew trust fanzzzd/agent-screen
 brew install --cask agent-screen</code></pre>
-          <button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button>
         </div>
         <p>Homebrew loads casks from a tap outside its own only once you trust it, which <code>brew trust</code> does.</p>
         <p>Or <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">download the DMG from the latest release</a> and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.</p>
@@ -174,8 +174,8 @@ brew install --cask agent-screen</code></pre>
         <h3>Connect your agents</h3>
         <p>Press <strong>Connect…</strong> in the setup window, or right-click the menu bar icon and choose <strong>Connect Claude Code and Codex</strong>, or run:</p>
         <div class="code">
+          <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
           <pre><code>"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install</code></pre>
-          <button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button>
         </div>
         <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. For any other MCP client, add a stdio server with the command <code>/Applications/Agent Screen.app/Contents/MacOS/AgentScreen</code> and the argument <code>mcp</code>.</p>
       </li>
@@ -201,14 +201,16 @@ brew install --cask agent-screen</code></pre>
 </main>
 
 <footer>
+ <div class="foot">
   <div class="foot-brand">
-    <img src="/media/icon.png" alt="" width="24" height="24">
+    <img src="/media/icon.png" alt="" width="22" height="22">
     <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
   </div>
   <nav>
     <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
     <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Latest release</a>
   </nav>
+ </div>
 </footer>
 
 <script>
