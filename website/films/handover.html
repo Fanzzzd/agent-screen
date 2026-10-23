@@ -34,7 +34,8 @@
       .v-head { position: absolute; left: 0; top: 0; right: 0; height: 110px; background: rgba(28,28,31,.97); border-bottom: 1.5px solid rgba(255,255,255,.08); }
       .v-title { position: absolute; left: 30px; top: 22px; font-size: 28px; font-weight: 600; white-space: nowrap; }
       .v-status { position: absolute; left: 30px; top: 64px; font-size: 23px; color: #8e8e94; white-space: nowrap; }
-      .btn { position: absolute; top: 28px; height: 54px; padding: 0 22px; border-radius: 999px; background: rgba(255,255,255,.12); display: flex; align-items: center; gap: 9px; font-size: 23px; font-weight: 600; white-space: nowrap; }
+      .btns { position: absolute; top: 28px; right: 24px; display: flex; gap: 8px; }
+      .btn { position: relative; height: 54px; padding: 0 20px; border-radius: 999px; background: rgba(255,255,255,.12); display: flex; align-items: center; gap: 9px; font-size: 23px; font-weight: 600; white-space: nowrap; }
       .btn svg { width: 22px; height: 22px; }
       .v-body { position: absolute; left: 0; right: 0; top: 110px; bottom: 0; overflow: hidden;
         background: radial-gradient(120% 120% at 20% 10%, #2b3f7a 0%, #141b3a 45%, #0a0b16 100%); }
@@ -49,7 +50,7 @@
       .win .aptr { position: absolute; left: 0; top: 0; width: 52px; height: 52px; opacity: 0; }
       .rip { position: absolute; left: 0; top: 0; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%; border: 4px solid #0a84ff; opacity: 0; }
 
-      .menu { position: absolute; left: 1520px; top: 238px; width: 380px; padding: 10px; border-radius: 16px;
+      .menu { position: absolute; left: 1436px; top: 238px; width: 380px; padding: 10px; border-radius: 16px;
         background: rgba(44,44,48,.97); border: 1.5px solid rgba(255,255,255,.12); box-shadow: 0 30px 80px rgba(0,0,0,.6); opacity: 0; transform-origin: 300px 0; }
       .menu .hd { font-size: 20px; color: #8e8e93; padding: 6px 14px 8px; }
       .menu .it { font-size: 23px; padding: 12px 14px; border-radius: 10px; white-space: nowrap; }
@@ -75,11 +76,13 @@
           <div class="viewer">
             <div class="v-body"><div class="v-ring"></div></div>
             <div class="v-head">
-              <div class="v-title">Claude Code · Test checkout</div>
+              <div class="v-title">Claude Code · Checkout</div>
               <div class="v-status">Controlled by Claude Code</div>
-              <div class="btn" style="left:420px">Take Over</div>
-              <div class="btn" style="left:580px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="12" y="5" width="9" height="14" rx="2"/><path d="M2.5 12h7m-3-3 3 3-3 3"/></svg>Give</div>
-              <div class="btn tb" style="left:706px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="9" height="14" rx="2"/><path d="M21.5 12h-7m3-3-3 3 3 3"/></svg>Take Back</div>
+              <div class="btns">
+              <div class="btn">Take Over</div>
+              <div class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="12" y="5" width="9" height="14" rx="2"/><path d="M2.5 12h7m-3-3 3 3-3 3"/></svg>Give</div>
+              <div class="btn tb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="9" height="14" rx="2"/><path d="M21.5 12h-7m3-3-3 3 3 3"/></svg>Take Back</div>
+              </div>
             </div>
           </div>
 
@@ -158,13 +161,13 @@
         tl.to(aptr, { opacity: 0, duration: 0.15 }, 5.5);
 
         // Take Back
-        var TB = { x: 960 + 706 + 85, y: 150 + 55 };
+        var TB = { x: 1724, y: 205 };
         tl.to(ptr, { x: TB.x - HS, y: TB.y - HS, duration: 0.5, ease: "power3.inOut" }, 4.45);
         tl.to(tb, { backgroundColor: "rgba(255,255,255,.24)", duration: 0.1 }, 4.9);
         tl.to(ptr, { scale: 0.9, duration: 0.05 }, 5.0);
         tl.to(ptr, { scale: 1, duration: 0.12 }, 5.05);
         tl.fromTo(menu, { opacity: 0, scale: 0.94, y: -8 }, { opacity: 1, scale: 1, y: 0, duration: 0.22, ease: "expo.out" }, 5.05);
-        var IT = { x: 1700, y: 300 };
+        var IT = { x: 1772, y: 318 };
         tl.to(ptr, { x: IT.x - HS, y: IT.y - HS, duration: 0.25, ease: "power3.inOut" }, 5.15);
         tl.to(item, { backgroundColor: "#0a84ff", duration: 0.06 }, 5.38);
         tl.to(ptr, { scale: 0.9, duration: 0.05 }, 5.45);
