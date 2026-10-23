@@ -24,9 +24,9 @@ Claude Code or Codex opens apps, clicks and types on a virtual display, while yo
 
 </div>
 
-![Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue.](docs/media/demo.gif)
+![You work in your editor and spreadsheet while agents grab your pointer. Agent Screen moves each agent onto a display of its own, and your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back.](docs/media/demo.gif)
 
-<sub>A scripted replay: [rust/tests/src/bin/demo.rs](rust/tests/src/bin/demo.rs) makes the same calls the MCP tools make, and draws the user's notes and pointer.</sub>
+<sub>An animation of Agent Screen's behavior, built from its interface and recordings of the repo's test sessions. More at [agentscreen.app](https://agentscreen.app).</sub>
 
 Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.
 

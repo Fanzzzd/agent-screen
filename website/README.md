@@ -6,6 +6,10 @@ The landing page for Agent Screen: static files in `public/`, served by a Cloudf
 - Deploy: `wrangler deploy`.
 - Copy follows the root `README.md`. Change the page when the README's claims change.
 - `public/og.png` is a 1200×630 screenshot of `og/og.html`. To redo it, copy `og/og.html` into `public/`, run `wrangler dev`, screenshot the page at 1200×630 (for example with headless Chrome: `--window-size=1200,630 --screenshot`), and delete the copy.
-- The fleet clips in `public/media/` come from `promo/public/fleet-*.mp4` (8× speed, 880 px wide), encoded with ffmpeg as H.264 without audio. `demo.mp4` is the first 18.4 s of `rust/target/demo.mov`, the full-size recording `cargo e2e demo` leaves behind, scaled to 1600 px. The three `state-*.png` strips are the Viewer header cropped from that recording at 3 s, 9 s and 12.5 s, and `state-*-buttons.png` are their right ends for narrow screens.
+- Films in `public/media/`:
+  - `hero.mp4` (and the 4:3 `hero-m.mp4` for phones) is the first 27.5 s of the teaser render `videos/agent-screen-teaser/renders/video-v30.mp4` in the main checkout, without sound. `docs/media/demo.gif` is the same cut at 720 px, 8 fps.
+  - `peek.mp4`, `help.mp4` and `handover.mp4` are rendered from `films/peek.html`, `films/help.html` and `films/handover.html` with HyperFrames (`npx hyperframes@0.8.180 render -c peek.html -o renders/peek.mp4 --quality high --video-frame-format png` inside `films/`), then scaled to 1440 px at 30 fps with ffmpeg.
+  - `films/` is a copy of the teaser project. Only the three website compositions and `06-help.html` are tracked; copy `assets/` and `node_modules/` from `videos/agent-screen-teaser` before rendering.
+  - `fleet-*.mp4` are the active seconds of the teaser's `assets/fleet2` recordings (address bar shows acme.cloud), at 880 px.
 - `logo.svg` (also `docs/media/logo.svg` for the README) is the icon's two screens and pointer without the tile. The favicons and `apple-touch-icon.png` are the installed app's icon as macOS draws it from `AppIcon.icon` (`NSWorkspace.shared.icon(forFile:)` at 1024 px, then cropped and scaled with `sips`). Redo them when the app icon changes.
 - Colors in `styles.css` are the app's own, from `rust/agent-screen/src/ui/theme.rs`.

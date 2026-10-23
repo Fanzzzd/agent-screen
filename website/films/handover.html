@@ -1,0 +1,190 @@
+<!doctype html>
+<!-- Handover: drag your window onto the Viewer, the agent works in it, Take Back brings it home. 7.5 s, silent. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+      #root {
+        position: relative; width: 1920px; height: 1080px; overflow: hidden;
+        font-family: -apple-system, "SF Pro Display", sans-serif; color: #f2f2f4;
+        background: radial-gradient(120% 90% at 25% 30%, #2a2f45 0%, #10121b 55%, #06070b 100%);
+      }
+      .layer { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; }
+      .cam { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 960px 520px; }
+
+      .menubar {
+        position: absolute; left: 0; top: 0; width: 1920px; height: 52px;
+        background: rgba(30, 30, 34, .72); border-bottom: 1px solid rgba(255,255,255,.06);
+        display: flex; align-items: center; gap: 40px; padding: 0 36px; font-size: 26px; color: #ececf0;
+      }
+      .menubar b { font-weight: 700; }
+      .mb-right { margin-left: auto; display: flex; align-items: center; gap: 34px; }
+      .mb-right img { width: 40px; height: 36px; filter: invert(1); }
+
+      /* Viewer, after rust/agent-screen/src/ui/viewer.rs */
+      .viewer {
+        position: absolute; left: 960px; top: 150px; width: 880px; height: 670px;
+        border-radius: 30px; overflow: hidden; background: #1c1c1f;
+        border: 1.5px solid rgba(255,255,255,.12); box-shadow: 0 60px 150px rgba(0,0,0,.65);
+      }
+      .v-head { position: absolute; left: 0; top: 0; right: 0; height: 110px; background: rgba(28,28,31,.97); border-bottom: 1.5px solid rgba(255,255,255,.08); }
+      .v-title { position: absolute; left: 30px; top: 22px; font-size: 28px; font-weight: 600; white-space: nowrap; }
+      .v-status { position: absolute; left: 30px; top: 64px; font-size: 23px; color: #8e8e94; white-space: nowrap; }
+      .btn { position: absolute; top: 28px; height: 54px; padding: 0 22px; border-radius: 999px; background: rgba(255,255,255,.12); display: flex; align-items: center; gap: 9px; font-size: 23px; font-weight: 600; white-space: nowrap; }
+      .btn svg { width: 22px; height: 22px; }
+      .v-body { position: absolute; left: 0; right: 0; top: 110px; bottom: 0; overflow: hidden;
+        background: radial-gradient(120% 120% at 20% 10%, #2b3f7a 0%, #141b3a 45%, #0a0b16 100%); }
+      .v-ring { position: absolute; inset: 0; border: 5px solid #0a84ff; opacity: 0; }
+
+      /* your window */
+      .win { position: absolute; left: 80px; top: 230px; width: 780px; height: 475px; border-radius: 18px; overflow: hidden;
+        box-shadow: 0 40px 110px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08); background: #fff; }
+      .win img, .win .w-end { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+      .win .w-end { opacity: 0; }
+      .win .w-vid { position: absolute; left: 0; top: -4.48%; width: 100%; height: auto; opacity: 0; }
+      .win .aptr { position: absolute; left: 0; top: 0; width: 52px; height: 52px; opacity: 0; }
+      .rip { position: absolute; left: 0; top: 0; width: 48px; height: 48px; margin: -24px 0 0 -24px; border-radius: 50%; border: 4px solid #0a84ff; opacity: 0; }
+
+      .menu { position: absolute; left: 1520px; top: 238px; width: 380px; padding: 10px; border-radius: 16px;
+        background: rgba(44,44,48,.97); border: 1.5px solid rgba(255,255,255,.12); box-shadow: 0 30px 80px rgba(0,0,0,.6); opacity: 0; transform-origin: 300px 0; }
+      .menu .hd { font-size: 20px; color: #8e8e93; padding: 6px 14px 8px; }
+      .menu .it { font-size: 23px; padding: 12px 14px; border-radius: 10px; white-space: nowrap; }
+
+      .ptr { position: absolute; left: 0; top: 0; width: 60px; height: 90px; transform-origin: 6px 6px; }
+      .ptr img { width: 60px; height: 90px; filter: drop-shadow(0 6px 10px rgba(0,0,0,.5)); }
+      .you { position: absolute; left: 46px; top: 64px; padding: 4px 16px; border-radius: 12px; background: #f2f2f4; color: #111; font-size: 26px; font-weight: 600; white-space: nowrap; box-shadow: 0 6px 16px rgba(0,0,0,.35); }
+
+      .grain { position: absolute; inset: 0; opacity: .18; mix-blend-mode: overlay;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence baseFrequency='.9' numOctaves='2'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>"); }
+      .vignette { position: absolute; inset: 0; background: radial-gradient(80% 80% at 50% 45%, transparent 55%, rgba(0,0,0,.6)); }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="handover" data-start="0" data-duration="7.5" data-width="1920" data-height="1080">
+      <div class="layer clip" data-start="0" data-duration="7.5" data-track-index="0">
+        <div class="cam">
+          <div class="menubar">
+            <span>&#63743;</span><b>Chrome</b><span>File</span><span>Edit</span><span>View</span><span>History</span>
+            <div class="mb-right"><img src="assets/ui/status-working.svg" alt="" /><span>Tue 9:41</span></div>
+          </div>
+
+          <div class="viewer">
+            <div class="v-body"><div class="v-ring"></div></div>
+            <div class="v-head">
+              <div class="v-title">Claude Code · Test checkout</div>
+              <div class="v-status">Controlled by Claude Code</div>
+              <div class="btn" style="left:420px">Take Over</div>
+              <div class="btn" style="left:580px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="12" y="5" width="9" height="14" rx="2"/><path d="M2.5 12h7m-3-3 3 3-3 3"/></svg>Give</div>
+              <div class="btn tb" style="left:706px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="9" height="14" rx="2"/><path d="M21.5 12h-7m3-3-3 3 3 3"/></svg>Take Back</div>
+            </div>
+          </div>
+
+          <div class="win">
+            <img src="assets/stills/window-start.png" alt="" />
+            <video class="w-vid clip" src="assets/fleet2/checkout.mp4" muted playsinline data-start="1.95" data-duration="3.8" data-media-start="0.6" data-track-index="10"></video>
+            <img class="w-end" src="assets/stills/window-end.png" alt="" />
+            <div class="rip"></div>
+            <img class="aptr" src="assets/ui/agent-pointer.svg" alt="" />
+          </div>
+
+          <div class="menu">
+            <div class="hd">Take Back</div>
+            <div class="it">Acme Cloud · Checkout</div>
+          </div>
+
+          <div class="ptr"><img src="assets/ui/mac-pointer.svg" alt="" /><div class="you">You</div></div>
+        </div>
+      </div>
+      <div class="layer clip" data-start="0" data-duration="7.5" data-track-index="2">
+        <div class="grain"></div>
+        <div class="vignette"></div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var root = document.querySelector('[data-composition-id="handover"]');
+        var q = function (s) { return root.querySelector(s); };
+        var cam = q(".cam"), win = q(".win"), vid = q(".w-vid"), wend = q(".w-end"), ring = q(".v-ring");
+        var ptr = q(".ptr"), tb = q(".tb"), menu = q(".menu"), item = q(".menu .it"), aptr = q(".aptr"), rip = q(".rip");
+        var END = 7.5, HS = 6;
+        var HOME = { left: 80, top: 230, width: 780, height: 475 };
+        var AWAY = { left: 1050, top: 330, width: 620, height: 378 };
+        var tl = gsap.timeline({ paused: true });
+
+        // camera: a slow push that leans toward the Viewer during the drag and back for the return
+        // wide for the drag, push into the Viewer while the agent works, pull back for the return.
+        // Origin (960,520): the Viewer's centre (1400,485) lands mid-frame at scale k with x = -440k, y = 20 + 35k.
+        tl.fromTo(cam, { scale: 1.0, x: 0, y: 0 }, { scale: 1.03, x: -24, y: -6, duration: 1.95, ease: "sine.inOut" }, 0);
+        tl.to(cam, { scale: 1.34, x: -590, y: 67, duration: 0.65, ease: "expo.inOut" }, 1.95);
+        tl.to(cam, { scale: 1.4, x: -616, y: 69, duration: 2.95, ease: "none" }, 2.6);
+        tl.to(cam, { scale: 1.02, x: 10, y: -4, duration: 0.8, ease: "expo.inOut" }, 5.55);
+        tl.to(cam, { scale: 1.045, x: 24, y: -8, duration: END - 6.35, ease: "none" }, 6.35);
+
+        // grab the title bar
+        var GRAB = { x: 470, y: 248 };
+        tl.set(ptr, { x: 640 - HS, y: 900 - HS }, 0);
+        tl.to(ptr, { x: GRAB.x - HS, y: GRAB.y - HS, duration: 0.55, ease: "power3.inOut" }, 0.05);
+        tl.to(ptr, { scale: 0.9, duration: 0.06 }, 0.62);
+        tl.to(win, { scale: 1.02, boxShadow: "0 60px 140px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.1)", duration: 0.15 }, 0.62);
+
+        // drag onto the Viewer; the pointer keeps hold of the same point on the title bar
+        var MID = { left: 1020, top: 300, width: 680, height: 414 };
+        tl.to(win, { left: MID.left, top: MID.top, width: MID.width, height: MID.height, duration: 1.0, ease: "power2.inOut" }, 0.7);
+        tl.to(ptr, { x: MID.left + MID.width * 0.5 - HS, y: MID.top + 18 - HS, duration: 1.0, ease: "power2.inOut" }, 0.7);
+        tl.to(ring, { opacity: 1, duration: 0.15 }, 1.35);
+
+        // drop: the window lands on the agent's display
+        tl.to(ptr, { scale: 1, duration: 0.1 }, 1.72);
+        tl.to(win, { left: AWAY.left, top: AWAY.top, width: AWAY.width, height: AWAY.height, scale: 1, duration: 0.3, ease: "expo.out" }, 1.72);
+        tl.to(ring, { opacity: 0, duration: 0.35 }, 1.85);
+        tl.to(vid, { opacity: 1, duration: 0.05 }, 1.95);
+        tl.to(ptr, { x: 1500, y: 1000, duration: 0.7, ease: "power2.inOut" }, 2.0);
+
+        // the agent fills the form: its pointer, from fleet2/actions.json (checkout), in window px
+        var S = AWAY.width / 1100, TIP = 12.55, OFF = -30 * S, M0 = 0.6, F0 = 1.95;
+        var ACTS = [[1.052, .3182, .46], [2.347, .3182, .5771], [3.626, .6818, .6514], [4.868, .8309, .6514]];
+        tl.set(aptr, { x: 0.5 * 1100 * S - TIP, y: 200 - TIP }, 0);
+        tl.to(aptr, { opacity: 1, duration: 0.2 }, 2.1);
+        ACTS.forEach(function (a) {
+          var t = F0 + a[0] - M0, x = a[1] * 1100 * S, y = a[2] * 700 * S + OFF;
+          tl.to(aptr, { x: x - TIP, y: y - TIP, duration: 0.36, ease: "power3.inOut" }, Math.max(2.1, t - 0.4));
+          tl.fromTo(rip, { x: x, y: y, opacity: 0.9, scale: 0.4 }, { opacity: 0, scale: 2.2, duration: 0.42, ease: "power2.out", immediateRender: false }, t);
+        });
+        tl.to(aptr, { opacity: 0, duration: 0.15 }, 5.5);
+
+        // Take Back
+        var TB = { x: 960 + 706 + 85, y: 150 + 55 };
+        tl.to(ptr, { x: TB.x - HS, y: TB.y - HS, duration: 0.5, ease: "power3.inOut" }, 4.45);
+        tl.to(tb, { backgroundColor: "rgba(255,255,255,.24)", duration: 0.1 }, 4.9);
+        tl.to(ptr, { scale: 0.9, duration: 0.05 }, 5.0);
+        tl.to(ptr, { scale: 1, duration: 0.12 }, 5.05);
+        tl.fromTo(menu, { opacity: 0, scale: 0.94, y: -8 }, { opacity: 1, scale: 1, y: 0, duration: 0.22, ease: "expo.out" }, 5.05);
+        var IT = { x: 1700, y: 300 };
+        tl.to(ptr, { x: IT.x - HS, y: IT.y - HS, duration: 0.25, ease: "power3.inOut" }, 5.15);
+        tl.to(item, { backgroundColor: "#0a84ff", duration: 0.06 }, 5.38);
+        tl.to(ptr, { scale: 0.9, duration: 0.05 }, 5.45);
+        tl.to(ptr, { scale: 1, duration: 0.12 }, 5.5);
+        tl.to(menu, { opacity: 0, duration: 0.15 }, 5.55);
+        tl.to(tb, { backgroundColor: "rgba(255,255,255,.12)", duration: 0.2 }, 5.55);
+
+        // the window flies home, finished
+        tl.set(wend, { opacity: 1 }, 5.6);
+        tl.set(vid, { opacity: 0 }, 5.6);
+        tl.to(win, { left: HOME.left, top: HOME.top, width: HOME.width, height: HOME.height, duration: 0.75, ease: "expo.inOut" }, 5.6);
+        tl.fromTo(win, { filter: "blur(0px)" }, { filter: "blur(6px)", duration: 0.2, ease: "power1.in" }, 5.75);
+        tl.to(win, { filter: "blur(0px)", duration: 0.25, ease: "power1.out" }, 5.98);
+        tl.to(ptr, { x: 640, y: 640, duration: 0.8, ease: "power2.inOut" }, 5.7);
+        tl.to(ptr, { x: 600, y: 700, duration: END - 6.5, ease: "sine.inOut" }, 6.5);
+
+        tl.set({}, {}, END);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["handover"] = tl;
+      })();
+    </script>
+  </body>
+</html>

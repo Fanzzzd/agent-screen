@@ -6,7 +6,8 @@
 <title>Agent Screen: give each AI agent its own Mac screen</title>
 <meta name="description" content="Agent Screen is a macOS menu bar app that gives each Claude Code or Codex session its own virtual display. The agent opens apps, clicks and types there while your cursor, keyboard and windows stay yours.">
 <link rel="canonical" href="https://agentscreen.app/">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#0a0a0c">
+<meta name="color-scheme" content="dark">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Agent Screen">
@@ -16,7 +17,7 @@
 <meta property="og:image" content="https://agentscreen.app/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Agent Screen: Claude Code writes in TextEdit on its own display while the user types in their own notes.">
+<meta property="og:image:alt" content="Agent Screen: agent displays working around your own screen.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Agent Screen: give each AI agent its own Mac screen">
 <meta name="twitter:description" content="Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
@@ -25,16 +26,21 @@
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preload" as="image" href="/media/hero.jpg" media="(min-width: 601px)">
+<link rel="preload" as="image" href="/media/hero-m.jpg" media="(max-width: 600px)">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
 <header class="top">
-  <a class="brand" href="/"><img src="/logo.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
-  <nav>
-    <a href="#install">Install</a>
-    <a class="gh" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
-  </nav>
+  <div class="top-in">
+    <a class="brand" href="/"><img src="/logo-dark.svg" alt="" width="26" height="25"><span>Agent Screen</span></a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a class="gh" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    </nav>
+  </div>
 </header>
 
 <main>
@@ -48,84 +54,92 @@
     <p class="fine">macOS 15 or later. Open source under the MIT license.</p>
   </section>
 
-  <figure class="demo">
-    <video src="/media/demo.mp4" poster="/media/demo.jpg" autoplay muted loop playsinline preload="metadata" aria-label="Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue."></video>
-    <figcaption>Claude Code writes in TextEdit on its own display while the user types in their own notes. It asks for a check, the user takes over, adds a line and lets it continue. A scripted replay that makes the same calls the MCP tools make.</figcaption>
+  <figure class="film">
+    <video id="hero" muted loop playsinline preload="none" poster="/media/hero.jpg"
+      data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
+      aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
+    <figcaption>An animation of Agent Screen's behavior, built from its interface and recordings of test sessions.</figcaption>
   </figure>
 
-  <section class="why">
-    <h2>Keep working while the agent works.</h2>
-    <p>Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves the agent onto a display of its own. You watch it from the menu bar, step in when it asks, and hand the screen back with one click.</p>
+  <section class="compare" aria-labelledby="compare-h">
+    <h2 id="compare-h">Built-in computer use takes your Mac. A&nbsp;VM&nbsp;takes your apps.</h2>
+    <p class="sub">Built-in computer use drives your real mouse and keyboard, so you stop working while the agent works. Agent Screen moves the agent onto a display of its own.</p>
+    <div class="cards">
+      <div class="card">
+        <h3>Built-in computer use</h3>
+        <dl>
+          <div><dt>You keep your mouse and keyboard</dt><dd class="no">No</dd></div>
+          <div><dt>Works with your real apps and logins</dt><dd>Yes</dd></div>
+          <div><dt>Several agents at once</dt><dd class="no">No</dd></div>
+          <div><dt>Watch and step in</dt><dd>Watch your own screen</dd></div>
+        </dl>
+      </div>
+      <div class="card">
+        <h3>A virtual machine</h3>
+        <dl>
+          <div><dt>You keep your mouse and keyboard</dt><dd>Yes</dd></div>
+          <div><dt>Works with your real apps and logins</dt><dd class="no">No, set them up again</dd></div>
+          <div><dt>Several agents at once</dt><dd>One VM each</dd></div>
+          <div><dt>Watch and step in</dt><dd>VM window</dd></div>
+        </dl>
+      </div>
+      <div class="card ours">
+        <h3><img src="/logo-dark.svg" alt="" width="20" height="19">Agent Screen</h3>
+        <dl>
+          <div><dt>You keep your mouse and keyboard</dt><dd class="yes">Yes</dd></div>
+          <div><dt>Works with your real apps and logins</dt><dd class="yes">Yes</dd></div>
+          <div><dt>Several agents at once</dt><dd class="yes">Yes, one display each</dd></div>
+          <div><dt>Watch and step in</dt><dd class="yes">Menu bar, one click</dd></div>
+        </dl>
+      </div>
+    </div>
   </section>
 
-  <section class="control">
-    <div class="state">
-      <picture class="strip"><source media="(max-width: 600px)" srcset="/media/state-agent-buttons.png" width="800" height="98"><img src="/media/state-agent.png" width="2134" height="98" alt="Viewer header: Claude Code, Write the launch note. Controlled by Claude Code. Buttons: Take Over, Give, Take Back."></picture>
-      <h3>The agent works on its own display</h3>
-      <p>The Viewer shows the agent's display live. Your pointer, keyboard and windows stay where they are.</p>
+  <section class="features" id="features">
+    <div class="feature">
+      <div class="f-text">
+        <p class="tag">Peek</p>
+        <h2>Every agent's screen, one hover away.</h2>
+        <p>Hover the menu bar icon to see every agent's screen live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
+      </div>
+      <video class="f-video" muted loop playsinline preload="none" poster="/media/peek.jpg" data-src="/media/peek.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
     </div>
-    <div class="state">
-      <picture class="strip"><source media="(max-width: 600px)" srcset="/media/state-help-buttons.png" width="800" height="98"><img src="/media/state-help.png" width="2134" height="98" alt="Viewer header: Needs your help: Please check the draft before I publish it. The Take Over button is orange."></picture>
-      <h3>It asks when it needs you</h3>
-      <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.</p>
+
+    <div class="feature flip">
+      <div class="f-text">
+        <p class="tag help">Help Request and Takeover</p>
+        <h2>It asks when it's stuck. You take the wheel.</h2>
+        <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it, and Let … Continue hands the screen back.</p>
+      </div>
+      <video class="f-video" muted loop playsinline preload="none" poster="/media/help.jpg" data-src="/media/help.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
-    <div class="state">
-      <picture class="strip"><source media="(max-width: 600px)" srcset="/media/state-takeover-buttons.png" width="800" height="98"><img src="/media/state-takeover.png" width="2134" height="98" alt="Viewer header: You're in control. Claude Code asked: Please check the draft before I publish it. Button: Let Claude Code Continue."></picture>
-      <h3>You take the wheel, then hand it back</h3>
-      <p>Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue.</p>
+
+    <div class="feature">
+      <div class="f-text">
+        <p class="tag you">Handover</p>
+        <h2>Hand a window over. Take it back.</h2>
+        <p>Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back. A handed-over window returns to where it was.</p>
+      </div>
+      <video class="f-video" muted loop playsinline preload="none" poster="/media/handover.jpg" data-src="/media/handover.mp4" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
     </div>
   </section>
 
   <section class="fleet">
-    <h2>One display per agent session.</h2>
-    <p class="sub">Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
-    <div class="screens">
-      <figure>
-        <video src="/media/fleet-chrome.mp4" poster="/media/fleet-chrome.jpg" autoplay muted loop playsinline preload="metadata"></video>
-        <figcaption>Sign-up form in Chrome</figcaption>
-      </figure>
-      <figure>
-        <video src="/media/fleet-numbers.mp4" poster="/media/fleet-numbers.jpg" autoplay muted loop playsinline preload="metadata"></video>
-        <figcaption>Budget in Numbers</figcaption>
-      </figure>
-      <figure>
-        <video src="/media/fleet-pages.mp4" poster="/media/fleet-pages.jpg" autoplay muted loop playsinline preload="metadata"></video>
-        <figcaption>Release notes in Pages</figcaption>
-      </figure>
+    <div class="fleet-head">
+      <h2>One display per agent session.</h2>
+      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
     </div>
-    <p class="note">Three of the twelve scripted sessions in the repo's fleet test, sped up 8×.</p>
-  </section>
-
-  <section class="more">
-    <div>
-      <h3>Peek</h3>
-      <p>Hover the menu bar icon to see every agent's screen live.</p>
+    <div class="grid">
+      <video muted loop playsinline preload="none" poster="/media/fleet-checkout.jpg" data-src="/media/fleet-checkout.mp4" aria-label="An agent fills in a checkout form."></video>
+      <video muted loop playsinline preload="none" poster="/media/fleet-kanban.jpg" data-src="/media/fleet-kanban.mp4" aria-label="An agent moves cards on a launch board."></video>
+      <video muted loop playsinline preload="none" poster="/media/fleet-booking.jpg" data-src="/media/fleet-booking.mp4" aria-label="An agent books a demo slot."></video>
+      <video muted loop playsinline preload="none" poster="/media/fleet-bugreport.jpg" data-src="/media/fleet-bugreport.mp4" aria-label="An agent files a bug report."></video>
     </div>
-    <div>
-      <h3>Handover</h3>
-      <p>Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.</p>
-    </div>
-    <div>
-      <h3>Menus and controls through accessibility</h3>
-      <p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p>
-    </div>
-  </section>
-
-  <section class="compare">
-    <h2>Compared with built-in computer use and a virtual machine</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr><th scope="col"><span class="sr-only">Question</span></th><th scope="col" class="ours">Agent Screen</th><th scope="col">Built-in computer use</th><th scope="col">A virtual machine</th></tr>
-        </thead>
-        <tbody>
-          <tr><th scope="row">You keep your mouse and keyboard</th><td class="ours">Yes</td><td>No</td><td>Yes</td></tr>
-          <tr><th scope="row">Works with your real apps and logins</th><td class="ours">Yes</td><td>Yes</td><td>No, set them up again</td></tr>
-          <tr><th scope="row">Several agents at once</th><td class="ours">Yes, one display each</td><td>No</td><td>One VM each</td></tr>
-          <tr><th scope="row">Watch and step in</th><td class="ours">Menu bar, one click</td><td>Watch your own screen</td><td>VM window</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <ul class="also">
+      <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p></li>
+      <li><h3>Agent Pointer</h3><p>The Viewer and Peek draw an arrow where the agent last acted. Agent screenshots don't contain it.</p></li>
+      <li><h3>Recording</h3><p>An agent can record its display to an MP4, with the sound of its apps and a timeline of its actions and your Takeovers.</p></li>
+    </ul>
   </section>
 
   <section class="install" id="install">
@@ -156,11 +170,12 @@ brew install --cask agent-screen</code></pre>
         </div>
         <p>This registers the MCP server with Claude Code for all projects and adds it to <code>~/.codex/config.toml</code>. For any other MCP client, add a stdio server with the command <code>/Applications/Agent Screen.app/Contents/MacOS/AgentScreen</code> and the argument <code>mcp</code>.</p>
       </li>
+      <li>
+        <h3>Ask for something</h3>
+        <p>Start a new session and ask your agent something like:</p>
+        <blockquote>Use Agent Screen to open Calculator on your own display and work out 12&nbsp;×&nbsp;34.</blockquote>
+      </li>
     </ol>
-    <div class="first-task">
-      <p>Then start a new session and ask your agent something like:</p>
-      <blockquote>Use Agent Screen to open Calculator on your own display and work out 12&nbsp;×&nbsp;34.</blockquote>
-    </div>
   </section>
 
   <section class="limits">
@@ -178,14 +193,20 @@ brew install --cask agent-screen</code></pre>
       <p><a href="https://github.com/Fanzzzd/agent-screen#known-limits">The README lists every known limit.</a></p>
     </div>
   </section>
+
+  <section class="end">
+    <img src="/logo-dark.svg" alt="" width="56" height="54">
+    <h2>Give your agents their own screens.</h2>
+    <div class="actions">
+      <a class="button primary" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download for macOS</a>
+      <a class="button" href="https://github.com/Fanzzzd/agent-screen">View on GitHub</a>
+    </div>
+  </section>
 </main>
 
 <footer>
   <div class="foot">
-    <div class="foot-brand">
-      <img src="/logo.svg" alt="" width="20" height="19">
-      <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
-    </div>
+    <span>Agent Screen is MIT licensed. Its background input recipe is ported from <a href="https://github.com/trycua/cua">trycua/cua</a>.</span>
     <nav>
       <a href="https://github.com/Fanzzzd/agent-screen">GitHub</a>
       <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">Releases</a>
@@ -195,6 +216,22 @@ brew install --cask agent-screen</code></pre>
 </footer>
 
 <script>
+  // Videos load and play only while on screen; the hero picks its cut by width.
+  const small = matchMedia('(max-width: 600px)').matches;
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const hero = document.getElementById('hero');
+  if (small) hero.poster = hero.dataset.posterM;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const v = e.target;
+      if (e.isIntersecting) {
+        if (!v.src) v.src = small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src;
+        if (!still) v.play().catch(() => {});
+      } else v.pause();
+    }
+  }, { rootMargin: '200px' });
+  document.querySelectorAll('video[data-src]').forEach((v) => io.observe(v));
+
   for (const b of document.querySelectorAll('.copy')) {
     b.addEventListener('click', async () => {
       await navigator.clipboard.writeText(b.dataset.copy);
