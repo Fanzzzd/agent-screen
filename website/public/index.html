@@ -40,7 +40,7 @@
       <a href="#install">Install</a>
       <div class="peek-wrap">
         <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
-        <div class="peek" id="peek">
+        <div class="peek" id="peek" tabindex="-1">
           <div class="tiles">
             <figure><video muted loop playsinline preload="none" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
             <figure><video muted loop playsinline preload="none" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
@@ -67,6 +67,7 @@
   </section>
 
   <figure class="film">
+    <div class="backscreen" aria-hidden="true"></div>
     <video id="hero" muted loop playsinline preload="none"
       data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
       aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
@@ -142,7 +143,7 @@
       <h2>One display per agent session.</h2>
       <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.</p>
     </div>
-    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-src="/media/fleet.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
       <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p></li>
       <li><h3>Agent Pointer</h3><p>The Viewer and Peek draw an arrow where the agent last acted. Agent screenshots don't contain it.</p></li>
@@ -235,7 +236,11 @@ brew install --cask agent-screen</code></pre>
     for (const e of entries) {
       const v = e.target;
       if (e.isIntersecting) {
-        if (!v.src) v.src = pick(v);
+        if (!v.src) {
+          // The hero opens on the twelve displays, then loops the story from the top.
+          if (v.id === 'hero') v.addEventListener('loadedmetadata', () => { v.currentTime = 13.4; }, { once: true });
+          v.src = pick(v);
+        }
         if (!still) v.play().catch(() => {});
       } else v.pause();
     }
@@ -258,11 +263,12 @@ brew install --cask agent-screen</code></pre>
   }
   // With a mouse, hover shows Peek and a click keeps it up; on touch or keyboard a click toggles it.
   btn.addEventListener('click', () => {
-    if (wrap.matches(':hover') && matchMedia('(hover: hover)').matches) { pinned = !pinned; show(true); }
+    if (wrap.matches(':hover') && matchMedia('(hover: hover)').matches) { pinned = !pinned; show(pinned); }
     else { pinned = !wrap.classList.contains('open'); show(pinned); }
   });
   document.querySelector('.try').addEventListener('click', (e) => { e.stopPropagation(); pinned = true; show(true); btn.focus(); });
-  wrap.addEventListener('focusout', (e) => { if (!wrap.contains(e.relatedTarget)) { pinned = false; show(false); } });
+  // Keyboard focus leaving closes it; a click inside (focus going nowhere) does not.
+  wrap.addEventListener('focusout', (e) => { if (e.relatedTarget && !wrap.contains(e.relatedTarget)) { pinned = false; show(false); } });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { pinned = false; show(false); } });
   document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { pinned = false; show(false); } });
 

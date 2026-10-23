@@ -99,10 +99,11 @@ main > section { max-width: var(--wrap); margin: 0 auto; padding: var(--section)
 .peek::before { content: ""; position: absolute; left: 0; right: 0; top: -14px; height: 14px; }
 .open .peek { opacity: 1; visibility: visible; transform: none; transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-@media (max-width: 760px) {
-  .tiles { grid-template-columns: 1fr 1fr; }
+@media (max-width: 1020px) {
   .peek { position: fixed; left: 12px; right: 12px; top: 64px; width: auto; transform-origin: 90% 0; }
 }
+@media (max-width: 760px) { .tiles { grid-template-columns: 1fr 1fr; } }
+.peek:focus { outline: none; }
 .tiles figure { margin: 0; }
 .tiles video, .tiles img { display: block; width: 100%; height: auto; aspect-ratio: 208 / 130; object-fit: cover; border-radius: 9px; background: #000; }
 .tiles figcaption { display: flex; flex-direction: column; align-items: center; padding: 6px 0 2px; line-height: 1.3; }
@@ -143,11 +144,16 @@ main > .hero { padding-top: 64px; text-align: center; }
 
 /* Hero film: lit from behind */
 
-.film { position: relative; max-width: 1360px; margin: 48px auto 0; padding: 0 var(--gutter); }
+.film { position: relative; isolation: isolate; max-width: 1360px; margin: 48px auto 0; padding: 0 var(--gutter); }
 .film::before {
   content: ""; position: absolute; left: 10%; right: 10%; top: 8%; bottom: 0;
   background: radial-gradient(50% 50% at 50% 50%, rgba(10, 132, 255, 0.28), rgba(10, 132, 255, 0) 70%);
   filter: blur(40px); z-index: -1;
+}
+.backscreen {
+  position: absolute; left: calc(var(--gutter) - 3.5%); top: -26px; width: 60%; aspect-ratio: 21 / 15;
+  border-radius: 28px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.08); z-index: -1;
 }
 .film video {
   display: block; width: 100%; height: auto; aspect-ratio: 16 / 9;
@@ -279,7 +285,12 @@ footer { border-top: 1px solid var(--line); }
   main > .hero { padding-top: 64px; }
   .button { flex: 1 1 auto; }
   .film { margin-top: 48px; padding: 0 12px; }
-  .film video { aspect-ratio: 4 / 3; border-radius: 12px; }
+  .backscreen {
+  position: absolute; left: calc(var(--gutter) - 3.5%); top: -26px; width: 60%; aspect-ratio: 21 / 15;
+  border-radius: 28px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.08); z-index: -1;
+}
+.film video { aspect-ratio: 4 / 3; border-radius: 12px; }
   .cards { grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 32px; }
   .card { padding: 16px 14px 4px; border-radius: 16px; }
   .card.ours { grid-column: 1 / -1; }
@@ -291,7 +302,8 @@ footer { border-top: 1px solid var(--line); }
   .features { gap: 96px; }
   .f-text p, .sub, .fleet-head p { font-size: 17px; }
   .f-video { border-radius: 12px; }
-  .f-video.cut { aspect-ratio: 4 / 3; }
+  .f-video.cut, .world { aspect-ratio: 4 / 3; }
+  .backscreen { display: none; }
   .world { border-radius: 12px; }
   .steps > li { padding-left: 46px; }
   .code pre { font-size: 12.5px; white-space: pre-wrap; overflow-wrap: break-word; }
