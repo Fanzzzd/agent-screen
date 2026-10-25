@@ -1,6 +1,6 @@
 # Third-party notices
 
-The background input recipe in `rust/agent-screen/native/SkyLight.m` and `rust/agent-screen/src/mac/input.rs` is ported from [trycua/cua](https://github.com/trycua/cua), used under the MIT License:
+The background input recipe in `apps/macos/native/SkyLight.m` and `apps/macos/src/mac/input.rs` is ported from [trycua/cua](https://github.com/trycua/cua), used under the MIT License:
 
 > MIT License
 >

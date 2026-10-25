@@ -1,0 +1,20 @@
+{
+  "name": "agent-screen",
+  "private": true,
+  "packageManager": "pnpm@10.5.2",
+  "scripts": {
+    "check": "turbo run check:rust",
+    "dev": "turbo run dev",
+    "deploy": "turbo run deploy",
+    "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+  },
+  "devDependencies": {
+    "turbo": "^2.11.10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
+  }
+}

@@ -4,15 +4,15 @@
 
 [package]
 versioned_files = [
-  "rust/agent-screen/Cargo.toml",
-  "rust/agent-screen-mcp/Cargo.toml",
-  "rust/agent-screen-model/Cargo.toml",
-  { path = "rust/Cargo.lock", dependency = "agent-screen" },
-  { path = "rust/Cargo.lock", dependency = "agent-screen-mcp" },
-  { path = "rust/Cargo.lock", dependency = "agent-screen-model" },
+  "apps/macos/Cargo.toml",
+  "crates/mcp/Cargo.toml",
+  "crates/model/Cargo.toml",
+  { path = "Cargo.lock", dependency = "agent-screen" },
+  { path = "Cargo.lock", dependency = "agent-screen-mcp" },
+  { path = "Cargo.lock", dependency = "agent-screen-model" },
 ]
 changelog = "CHANGELOG.md"
-assets = "rust/target/AgentScreen-*.dmg"
+assets = "target/AgentScreen-*.dmg"
 
 # Commit messages here are plain sentences, not conventional commits:
 # versions and notes come from changesets only.
