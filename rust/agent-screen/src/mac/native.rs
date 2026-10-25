@@ -80,7 +80,7 @@ pub enum Native {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
     CreateDisplay,
-    GrantPermissions,
+    OpenSettings,
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,
@@ -1027,23 +1027,4 @@ pub fn watch_activations() {
     };
     let observer: Retained<AnyObject> = observer.into();
     keep(observer);
-}
-
-/// The app's own icon as PNG, for drawing it in GPUI.
-pub fn app_icon_png() -> Option<Vec<u8>> {
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
-    let path = objc2_foundation::NSBundle::mainBundle()
-        .bundleURL()
-        .path()?;
-    let icon = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&path);
-    icon.setSize(objc2_foundation::NSSize::new(256.0, 256.0));
-    let tiff = icon.TIFFRepresentation()?;
-    let rep = NSBitmapImageRep::imageRepWithData(&tiff)?;
-    let png = unsafe {
-        rep.representationUsingType_properties(
-            NSBitmapImageFileType::PNG,
-            &objc2_foundation::NSDictionary::new(),
-        )
-    }?;
-    Some(png.to_vec())
 }

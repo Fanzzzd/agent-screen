@@ -1,5 +1,6 @@
 //! Peek opened by hovering the menu bar icon closes once the pointer has
-//! left the icon and Peek, however it left. Hover is reported to the app
+//! left the icon and Peek, however it left, or at the first click on the
+//! icon. Hover is reported to the app
 //! the way AppKit and GPUI report it, so the user's pointer is untouched
 //! and this runs at any time. Peek opens on a stage display.
 //!
@@ -60,5 +61,22 @@ fn test() -> Result<()> {
     check("hovering the icon opens it again", peek_shown(), "");
     show("icon-hover", 0)?;
     check("leaving the icon closes it again", !peek_shown(), "");
+
+    // Opened by hover, the first click on the icon closes it, and hover
+    // doesn't bring it back until the pointer leaves the icon.
+    show("icon-hover", 1)?;
+    show("click", 0)?;
+    check("a click closes Peek opened by hover", !peek_shown(), "");
+    show("card-hover", 0)?;
+    check("it stays closed under the pointer", !peek_shown(), "");
+    show("icon-hover", 0)?;
+    show("icon-hover", 1)?;
+    check("hovering after leaving opens it", peek_shown(), "");
+    show("click", 0)?;
+    show("icon-hover", 0)?;
+    show("click", 0)?;
+    check("a click on the closed icon opens it", peek_shown(), "");
+    show("click", 0)?;
+    check("the next click closes it", !peek_shown(), "");
     Ok(())
 }

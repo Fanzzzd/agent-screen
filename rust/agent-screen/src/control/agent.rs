@@ -1199,7 +1199,7 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     if missing.is_empty() {
         return Err(ControlError {
             code: "permission",
-            message: "The user turned on Screen Recording, and macOS applies it only once Agent Screen reopens. Agent Screen has put its setup window on the user's screen: tell the user to press Reopen Agent Screen there, then retry.".into(),
+            message: "The user turned on Screen Recording, and macOS applies it only once Agent Screen reopens. Agent Screen has put its Settings window on the user's screen: tell the user to press Reopen Agent Screen there, then retry.".into(),
         });
     }
     let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
@@ -1207,7 +1207,7 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
         code: "permission",
         message: format!(
             "Agent Screen is missing the macOS {} permission, and only the user can grant it. \
-             Agent Screen has put its setup window on the user's screen (also reachable from its \
+             Agent Screen has put its Settings window on the user's screen (also reachable from its \
              menu bar icon). Tell the user to turn it on there, then retry; until then every call \
              fails the same way.",
             names.join(" and ")

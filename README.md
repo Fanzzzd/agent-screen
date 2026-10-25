@@ -60,8 +60,8 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Or download the DMG from the [latest release](https://github.com/Fanzzzd/agent-screen/releases/latest) and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
 
-2. Open Agent Screen. The setup window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
-3. Connect your agents. Press **Connect…** in the setup window, or right-click the menu bar icon and choose **Connect Claude Code and Codex**, or run:
+2. Open Agent Screen. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
+3. Connect your agents. Press **Connect…** in Settings (right-click the menu bar icon and choose **Settings…**), or run:
 
    ```sh
    "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install
@@ -69,7 +69,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
 
-Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, the setup window and the menu name the agent. If Agent Screen isn't running, the first tool call starts it.
+Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent. If Agent Screen isn't running, the first tool call starts it.
 
 ## Agent tools
 
@@ -87,14 +87,14 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 
 ## Your side
 
-- **Peek.** Hover the menu bar icon, or click it to keep Peek up. Right-click it for the menu. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
+- **Peek.** Hover the menu bar icon, or click it to keep Peek up. Right-click it for the menu: New Display, Settings… and Quit, and anything that needs fixing. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
 - **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
 - **Help Request.** `request_help` drops a card from the menu bar icon with the display's picture and the agent's reason, and posts a notification. Take Over, on the card or the notification, opens the display in Takeover. Clicking the picture or the notification only opens it. Later puts the card away; the icon stays orange. When the agent gives steps, the Viewer lists them under its header while you are in control.
-- **Notifications.** Besides Help Requests, Agent Screen tells you when an agent leaves windows on its display, by finishing or by disconnecting. Allow them in the setup window.
+- **Notifications.** Besides Help Requests, Agent Screen tells you when an agent leaves windows on its display, by finishing or by disconnecting. Allow them in Settings.
 - **Recording.** While an agent records its display, the Viewer header and Peek show a red Recording mark. The video has the sound of the apps whose every window is on that display. macOS separates sound by app, not by window, so an app you also have open elsewhere, such as your browser, stays silent in it, and the agent is told which apps were left out.
 - **System prompts.** A macOS prompt that opens on an Agent Display, such as a keychain password request, moves to your main display.
 - **Agent Pointer.** The Viewer and Peek draw an arrow where the agent last acted. It is not on the display, so agent screenshots don't contain it.
-- **Wallpaper.** Agent Display Wallpaper… in the menu sets the picture agent displays show in the Viewer and in recordings. Use Agent Screen's Wallpaper puts back the default, which names each display in System Settings. Agents' screenshots leave the wallpaper out either way.
+- **Wallpaper.** Choose… on the Wallpaper row in Settings sets the picture agent displays show in the Viewer and in recordings. Use Default puts back Agent Screen's own, which names each display in System Settings. Agents' screenshots leave the wallpaper out either way.
 - **Handover.** Drag one of your windows onto the Viewer, or pick it under Give in the Viewer's header. Take Back brings any window back. A handed-over window returns to where it was. The × beside them closes the display.
 - **Window Requests.** An agent can ask for one of your windows, such as an app it opened with a script. A card drops from the menu bar icon, with a notification, naming the window. Hand Over gives it the window as a Handover; Keep leaves it with you.
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
@@ -128,7 +128,7 @@ Agent Screen runs on your Mac and sends nothing anywhere. Screen & System Audio 
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on.
 - **Tools say Agent Screen isn't running.** The first tool call starts it. If that fails, open `/Applications/Agent Screen.app` once yourself.
 - **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.
-- **The Mac stutters with many agent displays.** On every display change macOS reads its color records of every display ever connected, once per display online, and retries every 5 s until a read finishes within 50 ms. Turn on **Smooth Display Changes** in Agent Screen's setup window (or run `AgentScreen colorsync setup`). It asks for your administrator password once and installs a small tool that Agent Screen runs as root, through `sudo`, after displays change and every 30 minutes. The tool removes the records of displays that aren't connected and hold only what macOS made for them, and keeps display names in English and your languages, which makes the reads about five times faster. Profiles you chose for a display stay, and macOS makes a record again when you plug that display in. `AgentScreen colorsync remove` takes the tool away. Without it, Agent Screen refuses a new display when the reads would take too long.
+- **The Mac stutters with many agent displays.** On every display change macOS reads its color records of every display ever connected, once per display online, and retries every 5 s until a read finishes within 50 ms. Turn on **Smooth Display Changes** in Agent Screen's Settings (or run `AgentScreen colorsync setup`). It asks for your administrator password once and installs a small tool that Agent Screen runs as root, through `sudo`, after displays change and every 30 minutes. The tool removes the records of displays that aren't connected and hold only what macOS made for them, and keeps display names in English and your languages, which makes the reads about five times faster. Profiles you chose for a display stay, and macOS makes a record again when you plug that display in. `AgentScreen colorsync remove` takes the tool away. Without it, Agent Screen refuses a new display when the reads would take too long.
 - **Tools fail with "locked".** macOS blocks input and screenshots on every display while the screen is locked. Unlock and retry.
 
 ## Develop

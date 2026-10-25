@@ -120,6 +120,9 @@ pub struct Shell {
     peek_slides: u64,
     /// Opened by a click: stays until another click.
     latched: bool,
+    /// Closed by a click on the icon: hover opens it again only after the
+    /// pointer has left the icon.
+    clicked_shut: bool,
     /// Hover as AppKit and GPUI report it. An exit can go unreported (Peek
     /// ordered out under the pointer, a menu tracking), so Peek decides to
     /// stay by where the pointer is; see `pointer_over`.
@@ -310,6 +313,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             slide_card: None,
             peek_slides: 0,
             latched: false,
+            clicked_shut: false,
             over_icon: false,
             over_card: false,
             hover_generation: 0,
@@ -546,6 +550,9 @@ impl Shell {
                     self.check_aerospace(cx);
                 }
                 self.over_icon = over;
+                if !over {
+                    self.clicked_shut = false;
+                }
                 self.hover_changed(cx);
             }
             Native::IconClicked { right: true } => {
@@ -556,9 +563,12 @@ impl Shell {
                 self.open_setup(cx);
             }
             Native::IconClicked { right: false } => {
-                if self.peek_shown && self.latched {
+                // Shown by hover or by a click, a click hides it.
+                if self.peek_shown {
                     self.hide_peek(cx);
+                    self.clicked_shut = true;
                 } else {
+                    self.clicked_shut = false;
                     self.latched = true;
                     self.show_peek(cx);
                     // Opened on purpose: the keyboard can drive it. Peek is a
@@ -947,7 +957,10 @@ impl Shell {
         if !self.permissions.complete() && !self.peek_shown {
             return;
         }
-        if self.latched || self.settle_until.is_some_and(|t| t > Instant::now()) {
+        if self.latched
+            || self.clicked_shut
+            || self.settle_until.is_some_and(|t| t > Instant::now())
+        {
             return;
         }
         // Peek closes by `watch_pointer`.
@@ -1649,7 +1662,7 @@ impl Shell {
                 self.latched = true;
                 self.show_peek(cx);
             }
-            "setup" => self.open_setup(cx),
+            "setup" | "settings" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
             // The open setup window as with both permissions missing, the
             // first row explaining what to do in System Settings: the
@@ -1744,7 +1757,7 @@ impl Shell {
                     "完成设置：还差{}…",
                     names.join(t(" and ", "、"))
                 ),
-                MenuAction::GrantPermissions,
+                MenuAction::OpenSettings,
             );
             menu.separator();
         } else if self.restart {
@@ -1753,18 +1766,26 @@ impl Shell {
                     "Finish Setup: Reopen Agent Screen…",
                     "完成设置：重新打开 Agent Screen…",
                 ),
-                MenuAction::GrantPermissions,
+                MenuAction::OpenSettings,
             );
             menu.separator();
         }
-        if matches!(
-            self.colorsync,
-            Some(crate::mac::colorsync::Helper::Missing | crate::mac::colorsync::Helper::Outdated)
-        ) {
-            menu.action(
-                t("Keep Display Changes Smooth…", "让显示器切换不卡顿…"),
-                MenuAction::GrantPermissions,
+        // A workspace on an agent's display is gone from the user's screen:
+        // that can't wait for Settings.
+        if !self.conflicts.is_empty() {
+            let workspaces: Vec<&str> = self.conflicts.iter().map(|(w, _)| w.as_str()).collect();
+            let fix = menu.action(
+                &tf!(
+                    "AeroSpace Put Workspace {} on an Agent Display…",
+                    "AeroSpace 把工作区 {} 放到了 Agent 显示器上…",
+                    workspaces.join(", ")
+                ),
+                MenuAction::OpenAeroSpaceConfig,
             );
+            fix.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
+                "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like 2 = 'DELL'.",
+                "Agent 显示器会占用 workspace-to-monitor-force-assignment 里的显示器编号。改用显示器名称，例如 2 = 'DELL'。",
+            ))));
             menu.separator();
         }
         // Setup worked on the agent's side too: its session has the tools.
@@ -1782,54 +1803,9 @@ impl Shell {
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.separator();
-        if !self.conflicts.is_empty() {
-            for (workspace, display) in &self.conflicts {
-                menu.disabled(&tf!(
-                    "AeroSpace pins workspace {workspace} to {display}",
-                    "AeroSpace 把工作区 {workspace} 固定到了 {display}"
-                ));
-            }
-            let fix = menu.action(
-                t("Open AeroSpace Config…", "打开 AeroSpace 配置…"),
-                MenuAction::OpenAeroSpaceConfig,
-            );
-            fix.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
-                "Agent displays take monitor numbers in workspace-to-monitor-force-assignment. Use monitor names instead, like 2 = 'DELL'.",
-                "Agent 显示器会占用 workspace-to-monitor-force-assignment 里的显示器编号。改用显示器名称，例如 2 = 'DELL'。",
-            ))));
-            menu.separator();
-        }
-        if matches!(
-            self.aerospace,
-            Some(aerospace::Ignoring::Available | aerospace::Ignoring::Unsupported)
-        ) {
-            let item = menu.action(
-                t(
-                    "Keep AeroSpace Off Agent Screen's Displays…",
-                    "让 AeroSpace 不管 Agent Screen 的显示器…",
-                ),
-                MenuAction::IgnoreInAeroSpace,
-            );
-            item.setToolTip(Some(&objc2_foundation::NSString::from_str(t(
-                "AeroSpace shows your workspaces on these displays, and agents' new windows pass over your screen.",
-                "AeroSpace 会把你的工作区放到这些显示器上，agent 打开的新窗口也会先在你屏幕上闪一下。",
-            ))));
-            menu.separator();
-        }
-        menu.action(
-            t("Connect Claude Code and Codex", "接入 Claude Code 和 Codex"),
-            MenuAction::ConnectAgents,
-        );
-        menu.action(
-            t("Agent Display Wallpaper…", "Agent 显示器壁纸…"),
-            MenuAction::ChooseWallpaper,
-        );
-        if crate::mac::app::custom_wallpaper().is_some() {
-            menu.action(
-                t("Use Agent Screen's Wallpaper", "改回 Agent Screen 的壁纸"),
-                MenuAction::DefaultWallpaper,
-            );
-        }
+        // Agents, wallpaper, AeroSpace and the optional helpers.
+        let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
+        native::set_key_equivalent(&settings, ",", true, false, false, false);
         menu.separator();
         let quit = menu.action(
             t("Quit Agent Screen", "退出 Agent Screen"),
@@ -1988,7 +1964,7 @@ impl Shell {
     fn menu(&mut self, action: MenuAction, cx: &mut Context<Self>) {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
-            MenuAction::GrantPermissions => self.open_setup(cx),
+            MenuAction::OpenSettings => self.open_setup(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let pinned: Vec<String> = self
                     .conflicts
@@ -2293,7 +2269,7 @@ impl Shell {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some(t("Set Up Agent Screen", "设置 Agent Screen").into()),
+                title: Some(t("Agent Screen Settings", "Agent Screen 设置").into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),
@@ -2309,6 +2285,7 @@ impl Shell {
                 self.setup = Some(handle);
                 self.push_setup(cx);
                 self.read_registered(cx);
+                self.check_aerospace(cx);
                 cx.activate(true);
             }
             Err(error) => log::info!("setup window: {error}"),
@@ -2381,7 +2358,11 @@ impl Shell {
 
     pub fn close_setup(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.setup.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            // After this update: closing it tells `window_closed`, which
+            // needs the shell.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
         }
         self.waiting = None;
         self.setup_preview = false;
@@ -2461,6 +2442,7 @@ impl Shell {
             "Agent Display wallpaper: {}",
             picture.map_or("Agent Screen's".into(), |p| p.display().to_string())
         );
+        self.push_setup(cx);
     }
 
     /// The setup window's button for the ColorSync helper: macOS's
@@ -2653,8 +2635,14 @@ impl Shell {
             self.colorsync_busy,
             self.colorsync_error.clone(),
         );
+        let aerospace = self.aerospace;
+        let pinned: Vec<String> = self.conflicts.iter().map(|(w, _)| w.clone()).collect();
+        let wallpaper = crate::mac::app::custom_wallpaper();
         if handle
             .update(cx, |setup, _, cx| {
+                setup.aerospace = aerospace;
+                setup.pinned = pinned;
+                setup.wallpaper = wallpaper;
                 setup.status = status;
                 setup.notifications = notifications;
                 (setup.colorsync, setup.colorsync_busy, setup.colorsync_error) = colorsync;
@@ -3032,7 +3020,10 @@ impl Shell {
                 .background_executor()
                 .spawn(async { aerospace::ignoring() })
                 .await;
-            let _ = this.update(cx, |shell, _| shell.aerospace = ignoring);
+            let _ = this.update(cx, |shell, cx| {
+                shell.aerospace = ignoring;
+                shell.push_setup(cx);
+            });
         })
         .detach();
     }
@@ -3287,11 +3278,14 @@ open -a AeroSpace";
                             .collect::<Vec<_>>()
                     })
                     .await;
-                let _ = this.update(cx, |shell, _| {
+                let _ = this.update(cx, |shell, cx| {
                     for (workspace, display) in &conflicts {
                         log::warn!("AeroSpace pins workspace {workspace} to {display}");
                     }
-                    shell.conflicts = conflicts;
+                    if shell.conflicts != conflicts {
+                        shell.conflicts = conflicts;
+                        shell.push_setup(cx);
+                    }
                 });
             }
         })

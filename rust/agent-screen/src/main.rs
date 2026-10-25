@@ -96,7 +96,7 @@ fn app_menu(cx: &mut App) {
     use i18n::t;
     cx.on_action(|_: &OpenSetup, _| {
         mac::native::send(mac::native::Native::Menu(
-            mac::native::MenuAction::GrantPermissions,
+            mac::native::MenuAction::OpenSettings,
         ))
     });
     cx.on_action(|_: &HideApp, cx| cx.hide());
@@ -104,7 +104,7 @@ fn app_menu(cx: &mut App) {
     cx.set_menus(vec![Menu {
         name: "Agent Screen".into(),
         items: vec![
-            MenuItem::action(t("Set Up Agent Screen…", "设置 Agent Screen…"), OpenSetup),
+            MenuItem::action(t("Settings…", "设置…"), OpenSetup),
             MenuItem::separator(),
             MenuItem::action(t("Hide Agent Screen", "隐藏 Agent Screen"), HideApp),
             MenuItem::separator(),
@@ -187,7 +187,7 @@ fn main() {
     // window: permissions, the agents it is connected to, and AeroSpace.
     app.on_reopen(|_| {
         mac::native::send(mac::native::Native::Menu(
-            mac::native::MenuAction::GrantPermissions,
+            mac::native::MenuAction::OpenSettings,
         ))
     });
     app.run(|cx: &mut App| {
