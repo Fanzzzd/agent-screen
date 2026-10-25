@@ -94,6 +94,9 @@ pub fn definitions() -> Vec<Value> {
                 "cursor or keyboard. Call it only when you need a screen. Calling it again returns the same display, and so",
                 "does a call from a subagent of this session: let one subagent do all the GUI work.",
                 "The returned display_id stays valid until end_display or until this session ends.",
+                "The result's width and height are the display in points; scale is screenshot pixels per point",
+                "(1 on the default 1280×800, less when the screenshot is scaled down).",
+                "list_windows bounds, get_window_state centers and computer clicks use screenshot pixels.",
                 "Put windows on it with launch_app or place_window, then drive it with the computer tool.",
             ],
             object(
@@ -233,7 +236,8 @@ pub fn definitions() -> Vec<Value> {
             "list_windows",
             "List windows on the display",
             &[
-                "List app windows on the display, front to back, with ids and bounds in screenshot pixels. origin says how",
+                "List app windows on the display, front to back, with ids and bounds in screenshot pixels. scale is",
+                "screenshot pixels per display point, the same number create_display returns. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
                 "set_disposition verdict or null. With strays: true it lists instead the windows of apps launch_app started",
                 "for you that opened off your display, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
@@ -317,7 +321,7 @@ pub fn definitions() -> Vec<Value> {
             "See one window",
             &[
                 "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
-                "brackets that act_on_element takes, and its center in display coordinates. An element keeps its number",
+                "brackets that act_on_element takes, and its center in screenshot pixels. An element keeps its number",
                 "while it stays in the window; a number whose element went away fails instead of hitting another one.",
             ],
             object(
@@ -495,6 +499,7 @@ pub async fn run(
                 "display_id": reply.get("displayId"),
                 "width": reply.get("width"),
                 "height": reply.get("height"),
+                "scale": reply.get("scale"),
                 "reused": reply.get("reused")
             });
             if let Some(note) = reply.get("note") {
@@ -1078,6 +1083,29 @@ mod tests {
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }
+    }
+
+    #[test]
+    fn coordinate_copy_uses_screenshot_pixels() {
+        let tools = definitions();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name}"))["description"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let create = description("create_display");
+        assert!(create.contains("screenshot pixels"), "{create}");
+        assert!(create.contains("scale"), "{create}");
+        let list = description("list_windows");
+        assert!(list.contains("screenshot pixels"), "{list}");
+        assert!(list.contains("scale"), "{list}");
+        let state = description("get_window_state");
+        assert!(state.contains("screenshot pixels"), "{state}");
+        assert!(!state.contains("display coordinates"), "{state}");
     }
 
     #[test]
