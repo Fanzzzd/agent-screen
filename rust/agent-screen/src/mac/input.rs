@@ -490,7 +490,7 @@ impl Forwarder {
         self.run(move |w| {
             let _held = w.focus_something(within)?;
             let target = w.focused?;
-            w.key(chord.code, down, flags(chord.modifiers));
+            w.key(chord.code, down, flags(chord.modifiers), true);
             Some(target)
         })
         .await
@@ -500,7 +500,7 @@ impl Forwarder {
     /// Release a held chord in the window it was pressed in, even if keys
     /// go elsewhere now or it left the display.
     pub async fn release_chord(&self, chord: KeyChord, target: WindowTarget) {
-        self.run(move |w| w.key_to(target, chord.code, false, flags(chord.modifiers)))
+        self.run(move |w| w.key_to(target, chord.code, false, flags(chord.modifiers), true))
             .await;
     }
 
@@ -546,9 +546,9 @@ impl Forwarder {
                 return false;
             };
             for _ in 0..count.max(1) {
-                w.key(chord.code, true, flags(chord.modifiers));
+                w.key(chord.code, true, flags(chord.modifiers), true);
                 thread::sleep(Duration::from_millis(20));
-                w.key(chord.code, false, flags(chord.modifiers));
+                w.key(chord.code, false, flags(chord.modifiers), true);
             }
             true
         })
@@ -614,6 +614,11 @@ fn keep_on_display(press: Grab, at: (f64, f64)) {
 }
 
 /// Apps whose keys a display's worker is sending: one at a time per app.
+/// An ANSI keyboard type. A key event carries the Mac's keyboard type, and
+/// apps translate the key code through the layout for that type: on a JIS
+/// type the ANSI `]` key types `[` and `[` types `@`.
+const ANSI_KEYBOARD: i64 = 40;
+
 static APPS_IN_USE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 static APP_FREED: std::sync::Condvar = std::sync::Condvar::new();
 
@@ -1067,7 +1072,7 @@ impl Worker {
     fn viewer_key(&mut self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
         // A key-up goes where its key-down went.
         if !down {
-            self.key(code, down, flags);
+            self.key(code, down, flags, false);
             return;
         }
         // Only a window on the Viewer's display: the one focused may have
@@ -1077,23 +1082,38 @@ impl Worker {
             log::debug!("input: key {code} dropped, no window on the display");
             return;
         };
-        self.key(code, down, flags);
+        self.key(code, down, flags, false);
     }
 
-    /// A key to the focused window, already picked and focused.
-    fn key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
+    /// A key to the focused window, already picked and focused. `ansi` for
+    /// an agent's chord, whose codes are ANSI key positions.
+    fn key(&mut self, code: u16, down: bool, flags: CGEventFlags, ansi: bool) {
         let Some(target) = self.focused else {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
-        self.key_to(target, code, down, flags);
+        self.key_to(target, code, down, flags, ansi);
     }
 
-    fn key_to(&mut self, target: WindowTarget, code: u16, down: bool, flags: CGEventFlags) {
+    fn key_to(
+        &mut self,
+        target: WindowTarget,
+        code: u16,
+        down: bool,
+        flags: CGEventFlags,
+        ansi: bool,
+    ) {
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, down) else {
             return;
         };
         CGEvent::set_flags(Some(&event), flags);
+        if ansi {
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::KeyboardEventKeyboardType,
+                ANSI_KEYBOARD,
+            );
+        }
         deliver(&event, target.pid, true);
     }
 

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Keys</title>
+<style>
+  body { font: 16px -apple-system, sans-serif; margin: 40px; }
+  input { font: inherit; padding: 6px 8px; width: 320px; }
+</style>
+</head>
+<body>
+<h1>Keys</h1>
+<input aria-label="Field" autofocus>
+<p id="log">Seen:</p>
+<script>
+  const log = document.getElementById('log');
+  document.addEventListener('keydown', (e) => {
+    if (['Meta', 'Shift', 'Control', 'Alt'].includes(e.key)) return;
+    const mods = (e.metaKey ? 'cmd+' : '') + (e.ctrlKey ? 'ctrl+' : '');
+    if (e.metaKey) e.preventDefault();
+    log.textContent += ` ${mods}${e.key}`;
+  });
+</script>
+</body>
+</html>
