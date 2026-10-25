@@ -172,8 +172,6 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 40px 120px rgba(0, 0, 0, 0.7);
 }
 
-.film figcaption { text-align: center; color: var(--secondary); font-size: 13px; margin-top: 16px; }
-
 @media (min-width: 1100px) {
   main > .hero {
     display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr); gap: 72px; align-items: center;
@@ -186,7 +184,6 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
   .hero .actions { justify-content: flex-start; }
   .backscreen { left: -2.5%; }
   .film { margin: 0; }
-  .film figcaption { text-align: left; }
 }
 
 /* Comparison */

@@ -78,7 +78,6 @@ brew install --cask agent-screen</code></pre>
         data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
         aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
       <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
-      <figcaption>An animation of Agent Screen's behavior, built from its interface and recordings of test sessions.</figcaption>
     </figure>
   </section>
 
@@ -148,7 +147,7 @@ brew install --cask agent-screen</code></pre>
   <section class="fleet">
     <div class="fleet-head">
       <h2>One display per agent session.</h2>
-      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move. With many displays, turn on Smooth Display Changes in the setup window.</p>
+      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move. With many displays, turn on Smooth Display Changes in Settings.</p>
     </div>
     <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
@@ -175,11 +174,11 @@ brew install --cask agent-screen</code></pre>
       </li>
       <li>
         <h3>Open Agent Screen</h3>
-        <p>The setup window asks for Screen &amp; System Audio Recording and Accessibility. Both stay on this Mac.</p>
+        <p>Agent Screen's Settings window asks for Screen &amp; System Audio Recording and Accessibility. Both stay on this Mac.</p>
       </li>
       <li>
         <h3>Connect your agents</h3>
-        <p>Press <strong>Connect…</strong> in the setup window, or right-click the menu bar icon and choose <strong>Connect Claude Code and Codex</strong>, or run:</p>
+        <p>Press <strong>Connect…</strong> in Settings (right-click the menu bar icon and choose <strong>Settings…</strong>), or run:</p>
         <div class="code">
           <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
           <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
@@ -264,20 +263,27 @@ brew install --cask agent-screen</code></pre>
     tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still) v.play().catch(() => {}); } else v.pause(); });
   };
   let pinned = false;
-  if (matchMedia('(hover: hover)').matches) {
-    wrap.addEventListener('mouseenter', () => show(true));
-    wrap.addEventListener('mouseleave', () => { if (!pinned) show(false); });
-  }
-  // With a mouse, hover shows Peek and a click keeps it up; on touch or keyboard a click toggles it.
-  btn.addEventListener('click', () => {
-    if (wrap.matches(':hover') && matchMedia('(hover: hover)').matches) { pinned = !pinned; show(pinned); }
-    else { pinned = !wrap.classList.contains('open'); show(pinned); }
+  let hover = 0;
+  const set = (on) => { clearTimeout(hover); pinned = on; show(on); };
+  // Like the app: a mouse shows Peek after 120 ms on the icon and hides it 280 ms after leaving.
+  // Touch taps send pointer events too; only a mouse hovers.
+  wrap.addEventListener('pointerenter', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    clearTimeout(hover);
+    if (!wrap.classList.contains('open')) hover = setTimeout(() => show(true), 120);
   });
-  document.querySelector('.try').addEventListener('click', (e) => { e.stopPropagation(); pinned = true; show(true); btn.focus(); });
+  wrap.addEventListener('pointerleave', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    clearTimeout(hover);
+    if (!pinned) hover = setTimeout(() => show(false), 280);
+  });
+  // A click hides Peek whenever it shows, however it opened, and keeps it up otherwise.
+  btn.addEventListener('click', () => set(!wrap.classList.contains('open')));
+  document.querySelector('.try').addEventListener('click', (e) => { e.stopPropagation(); set(true); btn.focus(); });
   // Keyboard focus leaving closes it; a click inside (focus going nowhere) does not.
-  wrap.addEventListener('focusout', (e) => { if (e.relatedTarget && !wrap.contains(e.relatedTarget)) { pinned = false; show(false); } });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { pinned = false; show(false); } });
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { pinned = false; show(false); } });
+  wrap.addEventListener('focusout', (e) => { if (e.relatedTarget && !wrap.contains(e.relatedTarget)) set(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false); });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) set(false); });
 
   for (const b of document.querySelectorAll('.copy')) {
     b.addEventListener('click', async () => {
