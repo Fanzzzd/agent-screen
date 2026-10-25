@@ -35,7 +35,16 @@ if [[ "$config" != release ]]; then
   plutil -replace CFBundleName -string "Agent Screen Dev" "$app/Contents/Info.plist"
   plutil -replace CFBundleDisplayName -string "Agent Screen Dev" "$app/Contents/Info.plist"
 fi
+# AppIcon.icon is the Icon Composer source. macOS 26 draws the icon from
+# Assets.car (Liquid Glass, Dark, Tinted, Clear); older macOS uses AppIcon.icns.
+# After editing the .icon, rebuild Assets.car with:
+#   xcrun actool resources/AppIcon.icon --compile <dir> --platform macosx \
+#     --minimum-deployment-target 15.0 --app-icon AppIcon --output-partial-info-plist <dir>/p.plist
+# and the Settings window's flat copy, assets/app-icon.png, from AppIcon.icns:
+#   iconutil -c iconset resources/AppIcon.icns -o <dir>/i.iconset
+#   cp <dir>/i.iconset/icon_128x128@2x.png assets/app-icon.png
 cp resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp resources/Assets.car "$app/Contents/Resources/Assets.car"
 cp resources/AgentDisplay.png "$app/Contents/Resources/AgentDisplay.png"
 
 identity="${AGENTSCREEN_SIGN_IDENTITY:-}"
