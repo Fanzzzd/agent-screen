@@ -22,8 +22,10 @@ const INSTRUCTIONS: &[&str] = &[
     "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
     "Mark each window with set_disposition so the user knows what to keep.",
-    "If the user takes over, tools fail with a takeover error: call wait_for_control. For logins or captchas,",
-    "call request_help.",
+    "If the user takes over, tools fail with a takeover error: call wait_for_control. For a login or",
+    "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",
+    "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
+    "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
 ];
 
