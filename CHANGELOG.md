@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.17 (2026-10-25)
+
+### Fixes
+
+- Agents ask you to confirm a captcha immediately before they solve it, then fill it when they can. They still open a Help Request if you prefer to do it or they cannot. Confirming the challenge does not approve a new account.
+- create_display and list_windows now return scale, screenshot pixels per display point, so an agent can tell why a window's size in the tools is smaller than the app reports on a large display.
+- The `key` action types `]` and `[` on Macs whose keyboard is JIS. It used to send `[` and `@`, so `cmd+]` went Back instead of Forward.
+
 ## 0.1.16 (2026-10-25)
 
 ### Features
