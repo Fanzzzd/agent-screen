@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.16 (2026-10-25)
+
+### Features
+
+- The menu bar icon's right-click menu is shorter: New Display, Settings… (⌘,) and Quit, plus whatever needs fixing, such as unfinished setup or an AeroSpace workspace on an agent's display. Settings groups the permissions, connecting Claude Code and Codex, Smooth Display Changes, the Agent Display wallpaper and AeroSpace. The wallpaper row shows the picture you chose.
+
+### Fixes
+
+- Agent Screen has a new graphite app icon. On macOS 26 it follows the system's Dark, Tinted and Clear icon styles.
+- A click on the menu bar icon closes Peek when hover opened it. Before, the first click kept it up and only the second closed it.
+
 ## 0.1.15 (2026-10-22)
 
 ### Features
