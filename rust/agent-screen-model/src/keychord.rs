@@ -92,6 +92,96 @@ impl KeyChord {
         }
         Ok(KeyChord::parse(&format!("{}+a", names.join("+")))?.modifiers)
     }
+
+    /// The character a US ANSI keyboard produces for this chord, if any.
+    /// Posted on the CGEvent so apps that read `event.key` (Chromium, Electron)
+    /// see `]` for `cmd+]` instead of a layout-mangled glyph.
+    pub fn character(self) -> Option<char> {
+        let base = match self.code {
+            0 => 'a',
+            1 => 's',
+            2 => 'd',
+            3 => 'f',
+            4 => 'h',
+            5 => 'g',
+            6 => 'z',
+            7 => 'x',
+            8 => 'c',
+            9 => 'v',
+            11 => 'b',
+            12 => 'q',
+            13 => 'w',
+            14 => 'e',
+            15 => 'r',
+            16 => 'y',
+            17 => 't',
+            18 => '1',
+            19 => '2',
+            20 => '3',
+            21 => '4',
+            22 => '6',
+            23 => '5',
+            24 => '=',
+            25 => '9',
+            26 => '7',
+            27 => '-',
+            28 => '8',
+            29 => '0',
+            30 => ']',
+            31 => 'o',
+            32 => 'u',
+            33 => '[',
+            34 => 'i',
+            35 => 'p',
+            37 => 'l',
+            38 => 'j',
+            39 => '\'',
+            40 => 'k',
+            41 => ';',
+            42 => '\\',
+            43 => ',',
+            44 => '/',
+            45 => 'n',
+            46 => 'm',
+            47 => '.',
+            49 => ' ',
+            50 => '`',
+            _ => return None,
+        };
+        Some(if self.modifiers.shift {
+            shift_us(base)
+        } else {
+            base
+        })
+    }
+}
+
+fn shift_us(base: char) -> char {
+    match base {
+        'a'..='z' => base.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        other => other,
+    }
 }
 
 /// A modifier name, with xdotool's left/right variants: how it sets
@@ -288,5 +378,24 @@ mod tests {
             KeyChord::parse("f21"),
             Err(ParseError::UnknownKey("f21".into()))
         );
+    }
+
+    #[test]
+    fn bracket_keys_carry_the_right_character() {
+        assert_eq!(KeyChord::parse("]").unwrap().character(), Some(']'));
+        assert_eq!(
+            KeyChord::parse("bracketright").unwrap().character(),
+            Some(']')
+        );
+        assert_eq!(KeyChord::parse("cmd+]").unwrap().character(), Some(']'));
+        assert_eq!(KeyChord::parse("[").unwrap().character(), Some('['));
+        assert_eq!(
+            KeyChord::parse("bracketleft").unwrap().character(),
+            Some('[')
+        );
+        assert_eq!(KeyChord::parse("cmd+[").unwrap().character(), Some('['));
+        assert_eq!(KeyChord::parse("shift+]").unwrap().character(), Some('}'));
+        assert_eq!(KeyChord::parse("Return").unwrap().character(), None);
+        assert_eq!(KeyChord::parse("Escape").unwrap().character(), None);
     }
 }

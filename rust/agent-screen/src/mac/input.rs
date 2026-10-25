@@ -490,7 +490,7 @@ impl Forwarder {
         self.run(move |w| {
             let _held = w.focus_something(within)?;
             let target = w.focused?;
-            w.key(chord.code, down, flags(chord.modifiers));
+            w.key(chord.code, down, flags(chord.modifiers), chord.character());
             Some(target)
         })
         .await
@@ -500,8 +500,16 @@ impl Forwarder {
     /// Release a held chord in the window it was pressed in, even if keys
     /// go elsewhere now or it left the display.
     pub async fn release_chord(&self, chord: KeyChord, target: WindowTarget) {
-        self.run(move |w| w.key_to(target, chord.code, false, flags(chord.modifiers)))
-            .await;
+        self.run(move |w| {
+            w.key_to(
+                target,
+                chord.code,
+                false,
+                flags(chord.modifiers),
+                chord.character(),
+            )
+        })
+        .await;
     }
 
     /// The user left the Viewer: hand focus back to their window in a
@@ -545,10 +553,11 @@ impl Forwarder {
             let Some(_held) = w.focus_something(within) else {
                 return false;
             };
+            let typed = chord.character();
             for _ in 0..count.max(1) {
-                w.key(chord.code, true, flags(chord.modifiers));
+                w.key(chord.code, true, flags(chord.modifiers), typed);
                 thread::sleep(Duration::from_millis(20));
-                w.key(chord.code, false, flags(chord.modifiers));
+                w.key(chord.code, false, flags(chord.modifiers), typed);
             }
             true
         })
@@ -1067,7 +1076,7 @@ impl Worker {
     fn viewer_key(&mut self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
         // A key-up goes where its key-down went.
         if !down {
-            self.key(code, down, flags);
+            self.key(code, down, flags, None);
             return;
         }
         // Only a window on the Viewer's display: the one focused may have
@@ -1077,23 +1086,37 @@ impl Worker {
             log::debug!("input: key {code} dropped, no window on the display");
             return;
         };
-        self.key(code, down, flags);
+        self.key(code, down, flags, None);
     }
 
     /// A key to the focused window, already picked and focused.
-    fn key(&mut self, code: u16, down: bool, flags: CGEventFlags) {
+    fn key(&mut self, code: u16, down: bool, flags: CGEventFlags, typed: Option<char>) {
         let Some(target) = self.focused else {
             log::debug!("input: key {code} dropped, no window focused");
             return;
         };
-        self.key_to(target, code, down, flags);
+        self.key_to(target, code, down, flags, typed);
     }
 
-    fn key_to(&mut self, target: WindowTarget, code: u16, down: bool, flags: CGEventFlags) {
+    fn key_to(
+        &mut self,
+        target: WindowTarget,
+        code: u16,
+        down: bool,
+        flags: CGEventFlags,
+        typed: Option<char>,
+    ) {
         let Some(event) = CGEvent::new_keyboard_event(self.source.as_deref(), code, down) else {
             return;
         };
         CGEvent::set_flags(Some(&event), flags);
+        if let Some(character) = typed {
+            let mut units = [0u16; 2];
+            let units = character.encode_utf16(&mut units);
+            unsafe {
+                CGEvent::keyboard_set_unicode_string(Some(&event), units.len() as _, units.as_ptr())
+            };
+        }
         deliver(&event, target.pid, true);
     }
 
