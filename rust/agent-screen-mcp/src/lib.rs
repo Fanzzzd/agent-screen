@@ -25,7 +25,7 @@ const INSTRUCTIONS: &[&str] = &[
     "If the user takes over, tools fail with a takeover error: call wait_for_control. For a login or",
     "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",
     "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
-    "do it or you cannot.",
+    "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
 ];
 
