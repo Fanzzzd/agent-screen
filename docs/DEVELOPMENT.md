@@ -3,27 +3,39 @@
 ## Layout
 
 ```
-rust/agent-screen/            the app: GPUI UI, control socket, `AgentScreen mcp`
-rust/agent-screen-mcp/        the MCP server (rmcp), built into the app binary
-rust/agent-screen-model/      domain rules with no OS calls: displays, windows, key chords
-rust/agent-screen-colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
-rust/tests/                   MCP scripts, user-side e2e tests and the demo recorder
-rust/docs/                    Linux and Windows feasibility notes
-docs/                         ADRs and the AGENTS.md convention
+apps/macos/        the app: GPUI UI, control socket, `AgentScreen mcp`
+apps/website/      agentscreen.app, a Cloudflare Worker with static assets
+crates/mcp/        the MCP server (rmcp), built into the app binary
+crates/model/      domain rules with no OS calls: displays, windows, key chords
+crates/colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
+tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
+vendor/            Zed's gpui_apple, patched
+docs/              ADRs, the AGENTS.md convention, Linux and Windows feasibility notes
 ```
+
+The root holds the Cargo workspace (`target/` builds there) and a pnpm workspace run by Turborepo:
+
+```sh
+pnpm install
+pnpm check                  # what CI runs: cargo fmt, clippy and tests
+pnpm dev --filter website   # wrangler dev
+pnpm run deploy --filter website
+```
+
+The promo video and the website films are made in a private repo.
 
 Agent Screen started as a Swift app; the Rust app replaced it ([ADR 0005](adr/0005-rust-app-and-mcp.md)), and the Swift code lives on in the history.
 
 ## Build
 
 ```sh
-rust/agent-screen/scripts/bundle.sh [release]   # build rust/target/Agent Screen Dev.app (release: Agent Screen.app)
-rust/agent-screen/scripts/release.sh            # the DMG and Homebrew cask for a release
+apps/macos/scripts/bundle.sh [release]   # build target/Agent Screen Dev.app (release: Agent Screen.app)
+apps/macos/scripts/release.sh            # the DMG and Homebrew cask for a release
 ```
 
 A debug bundle is a separate app, "Agent Screen Dev" (`app.agentscreen.AgentScreen.dev`), so it runs beside an installed Agent Screen without touching it: its own privacy grants, its own control socket (instance `dev` unless `AGENTSCREEN_INSTANCE` says otherwise), and its own agent registration (`agent-screen-dev`). Its menu bar icon is purple.
 
-The Rust toolchain is pinned in `rust/rust-toolchain.toml`. The bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
+The Rust toolchain is pinned in `rust-toolchain.toml`. The bundle script signs with your first Apple Development identity. macOS ties the Screen Recording and Accessibility grants to that signature, so the grants survive rebuilds. An ad-hoc signature would lose them every build.
 
 Development switches for the Rust app:
 
@@ -40,7 +52,6 @@ Development switches for the Rust app:
 ## Test
 
 ```sh
-cd rust
 cargo test                    # unit tests
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
@@ -57,7 +68,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks the 
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; counts down on your screen first (needs Electron.app and Field.app)
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves, or at the first click on the icon
-AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from rust/tests/fixtures/electron: launch with arguments, clicks, typing, edge resize, late redraws; needs rust/target/e2e/Electron.app
+AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from tests/e2e/fixtures/electron: launch with arguments, clicks, typing, edge resize, late redraws; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e agentshots     # a screenshot is the whole display scaled down; a zoom over all of it works
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays
@@ -73,15 +84,13 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e asksave     # closing a display whose app ask
 AGENTSCREEN_INSTANCE=e2e cargo e2e alerts      # a system alert put on an agent display moves to the main display; it shows on your screen for a moment
 AGENTSCREEN_INSTANCE=e2e cargo e2e ime         # type and key through Apple's pinyin give 你好; your front app, input source and workspace stay; waits for you to be idle 3 s
 AGENTSCREEN_INSTANCE=e2e cargo e2e timing      # how long create_display and launch_app take
-AGENTSCREEN_INSTANCE=e2e cargo e2e pointer     # records the Agent Pointer in the Viewer through moves and quick clicks, frames at 60 fps in rust/target/e2e/pointer; needs ffmpeg
-AGENTSCREEN_INSTANCE=e2e cargo e2e promo       # records the promo video's footage, an agent applying a coupon and filling a checkout in Chrome in the Viewer, then asking for help, to promo/public/agent.mp4; skips when Chrome runs with windows
-AGENTSCREEN_INSTANCE=e2e cargo e2e fleet       # twelve agents at once, each on its own display, each on its own thread: web pages in Chrome, Firefox and Brave (sign-up, checkout, a board, a bug report, orders, settings, a booking), a budget in Numbers, release notes in Pages, the model tests in Terminal, a sum in Calculator; checks each got all its input; records each display to promo/public/fleet-<agent>.mp4; raises the test build's limit on new displays; FLEET_ONLY=a,b runs some; skips when one of the apps runs with windows
+AGENTSCREEN_INSTANCE=e2e cargo e2e pointer     # records the Agent Pointer in the Viewer through moves and quick clicks, frames at 60 fps in target/e2e/pointer; needs ffmpeg
 AGENTSCREEN_INSTANCE=e2e cargo e2e load        # with no displays, then LOAD_DISPLAYS (12) showing Chrome pages, or the Electron fixture's when Chrome is yours: CPU of WindowServer, replayd and Agent Screen, how late a plain AppKit app runs, and every agent typing and taking its screenshot at once; LOAD_SECONDS; AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE (1 or 2) set the test build's display mode
-AGENTSCREEN_INSTANCE=e2e cargo e2e perf        # what agents and you wait for, over ROUNDS rounds: a new and a reused display, launching Calculator, clicks, screenshots, window states, display changes, the test app's main-thread stalls and how late a plain AppKit app runs meanwhile; JSON in rust/target/e2e/perf. Two agents measuring at once wrap each run in `/usr/bin/lockf /tmp/agent-screen-perf.lock env AGENTSCREEN_INSTANCE=NAME cargo e2e perf`, so runs never overlap
+AGENTSCREEN_INSTANCE=e2e cargo e2e perf        # what agents and you wait for, over ROUNDS rounds: a new and a reused display, launching Calculator, clicks, screenshots, window states, display changes, the test app's main-thread stalls and how late a plain AppKit app runs meanwhile; JSON in target/e2e/perf. Two agents measuring at once wrap each run in `/usr/bin/lockf /tmp/agent-screen-perf.lock env AGENTSCREEN_INSTANCE=NAME cargo e2e perf`, so runs never overlap
 AGENTSCREEN_INSTANCE=e2e cargo e2e changecost     # how long every window on the Mac stops drawing when a display is added and removed, by Core Animation and by a main thread; the test build's AGENTSCREEN_NO_PARK, AGENTSCREEN_MAX_PIXELS=fit, AGENTSCREEN_DISPLAY_SCALE and AGENTSCREEN_DISPLAY_HZ compare choices; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekanim       # "+" shows a waiting tile at once and grows it in at the display's rate, the new display made once it has grown; a closed display's tile shrinks out the same way; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekrapid      # three + in a row with Peek opened by a click: Peek ends as one card filling its window; GAP_MS (1500) between them; 4 displays
-AGENTSCREEN_INSTANCE=e2e cargo e2e statusicon     # the menu bar icon's front screen fills while a display is in use and empties once it ends (debugIcon); the pictures come from `rust/agent-screen/assets/status/make.py`; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e statusicon     # the menu bar icon's front screen fills while a display is in use and empties once it ends (debugIcon); the pictures come from `apps/macos/assets/status/make.py`; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange  # a display comes and goes while Peek is open: Peek draws at its new size at once, with no draw GPUI skipped (AGENTSCREEN_LOG_ALL=1 logs GPUI's own errors), keeps drawing, and the new display gets its wallpaper; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e chrome      # Chrome on a throwaway profile while Firefox starts on another display: a click focuses a page's field, typing lands in it, a button runs the page's script
 AGENTSCREEN_INSTANCE=e2e cargo e2e keys        # the key action in Chrome: a page sees ], }, cmd+[ and cmd+] as those characters on any keyboard type, and the brackets land in the field; 1 display
@@ -91,7 +100,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped 
 
 Test scripts count the displays they make in `/tmp/agent-screen-test-displays`. `E2E_DISPLAYS_PER_HOUR=N` makes `createDisplay` fail in the script past N in an hour; there is no limit by default. About 60 displays in 11 minutes froze this Mac once, so compare builds with few rounds rather than loops.
 
-The scripts live in `rust/tests/src/bin`, one file each, with the helpers they share in `rust/tests/src/lib.rs`. `cargo e2e` is an alias in `rust/.cargo/config.toml` for `cargo run --quiet --package agent-screen-tests --bin`. The Swift helpers they call (`probe`, `hid`, `flash`, …) are in `rust/tests/tools` and build into `rust/target/e2e` on first use.
+The scripts live in `tests/e2e/src/bin`, one file each, with the helpers they share in `tests/e2e/src/lib.rs`. `cargo e2e` is an alias in `.cargo/config.toml` for `cargo run --quiet --package agent-screen-tests --bin`. The Swift helpers they call (`probe`, `hid`, `flash`, …) are in `tests/e2e/tools` and build into `target/e2e` on first use.
 
 `robust`, `timing` and `shared` skip when TextEdit is already open, `openpanel` when Preview is, and `browsers` when Safari is, since it may be yours. `robust` and `timing` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
 
@@ -117,15 +126,15 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 
 `AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. A click with `key` 1 takes the keyboard as the user's click does. `E2E_LOG=FILE` keeps the debug app's log.
 
-`cargo e2e run` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `rust/target/e2e`. `probe tap` (`rust/tests/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `rust/tests/fixtures/trackpad.log` was made.
+`cargo e2e run` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
 
-The scripts start `rust/target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
+The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
 Debug builds accept `debugTakeover`, `debugShow`, `debugIcon`, `debugViewerInput`, `debugMoveWindow` (any window, by `pid` and `windowId`, to a global `x`, `y`), `debugPanic` (a panic on the main thread after it replies, which aborts the app), `debugFront` (macOS last named the app with `pid` the front app), `debugUserKey` (a key of the user's went to the app with `pid`, as the global key monitor reports one), `debugAnswerWindow` (answers the display's Window Request with `give` true or false once one is open, as the card's buttons do) and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, icon-hover and card-hover (the pointer entering, `displayId` 1, or leaving, 0), menu, hide, select, viewer, collapse, create, dismiss, dismiss-confirm (the Dismiss sheet's confirm, with the plan as it stands), answer, primary, give, take-back, help, card-open, card-later, card-take-over, card-give, card-keep (a Window Request's Hand Over and Keep), focus, quit, settings (or setup), setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex), wallpaper (the Open panel behind Settings' Wallpaper row) or stage, and a `displayId` where one applies. `debugIcon` returns which picture the menu bar icon shows (`state`: idle, working, asking or setup). `debugViewer` returns the Viewer's frame and its display image in screen points, whether the Viewer is the key window, and whether its display's stream last showed another screen (`misrouted`). For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Install a local build
 
-`rust/agent-screen/scripts/install.sh` builds a release app, quits any running Agent Screen, installs it as `/Applications/Agent Screen.app` and opens it. Debug builds in `rust/target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
+`apps/macos/scripts/install.sh` builds a release app, quits any running Agent Screen, installs it as `/Applications/Agent Screen.app` and opens it. Debug builds in `target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
 
 ## Release
 

@@ -13,16 +13,11 @@ jobs:
     if: github.event_name != 'pull_request' || github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
     # apple-metal needs the macOS 26 SDK.
     runs-on: macos-26
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - uses: actions/checkout@v5
       # rust-toolchain.toml pins the version; rustup installs it on first use.
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -43,7 +38,7 @@ jobs:
           set -euo pipefail
           git cat-file -e "$BEFORE" 2>/dev/null || exit 0
           changed="$(git diff --name-only "$BEFORE" "$AFTER")"
-          app="$(grep -E '^rust/agent-screen(-mcp|-model)?/(src|resources)/' <<<"$changed" || true)"
+          app="$(grep -E '^(apps/macos|crates/(mcp|model))/(src|resources)/' <<<"$changed" || true)"
           notes="$(grep -E '^\.changeset/.+\.md$' <<<"$changed" || true)"
           if [[ -n "$app" && -z "$notes" ]]; then
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."
@@ -57,14 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
       - run: cargo build --release -p agent-screen
-        working-directory: rust
       - uses: actions/upload-artifact@v4
         with:
           name: agent-screen-binary
-          path: rust/target/release/AgentScreen
+          path: target/release/AgentScreen
           if-no-files-found: error
 
   starts-on-macos-15:
