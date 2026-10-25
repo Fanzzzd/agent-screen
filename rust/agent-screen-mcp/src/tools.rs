@@ -157,8 +157,10 @@ pub fn definitions() -> Vec<Value> {
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
                 "coordinate they act at the pointer. cursor_position returns the pointer without a screenshot. zoom",
-                "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Fails with",
-                "a takeover error while the user is operating the display; then call wait_for_control.",
+                "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
+                "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
+                "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
+                "wait_for_control.",
             ],
             object(
                 json!({
@@ -211,8 +213,10 @@ pub fn definitions() -> Vec<Value> {
             "request_help",
             "Ask the user to step in",
             &[
-                "Ask the user to take over your display for something you cannot do, such as a login, a captcha or a",
-                "two-factor code. The user gets a system notification with your reason. The call then waits like",
+                "Ask the user to take over your display for something you cannot do, such as a login or a",
+                "two-factor code. For a captcha, ask them to confirm the current challenge immediately before you",
+                "solve it. After they confirm, solve it when you can. Call this if they prefer to do it or you cannot.",
+                "The user gets a system notification with your reason. The call then waits like",
                 "wait_for_control until the user has stepped in and handed the display back, or until the timeout.",
                 "On a timeout the request stays open; call wait_for_control to keep waiting. If you got past it yourself,",
                 "call request_help with withdraw: true to take the request back.",
