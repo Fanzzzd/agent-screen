@@ -579,7 +579,7 @@ async fn handle_one(
                     json
                 })
                 .collect();
-            Ok(json!({ "windows": list }))
+            Ok(json!({ "windows": list, "scale": scale }))
         }
         "setDisposition" => {
             let id = display(&core, &p, true, cx)?;
@@ -1499,7 +1499,14 @@ async fn create_display(
 }
 
 fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
-    json!({ "displayId": d.id, "width": d.width as i64, "height": d.height as i64, "label": d.label(), "reused": reused })
+    json!({
+        "displayId": d.id,
+        "width": d.width as i64,
+        "height": d.height as i64,
+        "scale": shot_scale((d.width, d.height)),
+        "label": d.label(),
+        "reused": reused
+    })
 }
 
 fn shot_json(shot: &screenshot::Shot) -> Value {

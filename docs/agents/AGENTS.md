@@ -13,7 +13,7 @@ The step is done when `list_windows` shows each window you will touch.
 
 Use either toolset on windows that are on your display:
 
-- **Agent Screen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window.
+- **Agent Screen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window. Coordinates are screenshot pixels. `create_display` returns width and height in points and `scale` (screenshot pixels per point). The default 1280×800 display has scale 1.
 - **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
 
 ## While you work
