@@ -670,37 +670,57 @@ async fn handle_one(
                 reply.extend(frame_window(&core, id, target, asked, cx).await?);
                 return Ok(reply);
             };
+            // A window this display recorded before keeps that record if
+            // it can't be placed: it stays a stray either way.
+            let before = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .and_then(|d| d.records.get(&window.target.window_id).cloned())
+            });
             claim(&core, id, window.target, Origin::Placed, cx);
             // AeroSpace can lay the window out again in the user's
-            // workspace right after a display appears (`windows::kept_on`):
-            // watch it for 1.5 s and move it back each time.
+            // workspace right after a display appears (`windows::kept_on`),
+            // and an app can put it back on its own screen: watch it for
+            // 1.5 s and move it back each time. The answer waits until it
+            // has stayed 0.5 s since the last move (#47).
             let mut outcome = place(window.target, id, cx).await;
             let mut moves = 1;
-            for _ in 0..6 {
-                if outcome.is_err() {
-                    break;
-                }
+            let mut checks = 0;
+            let mut stayed = 0;
+            while outcome.is_ok() && !(checks >= 6 && stayed >= 2) {
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;
-                if !held(window.target, id, cx).await {
-                    if moves == 4 {
-                        outcome = Err("AeroSpace kept putting it back on the user's screen".into());
-                        break;
-                    }
-                    log::info!(
-                        "window {} left display {id} after place_window; placing again",
-                        window.target.window_id
-                    );
-                    moves += 1;
-                    outcome = place(window.target, id, cx).await;
+                checks += 1;
+                if held(window.target, id, cx).await {
+                    stayed += 1;
+                    continue;
                 }
+                if moves == 4 {
+                    outcome = Err(
+                        "it kept going back to the user's screen, moved there by its app or by AeroSpace"
+                            .into(),
+                    );
+                    break;
+                }
+                log::info!(
+                    "window {} left display {id} after place_window; placing again",
+                    window.target.window_id
+                );
+                moves += 1;
+                stayed = 0;
+                outcome = place(window.target, id, cx).await;
             }
             if let Err(e) = outcome {
                 // Still a stray, so the agent can try again.
                 core.update(cx, |c, _| {
                     if let Some(d) = c.displays.get_mut(id) {
-                        d.forget(window.target.window_id);
+                        match before {
+                            Some(record) => {
+                                d.records.insert(window.target.window_id, record);
+                            }
+                            None => d.forget(window.target.window_id),
+                        }
                     }
                 });
                 return Err(ControlError::failed(format!(
@@ -1692,10 +1712,12 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
     .await;
     core.update(cx, |c, _| {
         sync_user_made(c, id);
+        // This display's own records count as its strays once off it.
         let recorded: std::collections::HashSet<u32> = c
             .displays
             .list
             .iter()
+            .filter(|d| d.id != id)
             .flat_map(|d| d.records.keys().copied())
             .collect();
         let Some(display) = c.displays.get(id) else {
