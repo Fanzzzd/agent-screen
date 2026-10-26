@@ -10,6 +10,9 @@ const background = process.env.HARNESS_BACKGROUND === "1";
 const tone = Number(process.env.HARNESS_TONE || 0);
 if (tone) app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 if (background) app.setActivationPolicy("accessory");
+// HARNESS_SINGLE=1 allows one instance, as most packaged Electron apps do:
+// a second one quits at once and the first hears of it (#29).
+if (process.env.HARNESS_SINGLE === "1" && !app.requestSingleInstanceLock()) app.quit();
 
 app.whenReady().then(() => {
   // HARNESS_SIZE ("1700x1100") makes a window larger than the display (#19).

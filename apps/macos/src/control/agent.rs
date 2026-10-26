@@ -868,7 +868,8 @@ async fn handle_one(
             let mut reply = match launched.window {
                 Some(w) => json!({
                     "window": in_shot(w.json(), display_scale(&core, id, cx)),
-                    "wasRunning": launched.was_running
+                    "wasRunning": launched.was_running,
+                    "reason": launched.reason,
                 }),
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
             };
@@ -2507,6 +2508,13 @@ async fn launch_now(
     // another pid matches neither, so the first new one is it after all.
     let asked = start.open_arguments();
     let mut other = None;
+    // A new instance of an app that already runs may be one that allows
+    // only one: it hands its launch to the running instance and quits.
+    let single_instance_risk = fresh && !instances_before.is_empty();
+    let quit = |pid: i32| {
+        let pids = pids.clone();
+        move || !pids().contains(&pid)
+    };
     for _ in 0..200 {
         let now = off(cx, pids.clone()).await;
         pid = if fresh {
@@ -2533,6 +2541,14 @@ async fn launch_now(
         if poll_open(&mut opened) {
             return Err(could_not_open());
         }
+        // `open` came back and no new process runs: an app that allows one
+        // instance passed the launch to the running one and quit (#29).
+        if single_instance_risk
+            && other.is_none()
+            && matches!(opened, Some((true, at)) if at.elapsed() > Duration::from_millis(500))
+        {
+            return already_running(core, id, name, &instances_before, cx).await;
+        }
         cx.background_executor()
             .timer(Duration::from_millis(20))
             .await;
@@ -2543,6 +2559,9 @@ async fn launch_now(
     let pid = pid
         .or(other)
         .ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
+    if single_instance_risk && off(cx, quit(pid)).await {
+        return already_running(core, id, name, &instances_before, cx).await;
+    }
     // Two sessions launching an app at once both see it start; it's the
     // first one's.
     if !was_running {
@@ -2556,7 +2575,7 @@ async fn launch_now(
     // A starting app takes accessibility observers only once it has set
     // up; until then, try again, and move any window that beats it.
     for _ in 0..100 {
-        if catch.is_some() {
+        if catch.is_some() || single_instance_risk && off(cx, quit(pid)).await {
             break;
         }
         catch = catch_from(pid).await;
@@ -2581,6 +2600,14 @@ async fn launch_now(
         started.elapsed().as_millis(),
         catch.is_some()
     );
+    if single_instance_risk && off(cx, quit(pid)).await {
+        core.update(cx, |c, _| {
+            if let Some(d) = c.displays.get_mut(id) {
+                d.started.remove(&pid);
+            }
+        });
+        return already_running(core, id, name, &instances_before, cx).await;
+    }
     // Started hidden: once its windows sit on the display, show them there.
     if !was_running {
         for _ in 0..150 {
@@ -2710,10 +2737,19 @@ async fn launch_now(
     // Takes over from `catch` for a file still opening, with no gap between.
     let mut document_catch = None;
     // Every 25 ms for 6 s: the caught window is answered within a tick.
-    for _ in 0..240 {
+    for tick in 0..240 {
         cx.background_executor()
             .timer(Duration::from_millis(25))
             .await;
+        if single_instance_risk && tick % 8 == 0 && off(cx, quit(pid)).await {
+            drop(catch);
+            core.update(cx, |c, _| {
+                if let Some(d) = c.displays.get_mut(id) {
+                    d.started.remove(&pid);
+                }
+            });
+            return already_running(core, id, name, &instances_before, cx).await;
+        }
         let taken = catch.as_ref().and_then(|c| c.taken());
         let open_failed = poll_open(&mut opened);
         // A window already caught is the app's answer; keep it even if
@@ -2974,6 +3010,50 @@ async fn launch_now(
             "still_opening"
         }),
     })
+}
+
+/// The answer when the instance a launch started quit at once, as an app
+/// that allows one instance does, passing its arguments to the running one
+/// (#29): that instance's window on the display, or an error that says the
+/// app is already running.
+async fn already_running(
+    core: &Entity<Core>,
+    id: DisplayId,
+    name: &str,
+    running: &[i32],
+    cx: &mut AsyncApp,
+) -> Result<Launched, ControlError> {
+    log::info!(
+        "launch: {name} quit at once; it allows one instance, already running as {running:?}"
+    );
+    let on_display: std::collections::HashSet<u32> = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .map(|d| d.records.keys().copied().collect())
+            .unwrap_or_default()
+    });
+    let running = running.to_vec();
+    let theirs = running.clone();
+    let window = off(cx, move || {
+        windows::on_display(id).into_iter().find(|w| {
+            theirs.contains(&w.target.pid)
+                && w.layer == 0
+                && on_display.contains(&w.target.window_id)
+        })
+    })
+    .await;
+    match window {
+        Some(window) => Ok(Launched {
+            window: Some(window),
+            was_running: true,
+            reason: Some("already_running"),
+            pid: None,
+        }),
+        None => Err(ControlError::failed(format!(
+            "{name} is already running (pid {}) and allows only one instance: the new instance quit at once and passed its arguments to the running one, which has no window on this display. Ask the user to quit {name}, then call launch_app again; or call launch_app without arguments and environment to ask the running app for a new window",
+            running.first().copied().unwrap_or_default()
+        ))),
+    }
 }
 
 /// What to open for a `file://` target: its path, unless the app is a
