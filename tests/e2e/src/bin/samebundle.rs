@@ -17,8 +17,8 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use agent_screen_tests::{
-    Control, HandsOff, check, fixture, instance, json, listening, out, run, skip, sleep_ms,
-    start_test_app, stop_test_app, windows_of,
+    Control, check, fixture, instance, json, listening, out, run, skip, sleep_ms, start_test_app,
+    stop_test_app, windows_of,
 };
 use anyhow::{Result, bail};
 
@@ -42,7 +42,6 @@ fn main() -> ExitCode {
             ("AGENTSCREEN_OPEN_DELAY_MS", "1500"),
         ])?;
         // The copy's error box shows on the user's screen.
-        let _sign = HandsOff::start("samebundle")?;
         let result = test(&electron);
         quit_all(&electron);
         stop_test_app();
