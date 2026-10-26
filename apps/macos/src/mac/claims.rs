@@ -56,11 +56,8 @@ pub fn stage_claim(window: u32, display: u32) -> std::io::Result<u64> {
     {
         return Err(std::io::Error::other("stage claims are unavailable"));
     }
-    claims.publish(true, |c| c.claim(window, display), write)?;
-    Ok(claims
-        .desired()
-        .generation_of(window)
-        .expect("published stage claim"))
+    agent_screen_model::stage_gate::publish_fixture_claim(&mut claims, window, display, write)?
+        .ok_or_else(|| std::io::Error::other("stage claim has no generation"))
 }
 
 #[cfg(debug_assertions)]
@@ -166,6 +163,44 @@ mod publication_tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             state.published().to_json()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod stage_publication_tests {
+    use super::*;
+    use agent_screen_model::stage_gate::publish_fixture_claim;
+
+    #[test]
+    fn failed_stage_write_is_absent_from_the_next_real_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-screen-stage-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("claims.json");
+        let mut state = Publication::new();
+        state
+            .publish(false, |c| c.add_display(3), |c| write_at(c, &path))
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(publish_fixture_claim(&mut state, 7, 3, |c| write_at(c, &path)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // The unacknowledged fixture exits. There is no binding to release.
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        state
+            .publish(false, |c| c.claim(8, 3), |c| write_at(c, &path))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"version":1,"displays":[3],"windows":[8]}"#
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1,5 +1,24 @@
 //! Debug-only fixture preparation. Hardware claims do not grant session ownership.
 
+/// A debug grant is failure-atomic. Unlike production desired changes,
+/// an unacknowledged fixture must not leave a claim for a later unrelated
+/// publish. Keep pre-existing desired state intact until this grant commits.
+pub fn publish_fixture_claim<E>(
+    state: &mut crate::claims::Publication,
+    window: u32,
+    display: u32,
+    persist: impl FnOnce(&crate::claims::Claims) -> Result<(), E>,
+) -> Result<Option<u64>, E> {
+    if !state.desired().has_display(display) {
+        return Ok(None);
+    }
+    let mut next = state.clone();
+    next.publish(true, |c| c.claim(window, display), persist)?;
+    let generation = next.desired().generation_of(window);
+    *state = next;
+    Ok(generation)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub pid: i32,
@@ -140,7 +159,7 @@ impl Gate {
 mod tests {
     use super::*;
     use crate::{
-        claims::Claims,
+        claims::{Claims, Publication},
         model::{DisplayRole, Displays, Origin, Owner, WindowTarget},
     };
 
@@ -153,6 +172,133 @@ mod tests {
     }
     fn gate() -> Gate {
         Gate::new("local-test-token".into(), 0)
+    }
+
+    #[test]
+    fn stage_publication_can_retry_and_acknowledge_only_the_successful_grant() {
+        let mut state = Publication::new();
+        state
+            .publish(false, |c| c.add_display(3), |_| Ok::<_, &str>(()))
+            .unwrap();
+        let mut g = gate();
+        assert!(
+            g.claim("local-test-token", 1, identity(), true, || {
+                publish_fixture_claim(&mut state, 7, 3, |_| Err("disk full"))
+                    .map(|generation| generation.unwrap())
+            })
+            .is_err()
+        );
+        assert!(g.binding.is_none());
+        assert!(g.show("local-test-token", 2, identity(), true).is_err());
+        g.claim("local-test-token", 3, identity(), true, || {
+            publish_fixture_claim(&mut state, 7, 3, |_| Ok::<_, &str>(()))
+                .map(|generation| generation.unwrap())
+        })
+        .unwrap();
+        assert_eq!(state.desired().display_of(7), Some(3));
+        assert_eq!(state.published().display_of(7), Some(3));
+        assert_eq!(
+            g.binding.unwrap().1,
+            state.desired().generation_of(7).unwrap()
+        );
+        g.show("local-test-token", 4, identity(), true).unwrap();
+    }
+
+    #[test]
+    fn failed_stage_publication_cannot_escape_after_fixture_exit_or_cancellation() {
+        for cancelled in [false, true] {
+            let mut state = Publication::new();
+            state
+                .publish(false, |c| c.add_display(3), |_| Ok::<_, &str>(()))
+                .unwrap();
+            // Ordinary production desired state must keep its retry semantics.
+            assert!(
+                state
+                    .publish(false, |c| c.add_display(4), |_| Err("disk full"))
+                    .is_err()
+            );
+            {
+                let mut g = gate();
+                assert!(
+                    g.claim("local-test-token", 1, identity(), true, || {
+                        publish_fixture_claim(&mut state, 7, 3, |_| Err("stage write failed"))
+                            .map(|generation| generation.unwrap())
+                    })
+                    .is_err()
+                );
+                assert!(g.binding.is_none());
+                if cancelled {
+                    g.cancel();
+                }
+                let reused_id = Identity {
+                    pid: 99,
+                    started: 200,
+                    ..identity()
+                };
+                assert!(g.show("local-test-token", 2, reused_id, true).is_err());
+            } // The exited/cancelled fixture has no binding for CAS cleanup.
+            let mut file = String::new();
+            state
+                .publish(
+                    false,
+                    |c| c.claim(8, 4),
+                    |c| {
+                        file = c.to_json();
+                        Ok::<_, &str>(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                state.desired().display_of(7),
+                None,
+                "failed stage id must not protect its new user owner"
+            );
+            assert_eq!(state.published().display_of(7), None);
+            assert_eq!(state.published().display_of(8), Some(4));
+            assert_eq!(file, r#"{"version":1,"displays":[3,4],"windows":[8]}"#);
+        }
+    }
+
+    #[test]
+    fn failed_stage_publication_preserves_handover_and_reused_id_claims() {
+        for destination in [4, 3] {
+            let mut state = Publication::new();
+            state
+                .publish(false, |c| c.add_display(3), |_| Ok::<_, &str>(()))
+                .unwrap();
+            state
+                .publish(false, |c| c.add_display(4), |_| Ok::<_, &str>(()))
+                .unwrap();
+            state
+                .publish(false, |c| c.claim(7, 3), |_| Ok::<_, &str>(()))
+                .unwrap();
+            let old_stage = state.desired().generation_of(7).unwrap();
+            // A normal Handover, or a new fixture reusing id 7 on the stage.
+            state
+                .publish(false, |c| c.claim(7, destination), |_| Ok::<_, &str>(()))
+                .unwrap();
+            let current = state.desired().generation_of(7).unwrap();
+            let desired = state.desired().clone();
+            let published = state.published().clone();
+            assert!(
+                publish_fixture_claim(&mut state, 7, 3, |_| Err("stage write failed")).is_err()
+            );
+            assert_eq!(state.desired(), &desired);
+            assert_eq!(state.published(), &published);
+            state
+                .publish(
+                    false,
+                    |c| {
+                        assert!(!c.release_if(7, 3, old_stage));
+                        c.claim(8, 4)
+                    },
+                    |_| Ok::<_, &str>(()),
+                )
+                .unwrap();
+            assert_eq!(state.desired().display_of(7), Some(destination));
+            assert_eq!(state.desired().generation_of(7), Some(current));
+            assert_eq!(state.published().display_of(7), Some(destination));
+        }
     }
 
     #[test]
