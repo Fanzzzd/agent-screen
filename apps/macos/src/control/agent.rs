@@ -1132,6 +1132,16 @@ async fn handle_one(
             crate::mac::input::note_activation(p.int("pid").map(|pid| pid as i32));
             Ok(json!({}))
         }
+        // Test hook: the user brought `pid` to the front, as from the Dock:
+        // the displays the reminder of where its windows are named.
+        "debugActivated" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let task = shell
+                .update(cx, |shell, cx| shell.remind_where(pid, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "reminded": task.await }))
+        }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
         "debugUserKey" if debug_methods() => {

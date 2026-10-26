@@ -707,6 +707,22 @@ impl<H> Displays<H> {
     }
 }
 
+// MARK: Where an app's windows are
+
+/// The Agent Displays to point the user at when they bring an app to the
+/// front: every one its windows are on, when it has a window and none is
+/// on the user's screens (#51). Each entry is the Agent Display a window
+/// is on, or None for a window on the user's screens. Empty otherwise.
+pub fn only_on_agent_displays(windows: &[Option<DisplayId>]) -> Vec<DisplayId> {
+    if windows.is_empty() || windows.iter().any(Option::is_none) {
+        return Vec::new();
+    }
+    let mut ids: Vec<DisplayId> = windows.iter().flatten().copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 // MARK: Dismissal defaults
 
 /// What happens to one window when the user dismisses its display.
@@ -898,6 +914,26 @@ mod tests {
             d.wait_for_control(7),
             Wait::Now(ControlWait::Returned)
         ));
+    }
+
+    #[test]
+    fn an_app_whose_windows_are_all_on_agent_displays_points_there() {
+        assert_eq!(only_on_agent_displays(&[Some(7)]), vec![7]);
+        assert_eq!(
+            only_on_agent_displays(&[Some(9), Some(7), Some(9)]),
+            vec![7, 9],
+            "every display, once each"
+        );
+    }
+
+    #[test]
+    fn an_app_with_a_window_on_the_users_screen_needs_no_pointer() {
+        assert!(only_on_agent_displays(&[Some(7), None]).is_empty());
+        assert!(only_on_agent_displays(&[None]).is_empty());
+        assert!(
+            only_on_agent_displays(&[]).is_empty(),
+            "no window: nothing to point at"
+        );
     }
 
     #[test]

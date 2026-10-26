@@ -109,6 +109,8 @@ pub struct Shell {
     card_shown: Option<(DisplayId, bool)>,
     /// Help Requests the user put off with Later, by display.
     card_later: HashMap<DisplayId, String>,
+    /// When the user was last told where an app's windows are, by pid.
+    reminded: HashMap<i32, Instant>,
 
     peek_shown: bool,
     /// Some display is in use: the icon's front screen is filled.
@@ -306,6 +308,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer: None,
             card: None,
             card_shown: None,
+            reminded: HashMap::new(),
             card_later: HashMap::new(),
             peek_shown: false,
             working: false,
@@ -2741,7 +2744,82 @@ impl Shell {
     /// to show a new window: unless the user just acted on it, their app
     /// goes back to the front (issue #67, ADR 0001). A press in the Viewer
     /// makes Agent Screen the front app first, so the Viewer is left alone.
+    /// The user brought `pid` to the front, and every window it has is on
+    /// Agent Displays, where they can't see it: a notification names those
+    /// displays, and a click on it opens the first in the Viewer (#51). At
+    /// most once a minute for an app. The displays named.
+    pub fn remind_where(&mut self, pid: i32, cx: &mut Context<Self>) -> gpui::Task<Vec<DisplayId>> {
+        const AGAIN: Duration = Duration::from_secs(60);
+        let core = self.core.read(cx);
+        let places: Vec<(DisplayId, Rect, String)> = core
+            .displays
+            .list
+            .iter()
+            .map(|d| (d.id, cg::display_bounds(d.id), d.label()))
+            .collect();
+        // An app the agent started brings itself to the front, as Electron
+        // does: no one to tell, unless the user just used it.
+        let agents = core.displays.list.iter().any(|d| d.started.contains(&pid));
+        let recent = self
+            .reminded
+            .get(&pid)
+            .is_some_and(|at| at.elapsed() < AGAIN);
+        if places.is_empty() || recent || pid == std::process::id() as i32 {
+            return gpui::Task::ready(Vec::new());
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    if agents && !crate::mac::catch::user_acted_recently(pid) {
+                        return None;
+                    }
+                    // Windows on screen: an app keeps windows it never
+                    // shows, which count for nothing here.
+                    let windows: Vec<_> = cg::on_screen_windows()
+                        .into_iter()
+                        .filter(|w| {
+                            w.target.pid == pid
+                                && w.layer == 0
+                                && w.bounds.width > 40.0
+                                && w.bounds.height > 40.0
+                        })
+                        .collect();
+                    let app = windows.first()?.owner_name.clone();
+                    let on: Vec<Option<DisplayId>> = windows
+                        .iter()
+                        .map(|w| {
+                            places
+                                .iter()
+                                .find(|(_, area, _)| area.contains(w.bounds.mid()))
+                                .map(|(id, _, _)| *id)
+                        })
+                        .collect();
+                    let ids = agent_screen_model::model::only_on_agent_displays(&on);
+                    let labels: Vec<String> = ids
+                        .iter()
+                        .filter_map(|id| places.iter().find(|p| p.0 == *id))
+                        .map(|p| p.2.clone())
+                        .collect();
+                    Some((app, ids, labels))
+                })
+                .await;
+            let Some((app, ids, places)) = found.filter(|(_, ids, _)| !ids.is_empty()) else {
+                return Vec::new();
+            };
+            let _ = this.update(cx, |shell, _| {
+                shell.reminded.insert(pid, Instant::now());
+            });
+            log::info!("{app} came to the front with its windows only on displays {ids:?}; telling the user");
+            let first = ids[0];
+            notify::withdraw_where(first);
+            notify::update(first, "", "", Some(Note::Elsewhere { app, places }));
+            ids
+        })
+    }
+
     fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
+        self.remind_where(pid, cx).detach();
         let own = std::process::id() as i32;
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
             return;
