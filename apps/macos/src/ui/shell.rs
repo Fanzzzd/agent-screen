@@ -621,6 +621,7 @@ impl Shell {
             Native::NotificationAuth(auth) => self.notification_auth(auth, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::LauncherTyped => self.launcher_typed(cx),
+            Native::Activated { pid, previous } => self.activated(pid, previous, cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, cx| {
@@ -2730,6 +2731,38 @@ impl Shell {
     /// windows its app makes in the 2 s after it, go to the Viewer's
     /// display as a Handover (ADR 0007). Typed in after a click on their
     /// own screen, the launcher's apps open there.
+    /// An app the agent started made itself the front app, as Electron does
+    /// to show a new window: unless the user just acted on it, their app
+    /// goes back to the front (issue #67, ADR 0001). A press in the Viewer
+    /// makes Agent Screen the front app first, so the Viewer is left alone.
+    fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
+        let own = std::process::id() as i32;
+        let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
+            return;
+        };
+        let agents = self
+            .core
+            .read(cx)
+            .displays
+            .list
+            .iter()
+            .any(|d| d.started.contains(&pid));
+        if !agents || crate::mac::ime::holding(pid) {
+            return;
+        }
+        cx.background_executor()
+            .spawn(async move {
+                if crate::mac::catch::user_acted_recently(pid) {
+                    return;
+                }
+                log::info!(
+                    "pid {pid}, an app on an Agent Display, made itself the front app; giving the front back to pid {previous}"
+                );
+                crate::mac::ime::return_front(previous);
+            })
+            .detach();
+    }
+
     fn launcher_typed(&mut self, cx: &mut Context<Self>) {
         const SPAN: Duration = Duration::from_secs(10);
         let Some(display) = self.viewer.as_ref().and(self.viewer_display) else {

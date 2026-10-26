@@ -5,6 +5,7 @@
       html, body { margin: 0; height: 100%; background: #00ff00; font: 16px -apple-system; }
       .row { margin: 8px; padding: 14px; background: #ffffff; }
       #later { position: fixed; right: 8px; bottom: 8px; width: 120px; height: 30px; }
+      #popup { position: fixed; right: 8px; top: 8px; width: 120px; height: 30px; }
       #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
     </style>
   </head>
@@ -16,6 +17,7 @@
     <div id="page"></div>
     <input id="field" />
     <button id="later">later</button>
+    <button id="popup">open window</button>
     <script>
       // The title reads "harness w=WIDTH down=N up=N click=N dbl=N drag=N
       // nav=N ts=T", T the last click's timestamp in ms.
@@ -34,6 +36,10 @@
         history.pushState({}, "", `#page${seen.nav}`);
         document.getElementById("page").textContent = `page ${seen.nav}`;
         show();
+      });
+      // A second window, as an app's popup or new window (issue #67).
+      document.getElementById("popup").addEventListener("click", () => {
+        window.open("index.html", "_blank", "width=420,height=320");
       });
       addEventListener("dblclick", () => { seen.dbl++; show(); });
       addEventListener("dragstart", () => { seen.drag++; show(); });
