@@ -1,0 +1,75 @@
+name: Bug report
+description: Agent Screen did something wrong or broke.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a vulnerability privately instead, as SECURITY.md says.
+  - type: input
+    id: version
+    attributes:
+      label: Agent Screen version
+      description: '`"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" --version`'
+      placeholder: "0.1.18"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: Apple menu > About This Mac.
+      placeholder: "26.1"
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: MCP client and agent
+      description: The client that ran the tools, and its version.
+      placeholder: Claude Code 2.1, Codex CLI 0.50
+    validations:
+      required: true
+  - type: dropdown
+    id: aerospace
+    attributes:
+      label: Do you run AeroSpace?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you and the agent did, in order. Include the tool calls if you have them.
+      placeholder: |
+        1. Ask the agent to open Calculator on its display.
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead. Paste the error the agent got, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The lines from `~/Library/Logs/Agent Screen/displays.log` around the problem, and any Agent Screen messages from Console.
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Screenshots, a screen recording, or other window managers you run.
