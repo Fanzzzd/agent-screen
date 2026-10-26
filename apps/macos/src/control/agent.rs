@@ -9,8 +9,8 @@ use crate::mac::screenshot::{self, Format};
 use crate::mac::windows::Grab;
 use crate::mac::{app, ax, cg, windows};
 use crate::model::{
-    DEFAULT_SIZE, DisplayId, Disposition, EndReason, Origin, Owner, Rect, Wait, WindowTarget,
-    shot_scale,
+    DEFAULT_SIZE, DisplayId, Disposition, EndReason, FrameRequest, Origin, Owner, Rect, Wait,
+    WindowTarget, frame_in_shot, shot_scale,
 };
 use crate::numbers;
 use base64::Engine;
@@ -613,6 +613,27 @@ async fn handle_one(
             if wanted.is_none() && app.is_none() {
                 return Err(ControlError::invalid("window_id or app is required"));
             }
+            let asked = FrameRequest {
+                x: p.number("x"),
+                y: p.number("y"),
+                width: p.number("width"),
+                height: p.number("height"),
+            };
+            if asked.width.is_some_and(|w| w <= 0.0) || asked.height.is_some_and(|h| h <= 0.0) {
+                return Err(ControlError::invalid("width and height must be above 0"));
+            }
+            // A window already on the display only takes its new frame.
+            if let Some(wanted) = wanted {
+                let here = off(cx, move || {
+                    windows::on_display(id)
+                        .into_iter()
+                        .find(|w| w.target.window_id as i64 == wanted)
+                })
+                .await;
+                if let Some(window) = here {
+                    return frame_window(&core, id, window.target, asked, cx).await;
+                }
+            }
             let matches = |w: &windows::Window| match (wanted, &app) {
                 (Some(wanted), _) => w.target.window_id as i64 == wanted,
                 (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
@@ -643,7 +664,11 @@ async fn handle_one(
                         None => "no window with that id on the user's screen".into(),
                     })
                 })?;
-                return request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await;
+                let target = theirs.target;
+                let mut reply =
+                    request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await?;
+                reply.extend(frame_window(&core, id, target, asked, cx).await?);
+                return Ok(reply);
             };
             claim(&core, id, window.target, Origin::Placed, cx);
             // AeroSpace can lay the window out again in the user's
@@ -682,7 +707,9 @@ async fn handle_one(
                     "could not move the window: {e}"
                 )));
             }
-            Ok(json!({}))
+            frame_window(&core, id, window.target, asked, cx)
+                .await
+                .map(Value::Object)
         }
         "windowState" => {
             let id = display(&core, &p, false, cx)?;
@@ -1749,6 +1776,53 @@ async fn request_window(
     Err(ControlError::failed(format!(
         "the user handed over the {app} window, but it didn't reach the display"
     )))
+}
+
+/// Give a window on display `id` the frame the agent asked for, if any, and
+/// say where it ended up, in screenshot pixels: apps hold to their own
+/// minimum and maximum sizes.
+async fn frame_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    asked: FrameRequest,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let scale = display_scale(core, id, cx);
+    let frame = off(cx, move || {
+        let area = cg::display_bounds(id);
+        let now = || windows::find(target.window_id).map(|w| w.bounds);
+        let closed = || "the window closed".to_string();
+        let mut bounds = now().ok_or_else(closed)?;
+        if !asked.is_empty() {
+            ax::set_frame_asked(target, asked.resolve(bounds, area, scale))
+                .map_err(|e| format!("could not set the window's frame: {e}"))?;
+            // Some apps, Electron's among them, answer a resize a moment
+            // later: wait until two reads agree, up to half a second.
+            let mut last = None;
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(50));
+                let read = now().ok_or_else(closed)?;
+                if last == Some(read) {
+                    break;
+                }
+                last = Some(read);
+            }
+            bounds = last.unwrap_or(bounds);
+        }
+        Ok::<_, String>(frame_in_shot(bounds, area, scale))
+    })
+    .await;
+    let frame = frame.map_err(ControlError::failed)?;
+    Ok(Map::from_iter([(
+        "window".into(),
+        json!({
+            "x": frame.x as i64,
+            "y": frame.y as i64,
+            "width": frame.width as i64,
+            "height": frame.height as i64,
+        }),
+    )]))
 }
 
 /// Record a window Agent Screen put on a display.

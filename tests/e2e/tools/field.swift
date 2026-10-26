@@ -10,6 +10,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
                       styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.title = "Field"
+    // FIELD_MIN_SIZE="width,height" in points, for a test of an app that
+    // holds to a minimum size.
+    if let min = ProcessInfo.processInfo.environment["FIELD_MIN_SIZE"]?.split(separator: ","),
+       min.count == 2, let w = Double(min[0]), let h = Double(min[1]) {
+      window.minSize = NSSize(width: w, height: h)
+    }
     text.font = .systemFont(ofSize: 24)
     text.delegate = self
     window.contentView = text

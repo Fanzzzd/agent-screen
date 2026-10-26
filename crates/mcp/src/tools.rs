@@ -266,12 +266,21 @@ pub fn definitions() -> Vec<Value> {
                 "theirs. Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
                 "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
+                "x, y, width and height set the window's frame, in screenshot pixels from the display's top-left corner,",
+                "as list_windows reports bounds; each one left out keeps the window's own. Pass a window_id already on the",
+                "display to resize or move it there. The frame stays inside the display, and apps hold to their own minimum",
+                "and maximum sizes, so the result's window is the frame the window actually ended with. For a width wider",
+                "than the display, create_display with a larger width first.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
-                    "window_id": { "type": "integer", "description": "The window to move." },
+                    "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, or one already on the display." },
                     "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name, e.g. \"UTM\"." },
+                    "x": { "type": "number", "description": "Left edge in screenshot pixels from the display's left edge." },
+                    "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
+                    "width": { "type": "number", "description": "Width in screenshot pixels." },
+                    "height": { "type": "number", "description": "Height in screenshot pixels." },
                     "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." }
                 }),
                 &["display_id"],
@@ -582,18 +591,28 @@ pub async fn run(
             Ok(Output::Object(Value::Object(reply)))
         }
         "place_window" => {
-            control
-                .call(
-                    "placeWindow",
-                    json!({
-                        "displayId": a.require_int("display_id")?,
-                        "windowId": a.int("window_id")?,
-                        "app": a.string("app")?,
-                        "timeoutSeconds": a.number("timeout_seconds")?,
-                    }),
-                )
-                .await?;
-            Ok(Output::Object(json!({ "placed": true })))
+            let asked = [
+                ("x", a.number("x")?),
+                ("y", a.number("y")?),
+                ("width", a.number("width")?),
+                ("height", a.number("height")?),
+            ];
+            for (key, value) in &asked[2..] {
+                if value.is_some_and(|v| v <= 0.0) {
+                    return Err(ControlError::invalid(format!("{key} must be above 0")));
+                }
+            }
+            let mut params = json!({
+                "displayId": a.require_int("display_id")?,
+                "windowId": a.int("window_id")?,
+                "app": a.string("app")?,
+                "timeoutSeconds": a.number("timeout_seconds")?,
+            });
+            for (key, value) in asked {
+                params[key] = json!(value);
+            }
+            let reply = control.call("placeWindow", params).await?;
+            Ok(Output::Object(place_output(&reply, &asked)))
         }
         "set_disposition" => {
             let disposition = a
@@ -725,6 +744,34 @@ pub async fn run(
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
     }
+}
+
+/// place_window's result: the frame the window ended with, and a note
+/// when it isn't the one asked for.
+fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
+    let mut out = json!({ "placed": true });
+    if reply.get("handedOver") == Some(&Value::Bool(true)) {
+        out["handedOver"] = json!(true);
+    }
+    let Some(window) = reply.get("window") else {
+        return out;
+    };
+    out["window"] = window.clone();
+    let missed: Vec<String> = asked
+        .iter()
+        .filter_map(|(key, value)| {
+            let wanted = (*value)?;
+            let got = window.get(*key)?.as_f64()?;
+            ((got - wanted).abs() > 1.0).then(|| format!("{key} {got} for {wanted}"))
+        })
+        .collect();
+    if !missed.is_empty() {
+        out["note"] = json!(format!(
+            "The window didn't take the whole frame you asked for: {}. Apps keep to their own minimum and maximum sizes, the frame stays inside the display, and macOS keeps windows below the menu bar strip.",
+            missed.join(", ")
+        ));
+    }
+    out
 }
 
 /// What a wait for control came to. `helping`: a Help Request is open, and
@@ -1055,6 +1102,39 @@ fn launch_output(reply: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn place_output_reports_the_frame_and_what_the_app_refused() {
+        let reply = |w: Value| json!({ "window": w }).as_object().unwrap().clone();
+        let asked = [
+            ("x", None),
+            ("y", None),
+            ("width", Some(600.0)),
+            ("height", Some(400.0)),
+        ];
+        let took = place_output(
+            &reply(json!({ "x": 10, "y": 30, "width": 600, "height": 400 })),
+            &asked,
+        );
+        assert_eq!(took["window"]["width"], 600);
+        assert!(took.get("note").is_none());
+        // An app with a 700-wide minimum.
+        let clamped = place_output(
+            &reply(json!({ "x": 10, "y": 30, "width": 700, "height": 400 })),
+            &asked,
+        );
+        let note = clamped["note"].as_str().unwrap();
+        assert!(note.contains("width 700 for 600"), "{note}");
+        assert!(!note.contains("height"), "{note}");
+        // A plain place has no frame to compare.
+        assert_eq!(
+            place_output(
+                &Object::new(),
+                &[("x", None), ("y", None), ("width", None), ("height", None)]
+            ),
+            json!({ "placed": true })
+        );
+    }
 
     #[test]
     fn launch_output_says_why_and_whether_it_ran() {
