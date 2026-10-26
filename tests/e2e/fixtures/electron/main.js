@@ -1,7 +1,7 @@
 // A window for the end-to-end tests: resizable, with draggable rows. The
 // page writes what it saw into the title; if the renderer dies, so does
 // this process's title, so a test can tell.
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, screen } = require("electron");
 
 // As development builds that stay out of the user's way do: an accessory
 // app whose window shows without activating it (issues #17, #20).
@@ -14,7 +14,11 @@ if (background) app.setActivationPolicy("accessory");
 app.whenReady().then(() => {
   // HARNESS_SIZE ("1700x1100") makes a window larger than the display (#19).
   const [width, height] = (process.env.HARNESS_SIZE || "640x480").split("x").map(Number);
-  const win = new BrowserWindow({ width, height, title: "harness", show: false });
+  // HARNESS_DISPLAY (a CG display id) opens the window on that display, as
+  // an app whose saved bounds are there does (#17).
+  const on = screen.getAllDisplays().find((d) => d.id === Number(process.env.HARNESS_DISPLAY));
+  const at = on ? { x: on.bounds.x + 40, y: on.bounds.y + 40 } : {};
+  const win = new BrowserWindow({ width, height, ...at, title: "harness", show: false });
   win.once("ready-to-show", () => (background ? win.showInactive() : win.show()));
   win.webContents.on("render-process-gone", (_event, details) => {
     win.setTitle(`renderer gone: ${details.reason} ${details.exitCode}`);

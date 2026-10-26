@@ -3,7 +3,8 @@
 //! a double click on HTML5-draggable rows act like real ones and leave the
 //! renderer alive (#18, #20); a drag from just outside the window's right
 //! edge resizes it from the first move on (#15); and the screenshot after
-//! each move shows the window at its new width (#16).
+//! each move shows the window at its new width (#16). An accessory app whose
+//! window opens right on the display is listed too (#17).
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
@@ -114,7 +115,37 @@ fn test(electron: &std::path::Path) -> Result<()> {
         quit_harness();
     }
     quit_harness();
+    opened_there(&control, &id, electron)?;
+    quit_harness();
     big(&control, &id, electron)
+}
+
+/// An accessory app whose window opens right on the display, as one whose
+/// saved bounds are there does (#17): it is listed as launched.
+fn opened_there(control: &Control, id: &Value, electron: &std::path::Path) -> Result<()> {
+    let launched = control.call(
+        "launchApp",
+        json!({
+            "displayId": id,
+            "app": electron.to_str(),
+            "arguments": [fixture("electron").to_str()],
+            "environment": { "HARNESS_BACKGROUND": "1", "HARNESS_DISPLAY": id.to_string() },
+        }),
+    );
+    let mut window = None;
+    for _ in 0..50 {
+        window = harness(control, id)?;
+        if window.is_some() {
+            break;
+        }
+        sleep_ms(200);
+    }
+    check(
+        "an accessory app whose window opens on the display is listed as launched",
+        window.as_ref().is_some_and(|w| w["origin"] == "launched"),
+        format!("launched {launched:?}, listed {window:?}"),
+    );
+    Ok(())
 }
 
 /// A window larger than the display is shrunk onto it, and stays there.
