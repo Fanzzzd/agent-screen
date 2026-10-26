@@ -108,6 +108,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e peekrapid      # three + in a row with Peek o
 AGENTSCREEN_INSTANCE=e2e cargo e2e statusicon     # the menu bar icon's front screen fills while a display is in use and empties once it ends (debugIcon); the pictures come from `apps/macos/assets/status/make.py`; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange  # a display comes and goes while Peek is open: Peek draws at its new size at once, with no draw GPUI skipped (AGENTSCREEN_LOG_ALL=1 logs GPUI's own errors), keeps drawing, and the new display gets its wallpaper; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e chrome      # Chrome on a throwaway profile while Firefox starts on another display: a click focuses a page's field, typing lands in it, a button runs the page's script
+AGENTSCREEN_INSTANCE=e2e cargo e2e menuclosed  # a select menu in Chrome on a throwaway profile: typing into the open menu chooses its item; once the menu has closed, as at your click or key anywhere, the next click or key fails and says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e keys        # the key action in Chrome: a page sees ], }, cmd+[ and cmd+] as those characters on any keyboard type, and the brackets land in the field; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an app on its display (440 Hz, from the Electron fixture) and not of a process elsewhere (2000 Hz); mutes your output while it runs; needs Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
