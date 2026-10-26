@@ -4,7 +4,8 @@
 //! leaves restored windows on a display made again after a restart. The
 //! file lists a display from its creation, a window once it is placed
 //! there, and drops the window when the user takes it back. It is gone
-//! once the app quits.
+//! once the app quits. With AeroSpace running, the display gets none of the
+//! user's workspaces or windows (#44).
 //!
 //! Needs Field.app, which `cargo e2e ime` makes.
 //!
@@ -68,6 +69,8 @@ fn test(own: u32) -> Result<()> {
     let control = Control::connect()?;
     let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
     let key = "claims";
+    let monitors = || sh_lenient("aerospace", &["list-monitors"]);
+    let before = monitors();
     let display = control.call(
         "createDisplay",
         json!({ "sessionKey": key, "title": "Claims", "width": 1280, "height": 800 }),
@@ -77,6 +80,27 @@ fn test(own: u32) -> Result<()> {
         "the new display is claimed",
         claims(own).0.contains(&id),
         format!("{:?}", claims(own)),
+    );
+    // With AeroSpace running, it shows none of the user's workspaces on the
+    // display, so none of their windows land there (#44).
+    sleep_ms(1500);
+    let listed = control.call("listWindows", json!({ "displayId": id }))?;
+    let strays: Vec<Value> = listed["windows"]
+        .as_array()
+        .map(|w| {
+            w.iter()
+                .filter(|w| w["origin"] == "unknown")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    check(
+        "AeroSpace leaves the new display out of its monitors, and none of the user's windows are on it",
+        monitors() == before && strays.is_empty(),
+        format!(
+            "monitors before {before:?}, now {:?}; strays {strays:?}",
+            monitors()
+        ),
     );
     control.call(
         "launchApp",
