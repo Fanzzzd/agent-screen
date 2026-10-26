@@ -380,6 +380,8 @@ pub fn definitions() -> Vec<Value> {
                 "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
+                "set_value on a popupbutton, such as a web page's select, chooses the item value names in one call: use it",
+                "rather than opening the menu, which macOS closes at the user's next click or key.",
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
                 "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
                 "Both work in background apps, where Command-C and Command-V do nothing.",

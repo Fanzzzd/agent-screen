@@ -110,6 +110,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange  # a display comes and goes whi
 AGENTSCREEN_INSTANCE=e2e cargo e2e chrome      # Chrome on a throwaway profile while Firefox starts on another display: a click focuses a page's field, typing lands in it, a button runs the page's script
 AGENTSCREEN_INSTANCE=e2e cargo e2e menuclosed  # a select menu in Chrome on a throwaway profile: typing into the open menu chooses its item; once the menu has closed, as at your click or key anywhere, the next click or key fails and says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e typedrops   # typing into address fields in Chrome on a throwaway profile: a busy page and a controlled field get every character; a page that drops fast keys makes the type action fail and say what the field holds; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e selectvalue # act_on_element set_value on a select in Chrome on a throwaway profile chooses the named item in one call and leaves no menu open; a name several items match fails and lists them; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e keys        # the key action in Chrome: a page sees ], }, cmd+[ and cmd+] as those characters on any keyboard type, and the brackets land in the field; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an app on its display (440 Hz, from the Electron fixture) and not of a process elsewhere (2000 Hz); mutes your output while it runs; needs Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running

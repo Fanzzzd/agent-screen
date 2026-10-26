@@ -4,6 +4,7 @@
 
 pub mod alerts;
 pub mod budget;
+pub mod choice;
 pub mod claims;
 pub mod keychord;
 pub mod launch;
