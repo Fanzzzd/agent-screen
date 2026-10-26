@@ -240,3 +240,99 @@ The scratch apps now:
 - start through `launchApp`.
 
 The router now types and replays only while key focus is one of the scratch apps.
+
+## Round 3: survey
+
+The maintainer asked for every feasible approach, from other projects and from lower in macOS, combined into the best design. This round surveyed both, then ran three experiments on the leads nobody had tested here. The probes live in `~/.asq/cfi3`, outside the repo. Every live run used `AGENTSCREEN_INSTANCE=e2e`, one Agent Display under the display lock, and a scratch app (`PopApp3`, one `NSPopUpButton`) started through `launchApp`.
+
+### What other projects do
+
+| Project | Menus | Drags | Zero conflict? |
+| --- | --- | --- | --- |
+| trycua/cua `cua-driver` | Key-focus guard ([#4943](https://github.com/trycua/cua/pull/4943), [#5129](https://github.com/trycua/cua/pull/5129)): when a background menu steals key focus, release the theft by id and keep the menu open; menu bar items through AX while closed ([#5380](https://github.com/trycua/cua/pull/5380)); pop-ups open and close inside one call ([#4740](https://github.com/trycua/cua/pull/4740)) | Per-pid posts; refuses AppKit drag and drop when a drag image appears ([#5309](https://github.com/trycua/cua/pull/5309)); Electron only through CDP from the main process's Node inspector ([#5351](https://github.com/trycua/cua/pull/5351)); opt-in brief foreground drag that moves the real pointer ([#5481](https://github.com/trycua/cua/pull/5481)) | Close. They report 0 lost keys over 12 trials, down from 3 to 65 per trial |
+| OpenAI Codex computer use (`SkyComputerUseService`) | Not published. cua #4943 says Codex handles the theft the same way | Coordinates only | Unknown |
+| Anthropic background computer use (Sept 2026) | Not published | Not published | Unknown |
+| Microsoft UFO² | UIA patterns (`Invoke`, `ExpandCollapse`, `SelectionItem`) | Real cursor; isolation comes from an RDP loopback session ([paper](https://arxiv.org/html/2504.14603v1)) | Only inside the separate session. macOS has no equivalent short of a second user or a VM |
+| Agent S, Hammerspoon, Keyboard Maestro, AltTab | Real cursor, or the app comes to the front for a moment. Hammerspoon's `selectMenuItem` is an AX press | Real cursor | No |
+| yabai scripting addition | Code in Dock.app reorders, moves and layers windows. It has no event posting and no menu code ([payload.m](https://github.com/koekeishiya/yabai/blob/master/src/osax/payload.m)) | none | Not relevant, and it needs SIP partly off |
+| XCUITest, Appium mac2 | Takes the HID devices exclusively ([mac2 README](https://unpkg.com/appium-mac2-driver@0.11.0/README.md)) | Real cursor | No |
+| safaridriver, WebKit automation | `WebAutomationSessionMac` replaces `+[NSEvent pressedMouseButtons]` inside the web process while it delivers synthetic events ([source](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/Automation/mac/WebAutomationSessionMac.mm)) | Same | Yes, but for Safari automation windows only (round 1, candidate 3) |
+
+Nothing found on macOS gives a second key focus, a second cursor or a second button scoreboard in one login session. Karabiner's virtual HID feeds the one cursor. Universal Control and Sidecar move that same cursor.
+
+### Experiment 1: out-of-process menus
+
+On macOS 26.2, `-[NSMenuTrackingSession _setupMenuTracking]` skips `CPSStealKeyFocusReturningID` when `NSMenuIsOutOfProcess()` is true. AppKit turns that on for the os_feature `CoreFoundation/CFPasteboardVerification`, the app default `NSMenuEnableOutOfProcessMenus`, or the pasteboard privacy developer preview. Agent Screen could pass the default as a launch argument.
+
+`PopApp3` launched with `-NSMenuEnableOutOfProcessMenus YES` read the default as set. The AX press opened the menu in a new process, `TrustedUIService (PopApp3)`, which owned the layer-101 window and took key focus 58 ms after the press. Without the argument, PopApp3 itself took key focus 4 ms after the press. So the flag moves the theft to another process and doesn't remove it. Apple also dropped the related `EnablePasteboardPrivacyDeveloperPreview` default in 27.2 beta 2 ([thread](https://mastodon.social/@_inside/116285733111262102)). Dead end.
+
+### Experiment 2: release the menu's theft from outside
+
+Round 1 concluded that no outside process can keep a menu open without the keyboard. That was wrong. Round 1 called `CPSReleaseKeyFocusWithID(cid, id)`, which returns 1010 for every id. The SkyLight function cua uses takes the id alone: `SLPSReleaseKeyFocusWithID(id)`. Theft ids come from one counter for the whole session.
+
+The probe (`guard.m`) does this once the menu holds key focus and its window is on screen:
+
+1. It steals key focus on its own connection and gets id N, then releases N.
+2. It releases N−1, the menu's theft. The return is 0.
+3. Its event tap on the scratch app (`CGEventTapCreateForPid`, event type 21) drops the "lost key focus" notice (field 64 = `0x4000`, field 73 = the probe's pid) that step 1 sends the menu's app.
+
+Results. The user's front app was Dia, and nothing was posted to it.
+
+| Mode | Key focus | The menu | Pick through AX |
+| --- | --- | --- | --- |
+| No release | the menu's app until the menu closed | open | Cherry chosen |
+| Release, no tap | back to Dia 0.6 ms after the release | closed 24 ms later, nothing chosen | none |
+| Release with the tap | back to Dia 0.6 ms after the release | still open 300 ms later | Cherry chosen (`pop action Cherry`); key focus stayed with Dia |
+
+Earlier, without any release, the probe stole key focus for itself with options 0, 0x80, 0x400, 0x800 and 0xc80, and each time the menu was still open 150 ms later.
+
+What this means:
+
+- An agent's menu can stay open and be driven through AX while WindowServer sends the user's keys to the user's app again. The menu holds the keyboard only from the press until its window is on screen. That took 47 to 83 ms here.
+- The menu's app keeps its background event mask. `CGSSetBackgroundEventMask` on another process's connection returns 1000. So while the menu is open, the user's clicks and scrolls still reach the menu's app (round 2), and a click closes the menu.
+- WindowServer also sends the user's front app a "lost key focus" notice. cua drops it with a tap on that app, so its window never resigns key. This round tapped only its own scratch app. Whether Dia's window resigned key and came back wasn't measured: AX reported `AXFocused=0` for Dia's window before, during and after, in both modes.
+- Not tested here: Chromium and Electron `<select>` menus and context menus. cua reports the guard works for a Chrome `<select>` and for `AXShowMenu` context menus.
+
+### Experiment 3: the AX surface of closed controls
+
+On a closed AppKit `NSPopUpButton` and on a pull-down button, AX lists no children, `AXShowMenu` and `AXPress` as the actions, and only `AXFocused` as settable. `NSComboBox` has `AXValue` settable (round 1 uses it). This matches cua #4740. A closed menu can't be read through AX, so a list of items needs an open menu.
+
+### Other candidates, ruled out
+
+| Candidate | Why not |
+| --- | --- |
+| Code injection (`DYLD_INSERT_LIBRARIES`) to stub the theft or `pressedMouseButtons` | The hardened runtime ignores the variable, and nearly every notarized app has it |
+| yabai-style scripting addition in Dock | SIP partly off. It also offers nothing for key focus or button state |
+| testmanagerd and XCTest events | Session-level HID, the real cursor |
+| A DriverKit virtual HID device | The same session cursor and the same key focus |
+| A second session through Screen Sharing, or a VM | Zero conflict, but none of the user's apps or logins (rounds 1 and 2) |
+| Option bits on `CPSStealKeyFocusReturningID` | Every value behaved the same |
+| The Node inspector in Electron's main process (cua #5351) | Covers Electron apps that drop `--remote-debugging-pipe`, but it opens a TCP port any local process can reach, and apps can fuse it off |
+
+### Ranked solutions
+
+**1. In-call menus with the focus guard (all apps, no new channel).** This is the round 2 recommendation with the key hold mostly replaced:
+
+- Choose without opening wherever possible: type-ahead on a focused pop-up or `<select>`, `AXValue` plus `AXConfirm` on a combo box, and AX presses on menu bar items (round 1).
+- Any other menu opens only inside one call. A click that opens a menu gets the items back and the menu closes. A pick reopens the menu and presses the item in the same call (round 2).
+- During that call, Agent Screen taps the target app and drops its own "lost key focus" notice. Once the menu window is on screen, it releases the menu's theft. The user's keys then go to their own app while the menu stays open.
+- For the 50 to 80 ms before the release, the HID tap holds the user's keys and replays them after (round 2's hold). For the whole call, under 0.5 s, it holds the user's button presses, releases and scrolls, since the menu's app keeps its mouse mask. Pointer moves pass.
+- Agent Screen refuses to open a menu while secure input is on.
+
+What the user notices: keys typed in the first 80 ms come through up to 80 ms late. A click or scroll during a menu call comes through up to half a second late. Nothing reaches the agent and nothing is lost. Effort: medium. It is round 2's tap plus a SkyLight release and one per-pid tap.
+
+**2. Add the CDP pipe for Chromium and Electron apps `launch_app` starts** (rounds 1 and 2, in progress). It covers drags, HTML5 drag and drop, `insertText` and `<select>`, with base-select injected so no native menu opens. Nothing else found gives drags in a web page without the session's button state. WebKit apps, the user's own Chrome and apps that filter the flag still get a refusal that explains why.
+
+**3. An isolated mode for full zero conflict:** a second macOS user or a VM, as a separate product mode. Only this covers canvas apps, drags in WebKit and drags between processes. The user signs in again inside it. Effort: weeks.
+
+Solutions 1 and 2 together are the recommendation. Solution 3 is optional and later.
+
+### For the user to decide
+
+- Whether Agent Screen may release another app's key-focus theft through private SkyLight (`SLPSStealKeyFocusReturningID`, `SLPSReleaseKeyFocusWithID`), as cua and reportedly Codex do. For a few microseconds during the id lookup, Agent Screen itself holds key focus. A user key in that instant would reach Agent Screen, which can replay it.
+- Whether Agent Screen may also tap the user's front app to drop the one "lost key focus" notice, as cua does. That stops the user's window from resigning key, but it intercepts an event meant for a process the agent didn't start. Without it, whether the user's window stays key needs a test with the user present.
+- Whether mouse input during a menu call should be held (recommended) or allowed to close the agent's menu.
+
+### Incident during this round
+
+After a reboot, the rebuilt scratch app made its window with `NSWindow(contentRect:…)` at Agent Display coordinates. In six launches the window appeared at (1028, 361) on the user's main screen. The app's own check quit it 21 to 25 ms later each time. The window is now created with `screen:` set to the Agent Display and the app refuses to show it unless its frame is on that display. Every later run placed it at (4388, 2857) on the Agent Display.
