@@ -461,6 +461,12 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                 dismissal::execute(&plans, main_screen_name().as_deref());
             }
             crate::mac::claims::delete();
+            // Every display goes with the process: the log says so, as
+            // each is a display change all apps handle.
+            for id in core.read(cx).virtual_ids() {
+                crate::lifecycle::note("released", id, "quit");
+            }
+            crate::lifecycle::line(&format!("app quit pid={}", std::process::id()));
             async {}
         })
         .detach();

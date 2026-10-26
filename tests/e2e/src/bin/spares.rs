@@ -3,13 +3,17 @@
 //! reconfigures its screens. Each reconfiguration with a virtual display
 //! connected leaves ColorSync answering more requests for minutes.
 //!
+//! The display log records each of these, and the displays the app still
+//! has when it quits.
+//!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e spares
 
 use std::process::ExitCode;
 use std::thread;
 
 use agent_screen_tests::{
-    Control, check, instance, json, probe, run, sleep_ms, start_test_app, stop_test_app,
+    Control, check, cut, instance, json, listening, probe, run, sleep_ms, start_test_app,
+    stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -19,11 +23,42 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     run(|| {
+        let fresh = !listening();
+        let before_start = log_text().len();
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
+        let before = log_text().len();
         let result = test();
         stop_test_app();
-        result
+        let display = result?;
+        let log = log_text();
+        let added = log.get(before..).unwrap_or(&log);
+        let quit = added
+            .lines()
+            .any(|l| l.contains(&format!("released display={display} ")) && l.ends_with(" quit"));
+        check(
+            "the display log records the display released at quit",
+            quit && added.contains("app quit pid="),
+            cut(added, 600),
+        );
+        if fresh {
+            let start = log.get(before_start..before).unwrap_or("");
+            check(
+                "the display log records the app's start",
+                start.contains("app started pid="),
+                cut(start, 400),
+            );
+        }
+        Ok(())
     })
+}
+
+fn log_text() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::fs::read_to_string(format!(
+        "{home}/Library/Logs/Agent Screen/displays-{}.log",
+        instance().unwrap_or_default()
+    ))
+    .unwrap_or_default()
 }
 
 /// Display reconfigurations while `act` runs, counted for `seconds`.
@@ -50,7 +85,8 @@ fn create(control: &Control, key: &str) -> Result<u64> {
         .context("display id")
 }
 
-fn test() -> Result<()> {
+/// The display left on, for the quit to release.
+fn test() -> Result<u64> {
     let control = Control::connect()?;
     let (first, made) = reconfigurations(6, || create(&control, "first"))?;
     println!("     making display {first}: {made} reconfigurations");
@@ -78,10 +114,7 @@ fn test() -> Result<()> {
         shot["width"].as_u64().unwrap_or(0) > 0,
         format!("{}×{}", shot["width"], shot["height"]),
     );
-    let log = std::fs::read_to_string(
-        std::path::PathBuf::from(std::env::var("HOME")?)
-            .join("Library/Logs/Agent Screen/displays-e2e.log"),
-    )?;
+    let log = log_text();
     let mentions = |event: &str| log.contains(&format!("{event} display={first} "));
     check(
         "the display log records it",
@@ -93,5 +126,5 @@ fn test() -> Result<()> {
             mentions("reused")
         ),
     );
-    Ok(())
+    Ok(second)
 }
