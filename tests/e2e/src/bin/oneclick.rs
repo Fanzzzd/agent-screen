@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, HandsOff, check, fixture, hid, instance, json, open_stage, out, probe, run,
-    sh_lenient, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, check, fixture, hid, instance, json, open_stage, out, probe, run, sh_lenient,
+    sign_step, skip, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -115,14 +115,9 @@ fn test(electron: &Path, field: &Path) -> Result<()> {
     let real = std::env::var_os("ONECLICK_INJECT").is_none();
     // A real run: aTrust makes itself the active app as it shows its
     // window, and a click makes the test app active, so keys typed
-    // meanwhile would go to them: a sign counts down first.
-    let mut sign = if real {
-        Some(HandsOff::start("oneclick")?)
-    } else {
-        None
-    };
-    if let Some(sign) = sign.as_mut() {
-        sign.step("1/3 the login app opens and comes to the front / 登录窗口打开");
+    // meanwhile would go to them: the sign `run` counted down first.
+    if real {
+        sign_step("1/3 the login app opens and comes to the front / 登录窗口打开");
     }
     let launched = control.call(
         "launchApp",
@@ -163,8 +158,8 @@ fn test(electron: &Path, field: &Path) -> Result<()> {
     );
 
     // The user's last click goes to another app on the display.
-    if let Some(sign) = sign.as_mut() {
-        sign.step("2/3 a click on another app on the display / 点另一个应用");
+    if real {
+        sign_step("2/3 a click on another app on the display / 点另一个应用");
     }
     let other = control.call(
         "launchApp",
@@ -220,13 +215,10 @@ fn test(electron: &Path, field: &Path) -> Result<()> {
             json!({ "kind": "click", "x": px / dw, "y": py / dh }),
         )?;
     } else {
-        if let Some(sign) = sign.as_mut() {
-            sign.step("3/3 one click on the password field / 点密码框");
-        }
+        sign_step("3/3 one click on the password field / 点密码框");
         let at = (image[0] + px / dw * image[2], image[1] + py / dh * image[3]);
         hid(&["click", &at.0.to_string(), &at.1.to_string()])?;
         sleep_ms(600);
-        drop(sign.take());
     }
     sleep_ms(600);
     check(

@@ -67,7 +67,7 @@ fn main() -> ExitCode {
     run(|| {
         let notes_tool = tool("notes")?;
         if !wait_for_unlocked() {
-            std::process::exit(1);
+            bail!("the screen stayed locked");
         }
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = Control::connect().and_then(|control| {
