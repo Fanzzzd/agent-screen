@@ -66,6 +66,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent 
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks the user for a window the agent didn't launch; Keep refuses, Hand Over places it as a Handover (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
+AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; counts down on your screen first (needs Electron.app and Field.app)
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves, or at the first click on the icon

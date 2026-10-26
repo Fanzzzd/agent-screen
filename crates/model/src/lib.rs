@@ -6,3 +6,4 @@ pub mod claims;
 pub mod keychord;
 pub mod model;
 pub mod numbers;
+pub mod tree;
