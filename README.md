@@ -134,4 +134,4 @@ Agent Screen runs on your Mac and sends nothing anywhere. Screen & System Audio 
 
 ## Develop
 
-To build and install from source instead of the DMG, with Rust installed: `apps/macos/scripts/install.sh`. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for testing and how it works. Agent Screen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+To build and install from source instead of the DMG, with Rust installed: `apps/macos/scripts/install.sh`. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for testing and how it works. To send a change, read [CONTRIBUTING.md](CONTRIBUTING.md). Agent Screen is MIT licensed. Its background input recipe is ported from [trycua/cua](https://github.com/trycua/cua); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -47,7 +47,9 @@ The test scripts are Rust too, in `tests/e2e` (see `docs/DEVELOPMENT.md`, Test).
 ## Delivery
 
 - A change users will notice gets a changeset in `.changeset/`, written for users (see `docs/DEVELOPMENT.md`, Release).
-- Commit messages are plain sentences. knope ignores conventional commits here.
+- Commits follow Conventional Commits: `type(scope): summary`, at most 72 characters, imperative, lowercase after the colon, no period. The body, wrapped at 72, says what changed for users and why. A footer `Fixes #N` closes an issue. Types, scopes and breaking changes are in `CONTRIBUTING.md`, Commits and pull requests.
+- Pull requests merge by squash, and the title becomes the commit's subject, so the title follows the same rule (CI checks it). The body becomes the commit's body.
+- knope ignores commit messages: versions and the changelog come from changesets only.
 - A new test script gets a line in `docs/DEVELOPMENT.md`'s test list. A new or renamed debug surface goes in its `debugShow` list.
 
 ## Agent skills

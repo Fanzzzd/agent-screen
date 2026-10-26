@@ -1,0 +1,24 @@
+# Squash merging makes a pull request's title the commit's subject on
+# main, so the title follows the commit convention in CONTRIBUTING.md.
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    # knope titles the release pull request from knope.toml.
+    if: github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: .github/scripts
+      - name: Does the title follow the commit convention?
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: .github/scripts/check-pr-title.sh "$TITLE"

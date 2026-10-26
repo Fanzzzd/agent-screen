@@ -1,7 +1,7 @@
-# Publishes a release when a "Release Agent Screen x.y.z" pull request from
-# prepare-release.yml merges: checks, signs and builds the DMG, has knope
-# tag v<version> and publish the GitHub release with the CHANGELOG.md
-# section and the DMG, then points the Homebrew tap at it.
+# Publishes a release when a "chore(release): Agent Screen x.y.z" pull
+# request from prepare-release.yml merges: checks, signs and builds the
+# DMG, has knope tag v<version> and publish the GitHub release with the
+# CHANGELOG.md section and the DMG, then points the Homebrew tap at it.
 #
 # Run it from the Actions tab for a dry run: check, sign and build only,
 # with the DMG kept as an artifact. With "publish" ticked it publishes the
