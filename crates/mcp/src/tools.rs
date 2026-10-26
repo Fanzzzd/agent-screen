@@ -380,6 +380,8 @@ pub fn definitions() -> Vec<Value> {
                 "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
+                "Electron apps take a pressed menu item for its keyboard shortcut, which some ignore while a text field has",
+                "focus: click outside the field first.",
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
                 "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
                 "Both work in background apps, where Command-C and Command-V do nothing.",
@@ -779,12 +781,21 @@ pub async fn run(
                     "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"
                 ))]));
             }
+            // A word on how the app took the action, before what it shows.
+            let note = reply.get("note").and_then(Value::as_str).map(String::from);
+            let noted = |output: Result<Output, ControlError>| match (output, &note) {
+                (Ok(Output::Content(mut content)), Some(note)) => {
+                    content.insert(0, text(note.clone()));
+                    Ok(Output::Content(content))
+                }
+                (output, _) => output,
+            };
             // The window state shows the action's result once the display
             // stops changing.
             control
                 .call("settle", json!({ "displayId": display }))
                 .await?;
-            match window_state(control, display, window).await {
+            noted(match window_state(control, display, window).await {
                 // OK, Save or Close took its own window away: that is the
                 // action working, so show what is on the display now.
                 Err(error) if error.code == "not_found" => {
@@ -810,7 +821,7 @@ pub async fn run(
                     "changes" => state.changes(depth),
                     _ => state.content(depth),
                 })),
-            }
+            })
         }
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
