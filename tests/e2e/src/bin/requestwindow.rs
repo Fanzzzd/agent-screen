@@ -1,21 +1,21 @@
 //! An agent asks for a window it didn't start through launch_app: the user
 //! answers a Window Request with one click. An agent opened UTM with
 //! `open -g -a UTM` and couldn't place its window, so it quit the VM to
-//! start UTM again through launch_app. Here Field opens the same way, and
-//! the agent names it by app. The test answers the request as the card's
+//! start UTM again through launch_app. Here a separate stage session starts
+//! Field, and the target session names it by app. The test answers the request as the card's
 //! buttons do: Hand Over once, Not Now once.
 //!
 //! Needs Field.app, which `cargo e2e ime` makes.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow
 //!
-//! Makes 1 display. Field's window shows on your screen until handed over.
+//! Makes 2 displays. Field stays on the stage until handed over.
 
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, allow_on_your_screen, check, instance, json, kill_ours, our_binary, out,
-    run, sh_lenient, sleep_ms, start_test_app, stop_test_app,
+    Control, McpClient, check, field_app, instance, json, open_user_stage, out, run, sh_lenient,
+    sign_step, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -30,8 +30,12 @@ fn main() -> ExitCode {
     }
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
-        let result = test();
-        kill_ours(our_binary("Field"));
+        field_app()?;
+        let mut pid = None;
+        let result = test(&mut pid);
+        if let Some(pid) = pid {
+            sh_lenient("/bin/kill", &["-TERM", &format!("{pid}")]);
+        }
         stop_test_app();
         result
     })
@@ -49,23 +53,30 @@ fn answer_soon(display: u64, give: bool) -> std::thread::JoinHandle<Result<serde
     })
 }
 
-fn test() -> Result<()> {
+fn test(pid: &mut Option<u64>) -> Result<()> {
+    let stage = Control::connect()?;
+    sign_step("opening the user stand-in stage / 打开模拟用户显示器");
+    let stage_id = open_user_stage(&stage)?;
+    let field = stage.call(
+        "launchApp",
+        json!({
+            "displayId": stage_id, "app": out().join("Field.app"),
+            "arguments": [format!("--requestwindow-{}", std::process::id())],
+            "environment": { "FIELD_DISPLAY": stage_id.to_string(), "FIELD_LIFETIME_MS": "60000" }
+        }),
+    )?;
+    *pid = field["pid"].as_u64();
+    pid.context("Field's starting pid")?;
+    let window = field["window"]["windowId"]
+        .as_u64()
+        .context("Field's window")?;
+    sleep_ms(3500);
     let client = McpClient::start(&[])?;
-    kill_ours(our_binary("Field"));
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
-    // Started outside Agent Screen, as by a script.
-    allow_on_your_screen(
-        "Field",
-        u64::MAX,
-        "Field stands in for a window of yours, open on your screen",
-    );
-    sh_lenient(
-        "/usr/bin/open",
-        &["-g", "-n", out().join("Field.app").to_str().unwrap()],
-    );
-    sleep_ms(2500);
-
+    // The target session did not launch Field. It must ask for this
+    // stage window through the same request path as a physical user window.
+    sign_step("declining then granting the Window Request / 拒绝后同意窗口请求");
     // Not Now: the window stays where it is.
     let answer = answer_soon(id, false);
     let refused = client.tool("place_window", json!({ "display_id": id, "app": "Field" }))?;
@@ -84,7 +95,15 @@ fn test() -> Result<()> {
             .iter()
             .any(|w| w.app == "Field"))
     };
-    check("the window stays on the user's screen", !on(&client)?, "");
+    let kept = stage.call("listWindows", json!({ "displayId": stage_id }))?;
+    check(
+        "the declined window stays on the user stand-in stage",
+        !on(&client)?
+            && kept["windows"]
+                .as_array()
+                .is_some_and(|ws| ws.iter().any(|w| w["windowId"] == window)),
+        kept.to_string(),
+    );
 
     // Hand Over: the window comes, as a Handover.
     let answer = answer_soon(id, true);
@@ -103,7 +122,12 @@ fn test() -> Result<()> {
         listed.text().contains("\"handedOver\""),
         listed.text(),
     );
+    if let Some(pid) = pid.take() {
+        sh_lenient("/bin/kill", &["-TERM", &pid.to_string()]);
+    }
+    sleep_ms(300);
     client.call("end_display", json!({ "display_id": id }))?;
+    stage.call("endDisplay", json!({ "displayId": stage_id }))?;
     client.close();
     Ok(())
 }

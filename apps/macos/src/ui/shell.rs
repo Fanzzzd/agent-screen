@@ -1784,7 +1784,13 @@ impl Shell {
             }
             "focus" => self.take_keyboard(),
             "viewer" => self.open_viewer(id, cx),
-            "stage" => self.stage = (id != 0).then_some(id),
+            "stage" => {
+                #[cfg(debug_assertions)]
+                if let Some(old) = self.stage {
+                    cg::clear_user_stage(old);
+                }
+                self.stage = (id != 0).then_some(id);
+            }
             "select" => self.select(id, cx),
             "quit" => self.quit(cx),
             other => return Err(format!("unknown surface {other}")),
@@ -2976,6 +2982,11 @@ impl Shell {
     }
 
     // MARK: Handover
+
+    #[cfg(debug_assertions)]
+    pub fn stage_display(&self) -> Option<DisplayId> {
+        self.stage
+    }
 
     /// Place one of the user's windows onto a display, remembering where
     /// it was so Dismissal can put it back.

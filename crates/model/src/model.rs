@@ -9,6 +9,30 @@ use std::collections::{BTreeMap, HashSet};
 pub type DisplayId = u32;
 pub type WindowId = u32;
 
+/// A display's role in window ownership. A test stage may supply the User
+/// role without changing the hardware's identity or the placement rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayRole {
+    User,
+    Agent,
+    Closet,
+}
+
+impl DisplayRole {
+    pub fn from_hardware(vendor: u32, model: u32, simulated_user: bool) -> Self {
+        match (vendor, model) {
+            (0x4145, 1) => Self::Closet,
+            (0x5353, _) if !simulated_user => Self::Agent,
+            _ => Self::User,
+        }
+    }
+
+    /// Only a user's window can be offered in a Window Request.
+    pub fn accepts_window_request(self) -> bool {
+        self == Self::User
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Rect {
     pub x: f64,
@@ -347,6 +371,21 @@ impl<H> Display<H> {
             && !recorded_elsewhere
             && !self.returned.contains(&target.window_id)
             && !self.user_made.contains(&target.window_id)
+    }
+
+    /// A stray must also be outside every Agent Display. The platform
+    /// supplies the source display's role; ownership still decides whose
+    /// window it is and whether another display already records it.
+    pub fn is_stray_from(
+        &self,
+        target: WindowTarget,
+        recorded_elsewhere: bool,
+        source: DisplayRole,
+        held_on_source: bool,
+    ) -> bool {
+        source != DisplayRole::Closet
+            && !(source == DisplayRole::Agent && held_on_source)
+            && self.is_stray(target, recorded_elsewhere)
     }
 
     /// The Agent Session's verdict on a window. It can change its mind any time.
@@ -1090,6 +1129,50 @@ mod tests {
             default_fate(Some(Origin::HandedOver), Some(Disposition::Close), false),
             Fate::GiveBack
         );
+    }
+
+    #[test]
+    fn a_simulated_user_display_uses_the_users_placement_rules() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        let window = WindowTarget {
+            pid: 5,
+            window_id: 1,
+        };
+        let user = DisplayRole::from_hardware(0x610, 1, false);
+        let agent = DisplayRole::from_hardware(0x5353, 1, false);
+        let stage = DisplayRole::from_hardware(0x5353, 1, true);
+        for source in [user, stage] {
+            assert!(source.accepts_window_request());
+            assert!(
+                !display.is_stray_from(window, false, source, true),
+                "not our app"
+            );
+        }
+        display.started.insert(window.pid);
+        for source in [user, stage] {
+            assert!(display.is_stray_from(window, false, source, true));
+            assert!(
+                !display.is_stray_from(window, true, source, true),
+                "recorded elsewhere"
+            );
+        }
+        assert!(
+            display.is_stray_from(window, false, agent, false),
+            "AeroSpace still files the window in the user's workspace, so geometry alone is not a placement"
+        );
+        assert!(!agent.accepts_window_request());
+        assert!(!display.is_stray_from(window, false, agent, true));
+        display.give_back(window);
+        for source in [user, stage] {
+            assert!(
+                !display.is_stray_from(window, false, source, true),
+                "taken back"
+            );
+        }
+        let closet = DisplayRole::from_hardware(0x4145, 1, true);
+        assert!(!closet.accepts_window_request());
+        assert!(!display.is_stray_from(window, false, closet, true));
     }
 
     #[test]
