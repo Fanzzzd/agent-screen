@@ -99,6 +99,25 @@ pub fn flags(m: Modifiers) -> CGEventFlags {
     flags
 }
 
+fn focus_popup(
+    stopped: &std::sync::atomic::AtomicBool,
+    allowed: impl FnOnce() -> bool,
+    focus: impl FnOnce(),
+    focus_control: impl FnOnce() -> bool,
+) -> bool {
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) || !allowed() {
+        return false;
+    }
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    focus();
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    focus_control()
+}
+
 fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
     let until = Instant::now() + Duration::from_millis(1200);
     while Instant::now() < until {
@@ -119,6 +138,63 @@ mod popup_wait_tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    #[test]
+    fn takeover_during_target_check_prevents_focus() {
+        let stopped = AtomicBool::new(false);
+        let focused = std::cell::Cell::new(false);
+        let control = std::cell::Cell::new(false);
+        let result = focus_popup(
+            &stopped,
+            || {
+                stopped.store(true, Ordering::Relaxed);
+                true
+            },
+            || focused.set(true),
+            || {
+                control.set(true);
+                true
+            },
+        );
+        assert!(!result);
+        assert!(!focused.get());
+        assert!(!control.get());
+    }
+
+    #[test]
+    fn takeover_during_handshake_prevents_control_focus() {
+        let stopped = AtomicBool::new(false);
+        let control = std::cell::Cell::new(false);
+        let result = focus_popup(
+            &stopped,
+            || true,
+            || stopped.store(true, Ordering::Relaxed),
+            || {
+                control.set(true);
+                true
+            },
+        );
+        assert!(!result);
+        assert!(!control.get());
+    }
+
+    #[test]
+    fn an_uncancelled_popup_can_focus() {
+        let stopped = AtomicBool::new(false);
+        let focused = std::cell::Cell::new(false);
+        let control = std::cell::Cell::new(false);
+        assert!(focus_popup(
+            &stopped,
+            || true,
+            || focused.set(true),
+            || {
+                control.set(true);
+                true
+            }
+        ));
+        assert!(focused.get());
+        assert!(control.get());
+    }
+
     #[test]
     fn takeover_interrupts_the_typeahead_wait() {
         let stopped = Arc::new(AtomicBool::new(false));
@@ -525,14 +601,17 @@ impl Forwarder {
             {
                 return false;
             }
-            if !popup_keys_allowed(target) {
-                return false;
-            }
-            w.focus_waking(target, false);
-            if !super::ax::set_attribute(
-                element.get(),
-                "AXFocused",
-                objc2_core_foundation::CFBoolean::new(true),
+            if !focus_popup(
+                &stopped,
+                || popup_keys_allowed(target),
+                || w.focus_waking(target, false),
+                || {
+                    super::ax::set_attribute(
+                        element.get(),
+                        "AXFocused",
+                        objc2_core_foundation::CFBoolean::new(true),
+                    )
+                },
             ) {
                 return false;
             }
