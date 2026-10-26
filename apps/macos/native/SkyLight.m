@@ -1,4 +1,5 @@
 #import "AgentScreenPrivate.h"
+#import <AppKit/AppKit.h>
 
 #import <dlfcn.h>
 #import <objc/message.h>
@@ -169,4 +170,50 @@ bool SSMakeSelfFront(CGWindowID windowID) {
     if (setFront == NULL || SS.getProcessForPID == NULL || SS.getProcessForPID(getpid(), &own) != 0) return false;
     // 0x200: user generated.
     return setFront(&own, windowID, 0x200) == 0;
+}
+
+// The menu guard runs in a helper process so an app panic or a closed
+// control connection does not destroy the helper's retained input queue.
+static void *SSMenuSymbol(const char *name) {
+    SSResolve();
+    return dlsym(RTLD_DEFAULT, name);
+}
+
+bool SSMenuFocusAvailable(void) {
+    SSResolve();
+    return SS.mainConnectionID && SS.setIntegerField && SS.setWindowLocation && SSMenuSymbol("CPSGetKeyFocusProcess") &&
+        SSMenuSymbol("GetProcessPID") && SSMenuSymbol("SLPSStealKeyFocusReturningID") &&
+        SSMenuSymbol("SLPSReleaseKeyFocusWithID");
+}
+
+int SSMenuKeyPid(void) {
+    typedef int32_t (*KeyFn)(SSProcessSerialNumber *, uint8_t *);
+    typedef int32_t (*PidFn)(const SSProcessSerialNumber *, pid_t *);
+    KeyFn key = (KeyFn)SSMenuSymbol("CPSGetKeyFocusProcess");
+    PidFn getPID = (PidFn)SSMenuSymbol("GetProcessPID");
+    SSProcessSerialNumber psn = {0, 0};
+    uint8_t flag = 0;
+    pid_t pid = -1;
+    if (!key || !getPID || key(&psn, &flag) || getPID(&psn, &pid)) return -1;
+    return pid;
+}
+
+int32_t SSMenuStealFocus(int32_t *outID) {
+    typedef int32_t (*StealFn)(uint32_t, uint32_t, int32_t *);
+    StealFn steal = (StealFn)SSMenuSymbol("SLPSStealKeyFocusReturningID");
+    if (!steal || !SS.mainConnectionID) return -1;
+    return steal(SS.mainConnectionID(), 0xc80, outID);
+}
+
+int32_t SSMenuReleaseFocusID(int32_t focusID) {
+    typedef int32_t (*ReleaseFn)(int32_t);
+    ReleaseFn release = (ReleaseFn)SSMenuSymbol("SLPSReleaseKeyFocusWithID");
+    return release ? release(focusID) : -1;
+}
+
+bool SSMenuPrepareHelper(void) {
+    // Register the helper's own AppKit/WindowServer connection, as the
+    // round-three probe does. Never activate it or create a window.
+    [NSApplication sharedApplication];
+    return [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 }

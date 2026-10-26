@@ -440,6 +440,38 @@ pub fn pid_of(element: &AXUIElement) -> Option<i32> {
     (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
 }
 
+/// A menu owned by a known native menu window. Calls have a short timeout
+/// so cancellation work is not trapped behind an unresponsive AX endpoint.
+pub fn menu_for_window(pid: i32, bounds: Rect) -> Option<Element> {
+    let app = application(pid);
+    unsafe {
+        app.set_messaging_timeout(0.025);
+    }
+    let point = (
+        bounds.x + bounds.width / 2.0,
+        bounds.y + (bounds.height / 2.0).min(12.0),
+    );
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        app.copy_element_at_position(point.0 as f32, point.1 as f32, NonNull::from(&mut raw))
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    for _ in 0..5 {
+        unsafe {
+            element.set_messaging_timeout(0.025);
+        }
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXMenu") {
+            return Some(element);
+        }
+        element = element_attribute(&element, "AXParent")?;
+    }
+    None
+}
+
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window: near its top, with no control,
 /// text or web content there. Toolkits name that background differently,

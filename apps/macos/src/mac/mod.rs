@@ -14,6 +14,7 @@ pub mod display;
 pub mod hang;
 pub mod ime;
 pub mod input;
+pub mod menu_guard;
 pub mod menubar;
 pub mod mux;
 pub mod native;

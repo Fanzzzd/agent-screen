@@ -39,7 +39,8 @@ pub struct ReplayId(u64);
 pub struct Queue<T> {
     phase: Phase,
     held: VecDeque<(Event, T)>,
-    pending: VecDeque<ReplayId>,
+    pending: VecDeque<(ReplayId, T)>,
+    failure: Option<CancelReason>,
     next: u64,
 }
 
@@ -49,6 +50,7 @@ impl<T> Default for Queue<T> {
             phase: Phase::Opening,
             held: VecDeque::new(),
             pending: VecDeque::new(),
+            failure: None,
             next: 0,
         }
     }
@@ -62,6 +64,9 @@ impl<T> Queue<T> {
     pub fn should_hold(&self, event: Event, origin: Origin) -> bool {
         if origin == Origin::Posted || matches!(event, Event::PointerMove | Event::Other) {
             return false;
+        }
+        if self.failure.is_some() {
+            return true;
         }
         match self.phase {
             Phase::Opening | Phase::Draining => true,
@@ -104,32 +109,42 @@ impl<T> Queue<T> {
         true
     }
 
+    /// Inspect without transferring custody. The adapter can refuse an
+    /// unsafe focus transition before it creates an in-flight replay.
+    pub fn replay_front(&self) -> Option<&T> {
+        if self.failure.is_some() {
+            return None;
+        }
+        let (kind, payload) = self.held.front()?;
+        match self.phase {
+            Phase::Opening | Phase::Done => None,
+            Phase::FocusReleased if matches!(kind, Event::Button | Event::Scroll) => None,
+            _ => Some(payload),
+        }
+    }
+
     /// Keys may replay once focus returns, until a mouse event precedes them.
     /// Mouse events wait for menu closure. All held event kinds share this FIFO.
-    pub fn next_replay(&mut self) -> Option<(ReplayId, T)> {
-        match self.phase {
-            Phase::Opening | Phase::Done => return None,
-            Phase::FocusReleased
-                if self
-                    .held
-                    .front()
-                    .is_some_and(|(e, _)| matches!(e, Event::Button | Event::Scroll)) =>
-            {
-                return None;
-            }
-            _ => {}
-        }
-        let (_, payload) = self.held.pop_front()?;
+    pub fn next_replay(&mut self) -> Option<(ReplayId, T)>
+    where
+        T: Clone,
+    {
+        self.replay_front()?;
+        // Retain the original until acknowledgement. Allocate and clone
+        // before removing it, so a panic cannot orphan a consumed event.
+        self.pending.reserve(1);
+        let copy = self.held.front()?.1.clone();
+        let (_, original) = self.held.pop_front()?;
         let id = ReplayId(self.next);
         self.next = self.next.wrapping_add(1);
-        self.pending.push_back(id);
-        Some((id, payload))
+        self.pending.push_back((id, original));
+        Some((id, copy))
     }
 
     /// A replay marker must also be authenticated by the adapter's poster
     /// pid and a per-transaction nonce. Reject out-of-order acknowledgements.
     pub fn acknowledge(&mut self, id: ReplayId) -> bool {
-        if self.pending.front() != Some(&id) {
+        if self.pending.front().map(|(pending, _)| *pending) != Some(id) {
             return false;
         }
         self.pending.pop_front();
@@ -137,8 +152,57 @@ impl<T> Queue<T> {
         true
     }
 
+    /// The guard keeps custody while cleanup is incomplete. Posting a copy
+    /// does not transfer custody to the OS until an authenticated ACK arrives.
+    pub fn retained(&self) -> usize {
+        self.held.len() + self.pending.len()
+    }
+
+    /// Pending originals precede held originals in the recovery ledger.
+    pub fn retained_events(&self) -> impl Iterator<Item = &T> {
+        self.pending
+            .iter()
+            .map(|(_, value)| value)
+            .chain(self.held.iter().map(|(_, value)| value))
+    }
+
+    pub fn pending(&self) -> impl Iterator<Item = (ReplayId, &T)> {
+        self.pending.iter().map(|(id, value)| (*id, value))
+    }
+
+    pub fn fail(&mut self, reason: CancelReason) {
+        if self.phase != Phase::Done && self.failure.is_none() {
+            self.failure = Some(reason);
+        }
+    }
+
+    pub fn failure(&self) -> Option<CancelReason> {
+        self.failure
+    }
+
+    /// A failure never authorizes a timeout-based flush. The adapter must
+    /// independently verify menu closure, focus return and restored taps.
+    pub fn resume_after_failure(
+        &mut self,
+        menu_closed: bool,
+        focus_returned: bool,
+        secure_input: bool,
+        taps_ready: bool,
+    ) -> bool {
+        if self.failure.is_none() || !menu_closed || !focus_returned || secure_input || !taps_ready
+        {
+            return false;
+        }
+        self.failure = None;
+        self.confirm_closed(true, true)
+    }
+
     fn complete_if_drained(&mut self) {
-        if self.phase == Phase::Draining && self.held.is_empty() && self.pending.is_empty() {
+        if self.failure.is_none()
+            && self.phase == Phase::Draining
+            && self.held.is_empty()
+            && self.pending.is_empty()
+        {
             self.phase = Phase::Done;
         }
     }
@@ -149,6 +213,8 @@ pub enum CancelReason {
     SecureInput,
     TapUnavailable,
     Deadline,
+    OwnerGone,
+    Panic,
 }
 
 /// Reserve time for cancellation. Expiry means close first, never discard
@@ -174,6 +240,63 @@ pub fn must_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn posted_payload_remains_owned_until_acknowledgement() {
+        let mut q = Queue::default();
+        let _ = q.offer(Event::Key, Origin::Hardware, String::from("key"));
+        q.focus_released();
+        let (id, copy) = q.next_replay().unwrap();
+        drop(copy);
+        assert_eq!(q.retained(), 1);
+        assert_eq!(q.pending().next().unwrap().1, "key");
+        assert!(q.acknowledge(id));
+        assert_eq!(q.retained(), 0);
+    }
+
+    #[test]
+    fn failures_suspend_replay_without_losing_the_queue() {
+        for reason in [
+            CancelReason::SecureInput,
+            CancelReason::TapUnavailable,
+            CancelReason::Deadline,
+            CancelReason::OwnerGone,
+            CancelReason::Panic,
+        ] {
+            let mut q = Queue::default();
+            let _ = q.offer(Event::Key, Origin::Hardware, 1);
+            q.focus_released();
+            q.fail(reason);
+            assert_eq!(q.next_replay(), None);
+            assert_eq!(q.retained(), 1);
+            assert!(!q.resume_after_failure(false, true, false, true));
+            assert!(!q.resume_after_failure(true, false, false, true));
+            assert!(!q.resume_after_failure(true, true, true, true));
+            assert!(!q.resume_after_failure(true, true, false, false));
+            assert_eq!(q.retained(), 1);
+            assert!(q.resume_after_failure(true, true, false, true));
+            let (id, value) = q.next_replay().unwrap();
+            assert_eq!(value, 1);
+            assert!(q.acknowledge(id));
+            assert_eq!(q.phase(), Phase::Done);
+        }
+    }
+
+    #[test]
+    fn a_clone_panic_does_not_remove_the_original() {
+        struct Fault;
+        impl Clone for Fault {
+            fn clone(&self) -> Self {
+                panic!("clone fault")
+            }
+        }
+        let mut q = Queue::default();
+        let _ = q.offer(Event::Key, Origin::Hardware, Fault);
+        q.focus_released();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.next_replay()));
+        assert!(result.is_err());
+        assert_eq!(q.retained(), 1);
+    }
 
     #[test]
     fn only_hardware_keys_modifiers_buttons_and_scrolls_wait() {

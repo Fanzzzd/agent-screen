@@ -306,6 +306,7 @@ pub fn probe(args: &[&str]) -> Result<String> {
 /// screen. Their sign asks the user to keep their hands off; the others'
 /// only says a test runs.
 const HANDS_OFF: &[&str] = &[
+    "nativeguard",
     "alerts",
     "appwhere",
     "browsers",
