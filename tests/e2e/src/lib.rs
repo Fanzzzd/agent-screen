@@ -334,6 +334,7 @@ const HANDS_OFF: &[&str] = &[
     "timing",
     "viewerheader",
     "typedrops",
+    "webdrag",
 ];
 
 /// The sign `run` shows on the main screen (`tools/overlay.swift`): a count

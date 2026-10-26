@@ -10,6 +10,7 @@ pub mod catch;
 pub mod cg;
 pub mod claims;
 pub mod colorsync;
+pub mod devtools;
 pub mod display;
 pub mod hang;
 pub mod ime;

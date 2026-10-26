@@ -35,7 +35,7 @@ pub fn running_pid(bundle: &Path) -> Option<i32> {
 }
 
 /// The bundle's main executable, as its Info.plist names it.
-fn main_executable(bundle: &Path) -> Option<PathBuf> {
+pub fn main_executable(bundle: &Path) -> Option<PathBuf> {
     let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
     let name = info_value(&plist, "CFBundleExecutable")?;
     let path = bundle.join("Contents/MacOS").join(name);

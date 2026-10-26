@@ -324,6 +324,43 @@ fn web_area(window: &AXUIElement) -> Option<Element> {
     None
 }
 
+/// The frame of the web page at a global point of a window: the outermost
+/// web area there, whose frame is the page's viewport, an iframe's own web
+/// area inside it left aside. None where the point is on anything else,
+/// such as a toolbar, a native control or a title bar, and where the app
+/// publishes no page tree at all. Chromium and WebKit both report web
+/// content as AXWebArea.
+pub fn web_area_at(target: WindowTarget, at: (f64, f64)) -> Option<Rect> {
+    let window = window_element(target)?;
+    ask_for_web_tree(target.pid, &window);
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(target.pid).copy_element_at_position(
+            at.0 as f32,
+            at.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    let mut outermost = None;
+    for _ in 0..200 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXWebArea") => outermost = Some(element.clone()),
+            Some("AXWindow" | "AXSheet" | "AXApplication") => break,
+            _ => {}
+        }
+        match element_attribute(&element, "AXParent") {
+            Some(parent) => element = parent,
+            None => break,
+        }
+    }
+    frame(&outermost?.clone())
+}
+
 /// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates
 /// window moves and resizes, slowly. Turn it off around a move.
 fn with_moves_direct<T>(window: &AXUIElement, f: impl FnOnce() -> T) -> T {
