@@ -36,7 +36,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 - **Peek.** Hover the menu bar icon to see every agent's screen live.
 - **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.
 - **Help Request.** An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.
-- **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. For pop-up buttons and HTML selects, `set_value` types the exact full item title into the closed control and checks the choice. No menu opens. Combo boxes set and confirm their value in one call.
+- **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. For pop-up buttons and HTML selects, `set_value` types the exact full item title into the closed control and checks the choice. No menu opens. Combo boxes set and confirm their value in one call. Closed-control selection includes a 1.2 s search-expiry wait; recent Chromium calls took about 1.3 s in total. This path does not intercept your input. A runtime focus guard for menus that must open is proposed and is not enabled.
 - **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.
 
 |                                      | Agent Screen            | Built-in computer use | A virtual machine     |

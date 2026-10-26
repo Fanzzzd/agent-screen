@@ -139,6 +139,34 @@ mod popup_wait_tests {
         atomic::{AtomicBool, Ordering},
     };
     #[test]
+    fn an_initially_cancelled_popup_runs_no_callbacks() {
+        let stopped = AtomicBool::new(true);
+        assert!(!focus_popup(
+            &stopped,
+            || panic!("target check ran"),
+            || panic!("window focus ran"),
+            || panic!("control focus ran")
+        ));
+    }
+
+    #[test]
+    fn a_rejected_target_runs_no_focus_callbacks() {
+        let stopped = AtomicBool::new(false);
+        assert!(!focus_popup(
+            &stopped,
+            || false,
+            || panic!("window focus ran"),
+            || panic!("control focus ran")
+        ));
+    }
+
+    #[test]
+    fn a_control_focus_failure_is_reported() {
+        let stopped = AtomicBool::new(false);
+        assert!(!focus_popup(&stopped, || true, || {}, || false));
+    }
+
+    #[test]
     fn takeover_during_target_check_prevents_focus() {
         let stopped = AtomicBool::new(false);
         let focused = std::cell::Cell::new(false);
@@ -1534,7 +1562,7 @@ impl Worker {
 
 /// Fields WindowServer and Chromium use to route an event to a window that
 /// is neither key nor under the real cursor.
-fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
+pub(super) fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
     let window = target.window_id as i64;
     // The point in the window, from its top-left corner. AppKit takes it as
     // is for an event with a time, where it would work it out for one

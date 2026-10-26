@@ -1,24 +1,28 @@
 ---
-status: accepted
+status: proposed
 ---
 
-# Agent menus close within one call and protect the user's input
+# Proposed in-call menu focus guard
 
-An AppKit menu steals the session's key focus and captures clicks and scrolls outside its window. A menu left open between tool calls can take the user's typing or close before the agent chooses. The approved design keeps menus inside one call and protects input while they track. It uses private SkyLight calls and a tap on the user's front app because per-process event posting alone cannot prevent a menu's session-wide capture.
+An AppKit menu steals the session's key focus and captures clicks and scrolls outside its window. A menu left open between tool calls can take the user's typing or close before the agent chooses. The user approved the design direction. The runtime below remains Proposed until its bounds and recovery paths have been validated. The proposed runtime would keep menus inside one call and protect input while they track. It uses private SkyLight calls and a tap on the user's front app because per-process event posting alone cannot prevent a menu's session-wide capture.
 
-**Implementation status.** Closed pop-up type-ahead and combo confirmation are implemented separately. `crates/model/src/menu_guard.rs` defines queue ordering and cancellation rules. The runtime focus guard, menu snapshots and reopen-and-pick are not implemented yet. This ADR records their requirements, not a claim that current menu calls meet them.
+**Implementation status.** Closed pop-up type-ahead and combo confirmation are implemented separately. `crates/model/src/menu_guard.rs` defines queue ordering and cancellation rules. An isolated helper prototype is available only in debug e2e mode with an owned stand-in and an explicit live-validation flag. Ordinary tool calls do not use it. Its native validation session stopped before a helper started because the fixtures published unrealized window IDs. Runtime interception, menu snapshots and reopen-and-pick remain Proposed. This ADR does not claim current menu calls meet those requirements.
 
 ## Avoid opening a menu
 
 For a pop-up button or HTML select, focus the closed control through AX, type the full item title through per-process events, and verify its value. Type-ahead cannot distinguish equal titles and may change the choice before verification fails. Let an earlier search expire before typing another title. For a combo box, set `AXValue` and perform `AXConfirm`. Menu bar items keep the existing AX press path unless the Electron mouse-event path is verified.
 
-## One call owns an open menu
+## Measured closed-control duration
 
-A click that opens any other menu returns a numbered item list and closes the menu before returning. A later item action reopens it and chooses within that same call. Store the opener, owning window and item title path. Revalidate all of them when reopening. Fail rather than press a different or ambiguous item when the menu changes. Pull-downs, context menus and menus opened by an ordinary click follow the same rule.
+Closed-control selection currently waits 1.2 s for an earlier type-ahead search to expire. The last Chromium checks took 1303 ms and 1312 ms after startup. These are total tool-call durations, not input-interception durations. This path installs no HID or per-pid tap and holds no user events. It does not implement or demonstrate the proposed 500 ms interception target. Native type-ahead can also defer its committed value, so verification may wait longer.
 
-The call has a 500 ms input-protection budget. Start an independent watchdog before any action that might open a menu. Reserve time for cancellation instead of waiting for the budget to expire. An AX action can block, so the watchdog must not share its executor or wait behind it. Close the menu before replaying mouse input, including on errors, timeout, cancellation or a dropped request.
+## Proposed menu transaction
 
-## Release the menu's focus theft
+The proposed tool path would return a numbered item list from a menu-opening click and close the menu before returning. A later item action reopens it and chooses within that same call. Store the opener, owning window and item title path. Revalidate all of them when reopening. Fail rather than press a different or ambiguous item when the menu changes. Pull-downs, context menus and menus opened by an ordinary click follow the same rule.
+
+The proposed target is at most 500 ms of input interception. This is not a measured bound or a guarantee of the current code. Start an independent watchdog before any action that might open a menu. Reserve time for cancellation instead of waiting for the budget to expire. An AX action can block, so the watchdog must not share its executor or wait behind it. Close the menu before replaying mouse input, including on errors, timeout, cancellation or a dropped request.
+
+## Proposed focus release
 
 Before opening, refuse if secure input is enabled, key focus cannot be identified, a required private symbol is missing, or any required tap cannot run. Serialize menu calls across Agent Displays.
 
@@ -29,6 +33,14 @@ Before opening, refuse if secure input is enabled, key focus cannot be identifie
 5. Close the menu and verify focus return. Drain the remaining queue through the normal input path, preserving system shortcuts, modifier state and the user's input method. Finish only after the tap acknowledges the replays. New hardware input waits behind pending replays.
 
 Production taps hold only events whose poster pid is 0. Agent Screen's events and events posted by other tools pass unchanged. Replays need the guard's poster pid and a per-transaction nonce so they pass the tap and cannot be mistaken for new hardware input. Test-only marked events may stand in for hardware only when the test has verified that input can reach solely the stand-in process it started.
+
+## Recovery custody prototype
+
+The helper process owns captured event originals independently of its requesting pipe. The queue retains originals after posting a copy and removes them only at the helper's final annotated tap acknowledgement. That acknowledgement is an OS hand-back observation, not proof that an app consumed the key. Native receiver measurements are still required.
+
+Controller panic and parent EOF enter cancellation and drain. If automatic restoration cannot be verified, the helper writes a complete, synced private checkpoint before relinquishing its in-memory originals. The recovery directory uses mode 0700 and event files use mode 0600. Records contain serialized input, so they are not app logs and their payloads are never returned to agents. Ambiguous dispatch is not retried automatically. The summary CLI reports counts only; owner-facing recovery UX is not implemented yet.
+
+The debug prototype has a two-second recovery observation limit. Its custody writer can wait longer when storage fails. Neither limit proves a 500 ms input-interception bound. Target hangs, helper hard termination, global tap revocation, blind secure-input intervals, cross-window mouse replay and complete drag semantics remain unverified. These gaps block enabling ordinary tool interception.
 
 ## Failure modes and release gates
 
@@ -43,4 +55,4 @@ Before enabling the runtime, measure keys lost, event order, maximum added laten
 
 ## Alternatives
 
-Leaving a menu open gives it the user's keyboard until the next call. Routing the user's keys directly to a pid bypasses session shortcuts and window activation. Holding every key until closure delays typing for the entire call. A separate login session or VM isolates input but has none of the user's current apps or logins. The focus guard keeps existing apps available and limits the initial key hold, at the cost of private API and event-tap failure modes.
+Leaving a menu open gives it the user's keyboard until the next call. Routing the user's keys directly to a pid bypasses session shortcuts and window activation. Holding every key until closure delays typing for the entire call. A separate login session or VM isolates input but has none of the user's current apps or logins. The proposed guard would keep existing apps available and limit the initial key hold, at the cost of private API and event-tap failure modes.
