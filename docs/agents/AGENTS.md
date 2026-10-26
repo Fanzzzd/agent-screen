@@ -27,5 +27,6 @@ Use either toolset on windows that are on your display:
 - To resize or move a window on your display, call `place_window` with its `window_id` and `x`, `y`, `width` or `height` in screenshot pixels. Don't use System Events or AppleScript: their coordinates are global, and a window sent there lands on the user's screen.
 - To show the user what you did, `record_display` with `start` before and `stop` after. It returns the video and a timeline of your actions.
 - An Electron app takes a menu item you press with `act_on_element` for its keyboard shortcut, and some ignore shortcuts while a text field has focus. Click outside the field before you press the item.
+- A drag in a web page (a splitter, a slider, a list to reorder, HTML5 drag and drop) works only in a Chromium or Electron app that `launch_app` started. For a browser, start a new instance with `arguments: ["--user-data-dir=/tmp/<name>"]`. A drag in another app's page fails and says so: start the app with `launch_app`, or call `request_help`.
 - `type` inserts finished text and skips the input method. Use `via_input_method` only to test input-method behavior: it uses the user's keyboard for the call.
 - When the GUI part of the task is finished, call `end_display`.

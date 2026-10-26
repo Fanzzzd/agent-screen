@@ -569,6 +569,9 @@ impl Core {
         if let Some(forwarder) = self.forwarders.get(&id) {
             forwarder.stop_agent(stop);
         }
+        if stop {
+            crate::control::agent::release_hold(id);
+        }
     }
 
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {

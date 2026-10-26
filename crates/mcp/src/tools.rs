@@ -163,7 +163,9 @@ pub fn definitions() -> Vec<Value> {
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
-                "coordinate they act at the pointer. cursor_position returns the pointer without a screenshot. zoom",
+                "coordinate they act at the pointer. A drag in a web page works only in a Chromium or Electron app that",
+                "launch_app started, through its private DevTools pipe; elsewhere, as in Safari or an app the user opened,",
+                "it fails and says so. cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
                 "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
@@ -321,6 +323,8 @@ pub fn definitions() -> Vec<Value> {
                 "Open an app in the background and put its new window on the display. If the app is already running, Agent Screen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
                 "the app starts with them, as a development build needs, and its windows go on the display.",
+                "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
+                "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance.",
             ],
             object(
                 json!({

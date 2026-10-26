@@ -4,6 +4,7 @@
 use super::server::{ControlError, Reply};
 use crate::core::Core;
 use crate::keychord::KeyChord;
+use crate::mac::devtools::{self, Route};
 use crate::mac::input::{Button, Sent};
 use crate::mac::screenshot::{self, Format};
 use crate::mac::windows::Grab;
@@ -349,6 +350,39 @@ async fn handle_one(
                 drag_to(grab, point, cx).await;
                 return reply(json!({}));
             }
+            match HOLDS.with(|h| h.borrow_mut().remove(&id)) {
+                Some(Hold::Pipe(drag)) => {
+                    if forwarder_stopped(&core, id, cx) {
+                        off(cx, move || drag.cancel()).await;
+                        return Err(ControlError::takeover(format!(
+                            "the user took over display {id}, which let go of the button where it was. Call wait_for_control to wait until they hand it back."
+                        )));
+                    }
+                    show_pointer(&core, id, point, false, cx);
+                    let mut drag = drag;
+                    let (drag, moved) = off(cx, move || {
+                        let moved = drag.move_to(point);
+                        (drag, moved)
+                    })
+                    .await;
+                    if let Err(e) = moved {
+                        off(cx, move || drag.cancel()).await;
+                        return Err(ControlError::failed(format!(
+                            "the move didn't reach the page, so the button was let go: {e}"
+                        )));
+                    }
+                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
+                    return reply(json!({}));
+                }
+                Some(Hold::Refused(app)) => {
+                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(app.clone())));
+                    return Err(ControlError::failed(format!(
+                        "{} The left button is still down where you pressed: left_mouse_up lets go, and the page may take that as a click.",
+                        devtools::refused_message(&app)
+                    )));
+                }
+                None => {}
+            }
             show_pointer(&core, id, point, false, cx)
                 .move_to(point)
                 .await;
@@ -370,6 +404,18 @@ async fn handle_one(
                     ));
                 }
                 return reply(json!({ "movedWindow": true }));
+            }
+            // A web page takes a drag through the app's DevTools pipe, or
+            // not at all (#37, ADR 0010).
+            match web_route(from, cx).await {
+                Route::Pipe(page) => {
+                    return pipe_drag(&core, id, page, from, to, modifiers, cx).await;
+                }
+                Route::Refused(app) => {
+                    return Err(ControlError::failed(devtools::refused_message(&app)));
+                }
+                Route::Unmapped(why) => return Err(unmapped(why)),
+                Route::Posted => {}
             }
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
@@ -428,9 +474,58 @@ async fn handle_one(
                 return reply(json!({ "windowId": grab.target.window_id }));
             }
             let modifiers = modifiers(&p)?;
+            // A press in a web page goes through the app's DevTools pipe,
+            // and so do the moves and the release after it (#37, ADR 0010).
+            let held = HOLDS.with(|h| h.borrow_mut().remove(&id));
+            if let Some(Hold::Pipe(drag)) = held {
+                if down {
+                    off(cx, move || drag.cancel()).await;
+                } else {
+                    show_pointer(&core, id, point, false, cx);
+                    let window = drag.window();
+                    off(cx, move || drag.release(point)).await.map_err(|e| {
+                        ControlError::failed(format!("the release didn't reach the page: {e}"))
+                    })?;
+                    return reply(json!({ "windowId": window }));
+                }
+            }
+            let mut refused = None;
+            if down {
+                match web_route(point, cx).await {
+                    Route::Pipe(page) => {
+                        if forwarder_stopped(&core, id, cx) {
+                            return Err(ControlError::takeover(format!(
+                                "the user took over display {id}, so the press was not sent. Call wait_for_control to wait until they hand it back."
+                            )));
+                        }
+                        // Keys go to the window pressed, as after a click.
+                        let window = page.window();
+                        show_pointer(&core, id, point, true, cx).focus(window).await;
+                        let window = window.window_id;
+                        let bits = modifier_bits(modifiers);
+                        let drag = off(cx, move || devtools::Drag::press(page, point, bits))
+                            .await
+                            .map_err(|e| {
+                                ControlError::failed(format!(
+                                    "the press didn't reach the page: {e}"
+                                ))
+                            })?;
+                        HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
+                        return reply(json!({ "windowId": window }));
+                    }
+                    Route::Unmapped(why) => return Err(unmapped(why)),
+                    Route::Refused(app) => refused = Some(app),
+                    Route::Posted => {}
+                }
+            }
             let hit = show_pointer(&core, id, point, down, cx)
                 .button(point, down, modifiers)
                 .await;
+            // A press in a web page without a pipe is a click's half; a
+            // move after it is refused.
+            if let (Some(app), Some(_)) = (refused, hit.as_ref()) {
+                HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(app)));
+            }
             match hit {
                 Some(window) => Ok(json!({ "windowId": window.window_id })),
                 None if down && forwarder_stopped(&core, id, cx) => {
@@ -2216,6 +2311,18 @@ fn open_target(text: &str) -> Result<String, ControlError> {
     }
 }
 
+/// Test builds may hold the launch, so a test can start another copy of
+/// the app while it waits (issue #35).
+fn hold_launch_for_tests() {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("AGENTSCREEN_OPEN_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
 /// `open -g`: without activating, like OpenConfiguration.activates = false.
 async fn open_in_background(
     app: std::path::PathBuf,
@@ -2229,15 +2336,7 @@ async fn open_in_background(
     let environment = start.environment.clone();
     cx.background_executor()
         .spawn(async move {
-            // Test builds may hold the launch, so a test can start another
-            // copy of the app while it waits (issue #35).
-            if cfg!(debug_assertions)
-                && let Some(ms) = std::env::var("AGENTSCREEN_OPEN_DELAY_MS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-            {
-                std::thread::sleep(Duration::from_millis(ms));
-            }
+            hold_launch_for_tests();
             let mut open = std::process::Command::new("/usr/bin/open");
             open.arg("-g");
             if new_instance {
@@ -2565,14 +2664,50 @@ async fn launch_now(
             .remember_user_window(pid)
             .await;
     }
-    let opening = if !was_running || first.is_some() {
-        Some(
+    // A Chromium or Electron app that starts here gets a private DevTools
+    // pipe, so drags in its pages work (ADR 0010). `open` can't hand it
+    // one: Agent Screen starts it. Only a browser takes a URL or file as
+    // an argument; another app given one starts through `open`, without.
+    let piped = !was_running
+        && off(cx, {
+            let (path, given) = (path.clone(), first.is_some());
+            move || devtools::is_chromium(&path) && (!given || app::handles_web(&path))
+        })
+        .await;
+    let mut spawned = None;
+    let opening = if piped {
+        let (path, first) = (path.clone(), first.clone());
+        let mut arguments = start.open_arguments();
+        arguments.extend(first);
+        let environment = start.environment.clone();
+        let started = off(cx, move || {
+            hold_launch_for_tests();
+            devtools::spawn(&path, &arguments, &environment)
+        })
+        .await;
+        match started {
+            Ok(pid) => {
+                spawned = Some(pid);
+                let (done, outcome) = std::sync::mpsc::channel();
+                let _ = done.send(true);
+                Some(outcome)
+            }
+            Err(e) => {
+                log::warn!("launch: couldn't start {name} with a pipe ({e}); opening it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let opening = match opening {
+        Some(o) => Some(o),
+        None if !was_running || first.is_some() => Some(
             open_in_background(path.clone(), first, !was_running, start, cx)
                 .await
                 .ok_or_else(could_not_open)?,
-        )
-    } else {
-        None
+        ),
+        None => None,
     };
     // How `open` ended: None while it runs, or without one.
     let mut opened: Option<(bool, Instant)> = None;
@@ -2599,6 +2734,11 @@ async fn launch_now(
         move || !pids().contains(&pid)
     };
     for _ in 0..200 {
+        // Started here: its pid is known.
+        if spawned.is_some() {
+            pid = spawned;
+            break;
+        }
         let now = off(cx, pids.clone()).await;
         pid = if fresh {
             let new: Vec<i32> = now
@@ -2663,8 +2803,15 @@ async fn launch_now(
         }
         catch = catch_from(pid).await;
         let seen = before.clone();
+        // `open -j` starts an app hidden; one Agent Screen started itself
+        // is hidden as soon as it can be, so its first window doesn't
+        // draw on the user's screen.
+        let hide = spawned.is_some();
         cx.background_executor()
             .spawn(async move {
+                if hide && !app::is_hidden(pid) {
+                    app::hide(pid);
+                }
                 for w in windows::all() {
                     if w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id) {
                         let _ = ax::move_into(w.target, bounds);
@@ -3666,6 +3813,111 @@ async fn drag_to(grab: Grab, to: (f64, f64), cx: &mut AsyncApp) -> bool {
     cx.background_executor()
         .spawn(async move { grab.drag_to(to) })
         .await
+}
+
+/// A drag an agent holds on a display across calls, from left_mouse_down
+/// to left_mouse_up, in a web page.
+enum Hold {
+    /// Through the app's DevTools pipe.
+    Pipe(devtools::Drag),
+    /// In an app with no pipe: the app's name. Its moves are refused.
+    Refused(String),
+}
+
+thread_local! {
+    static HOLDS: std::cell::RefCell<std::collections::HashMap<DisplayId, Hold>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The user took the display over: an agent's drag held through a pipe
+/// lets go where it is, as a posted one does.
+pub fn release_hold(id: DisplayId) {
+    if let Some(Hold::Pipe(drag)) = HOLDS.with(|h| h.borrow_mut().remove(&id)) {
+        std::thread::spawn(move || drag.cancel());
+    }
+}
+
+/// How a drag starting at a global point goes out (ADR 0010).
+async fn web_route(at: (f64, f64), cx: &mut AsyncApp) -> Route {
+    off(cx, move || {
+        devtools::route(crate::mac::input::window_at(at), at)
+    })
+    .await
+}
+
+fn unmapped(why: String) -> ControlError {
+    ControlError::failed(format!(
+        "the app shows a web page there, but Agent Screen couldn't tell which of its pages is under the point ({why}), so nothing was sent. Take a screenshot and try again."
+    ))
+}
+
+fn modifier_bits(m: crate::keychord::Modifiers) -> i64 {
+    agent_screen_model::devtools::modifier_bits(m.alt, m.control, m.command, m.shift)
+}
+
+/// left_click_drag in a web page, through the app's DevTools pipe: a press,
+/// a hold, 20 even steps and a pause before the release, as a posted drag
+/// has. Nothing reaches WindowServer, so the session's button state and
+/// the user's pointer stay theirs.
+async fn pipe_drag(
+    core: &Entity<Core>,
+    id: DisplayId,
+    page: devtools::Page,
+    from: (f64, f64),
+    to: (f64, f64),
+    modifiers: crate::keychord::Modifiers,
+    cx: &mut AsyncApp,
+) -> Reply {
+    if forwarder_stopped(core, id, cx) {
+        return Err(ControlError::takeover(format!(
+            "the user took over display {id}, so the drag was not sent. Call wait_for_control to wait until they hand it back."
+        )));
+    }
+    // Keys go to the window dragged in, as after a posted drag.
+    show_pointer(core, id, from, true, cx)
+        .focus(page.window())
+        .await;
+    let bits = modifier_bits(modifiers);
+    let mut drag = off(cx, move || devtools::Drag::press(page, from, bits))
+        .await
+        .map_err(|e| ControlError::failed(format!("the press didn't reach the page: {e}")))?;
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
+    for at in agent_screen_model::devtools::path(from, to, 20) {
+        if forwarder_stopped(core, id, cx) {
+            let at = drag.at();
+            off(cx, move || drag.cancel()).await;
+            show_pointer(core, id, at, false, cx);
+            return Err(ControlError::takeover(format!(
+                "the user took over display {id} during the drag, which let go short of its target and dropped nothing. Call wait_for_control to wait until they hand it back."
+            )));
+        }
+        let (back, moved) = off(cx, move || {
+            let moved = drag.move_to(at);
+            (drag, moved)
+        })
+        .await;
+        drag = back;
+        if let Err(e) = moved {
+            off(cx, move || drag.cancel()).await;
+            return Err(ControlError::failed(format!(
+                "the drag stopped partway, as a move didn't reach the page: {e}"
+            )));
+        }
+        show_pointer(core, id, at, false, cx);
+        cx.background_executor()
+            .timer(Duration::from_millis(16))
+            .await;
+    }
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
+    off(cx, move || drag.release(to))
+        .await
+        .map_err(|e| ControlError::failed(format!("the release didn't reach the page: {e}")))?;
+    show_pointer(core, id, to, false, cx);
+    reply(json!({}))
 }
 
 thread_local! {

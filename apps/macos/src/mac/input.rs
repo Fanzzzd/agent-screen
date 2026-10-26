@@ -1426,6 +1426,16 @@ fn hits() -> Vec<Hit> {
     list
 }
 
+/// The app window at a global point, as a press there would hit it, and
+/// its frame. None for a menu, a pop-up, or a panel another process draws.
+pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
+    hits()
+        .into_iter()
+        .find(|h| h.bounds.contains(at))
+        .filter(|h| h.layer == 0 && h.target == h.host)
+        .map(|h| (h.target, h.bounds))
+}
+
 /// A key chord through the public API, for apps that need no focus
 /// handshake: a running app's New Window shortcut.
 pub fn post_key_to_pid(pid: i32, chord: KeyChord) {

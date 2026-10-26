@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>drag</title>
+    <style>
+      body { margin: 0; font: 14px sans-serif; background: #f4f4f4; }
+      #row { position: fixed; left: 20px; top: 20px; width: 200px; height: 40px; background: #ffffff; }
+      #split { position: fixed; left: 340px; top: 100px; width: 12px; height: 160px; background: #0000ff; touch-action: none; }
+      #bin { position: fixed; left: 380px; top: 300px; width: 160px; height: 60px; background: #ff00ff; }
+    </style>
+  </head>
+  <body>
+    <div id="row" draggable="true" role="button" aria-label="row">row</div>
+    <div id="split" role="button" aria-label="splitter"></div>
+    <div id="bin" role="button" aria-label="bin"></div>
+    <script>
+      // The title reads "drag held=N free=N split=N dragged=N dropped=N", as
+      // the Electron harness's: a splitter that follows pointermove only
+      // while buttons holds the left button, and an HTML5 drop target (#37).
+      const seen = { held: 0, free: 0, split: 0, dragged: 0, dropped: 0 };
+      const show = () => {
+        document.title = "drag " + Object.entries(seen).map(([k, v]) => `${k}=${v}`).join(" ");
+      };
+      const split = document.getElementById("split");
+      let pressed = null;
+      split.addEventListener("pointerdown", (e) => {
+        pressed = e.clientX;
+        split.setPointerCapture(e.pointerId);
+      });
+      split.addEventListener("pointermove", (e) => {
+        if (pressed === null) return;
+        if (e.buttons & 1) {
+          seen.held++;
+          seen.split = Math.round(e.clientX - pressed);
+        } else {
+          seen.free++;
+        }
+        show();
+      });
+      split.addEventListener("pointerup", () => { pressed = null; show(); });
+      const row = document.getElementById("row");
+      row.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", "row");
+        seen.dragged++;
+        show();
+      });
+      const bin = document.getElementById("bin");
+      bin.addEventListener("dragover", (e) => e.preventDefault());
+      bin.addEventListener("drop", (e) => {
+        e.preventDefault();
+        seen.dropped++;
+        show();
+      });
+      show();
+    </script>
+  </body>
+</html>
