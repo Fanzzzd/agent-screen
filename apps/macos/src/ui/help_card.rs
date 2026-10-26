@@ -316,7 +316,10 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
                 .h(px(REASON))
                 .text_size(px(12.5))
                 .line_height(px(18.))
+                // Without an ellipsis GPUI puts the rest of the text on
+                // the last line, past the card's edge.
                 .line_clamp(2)
+                .text_ellipsis()
                 .tooltip({
                     let reason = reason.clone();
                     move |_, cx| super::shell::hint(reason.clone(), cx)
