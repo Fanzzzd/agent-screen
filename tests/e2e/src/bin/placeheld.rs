@@ -13,8 +13,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    HandsOff, McpClient, check, field_app, instance, json, pid_of, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app, windows_of,
+    McpClient, check, field_app, instance, json, pid_of, run, sh_lenient, sleep_ms, start_test_app,
+    stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -27,7 +27,6 @@ fn main() -> ExitCode {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         // Field's window moves to the user's screen.
-        let _sign = HandsOff::start("placeheld")?;
         let result = test(field.to_str().unwrap());
         quit_field();
         stop_test_app();
