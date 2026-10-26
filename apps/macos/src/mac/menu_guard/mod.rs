@@ -200,8 +200,7 @@ fn logger(
                         let result = if retained == 0 {
                             current.finish(0, closed, focus)
                         } else {
-                            drop(current);
-                            journal::Journal::checkpoint(&root, nonce, target, user, &snapshot)
+                            current.checkpoint_owned(&root, nonce, target, user, &snapshot)
                         };
                         let _ = reply.send(result);
                         return;
@@ -723,6 +722,31 @@ fn recovery_snapshot(state: &Capture) -> Result<Vec<journal::RetainedRecord>, St
     Ok(result)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointWait {
+    Acquire,
+    Publish,
+}
+
+fn persist_with_lease<L>(
+    mut acquire: impl FnMut() -> Result<L, String>,
+    mut publish: impl FnMut(&mut L) -> Result<(), String>,
+    mut wait: impl FnMut(CheckpointWait),
+) {
+    let mut lease = loop {
+        match acquire() {
+            Ok(lease) => break lease,
+            Err(_) => wait(CheckpointWait::Acquire),
+        }
+    };
+    loop {
+        match publish(&mut lease) {
+            Ok(()) => return,
+            Err(_) => wait(CheckpointWait::Publish),
+        }
+    }
+}
+
 fn finish_custody(
     state: &mut Capture,
     ports: &Taps,
@@ -762,33 +786,38 @@ fn finish_custody(
         .and_then(|r| r);
     if retained != 0 {
         if writer.is_err() {
-            loop {
-                let snapshot = match recovery_snapshot(state) {
-                    Ok(snapshot) => snapshot,
+            let snapshot = loop {
+                match recovery_snapshot(state) {
+                    Ok(snapshot) => break snapshot,
                     Err(_) => {
                         output(
                             json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}),
                         );
                         thread::sleep(Duration::from_secs(1));
-                        continue;
                     }
-                };
-                if journal::Journal::checkpoint(
-                    root,
-                    u64::from(nonce),
-                    state.target,
-                    state.user,
-                    &snapshot,
-                )
-                .is_ok()
-                {
-                    break;
                 }
-                output(
-                    json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}),
-                );
-                thread::sleep(Duration::from_secs(1));
-            }
+            };
+            // Acquisition errors happen before authority is reserved. Retry
+            // the same frozen snapshot until one lease is acquired. Never
+            // refresh that lease or its generation after publication starts.
+            persist_with_lease(
+                || {
+                    journal::Journal::fallback(
+                        root,
+                        u64::from(nonce),
+                        state.target,
+                        state.user,
+                        snapshot.clone(),
+                    )
+                },
+                |lease| lease.retry(),
+                |stage| {
+                    output(
+                        json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory","acquiringAuthority":stage==CheckpointWait::Acquire}),
+                    );
+                    thread::sleep(Duration::from_secs(1));
+                },
+            );
         }
         return Err(
             "retained input is sealed in private recovery custody; automatic replay is forbidden"
@@ -1301,6 +1330,51 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn transient_acquisition_retries_frozen_snapshot_but_publication_keeps_one_lease() {
+        use std::cell::Cell;
+        let root = test_directory();
+        let mut old = Some(journal::Journal::create(&root, 71, 20, 21).unwrap());
+        old.as_mut().unwrap().held(1, b"old").unwrap();
+        let frozen = vec![journal::RetainedRecord {
+            id: 2,
+            bytes: b"pending".to_vec(),
+            dispatched: true,
+        }];
+        let acquisitions = Cell::new(0);
+        let publications = Cell::new(0);
+        let mut waits = Vec::new();
+        persist_with_lease(
+            || {
+                acquisitions.set(acquisitions.get() + 1);
+                assert_eq!(frozen[0].bytes, b"pending");
+                if acquisitions.get() == 1 {
+                    return Err("injected transient open EINTR".into());
+                }
+                journal::Journal::fallback(&root, 71, 20, 21, frozen.clone())
+            },
+            |lease| {
+                publications.set(publications.get() + 1);
+                if publications.get() == 1 {
+                    assert!(
+                        old.take().unwrap().finish(0, true, true).is_err(),
+                        "reserved fallback must revoke the old writer"
+                    );
+                    return Err("injected transient publication error".into());
+                }
+                lease.retry()
+            },
+            |stage| waits.push(stage),
+        );
+        assert_eq!(acquisitions.get(), 2);
+        assert_eq!(publications.get(), 2);
+        assert_eq!(waits, [CheckpointWait::Acquire, CheckpointWait::Publish]);
+        let inventory = journal::summaries(&root).unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0]["retained"], 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
