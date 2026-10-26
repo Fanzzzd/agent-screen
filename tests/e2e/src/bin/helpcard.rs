@@ -53,6 +53,7 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
     };
 
     check("no card without a Help Request", card().is_none(), "");
+    window_request(control, pid, display_id)?;
 
     client.call(
         "request_help",
@@ -140,6 +141,47 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         card().is_none(),
         "",
     );
+    Ok(())
+}
+
+/// The Window Request's card, for a short app name and a long one: its
+/// captures go under target/e2e with the language in their names.
+fn window_request(control: &Control, pid: u32, display_id: u64) -> Result<()> {
+    let lang = std::env::var("AGENTSCREEN_LANG").unwrap_or_else(|_| "system".into());
+    for (name, app, title) in [
+        ("short", "TextEdit", "Notes.txt"),
+        (
+            "long",
+            "Visual Studio Code - Insiders",
+            "agent-screen — apps/macos/src/ui/help_card.rs — a very long window title",
+        ),
+    ] {
+        control.call(
+            "debugShow",
+            json!({ "surface": "window-request", "displayId": display_id, "app": app, "title": title }),
+        )?;
+        sleep_ms(300);
+        let shown = windows_of(pid)
+            .into_iter()
+            .find(|w| w.layer > 0 && w.height < 200.0 && w.width < 450.0);
+        check(
+            &format!("a Window Request for {app} shows its card"),
+            shown.is_some(),
+            json!(shown).to_string(),
+        );
+        if let Some(s) = shown {
+            let file = capture(
+                &format!("windowrequest-{lang}-{name}"),
+                [s.x, s.y, s.width, s.height],
+            )?;
+            println!("     card: {}", file.display());
+        }
+        control.call(
+            "debugShow",
+            json!({ "surface": "card-keep", "displayId": display_id }),
+        )?;
+        sleep_ms(400);
+    }
     Ok(())
 }
 

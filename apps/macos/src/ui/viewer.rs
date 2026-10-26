@@ -23,6 +23,10 @@ use std::time::Instant;
 pub const HEADER: f32 = 52.;
 pub const INSET: f32 = 8.;
 pub const RADIUS: f32 = 22.;
+/// The header's buttons need this much at their longest: "Let {agent}
+/// Continue" at its 220-pt cap beside Give | Take Back and the two icons.
+/// A narrower display shows letterboxed in a Viewer this wide.
+const MIN_WIDTH: f64 = 640.;
 const SCREEN_RADIUS: f32 = 13.;
 /// The header fades in after the card lands.
 const HEADER_IN: std::time::Duration = std::time::Duration::from_millis(120);
@@ -149,7 +153,7 @@ impl Viewer {
             height = max_height;
             width = (height - header - inset) * aspect + inset * 2.0;
         }
-        (width.round(), height.round())
+        (width.max(MIN_WIDTH).round(), height.round())
     }
 }
 
@@ -1133,6 +1137,9 @@ mod tests {
         let (w, h) = Viewer::card_size((1000., 1500.), (1728., 1084.));
         assert_eq!(h, (1084. * 0.86f64).round());
         assert!(w < h);
+        // The narrowest display still leaves the header room for its buttons.
+        let (w, _) = Viewer::card_size((640., 1600.), (1728., 1084.));
+        assert_eq!(w, MIN_WIDTH);
     }
 
     #[test]

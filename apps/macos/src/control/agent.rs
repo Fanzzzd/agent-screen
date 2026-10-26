@@ -1047,7 +1047,23 @@ async fn handle_one(
                     .zip(crate::ui::stream::global())
                     .is_some_and(|(id, streams)| streams.read(cx).misrouted(id))
             });
-            Ok(json!({ "frame": frame, "image": image, "key": key, "misrouted": misrouted }))
+            // The header's Take Back button, in points from the Viewer's
+            // top-left corner, as last painted.
+            let take_back = crate::ui::viewer::WindowMenu::TakeBack.button().map(|b| {
+                [
+                    f64::from(b.origin.x),
+                    f64::from(b.origin.y),
+                    f64::from(b.size.width),
+                    f64::from(b.size.height),
+                ]
+            });
+            Ok(json!({
+                "frame": frame,
+                "image": image,
+                "key": key,
+                "misrouted": misrouted,
+                "takeBack": take_back,
+            }))
         }
         "debugViewerInput" if debug_methods() => {
             use crate::mac::viewer_input;
@@ -1229,6 +1245,27 @@ async fn handle_one(
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            // A Window Request for no real window, so scripts can look at
+            // the card with any `app` and `title`. Keep answers it.
+            if surface == "window-request" {
+                let app = p.string("app").unwrap_or_else(|| "TextEdit".into());
+                let title = p.string("title").unwrap_or_default();
+                let target = WindowTarget {
+                    pid: 0,
+                    window_id: 0,
+                };
+                let _answer = core
+                    .update(cx, |c, cx| {
+                        let rx = c.displays.request_window(id, target, app, title);
+                        cx.notify();
+                        rx
+                    })
+                    .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
+                cx.background_executor()
+                    .timer(Duration::from_millis(900))
+                    .await;
+                return reply(json!({}));
+            }
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
                 .update(cx, |shell, cx| shell.debug_show(&surface, id, cx))
