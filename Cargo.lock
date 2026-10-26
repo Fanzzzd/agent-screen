@@ -181,6 +181,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "libc",
  "md-5",
  "regex",
  "serde",

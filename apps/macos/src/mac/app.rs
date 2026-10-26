@@ -104,6 +104,37 @@ pub fn parent_pid(pid: i32) -> Option<i32> {
     (read == size).then_some(info.pbi_ppid as i32)
 }
 
+#[cfg(debug_assertions)]
+pub fn process_state(pid: i32) -> agent_screen_model::stage_gate::ProcessState {
+    use agent_screen_model::stage_gate::ProcessState;
+    if pid <= 0 {
+        return ProcessState::Unknown;
+    }
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if read == size {
+        return ProcessState::Running(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec);
+    }
+    // Permission failures, short reads and a live-but-unqueryable process
+    // are Unknown. Only a separate existence probe reporting ESRCH proves exit.
+    if unsafe { libc::kill(pid, 0) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+        ProcessState::Exited
+    } else {
+        ProcessState::Unknown
+    }
+}
+
 /// A process's arguments, its own path first.
 pub fn arguments(pid: i32) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];

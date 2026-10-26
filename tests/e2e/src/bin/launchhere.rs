@@ -11,13 +11,14 @@
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere
 //!
 //! Makes 2 displays: the stage and the one the Viewer shows. Field's window
-//! may show on your screen for a moment.
+//! opens on the stage, never on your screen.
 
-use std::process::ExitCode;
+use agent_screen_tests::stage_fixture::{self, StageFixture};
+use std::{process::ExitCode, sync::Arc};
 
 use agent_screen_tests::{
-    Control, allow_on_your_screen, check, debug_pid, instance, json, kill_ours, open_stage,
-    our_binary, out, pid_of, run, sh_lenient, sleep_ms, start_test_app, stop_test_app,
+    Control, check, debug_pid, field_app, instance, json, open_user_stage, out, run, sh_lenient,
+    sign_step, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -32,9 +33,11 @@ fn main() -> ExitCode {
     }
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
+        field_app()?;
         let result = test();
-        kill_ours(our_binary("Field"));
-        stop_test_app();
+        if stage_fixture::cleanup_complete() {
+            stop_test_app();
+        }
         result
     })
 }
@@ -47,9 +50,10 @@ fn field_window(control: &Control, id: u64) -> Result<bool> {
 }
 
 fn test() -> Result<()> {
+    let stage = Arc::new(Control::connect()?);
+    sign_step("opening the user stand-in stage / 打开模拟用户显示器");
+    let stage_id = open_user_stage(&stage)?;
     let control = Control::connect()?;
-    kill_ours(our_binary("Field"));
-    open_stage(&control)?;
     let display = control.call(
         "createDisplay",
         json!({ "sessionKey": "launchhere", "title": "Launch here", "width": 1280, "height": 800 }),
@@ -57,6 +61,8 @@ fn test() -> Result<()> {
     let id = display["displayId"].as_u64().context("display id")?;
     control.call("debugShow", json!({ "surface": "viewer", "displayId": id }))?;
     sleep_ms(1200);
+    // Prepared outside launch_app: a hardware claim grants no session ownership.
+    let mut first = StageFixture::prepare(stage.clone(), stage_id)?;
     // The user works in the Viewer: Agent Screen is the front app.
     let own = debug_pid().context("no test app")?;
     control.call("debugFront", json!({ "pid": own }))?;
@@ -68,15 +74,9 @@ fn test() -> Result<()> {
         .and_then(|p| p.trim().parse().ok())
         .context("Spotlight isn't running")?;
     control.call("debugUserKey", json!({ "pid": spotlight }))?;
-    allow_on_your_screen(
-        "Field",
-        150,
-        "an app the user opens shows its window where macOS puts it, and AppKit's open animation holds the window there until it ends, 47 to 72 ms after Agent Screen moved it",
-    );
-    sh_lenient(
-        "/usr/bin/open",
-        &["-g", "-n", out().join("Field.app").to_str().unwrap()],
-    );
+    sign_step("opening Field from the Viewer / 从查看器打开 Field");
+    first.show()?;
+    let first_pid = first.pid();
     let mut here = false;
     for _ in 0..60 {
         here = field_window(&control, id)?;
@@ -85,15 +85,13 @@ fn test() -> Result<()> {
         }
         sleep_ms(100);
     }
-    let on_screen = pid_of("Field.app/Contents/MacOS/Field$")
-        .map(agent_screen_tests::windows_of)
-        .unwrap_or_default();
+    let on_screen = agent_screen_tests::windows_of(first_pid);
     check(
         "the app opened from Spotlight shows its window on the Viewer's display",
         here,
         format!("Field's windows: {on_screen:?}"),
     );
-    kill_ours(our_binary("Field"));
+    first.close()?;
     sleep_ms(500);
 
     // Typed into Spotlight after a click on their own screen, where Finder
@@ -103,22 +101,15 @@ fn test() -> Result<()> {
         .next()
         .and_then(|p| p.trim().parse().ok())
         .context("Finder isn't running")?;
+    let mut second = StageFixture::prepare(stage.clone(), stage_id)?;
     control.call("debugFront", json!({ "pid": finder }))?;
     control.call("debugUserKey", json!({ "pid": spotlight }))?;
-    allow_on_your_screen(
-        "Field",
-        u64::MAX,
-        "opened from Spotlight after a click on your screen, the app is yours and opens there",
-    );
-    sh_lenient(
-        "/usr/bin/open",
-        &["-g", "-n", out().join("Field.app").to_str().unwrap()],
-    );
+    sign_step("opening Field outside the Viewer / 在查看器之外打开 Field");
+    second.show()?;
+    let second_pid = second.pid();
     let mut shown = Vec::new();
     for _ in 0..40 {
-        shown = pid_of("Field.app/Contents/MacOS/Field$")
-            .map(agent_screen_tests::windows_of)
-            .unwrap_or_default();
+        shown = agent_screen_tests::windows_of(second_pid);
         if !shown.is_empty() {
             break;
         }
@@ -126,13 +117,16 @@ fn test() -> Result<()> {
     }
     sleep_ms(1500);
     check(
-        "after a click on the user's own screen, it opens there",
-        !shown.is_empty() && !field_window(&control, id)?,
+        "after a click outside the Viewer, Field stays on the user stand-in stage",
+        !shown.is_empty() && !field_window(&control, id)? && field_window(&stage, stage_id)?,
         format!("Field's windows: {shown:?}"),
     );
+    second.close()?;
+    sleep_ms(300);
     control.call(
         "endDisplay",
         json!({ "sessionKey": "launchhere", "displayId": id }),
     )?;
+    stage.call("endDisplay", json!({ "displayId": stage_id }))?;
     Ok(())
 }

@@ -26,3 +26,6 @@ pub mod viewer_input;
 pub mod windows;
 
 pub use native::menu_bar_height as menubar_height;
+
+#[cfg(debug_assertions)]
+pub mod stage_gate;

@@ -13,3 +13,6 @@ pub mod model;
 pub mod numbers;
 pub mod tree;
 pub mod typing;
+
+#[cfg(debug_assertions)]
+pub mod stage_gate;

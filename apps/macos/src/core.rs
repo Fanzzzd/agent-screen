@@ -47,6 +47,8 @@ pub struct Spare {
 }
 
 pub struct Core {
+    #[cfg(debug_assertions)]
+    pub debug_peers: HashMap<u64, i32>,
     pub displays: Displays<VirtualDisplay>,
     forwarders: HashMap<DisplayId, Forwarder>,
     /// The numbered elements of each window an agent has looked at, by
@@ -118,6 +120,8 @@ const RECLAIM_EVERY: Duration = Duration::from_secs(30 * 60);
 impl Core {
     pub fn new() -> Self {
         Core {
+            #[cfg(debug_assertions)]
+            debug_peers: HashMap::new(),
             displays: Displays::default(),
             forwarders: HashMap::new(),
             elements: HashMap::new(),
@@ -579,6 +583,11 @@ impl Core {
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage_connection(connection);
+        #[cfg(debug_assertions)]
+        {
+            self.debug_peers.remove(&connection);
+            crate::mac::stage_gate::cancel(connection);
+        }
         self.closed.insert(connection);
         self.sessions.remove(&connection);
         let ended = self.displays.connection_closed(connection);
@@ -597,6 +606,11 @@ impl Core {
     /// Drop a display. An empty one stays connected as a spare while there
     /// is room; otherwise macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        if crate::mac::stage_gate::holds_display(id) {
+            schedule_sweep(cx);
+            return;
+        }
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage(id);
         stop_recording(id, cx);

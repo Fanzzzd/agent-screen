@@ -9,6 +9,10 @@ pub struct Claims {
     displays: BTreeSet<u32>,
     /// Each claimed window, by the display it is on or on its way to.
     windows: BTreeMap<u32, u32>,
+    #[cfg(debug_assertions)]
+    generations: BTreeMap<u32, u64>,
+    #[cfg(debug_assertions)]
+    generation: u64,
 }
 
 impl Claims {
@@ -16,6 +20,10 @@ impl Claims {
         Claims {
             displays: BTreeSet::new(),
             windows: BTreeMap::new(),
+            #[cfg(debug_assertions)]
+            generations: BTreeMap::new(),
+            #[cfg(debug_assertions)]
+            generation: 0,
         }
     }
 
@@ -28,6 +36,8 @@ impl Claims {
         let had = self.displays.remove(&display);
         let before = self.windows.len();
         self.windows.retain(|_, d| *d != display);
+        #[cfg(debug_assertions)]
+        self.generations.retain(|w, _| self.windows.contains_key(w));
         had || self.windows.len() != before
     }
 
@@ -42,11 +52,38 @@ impl Claims {
     /// Claim a window going onto one of the claimed displays. A window going
     /// anywhere else isn't claimed.
     pub fn claim(&mut self, window: u32, display: u32) -> bool {
-        self.displays.contains(&display) && self.windows.insert(window, display) != Some(display)
+        if !self.displays.contains(&display) {
+            return false;
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .expect("claim generation exhausted");
+            self.generations.insert(window, self.generation);
+        }
+        self.windows.insert(window, display) != Some(display)
     }
 
     pub fn release(&mut self, window: u32) -> bool {
+        #[cfg(debug_assertions)]
+        self.generations.remove(&window);
         self.windows.remove(&window).is_some()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn generation_of(&self, window: u32) -> Option<u64> {
+        self.generations.get(&window).copied()
+    }
+
+    /// A cancelled stage must not release a later claim, even if a window
+    /// id was reused on the same display.
+    #[cfg(debug_assertions)]
+    pub fn release_if(&mut self, window: u32, display: u32, generation: u64) -> bool {
+        self.display_of(window) == Some(display)
+            && self.generation_of(window) == Some(generation)
+            && self.release(window)
     }
 
     /// Nothing to claim: the claim file should not exist.
@@ -109,6 +146,25 @@ impl Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn stage_cleanup_cannot_release_a_handover_or_a_reused_window_id() {
+        let mut c = Claims::new();
+        c.add_display(3);
+        c.add_display(4);
+        c.claim(7, 3);
+        let old = c.generation_of(7).unwrap();
+        c.claim(7, 4);
+        assert!(!c.release_if(7, 3, old));
+        c.remove_display(3);
+        assert_eq!(c.display_of(7), Some(4));
+        c.add_display(3);
+        c.release(7);
+        c.claim(7, 3);
+        assert!(!c.release_if(7, 3, old));
+        assert!(c.release_if(7, 3, c.generation_of(7).unwrap()));
+    }
 
     #[test]
     fn failed_display_registration_recovers_on_a_later_claim() {

@@ -7,6 +7,7 @@
 
 pub mod control;
 pub mod mcp;
+pub mod stage_fixture;
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -1331,5 +1332,26 @@ mod tests {
         for name in super::HANDS_OFF {
             assert!(bin.join(format!("{name}.rs")).exists(), "no script {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod gated_fixture_static_tests {
+    #[test]
+    fn gated_field_cannot_install_the_move_signal_handlers() {
+        let source = include_str!("../tools/field.swift");
+        let body = source
+            .split("func applicationDidFinishLaunching")
+            .nth(1)
+            .unwrap()
+            .split("func installMoveHandlers")
+            .next()
+            .unwrap();
+        assert!(
+            !body.contains(".setEventHandler"),
+            "move handlers must live outside the gated launch body"
+        );
+        assert_eq!(body.matches("installMoveHandlers").count(), 1);
+        assert!(body.contains("if !gated {\n      installMoveHandlers"));
     }
 }
