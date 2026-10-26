@@ -63,6 +63,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e takeover    # Takeover through the Viewer
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag  # a title-bar drag in the Viewer stays on the display
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerkey  # a click that makes the Viewer key again, and a paste after it in a Takeover, keep the app running
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks the user for a window the agent didn't launch; Keep refuses, Hand Over places it as a Handover (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
