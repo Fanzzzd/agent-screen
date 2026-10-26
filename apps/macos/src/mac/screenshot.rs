@@ -94,50 +94,79 @@ fn filter_counting(
         log::debug!("display {id} shares its unit number with display {twin}; not capturing it");
         return Err("macOS mixes this display up with another one right now, so Agent Screen won't capture it".into());
     }
-    let content = content(fresh)?;
+    let area = super::cg::display_bounds(id);
+    // Where windows are now, from the window server. A listing is kept
+    // while the set of window ids stays the same, and its frames go stale:
+    // Control Centre moves the same status item windows from display to
+    // display, so after an app on this one quit they sat in its strip while
+    // the listing still had them on the user's screen (#38).
+    let frames = super::cg::on_screen_frames();
+    let across = |f: crate::model::Rect| {
+        f.x < area.max_x() && f.max_x() > area.x && f.y < area.max_y() && f.max_y() > area.y
+    };
+    // The bar is one Window Server window at level 24, the status items
+    // level-25 windows and the recording indicator a dot far above, all
+    // within the top 40 pt. Full-screen windows at those levels, such as
+    // the screenshot tool's, stay.
+    let in_bar: std::collections::HashSet<u32> = frames
+        .iter()
+        .filter(|&&(_, layer, f)| {
+            across(f)
+                && layer >= 24
+                && f.height <= 40.0
+                && f.y >= area.y - 1.0
+                && f.y < area.y + 40.0
+        })
+        .map(|&(window_id, _, _)| window_id)
+        .collect();
+    let mut content = content(fresh)?;
+    // A bar window the listing doesn't have yet can't be left out: list anew.
+    let listed = |content: &SCShareableContent| {
+        let ids: std::collections::HashSet<u32> =
+            content.windows().iter().map(|w| w.window_id()).collect();
+        in_bar.iter().all(|w| ids.contains(w))
+    };
+    if !listed(&content) {
+        forget();
+        content = self::content(true)?;
+        if !listed(&content) {
+            log::debug!("display {id}: a menu bar window is not in the listing yet");
+        }
+    }
     let display = content
         .displays()
         .into_iter()
         .find(|d| d.display_id() == id)
         .ok_or("display is not capturable yet; retry in a moment")?;
-    let area = super::cg::display_bounds(id);
-    // The bar is one Window Server window at level 24, the status items
-    // level-25 windows and the recording indicator a dot far above, all
-    // within the top 40 pt. Full-screen windows at those levels, such as
-    // the screenshot tool's, stay.
     let bar: Vec<SCWindow> = content
         .windows()
         .into_iter()
         .filter(|w| {
+            // The wallpaper and desktop icons sit below every normal level,
+            // and stay where they are.
             let f = w.frame();
-            let across = f.origin.x < area.max_x()
-                && f.origin.x + f.size.width > area.x
-                && f.origin.y < area.max_y()
-                && f.origin.y + f.size.height > area.y;
-            // The wallpaper and desktop icons sit below every normal level.
-            let desktop = plain && w.window_layer() < 0;
-            let in_bar = w.window_layer() >= 24
-                && f.size.height <= 40.0
-                && f.origin.y >= area.y - 1.0
-                && f.origin.y < area.y + 40.0;
-            across && (in_bar || desktop)
+            let desktop = plain
+                && w.window_layer() < 0
+                && across(crate::model::Rect::new(
+                    f.origin.x,
+                    f.origin.y,
+                    f.size.width,
+                    f.size.height,
+                ));
+            in_bar.contains(&w.window_id()) || desktop
         })
         .collect();
     // What an agent could see: app windows, panels and menus. The cursor,
     // the recording indicator and other overlays from layer 1000 up, and
-    // 1-point status windows, don't make a picture. Where windows are now,
-    // from the window server: the listing may be older than a window's move.
-    let left = super::cg::on_screen_frames()
+    // 1-point status windows, don't make a picture.
+    let left = frames
         .into_iter()
         .filter(|&(window_id, layer, f)| {
             (0..1000).contains(&layer)
                 && f.width > 1.0
                 && f.height > 1.0
-                && f.x < area.max_x()
-                && f.max_x() > area.x
-                && f.y < area.max_y()
-                && f.max_y() > area.y
-                && !bar.iter().any(|b| b.window_id() == window_id)
+                && across(f)
+                && !in_bar.contains(&window_id)
         })
         .count();
     let refs: Vec<&SCWindow> = bar.iter().collect();
