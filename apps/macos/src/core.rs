@@ -62,6 +62,8 @@ pub struct Core {
     pub tucked: HashSet<DisplayId>,
     /// Tries at parking a moved display again, since it was last in place.
     reparks: HashMap<DisplayId, u8>,
+    /// Tries at giving a display its size back, since it last ran at it.
+    remodes: HashMap<DisplayId, u8>,
     /// Apps an Agent Session is launching. Two launches of one app at once
     /// can't tell their new windows apart, so they take turns.
     pub launching: HashSet<std::path::PathBuf>,
@@ -125,6 +127,7 @@ impl Core {
             sessions: HashMap::new(),
             tucked: HashSet::new(),
             reparks: HashMap::new(),
+            remodes: HashMap::new(),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
             returning: Vec::new(),
@@ -533,6 +536,47 @@ impl Core {
             .detach();
     }
 
+    /// Give each display its size back if it runs at another (issue #33).
+    /// WindowServer can switch a virtual display to another of the modes
+    /// macOS lists for it, such as 800×600, under load; the agent's
+    /// screenshots and the windows on it then no longer fit.
+    pub fn hold_modes(&mut self, cx: &mut Context<Self>) {
+        let mut wrong = Vec::new();
+        for d in &self.displays.list {
+            let (width, height) = (d.width as u32, d.height as u32);
+            let now = crate::mac::cg::display_bounds(d.id);
+            if (now.width as u32, now.height as u32) == (width, height) {
+                self.remodes.remove(&d.id);
+                continue;
+            }
+            let tries = self.remodes.entry(d.id).or_default();
+            if *tries >= 3 {
+                continue;
+            }
+            *tries += 1;
+            wrong.push((d.id, width, height));
+        }
+        if wrong.is_empty() {
+            return;
+        }
+        cx.background_executor()
+            .spawn(display::configure(move || {
+                for (id, width, height) in wrong {
+                    let was = crate::mac::cg::display_bounds(id);
+                    let back = display::restore_mode(id, width, height);
+                    crate::lifecycle::note(
+                        "mode",
+                        id,
+                        &format!(
+                            "ran at {}x{}, wants {width}x{height}, back: {back}",
+                            was.width, was.height
+                        ),
+                    );
+                }
+            }))
+            .detach();
+    }
+
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
         if self.displays.end(id, reason) {
             // An ended display takes no more windows, from catches either.
@@ -602,6 +646,7 @@ impl Core {
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
             self.reparks.remove(&id);
+            self.remodes.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
             self.returning.retain(|(display, _)| *display != id);
             self.pending_returns.retain(|(display, _)| *display != id);

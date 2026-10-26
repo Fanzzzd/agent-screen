@@ -623,7 +623,10 @@ impl Shell {
             Native::LauncherTyped => self.launcher_typed(cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
-                self.core.update(cx, |core, cx| core.repark(cx));
+                self.core.update(cx, |core, cx| {
+                    core.repark(cx);
+                    core.hold_modes(cx);
+                });
                 self.streams.update(cx, |s, cx| s.restart_misrouted(cx));
                 self.schedule_guard(cx);
                 self.schedule_regather(cx);

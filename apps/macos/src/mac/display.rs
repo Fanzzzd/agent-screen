@@ -286,11 +286,25 @@ unsafe fn apply_mode(handle: &AnyObject, width: u32, height: u32) -> bool {
 fn settle_mode(id: u32, width: u32, height: u32) {
     let (_, scale) = mode_settings();
     for _ in 0..25 {
-        if scale == 1 || use_hidpi_mode(id, width, height) {
+        if scale == 1 || use_mode(id, width, height, 2) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+/// Switch display `id` back to `width` × `height`, after macOS picked
+/// another of its modes. True once it runs at that size.
+pub fn restore_mode(id: u32, width: u32, height: u32) -> bool {
+    let (_, scale) = mode_settings();
+    for _ in 0..25 {
+        if use_mode(id, width, height, scale) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let now = cg::display_bounds(id);
+    (now.width as u32, now.height as u32) == (width, height)
 }
 
 /// Display configuration runs on a thread of its own. Each change waits
@@ -491,14 +505,14 @@ fn mode_settings() -> (f64, u32) {
     (hz, scale)
 }
 
-/// Switch display `id` to `width` × `height` points at 2x. True once it
-/// runs that way.
-fn use_hidpi_mode(id: u32, width: u32, height: u32) -> bool {
+/// Switch display `id` to `width` × `height` points at `scale`. True once
+/// it runs that way.
+fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
     let (width, height) = (width as usize, height as usize);
     let is_wanted = |mode: *const c_void| unsafe {
         CGDisplayModeGetWidth(mode) == width
             && CGDisplayModeGetHeight(mode) == height
-            && CGDisplayModeGetPixelWidth(mode) == width * 2
+            && CGDisplayModeGetPixelWidth(mode) == width * scale as usize
     };
     unsafe {
         let current = CGDisplayCopyDisplayMode(id);
@@ -528,7 +542,7 @@ fn use_hidpi_mode(id: u32, width: u32, height: u32) -> bool {
             .map(|i| CFArrayGetValueAtIndex(modes, i))
             .find(|&mode| is_wanted(mode));
         log::debug!(
-            "display {id}: {} modes, {width}×{height} at 2x among them: {}",
+            "display {id}: {} modes, {width}×{height} at {scale}x among them: {}",
             CFArrayGetCount(modes),
             wanted.is_some()
         );
