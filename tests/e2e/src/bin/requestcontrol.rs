@@ -6,12 +6,15 @@
 //! once and nothing shows. Captures the card under target/e2e. The card
 //! shows on the user's screen for a few seconds.
 //!
+//! The agent has a long name, so the card's buttons are seen at their
+//! longest. AGENTSCREEN_LANG=zh shows the Chinese card.
+//!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol
 
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Frame, McpClient, capture, check, debug_pid, instance, json, now_ms, run, sleep_ms,
+    Control, Frame, McpClient, capture, check, debug_pid, instance, json, run, sleep_ms,
     start_test_app, windows_of,
 };
 use anyhow::{Context, Result};
@@ -25,8 +28,11 @@ fn main() -> ExitCode {
         start_test_app(&[])?;
         let pid = debug_pid().context("no test app")?;
         let control = Control::connect()?;
-        let session = format!("requestcontrol-{}", now_ms());
-        let client = McpClient::start(&[("CLAUDE_CODE_SESSION_ID", &session)])?;
+        // Not a Claude Code session, so the client's own name labels it.
+        let client = McpClient::start(&[
+            ("CLAUDE_CODE_SESSION_ID", ""),
+            ("E2E_CLIENT_NAME", "GitHub Copilot Coding Agent"),
+        ])?;
         let display_id = client
             .call("create_display", json!({ "title": "Book a flight" }))?
             .display_id()
@@ -96,9 +102,25 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         json!(shown).to_string(),
     );
     if let Some(s) = shown {
-        let file = capture("requestcontrol", [s.x, s.y, s.width, s.height])?;
+        let lang = std::env::var("AGENTSCREEN_LANG").unwrap_or_else(|_| "system".into());
+        let file = capture(
+            &format!("requestcontrol-{lang}"),
+            [s.x, s.y, s.width, s.height],
+        )?;
         println!("     card: {}", file.display());
     }
+    let painted = control.call("debugCard", json!({}))?;
+    let width = painted["width"].as_f64().unwrap_or(0.0);
+    let right = |id: &str| -> Option<f64> {
+        let r = painted["buttons"][id].as_array()?;
+        Some(r[0].as_f64()? + r[2].as_f64()?)
+    };
+    let (go, keep) = (right("control-continue"), right("control-keep"));
+    check(
+        "both buttons fit the card with a long agent name",
+        matches!((go, keep), (Some(g), Some(k)) if g < k && k <= width - 14.0 + 0.5),
+        format!("right edges {go:?} and {keep:?} in a {width}-pt card"),
+    );
 
     // Keep Control while the agent waits.
     let waiting = client.begin("request_control", ask(20))?;

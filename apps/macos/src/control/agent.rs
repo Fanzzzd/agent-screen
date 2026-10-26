@@ -1209,6 +1209,15 @@ async fn handle_one(
             .detach();
             Ok(json!({}))
         }
+        // The Help Card's width and its buttons' bounds at the last paint.
+        "debugCard" if debug_methods() => {
+            let (width, buttons) = crate::ui::help_card::painted_buttons();
+            let buttons: Map<String, Value> = buttons
+                .into_iter()
+                .map(|(id, r)| (id.to_string(), json!(r)))
+                .collect();
+            Ok(json!({ "width": width, "buttons": buttons }))
+        }
         // Which picture the menu bar icon shows: idle, working, asking or setup.
         "debugIcon" if debug_methods() => {
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
