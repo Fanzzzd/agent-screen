@@ -102,7 +102,7 @@ pub fn flags(m: Modifiers) -> CGEventFlags {
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 
 /// How much of an agent's drag or text went out.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Sent {
     All,
     /// The user took the display over partway through a drag, which let
@@ -110,6 +110,8 @@ pub enum Sent {
     Stopped((f64, f64)),
     /// The same, partway through text: how many characters went in.
     Typed(usize),
+    /// All the text went out, but the field shows this, without some of it.
+    Dropped(String),
     /// No window to send it to.
     Nowhere,
 }
@@ -375,6 +377,15 @@ impl Forwarder {
                 return Sent::Nowhere;
             };
             let text = typed_text(&text);
+            // A field that says what it holds is read back after, unless
+            // Return or Tab moves on from it.
+            let field = (!text.contains(['\n', '\r', '\t']))
+                .then(|| super::ax::focused_text(target))
+                .flatten()
+                .map(|f| {
+                    let before = super::ax::string_attribute(&f, "AXValue").unwrap_or_default();
+                    (f, before)
+                });
             for (typed, character) in text.chars().enumerate() {
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     return Sent::Typed(typed);
@@ -405,6 +416,28 @@ impl Forwarder {
                     deliver(&event, target.pid, true);
                 }
                 thread::sleep(Duration::from_millis(4));
+            }
+            // A page can drop keys that come faster than its script runs
+            // (#50): the text is in the field, or the call says it isn't.
+            // A busy page is still taking keys in while its text grows, and
+            // Chromium's accessibility shows nothing new until the page's
+            // script is idle: judge once the text has changed and then held
+            // still for 1.5 s, within 5 s.
+            if let Some((field, before)) = field {
+                let mut shown = before.clone();
+                let mut still = 0;
+                for _ in 0..200 {
+                    let now = super::ax::string_attribute(&field, "AXValue").unwrap_or_default();
+                    if agent_screen_model::typing::landed(&text, &now) {
+                        return Sent::All;
+                    }
+                    still = if now == shown { still + 1 } else { 0 };
+                    shown = now;
+                    if still >= 60 && shown != before {
+                        return Sent::Dropped(shown);
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
             }
             Sent::All
         })

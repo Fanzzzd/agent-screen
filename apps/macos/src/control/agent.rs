@@ -504,6 +504,13 @@ async fn handle_one(
                     }
                     match forwarder.type_text(run.iter().collect(), bounds).await {
                         Sent::Nowhere => return Err(no_keyboard_target()),
+                        Sent::Dropped(shown) => {
+                            let typed = done + run.len();
+                            let shown: String = shown.chars().take(300).collect();
+                            return Err(ControlError::failed(format!(
+                                "sent {typed} of {total} characters, but the field holds {shown:?}, without some of them: the app dropped keys that came too fast, or changed the text. Typing stopped there. Select the field's text and type it again in shorter calls, a word or a few characters each, then check the field."
+                            )));
+                        }
                         Sent::Typed(typed) => {
                             let typed = done + typed;
                             return Err(ControlError::takeover(format!(

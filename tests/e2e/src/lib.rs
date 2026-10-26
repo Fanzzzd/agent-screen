@@ -333,6 +333,7 @@ const HANDS_OFF: &[&str] = &[
     "statusicon",
     "timing",
     "viewerheader",
+    "typedrops",
 ];
 
 /// The sign `run` shows on the main screen (`tools/overlay.swift`): a count
