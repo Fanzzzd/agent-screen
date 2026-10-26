@@ -44,6 +44,9 @@ pub enum Note {
     Help(String),
     /// The agent asks for a window of this app.
     Window(String),
+    /// The user brought an app to the front whose windows are all on Agent
+    /// Displays: its name, and those displays' labels.
+    Elsewhere { app: String, places: Vec<String> },
     /// The agent stopped using its display and left windows on it.
     Review { windows: usize },
     /// The agent's connection closed and its windows stayed.
@@ -55,6 +58,7 @@ impl Note {
         match self {
             Note::Help(_) => "help",
             Note::Window(_) => "window",
+            Note::Elsewhere { .. } => "where",
             Note::Review { .. } | Note::Disconnected { .. } => "review",
         }
     }
@@ -182,7 +186,7 @@ pub fn request() {
 /// `task` is the rest of the Display Label.
 pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     let Some(note) = note else {
-        for prefix in ["help", "window", "review"] {
+        for prefix in ["help", "window", "where", "review"] {
             withdraw(display, prefix);
         }
         return;
@@ -209,6 +213,26 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             )
             .to_string(),
         ),
+        Note::Elsewhere { app, places } => {
+            let quoted = |open: &str, close: &str, join: &str| {
+                places
+                    .iter()
+                    .map(|p| format!("{open}{p}{close}"))
+                    .collect::<Vec<_>>()
+                    .join(join)
+            };
+            let (en, zh) = (quoted("“", "”", ", "), quoted("“", "”", "、"));
+            (
+                tf!(
+                    "{app}'s window is in Agent Screen",
+                    "{app} 的窗口在 Agent Screen 里"
+                ),
+                tf!(
+                    "On {en}. Click to open it in the Viewer.",
+                    "在 {zh} 上。点按在 Viewer 中打开。"
+                ),
+            )
+        }
         Note::Review { windows } => (
             tf!("{agent} is done with its display", "{agent} 用完了显示器"),
             windows_waiting(*windows),
@@ -261,6 +285,12 @@ pub fn withdraw_help(display: u32) {
 /// Withdraw only the Window Request's notification of a display.
 pub fn withdraw_window(display: u32) {
     withdraw(display, "window");
+}
+
+/// Withdraw the note saying where an app's windows are, so the next one
+/// shows again.
+pub fn withdraw_where(display: u32) {
+    withdraw(display, "where");
 }
 
 fn withdraw(display: u32, prefix: &str) {

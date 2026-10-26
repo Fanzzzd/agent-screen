@@ -302,6 +302,7 @@ pub fn probe(args: &[&str]) -> Result<String> {
 /// only says a test runs.
 const HANDS_OFF: &[&str] = &[
     "alerts",
+    "appwhere",
     "browsers",
     "chrome",
     "displaychange",
