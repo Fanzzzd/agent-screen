@@ -1,8 +1,8 @@
 //! Closed pop-up type-ahead and combo confirmation. The fixture counts menu opens.
 //! AGENTSCREEN_INSTANCE=e2e cargo e2e menuchoice
 use agent_screen_tests::{
-    Control, check, json, listening, menu_choice_app, run, skip, sleep_ms, start_test_app,
-    stop_started_pid, stop_test_app,
+    Control, check, finish_test_app, json, listening, menu_choice_app, run, skip, sleep_ms,
+    start_test_app, stop_started_pid,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -15,8 +15,7 @@ fn main() -> ExitCode {
         let fixture = menu_choice_app()?;
         start_test_app(&[])?;
         let result = test(&fixture);
-        stop_test_app();
-        result
+        finish_test_app(result)
     })
 }
 fn test(fixture: &std::path::Path) -> Result<()> {
@@ -82,6 +81,32 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             .to_owned();
         let re = Regex::new(r#"\[(\d+)\] popupbutton "Fruit""#)?;
         let index = re.captures(&tree).context("Fruit control")?[1].parse::<u64>()?;
+        let wrong_case = call(
+            "elementAction",
+            json!({"element":index,"action":"set_value","value":"banana"}),
+        );
+        check(
+            "a case-mismatched item title never reports an exact choice",
+            wrong_case
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("shows \"Banana\"")),
+            format!("{wrong_case:?}"),
+        );
+        let combo = Regex::new(r#"\[(\d+)\] combobox "Color""#)?;
+        let combo_index = combo.captures(&tree).context("Color control")?[1].parse::<u64>()?;
+        let commit = call(
+            "elementAction",
+            json!({"element":combo_index,"action":"set_value","value":"Reject"}),
+        );
+        check(
+            "a rejected combo commit reports the restored value",
+            commit
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("Blue")),
+            format!("{commit:?}"),
+        );
         let rejected = call(
             "elementAction",
             json!({"element":index,"action":"set_value","value":"Cherry\n"}),

@@ -5,8 +5,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, fixture, json, listening, out, probe, run, running_headed, skip, sleep_ms,
-    start_test_app, stop_started_pid, stop_test_app,
+    Control, check, finish_test_app, fixture, json, listening, out, probe, run, running_headed,
+    skip, sleep_ms, start_test_app, stop_started_pid,
 };
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -24,8 +24,7 @@ fn main() -> ExitCode {
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
-        stop_test_app();
-        result
+        finish_test_app(result)
     })
 }
 
@@ -90,14 +89,14 @@ fn test() -> Result<()> {
             }
             Ok(title)
         };
-        for month in ["April", "February", "may"] {
+        for month in ["April", "February", "May"] {
             let started = std::time::Instant::now();
             let set = call(
                 "elementAction",
                 json!({ "element": select()?, "action": "set_value", "value": month }),
             );
             let took = started.elapsed().as_millis();
-            let wanted = if month == "may" { "May" } else { month };
+            let wanted = month;
             let title = shows(wanted)?;
             check(
                 &format!("set_value {month} chooses it in one call, with no menu left open"),

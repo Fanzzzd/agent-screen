@@ -927,6 +927,47 @@ pub fn in_test_app(body: impl FnOnce() -> Result<()>) -> Result<()> {
     result
 }
 
+/// Finish a new isolated test. On an error, keep the instance alive: a
+/// fixture may still have a window on its display or lack a returned pid.
+pub fn finish_test_app(result: Result<()>) -> Result<()> {
+    finish_after_test(result, stop_test_app)
+}
+
+fn finish_after_test(result: Result<()>, quit: impl FnOnce()) -> Result<()> {
+    if result.is_ok() {
+        quit();
+    } else {
+        eprintln!(
+            "test cleanup did not complete; the e2e instance stays running to keep any fixture windows off the user's screen"
+        );
+    }
+    result
+}
+
+#[cfg(test)]
+mod isolated_cleanup_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn failed_cleanup_does_not_quit_the_instance() {
+        let quit = Cell::new(false);
+        let result = finish_after_test(Err(anyhow::anyhow!("fixture still alive")), || {
+            quit.set(true)
+        });
+        assert!(result.is_err());
+        assert!(!quit.get());
+    }
+
+    #[test]
+    fn successful_cleanup_can_quit() {
+        let quit = Cell::new(false);
+        let result = finish_after_test(Ok(()), || quit.set(true));
+        assert!(result.is_ok());
+        assert!(quit.get());
+    }
+}
+
 /// Quit the test instance through its socket; AppleScript would find the
 /// user's app by bundle id.
 pub fn stop_test_app() {

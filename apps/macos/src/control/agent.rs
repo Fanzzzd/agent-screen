@@ -2166,7 +2166,7 @@ async fn act(
                         ax::string_attribute(item.get(), "AXValue").unwrap_or_default()
                     })
                     .await;
-                    if shown.trim().eq_ignore_ascii_case(value.trim()) {
+                    if shown == value {
                         return Ok(());
                     }
                     cx.background_executor()
@@ -2180,6 +2180,7 @@ async fn act(
             let combo = role.as_deref() == Some("AXComboBox");
             // Some elements, static text among them, report success and
             // keep their value: read it back.
+            let committed = value.clone();
             let set = off_main(
                 cx,
                 Box::new(move |e| {
@@ -2199,10 +2200,24 @@ async fn act(
                     "the element's value cannot be set; focus it and type instead",
                 ));
             }
-            if combo && !perform("AXConfirm", cx).await {
-                return Err(ControlError::failed(
-                    "the combo box accepted its value but refused AXConfirm; check the window before retrying",
-                ));
+            if combo {
+                if !perform("AXConfirm", cx).await {
+                    return Err(ControlError::failed(
+                        "the combo box accepted its value but refused AXConfirm; check the window before retrying",
+                    ));
+                }
+                // Confirmation runs the app's commit handler, which may
+                // reject the text. Check after that handler has had a turn.
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let item = ax::Sendable(element.clone());
+                let shown = off(cx, move || ax::string_attribute(item.get(), "AXValue")).await;
+                if shown.as_deref() != Some(&committed) {
+                    return Err(ControlError::failed(format!(
+                        "the combo box confirmed {committed:?}, but now shows {shown:?}; the app may have rejected or changed the value"
+                    )));
+                }
             }
         }
         "insert_text" => {

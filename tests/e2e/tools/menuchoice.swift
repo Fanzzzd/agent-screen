@@ -13,7 +13,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     pop.addItems(withTitles: ["Apple", "Banana", "Cherry"])
     pop.setAccessibilityLabel("Fruit")
     pop.target = self; pop.action = #selector(changed); pop.menu?.delegate = self
-    combo.addItems(withObjectValues: ["Red", "Blue", "Green"])
+    combo.addItems(withObjectValues: ["Red", "Blue", "Green", "Reject"])
     combo.setAccessibilityLabel("Color")
     combo.target = self; combo.action = #selector(changed)
     window.contentView!.addSubview(pop); window.contentView!.addSubview(combo)
@@ -23,7 +23,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 55) { exit(0) }
   }
-  @objc func changed() { window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) opens=\(opens)" }
+  @objc func changed() { if combo.stringValue == "Reject" { combo.stringValue = "Blue" }; window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) opens=\(opens)" }
   func menuWillOpen(_ menu: NSMenu) { opens += 1; changed(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { menu.cancelTrackingWithoutAnimation() } }
 }
 let app = NSApplication.shared
