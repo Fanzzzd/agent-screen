@@ -13,8 +13,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    HandsOff, McpClient, check, field_app, instance, json, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app,
+    McpClient, check, field_app, instance, json, run, sh_lenient, sleep_ms, start_test_app,
+    stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -27,7 +27,6 @@ fn main() -> ExitCode {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         // Field's new window may show on the user's screen.
-        let _sign = HandsOff::start("reopened")?;
         let result = test(field.to_str().unwrap());
         let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
         stop_test_app();
