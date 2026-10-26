@@ -924,6 +924,20 @@ async fn handle_one(
                 let forwarder = core.update(cx, |c, _| c.forwarder(id));
                 forwarder.focus(window.target).await;
             }
+            // Electron takes a menu item pressed through accessibility for
+            // its shortcut: AppKit runs the press with no current event,
+            // and Electron reads only a mouse event as a click (#39).
+            if action == "press" {
+                let (item, pid) = (ax::Sendable(element.clone()), window.target.pid);
+                let electron_menu = off(cx, move || {
+                    ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem")
+                        && app::is_electron(pid)
+                })
+                .await;
+                if electron_menu {
+                    return reply(json!({ "note": ELECTRON_MENU_NOTE }));
+                }
+            }
             Ok(json!({}))
         }
         "launchApp" => {
@@ -3469,6 +3483,9 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     }
     keep_counting(id, cx);
 }
+
+/// What an agent hears after pressing an Electron app's menu item.
+const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, move focus out of the text field, with a click on an empty part of the window, then press the item again.";
 
 thread_local! {
     /// When each display last settled after an action.

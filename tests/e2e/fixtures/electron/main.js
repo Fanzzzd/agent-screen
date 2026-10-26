@@ -1,7 +1,7 @@
 // A window for the end-to-end tests: resizable, with draggable rows. The
 // page writes what it saw into the title; if the renderer dies, so does
 // this process's title, so a test can tell.
-const { app, BrowserWindow, screen } = require("electron");
+const { app, BrowserWindow, Menu, screen } = require("electron");
 
 // As development builds that stay out of the user's way do: an accessory
 // app whose window shows without activating it (issues #17, #20).
@@ -13,6 +13,32 @@ if (background) app.setActivationPolicy("accessory");
 // HARNESS_SINGLE=1 allows one instance, as most packaged Electron apps do:
 // a second one quits at once and the first hears of it (#29).
 if (process.env.HARNESS_SINGLE === "1" && !app.requestSingleInstanceLock()) app.quit();
+
+// HARNESS_MENU_LOG (a file) adds a Go menu whose Previous view item, with
+// no shortcut, writes how its click came: "previous accelerator=false"
+// for a click on the item, true for a shortcut (#39).
+const menuLog = process.env.HARNESS_MENU_LOG;
+if (menuLog) {
+  const fs = require("fs");
+  const note = (line) => fs.appendFileSync(menuLog, line + "\n");
+  app.whenReady().then(() => {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: "appMenu" },
+        { role: "editMenu" },
+        {
+          label: "Go",
+          submenu: [
+            {
+              label: "Previous view",
+              click: (_item, _window, event) => note(`previous accelerator=${event.triggeredByAccelerator}`),
+            },
+          ],
+        },
+      ]),
+    );
+  });
+}
 
 app.whenReady().then(() => {
   // HARNESS_SIZE ("1700x1100") makes a window larger than the display (#19).

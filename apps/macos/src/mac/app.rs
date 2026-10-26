@@ -157,6 +157,14 @@ pub fn bundle_of(pid: i32) -> Option<PathBuf> {
     Some(PathBuf::from(app.bundleURL()?.path()?.to_string()))
 }
 
+/// Whether the app is built on Electron, which ships its framework inside.
+pub fn is_electron(pid: i32) -> bool {
+    bundle_of(pid).is_some_and(|b| {
+        b.join("Contents/Frameworks/Electron Framework.framework")
+            .exists()
+    })
+}
+
 /// Whether the app started less than `span` ago.
 pub fn launched_within(pid: i32, span: std::time::Duration) -> bool {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
