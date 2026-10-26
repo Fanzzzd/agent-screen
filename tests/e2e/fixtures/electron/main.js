@@ -23,6 +23,23 @@ app.whenReady().then(() => {
   win.webContents.on("render-process-gone", (_event, details) => {
     win.setTitle(`renderer gone: ${details.reason} ${details.exitCode}`);
   });
+  // HARNESS_LATER, 1.5 s after the window shows: "1700x1100" makes it that
+  // size, past the display; "main" puts it on the main screen at the
+  // height of its work area, as an app restoring saved bounds does (#19).
+  const later = process.env.HARNESS_LATER;
+  if (later) {
+    win.once("show", () =>
+      setTimeout(() => {
+        if (later === "main") {
+          const area = screen.getPrimaryDisplay().workArea;
+          win.setBounds({ x: area.x + 400, y: area.y, width: 480, height: area.height });
+        } else {
+          const [w, h] = later.split("x").map(Number);
+          win.setSize(w, h);
+        }
+      }, 1500),
+    );
+  }
   win.loadFile("index.html");
   if (tone) {
     win.webContents.once("did-finish-load", () => {
