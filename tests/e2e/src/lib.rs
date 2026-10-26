@@ -294,32 +294,59 @@ pub fn probe(args: &[&str]) -> Result<String> {
     sh(tool("probe")?, args)
 }
 
-/// A sign in the middle of the user's screen while a test moves their
-/// pointer or takes the keyboard (`tools/overlay.swift`): a count from 3
-/// first, then each step, and "可以操作了" once it drops, test passed or not.
-pub struct HandsOff {
+// MARK: The sign
+
+/// Scripts that move the user's pointer, take their keyboard or input
+/// source, mute their sound, or put windows, alerts, cards or focus on their
+/// screen. Their sign asks the user to keep their hands off; the others'
+/// only says a test runs.
+const HANDS_OFF: &[&str] = &[
+    "alerts",
+    "browsers",
+    "chrome",
+    "displaychange",
+    "flash",
+    "helpcard",
+    "ime",
+    "keys",
+    "launchhere",
+    "load",
+    "oneclick",
+    "openpanel",
+    "peekanim",
+    "peekhover",
+    "peekrapid",
+    "requestwindow",
+    "restart",
+    "robust",
+    "run",
+    "secondwindow",
+    "settings",
+    "shared",
+    "sound",
+    "statusicon",
+    "timing",
+];
+
+/// The sign `run` shows on the main screen (`tools/overlay.swift`): a count
+/// from 3 in the middle with the script's name, then a badge in the
+/// bottom-right corner with the current step and each check, then the
+/// result and "可以操作了" when the script ends, whatever the result: a
+/// skip, an error and a panic too. One per process, however many
+/// threads the script runs. E2E_NO_SIGN=1 turns it off.
+struct Sign {
     child: std::process::Child,
+    acks: std::io::BufReader<std::process::ChildStdout>,
+    hidden: usize,
 }
 
-impl HandsOff {
-    /// Count down from 3 and return when the count is over.
-    pub fn start(what: &str) -> Result<HandsOff> {
-        let child = command(tool("overlay")?)
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        let mut sign = HandsOff { child };
-        sign.say(&format!(
-            "count 3 {what}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
-        ));
-        sleep_ms(3000);
-        Ok(sign)
-    }
+static SIGN: std::sync::Mutex<Option<Sign>> = std::sync::Mutex::new(None);
 
-    /// What the test does now.
-    pub fn step(&mut self, text: &str) {
-        self.say(&format!("step {text}"));
-    }
+fn sign() -> std::sync::MutexGuard<'static, Option<Sign>> {
+    SIGN.lock().unwrap_or_else(|e| e.into_inner())
+}
 
+impl Sign {
     fn say(&mut self, line: &str) {
         use std::io::Write;
         if let Some(stdin) = self.child.stdin.as_mut() {
@@ -328,15 +355,133 @@ impl HandsOff {
     }
 }
 
-impl Drop for HandsOff {
-    fn drop(&mut self) {
-        self.say("done Test over: the mouse and keyboard are yours / 测试结束");
-        // The sign stays 2 s, then quits by itself.
-        drop(self.child.stdin.take());
+/// The running script's name, its binary's.
+fn script_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "e2e".into())
+}
+
+/// Count down from 3 and return once the count is over, the sign shrunk to
+/// its badge. A sign that can't start leaves the script to run without.
+fn start_sign(name: &str) {
+    if env_is("E2E_NO_SIGN", "1") {
+        return;
+    }
+    let started = tool("overlay").and_then(|overlay| {
+        Ok(command(overlay)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?)
+    });
+    let mut child = match started {
+        Ok(child) => child,
+        Err(e) => {
+            println!("no sign: {e:#}");
+            return;
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return;
+    };
+    let mut sign = Sign {
+        child,
+        acks: std::io::BufReader::new(stdout),
+        hidden: 0,
+    };
+    {
+        use std::io::BufRead;
+        let mut ready = String::new();
+        let _ = sign.acks.read_line(&mut ready);
+    }
+    if HANDS_OFF.contains(&name) {
+        sign.say(&format!(
+            "count 3 {name}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
+        ));
+    } else {
+        sign.say(&format!(
+            "calm 3 {name}: Agent Screen e2e running / 测试运行中"
+        ));
+    }
+    sleep_ms(3000);
+    sign.say(&format!("badge {name}"));
+    *self::sign() = Some(sign);
+}
+
+/// What the script does now, on the sign's badge.
+pub fn sign_step(text: &str) {
+    if let Some(sign) = sign().as_mut() {
+        sign.say(&format!("step {}", text.replace('\n', " ")));
     }
 }
 
+/// How a script ended, as the sign shows it.
+enum Outcome<'a> {
+    Passed,
+    Failed,
+    Skipped(&'a str),
+}
+
+/// The sign shows the result and goes a few seconds later, by itself.
+fn finish_sign(outcome: Outcome) {
+    let Some(mut sign) = sign().take() else {
+        return;
+    };
+    let name = script_name();
+    let line = match outcome {
+        Outcome::Passed => {
+            let n = PASSES.load(Ordering::SeqCst);
+            format!("pass 全部通过 / all passed ({n})\t{name}")
+        }
+        Outcome::Failed => {
+            let n = failed().max(1);
+            let first = FIRST_FAILURE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default();
+            format!("fail {n} 项失败 / {n} failed\t{name}: {first}")
+        }
+        Outcome::Skipped(reason) => format!("skip 跳过 / skipped\t{name}: {reason}"),
+    };
+    sign.say(&format!("done {}", line.replace('\n', " ")));
+    drop(sign.child.stdin.take());
+}
+
+/// The sign stays off the screen while this lives, so a capture of the
+/// main screen doesn't show it.
+pub struct SignHidden(());
+
+pub fn hide_sign() -> SignHidden {
+    if let Some(sign) = sign().as_mut() {
+        sign.hidden += 1;
+        if sign.hidden == 1 {
+            use std::io::BufRead;
+            sign.say("hide");
+            // The overlay answers once WindowServer stops listing it.
+            let mut ack = String::new();
+            let _ = sign.acks.read_line(&mut ack);
+        }
+    }
+    SignHidden(())
+}
+
+impl Drop for SignHidden {
+    fn drop(&mut self) {
+        if let Some(sign) = sign().as_mut() {
+            sign.hidden = sign.hidden.saturating_sub(1);
+            if sign.hidden == 0 {
+                sign.say("show");
+            }
+        }
+    }
+}
+
+/// Real pointer and key input; `hover` with a region captures it, without
+/// the sign.
 pub fn hid(args: &[&str]) -> Result<String> {
+    let _hidden = (args.first() == Some(&"hover") && args.len() > 3).then(hide_sign);
     sh(tool("hid")?, args)
 }
 
@@ -411,6 +556,15 @@ pub fn locked() -> bool {
 // MARK: Results
 
 static FAILURES: AtomicIsize = AtomicIsize::new(0);
+static PASSES: AtomicIsize = AtomicIsize::new(0);
+static FIRST_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn note_failure(label: &str) {
+    FIRST_FAILURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| label.to_string());
+}
 
 pub fn check(label: &str, ok: bool, detail: impl AsRef<str>) -> bool {
     let detail = detail.as_ref();
@@ -420,7 +574,11 @@ pub fn check(label: &str, ok: bool, detail: impl AsRef<str>) -> bool {
     } else {
         println!("{tag} {label}: {detail}");
     }
-    if !ok {
+    sign_step(&format!("{} {label}", if ok { "✓" } else { "✗" }));
+    if ok {
+        PASSES.fetch_add(1, Ordering::SeqCst);
+    } else {
+        note_failure(label);
         fail();
     }
     ok
@@ -443,27 +601,43 @@ pub fn voided(count: isize) {
 /// Stop here without failing.
 pub fn skip(reason: &str) -> ! {
     println!("skip: {reason}");
+    finish_sign(Outcome::Skipped(reason));
     std::process::exit(0);
 }
 
-/// Run a script's body, then report: "all passed" or the failure count. An
-/// error from the body counts as a failure.
+/// Run a script's body under the sign, then report: "all passed" or the
+/// failure count. An error from the body counts as a failure. The sign
+/// turns green whatever the result, a panic too.
 pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
-    if let Err(e) = body() {
-        check("the script ran to the end", false, format!("{e:#}"));
+    start_sign(&script_name());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            check("the script ran to the end", false, format!("{e:#}"));
+        }
+        Err(panic) => {
+            fail();
+            note_failure("the script panicked");
+            finish_sign(Outcome::Failed);
+            std::panic::resume_unwind(panic);
+        }
     }
     let n = failed();
     if n > 0 {
         println!("{n} failed");
+        finish_sign(Outcome::Failed);
         ExitCode::FAILURE
     } else {
         println!("all passed");
+        finish_sign(Outcome::Passed);
         ExitCode::SUCCESS
     }
 }
 
-/// A capture of a screen region in global points, written under target/e2e.
+/// A capture of a screen region in global points, written under target/e2e,
+/// with the sign off the screen.
 pub fn capture(name: &str, [x, y, w, h]: Rect) -> Result<PathBuf> {
+    let _hidden = hide_sign();
     let file = out().join(format!("{name}.png"));
     let region = [x, y, w, h].map(|v| v.round().to_string()).join(",");
     sh(
@@ -970,5 +1144,17 @@ pub fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
     let _ = std::fs::remove_file(support().join("wallpaper-recording.png"));
     if let Some((path, bytes)) = saved {
         let _ = std::fs::write(path, bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every hands-off name is a script, so a rename can't drop its warning.
+    #[test]
+    fn hands_off_names_scripts() {
+        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin");
+        for name in super::HANDS_OFF {
+            assert!(bin.join(format!("{name}.rs")).exists(), "no script {name}");
+        }
     }
 }
