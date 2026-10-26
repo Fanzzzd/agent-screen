@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -225,7 +225,7 @@ impl McpClient {
                 vec!["mcp".to_string()],
             ),
         };
-        let mut server = Command::new(&command)
+        let mut server = crate::command(&command)
             .args(&args)
             .env("CLAUDE_PROJECT_DIR", "/tmp/smoke")
             .envs(env.iter().copied())

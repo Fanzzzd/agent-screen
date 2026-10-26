@@ -36,6 +36,7 @@ fn main() -> ExitCode {
 fn save(reply: &serde_json::Value, name: &str) -> Result<String> {
     let data = base64::engine::general_purpose::STANDARD
         .decode(reply["data"].as_str().context("image data")?)?;
+    std::fs::create_dir_all(agent_screen_tests::out())?;
     let path = agent_screen_tests::out().join(format!("{name}.png"));
     std::fs::write(&path, data)?;
     Ok(path.to_string_lossy().into_owned())

@@ -12,7 +12,7 @@
 
 use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, ExitCode, Stdio};
 use std::time::Instant;
 
 use agent_screen_tests::{
@@ -231,7 +231,7 @@ fn focus() -> Result<()> {
     }
     start_debug_app(&[])?;
     let control = Control::connect()?;
-    let mut holder = Command::new(tool("keyholder")?)
+    let mut holder = agent_screen_tests::command(tool("keyholder")?)
         .arg("12")
         .stdout(Stdio::piped())
         .spawn()?;

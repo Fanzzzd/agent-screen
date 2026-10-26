@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     }
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
-        let mut alert = std::process::Command::new(tool("alert")?)
+        let mut alert = agent_screen_tests::command(tool("alert")?)
             .arg("20")
             .spawn()?;
         let result = test();

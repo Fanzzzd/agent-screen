@@ -11,7 +11,7 @@
 //! Makes 1 display.
 
 use std::io::{BufRead, BufReader};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{ExitCode, Stdio};
 
 use agent_screen_tests::{
     Control, instance, json, now_ms, run, sleep_ms, start_test_app, stop_test_app, tool,
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 }
 
 fn test() -> Result<()> {
-    let mut frames = Command::new(tool("frames")?)
+    let mut frames = agent_screen_tests::command(tool("frames")?)
         .arg("40")
         .stdout(Stdio::piped())
         .spawn()?;
