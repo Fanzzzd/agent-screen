@@ -1,7 +1,8 @@
 //! The Help Card: drops from the menu bar icon while a Help Request is
 //! open, with the display's picture, the agent's reason, and Take Over or
 //! Later. For a Window Request it names the window the agent asks for,
-//! with Hand Over or Keep.
+//! with Hand Over or Keep. For a Control Request, during a Takeover, it
+//! gives the agent's reason, with Let … Continue or Keep Control.
 
 use super::pointer;
 use super::shell::{Shell, tell};
@@ -133,6 +134,52 @@ impl Render for HelpCard {
                             .on_click(move |_, _, cx| {
                                 tell(&keep, cx, move |shell, cx| {
                                     shell.answer_window(id, false, cx);
+                                })
+                            }),
+                    ),
+            )
+            .into_any_element();
+        }
+        if let Some(reason) = display.control_request.clone() {
+            let (give, keep) = (self.shell.clone(), self.shell.clone());
+            return card(
+                tf!("{agent} asks to continue", "{agent} 想继续操作"),
+                reason,
+                &theme,
+            )
+            .child(
+                div()
+                    .h(px(LABEL))
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(theme.secondary)
+                    .child(display.label()),
+            )
+            .child(
+                div()
+                    .h(px(BUTTONS))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        card_button(
+                            "control-continue",
+                            tf!("Let {agent} Continue", "让 {agent} 继续"),
+                            true,
+                            &theme,
+                        )
+                        .flex_1()
+                        .on_click(move |_, _, cx| {
+                            tell(&give, cx, move |shell, cx| {
+                                shell.answer_control(id, true, cx);
+                            })
+                        }),
+                    )
+                    .child(
+                        card_button("control-keep", t("Keep Control", "继续接管"), false, &theme)
+                            .px(px(16.))
+                            .on_click(move |_, _, cx| {
+                                tell(&keep, cx, move |shell, cx| {
+                                    shell.answer_control(id, false, cx);
                                 })
                             }),
                     ),
@@ -276,10 +323,11 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
 
 fn card_button(
     id: &'static str,
-    title: &'static str,
+    title: impl Into<SharedString>,
     prominent: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let title: SharedString = title.into();
     let (bg, hover, fg) = if prominent {
         (theme.orange.opacity(0.9), theme.orange, gpui::white())
     } else {
@@ -288,7 +336,7 @@ fn card_button(
     div()
         .id(id)
         .role(Role::Button)
-        .aria_label(title)
+        .aria_label(title.clone())
         .h(px(BUTTONS))
         .flex()
         .items_center()

@@ -1,6 +1,6 @@
-//! System notifications: one while a display's Help Request is open,
-//! withdrawn when it ends, and one when an agent leaves windows on its
-//! display. Clicking one opens that display in the Viewer; a Help Request's
+//! System notifications: one while a display's Help, Window or Control
+//! Request is open, withdrawn when it ends, and one when an agent leaves
+//! windows on its display. Clicking one opens that display in the Viewer; a Help Request's
 //! Take Over button also starts a Takeover.
 //!
 //! Agent Screen asks for permission from the setup window, or once at launch
@@ -47,6 +47,9 @@ pub enum Note {
     /// The user brought an app to the front whose windows are all on Agent
     /// Displays: its name, and those displays' labels.
     Elsewhere { app: String, places: Vec<String> },
+    /// During a Takeover, the agent asks for its display back, with its
+    /// reason.
+    Control(String),
     /// The agent stopped using its display and left windows on it.
     Review { windows: usize },
     /// The agent's connection closed and its windows stayed.
@@ -59,6 +62,7 @@ impl Note {
             Note::Help(_) => "help",
             Note::Window(_) => "window",
             Note::Elsewhere { .. } => "where",
+            Note::Control(_) => "control",
             Note::Review { .. } | Note::Disconnected { .. } => "review",
         }
     }
@@ -186,7 +190,7 @@ pub fn request() {
 /// `task` is the rest of the Display Label.
 pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     let Some(note) = note else {
-        for prefix in ["help", "window", "where", "review"] {
+        for prefix in ["help", "window", "where", "control", "review"] {
             withdraw(display, prefix);
         }
         return;
@@ -233,6 +237,13 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
                 ),
             )
         }
+        Note::Control(reason) => (
+            tf!("{agent} asks to continue", "{agent} 想继续操作"),
+            tf!(
+                "{reason} Answer from the card under the menu bar icon.",
+                "{reason} 在菜单栏图标下的卡片里回答。"
+            ),
+        ),
         Note::Review { windows } => (
             tf!("{agent} is done with its display", "{agent} 用完了显示器"),
             windows_waiting(*windows),
@@ -249,7 +260,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     content.setTitle(&NSString::from_str(&title));
     content.setSubtitle(&NSString::from_str(task));
     content.setBody(&NSString::from_str(&body));
-    if matches!(note, Note::Window(_)) {
+    if matches!(note, Note::Window(_) | Note::Control(_)) {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
     }
     if matches!(note, Note::Help(_)) {
@@ -291,6 +302,11 @@ pub fn withdraw_window(display: u32) {
 /// shows again.
 pub fn withdraw_where(display: u32) {
     withdraw(display, "where");
+}
+
+/// Withdraw only the Control Request's notification of a display.
+pub fn withdraw_control(display: u32) {
+    withdraw(display, "control");
 }
 
 fn withdraw(display: u32, prefix: &str) {

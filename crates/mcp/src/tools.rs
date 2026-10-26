@@ -241,6 +241,28 @@ pub fn definitions() -> Vec<Value> {
             PLAIN,
         ),
         tool(
+            "request_control",
+            "Ask the user to hand the display back",
+            &[
+                "While the user is operating your display (a Takeover) and you need it to go on, ask them to hand it",
+                "back, with a short reason. The user gets a notification and a card with Let <agent> Continue and Keep",
+                "Control. The call then waits like wait_for_control. Returns control: agent at once if you have control",
+                "already. control: user with kept: true means the user chose to keep control: don't ask again right",
+                "away. On a timeout the request stays open; call wait_for_control to keep waiting, or request_control",
+                "with withdraw: true when you no longer need the display. Only the user ends a Takeover.",
+            ],
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "reason": { "type": "string", "description": "Why you need the display back, in one short sentence." },
+                    "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
+                    "timeout_seconds": timeout()
+                }),
+                &["display_id"],
+            ),
+            PLAIN,
+        ),
+        tool(
             "list_windows",
             "List windows on the display",
             &[
@@ -592,6 +614,32 @@ pub async fn run(
                 .await?;
             Ok(Output::Object(describe_wait(&reply, true)))
         }
+        "request_control" => {
+            let display = a.require_int("display_id")?;
+            if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
+                let reply = control
+                    .call("withdrawControlRequest", json!({ "displayId": display }))
+                    .await?;
+                let withdrawn = reply.get("withdrawn") == Some(&Value::Bool(true));
+                return Ok(Output::Object(json!({ "withdrawn": withdrawn })));
+            }
+            let reason = a
+                .string("reason")?
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            control
+                .call(
+                    "requestControl",
+                    json!({ "displayId": display, "reason": reason }),
+                )
+                .await?;
+            let reply = control
+                .call(
+                    "waitForControl",
+                    json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
+                )
+                .await?;
+            Ok(Output::Object(describe_wait(&reply, false)))
+        }
         "list_windows" => {
             let reply = control
                 .call(
@@ -803,6 +851,12 @@ fn describe_wait(reply: &Object, helping: bool) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
         Some("returned") => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
+        }
+        Some("kept") => {
+            json!({ "control": "user", "kept": true, "note": "The user chose to keep control of the display. Don't ask again right away; call wait_for_control to wait until they hand it back." })
+        }
+        Some("timedOut") if reply.get("controlAsked") == Some(&Value::Bool(true)) => {
+            json!({ "control": "user", "note": "The user hasn't answered your request to hand the display back; it stays open. Call wait_for_control to keep waiting, or request_control with withdraw: true if you no longer need the display." })
         }
         Some("timedOut") if helping => {
             json!({ "control": "user", "note": "The user hasn't handed the display back yet; the request stays open. Call wait_for_control to keep waiting, or request_help with withdraw: true if you no longer need them." })
@@ -1288,9 +1342,9 @@ mod tests {
     }
 
     #[test]
-    fn twelve_tools_with_object_schemas() {
+    fn thirteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }

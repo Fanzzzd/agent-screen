@@ -68,6 +68,10 @@ _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept
 The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs.
 _Avoid_: window permission, borrow
 
+**Control Request**:
+During a Takeover, the Agent Session asking the user to hand its display back, with a reason. The user answers Let … Continue, which ends the Takeover, or Keep Control, and the Takeover goes on. Only the user's answer ends it (ADR 0004).
+_Avoid_: resume request, reclaim
+
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.
 _Avoid_: cleanup flag, keep/delete mark

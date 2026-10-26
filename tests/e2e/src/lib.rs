@@ -317,6 +317,7 @@ const HANDS_OFF: &[&str] = &[
     "peekanim",
     "peekhover",
     "peekrapid",
+    "requestcontrol",
     "requestwindow",
     "restart",
     "robust",
