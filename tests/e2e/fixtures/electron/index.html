@@ -6,6 +6,7 @@
       .row { margin: 8px; padding: 14px; background: #ffffff; }
       #later { position: fixed; right: 8px; bottom: 8px; width: 120px; height: 30px; }
       #popup { position: fixed; right: 8px; top: 8px; width: 120px; height: 30px; }
+      #split { position: fixed; left: 340px; top: 200px; width: 12px; height: 160px; background: #0000ff; touch-action: none; }
       #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
     </style>
   </head>
@@ -15,6 +16,7 @@
     <div class="row" id="r3" draggable="true">row 3</div>
     <button class="row" id="nav">open page</button>
     <div id="page"></div>
+    <div id="split"></div>
     <input id="field" />
     <button id="later">later</button>
     <button id="popup">open window</button>
@@ -43,6 +45,28 @@
       });
       addEventListener("dblclick", () => { seen.dbl++; show(); });
       addEventListener("dragstart", () => { seen.drag++; show(); });
+      // A splitter as react-resizable-panels has: it captures the pointer
+      // on press and follows moves only while the button is held, by
+      // pointermove's buttons (#37). held and free count the moves seen
+      // between press and release with the button down and up; split is
+      // how far the splitter followed.
+      const split = document.getElementById("split");
+      let pressed = null;
+      split.addEventListener("pointerdown", (e) => {
+        pressed = e.clientX;
+        split.setPointerCapture(e.pointerId);
+      });
+      split.addEventListener("pointermove", (e) => {
+        if (pressed === null) return;
+        if (e.buttons & 1) {
+          seen.held = (seen.held || 0) + 1;
+          seen.split = Math.round(e.clientX - pressed);
+        } else {
+          seen.free = (seen.free || 0) + 1;
+        }
+        show();
+      });
+      split.addEventListener("pointerup", () => { pressed = null; show(); });
       addEventListener("resize", show);
       // Turns the page red, or back, 400 ms after a click, as an app that
       // takes a moment to show what an action did (issue #16).
