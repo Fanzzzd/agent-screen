@@ -543,17 +543,67 @@ pub fn running(name: &str) -> bool {
 /// The caller must never pass a process it did not start.
 pub fn stop_started_pid(pid: u32) -> Result<()> {
     let pid = pid.to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
     let _ = Command::new("/bin/kill").args(["-TERM", &pid]).status();
-    for _ in 0..50 {
+    loop {
         if sh_lenient("/bin/ps", &["-p", &pid, "-o", "args="])
             .trim()
             .is_empty()
         {
             return Ok(());
         }
-        sleep_ms(100);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "the test process {pid} did not exit after the five-second TERM wait; preserve its display, backend and custody"
+            );
+        }
+        sleep_ms(remaining.min(Duration::from_millis(100)).as_millis() as u64);
     }
-    bail!("the test process {pid} did not exit; its display must stay connected")
+}
+
+/// Ending a display is permitted only after every owned fixture stopped.
+/// On Err the caller must record cleanupVerified=false and preserve backend.
+pub fn finish_fixture_cleanup(
+    stop: impl FnOnce() -> Result<()>,
+    end_display: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    stop()?;
+    end_display()
+}
+
+/// Compile the native fixture only; this does not launch it or create UI.
+pub fn native_guard_fixture_binary(output: &Path) -> Result<()> {
+    sh(
+        "/usr/bin/clang",
+        &[
+            "-fobjc-arc",
+            "-Wall",
+            "-Werror",
+            "-mmacosx-version-min=26.0",
+            "-I",
+            root().join("apps/macos/native").to_str().unwrap(),
+            root()
+                .join("tests/e2e/tools/nativeguard.m")
+                .to_str()
+                .unwrap(),
+            root()
+                .join("apps/macos/native/SkyLight.m")
+                .to_str()
+                .unwrap(),
+            "-framework",
+            "AppKit",
+            "-framework",
+            "ApplicationServices",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "Carbon",
+            "-o",
+            output.to_str().unwrap(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// `name` is running with windows: a headless browser that a script on this
@@ -1246,5 +1296,102 @@ mod tests {
         for name in super::HANDS_OFF {
             assert!(bin.join(format!("{name}.rs")).exists(), "no script {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fixture_term_process_tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        io::{BufRead, BufReader, Write},
+        sync::mpsc,
+    };
+
+    struct RepairOnDrop {
+        child: std::process::Child,
+        input: Option<std::process::ChildStdin>,
+    }
+    impl RepairOnDrop {
+        fn repair(&mut self) -> Result<()> {
+            if let Some(mut input) = self.input.take() {
+                writeln!(input, "repair")?;
+            }
+            let status = self.child.wait()?;
+            anyhow::ensure!(status.success(), "offline custody child could not drain");
+            Ok(())
+        }
+    }
+    impl Drop for RepairOnDrop {
+        fn drop(&mut self) {
+            let _ = self.repair();
+        }
+    }
+
+    #[test]
+    fn term_timeout_preserves_live_custodian_display_and_backend() -> Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("as-guard-term-{}-{}", std::process::id(), now_ms()));
+        std::fs::DirBuilder::new().create(&path)?;
+        let binary = path.join("custody-child");
+        native_guard_fixture_binary(&binary)?;
+        let mut child = command(&binary)
+            .arg("--custody-term-child")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let input = child.stdin.take();
+        let output = child.stdout.take().context("offline child stdout")?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut child = RepairOnDrop { child, input };
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5))?, "ready retained=1");
+        let end_called = Cell::new(false);
+        let quit_called = Cell::new(false);
+        let began = Instant::now();
+        let cleanup = finish_fixture_cleanup(
+            || stop_started_pid(child.child.id()),
+            || {
+                end_called.set(true);
+                Ok(())
+            },
+        );
+        let elapsed = began.elapsed();
+        let cleanup_verified = cleanup.is_ok();
+        let result = finish_after_test(cleanup, || quit_called.set(true));
+        assert!(result.is_err());
+        assert!(!cleanup_verified);
+        assert!(!end_called.get());
+        assert!(!quit_called.get());
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+            "TERM wait took {elapsed:?}"
+        );
+        assert!(
+            child.child.try_wait()?.is_none(),
+            "parent forcibly killed the custodian"
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))?,
+            "term-refused retained=1"
+        );
+        child.repair()?;
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))?,
+            "repaired retained=0"
+        );
+        println!(
+            "offline TERM wait={} ms; Err; child alive; cleanupVerified=false; endDisplay=0; backendQuit=0; repaired without kill",
+            elapsed.as_millis()
+        );
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }

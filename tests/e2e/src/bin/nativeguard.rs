@@ -2,8 +2,9 @@
 //! Requires /tmp/asq/native-guard-live-budget.json and the external display
 //! lock. A consumed budget is never reset by this script. No retry loop.
 use agent_screen_tests::{
-    Control, check, command, debug_app, debug_pid, finish_test_app, instance, json, listening, out,
-    root, run, sh, sh_lenient, skip, sleep_ms, start_test_app, stop_started_pid, stop_test_app,
+    Control, check, command, debug_app, debug_pid, finish_fixture_cleanup, finish_test_app,
+    instance, json, listening, native_guard_fixture_binary, out, run, sh, sh_lenient, skip,
+    sleep_ms, start_test_app, stop_started_pid, stop_test_app,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -60,35 +61,7 @@ fn save_budget(budget: &Value) -> Result<()> {
 fn build_fixtures() -> Result<[PathBuf; 2]> {
     fs::create_dir_all(out())?;
     let binary = out().join("nativeguard-fixture");
-    sh(
-        "/usr/bin/clang",
-        &[
-            "-fobjc-arc",
-            "-Wall",
-            "-Werror",
-            "-mmacosx-version-min=26.0",
-            "-I",
-            root().join("apps/macos/native").to_str().unwrap(),
-            root()
-                .join("tests/e2e/tools/nativeguard.m")
-                .to_str()
-                .unwrap(),
-            root()
-                .join("apps/macos/native/SkyLight.m")
-                .to_str()
-                .unwrap(),
-            "-framework",
-            "AppKit",
-            "-framework",
-            "ApplicationServices",
-            "-framework",
-            "CoreGraphics",
-            "-framework",
-            "Carbon",
-            "-o",
-            binary.to_str().unwrap(),
-        ],
-    )?;
+    native_guard_fixture_binary(&binary)?;
     let mut apps = Vec::new();
     for (name, role) in [("GuardMenu", "menu"), ("GuardUser", "user")] {
         let app = out().join(format!("{name}.app"));
@@ -549,12 +522,20 @@ fn session(apps: &[PathBuf; 2], mut budget: Value) -> Result<()> {
             send_fixture(&cmd, pids[1], json!({"command":"release"}))?;
             wait_record(&user_log, "released", pos)?;
         }
-        for (index, pid) in pids.iter().copied().enumerate().rev() {
-            if fixture_running(pid, &apps[index])? {
-                stop_started_pid(pid)?;
-            }
-        }
-        c.call("endDisplay", json!({"sessionKey":KEY,"displayId":display}))?;
+        finish_fixture_cleanup(
+            || {
+                for (index, pid) in pids.iter().copied().enumerate().rev() {
+                    if fixture_running(pid, &apps[index])? {
+                        stop_started_pid(pid)?;
+                    }
+                }
+                Ok(())
+            },
+            || {
+                c.call("endDisplay", json!({"sessionKey":KEY,"displayId":display}))?;
+                Ok(())
+            },
+        )?;
         Ok(())
     })();
     budget["cleanupVerified"] = json!(cleanup.is_ok());

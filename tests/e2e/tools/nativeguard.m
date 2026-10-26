@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <assert.h>
+#include <poll.h>
 #import "AgentScreenPrivate.h"
 
 extern int SSMenuKeyPid(void);
@@ -360,9 +361,9 @@ static BOOL post(CGEventRef e) {
 @end
 // Fault tests construct CGEvent values only. They never initialize NSApp,
 // install a tap, create a window, post input, or touch a display.
-typedef NS_ENUM(int, CustodyFault) { CFNone, CFEncodeNil, CFEncodeThrow, CFOpenDir, CFNoSpace, CFShortFail, CFSyncFail, CFRenameFail, CFZeroWrite, CFEintr };
+typedef NS_ENUM(int, CustodyFault) { CFNone, CFEncodeNil, CFEncodeThrow, CFOpenDir, CFNoSpace, CFShortFail, CFSyncFail, CFRenameFail, CFZeroWrite, CFEintr, CFCloseFail, CFDirSyncFail };
 static CustodyFault TestFault;
-static NSUInteger TestWrites, TestOpens, TestBytes;
+static NSUInteger TestWrites, TestOpens, TestBytes, TestSyncs, TestCloses;
 static NSData *testEncode(CGEventRef e) { if (TestFault==CFEncodeNil) return nil; if (TestFault==CFEncodeThrow) @throw [NSException exceptionWithName:@"encode fault" reason:@"offline injection" userInfo:nil]; return encodeUnexpected(e); }
 static int testOpen(const char *p,int f,mode_t m) { (void)p;(void)f;(void)m; TestOpens++; if (TestFault==CFOpenDir) { errno=EISDIR; return -1; } return 300; }
 static ssize_t testWrite(int fd,const void *p,size_t n) {
@@ -372,8 +373,8 @@ static ssize_t testWrite(int fd,const void *p,size_t n) {
     if (TestFault==CFEintr && TestWrites==1) { errno=EINTR; return -1; }
     size_t count=MIN(n,3); TestBytes+=count; return (ssize_t)count;
 }
-static int testSync(int fd) { (void)fd; if (TestFault==CFSyncFail) { errno=EIO; return -1; } return 0; }
-static int testClose(int fd) { (void)fd; return 0; }
+static int testSync(int fd) { (void)fd; TestSyncs++; if (TestFault==CFSyncFail || (TestFault==CFDirSyncFail && TestSyncs==2)) { errno=EIO; return -1; } return 0; }
+static int testClose(int fd) { (void)fd; TestCloses++; if (TestFault==CFCloseFail && TestCloses==1) { errno=EIO; return -1; } return 0; }
 static int testRename(const char *a,const char *b) { (void)a;(void)b; if (TestFault==CFRenameFail) { errno=EACCES; return -1; } return 0; }
 static int testUnlink(const char *p) { (void)p; return 0; }
 static CustodyIO TestIO(void) { return (CustodyIO){testEncode,testOpen,testWrite,testSync,testClose,testRename,testUnlink}; }
@@ -384,9 +385,9 @@ static CustodyIO TestIO(void) { return (CustodyIO){testEncode,testOpen,testWrite
 - (CGEventRef)CGEvent { return NULL; }
 @end
 static int custodySelfTest(void) {
-    CustodyFault failures[]={CFEncodeNil,CFEncodeThrow,CFOpenDir,CFNoSpace,CFShortFail,CFSyncFail,CFRenameFail,CFZeroWrite};
+    CustodyFault failures[]={CFEncodeNil,CFEncodeThrow,CFOpenDir,CFNoSpace,CFShortFail,CFSyncFail,CFRenameFail,CFZeroWrite,CFCloseFail,CFDirSyncFail};
     for (NSUInteger i=0;i<sizeof(failures)/sizeof(failures[0]);i++) {
-        TestFault=failures[i]; TestWrites=TestOpens=TestBytes=0;
+        TestFault=failures[i]; TestWrites=TestOpens=TestBytes=TestSyncs=TestCloses=0;
         CGEventSourceRef source=CGEventSourceCreate(kCGEventSourceStatePrivate);
         CGEventRef original=CGEventCreateKeyboardEvent(source,0,true); CGEventSetTimestamp(original,777);
         UnexpectedCustody *custody=[[UnexpectedCustody alloc] initPrefix:@"/not-written/offline" io:TestIO()];
@@ -396,11 +397,11 @@ static int custodySelfTest(void) {
         assert(CGEventGetTimestamp(custody.pending.firstObject.original)==777);
         if (TestFault==CFEncodeNil || TestFault==CFEncodeThrow) assert(TestOpens==0);
         if (TestFault==CFShortFail) assert(TestWrites==2 && TestBytes==3);
-        TestFault=CFNone; TestWrites=0;
+        TestFault=CFNone; TestWrites=TestSyncs=TestCloses=0;
         assert(custodyAllowsExit(custody)); assert(custody.pending.count==0);
     }
     for (int mode=0;mode<2;mode++) {
-        TestFault=mode ? CFEintr : CFNone; TestWrites=TestOpens=TestBytes=0;
+        TestFault=mode ? CFEintr : CFNone; TestWrites=TestOpens=TestBytes=TestSyncs=TestCloses=0;
         CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,true);
         UnexpectedCustody *custody=[[UnexpectedCustody alloc] initPrefix:@"/not-written/offline" io:TestIO()]; [custody captureCG:event]; CFRelease(event);
         assert(custodyAllowsExit(custody)); assert(custody.pending.count==0 && TestWrites>2 && TestBytes>3);
@@ -427,11 +428,44 @@ static int custodySelfTest(void) {
     NSData *bytes=[[NSData alloc] initWithBase64EncodedString:record[@"event"] options:0];
     CGEventRef restored=CGEventCreateFromData(NULL,(__bridge CFDataRef)bytes); assert(restored && CGEventGetTimestamp(restored)==888); CFRelease(restored);
     assert([[NSFileManager defaultManager] removeItemAtPath:root error:NULL]);
-    puts("12 offline unexpected-input custody cases passed"); return 0;
+    puts("14 offline unexpected-input custody cases passed"); return 0;
+}
+// This subprocess owns one artificial event created here, never live
+// input. TERM cannot end it while the injected storage failure persists.
+// A private controller repair command (or controller EOF during test
+// teardown) removes only the artificial fault, then drains before exit.
+static volatile sig_atomic_t TestTerm;
+static void testTerm(int s) { (void)s; TestTerm=1; }
+static int custodyTermChild(void) {
+    TestFault=CFNoSpace;
+    UnexpectedCustody *custody=[[UnexpectedCustody alloc] initPrefix:@"/not-written/process-test" io:TestIO()];
+    CGEventRef event=CGEventCreateKeyboardEvent(NULL,0,true); [custody captureCG:event]; CFRelease(event);
+    signal(SIGTERM,testTerm);
+    puts("ready retained=1"); fflush(stdout);
+    for (;;) {
+        if (TestTerm) {
+            TestTerm=0;
+            if (custodyAllowsExit(custody)) return 0;
+            printf("term-refused retained=%lu\n",(unsigned long)custody.pending.count); fflush(stdout);
+        }
+        struct pollfd input={STDIN_FILENO,POLLIN,0};
+        int ready=poll(&input,1,20);
+        if (ready<0 && errno==EINTR) continue;
+        if (ready<0) return 2;
+        if (ready>0 && (input.revents & (POLLIN|POLLHUP))) {
+            char buffer[32]; ssize_t n=read(STDIN_FILENO,buffer,sizeof(buffer));
+            if (n==0 || (n>=6 && !memcmp(buffer,"repair",6))) {
+                TestFault=CFNone;
+                if (!custodyAllowsExit(custody)) return 3;
+                puts("repaired retained=0"); fflush(stdout); return 0;
+            }
+        }
+    }
 }
 static GuardDelegate *Delegate;
 int main(int argc,const char *argv[]) { @autoreleasepool {
     if (argc==2 && strcmp(argv[1],"--custody-self-test")==0) return custodySelfTest();
+    if (argc==2 && strcmp(argv[1],"--custody-term-child")==0) return custodyTermChild();
     Env = NSProcessInfo.processInfo.environment; UserRole = [Env[@"GUARD_ROLE"] isEqual:@"user"];
     LogPath = Env[@"GUARD_LOG"]; CommandPath = Env[@"GUARD_COMMAND"];
     if (!LogPath || !CommandPath) return 2;
