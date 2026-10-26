@@ -38,7 +38,9 @@ Production taps hold only events whose poster pid is 0. Agent Screen's events an
 
 The helper process owns captured event originals independently of its requesting pipe. The queue retains originals after posting a copy and removes them only at the helper's final annotated tap acknowledgement. That acknowledgement is an OS hand-back observation, not proof that an app consumed the key. Native receiver measurements are still required.
 
-Controller panic and parent EOF enter cancellation and drain. If automatic restoration cannot be verified, the helper writes a complete, synced private checkpoint before relinquishing its in-memory originals. The recovery directory uses mode 0700 and event files use mode 0600. Records contain serialized input, so they are not app logs and their payloads are never returned to agents. Ambiguous dispatch is not retried automatically. The summary CLI reports counts only; owner-facing recovery UX is not implemented yet.
+Controller panic and parent EOF enter cancellation and drain. If automatic restoration cannot be verified, the helper writes a complete, synced private checkpoint before relinquishing its in-memory originals. The recovery directory uses mode 0700 and event files use mode 0600. Records contain serialized input, so they are not app logs and their payloads are never returned to agents. Each helper has one canonical recovery transaction. Finish with retained input atomically replaces its live journal with the current remaining events. The fallback uses the same transaction and path; temporary checkpoints are excluded from the inventory. Already acknowledged events and their old ACK history do not reappear as another pending record. No journal-reading path posts input.
+
+Ambiguous dispatch is not retried automatically. The summary CLI reports counts only; owner-facing recovery UX is not implemented yet.
 
 The debug prototype has a two-second recovery observation limit. Its custody writer can wait longer when storage fails. Neither limit proves a 500 ms input-interception bound. Target hangs, helper hard termination, global tap revocation, blind secure-input intervals, cross-window mouse replay and complete drag semantics remain unverified. These gaps block enabling ordinary tool interception.
 
@@ -56,3 +58,9 @@ Before enabling the runtime, measure keys lost, event order, maximum added laten
 ## Alternatives
 
 Leaving a menu open gives it the user's keyboard until the next call. Routing the user's keys directly to a pid bypasses session shortcuts and window activation. Holding every key until closure delays typing for the entire call. A separate login session or VM isolates input but has none of the user's current apps or logins. The proposed guard would keep existing apps available and limit the initial key hold, at the cost of private API and event-tap failure modes.
+
+## Fixture unexpected-input custody
+
+The owned native fixture retains the original NSEvent and CGEvent before serialization. Untagged input is never replayed to a real user app. Nil serialization, failed open, short or failed write, fsync, close and rename failures keep the in-memory owner. Per-event files become authoritative only after complete writes, file sync, atomic rename and directory sync.
+
+The fixture stops emitting and releases its own focus lease on unexpected input. While custody cannot become durable, it refuses Quit, SIGTERM and its normal 55-second exit. It retries storage without discarding the event. This deliberate pending-recovery exception can keep the fixture alive beyond its normal test lifetime and must be reported rather than force-killed. Hard termination and allocation failure remain outside the proof. Offline fault injection constructs events but never starts NSApp, opens a window, installs a tap or posts input.

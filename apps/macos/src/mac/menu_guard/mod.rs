@@ -163,6 +163,7 @@ enum Record {
     Fault(String),
     Finish {
         retained: usize,
+        snapshot: Vec<journal::RetainedRecord>,
         closed: bool,
         focus: bool,
         reply: mpsc::Sender<Result<(), String>>,
@@ -190,11 +191,18 @@ fn logger(
                     Record::Fault(reason) => journal.as_mut().unwrap().fault(&reason),
                     Record::Finish {
                         retained,
+                        snapshot,
                         closed,
                         focus,
                         reply,
                     } => {
-                        let result = journal.take().unwrap().finish(retained, closed, focus);
+                        let current = journal.take().unwrap();
+                        let result = if retained == 0 {
+                            current.finish(0, closed, focus)
+                        } else {
+                            drop(current);
+                            journal::Journal::checkpoint(&root, nonce, target, user, &snapshot)
+                        };
                         let _ = reply.send(result);
                         return;
                     }
@@ -699,18 +707,20 @@ fn output(value: Value) {
     let _ = writeln!(std::io::stdout().lock(), "{value}");
 }
 
-fn escrow(state: &Capture, root: &std::path::Path, nonce: u64) -> Result<(), String> {
-    let mut ledger = journal::Journal::create(root, nonce, state.target, state.user)?;
+fn recovery_snapshot(state: &Capture) -> Result<Vec<journal::RetainedRecord>, String> {
+    let mut result = Vec::new();
     for saved in state.queue.retained_events().chain(state.quarantine.iter()) {
         let data = CGEvent::new_data(None, Some(saved.event()))
             .ok_or("could not serialize retained recovery custody")?;
-        let bytes = unsafe { std::slice::from_raw_parts(data.byte_ptr(), data.length() as usize) };
-        ledger.held(saved.id, bytes)?;
-        if state.pending.contains_key(&saved.id) {
-            ledger.dispatched(saved.id)?;
-        }
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.byte_ptr(), data.length() as usize) }.to_vec();
+        result.push(journal::RetainedRecord {
+            id: saved.id,
+            bytes,
+            dispatched: state.pending.contains_key(&saved.id),
+        });
     }
-    ledger.seal_pending()
+    Ok(result)
 }
 
 fn finish_custody(
@@ -727,9 +737,21 @@ fn finish_custody(
     }
     state.persist_new();
     let retained = state.queue.retained() + state.quarantine.len();
+    let snapshot = loop {
+        match recovery_snapshot(state) {
+            Ok(snapshot) => break snapshot,
+            Err(_) => {
+                output(
+                    json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}),
+                );
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    };
     let (tx, rx) = mpsc::channel();
     let _ = state.records.send(Record::Finish {
         retained,
+        snapshot,
         closed,
         focus,
         reply: tx,
@@ -739,18 +761,34 @@ fn finish_custody(
         .map_err(|_| "input custody writer did not finish".to_owned())
         .and_then(|r| r);
     if retained != 0 {
-        let mut attempt = 0u64;
-        loop {
-            let checkpoint =
-                u64::from(nonce) ^ (u64::from(std::process::id()) << 32) ^ (attempt << 16);
-            if escrow(state, root, checkpoint).is_ok() {
-                break;
+        if writer.is_err() {
+            loop {
+                let snapshot = match recovery_snapshot(state) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        output(
+                            json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}),
+                        );
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
+                if journal::Journal::checkpoint(
+                    root,
+                    u64::from(nonce),
+                    state.target,
+                    state.user,
+                    &snapshot,
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                output(
+                    json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}),
+                );
+                thread::sleep(Duration::from_secs(1));
             }
-            // No callback runs after invalidation. Keep the originals alive
-            // until a complete, synced recovery checkpoint owns every one.
-            output(json!({"recoveryPending":true,"retained":retained,"custody":"helper-memory"}));
-            attempt = attempt.wrapping_add(1);
-            thread::sleep(Duration::from_secs(1));
         }
         return Err(
             "retained input is sealed in private recovery custody; automatic replay is forbidden"
@@ -787,17 +825,7 @@ pub fn recovery_summary() -> Result<(), String> {
         output(json!({"recovery":[]}));
         return Ok(());
     }
-    let mut records = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_name().to_string_lossy().starts_with("guard-") {
-            continue;
-        }
-        match journal::inspect(&entry.path()) {
-            Ok(record) => records.push(json!({"guard":entry.file_name().to_string_lossy(),"retained":record.events.len(),"deliveryUncertain":record.dispatched.len(),"complete":record.complete})),
-            Err(error) => records.push(json!({"guard":entry.file_name().to_string_lossy(),"error":error})),
-        }
-    }
+    let records = journal::summaries(&root)?;
     output(json!({"recovery":records}));
     Ok(())
 }
@@ -1262,10 +1290,12 @@ mod tests {
         }
     }
 
+    static TEST_DIRECTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     fn test_directory() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "agent-screen-custody-exit-{}-{}",
+            "agent-screen-custody-exit-{}-{}-{}",
             std::process::id(),
+            TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
