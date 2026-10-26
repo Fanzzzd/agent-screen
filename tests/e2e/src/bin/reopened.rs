@@ -13,8 +13,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    McpClient, check, field_app, instance, json, run, sh_lenient, sleep_ms, start_test_app,
-    stop_test_app,
+    McpClient, allow_on_your_screen, check, field_app, instance, json, run, sh_lenient, sleep_ms,
+    start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -24,6 +24,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     run(|| {
+        allow_on_your_screen(
+            "Field",
+            200,
+            "a window an app opens by itself shows where the app puts it until Agent Screen hears of it and moves it, 64 ms on 2026-10-26",
+        );
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         // Field's new window may show on the user's screen.

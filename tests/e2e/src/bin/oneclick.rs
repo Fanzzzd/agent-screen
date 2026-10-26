@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, fixture, hid, instance, json, kill_ours, open_stage, our_binary, out, probe,
-    run, sh_lenient, sign_step, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, allow_on_your_screen, check, fixture, hid, instance, json, kill_ours, open_stage,
+    our_binary, out, probe, run, sh_lenient, sign_step, skip, sleep_ms, start_test_app,
+    stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -46,6 +47,11 @@ fn main() -> ExitCode {
     }
     let front = front_app();
     run(|| {
+        allow_on_your_screen(
+            "Electron",
+            800,
+            "Electron brings itself to the front as its first window shows, which shows the app Agent Screen started hidden, and answers no accessibility call for about 0.5 s after (AXRole on it took 508 ms), so nothing can move the window sooner",
+        );
         // AGENTSCREEN_NO_CLAIMS=1 leaves AeroSpace guessing whose the
         // login window is.
         let unclaimed = std::env::var("AGENTSCREEN_NO_CLAIMS").unwrap_or_default();

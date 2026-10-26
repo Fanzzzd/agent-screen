@@ -8,8 +8,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, fixture, instance, json, out, run, skip, sleep_ms, start_test_app,
-    stop_test_app,
+    Control, allow_on_your_screen, check, fixture, instance, json, out, run, skip, sleep_ms,
+    start_test_app, stop_test_app,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -26,6 +26,11 @@ fn main() -> ExitCode {
         skip("no Electron.app; copy one to target/e2e or set E2E_ELECTRON");
     }
     run(|| {
+        allow_on_your_screen(
+            "Electron",
+            800,
+            "Electron brings itself to the front as its first window shows, which shows the app Agent Screen started hidden, and answers no accessibility call for about 0.5 s after (AXRole on it took 508 ms), so nothing can move the window sooner",
+        );
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let mut pids = Vec::new();
         let result = test(&electron, &mut pids);

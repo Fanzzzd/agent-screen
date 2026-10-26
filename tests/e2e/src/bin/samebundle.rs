@@ -10,15 +10,14 @@
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e samebundle
 //!
-//! Makes 1 display. The copy shows Electron's "Error launching app" box on
-//! your screen for a few seconds.
+//! Makes 1 display.
 
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use agent_screen_tests::{
-    Control, check, fixture, instance, json, listening, out, run, skip, sleep_ms, start_test_app,
-    stop_test_app, windows_of,
+    Control, allow_on_your_screen, check, fixture, instance, json, listening, out, run, skip,
+    sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Result, bail};
 
@@ -34,6 +33,11 @@ fn main() -> ExitCode {
         skip("no Electron.app; copy one to target/e2e or set E2E_ELECTRON");
     }
     run(|| {
+        allow_on_your_screen(
+            "Electron",
+            800,
+            "Electron brings itself to the front as its first window shows, which shows the app Agent Screen started hidden, and answers no accessibility call for about 0.5 s after (AXRole on it took 508 ms), so nothing can move the window sooner",
+        );
         if listening() {
             bail!("quit the e2e app first: this test starts it with a delayed open");
         }
@@ -41,7 +45,6 @@ fn main() -> ExitCode {
             ("AGENTSCREEN_LANG", "en"),
             ("AGENTSCREEN_OPEN_DELAY_MS", "1500"),
         ])?;
-        // The copy's error box shows on the user's screen.
         let result = test(&electron);
         quit_all(&electron);
         stop_test_app();
@@ -56,6 +59,13 @@ fn quit_all(electron: &Path) {
         .arg(binary)
         .status();
     sleep_ms(1000);
+}
+
+fn copy_running(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn test(electron: &Path) -> Result<()> {
@@ -78,9 +88,12 @@ fn test(electron: &Path) -> Result<()> {
             )
         });
         sleep_ms(100);
-        // Another tool's Electron, from a checkout with nothing built.
+        // Another tool's Electron, started from a shell with other
+        // arguments. It opens no window: one would show on the user's screen.
         let copy = Command::new(electron.join("Contents/MacOS/Electron"))
-            .arg("/tmp/agent-screen-e2e-no-such-checkout")
+            .arg(fixture("electron"))
+            .arg("--another-tool")
+            .env("HARNESS_IDLE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -91,7 +104,6 @@ fn test(electron: &Path) -> Result<()> {
         Ok((launched, copy))
     })?;
     sleep_ms(2000);
-    let theirs: Vec<u64> = windows_of(copy.id()).iter().map(|w| w.id).collect();
     let listed = control.call("listWindows", json!({ "displayId": id }))?;
     let on: Vec<u64> = listed["windows"]
         .as_array()
@@ -101,17 +113,19 @@ fn test(electron: &Path) -> Result<()> {
         .as_ref()
         .ok()
         .and_then(|l| l["window"]["windowId"].as_u64());
+    let pid = launched.as_ref().ok().and_then(|l| l["pid"].as_u64());
+    let copy_runs = copy_running(copy.id());
     check(
-        "the copy's window stays off the display",
-        !theirs.is_empty() && !theirs.iter().any(|w| on.contains(w)),
+        "the copy still runs, and launch_app didn't take it",
+        copy_runs && pid != Some(u64::from(copy.id())),
         format!(
-            "copy pid {} windows {theirs:?}, on display {on:?}",
+            "copy pid {} running {copy_runs}, launched pid {pid:?}",
             copy.id()
         ),
     );
     check(
         "launch_app answers with its own instance's window, on the display",
-        window.is_some_and(|w| on.contains(&w) && !theirs.contains(&w)),
+        window.is_some_and(|w| on.contains(&w)),
         format!("launched {launched:?}"),
     );
     control.call(
