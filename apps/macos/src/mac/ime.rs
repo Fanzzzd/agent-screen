@@ -44,6 +44,15 @@ unsafe extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
 }
 
+/// The agent's app this module brought to the front, 0 for none. The guard
+/// that gives the front back to the user's app leaves it alone (issue #67).
+static HOLDING: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Whether a call here holds the front for `pid` now.
+pub fn holding(pid: i32) -> bool {
+    HOLDING.load(std::sync::atomic::Ordering::Relaxed) == pid
+}
+
 /// When Agent Screen last posted an event, and how long the user had been
 /// idle just before.
 static POSTED: std::sync::Mutex<Option<(Instant, f64)>> = std::sync::Mutex::new(None);
@@ -179,6 +188,7 @@ pub fn type_keys(
     // The agent's app comes to the front, its window key, the pointer
     // where it is.
     let application = ax::application(target.pid);
+    HOLDING.store(target.pid, std::sync::atomic::Ordering::Relaxed);
     ax::set_attribute(&application, "AXFrontmost", CFBoolean::new(true));
     ax::make_main(target);
     // Keys go to whichever app has keyboard focus. Unless it is the agent's,
@@ -260,22 +270,28 @@ pub fn type_keys(
 /// AXFrontmost; NSRunningApplication brings those.
 fn give_back(front: Option<i32>, agent: i32, source: Option<&Source>) {
     if let Some(front) = front.filter(|&p| p != agent) {
-        ax::set_attribute(&ax::application(front), "AXFrontmost", CFBoolean::new(true));
-        let asked = Instant::now();
-        let mut fallback = false;
-        while app::frontmost_pid() != Some(front) && asked.elapsed() < Duration::from_secs(1) {
-            if !fallback && asked.elapsed() > Duration::from_millis(200) {
-                fallback = true;
-                log::debug!("ime: pid {front} ignored AXFrontmost; activating it");
-                app::activate(front);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        if app::frontmost_pid() != Some(front) {
-            log::warn!("ime: pid {front} didn't come back to the front");
-        }
+        return_front(front);
     }
+    HOLDING.store(0, std::sync::atomic::Ordering::Relaxed);
     if let Some(source) = source {
         select(source);
+    }
+}
+
+/// Bring the user's app `front` back to the front, waiting up to 1 s.
+pub fn return_front(front: i32) {
+    ax::set_attribute(&ax::application(front), "AXFrontmost", CFBoolean::new(true));
+    let asked = Instant::now();
+    let mut fallback = false;
+    while app::frontmost_pid() != Some(front) && asked.elapsed() < Duration::from_secs(1) {
+        if !fallback && asked.elapsed() > Duration::from_millis(200) {
+            fallback = true;
+            log::debug!("front: pid {front} ignored AXFrontmost; activating it");
+            app::activate(front);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if app::frontmost_pid() != Some(front) {
+        log::warn!("front: pid {front} didn't come back to the front");
     }
 }

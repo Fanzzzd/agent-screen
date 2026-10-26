@@ -73,6 +73,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an 
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves, or at the first click on the icon
 AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from tests/e2e/fixtures/electron: launch with arguments, an accessory app's window that opens on the display, clicks, typing, edge resize, late redraws; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # a display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e secondwindow   # an Electron app on the display that brings itself to the front to show a window, at launch and for a window.open: your front app is back within 300 ms; shows the sign first; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e agentshots     # a screenshot is the whole display scaled down; a zoom over all of it works
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays

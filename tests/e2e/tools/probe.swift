@@ -8,6 +8,7 @@
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
 //   probe span PNG Y R G B    first and last x in row Y within 40 of the color, or nothing
 //   probe front               the front app's name
+//   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 //   probe bounds ID           a display's frame in global points, "x y w h"
@@ -127,6 +128,16 @@ case "main":
   print(Int(b.width), Int(b.height))
 case "front":
   print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
+case "fronts":
+  let say = { (app: NSRunningApplication?) in
+    print(Int(Date().timeIntervalSince1970 * 1000), app?.processIdentifier ?? 0, app?.localizedName ?? "")
+    fflush(stdout)
+  }
+  say(NSWorkspace.shared.frontmostApplication)
+  NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
+    say(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+  }
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
 case "activate":
   // Bring a process forward, as the user clicking it would.
   let pid = pid_t(args[2])!

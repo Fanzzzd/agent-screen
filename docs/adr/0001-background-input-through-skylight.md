@@ -7,3 +7,4 @@ Agent Sessions and the Viewer deliver clicks and keys to windows on an Agent Dis
 - Only apps that accept per-process events work. Canvas apps and games that filter them need a brief foreground activation instead.
 - The first click on an inactive window only activates it, as with a real click.
 - A macOS update can break the private symbols. Every call falls back to the public `CGEventPostToPid`, which reaches fewer apps.
+- An app on an Agent Display can still bring itself to the front, as Electron does to show a window. When the agent started the app and the user didn't just act on it, Agent Screen gives the front back to the user's app as soon as macOS reports the change, a few ms later (issue #67). The ime path (ADR 0008) holds the front on purpose and is left alone.

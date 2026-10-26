@@ -53,6 +53,11 @@ pub enum Native {
     Menu(MenuAction),
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
+    /// App `pid` became the front app, after `previous`.
+    Activated {
+        pid: i32,
+        previous: Option<i32>,
+    },
     /// The user clicked, scrolled or typed on the Viewer's display image.
     ScreenTouched {
         display: u32,
@@ -1014,8 +1019,13 @@ pub fn watch_activations() {
         });
         let pid = app
             .and_then(|app| app.downcast::<NSRunningApplication>().ok())
-            .map(|app| app.processIdentifier());
-        super::input::note_activation(pid.or_else(super::app::frontmost_pid))
+            .map(|app| app.processIdentifier())
+            .or_else(super::app::frontmost_pid);
+        let previous = super::input::front();
+        super::input::note_activation(pid);
+        if let Some(pid) = pid {
+            send(Native::Activated { pid, previous });
+        }
     });
     let observer = unsafe {
         center.addObserverForName_object_queue_usingBlock(
