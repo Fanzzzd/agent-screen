@@ -134,7 +134,7 @@ fn record(
 
     // The user's notes float over the lower right of the agent's screen.
     let (nw, nh) = (420.0, 150.0);
-    let mut child = Command::new(notes_tool)
+    let mut child = agent_screen_tests::command(notes_tool)
         .args([ix + iw - nw - 24.0, iy + ih - nh - 24.0, nw, nh].map(|v| v.to_string()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

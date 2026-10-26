@@ -106,10 +106,28 @@ pub fn sleep_ms(ms: u64) {
 
 // MARK: Commands
 
+/// A command for the debug app or a test tool, without the shell's `DYLD_*`
+/// variables. With `DYLD_LIBRARY_PATH=/opt/homebrew/lib`, as a shell profile
+/// may set it, dyld loads Homebrew's libpng and libtiff in place of ImageIO's
+/// own `libPng.dylib` and `libTIFF.dylib` (the file system ignores case).
+/// ImageIO's calls into them then jump to dyld's missing-symbol address
+/// 0xbad4007, and the first PNG encode, such as a screenshot, ends the
+/// process with SIGBUS. The installed app, started by Launch Services, never
+/// sees these variables.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("DYLD_") {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
 /// Run a command and return its stdout, trimmed; fail when it fails.
 pub fn sh(command: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
     let command = command.as_ref();
-    let run = Command::new(command)
+    let run = self::command(command)
         .args(args)
         .output()
         .with_context(|| format!("{} can't start", command.display()))?;
@@ -128,7 +146,7 @@ pub fn sh(command: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String>
 
 /// stdout of a command that may fail; empty when it can't start.
 pub fn sh_lenient(command: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> String {
-    Command::new(command)
+    self::command(command)
         .args(args)
         .output()
         .map(|run| String::from_utf8_lossy(&run.stdout).trim().to_string())
@@ -251,7 +269,7 @@ pub struct HandsOff {
 impl HandsOff {
     /// Count down from 3 and return when the count is over.
     pub fn start(what: &str) -> Result<HandsOff> {
-        let child = std::process::Command::new(tool("overlay")?)
+        let child = command(tool("overlay")?)
             .stdin(std::process::Stdio::piped())
             .spawn()?;
         let mut sign = HandsOff { child };
@@ -596,7 +614,7 @@ fn spawn_debug(env: &[(&str, &str)]) -> Result<()> {
         Err(_) => (Stdio::null(), Stdio::null()),
     };
     // Its own process group, so Ctrl-C on a script leaves it running.
-    Command::new(binary_of(&debug_app()))
+    command(binary_of(&debug_app()))
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -872,7 +890,7 @@ pub struct Flash {
 
 /// Watch the main display for `app`'s windows while `work` runs.
 pub fn watch_flash<T>(app: &str, work: impl FnOnce() -> Result<T>) -> Result<(Flash, T)> {
-    let mut watcher = Command::new(tool("flash")?)
+    let mut watcher = command(tool("flash")?)
         .arg(app)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
