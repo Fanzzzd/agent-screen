@@ -3,6 +3,8 @@
 //! click's handling: the handler held the Viewer's input state while the
 //! Viewer's paint wrote its layout there, and the app aborted. Clicks go
 //! through the Viewer's own handler, so the user's pointer is untouched.
+//! Then, in the Takeover the clicks started, Command-V after each click
+//! (issue #40).
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e viewerkey
 //!
@@ -53,6 +55,34 @@ fn test() -> Result<()> {
             &format!("the app is still running after click {round} takes the keyboard"),
             alive && clicked.is_ok(),
             format!("{clicked:?}"),
+        );
+        if !alive {
+            return Ok(());
+        }
+    }
+    // The clicks took the display over. The user pastes into it: Command-V
+    // straight after a click that took the keyboard back (issue #40).
+    let typed = control.call("type", json!({ "displayId": id, "text": "x" }));
+    check(
+        "the clicks took the display over",
+        typed.is_err(),
+        format!("{typed:?}"),
+    );
+    for round in 1..=3 {
+        control.call(
+            "debugViewerInput",
+            json!({ "kind": "click", "x": 0.5, "y": 0.6, "key": 1 }),
+        )?;
+        let pasted = control.call(
+            "debugViewerInput",
+            json!({ "kind": "key", "code": 9, "command": 1 }),
+        );
+        sleep_ms(400);
+        let alive = debug_pid() == Some(pid);
+        check(
+            &format!("the app is still running after paste {round} in the Takeover"),
+            alive && pasted.is_ok(),
+            format!("{pasted:?}"),
         );
         if !alive {
             return Ok(());
