@@ -16,8 +16,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, check, debug_pid, instance, json, out, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app,
+    Control, Value, check, debug_pid, instance, json, kill_ours, our_binary, out, run, sh_lenient,
+    sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let own = debug_pid().context("no test app")?;
         let result = test(own);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         sleep_ms(500);
         check(
@@ -67,7 +67,7 @@ fn claims(pid: u32) -> (Vec<u64>, Vec<u64>) {
 
 fn test(own: u32) -> Result<()> {
     let control = Control::connect()?;
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+    kill_ours(our_binary("Field"));
     let key = "claims";
     let monitors = || sh_lenient("aerospace", &["list-monitors"]);
     let before = monitors();

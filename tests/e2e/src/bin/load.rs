@@ -14,6 +14,7 @@
 
 use std::process::{Command, ExitCode};
 
+use agent_screen_tests::kill_ours;
 use agent_screen_tests::{
     Control, fixture, json, out, quit_profile, run, running_headed, sh_lenient, skip, sleep_ms,
     start_test_app, stop_test_app, tool,
@@ -51,7 +52,7 @@ fn main() -> ExitCode {
             quit_profile(&out().join(format!("load-{n}-profile")));
         }
         if use_electron {
-            sh_lenient("/usr/bin/pkill", &["-f", "fixtures/electron"]);
+            kill_ours(fixture("electron"));
         }
         stop_test_app();
         result

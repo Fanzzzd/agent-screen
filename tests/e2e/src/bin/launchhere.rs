@@ -16,8 +16,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, debug_pid, instance, json, open_stage, out, pid_of, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app,
+    Control, check, debug_pid, instance, json, kill_ours, open_stage, our_binary, out, pid_of, run,
+    sh_lenient, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
@@ -48,7 +48,7 @@ fn field_window(control: &Control, id: u64) -> Result<bool> {
 
 fn test() -> Result<()> {
     let control = Control::connect()?;
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+    kill_ours(our_binary("Field"));
     open_stage(&control)?;
     let display = control.call(
         "createDisplay",
@@ -88,7 +88,7 @@ fn test() -> Result<()> {
         here,
         format!("Field's windows: {on_screen:?}"),
     );
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+    kill_ours(our_binary("Field"));
     sleep_ms(500);
 
     // Typed into Spotlight after a click on their own screen, where Finder

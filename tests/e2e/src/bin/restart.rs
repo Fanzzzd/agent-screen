@@ -12,8 +12,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, check, cut, debug_pid, instance, json, listening, out, pid_of, run,
-    running, sh_lenient, sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, McpClient, check, cut, debug_pid, instance, json, kill_ours, listening, our_binary,
+    out, pid_of, run, running, sh_lenient, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&field);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
@@ -67,7 +67,7 @@ fn test(field: &std::path::Path) -> Result<()> {
         cut(added, 300),
     );
     sleep_ms(1000);
-    if let Some(field) = pid_of("Field.app/Contents/MacOS/Field") {
+    if let Some(field) = pid_of(&our_binary("Field").to_string_lossy()) {
         println!("  Field's windows: {:?}", windows_of(field));
     }
     start_test_app(&[("AGENTSCREEN_LANG", "en")])?;

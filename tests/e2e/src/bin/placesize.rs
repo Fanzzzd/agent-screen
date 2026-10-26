@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    McpClient, ToolResult, check, field_app, instance, json, run, sh_lenient, sleep_ms,
+    McpClient, ToolResult, check, field_app, instance, json, kill_ours, our_binary, run, sleep_ms,
     start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
@@ -25,7 +25,7 @@ fn main() -> ExitCode {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(field.to_str().unwrap());
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
@@ -48,7 +48,7 @@ fn near(a: f64, b: f64) -> bool {
 
 fn test(field: &str) -> Result<()> {
     let client = McpClient::start(&[])?;
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+    kill_ours(our_binary("Field"));
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
     client.call(
