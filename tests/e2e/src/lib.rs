@@ -320,6 +320,7 @@ const HANDS_OFF: &[&str] = &[
     "restart",
     "robust",
     "run",
+    "secondwindow",
     "settings",
     "shared",
     "sound",

@@ -14,8 +14,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, HandsOff, check, fixture, instance, json, now_ms, out, run, skip, sleep_ms,
-    start_test_app, stop_test_app, tool,
+    Control, check, fixture, instance, json, now_ms, out, run, skip, sleep_ms, start_test_app,
+    stop_test_app, tool,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -33,8 +33,6 @@ fn main() -> ExitCode {
     }
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
-        // The app may come in front of the user's while the bug is there.
-        let _sign = HandsOff::start("secondwindow")?;
         let result = test(&electron);
         stop_test_app();
         result
