@@ -255,6 +255,29 @@ pub fn tool(name: &str) -> Result<PathBuf> {
     Ok(binary)
 }
 
+/// tools/field.swift as an app, so launch_app takes it.
+pub fn field_app() -> Result<PathBuf> {
+    let app = out().join("Field.app");
+    let macos = app.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos)?;
+    std::fs::copy(tool("field")?, macos.join("Field"))?;
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.field</string>
+<key>CFBundleExecutable</key><string>Field</string>
+<key>CFBundleName</key><string>Field</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>"#,
+    )?;
+    sh(
+        "/usr/bin/codesign",
+        &["--force", "--sign", "-", app.to_str().unwrap()],
+    )?;
+    Ok(app)
+}
+
 pub fn probe(args: &[&str]) -> Result<String> {
     sh(tool("probe")?, args)
 }

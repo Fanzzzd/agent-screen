@@ -9,12 +9,12 @@
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e ime
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, instance, json, out, probe, run, sh, sh_lenient, skip, sleep_ms,
-    start_test_app, stop_test_app, tool,
+    Control, check, field_app, instance, json, out, probe, run, sh_lenient, skip, sleep_ms,
+    start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -48,29 +48,6 @@ fn idle() -> f64 {
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0.0)
-}
-
-/// tools/field.swift as an app, so launch_app takes it.
-fn field_app() -> Result<PathBuf> {
-    let app = out().join("Field.app");
-    let macos = app.join("Contents/MacOS");
-    std::fs::create_dir_all(&macos)?;
-    std::fs::copy(tool("field")?, macos.join("Field"))?;
-    std::fs::write(
-        app.join("Contents/Info.plist"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.field</string>
-<key>CFBundleExecutable</key><string>Field</string>
-<key>CFBundleName</key><string>Field</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-</dict></plist>"#,
-    )?;
-    sh(
-        "/usr/bin/codesign",
-        &["--force", "--sign", "-", app.to_str().unwrap()],
-    )?;
-    Ok(app)
 }
 
 fn test(field: &Path) -> Result<()> {

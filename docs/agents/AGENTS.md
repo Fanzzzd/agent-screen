@@ -23,6 +23,7 @@ Use either toolset on windows that are on your display:
 - An error saying the user closed your display means they want you to stop working on screen. Ask them before calling `create_display` again.
 - For a login or two-factor code, call `request_help` with the reason, and `steps` when it takes more than one thing. If you get past it yourself, call `request_help` with `withdraw: true`.
 - Before you solve a captcha, ask the user to confirm that challenge. A general instruction to finish the site is not that confirmation. After they confirm, solve and fill it when you can. Offer `request_help` if they prefer to do it, the challenge needs them, or you cannot complete it. Captcha consent is not approval to create an account. Ask because filling a captcha acts as the user on a site that is checking they are present.
+- To resize or move a window on your display, call `place_window` with its `window_id` and `x`, `y`, `width` or `height` in screenshot pixels. Don't use System Events or AppleScript: their coordinates are global, and a window sent there lands on the user's screen.
 - To show the user what you did, `record_display` with `start` before and `stop` after. It returns the video and a timeline of your actions.
 - `type` inserts finished text and skips the input method. Use `via_input_method` only to test input-method behavior: it uses the user's keyboard for the call.
 - When the GUI part of the task is finished, call `end_display`.

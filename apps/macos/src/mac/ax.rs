@@ -555,6 +555,26 @@ pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
     })
 }
 
+/// Give a window the frame an agent asked for. Position, size, then
+/// position again: an app that keeps its windows on one screen clamps a
+/// size against where the window was, and the second move puts it where
+/// asked once it has its new size.
+pub fn set_frame_asked(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    with_moves_direct(&window, || {
+        if !set_position(&window, frame.x, frame.y) {
+            return Err(MoveError::Rejected);
+        }
+        let sized = set_size(&window, frame.width, frame.height);
+        set_position(&window, frame.x, frame.y);
+        if sized {
+            Ok(())
+        } else {
+            Err(MoveError::Rejected)
+        }
+    })
+}
+
 /// Press the window's close button. The app may still keep it open, for
 /// example to ask about unsaved changes.
 /// Whether the window shows a sheet, such as one asking whether to save.

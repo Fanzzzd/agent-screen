@@ -445,6 +445,49 @@ pub fn lowest_free_serial(first: u32, taken: &std::collections::BTreeSet<u32>) -
         .expect("a free serial")
 }
 
+/// A window frame place_window asked for, in screenshot pixels from the
+/// display's top-left corner. A part left out keeps the window's own.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct FrameRequest {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+}
+
+impl FrameRequest {
+    pub fn is_empty(&self) -> bool {
+        self.x.is_none() && self.y.is_none() && self.width.is_none() && self.height.is_none()
+    }
+
+    /// The global frame in points for a window now at `current`, on a
+    /// display at `area`, both global points; `scale` is screenshot pixels
+    /// per point. The frame stays inside the display: past an edge, part of
+    /// the window would show on the user's screen.
+    pub fn resolve(&self, current: Rect, area: Rect, scale: f64) -> Rect {
+        let points = |px: Option<f64>| px.map(|v| v / scale);
+        Rect::new(
+            points(self.x).map_or(current.x, |x| area.x + x),
+            points(self.y).map_or(current.y, |y| area.y + y),
+            points(self.width).unwrap_or(current.width),
+            points(self.height).unwrap_or(current.height),
+        )
+        .kept_inside(&area)
+    }
+}
+
+/// A global frame in points as screenshot pixels from the top-left corner
+/// of the display at `area`: the space list_windows reports.
+pub fn frame_in_shot(frame: Rect, area: Rect, scale: f64) -> Rect {
+    let px = |v: f64| (v * scale).round();
+    Rect::new(
+        px(frame.x - area.x),
+        px(frame.y - area.y),
+        px(frame.width),
+        px(frame.height),
+    )
+}
+
 /// Screenshot pixels per display point: 1 within the image budget, less for
 /// a larger display, so the agent's coordinates and its image agree.
 pub fn shot_scale((width, height): (f64, f64)) -> f64 {
@@ -977,6 +1020,64 @@ mod tests {
         assert_eq!(
             default_fate(Some(Origin::Found), Some(Disposition::Keep), false),
             Fate::GiveBack
+        );
+    }
+
+    #[test]
+    fn a_frame_request_in_screenshot_pixels_lands_on_the_display() {
+        use super::{FrameRequest, frame_in_shot};
+        let area = Rect::new(4448.0, -870.0, 2560.0, 1600.0);
+        let scale = super::shot_scale((2560.0, 1600.0));
+        let current = Rect::new(4548.0, -770.0, 800.0, 600.0);
+        // x, y, width and height scale up to points from the display corner.
+        let all = FrameRequest {
+            x: Some(40.0),
+            y: Some(30.0),
+            width: Some(600.0),
+            height: Some(400.0),
+        };
+        let frame = all.resolve(current, area, scale);
+        assert_eq!(frame.x, 4448.0 + 40.0 / scale);
+        assert_eq!(frame.width, 600.0 / scale);
+        let back = frame_in_shot(frame, area, scale);
+        assert_eq!(back, Rect::new(40.0, 30.0, 600.0, 400.0));
+        // A size alone keeps the window where it is.
+        let size = FrameRequest {
+            width: Some(250.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            size.resolve(current, area, 0.5),
+            Rect::new(4548.0, -770.0, 500.0, 600.0)
+        );
+        assert!(FrameRequest::default().is_empty());
+        assert!(!size.is_empty());
+    }
+
+    #[test]
+    fn a_frame_request_never_reaches_past_the_display() {
+        use super::FrameRequest;
+        let area = Rect::new(5000.0, 0.0, 1280.0, 800.0);
+        let current = Rect::new(5100.0, 100.0, 400.0, 300.0);
+        // Growing at the right edge shifts the window back in.
+        let wide = FrameRequest {
+            width: Some(1000.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            wide.resolve(Rect::new(5900.0, 100.0, 380.0, 300.0), area, 1.0),
+            Rect::new(5280.0, 100.0, 1000.0, 300.0)
+        );
+        // Larger than the display: as large as the display.
+        let huge = FrameRequest {
+            x: Some(-50.0),
+            width: Some(1320.0),
+            height: Some(900.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            huge.resolve(current, area, 1.0),
+            Rect::new(5000.0, 0.0, 1280.0, 800.0)
         );
     }
 }
