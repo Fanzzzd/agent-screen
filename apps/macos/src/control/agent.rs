@@ -1010,6 +1010,7 @@ async fn handle_one(
                 Some("key") => viewer_input::inject_key(
                     p.int("code").unwrap_or(0) as u16,
                     p.int("shift").unwrap_or(0) == 1,
+                    p.int("command").unwrap_or(0) == 1,
                 ),
                 // A press, a drag in steps and a release, as a hand on
                 // the trackpad makes them.

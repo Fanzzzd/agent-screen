@@ -89,18 +89,21 @@ pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
     inject(&event)
 }
 
-/// Tests: press and release a key on the Viewer, as if the user typed it.
-pub fn inject_key(code: u16, shift: bool) -> Result<(), String> {
+/// Tests: press and release a key on the Viewer, as if the user typed it,
+/// with Shift and Command held as asked.
+pub fn inject_key(code: u16, shift: bool, command: bool) -> Result<(), String> {
     let window = STATE.with(|s| s.borrow().window);
     if window == 0 {
         return Err("no Viewer".into());
     }
     let window = unsafe { &*(window as *const NSWindow) };
-    let flags = if shift {
-        objc2_app_kit::NSEventModifierFlags::Shift
-    } else {
-        objc2_app_kit::NSEventModifierFlags::empty()
-    };
+    let mut flags = objc2_app_kit::NSEventModifierFlags::empty();
+    if shift {
+        flags |= objc2_app_kit::NSEventModifierFlags::Shift;
+    }
+    if command {
+        flags |= objc2_app_kit::NSEventModifierFlags::Command;
+    }
     let empty = objc2_foundation::NSString::new();
     for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
@@ -146,12 +149,24 @@ pub fn show(display: Option<(u32, Forwarder)>) {
 
 /// Where the image is, and whether the sheet covers it. The Viewer reports
 /// this on every paint.
+///
+/// AppKit paints a window that becomes key at once, inside whatever made it
+/// key. When that is the input handler, which holds the state, the report
+/// waits for the event to finish: a second borrow would panic inside an
+/// AppKit callback and abort the app (issue #40).
 pub fn layout(content: Option<[f64; 4]>, blocked: bool) {
-    STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        s.content = content;
-        s.blocked = blocked;
+    let busy = STATE.with(|s| match s.try_borrow_mut() {
+        Ok(mut s) => {
+            s.content = content;
+            s.blocked = blocked;
+            false
+        }
+        Err(_) => true,
     });
+    if busy {
+        log::debug!("viewer: layout reported during input handling, applied after it");
+        native::main_async(move || layout(content, blocked));
+    }
 }
 
 /// The Viewer's frame and its display image, in global top-left points,
