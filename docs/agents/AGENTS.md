@@ -14,6 +14,7 @@ The step is done when `list_windows` shows each window you will touch.
 Use either toolset on windows that are on your display:
 
 - **Agent Screen**: `computer` for the whole display, or `get_window_state` and `act_on_element` for one window. Coordinates are screenshot pixels. `create_display` returns width and height in points and `scale` (screenshot pixels per point). The default 1280×800 display has scale 1.
+- A large window's tree costs thousands of tokens. Pass `max_depth` to `get_window_state` to see the top levels first, and `result: "changes"` to `act_on_element` to get back only the elements that changed.
 - **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
 
 ## While you work

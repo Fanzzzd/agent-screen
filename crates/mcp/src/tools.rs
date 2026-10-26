@@ -47,6 +47,10 @@ fn window_id() -> Value {
     json!({ "type": "integer", "description": "A window on your display, from list_windows or launch_app." })
 }
 
+fn max_depth() -> Value {
+    json!({ "type": "integer", "description": "Leave out elements nested deeper than this many levels; 0 keeps only the window's direct children. Default: all." })
+}
+
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
 }
@@ -336,9 +340,11 @@ pub fn definitions() -> Vec<Value> {
                 "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
                 "brackets that act_on_element takes, and its center in screenshot pixels. An element keeps its number",
                 "while it stays in the window; a number whose element went away fails instead of hitting another one.",
+                "A large window's tree runs to thousands of tokens: max_depth leaves out deeper elements and says how many,",
+                "and their numbers still work.",
             ],
             object(
-                json!({ "display_id": display_id(), "window_id": window_id() }),
+                json!({ "display_id": display_id(), "window_id": window_id(), "max_depth": max_depth() }),
                 &["display_id", "window_id"],
             ),
             READ_ONLY,
@@ -354,7 +360,9 @@ pub fn definitions() -> Vec<Value> {
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
                 "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
                 "Both work in background apps, where Command-C and Command-V do nothing.",
-                "Fails with a takeover error while the user operates the display.",
+                "result picks what comes back: state, the default, is the whole window state; changes lists only the",
+                "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
+                "none says only that it is done. Fails with a takeover error while the user operates the display.",
             ],
             object(
                 json!({
@@ -365,7 +373,9 @@ pub fn definitions() -> Vec<Value> {
                         "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "insert_text",
                         "read_text", "scroll_into_view"
                     ] },
-                    "value": { "type": "string", "description": "Text for set_value and insert_text." }
+                    "value": { "type": "string", "description": "Text for set_value and insert_text." },
+                    "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
+                    "max_depth": max_depth()
                 }),
                 &["display_id", "window_id", "element", "action"],
             ),
@@ -658,16 +668,23 @@ pub async fn run(
             }
             Ok(Output::Object(launch_output(&Value::Object(reply))))
         }
-        "get_window_state" => window_state(
-            control,
-            a.require_int("display_id")?,
-            a.require_int("window_id")?,
-        )
-        .await
-        .map(Output::Content),
+        "get_window_state" => {
+            let depth = max_depth_arg(&a)?;
+            let state = window_state(
+                control,
+                a.require_int("display_id")?,
+                a.require_int("window_id")?,
+            )
+            .await?;
+            Ok(Output::Content(state.content(depth)))
+        }
         "act_on_element" => {
             let display = a.require_int("display_id")?;
             let window = a.require_int("window_id")?;
+            let result = a
+                .one_of("result", &["state", "changes", "none"])?
+                .unwrap_or_else(|| "state".into());
+            let depth = max_depth_arg(&a)?;
             let action = a
                 .one_of(
                     "action",
@@ -738,7 +755,12 @@ pub async fn run(
                         image(&get("data"), &get("mimeType")),
                     ]))
                 }
-                other => other.map(Output::Content),
+                Err(error) => Err(error),
+                Ok(state) => Ok(Output::Content(match result.as_str() {
+                    "none" => vec![text(format!("Done.{}", state.strayed))],
+                    "changes" => state.changes(depth),
+                    _ => state.content(depth),
+                })),
             }
         }
         "computer" => computer(&a, control).await.map(Output::Content),
@@ -819,12 +841,71 @@ fn strayed_note(result: &serde_json::Map<String, Value>) -> String {
     note
 }
 
-/// Window state as tool content: the tree as text, then the window image.
+fn max_depth_arg(a: &Args<'_>) -> Result<Option<usize>, ControlError> {
+    match a.int("max_depth")? {
+        Some(d) if d < 0 => Err(ControlError::invalid("max_depth must be 0 or more")),
+        d => Ok(d.map(|d| d as usize)),
+    }
+}
+
+/// One window's state from the app, and the tree it had before.
+struct WindowState {
+    window: i64,
+    /// The window and its element count.
+    header: String,
+    strayed: String,
+    tree: String,
+    before: Option<String>,
+    image: Value,
+}
+
+impl WindowState {
+    /// The tree as text, cut at `depth`, then the window image.
+    fn content(&self, depth: Option<usize>) -> Vec<Value> {
+        let full = self.tree.as_str();
+        let cut = depth.map(|d| agent_screen_model::tree::cut_depth(full, d));
+        let note = match (&cut, depth) {
+            (Some(cut), Some(d)) if cut != full => format!(
+                " Elements deeper than {d} levels are left out; call get_window_state with a larger max_depth, or none, to see them."
+            ),
+            _ => String::new(),
+        };
+        let tree = cut.as_deref().unwrap_or(full);
+        vec![
+            text(format!(
+                "{} \"at (x,y)\" is an element's center in screenshot pixels, where the computer tool clicks; the image shows just this window.{note}{}\n\n{tree}",
+                self.header, self.strayed
+            )),
+            self.image.clone(),
+        ]
+    }
+
+    /// What changed since the window's last tree, then the window image.
+    /// With no tree before, the whole state.
+    fn changes(&self, depth: Option<usize>) -> Vec<Value> {
+        let Some(before) = &self.before else {
+            return self.content(depth);
+        };
+        let window = self.window;
+        let body = match agent_screen_model::tree::changes(before, &self.tree) {
+            Some(changes) => format!(
+                "Done. Changes in window {window} since its last tree (+ new, ~ changed, - gone):{}\n\n{changes}",
+                self.strayed
+            ),
+            None => format!(
+                "Done. Window {window}'s elements didn't change.{}",
+                self.strayed
+            ),
+        };
+        vec![text(body), self.image.clone()]
+    }
+}
+
 async fn window_state(
     control: &Control,
     display: i64,
     window: i64,
-) -> Result<Vec<Value>, ControlError> {
+) -> Result<WindowState, ControlError> {
     let state = control
         .call(
             "windowState",
@@ -832,26 +913,28 @@ async fn window_state(
         )
         .await?;
     let get = |key: &str| state.get(key).cloned().unwrap_or(Value::Null);
-    let elements = get("elements");
     let truncated = if get("truncated") == Value::Bool(true) {
         " (truncated)"
     } else {
         ""
     };
-    let header = format!(
-        "Window {window}: {} {} elements{truncated}. \"at (x,y)\" is an element's center in screenshot pixels, where the computer tool clicks; the image shows just this window.{}",
-        get("window"),
-        elements,
-        strayed_note(&state),
-    );
     let tree = state
         .get("tree")
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    Ok(vec![
-        text(format!("{header}\n\n{tree}")),
-        image(&get("data"), &get("mimeType")),
-    ])
+        .unwrap_or_default()
+        .to_string();
+    Ok(WindowState {
+        window,
+        header: format!(
+            "Window {window}: {} {} elements{truncated}.",
+            get("window"),
+            get("elements")
+        ),
+        strayed: strayed_note(&state),
+        before: control.swap_tree(display, window, tree.clone()),
+        tree,
+        image: image(&get("data"), &get("mimeType")),
+    })
 }
 
 async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, ControlError> {
@@ -1102,6 +1185,49 @@ fn launch_output(reply: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(before: Option<&str>, tree: &str) -> WindowState {
+        WindowState {
+            window: 7,
+            header: "Window 7: {} 3 elements.".into(),
+            strayed: String::new(),
+            tree: tree.into(),
+            before: before.map(String::from),
+            image: json!({ "type": "image" }),
+        }
+    }
+
+    fn first_text(content: &[Value]) -> &str {
+        content[0]["text"].as_str().unwrap()
+    }
+
+    #[test]
+    fn window_state_cuts_at_max_depth_and_says_so() {
+        let tree = "[0] group \"A\"\n  [1] button \"B\"\n[2] button \"C\"";
+        let full = state(None, tree).content(None);
+        assert!(first_text(&full).ends_with(tree));
+        assert!(!first_text(&full).contains("left out"));
+        let cut = state(None, tree).content(Some(0));
+        let text = first_text(&cut);
+        assert!(text.contains("  … 1 more inside\n[2]"), "{text}");
+        assert!(text.contains("larger max_depth"), "{text}");
+        assert_eq!(cut[1]["type"], "image");
+        // Deep enough for the whole tree: no note.
+        assert!(!first_text(&state(None, tree).content(Some(3))).contains("left out"));
+    }
+
+    #[test]
+    fn act_on_element_changes_list_only_what_moved() {
+        let before = "[0] button \"Send\"\n[1] textfield value=\"hi\"";
+        let after = "[0] button \"Send\" disabled\n[1] textfield value=\"hi\"";
+        let changed = state(Some(before), after).changes(None);
+        let text = first_text(&changed);
+        assert!(text.ends_with("~ [0] button \"Send\" disabled"), "{text}");
+        assert!(!text.contains("textfield"), "{text}");
+        assert!(first_text(&state(Some(after), after).changes(None)).contains("didn't change"));
+        // No tree before: the whole state.
+        assert!(first_text(&state(None, after).changes(None)).ends_with(after));
+    }
 
     #[test]
     fn place_output_reports_the_frame_and_what_the_app_refused() {

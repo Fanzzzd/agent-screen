@@ -69,6 +69,9 @@ pub struct Control {
     /// Displays this session made, by id: the connection each was made on,
     /// and the apps launch_app started there.
     made: std::sync::Mutex<HashMap<u64, Made>>,
+    /// The last element tree each window sent, by display and window, for
+    /// act_on_element's changes.
+    trees: std::sync::Mutex<HashMap<(i64, i64), String>>,
 }
 
 #[derive(Default)]
@@ -80,6 +83,11 @@ struct Made {
 }
 
 impl Control {
+    /// Keep a window's latest tree; the one before it, if any.
+    pub fn swap_tree(&self, display: i64, window: i64, tree: String) -> Option<String> {
+        self.trees.lock().unwrap().insert((display, window), tree)
+    }
+
     /// Note a display this session made on the current connection.
     pub fn made_display(&self, id: u64) {
         let connection = self.connections.load(Ordering::Relaxed);

@@ -160,6 +160,7 @@ dependencies = [
 name = "agent-screen-mcp"
 version = "0.1.17"
 dependencies = [
+ "agent-screen-model",
  "anyhow",
  "rmcp",
  "serde",
