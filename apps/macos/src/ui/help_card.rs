@@ -1,7 +1,8 @@
 //! The Help Card: drops from the menu bar icon while a Help Request is
 //! open, with the display's picture, the agent's reason, and Take Over or
 //! Later. For a Window Request it names the window the agent asks for,
-//! with Hand Over or Keep.
+//! with Hand Over or Keep. For a Control Request, during a Takeover, it
+//! gives the agent's reason, with Let … Continue or Keep Control.
 
 use super::pointer;
 use super::shell::{Shell, tell};
@@ -10,10 +11,13 @@ use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
 use crate::model::DisplayId;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement,
-    Render, Role, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window, div,
-    prelude::FluentBuilder, px, surface, svg,
+    Bounds, Context, Entity, InteractiveElement, IntoElement, MouseButton, ObjectFit,
+    ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement, Styled,
+    WeakEntity, Window, canvas, div, prelude::FluentBuilder, px, surface, svg,
 };
 
 pub const WIDTH: f32 = 320.;
@@ -133,6 +137,54 @@ impl Render for HelpCard {
                             .on_click(move |_, _, cx| {
                                 tell(&keep, cx, move |shell, cx| {
                                     shell.answer_window(id, false, cx);
+                                })
+                            }),
+                    ),
+            )
+            .into_any_element();
+        }
+        if let Some(reason) = display.control_request.clone() {
+            let (give, keep) = (self.shell.clone(), self.shell.clone());
+            return card(
+                tf!("{agent} asks to continue", "{agent} 想继续操作"),
+                reason,
+                &theme,
+            )
+            .child(
+                div()
+                    .h(px(LABEL))
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(theme.secondary)
+                    .child(display.label()),
+            )
+            .child(
+                div()
+                    .h(px(BUTTONS))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        // The title names the agent: a long name here pushed
+                        // Keep Control off the card.
+                        card_button(
+                            "control-continue",
+                            t("Let It Continue", "让它继续"),
+                            true,
+                            &theme,
+                        )
+                        .flex_1()
+                        .on_click(move |_, _, cx| {
+                            tell(&give, cx, move |shell, cx| {
+                                shell.answer_control(id, true, cx);
+                            })
+                        }),
+                    )
+                    .child(
+                        card_button("control-keep", t("Keep Control", "继续接管"), false, &theme)
+                            .px(px(16.))
+                            .on_click(move |_, _, cx| {
+                                tell(&keep, cx, move |shell, cx| {
+                                    shell.answer_control(id, false, cx);
                                 })
                             }),
                     ),
@@ -276,10 +328,11 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
 
 fn card_button(
     id: &'static str,
-    title: &'static str,
+    title: impl Into<SharedString>,
     prominent: bool,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let title: SharedString = title.into();
     let (bg, hover, fg) = if prominent {
         (theme.orange.opacity(0.9), theme.orange, gpui::white())
     } else {
@@ -288,7 +341,7 @@ fn card_button(
     div()
         .id(id)
         .role(Role::Button)
-        .aria_label(title)
+        .aria_label(title.clone())
         .h(px(BUTTONS))
         .flex()
         .items_center()
@@ -305,5 +358,40 @@ fn card_button(
         .when(prominent, |d| {
             d.child(svg().path("icons/hand.svg").size(px(13.)).text_color(fg))
         })
-        .child(title)
+        .child(div().whitespace_nowrap().child(title))
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    BUTTONS_PAINTED.with(|b| b.borrow_mut().insert(id, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+}
+
+thread_local! {
+    /// Each card button's bounds in the card at its last paint, for the
+    /// debug check that every button fits the card.
+    static BUTTONS_PAINTED: RefCell<HashMap<&'static str, Bounds<Pixels>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The card's width and its buttons as last painted: id and `[x, y, w,
+/// h]` in points from the card's corner. A button the card showed before
+/// keeps its last bounds; look at the ones the card shows now.
+pub fn painted_buttons() -> (f32, Vec<(&'static str, [f32; 4])>) {
+    let buttons = BUTTONS_PAINTED.with(|b| {
+        b.borrow()
+            .iter()
+            .map(|(id, b)| {
+                let r = [b.origin.x, b.origin.y, b.size.width, b.size.height].map(f32::from);
+                (*id, r)
+            })
+            .collect()
+    });
+    (WIDTH, buttons)
 }

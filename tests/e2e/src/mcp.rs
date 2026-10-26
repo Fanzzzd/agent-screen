@@ -208,7 +208,15 @@ impl McpClient {
     /// Spawn the server and run the 2025-06-18 handshake. Skips the script
     /// when the screen is locked: it blocks input and lists no windows, so
     /// every check would fail for that reason alone.
+    /// `E2E_CLIENT_NAME` in `env` is the name the client gives in
+    /// `initialize`, which names the agent in the UI when no Claude Code
+    /// or Codex session says otherwise. "smoke" without it.
     pub fn start(env: &[(&str, &str)]) -> Result<McpClient> {
+        let client_name = env
+            .iter()
+            .find(|(k, _)| *k == "E2E_CLIENT_NAME")
+            .map_or("smoke", |(_, v)| *v)
+            .to_string();
         if locked() {
             skip("the screen is locked");
         }
@@ -262,7 +270,7 @@ impl McpClient {
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "smoke", "version": "0" },
+                "clientInfo": { "name": client_name, "version": "0" },
             }),
         )?;
         let version = init

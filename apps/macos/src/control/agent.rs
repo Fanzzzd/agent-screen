@@ -77,6 +77,8 @@ fn recorded(method: &str, p: &Params) -> Option<(DisplayId, Value)> {
             | "placeWindow"
             | "requestHelp"
             | "withdrawHelp"
+            | "requestControl"
+            | "withdrawControlRequest"
     );
     if !kept {
         return None;
@@ -927,6 +929,34 @@ async fn handle_one(
             });
             Ok(json!({ "withdrawn": withdrawn }))
         }
+        // During a Takeover, ask the user to hand the display back. The
+        // agent then waits with waitForControl.
+        "requestControl" => {
+            let id = display(&core, &p, false, cx)?;
+            let reason = p
+                .string("reason")
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            let requested = core.update(cx, |c, cx| {
+                let requested = c.displays.request_control(id, reason);
+                if requested {
+                    cx.notify();
+                }
+                requested
+            });
+            Ok(json!({ "requested": requested }))
+        }
+        "withdrawControlRequest" => {
+            let id = display(&core, &p, false, cx)?;
+            let withdrawn = core.update(cx, |c, cx| {
+                let withdrawn = c.displays.withdraw_control_request(id);
+                if withdrawn {
+                    cx.notify();
+                }
+                withdrawn
+            });
+            Ok(json!({ "withdrawn": withdrawn }))
+        }
         "waitForControl" => {
             let id = display(&core, &p, false, cx)?;
             let seconds = p
@@ -966,7 +996,12 @@ async fn handle_one(
             } else {
                 outcome.as_str()
             };
-            Ok(json!({ "outcome": outcome, "helpOpen": help_open }))
+            let control_asked = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.control_request.is_some())
+            });
+            Ok(json!({ "outcome": outcome, "helpOpen": help_open, "controlAsked": control_asked }))
         }
         // Test hook: stands in for the user's input in the Viewer.
         "debugTakeover" if debug_methods() => {
@@ -1174,6 +1209,15 @@ async fn handle_one(
             .detach();
             Ok(json!({}))
         }
+        // The Help Card's width and its buttons' bounds at the last paint.
+        "debugCard" if debug_methods() => {
+            let (width, buttons) = crate::ui::help_card::painted_buttons();
+            let buttons: Map<String, Value> = buttons
+                .into_iter()
+                .map(|(id, r)| (id.to_string(), json!(r)))
+                .collect();
+            Ok(json!({ "width": width, "buttons": buttons }))
+        }
         // Which picture the menu bar icon shows: idle, working, asking or setup.
         "debugIcon" if debug_methods() => {
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
@@ -1210,6 +1254,8 @@ fn needs_permissions(method: &str) -> bool {
         method,
         "endDisplay"
             | "requestHelp"
+            | "requestControl"
+            | "withdrawControlRequest"
             | "waitForControl"
             | "setDisposition"
             | "listWindows"

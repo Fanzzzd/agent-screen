@@ -203,6 +203,8 @@ pub enum ControlWait {
     Returned,
     TimedOut,
     Ended,
+    /// The user answered a Control Request with Keep Control.
+    Kept,
 }
 
 impl ControlWait {
@@ -211,6 +213,7 @@ impl ControlWait {
             ControlWait::Returned => "returned",
             ControlWait::TimedOut => "timedOut",
             ControlWait::Ended => "ended",
+            ControlWait::Kept => "kept",
         }
     }
 }
@@ -252,6 +255,9 @@ pub struct Display<H> {
     pub help_steps: Vec<String>,
     /// An open Window Request: the agent asks for a window it didn't start.
     pub window_request: Option<WindowRequest>,
+    /// The reason of an open Control Request: during a Takeover, the agent
+    /// asks the user to hand the display back.
+    pub control_request: Option<String>,
     /// The agent is typing through the user's input method, which takes
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
@@ -528,6 +534,7 @@ impl<H> Displays<H> {
             help_request: None,
             help_steps: Vec::new(),
             window_request: None,
+            control_request: None,
             keyboard_borrowed: false,
             pointer: None,
             waiters: Vec::new(),
@@ -582,6 +589,7 @@ impl<H> Displays<H> {
         display.help_steps.clear();
         // Its waiter hears the request went unanswered.
         display.window_request = None;
+        display.control_request = None;
         display.pointer = None;
         display.resume_waiters(ControlWait::Ended);
         true
@@ -616,6 +624,7 @@ impl<H> Displays<H> {
         match self.get_mut(id) {
             Some(d) if d.takeover => {
                 d.takeover = false;
+                d.control_request = None;
                 d.help_request = None;
                 d.help_steps.clear();
                 d.resume_waiters(ControlWait::Returned);
@@ -669,6 +678,44 @@ impl<H> Displays<H> {
             answer: Some(tx),
         });
         Some(rx)
+    }
+
+    /// During a Takeover, ask the user to hand the display back, replacing
+    /// an earlier request's reason. False when the agent has control
+    /// already, or the display isn't live: nothing to ask.
+    pub fn request_control(&mut self, id: DisplayId, reason: String) -> bool {
+        match self.get_mut(id) {
+            Some(d) if d.is_live() && d.takeover => {
+                d.control_request = Some(reason);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The agent no longer needs the display back. The Takeover goes on.
+    pub fn withdraw_control_request(&mut self, id: DisplayId) -> bool {
+        self.get_mut(id)
+            .is_some_and(|d| d.control_request.take().is_some())
+    }
+
+    /// The user answered the display's Control Request: `give` hands the
+    /// display back, as the Viewer's button does; otherwise the Takeover
+    /// goes on and waiters hear the user kept control. False when there
+    /// was no request.
+    pub fn answer_control(&mut self, id: DisplayId, give: bool) -> bool {
+        let Some(d) = self.get_mut(id) else {
+            return false;
+        };
+        if d.control_request.take().is_none() {
+            return false;
+        }
+        if give {
+            self.end_takeover(id);
+        } else {
+            d.resume_waiters(ControlWait::Kept);
+        }
+        true
     }
 
     /// The user answered the display's Window Request. Returns the window
@@ -934,6 +981,68 @@ mod tests {
             only_on_agent_displays(&[]).is_empty(),
             "no window: nothing to point at"
         );
+    }
+
+    #[test]
+    fn a_control_request_needs_a_takeover() {
+        let mut d = displays();
+        assert!(
+            !d.request_control(7, "继续订票".into()),
+            "the agent has control already"
+        );
+        assert!(d.get(7).unwrap().control_request.is_none());
+    }
+
+    #[test]
+    fn continue_hands_the_display_back() {
+        let mut d = displays();
+        assert!(d.begin_takeover(7));
+        assert!(d.request_control(7, "继续订票".into()));
+        assert!(
+            d.request_control(7, "继续订票，已登录".into()),
+            "a new reason replaces the old"
+        );
+        let Wait::Later(mut rx) = d.wait_for_control(7) else {
+            panic!("should wait")
+        };
+        assert!(d.answer_control(7, true));
+        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Returned));
+        let display = d.get(7).unwrap();
+        assert!(!display.takeover && display.control_request.is_none());
+    }
+
+    #[test]
+    fn keep_control_leaves_the_takeover_and_tells_the_waiter() {
+        let mut d = displays();
+        assert!(d.begin_takeover(7));
+        assert!(d.request_control(7, "继续订票".into()));
+        let Wait::Later(mut rx) = d.wait_for_control(7) else {
+            panic!("should wait")
+        };
+        assert!(d.answer_control(7, false));
+        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Kept));
+        assert!(d.get(7).unwrap().takeover, "only the user ends a Takeover");
+        assert!(!d.answer_control(7, true), "the request is gone");
+        assert!(d.get(7).unwrap().takeover);
+    }
+
+    #[test]
+    fn a_control_request_ends_with_the_takeover_or_its_withdrawal() {
+        let mut d = displays();
+        assert!(d.begin_takeover(7));
+        assert!(d.request_control(7, "继续".into()));
+        assert!(d.withdraw_control_request(7));
+        assert!(
+            d.get(7).unwrap().takeover,
+            "withdrawing doesn't end the Takeover"
+        );
+        assert!(d.request_control(7, "继续".into()));
+        assert!(d.end_takeover(7));
+        assert!(d.get(7).unwrap().control_request.is_none());
+        assert!(d.begin_takeover(7));
+        assert!(d.request_control(7, "继续".into()));
+        d.end(7, EndReason::Finished);
+        assert!(d.get(7).unwrap().control_request.is_none());
     }
 
     #[test]

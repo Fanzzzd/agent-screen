@@ -104,8 +104,8 @@ pub struct Shell {
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
     viewer: Option<(WindowHandle<Viewer>, Retained<NSWindow>)>,
     card: Option<(WindowHandle<HelpCard>, Retained<NSWindow>)>,
-    /// The display whose Help Request the Help Card shows.
-    /// The display the Help Card shows, and whether for a Window Request.
+    /// The display the Help Card shows, and whether for a Window or
+    /// Control Request, which have no picture.
     card_shown: Option<(DisplayId, bool)>,
     /// Help Requests the user put off with Later, by display.
     card_later: HashMap<DisplayId, String>,
@@ -669,11 +669,10 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core
-            .displays
-            .list
-            .iter()
-            .any(|d| (d.help_request.is_some() || d.window_request.is_some()) && !d.is_ended());
+        let asking = core.displays.list.iter().any(|d| {
+            (d.help_request.is_some() || d.window_request.is_some() || d.control_request.is_some())
+                && !d.is_ended()
+        });
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
@@ -710,6 +709,19 @@ impl Shell {
                     Some(Note::Window(request.app.clone())),
                 ),
                 None => notify::withdraw_window(display.id),
+            }
+            match display
+                .control_request
+                .as_deref()
+                .filter(|_| display.is_live())
+            {
+                Some(reason) => notify::update(
+                    display.id,
+                    display.agent_name(),
+                    task,
+                    Some(Note::Control(reason.to_string())),
+                ),
+                None => notify::withdraw_control(display.id),
             }
             // An agent left windows on its display: tell the user once.
             if display.owner.is_some() && display.is_ended() && !self.ended.contains(&display.id) {
@@ -800,12 +812,13 @@ impl Shell {
             core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
         });
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
-        // A Window Request waits for an answer even beside the Viewer.
+        // Window and Control Requests wait for an answer even beside the
+        // Viewer, where the user operates the display during a Takeover.
         let requests = core
             .displays
             .list
             .iter()
-            .filter(|d| d.is_live() && d.window_request.is_some())
+            .filter(|d| d.is_live() && (d.window_request.is_some() || d.control_request.is_some()))
             .map(|d| (d.id, true, (d.width, d.height)));
         let helps = core
             .displays
@@ -888,6 +901,22 @@ impl Shell {
             self.hand_over(target, None, id, cx);
         }
         true
+    }
+
+    /// The user answers a Control Request from the card: Continue hands
+    /// the display back as the Viewer's button does, Keep Control leaves
+    /// the Takeover. False when there was no request.
+    pub fn answer_control(&mut self, id: DisplayId, give: bool, cx: &mut Context<Self>) -> bool {
+        self.core.update(cx, |core, cx| {
+            let answered = core.displays.answer_control(id, give);
+            if answered && give {
+                core.stop_agent_input(id, false);
+            }
+            if answered {
+                cx.notify();
+            }
+            answered
+        })
     }
 
     /// A click on the Help Card's picture opens the display, as a
@@ -1713,6 +1742,12 @@ impl Shell {
             }
             "card-keep" => {
                 self.answer_window(id, false, cx);
+            }
+            "card-continue" => {
+                self.answer_control(id, true, cx);
+            }
+            "card-keep-control" => {
+                self.answer_control(id, false, cx);
             }
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "wallpaper" => self.choose_wallpaper(cx),
