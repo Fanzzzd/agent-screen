@@ -812,6 +812,7 @@ fn wait_listening_at(socket: &Path) -> bool {
 }
 
 fn bundle_debug() -> Result<()> {
+    sign_step("building the test app / 正在编译测试 app");
     sh(root().join("apps/macos/scripts/bundle.sh"), &["debug"]).map(|_| ())
 }
 
@@ -825,6 +826,7 @@ fn spawn_debug(env: &[(&str, &str)]) -> Result<()> {
         }
         Err(_) => (Stdio::null(), Stdio::null()),
     };
+    sign_step("starting the test app / 正在启动测试 app");
     // Its own process group, so Ctrl-C on a script leaves it running.
     command(binary_of(&debug_app()))
         .envs(env.iter().copied())
