@@ -10,7 +10,8 @@
 use std::process::{Command, ExitCode};
 
 use agent_screen_tests::{
-    Control, check, fixture, json, out, run, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, check, fixture, json, kill_ours, out, run, skip, sleep_ms, start_test_app,
+    stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -134,15 +135,9 @@ fn test(control: &Control, electron: &std::path::Path) -> Result<()> {
     sleep_ms(5000);
     let done = control.call("recordStop", json!({ "displayId": id }))?;
     let _ = afplay.kill();
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-f", "HARNESS|electron.*fixtures/electron"])
-        .status();
-    let _ = Command::new("/usr/bin/osascript")
-        .args([
-            "-e",
-            &format!("tell application \"{}\" to quit", electron.display()),
-        ])
-        .status();
+    // Only this checkout's harness: quitting Electron.app by name would end
+    // another worktree's run of it too.
+    kill_ours(fixture("electron"));
     control.call("endDisplay", json!({ "displayId": id }))?;
     println!("sound: {}", done["sound"]);
     let video = std::path::PathBuf::from(done["video"].as_str().context("no video")?);

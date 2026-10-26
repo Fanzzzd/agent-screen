@@ -535,6 +535,21 @@ pub fn running_headed(name: &str) -> bool {
         .any(|pid| !sh_lenient("/bin/ps", &["-o", "args=", "-p", pid]).contains("--headless"))
 }
 
+/// Kill the processes whose command line holds `path`, a path inside this
+/// checkout: a run of the same script in another worktree has its own path,
+/// so its fixtures live on.
+pub fn kill_ours(path: impl AsRef<Path>) {
+    let _ = Command::new("/usr/bin/pkill")
+        .arg("-f")
+        .arg(path.as_ref())
+        .status();
+}
+
+/// The executable of the app `name`.app this checkout builds in `out()`.
+pub fn our_binary(name: &str) -> PathBuf {
+    out().join(format!("{name}.app/Contents/MacOS/{name}"))
+}
+
 /// Quit the browser running on the throwaway profile `dir`, and no other
 /// copy of it.
 pub fn quit_profile(dir: &Path) {

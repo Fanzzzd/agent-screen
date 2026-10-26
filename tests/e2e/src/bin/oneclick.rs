@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, fixture, hid, instance, json, open_stage, out, probe, run, sh_lenient,
-    sign_step, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, check, fixture, hid, instance, json, kill_ours, open_stage, our_binary, out, probe,
+    run, sh_lenient, sign_step, skip, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -54,8 +54,8 @@ fn main() -> ExitCode {
             ("AGENTSCREEN_NO_CLAIMS", &unclaimed),
         ])?;
         let result = test(&electron, &field);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "fixtures/login"]);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(fixture("login"));
+        kill_ours(our_binary("Field"));
         stop_test_app();
         if let Some(front) = &front {
             let _ = sh_lenient(

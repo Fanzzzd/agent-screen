@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, instance, json, out, pid_of, probe, run, sh, sh_lenient, sleep_ms,
+    Control, check, instance, json, kill_ours, our_binary, out, pid_of, probe, run, sh, sleep_ms,
     start_test_app, stop_test_app, tool, try_osa,
 };
 use anyhow::{Context, Result};
@@ -25,10 +25,7 @@ fn main() -> ExitCode {
         let app = ask_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&app, "Don't Save").and_then(|()| test(&app, "Cancel"));
-        let _ = sh_lenient(
-            "/usr/bin/pkill",
-            &["-f", "AskSave.app/Contents/MacOS/AskSave"],
-        );
+        kill_ours(our_binary("AskSave"));
         stop_test_app();
         result
     })
@@ -88,7 +85,7 @@ fn test(app: &Path, answer: &str) -> Result<()> {
                 "environment": { "ASK_OUT": said.to_str().unwrap() } }),
     )?;
     sleep_ms(1000);
-    let pid = pid_of("AskSave.app/Contents/MacOS/AskSave").context("AskSave running")?;
+    let pid = pid_of(&our_binary("AskSave").to_string_lossy()).context("AskSave running")?;
     let from = std::fs::metadata(log_path())
         .map(|m| m.len() as usize)
         .unwrap_or(0);
@@ -138,13 +135,10 @@ fn test(app: &Path, answer: &str) -> Result<()> {
             "after Cancel, the window and the display stay",
             after.contains("cancelled")
                 && !gone
-                && pid_of("AskSave.app/Contents/MacOS/AskSave").is_some(),
+                && pid_of(&our_binary("AskSave").to_string_lossy()).is_some(),
             format!("app said {after:?}, display gone {gone}"),
         );
-        let _ = sh_lenient(
-            "/usr/bin/pkill",
-            &["-f", "AskSave.app/Contents/MacOS/AskSave"],
-        );
+        kill_ours(our_binary("AskSave"));
         sleep_ms(1000);
         let _ = control.call(
             "debugShow",

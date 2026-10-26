@@ -14,8 +14,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, check, instance, json, out, run, sh_lenient, sleep_ms, start_test_app,
-    stop_test_app,
+    Control, McpClient, check, instance, json, kill_ours, our_binary, out, run, sh_lenient,
+    sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
@@ -51,7 +51,7 @@ fn answer_soon(display: u64, give: bool) -> std::thread::JoinHandle<Result<serde
 
 fn test() -> Result<()> {
     let client = McpClient::start(&[])?;
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+    kill_ours(our_binary("Field"));
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
     // Started outside Agent Screen, as by a script.

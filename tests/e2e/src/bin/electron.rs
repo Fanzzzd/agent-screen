@@ -15,8 +15,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, fixture, instance, json, out, probe, run, skip, sleep_ms, start_test_app,
-    stop_test_app,
+    Control, check, fixture, instance, json, kill_ours, out, probe, run, skip, sleep_ms,
+    start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -220,9 +220,7 @@ fn big(control: &Control, id: &Value, electron: &std::path::Path) -> Result<()> 
 }
 
 fn quit_harness() {
-    let _ = std::process::Command::new("/usr/bin/pkill")
-        .args(["-f", "fixtures/electron"])
-        .status();
+    kill_ours(fixture("electron"));
     sleep_ms(1000);
 }
 

@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, field_app, instance, json, out, probe, run, sh_lenient, skip, sleep_ms,
-    start_test_app, stop_test_app,
+    Control, check, field_app, instance, json, kill_ours, our_binary, out, probe, run, sh_lenient,
+    skip, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&field);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
@@ -106,7 +106,7 @@ fn test(field: &Path) -> Result<()> {
         && e.to_string().contains("secure input")
     {
         control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Field"));
         stop_test_app();
         skip(
             "a password field on the user's screen has the keyboard; Agent Screen refused, as it should",

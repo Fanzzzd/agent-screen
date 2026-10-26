@@ -17,8 +17,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, field_app, instance, json, login_app, open_stage, probe, run, sh_lenient,
-    sleep_ms, start_test_app, stop_test_app,
+    Control, check, field_app, instance, json, kill_ours, login_app, open_stage, our_binary, probe,
+    run, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -33,8 +33,8 @@ fn main() -> ExitCode {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(login.to_str().unwrap(), field.to_str().unwrap());
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Login.app/Contents/MacOS/Login"]);
-        let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
+        kill_ours(our_binary("Login"));
+        kill_ours(our_binary("Field"));
         stop_test_app();
         result
     })
