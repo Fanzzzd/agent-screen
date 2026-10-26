@@ -5,6 +5,7 @@ fn main() {
     // The private CoreGraphics and SkyLight shims, shared with the Swift app.
     cc::Build::new()
         .file("native/SkyLight.m")
+        .file("native/ButtonLatch.m")
         .include("native")
         .flag("-fobjc-arc")
         .compile("agent_screen_private");

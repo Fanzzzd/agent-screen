@@ -27,7 +27,43 @@ unsafe extern "C" {
     fn SSFocusWithoutRaise(pid: i32, window: u32) -> bool;
     fn SSFrontPid() -> i32;
     fn SSMakeSelfFront(window: u32) -> bool;
+    fn SSLatchHold() -> bool;
+    fn SSLatchRelease() -> i32;
 }
+
+/// WindowServer's session left button, held while an agent's drag goes out.
+/// Chromium and WebKit read a web pointer event's `buttons` from
+/// `[NSEvent pressedMouseButtons]`, that session state, which events posted
+/// to one process don't change; a page that follows a pointer only while
+/// the button is held, as a splitter or a sortable list does, saw no button
+/// (#37). The native side posts a press at the cursor's own location and
+/// drops it before any app gets it, so the cursor stays put and no app sees
+/// a click. Held for a gesture's moves only: a hold across an agent's tool
+/// calls would leave the user's own pointer reading as held.
+struct Latch;
+
+impl Latch {
+    fn hold() -> Latch {
+        if !unsafe { SSLatchHold() } {
+            log::info!("input: the session's left button doesn't read held for this drag");
+        }
+        Latch
+    }
+}
+
+impl Drop for Latch {
+    fn drop(&mut self) {
+        match unsafe { SSLatchRelease() } {
+            2 => log::warn!("input: the session's left button still reads held after the drag"),
+            3 => log::info!("input: the user holds the left button; their release lets go"),
+            _ => {}
+        }
+    }
+}
+
+/// How long a held latch outlasts the last event of a step, so the app has
+/// read the button before it lets go.
+const LATCH_SETTLE: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -289,6 +325,7 @@ impl Forwarder {
     pub async fn drag(&self, from: (f64, f64), to: (f64, f64), m: Modifiers) -> Sent {
         let stopped = self.stopped.clone();
         self.run(move |w| {
+            let latch = Latch::hold();
             if w.mouse_down(from, Button::Left, 1, flags(m)).is_none() {
                 return Sent::Nowhere;
             }
@@ -303,12 +340,15 @@ impl Forwarder {
                 // so the release is at least a step away from the source,
                 // though still inside a large one.
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(latch);
                     w.mouse_up(at, Button::Left, 1, flags(m));
                     return Sent::Stopped(at);
                 }
                 thread::sleep(Duration::from_millis(16));
             }
             thread::sleep(Duration::from_millis(100));
+            // Up before the release, as with a hand's button.
+            drop(latch);
             w.mouse_up(to, Button::Left, 1, flags(m));
             Sent::All
         })
@@ -327,10 +367,15 @@ impl Forwarder {
                 return None;
             }
             if down {
+                let latch = Latch::hold();
                 let hit = w.mouse_down(at, Button::Left, 1, flags(m));
                 if let Some(g) = &mut w.gesture {
                     g.agent = true;
                 }
+                if hit.is_some() {
+                    thread::sleep(LATCH_SETTLE);
+                }
+                drop(latch);
                 hit
             } else {
                 let target = w.gesture.as_ref().map(|g| g.target);
@@ -346,7 +391,9 @@ impl Forwarder {
     pub async fn move_to(&self, to: (f64, f64)) {
         self.run(move |w| {
             if w.gesture.as_ref().is_some_and(|g| g.agent) {
+                let _latch = Latch::hold();
                 w.mouse_dragged(to, Button::Left, CGEventFlags::empty());
+                thread::sleep(LATCH_SETTLE);
             } else {
                 w.mouse_moved(to, CGEventFlags::empty());
             }

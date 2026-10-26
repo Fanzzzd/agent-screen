@@ -1,13 +1,16 @@
 //! A drag in a web page holds the button down (#37): the Electron harness's
 //! splitter, which captures the pointer and follows pointermove only while
 //! `buttons` has the left button, as react-resizable-panels does, follows
-//! a whole drag and a drag sent as press, moves and release.
+//! a whole drag and a drag sent as press, moves and release; an HTML5 drag
+//! of a row drops on the page's drop target.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e webdrag
 //!
-//! Makes 1 display. Nothing shows on your screen.
+//! Makes 1 display. Each drag holds the session's left button for under a
+//! second, at your cursor, which stays put: the sign asks you to keep your
+//! hands off.
 
 use std::process::ExitCode;
 
@@ -16,6 +19,17 @@ use agent_screen_tests::{
     start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+}
+
+/// Whether the session's left button reads held, as `[NSEvent
+/// pressedMouseButtons]` reads it in every app.
+fn left_held() -> bool {
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
 
 fn main() -> ExitCode {
     if instance().is_none() {
@@ -117,21 +131,63 @@ fn test(electron: &std::path::Path) -> Result<()> {
             seen(&now, "free") == 0 && seen(&now, "held") > 0 && seen(&now, "split") >= 70,
             now["title"].as_str().unwrap_or_default(),
         );
+        check(
+            "the session's left button reads up after the drag, for every app",
+            !left_held(),
+            "",
+        );
         quit_harness();
 
         // left_mouse_down, two mouse_move, left_mouse_up.
         let (sx, sy) = start(&control, &id, electron)?;
         let at = |x: i64| json!({ "sessionKey": key, "displayId": id, "x": x, "y": sy });
+        // The latch holds the button for a step's events only, not
+        // between the agent's tool calls.
+        let mut between = Vec::new();
         control.call("mouseDown", at(sx))?;
+        between.push(left_held());
         control.call("move", at(sx + 30))?;
+        between.push(left_held());
         control.call("move", at(sx + 60))?;
+        between.push(left_held());
         control.call("mouseUp", at(sx + 60))?;
+        between.push(left_held());
         sleep_ms(500);
         let now = harness(&control, &id)?.context("window")?;
         check(
             "moves between mouse_down and mouse_up have the left button held, and the splitter follows",
             seen(&now, "free") == 0 && seen(&now, "held") > 0 && seen(&now, "split") >= 50,
             now["title"].as_str().unwrap_or_default(),
+        );
+        check(
+            "the session's left button reads up between the agent's steps and after them",
+            !between.contains(&true),
+            format!("held after each step: {between:?}"),
+        );
+        quit_harness();
+
+        // An HTML5 drag: row 1 into the drop target. Chromium ends its drag
+        // session at once when the button reads up.
+        let (sx, sy) = start(&control, &id, electron)?;
+        // Row 1's middle is 31 pt down the page, the drop target's 405;
+        // from the splitter, 346 pt from the left, and 280 down.
+        let (row, bin) = ((sx - 246, sy - 249), (sx + 94, sy + 125));
+        control.call(
+            "drag",
+            json!({ "sessionKey": key, "displayId": id,
+                    "fromX": row.0, "fromY": row.1, "toX": bin.0, "toY": bin.1 }),
+        )?;
+        sleep_ms(800);
+        let now = harness(&control, &id)?.context("window")?;
+        check(
+            "an HTML5 drag of a row drops it on the page's drop target",
+            seen(&now, "drag") == 1 && seen(&now, "dropped") == 1,
+            now["title"].as_str().unwrap_or_default(),
+        );
+        check(
+            "the session's left button reads up after the HTML5 drag",
+            !left_held(),
+            "",
         );
         Ok(())
     })();

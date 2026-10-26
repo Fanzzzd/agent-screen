@@ -70,4 +70,17 @@ int SSFrontPid(void);
 /// _AXUIElementGetWindow: the CGWindowID behind an AX window element.
 bool SSAXWindowID(AXUIElementRef element, CGWindowID *outWindowID);
 
+// MARK: - The left button as apps read it (ButtonLatch.m)
+//
+// Hold WindowServer's session left button down while an agent's drag goes to
+// one process, so [NSEvent pressedMouseButtons] reads it held there, as
+// Chromium and WebKit do for a web pointer event's `buttons` (#37). The
+// press is posted at the cursor's location and dropped before any app gets
+// it. Nested holds count; the last release lets go. False when the button
+// doesn't read held: no event tap, or WindowServer didn't take it in time.
+// The release: 0 nothing to let go, 1 let go, 2 posted but still reads
+// held, 3 left to the user, who holds the button now.
+bool SSLatchHold(void);
+int SSLatchRelease(void);
+
 NS_ASSUME_NONNULL_END
