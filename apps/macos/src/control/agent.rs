@@ -112,7 +112,7 @@ async fn menu_still_open(
         _ => "click",
     };
     Err(ControlError::failed(format!(
-        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. Take a screenshot, open the menu again and choose its item in the next call, with act_on_element press on the item or a click on it; or focus the closed control and type the option's text"
+        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. For a pop-up button, such as a web page's select, choose with act_on_element set_value and the item's name, which opens the menu and picks the item in one call; for another menu, take a screenshot, open it again and choose its item in the next call"
     )))
 }
 
@@ -2113,6 +2113,16 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
+            let item = ax::Sendable(element.clone());
+            let popup = off(cx, move || {
+                (ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXPopUpButton"))
+                    .then(|| ax::pid_of(item.get()))
+                    .flatten()
+            })
+            .await;
+            if let Some(pid) = popup {
+                return choose_in_popup(element, pid, bounds, &value, click, cx).await;
+            }
             // Some elements, static text among them, report success and
             // keep their value: read it back.
             let set = off_main(
@@ -2404,6 +2414,107 @@ impl Start {
     fn new_instance(&self) -> bool {
         !self.arguments.is_empty() || !self.environment.is_empty()
     }
+}
+
+/// Set a pop-up button, as a web page's select, to the item `value` names,
+/// all in this call: click it open, press the item through accessibility
+/// and see the button show it. macOS closes an open menu at the user's
+/// next click or key anywhere, and sends their keys to it while it is
+/// open, so a menu left open for the agent's next call is often gone, and
+/// takes the user's typing meanwhile (#48, #79).
+async fn choose_in_popup(
+    element: &ax::Element,
+    pid: i32,
+    area: Rect,
+    value: &str,
+    open: impl AsyncFnOnce(Button, i64, &mut AsyncApp) -> Result<(), ControlError>,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let before = popup_value(element, cx).await;
+    if before.trim().eq_ignore_ascii_case(value.trim()) {
+        return Ok(());
+    }
+    let opened = Instant::now();
+    open(Button::Left, 1, cx).await?;
+    let mut menu = None;
+    for _ in 0..40 {
+        menu = off(cx, move || ax::open_menu(pid, area).map(ax::Sendable)).await;
+        if menu.is_some() {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    }
+    let menu = menu.ok_or_else(|| {
+        ControlError::failed("the pop-up button opened no menu; take a screenshot, click it and choose the item in your next call")
+    })?;
+    let wanted = value.to_string();
+    let picked = off(cx, move || {
+        let items: Vec<ax::Element> = ax::elements_attribute(menu.get(), "AXChildren")
+            .into_iter()
+            .filter(|i| ax::string_attribute(i, "AXRole").as_deref() == Some("AXMenuItem"))
+            .collect();
+        let titles: Vec<String> = items
+            .iter()
+            .map(|i| ax::string_attribute(i, "AXTitle").unwrap_or_default())
+            .collect();
+        match agent_screen_model::choice::choose(&titles, &wanted) {
+            Some(i) if ax::try_action(&items[i], "AXPress") => Ok(titles[i].clone()),
+            found => {
+                ax::try_action(menu.get(), "AXCancel");
+                Err((found.is_some(), titles))
+            }
+        }
+    })
+    .await;
+    log::info!(
+        "select: menu open for {} ms before its item was pressed",
+        opened.elapsed().as_millis()
+    );
+    let title = match picked {
+        Ok(title) => title,
+        Err((true, _)) => {
+            return Err(ControlError::failed(format!(
+                "the menu refused the press on its item {value:?}; take a screenshot"
+            )));
+        }
+        Err((false, titles)) => {
+            let listed: Vec<String> = titles
+                .into_iter()
+                .filter(|t| !t.trim().is_empty())
+                .take(60)
+                .map(|t| format!("{t:?}"))
+                .collect();
+            return Err(ControlError::not_found(format!(
+                "no item, or more than one, matches {value:?}, so nothing changed; its items: {}",
+                listed.join(", ")
+            )));
+        }
+    };
+    // The button shows the item once the app has handled it.
+    let mut now = before.clone();
+    for _ in 0..40 {
+        now = popup_value(element, cx).await;
+        if now.trim() == title.trim() {
+            return Ok(());
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    }
+    Err(ControlError::failed(format!(
+        "pressed the menu's item {title:?}, but the pop-up button still shows {now:?}; take a screenshot"
+    )))
+}
+
+/// What a pop-up button shows.
+async fn popup_value(element: &ax::Element, cx: &mut AsyncApp) -> String {
+    let e = ax::Sendable(element.clone());
+    off(cx, move || {
+        ax::string_attribute(e.get(), "AXValue").unwrap_or_default()
+    })
+    .await
 }
 
 /// Run `f`, which waits on another process, off the UI thread.

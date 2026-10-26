@@ -327,6 +327,7 @@ const HANDS_OFF: &[&str] = &[
     "placeheld",
     "samebundle",
     "secondwindow",
+    "selectvalue",
     "settings",
     "shared",
     "sound",

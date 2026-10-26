@@ -434,6 +434,42 @@ pub fn press_menu_item_at(pid: i32, at: (f64, f64)) -> bool {
         && unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
 }
 
+/// The pid of the app an element belongs to.
+pub fn pid_of(element: &AXUIElement) -> Option<i32> {
+    let mut pid = 0;
+    let ok = unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success;
+    ok.then_some(pid)
+}
+
+/// The pop-up menu `pid` has open on the display covering `area`, as a web
+/// page's select shows: found at its first row, which the menu's window
+/// covers, since the menu isn't in the window's tree.
+pub fn open_menu(pid: i32, area: Rect) -> Option<Element> {
+    let window = super::cg::on_screen_windows()
+        .into_iter()
+        .find(|w| w.target.pid == pid && w.layer == 101 && w.bounds.intersects(&area))?;
+    let at = (
+        window.bounds.x + window.bounds.width / 2.0,
+        window.bounds.y + (window.bounds.height / 2.0).min(12.0),
+    );
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(pid).copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    for _ in 0..4 {
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXMenu") {
+            return Some(element);
+        }
+        element = element_attribute(&element, "AXParent")?;
+    }
+    None
+}
+
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window: near its top, with no control,
 /// text or web content there. Toolkits name that background differently,
