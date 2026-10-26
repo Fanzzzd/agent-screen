@@ -2026,10 +2026,19 @@ async fn open_in_background(
     cx: &mut AsyncApp,
 ) -> Option<std::sync::mpsc::Receiver<bool>> {
     let new_instance = start.new_instance();
-    let arguments = start.arguments.clone();
+    let arguments = start.open_arguments();
     let environment = start.environment.clone();
     cx.background_executor()
         .spawn(async move {
+            // Test builds may hold the launch, so a test can start another
+            // copy of the app while it waits (issue #35).
+            if cfg!(debug_assertions)
+                && let Some(ms) = std::env::var("AGENTSCREEN_OPEN_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
             let mut open = std::process::Command::new("/usr/bin/open");
             open.arg("-g");
             if new_instance {
@@ -2047,24 +2056,7 @@ async fn open_in_background(
                 Some(target) => open.arg("-a").arg(&app).arg(target),
                 None => open.arg(&app),
             };
-            // A document app that starts with nothing to open shows an Open
-            // panel, owned by a system service and left on the user's
-            // screen, instead of a window. Ask for an untitled document.
-            // Only a starting app reads its arguments.
-            // Nor bring back windows from its last run, unsaved text
-            // included, which may be the user's.
-            // Given arguments, the app gets exactly those: Electron takes
-            // the first one that isn't a flag for its app folder.
-            open.arg("--args");
-            if arguments.is_empty() {
-                open.args([
-                    "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
-                    "NO",
-                    "-ApplePersistenceIgnoreState",
-                    "YES",
-                ]);
-            }
-            open.args(&arguments);
+            open.arg("--args").args(&arguments);
             // `open` returns once the app has finished starting, a second
             // or more; the caller watches for the process meanwhile, and
             // hears whether `open` succeeded when it ends.
@@ -2199,6 +2191,28 @@ impl Start {
             arguments,
             environment,
         })
+    }
+
+    /// What `open` passes after `--args`. A document app that starts
+    /// with nothing to open shows an Open panel, owned by a system service
+    /// and left on the user's screen, instead of a window: ask for an
+    /// untitled document. Only a starting app reads its arguments. Nor
+    /// bring back windows from its last run, unsaved text included, which
+    /// may be the user's. Given arguments, the app gets exactly those:
+    /// Electron takes the first one that isn't a flag for its app folder.
+    fn open_arguments(&self) -> Vec<String> {
+        if self.arguments.is_empty() {
+            [
+                "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
+                "NO",
+                "-ApplePersistenceIgnoreState",
+                "YES",
+            ]
+            .map(String::from)
+            .to_vec()
+        } else {
+            self.arguments.clone()
+        }
     }
 
     /// A running instance would ignore both: a new one starts.
@@ -2372,10 +2386,29 @@ async fn launch_now(
         matches!(opened, Some((false, _)))
     };
     let mut pid = None;
+    // A new process of the bundle may be another tool's, started from a
+    // shell meanwhile (issue #35): the new instance is the one launchd
+    // started with these arguments. One that restarted itself under
+    // another pid matches neither, so the first new one is it after all.
+    let asked = start.open_arguments();
+    let mut other = None;
     for _ in 0..200 {
         let now = off(cx, pids.clone()).await;
         pid = if fresh {
-            now.into_iter().find(|p| !instances_before.contains(p))
+            let new: Vec<i32> = now
+                .into_iter()
+                .filter(|p| !instances_before.contains(p))
+                .collect();
+            other = other.or(new.first().copied());
+            let asked = asked.clone();
+            off(cx, move || {
+                new.into_iter().find(|&p| {
+                    let parent = app::parent_pid(p).unwrap_or(0);
+                    let argv = app::arguments(p).unwrap_or_default();
+                    agent_screen_model::launch::is_opened(parent, &argv, &asked)
+                })
+            })
+            .await
         } else {
             now.into_iter().next()
         };
@@ -2389,7 +2422,12 @@ async fn launch_now(
             .timer(Duration::from_millis(20))
             .await;
     }
-    let pid = pid.ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
+    if pid.is_none() && other.is_some() {
+        log::info!("launch: no new instance of {name} matched its launch; taking {other:?}");
+    }
+    let pid = pid
+        .or(other)
+        .ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
     // Two sessions launching an app at once both see it start; it's the
     // first one's.
     if !was_running {
