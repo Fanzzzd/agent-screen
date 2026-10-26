@@ -8,8 +8,9 @@ use crate::mac::input::Forwarder;
 use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
+use agent_screen_model::budget::{Budget, ColorState, MadeLimit};
 use gpui::{App, AsyncApp, Context, Entity};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Adding or removing a display is a reconfiguration every app on the Mac
@@ -94,7 +95,7 @@ pub struct Core {
     /// A spare is being made while the user is idle.
     warming: bool,
     /// When agents' displays were made new, within `MADE_WINDOW`.
-    made: VecDeque<Instant>,
+    made: MadeLimit,
     reclaim: Reclaim,
 }
 
@@ -113,9 +114,6 @@ struct Reclaim {
 /// A new display waits this long for its record, and merges with others.
 const RECLAIM_DELAY: Duration = Duration::from_secs(3);
 const RECLAIM_EVERY: Duration = Duration::from_secs(30 * 60);
-/// The longest an answer to WindowServer's color request may take, against
-/// its 50 ms limit (ADR 0009).
-const BUDGET_MS: f64 = 40.0;
 
 impl Core {
     pub fn new() -> Self {
@@ -139,7 +137,7 @@ impl Core {
             retiring: Vec::new(),
             last_used: None,
             warming: false,
-            made: VecDeque::new(),
+            made: MadeLimit::new(MADE, MADE_WINDOW),
             reclaim: Reclaim::default(),
         }
     }
@@ -208,39 +206,26 @@ impl Core {
         self.reclaim.helper
     }
 
-    /// How long WindowServer's color request would take with one display
-    /// more, in ms (ADR 0009).
-    fn color_request_ms(&self, online: usize) -> f64 {
-        let per_record = match self.reclaim.helper {
-            Some(colorsync::Helper::Ready) => 0.05,
-            _ => 0.2,
-        };
-        let records = self.reclaim.records.unwrap_or(0) as f64;
-        online as f64 * (1.0 + records * per_record)
-    }
-
     /// Whether one display more keeps WindowServer's color request in
-    /// time. Releases spares when that is what it takes.
+    /// time (ADR 0009). Releases spares when that is what it takes.
     pub fn budget_allows(&mut self) -> Result<(), String> {
-        // Counted 10 s after launch; till then, no guess refuses a display.
-        if self.reclaim.records.is_none() {
-            return Ok(());
-        }
-        let online = crate::mac::cg::online().len() + 1;
-        if self.color_request_ms(online) <= BUDGET_MS {
-            return Ok(());
-        }
-        let spares = self.spares.len();
-        if spares > 0 && self.color_request_ms(online - spares) <= BUDGET_MS {
-            for spare in std::mem::take(&mut self.spares) {
-                crate::lifecycle::note("released", spare.handle.id, "spare over budget");
+        let state = ColorState {
+            records: self.reclaim.records,
+            helper_ready: self.reclaim.helper == Some(colorsync::Helper::Ready),
+        };
+        let online = crate::mac::cg::online().len();
+        match state.allows(online, self.spares.len()) {
+            Budget::Allow => Ok(()),
+            Budget::ReleaseSpares => {
+                for spare in std::mem::take(&mut self.spares) {
+                    crate::lifecycle::note("released", spare.handle.id, "spare over budget");
+                }
+                Ok(())
             }
-            return Ok(());
+            Budget::Refuse => Err(format!(
+                "This Mac has {online} displays online, and with another, macOS would take longer than it allows to look up their color profiles on every display change, so every app would stutter. Keep working on a display you have, or end one you no longer need with end_display."
+            )),
         }
-        Err(format!(
-            "This Mac has {} displays online, and with another, macOS would take longer than it allows to look up their color profiles on every display change, so every app would stutter. Keep working on a display you have, or end one you no longer need with end_display.",
-            online - 1
-        ))
     }
 
     /// Ids of every virtual display of this app, spares included: they
@@ -291,33 +276,20 @@ impl Core {
     /// Whether an agent may have a new display now; otherwise how long
     /// until it may.
     pub fn may_make(&mut self) -> Result<(), Duration> {
-        let now = Instant::now();
-        while self
-            .made
-            .front()
-            .is_some_and(|t| now.duration_since(*t) > MADE_WINDOW)
-        {
-            self.made.pop_front();
-        }
         // Test builds may raise it, as the fleet script does for its twelve.
-        let made = if cfg!(debug_assertions) {
+        let limit = if cfg!(debug_assertions) {
             std::env::var("AGENTSCREEN_NEW_DISPLAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(MADE)
         } else {
-            MADE
+            None
         };
-        if self.made.len() < made {
-            return Ok(());
-        }
-        let oldest = self.made.front().copied().unwrap_or(now);
-        Err(MADE_WINDOW.saturating_sub(now.duration_since(oldest)))
+        self.made.allows(Instant::now(), limit)
     }
 
     /// An agent's display was made new.
     pub fn count_made(&mut self) {
-        self.made.push_back(Instant::now());
+        self.made.record(Instant::now());
     }
 
     /// While the user is idle: release what waited for it, spares kept

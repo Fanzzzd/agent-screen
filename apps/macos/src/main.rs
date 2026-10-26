@@ -191,6 +191,13 @@ fn main() {
         ))
     });
     app.run(|cx: &mut App| {
+        // Displays an abort removed fall between this line and the last
+        // one before it.
+        lifecycle::line(&format!(
+            "app started pid={} version={}",
+            std::process::id(),
+            env!("CARGO_PKG_VERSION")
+        ));
         // No permission prompts at launch: the setup window asks when
         // the user clicks, so each prompt comes with its reason.
         mac::permissions::screen_recording_at_launch();
