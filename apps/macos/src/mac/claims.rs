@@ -4,10 +4,10 @@
 //! and released before it moves off, so AeroSpace never lays it out between.
 //! Without the file, AeroSpace guesses from where windows are.
 
-use agent_screen_model::claims::Claims;
+use agent_screen_model::claims::{Claims, Publication};
 use std::sync::Mutex;
 
-static CLAIMS: Mutex<Claims> = Mutex::new(Claims::new());
+static CLAIMS: Mutex<Publication> = Mutex::new(Publication::new());
 
 fn path() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -15,38 +15,35 @@ fn path() -> std::path::PathBuf {
         .join(format!("{}.json", std::process::id()))
 }
 
-/// Apply a change and write the file if it changed. AeroSpace reads the
-/// directory before each command, so the file is current once this returns.
+/// Preserve the desired state and retry while its file snapshot is dirty.
+/// Production callers stay best-effort: publication failures only log.
 fn change(apply: impl FnOnce(&mut Claims) -> bool) {
     let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
-    if apply(&mut claims) {
-        write(&claims);
+    if let Err(error) = claims.publish(false, apply, write) {
+        log::warn!("claims: could not write {}: {error}", path().display());
     }
 }
 
-fn write(claims: &Claims) {
-    // Debug builds can leave AeroSpace guessing, for a test to show what
-    // the claim prevents.
+fn write(claims: &Claims) -> std::io::Result<()> {
     if cfg!(debug_assertions) && std::env::var("AGENTSCREEN_NO_CLAIMS").as_deref() == Ok("1") {
-        return;
+        return Ok(());
     }
-    let path = path();
+    write_at(claims, &path())
+}
+
+fn write_at(claims: &Claims, path: &std::path::Path) -> std::io::Result<()> {
     if claims.is_empty() {
-        let _ = std::fs::remove_file(&path);
-        return;
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        };
     }
-    // Renamed over the claim file, so AeroSpace never reads half of one.
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            let temporary = path.with_extension("json.tmp");
-            std::fs::write(&temporary, claims.to_json())?;
-            std::fs::rename(&temporary, &path)
-        });
-    if let Err(error) = written {
-        log::warn!("claims: could not write {}: {error}", path.display());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, claims.to_json())?;
+    std::fs::rename(&temporary, path)
 }
 
 pub fn add_display(display: u32) {
@@ -84,4 +81,62 @@ pub fn release(window: u32) {
 /// On quit: AeroSpace lays out what is left as the user's.
 pub fn delete() {
     let _ = std::fs::remove_file(path());
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn failed_display_write_recovers_on_claim_with_the_real_publisher() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-screen-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("claims.json");
+        let mut state = Publication::new();
+        // A directory at the temporary-file path makes the canonical write
+        // fail without changing any user path or permission.
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(
+            state
+                .publish(false, |c| c.add_display(3), |c| write_at(c, &path))
+                .is_err()
+        );
+        assert!(state.desired().has_display(3));
+        assert!(!state.published().has_display(3));
+        assert!(!path.exists());
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        state
+            .publish(false, |c| c.claim(7, 3), |c| write_at(c, &path))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"version":1,"displays":[3],"windows":[7]}"#
+        );
+        assert_eq!(state.desired(), state.published());
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let published = state.published().to_json();
+        assert!(
+            state
+                .publish(false, |c| c.release(7), |c| write_at(c, &path))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), published);
+        assert_eq!(state.published().to_json(), published);
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        state
+            .publish(false, |c| c.release(7), |c| write_at(c, &path))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            state.published().to_json()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
