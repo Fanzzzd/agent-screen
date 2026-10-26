@@ -16,8 +16,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, debug_pid, instance, json, kill_ours, open_stage, our_binary, out, pid_of, run,
-    sh_lenient, sleep_ms, start_test_app, stop_test_app,
+    Control, allow_on_your_screen, check, debug_pid, instance, json, kill_ours, open_stage,
+    our_binary, out, pid_of, run, sh_lenient, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -68,6 +68,11 @@ fn test() -> Result<()> {
         .and_then(|p| p.trim().parse().ok())
         .context("Spotlight isn't running")?;
     control.call("debugUserKey", json!({ "pid": spotlight }))?;
+    allow_on_your_screen(
+        "Field",
+        150,
+        "an app the user opens shows its window where macOS puts it, and AppKit's open animation holds the window there until it ends, 47 to 72 ms after Agent Screen moved it",
+    );
     sh_lenient(
         "/usr/bin/open",
         &["-g", "-n", out().join("Field.app").to_str().unwrap()],
@@ -100,6 +105,11 @@ fn test() -> Result<()> {
         .context("Finder isn't running")?;
     control.call("debugFront", json!({ "pid": finder }))?;
     control.call("debugUserKey", json!({ "pid": spotlight }))?;
+    allow_on_your_screen(
+        "Field",
+        u64::MAX,
+        "opened from Spotlight after a click on your screen, the app is yours and opens there",
+    );
     sh_lenient(
         "/usr/bin/open",
         &["-g", "-n", out().join("Field.app").to_str().unwrap()],

@@ -15,7 +15,7 @@ use crate::mac::aerospace::{self, AeroSpace};
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
-use crate::mac::{app, assist, cg, menubar, notify, viewer_input, windows};
+use crate::mac::{app, assist, ax, cg, menubar, notify, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -2912,8 +2912,12 @@ impl Shell {
             // The app the launcher opened, once its first window came.
             let mut opened: Option<i32> = None;
             loop {
+                // Every frame: the new window shows on the user's screen
+                // until it moves, and AeroSpace tiles their windows around
+                // it meanwhile. A list of windows takes a few ms, for at
+                // most 10 s after a key typed into a launcher.
                 cx.background_executor()
-                    .timer(Duration::from_millis(150))
+                    .timer(Duration::from_millis(16))
                     .await;
                 let Ok(Some((d, until))) = this.read_with(cx, |shell, _| shell.launch_here) else {
                     return;
@@ -2953,6 +2957,15 @@ impl Shell {
                         window.target.window_id,
                         window.app
                     );
+                    // Off the user's screen first: the Handover below asks
+                    // AeroSpace where the window was before it moves it,
+                    // and each question to AeroSpace takes a while.
+                    let target = window.target;
+                    cx.background_executor()
+                        .spawn(async move {
+                            let _ = ax::move_into(target, cg::display_bounds(display));
+                        })
+                        .await;
                     let _ = this.update(cx, |shell, cx| {
                         shell.hand_over(window.target, Some(window.bounds), display, cx)
                     });

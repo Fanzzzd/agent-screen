@@ -16,8 +16,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, check, debug_pid, instance, json, kill_ours, our_binary, out, run, sh_lenient,
-    sleep_ms, start_test_app, stop_test_app,
+    Control, Value, allow_on_your_screen, check, debug_pid, instance, json, kill_ours, our_binary,
+    out, run, sh_lenient, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -124,6 +124,11 @@ fn test(own: u32) -> Result<()> {
         "Field's window on the display is claimed",
         claims(own).1.contains(&window),
         format!("window {window}, {:?}", claims(own)),
+    );
+    allow_on_your_screen(
+        "Field",
+        u64::MAX,
+        "Take Back puts the window on your screen, as the user asks",
     );
     control.call(
         "debugTakeBack",

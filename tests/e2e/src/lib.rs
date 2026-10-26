@@ -622,9 +622,14 @@ pub fn voided(count: isize) {
     FAILURES.fetch_sub(count, Ordering::SeqCst);
 }
 
-/// Stop here without failing.
+/// Stop here without failing, unless the test showed a window on the
+/// user's screen first.
 pub fn skip(reason: &str) -> ! {
     println!("skip: {reason}");
+    if !finish_sighting() {
+        finish_sign(Outcome::Failed);
+        std::process::exit(1);
+    }
     finish_sign(Outcome::Skipped(reason));
     std::process::exit(0);
 }
@@ -633,6 +638,7 @@ pub fn skip(reason: &str) -> ! {
 /// failure count. An error from the body counts as a failure. The sign
 /// turns green whatever the result, a panic too.
 pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
+    start_sighting();
     start_sign(&script_name());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(())) => {}
@@ -642,10 +648,12 @@ pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
         Err(panic) => {
             fail();
             note_failure("the script panicked");
+            finish_sighting();
             finish_sign(Outcome::Failed);
             std::panic::resume_unwind(panic);
         }
     }
+    finish_sighting();
     let n = failed();
     if n > 0 {
         println!("{n} failed");
@@ -656,6 +664,136 @@ pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
         finish_sign(Outcome::Passed);
         ExitCode::SUCCESS
     }
+}
+
+// MARK: Your screen
+
+/// tools/sighting.swift, watching the user's displays for the test's windows
+/// while `run` runs the script.
+static SIGHTING: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// When the watch began: sightings count their times from it.
+static SIGHTING_SINCE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// What a script lets show on the user's screen: an owner ("" for any),
+/// how long each of its windows may show there, in ms, and from when, in
+/// ms since the watch began.
+static ALLOWED: std::sync::Mutex<Vec<(String, u64, i64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Let `owner`'s windows ("" for any process of the test) that first show
+/// from now on stay on the user's screen for up to `ms` each, for the
+/// reason `why`, printed with the result. The default is none at all: give
+/// a budget only for what Agent Screen can't prevent, as a window macOS or
+/// the app shows before any call reaches it, or for a window the script
+/// puts there on purpose, as `alerts` does.
+pub fn allow_on_your_screen(owner: &str, ms: u64, why: &str) {
+    println!("allowed on your screen from here: {owner:?} for {ms} ms, {why}");
+    let from = SIGHTING_SINCE
+        .get()
+        .map_or(0, |since| since.elapsed().as_millis() as i64);
+    ALLOWED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((owner.to_string(), ms, from));
+}
+
+/// A window of the test's that showed on the user's screen.
+#[derive(Debug, Deserialize)]
+pub struct Sighting {
+    pub owner: String,
+    pub pid: i64,
+    pub path: String,
+    pub title: String,
+    pub layer: i64,
+    pub frame: [f64; 4],
+    /// When it first and last showed, in ms since the script started.
+    pub first: i64,
+    pub last: i64,
+    /// How long it showed, in all.
+    pub ms: i64,
+}
+
+/// Start watching the user's displays for windows of processes the test
+/// started. E2E_NO_SIGHTING=1 turns it off.
+fn start_sighting() {
+    if env_is("E2E_NO_SIGHTING", "1") {
+        return;
+    }
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let mark = root().to_string_lossy().into_owned() + "/";
+    let overlay = out().join("overlay").to_string_lossy().into_owned();
+    let app = debug_app().to_string_lossy().into_owned() + "/";
+    let started = tool("sighting").and_then(|watcher| {
+        Ok(command(watcher)
+            .args([
+                &std::process::id().to_string(),
+                &since.to_string(),
+                &mark,
+                &overlay,
+                &app,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?)
+    });
+    let _ = SIGHTING_SINCE.set(Instant::now());
+    match started {
+        Ok(child) => *SIGHTING.lock().unwrap_or_else(|e| e.into_inner()) = Some(child),
+        Err(e) => println!("not watching your screen: {e:#}"),
+    }
+}
+
+/// Stop watching and check that nothing the test started showed on the
+/// user's screen, past what the script allowed. False when something did.
+fn finish_sighting() -> bool {
+    let Some(mut child) = SIGHTING.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return true;
+    };
+    drop(child.stdin.take());
+    let Ok(output) = child.wait_with_output() else {
+        return true;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let _ = std::fs::write(
+        out().join(format!("sightings-{}.jsonl", script_name())),
+        text.as_bytes(),
+    );
+    let allowed = ALLOWED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let seen: Vec<Sighting> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let offenders: Vec<&Sighting> = seen
+        .iter()
+        .filter(|s| {
+            !allowed.iter().any(|(owner, ms, from)| {
+                (owner.is_empty() || *owner == s.owner) && s.first >= *from && s.ms as u64 <= *ms
+            })
+        })
+        .collect();
+    let lines: Vec<String> = offenders
+        .iter()
+        .map(|s| {
+            let [x, y, w, h] = s.frame;
+            format!(
+                "\n  {} (pid {}, layer {}) {:?} at {x},{y} {w}x{h}: {} ms, from {} to {} ms",
+                s.owner, s.pid, s.layer, s.title, s.ms, s.first, s.last
+            )
+        })
+        .collect();
+    check(
+        "nothing the test started showed on your screen",
+        offenders.is_empty(),
+        format!(
+            "{} window(s), {} allowed{}",
+            offenders.len(),
+            seen.len() - offenders.len(),
+            lines.concat()
+        ),
+    )
 }
 
 /// A capture of a screen region in global points, written under target/e2e,

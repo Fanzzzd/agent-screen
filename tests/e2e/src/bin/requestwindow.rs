@@ -14,8 +14,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, check, instance, json, kill_ours, our_binary, out, run, sh_lenient,
-    sleep_ms, start_test_app, stop_test_app,
+    Control, McpClient, allow_on_your_screen, check, instance, json, kill_ours, our_binary, out,
+    run, sh_lenient, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -55,6 +55,11 @@ fn test() -> Result<()> {
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
     // Started outside Agent Screen, as by a script.
+    allow_on_your_screen(
+        "Field",
+        u64::MAX,
+        "Field stands in for a window of yours, open on your screen",
+    );
     sh_lenient(
         "/usr/bin/open",
         &["-g", "-n", out().join("Field.app").to_str().unwrap()],

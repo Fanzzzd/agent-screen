@@ -13,8 +13,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    McpClient, check, field_app, instance, json, pid_of, run, sh_lenient, sleep_ms, start_test_app,
-    stop_test_app, windows_of,
+    McpClient, allow_on_your_screen, check, field_app, instance, json, pid_of, run, sh_lenient,
+    sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -85,6 +85,11 @@ fn test(field: &str) -> Result<()> {
     // Once, 5 s after launch, when the launch's watch has ended.
     let window = launch(&client, id, field)?;
     sleep_ms(5000);
+    allow_on_your_screen(
+        "Field",
+        u64::MAX,
+        "Field moves its window to your screen itself from here, as UTM did (#47)",
+    );
     signal("-USR1");
     sleep_ms(1000);
     check(
