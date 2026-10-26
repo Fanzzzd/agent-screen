@@ -68,6 +68,11 @@ fn test() -> Result<()> {
         .and_then(|p| p.trim().parse().ok())
         .context("Spotlight isn't running")?;
     control.call("debugUserKey", json!({ "pid": spotlight }))?;
+    allow_on_your_screen(
+        "Field",
+        150,
+        "an app the user opens shows its window where macOS puts it, and AppKit's open animation holds the window there until it ends, 47 to 72 ms after Agent Screen moved it",
+    );
     sh_lenient(
         "/usr/bin/open",
         &["-g", "-n", out().join("Field.app").to_str().unwrap()],
