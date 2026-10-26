@@ -4,7 +4,9 @@
 //! renderer alive (#18, #20); a drag from just outside the window's right
 //! edge resizes it from the first move on (#15); and the screenshot after
 //! each move shows the window at its new width (#16). An accessory app whose
-//! window opens right on the display is listed too (#17).
+//! window opens right on the display is listed too (#17). A window larger
+//! than the display stays on it, and so does one its app grows past the
+//! display or moves to the main screen after it shows (#19).
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
@@ -117,7 +119,51 @@ fn test(electron: &std::path::Path) -> Result<()> {
     quit_harness();
     opened_there(&control, &id, electron)?;
     quit_harness();
-    big(&control, &id, electron)
+    big(&control, &id, electron)?;
+    for later in ["1700x1100", "main"] {
+        quit_harness();
+        moved_later(&control, &id, electron, later)?;
+    }
+    Ok(())
+}
+
+/// A window the app resizes past the display, or moves to the main screen,
+/// 1.5 s after it shows, as an app restoring its saved bounds does (#19):
+/// it is on the display 4 s after launch.
+fn moved_later(
+    control: &Control,
+    id: &Value,
+    electron: &std::path::Path,
+    later: &str,
+) -> Result<()> {
+    let launched = control.call(
+        "launchApp",
+        json!({
+            "displayId": id,
+            "app": electron.to_str(),
+            "arguments": [fixture("electron").to_str()],
+            "environment": { "HARNESS_LATER": later },
+        }),
+    );
+    let first = launched
+        .as_ref()
+        .ok()
+        .and_then(|l| l["window"]["windowId"].as_i64());
+    sleep_ms(4000);
+    let now = harness(control, id)?;
+    let frame = |w: &Value| format!("{}x{} at {},{}", w["width"], w["height"], w["x"], w["y"]);
+    check(
+        &format!(
+            "a window its app makes {later} after it shows is on the display 4 s after launch"
+        ),
+        first.is_some() && now.as_ref().and_then(|w| w["windowId"].as_i64()) == first,
+        format!(
+            "launched {:?}, now {:?}",
+            launched.as_ref().ok().map(|l| frame(&l["window"])),
+            now.as_ref().map(frame)
+        ),
+    );
+    Ok(())
 }
 
 /// An accessory app whose window opens right on the display, as one whose
