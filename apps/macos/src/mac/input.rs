@@ -99,6 +99,53 @@ pub fn flags(m: Modifiers) -> CGEventFlags {
     flags
 }
 
+fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < until {
+        if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(
+            Duration::from_millis(10).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    !stopped.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod popup_wait_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    #[test]
+    fn takeover_interrupts_the_typeahead_wait() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        assert!(!wait_typeahead(&stopped));
+        trigger.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+}
+
+/// Check the explicit window, not whichever window this display last typed
+/// into. PID-posted keys in a foreground app otherwise reach its key window.
+fn popup_keys_allowed(target: WindowTarget) -> bool {
+    let Some(front) = front() else {
+        return false;
+    };
+    agent_screen_model::typing::keys_reach_target(
+        front == target.pid,
+        front != target.pid || super::ax::focused_window_id(target.pid) == Some(target.window_id),
+    )
+}
+
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 
 /// How much of an agent's drag or text went out.
@@ -466,7 +513,9 @@ impl Forwarder {
             // AppKit and Chromium retain a type-ahead search across calls.
             // A second title sent during that interval appends to the first.
             // Wait without opening a menu, then recheck placement before keys.
-            thread::sleep(Duration::from_millis(1200));
+            if !wait_typeahead(&stopped) {
+                return false;
+            }
             if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                 return false;
             }
@@ -474,6 +523,9 @@ impl Forwarder {
                 .iter()
                 .any(|h| h.host == target && within.contains(h.bounds.mid()))
             {
+                return false;
+            }
+            if !popup_keys_allowed(target) {
                 return false;
             }
             w.focus_waking(target, false);
@@ -485,7 +537,8 @@ impl Forwarder {
                 return false;
             }
             for ch in title.chars() {
-                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) || !popup_keys_allowed(target)
+                {
                     return false;
                 }
                 let mut units = [0u16; 2];

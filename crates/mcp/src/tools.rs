@@ -383,6 +383,7 @@ pub fn definitions() -> Vec<Value> {
                 "For a popupbutton, including an HTML select, set_value takes the exact full item title: it focuses the closed",
                 "control, types the title and verifies the value without opening a menu. A combobox takes AXValue and",
                 "AXConfirm. Type-ahead may select a different item before verification fails; inspect the returned value.",
+                "Titles starting with whitespace or containing control or function-key characters are rejected.",
                 "Electron apps take a pressed menu item for its keyboard shortcut, which some ignore while a text field has",
                 "focus: click outside the field first.",
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",

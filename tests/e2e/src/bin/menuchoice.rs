@@ -1,7 +1,7 @@
 //! Closed pop-up type-ahead and combo confirmation. The fixture counts menu opens.
 //! AGENTSCREEN_INSTANCE=e2e cargo e2e menuchoice
 use agent_screen_tests::{
-    Control, check, finish_test_app, json, listening, menu_choice_app, run, skip, sleep_ms,
+    Control, check, finish_test_app, json, listening, menu_choice_app, out, run, skip, sleep_ms,
     start_test_app, stop_started_pid,
 };
 use anyhow::{Context, Result};
@@ -25,9 +25,11 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         json!({"sessionKey":"menuchoice","title":"Menu choice", "width":1100,"height":700}),
     )?;
     let id = display["displayId"].as_u64().context("display id")?;
+    let marker = out().join("menuchoice-setter");
+    let _ = std::fs::remove_file(&marker);
     let mut pid = None;
     let result = (|| -> Result<()> {
-        let launch = c.call("launchApp", json!({"sessionKey":"menuchoice","displayId":id,"app":fixture,"environment":{"MENU_DISPLAY_ID":id.to_string()}}))?;
+        let launch = c.call("launchApp", json!({"sessionKey":"menuchoice","displayId":id,"app":fixture,"environment":{"MENU_DISPLAY_ID":id.to_string(),"MENU_SETTER_MARKER":marker}}))?;
         pid = launch["pid"].as_u64();
         let window = launch["window"]["windowId"]
             .as_u64()
@@ -118,6 +120,62 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 .err()
                 .is_some_and(|e| e.to_string().contains("without control characters")),
             format!("{rejected:?}"),
+        );
+        for value in [" Banana", "\u{f701}Banana"] {
+            let rejected = call(
+                "elementAction",
+                json!({"element":index,"action":"set_value","value":value}),
+            );
+            check(
+                "activation and navigation titles are rejected before typing",
+                rejected
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| format!("{e:#}").contains("without control characters")),
+                format!("{rejected:?}"),
+            );
+        }
+        let pending = c.begin("elementAction", json!({"sessionKey":"menuchoice","displayId":id,"windowId":window,"element":combo_index,"action":"set_value","value":"Slow"}))?;
+        for _ in 0..100 {
+            if marker.exists() {
+                break;
+            }
+            sleep_ms(10);
+        }
+        anyhow::ensure!(marker.exists(), "slow setter marker missing");
+        call("debugTakeover", json!({"active":true}))?;
+        let during_takeover = pending.wait();
+        let title = call("listWindows", json!({}))?["windows"][0]["title"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        call("debugTakeover", json!({"active":false}))?;
+        check(
+            "Takeover during AXValue prevents the subsequent combo confirmation",
+            during_takeover
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("takeover"))
+                && title.contains("color=Blue"),
+            format!("{during_takeover:?}; {title}"),
+        );
+        let pending = c.begin("elementAction", json!({"sessionKey":"menuchoice","displayId":id,"windowId":window,"element":index,"action":"set_value","value":"Cherry"}))?;
+        sleep_ms(100);
+        call("debugTakeover", json!({"active":true}))?;
+        let interrupted = pending.wait();
+        call("debugTakeover", json!({"active":false}))?;
+        let title = call("listWindows", json!({}))?["windows"][0]["title"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        check(
+            "Takeover interrupts popup type-ahead before another choice is sent",
+            interrupted
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("takeover"))
+                && title.contains("fruit=Banana"),
+            format!("{interrupted:?}; {title}"),
         );
         Ok(())
     })();

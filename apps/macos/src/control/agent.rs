@@ -918,6 +918,11 @@ async fn handle_one(
                     .await;
             }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
+            if forwarder_stopped(&core, id, cx) {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id} during the element action; no further focus was sent. Call wait_for_control to wait until they hand it back."
+                )));
+            }
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
@@ -2140,9 +2145,9 @@ async fn act(
                 })
                 .await
                 .ok_or_else(|| ControlError::failed("the pop-up button has no window"))?;
-                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                if !agent_screen_model::typing::popup_title_is_safe(&value) {
                     return Err(ControlError::invalid(
-                        "a pop-up choice needs the full, nonempty item title without control characters",
+                        "a pop-up choice needs the full, nonempty item title without control characters, function-key characters or leading whitespace",
                     ));
                 }
                 let forwarder = core.update(cx, |c, _| c.forwarder(id));
@@ -2155,8 +2160,13 @@ async fn act(
                     )
                     .await
                 {
+                    if forwarder.agent_stopped() {
+                        return Err(ControlError::takeover(format!(
+                            "the user took over display {id} during type-ahead; no further keys were sent. Call wait_for_control to wait until they hand it back."
+                        )));
+                    }
                     return Err(ControlError::failed(
-                        "type-ahead on the closed pop-up button could not finish; its value may have changed. No menu was opened",
+                        "type-ahead could not safely reach the closed pop-up button; its value may have changed. No menu was opened. If the user is working in another window of this app, wait until they leave it before retrying",
                     ));
                 }
                 let mut shown = String::new();
@@ -2201,7 +2211,21 @@ async fn act(
                 ));
             }
             if combo {
-                if !perform("AXConfirm", cx).await {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                let may_confirm = forwarder.clone();
+                let confirmed = off_main(
+                    cx,
+                    Box::new(move |e| {
+                        !may_confirm.agent_stopped() && ax::try_action(e, "AXConfirm")
+                    }),
+                )
+                .await;
+                if forwarder.agent_stopped() {
+                    return Err(ControlError::takeover(format!(
+                        "the user took over display {id} while the combo value was being set; no further confirmation was sent. Call wait_for_control to wait until they hand it back."
+                    )));
+                }
+                if !confirmed {
                     return Err(ControlError::failed(
                         "the combo box accepted its value but refused AXConfirm; check the window before retrying",
                     ));
