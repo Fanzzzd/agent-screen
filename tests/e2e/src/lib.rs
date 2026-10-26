@@ -257,19 +257,31 @@ pub fn tool(name: &str) -> Result<PathBuf> {
 
 /// tools/field.swift as an app, so launch_app takes it.
 pub fn field_app() -> Result<PathBuf> {
-    let app = out().join("Field.app");
+    swift_app("field", "Field")
+}
+
+/// tools/login.swift as an app: a native login window.
+pub fn login_app() -> Result<PathBuf> {
+    swift_app("login", "Login")
+}
+
+/// A tool as an app named `name`, so launch_app takes it.
+fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
+    let app = out().join(format!("{name}.app"));
     let macos = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos)?;
-    std::fs::copy(tool("field")?, macos.join("Field"))?;
+    std::fs::copy(tool(tool_name)?, macos.join(name))?;
     std::fs::write(
         app.join("Contents/Info.plist"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.field</string>
-<key>CFBundleExecutable</key><string>Field</string>
-<key>CFBundleName</key><string>Field</string>
+<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.{tool_name}</string>
+<key>CFBundleExecutable</key><string>{name}</string>
+<key>CFBundleName</key><string>{name}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-</dict></plist>"#,
+</dict></plist>"#
+        ),
     )?;
     sh(
         "/usr/bin/codesign",
