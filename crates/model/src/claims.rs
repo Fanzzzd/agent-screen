@@ -67,9 +67,139 @@ impl Claims {
     }
 }
 
+/// Desired claims survive a failed publication. Only `published` describes
+/// the last successful file, so even an idempotent later operation retries
+/// while desired state and that snapshot differ.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Publication {
+    desired: Claims,
+    published: Claims,
+}
+
+impl Publication {
+    pub const fn new() -> Self {
+        Self {
+            desired: Claims::new(),
+            published: Claims::new(),
+        }
+    }
+
+    pub fn desired(&self) -> &Claims {
+        &self.desired
+    }
+    pub fn published(&self) -> &Claims {
+        &self.published
+    }
+
+    pub fn publish<E>(
+        &mut self,
+        force: bool,
+        apply: impl FnOnce(&mut Claims) -> bool,
+        persist: impl FnOnce(&Claims) -> Result<(), E>,
+    ) -> Result<(), E> {
+        apply(&mut self.desired);
+        if force || self.desired.to_json() != self.published.to_json() {
+            persist(&self.desired)?;
+            self.published = self.desired.clone();
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_display_registration_recovers_on_a_later_claim() {
+        let mut state = Publication::new();
+        assert!(
+            state
+                .publish(false, |c| c.add_display(3), |_| Err("disk full"))
+                .is_err()
+        );
+        assert!(state.desired().has_display(3));
+        assert!(!state.published().has_display(3));
+        let mut file = String::new();
+        state
+            .publish(
+                false,
+                |c| c.claim(7, 3),
+                |c| {
+                    file = c.to_json();
+                    Ok::<_, &str>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(state.desired().display_of(7), Some(3));
+        assert_eq!(file, r#"{"version":1,"displays":[3],"windows":[7]}"#);
+        assert_eq!(state.desired(), state.published());
+    }
+
+    #[test]
+    fn an_identical_claim_retries_after_failure_and_keeps_the_published_snapshot() {
+        let mut state = Publication::new();
+        state
+            .publish(false, |c| c.add_display(3), |_| Ok::<_, &str>(()))
+            .unwrap();
+        let file = state.published().to_json();
+        assert!(
+            state
+                .publish(false, |c| c.claim(7, 3), |_| Err("disk full"))
+                .is_err()
+        );
+        assert_eq!(state.desired().display_of(7), Some(3));
+        assert_eq!(state.published().to_json(), file);
+        let mut writes = 0;
+        state
+            .publish(
+                false,
+                |c| c.claim(7, 3),
+                |_| {
+                    writes += 1;
+                    Ok::<_, &str>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(writes, 1);
+        assert_eq!(state.published().display_of(7), Some(3));
+    }
+
+    #[test]
+    fn failed_removal_and_forced_flush_can_retry_without_losing_desired_state() {
+        let mut state = Publication::new();
+        state
+            .publish(false, |c| c.add_display(3), |_| Ok::<_, &str>(()))
+            .unwrap();
+        assert!(
+            state
+                .publish(false, |c| c.remove_display(3), |_| Err("unlink failed"))
+                .is_err()
+        );
+        assert!(!state.desired().has_display(3));
+        assert!(state.published().has_display(3));
+        state
+            .publish(false, |c| c.remove_display(3), |_| Ok::<_, &str>(()))
+            .unwrap();
+        assert!(!state.published().has_display(3));
+        assert!(
+            state
+                .publish(true, |_| false, |_| Err("forced retry failed"))
+                .is_err()
+        );
+        let mut writes = 0;
+        state
+            .publish(
+                true,
+                |_| false,
+                |_| {
+                    writes += 1;
+                    Ok::<_, &str>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(writes, 1);
+    }
 
     #[test]
     fn claims_only_windows_going_onto_its_displays() {
