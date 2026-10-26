@@ -12,8 +12,8 @@
 use std::process::{Child, ExitCode};
 
 use agent_screen_tests::{
-    Control, check, command, instance, json, out, pid_of, probe, run, sign_step, sleep_ms,
-    start_test_app, stop_test_app, tool,
+    Control, allow_on_your_screen, check, command, instance, json, out, pid_of, probe, run,
+    sign_step, sleep_ms, start_test_app, stop_test_app, tool,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -24,6 +24,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     run(|| {
+        allow_on_your_screen(
+            "FollowUpUI",
+            u64::MAX,
+            "the stand-in alert shows there by design: Agent Screen sends system alerts to your screen",
+        );
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test();
         stop_test_app();

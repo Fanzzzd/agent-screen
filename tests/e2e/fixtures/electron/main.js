@@ -40,7 +40,13 @@ if (menuLog) {
   });
 }
 
+// HARNESS_IDLE=1 opens no window, as another tool's copy of the bundle
+// that runs in the background does (#35).
+const idle = process.env.HARNESS_IDLE === "1";
+if (idle) app.whenReady().then(() => app.dock && app.dock.hide());
+
 app.whenReady().then(() => {
+  if (idle) return;
   // HARNESS_SIZE ("1700x1100") makes a window larger than the display (#19).
   const [width, height] = (process.env.HARNESS_SIZE || "640x480").split("x").map(Number);
   // HARNESS_DISPLAY (a CG display id) opens the window on that display, as

@@ -12,8 +12,9 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, check, cut, debug_pid, instance, json, kill_ours, listening, our_binary,
-    out, pid_of, run, running, sh_lenient, sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, McpClient, allow_on_your_screen, check, cut, debug_pid, instance, json, kill_ours,
+    listening, our_binary, out, pid_of, run, running, sh_lenient, sleep_ms, start_test_app,
+    stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -49,6 +50,11 @@ fn test(field: &std::path::Path) -> Result<()> {
     // The abort: no chance to end anything.
     let log = log_text();
     debug_pid().context("no test app")?;
+    allow_on_your_screen(
+        "Field",
+        u64::MAX,
+        "the app aborts on purpose, and macOS moves the windows of its ended displays to your screen",
+    );
     Control::connect()?.send("debugPanic", json!({}))?;
     // The process lingers while macOS writes its crash report; its
     // socket closes at once.
