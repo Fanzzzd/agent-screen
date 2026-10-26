@@ -128,3 +128,115 @@ The press takes nothing from the user. Only its fidelity is wrong. For apps that
 - Whether drags without a channel should fail (recommended), or ask to borrow the user's mouse for about a second.
 - Whether clicks on dropdown and menu buttons, and right-clicks, should be refused in favour of item lists. A few agents' flows change.
 - Whether context menus stay unsupported. No conflict-free path exists for them.
+
+## Round 2: keeping menus without a conflict
+
+The user wants agents to keep menu clicks, since many apps work only through them. This round tests input routing while an agent's menu is open, and the alternatives.
+
+### Setup
+
+The setup runs on one Agent Display with two scratch apps, both started by `launchApp`:
+
+- **PopApp** is the agent's app, with an `NSPopUpButton`.
+- **UserApp** stands in for the user's front app, with a text field. The probe activates it, so it holds key focus as the user's app would.
+
+Then a probe (`/tmp/cfi/router/router.m`) does this:
+
+1. It opens PopApp's menu through AX.
+2. It types as "the user": HID-level events marked with `kCGEventSourceUserData`, so a tap can tell them apart from real hardware events.
+3. Optionally, it switches to Apple Pinyin or turns on secure input in UserApp.
+
+The router is an active event tap at the head of `kCGHIDEventTap`, and it acts only on the marked events. Both apps log key and mouse events with wall-clock times.
+
+### Results
+
+| Mode | The agent's menu | UserApp |
+| --- | --- | --- |
+| No router | took every key: type-ahead moved the highlight | nothing |
+| **Route**: drop the key at the HID tap, post it to UserApp's pid | saw nothing and stayed open | `abc` in order, 0.3 to 47 ms after each key |
+| Route, Apple Pinyin on | saw nothing | `nihao␣` composed `你好` |
+| **Hold**: drop and queue the keys, `AXCancel` the menu, replay them at the HID tap once key focus has left the agent | closed; saw nothing | `abc` in order; key focus came back 18 to 57 ms after the first key |
+| Hold, Apple Pinyin on | closed; saw nothing | `你好` |
+| Route, with secure input on in UserApp | took every key | nothing: the tap never saw the keys |
+| User's move, scroll and click on UserApp's window, no router | the scroll went to **PopApp**; the click went nowhere visible, and the menu stayed open | nothing |
+
+How long a menu holds key focus inside a single call, measured three times on an AppKit pop-up: AX press, find the menu window, press the item, until key focus comes back.
+
+- Key focus is taken 2 to 8 ms after the AX press.
+- The menu window appears 115 to 128 ms later.
+- The item press returns, and key focus comes back, after 458 to 472 ms in total.
+
+PR #91 measured 66 to 122 ms for Chrome.
+
+What the results mean:
+
+- **Pid-posted keys go through the input method when the app they reach is the active app.** ADR 0008's limit applies to background apps. So routing doesn't break Pinyin for the user's front app.
+- **The mouse is captured too.** While an agent's menu tracks, the user's scroll over their own window went to the agent's app, and their click didn't reach their window. These were synthetic HID events, and real hardware wasn't tested. If real input behaves the same, the conflict covers the user's mouse as well as their keyboard.
+- **Secure input blinds every tap.** With a password field focused anywhere, the user's keys go to the agent's menu, and no router can stop that.
+
+### Route compared with hold
+
+**Route** keeps the agent's menu open, but it is the wrong tool for the session:
+
+- Keys dropped at the HID tap never reach WindowServer. So system shortcuts (Command-Tab, Spotlight, screenshots) stop working, and the session's modifier state goes stale.
+- A launcher panel that takes keys without coming to the front gets nothing.
+- Routing clicks to a pid skips WindowServer, so window activation, title-bar drags, resizing and Mission Control are lost.
+
+**Hold** keeps the user's input on its normal path, delayed. The input method, shortcuts, modifiers, clicks and drags all work after the replay. The cost falls on the agent, whose menu closes. The delay is how long the menu stays open, or the time to cancel it.
+
+### The inverse: stop the menu taking focus
+
+Not possible from outside the app:
+
+- AppKit steals key focus whenever its process doesn't already hold it, popped up from a non-activating accessory app included.
+- A third process can't steal for another app's connection (`err 1003`).
+- Stealing for itself closes the menu (round 1).
+
+`SLSSetMenuBarOwner` concerns the menu bar, not pop-up tracking. The only way in is code injection, which hardened apps refuse.
+
+### Other routes
+
+- **Snapshot the menu, close it, pick later in one call.** This works for any menu an agent's click opens: pop-ups, pull-downs and context menus.
+  - Agent Screen sees the app's layer-101 window appear after the agent's click. It reads the items through AX, cancels the menu, and returns the items, the way it returns a menu bar title's items.
+  - When the agent picks an item, Agent Screen repeats the opening click and presses the item through AX in the same call. Key focus is held under 0.5 s (above), with no agent think time inside it.
+  - It breaks for menus whose items change between opens, and for menus that open on hover.
+- **A macOS VM** (Virtualization.framework):
+  - Isolation is complete, so there is zero conflict.
+  - It runs on Apple silicon only, and the macOS licence allows two extra copies.
+  - Each VM needs a 15 to 18 GB restore image, 30 GB or more of disk and 4 to 8 GB of memory, and takes about a minute to boot.
+  - The guest has none of the user's apps, logins or keychain. The user signs in again inside it.
+  - It would be a separate product mode, many weeks of work. Not run.
+- **A second GUI session** needs another macOS user (round 1). Same verdict as the VM, minus the image.
+
+### Recommendation for menus
+
+Combine the snapshot route with hold:
+
+1. **Agents never leave a menu open between calls.** A click that opens a menu returns its items, and the menu closes. A pick reopens the menu and presses the item inside one call.
+2. **For that window (under 0.5 s), an HID tap holds the user's events.** It holds keys, flags, button downs and ups, and scrolls, but not pointer moves, so the cursor keeps moving. The tap releases the events as soon as key focus leaves the agent's app. If the window runs past a deadline (say 300 ms), it cancels the menu first.
+3. **Before it opens any menu, Agent Screen refuses while secure input is on** (`IsSecureEventInputEnabled`, as the ime path already checks).
+
+The user then sees at most a few hundred milliseconds of lag once in a while. None of their input reaches the agent, and none is lost.
+
+Remaining risks:
+
+- Real hardware events weren't tested, only marked HID events.
+- Secure input that turns on mid-window can't be held.
+- A crash between drop and replay loses the held events. A watchdog that replays them, and macOS's own tap timeout, bound that.
+
+Effort: medium, about the size of PR #89's tap plus the menu snapshot.
+
+### Incidents during this round
+
+Fixed in the scratch apps:
+
+- In two runs, UserApp was started with `open`, not `launchApp`. AeroSpace moved its window to the user's screen and tiled it there for about 10 s. One of those runs posted a marked move, scroll and click at that window's spot, (150, 1001) on the main screen, and put the cursor back afterwards.
+- In one hold run, Agent Screen gave the front back to the user's Dia (#67), and the router replayed `abc` there.
+
+The scratch apps now:
+
+- quit within 20 ms if their window leaves the Agent Display;
+- quit after 60 s;
+- start through `launchApp`.
+
+The router now types and replays only while key focus is one of the scratch apps.
