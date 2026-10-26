@@ -445,6 +445,74 @@ impl Forwarder {
         .unwrap_or(Sent::Nowhere)
     }
 
+    /// Type-select a closed pop-up. Unlike general text entry, this targets
+    /// exactly one window and never wakes it with a click or sends arrows.
+    pub async fn choose_closed_popup(
+        &self,
+        target: WindowTarget,
+        element: super::ax::Sendable,
+        title: String,
+        within: Rect,
+    ) -> bool {
+        let stopped = self.stopped.clone();
+        self.run(move |w| {
+            if !hits()
+                .iter()
+                .any(|h| h.host == target && within.contains(h.bounds.mid()))
+            {
+                return false;
+            }
+            let _held = AppKeys::hold(target.pid);
+            // AppKit and Chromium retain a type-ahead search across calls.
+            // A second title sent during that interval appends to the first.
+            // Wait without opening a menu, then recheck placement before keys.
+            thread::sleep(Duration::from_millis(1200));
+            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
+            if !hits()
+                .iter()
+                .any(|h| h.host == target && within.contains(h.bounds.mid()))
+            {
+                return false;
+            }
+            w.focus_waking(target, false);
+            if !super::ax::set_attribute(
+                element.get(),
+                "AXFocused",
+                objc2_core_foundation::CFBoolean::new(true),
+            ) {
+                return false;
+            }
+            for ch in title.chars() {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    return false;
+                }
+                let mut units = [0u16; 2];
+                let units = ch.encode_utf16(&mut units);
+                for down in [true, false] {
+                    let Some(event) = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)
+                    else {
+                        return false;
+                    };
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    unsafe {
+                        CGEvent::keyboard_set_unicode_string(
+                            Some(&event),
+                            units.len() as _,
+                            units.as_ptr(),
+                        );
+                    }
+                    deliver(&event, target.pid, true);
+                }
+                thread::sleep(Duration::from_millis(4));
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Focus the display's window of app `pid` for a menu command: the one
     /// last clicked if it is that app's, else its topmost window there.
     /// False when the app has no window there: then a menu command would

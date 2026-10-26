@@ -17,6 +17,8 @@ Use either toolset on windows that are on your display:
 - A large window's tree costs thousands of tokens. Pass `max_depth` to `get_window_state` to see the top levels first, and `result: "changes"` to `act_on_element` to get back only the elements that changed.
 - **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
 
+- For a pop-up button or HTML select, use `act_on_element set_value` with the full item title. It chooses by typing into the closed control and verifies the value. A failed verification names the current value, which may have changed. Combo boxes set and confirm the value in one call.
+
 ## While you work
 
 - After each window's purpose is clear, call `set_disposition`: `keep` for results the user should see, `close` for scratch windows. Your session can end without warning.

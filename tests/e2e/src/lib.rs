@@ -265,6 +265,11 @@ pub fn login_app() -> Result<PathBuf> {
     swift_app("login", "Login")
 }
 
+/// A native menu-choice fixture.
+pub fn menu_choice_app() -> Result<PathBuf> {
+    swift_app("menuchoice", "MenuChoice")
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));
@@ -530,6 +535,24 @@ pub fn pid_of(pattern: &str) -> Option<u32> {
 
 pub fn running(name: &str) -> bool {
     !sh_lenient("/usr/bin/pgrep", &["-x", name]).is_empty()
+}
+
+/// Stop a pid returned by this script's launchApp, and wait before ending
+/// its display so macOS cannot move a still-closing window onto the user.
+/// The caller must never pass a process it did not start.
+pub fn stop_started_pid(pid: u32) -> Result<()> {
+    let pid = pid.to_string();
+    let _ = Command::new("/bin/kill").args(["-TERM", &pid]).status();
+    for _ in 0..50 {
+        if sh_lenient("/bin/ps", &["-p", &pid, "-o", "args="])
+            .trim()
+            .is_empty()
+        {
+            return Ok(());
+        }
+        sleep_ms(100);
+    }
+    bail!("the test process {pid} did not exit; its display must stay connected")
 }
 
 /// `name` is running with windows: a headless browser that a script on this

@@ -2127,6 +2127,57 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
+            let item = ax::Sendable(element.clone());
+            let role = off(cx, move || ax::string_attribute(item.get(), "AXRole")).await;
+            if role.as_deref() == Some("AXPopUpButton") {
+                let item = ax::Sendable(element.clone());
+                let target = off(cx, move || {
+                    let window = ax::element_attribute(item.get(), "AXWindow")?;
+                    Some(WindowTarget {
+                        pid: ax::pid_of(item.get())?,
+                        window_id: ax::window_id(&window)?,
+                    })
+                })
+                .await
+                .ok_or_else(|| ControlError::failed("the pop-up button has no window"))?;
+                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                    return Err(ControlError::invalid(
+                        "a pop-up choice needs the full, nonempty item title without control characters",
+                    ));
+                }
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                if !forwarder
+                    .choose_closed_popup(
+                        target,
+                        ax::Sendable(element.clone()),
+                        value.clone(),
+                        bounds,
+                    )
+                    .await
+                {
+                    return Err(ControlError::failed(
+                        "type-ahead on the closed pop-up button could not finish; its value may have changed. No menu was opened",
+                    ));
+                }
+                let mut shown = String::new();
+                for _ in 0..100 {
+                    let item = ax::Sendable(element.clone());
+                    shown = off(cx, move || {
+                        ax::string_attribute(item.get(), "AXValue").unwrap_or_default()
+                    })
+                    .await;
+                    if shown.trim().eq_ignore_ascii_case(value.trim()) {
+                        return Ok(());
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(25))
+                        .await;
+                }
+                return Err(ControlError::failed(format!(
+                    "typed {value:?} into the closed pop-up button, but it shows {shown:?}; type-ahead may have selected a different item. Use the full item title. No menu was opened"
+                )));
+            }
+            let combo = role.as_deref() == Some("AXComboBox");
             // Some elements, static text among them, report success and
             // keep their value: read it back.
             let set = off_main(
@@ -2146,6 +2197,11 @@ async fn act(
             if !set {
                 return Err(ControlError::failed(
                     "the element's value cannot be set; focus it and type instead",
+                ));
+            }
+            if combo && !perform("AXConfirm", cx).await {
+                return Err(ControlError::failed(
+                    "the combo box accepted its value but refused AXConfirm; check the window before retrying",
                 ));
             }
         }

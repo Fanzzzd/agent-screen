@@ -434,6 +434,12 @@ pub fn press_menu_item_at(pid: i32, at: (f64, f64)) -> bool {
         && unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
 }
 
+/// The process that owns an accessibility element.
+pub fn pid_of(element: &AXUIElement) -> Option<i32> {
+    let mut pid = 0;
+    (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
+}
+
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window: near its top, with no control,
 /// text or web content there. Toolkits name that background differently,
