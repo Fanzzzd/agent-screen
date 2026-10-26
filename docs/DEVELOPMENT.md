@@ -67,6 +67,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits,
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks the user for a window the agent didn't launch; Keep refuses, Hand Over places it as a Handover (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
+AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # a window that left the display is a stray place_window takes again, and place_window fails when its app keeps moving it back (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit; with AeroSpace running, the display gets none of your workspaces or windows (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front

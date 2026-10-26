@@ -5,6 +5,8 @@ import AppKit
 final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
   var window: NSWindow!
   let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+  let usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+  let usr2 = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
 
   func applicationDidFinishLaunching(_ note: Notification) {
     window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
@@ -16,6 +18,23 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
        min.count == 2, let w = Double(min[0]), let h = Double(min[1]) {
       window.minSize = NSSize(width: w, height: h)
     }
+    // As an app that resizes its window past a small display does (#19,
+    // #47): SIGUSR1 puts the window on the main screen once, now; after
+    // SIGUSR2, each time it lands on another screen, 300 ms later.
+    let main = { NSPoint(x: NSScreen.screens[0].frame.minX + 200, y: NSScreen.screens[0].frame.minY + 200) }
+    var back = false
+    NotificationCenter.default.addObserver(
+      forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
+    ) { [unowned self] _ in
+      guard back, self.window.screen != NSScreen.screens[0] else { return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.window.setFrameOrigin(main()) }
+    }
+    signal(SIGUSR1, SIG_IGN)
+    signal(SIGUSR2, SIG_IGN)
+    usr1.setEventHandler { [unowned self] in self.window.setFrameOrigin(main()) }
+    usr2.setEventHandler { back = true }
+    usr1.resume()
+    usr2.resume()
     text.font = .systemFont(ofSize: 24)
     text.delegate = self
     window.contentView = text

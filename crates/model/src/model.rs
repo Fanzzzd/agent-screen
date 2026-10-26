@@ -332,11 +332,13 @@ impl<H> Display<H> {
     }
 
     /// Whether a window off every display is the agent's to place: one of
-    /// an app it started, that no display records, that the user didn't
-    /// make while using the app, and never took back.
-    pub fn is_stray(&self, target: WindowTarget, recorded_anywhere: bool) -> bool {
-        self.started.contains(&target.pid)
-            && !recorded_anywhere
+    /// an app it started, or one this display recorded that has left it,
+    /// as when its app put it back on the user's screen (#19, #47). Not
+    /// one another display records, the user made while using the app, or
+    /// took back.
+    pub fn is_stray(&self, target: WindowTarget, recorded_elsewhere: bool) -> bool {
+        (self.started.contains(&target.pid) || self.records.contains_key(&target.window_id))
+            && !recorded_elsewhere
             && !self.returned.contains(&target.window_id)
             && !self.user_made.contains(&target.window_id)
     }
@@ -959,7 +961,10 @@ mod tests {
         };
         display.started.insert(5);
         assert!(display.is_stray(ours, false));
-        assert!(!display.is_stray(ours, true), "on a display's records");
+        assert!(
+            !display.is_stray(ours, true),
+            "on another display's records"
+        );
         assert!(
             !display.is_stray(users, false),
             "an app the agent didn't start"
@@ -977,6 +982,22 @@ mod tests {
         // Handed over again, it's the agent's.
         display.claim(ours, Origin::HandedOver, None);
         assert!(!display.returned.contains(&1));
+    }
+
+    #[test]
+    fn a_recorded_window_that_left_the_display_is_a_stray() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        // Handed over: an app the agent didn't start.
+        let given = WindowTarget {
+            pid: 6,
+            window_id: 2,
+        };
+        display.claim(given, Origin::HandedOver, None);
+        assert!(display.is_stray(given, false));
+        assert!(!display.is_stray(given, true));
+        display.give_back(given);
+        assert!(!display.is_stray(given, false), "taken back");
     }
 
     #[test]

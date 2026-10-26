@@ -248,12 +248,12 @@ pub fn definitions() -> Vec<Value> {
                 "screenshot pixels per display point, the same number create_display returns. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
                 "set_disposition verdict or null. With strays: true it lists instead the windows of apps launch_app started",
-                "for you that opened off your display, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
+                "for you that opened off your display, and windows that were on your display and left it, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
-                    "strays": { "type": "boolean", "description": "List your apps' windows that opened off the display." }
+                    "strays": { "type": "boolean", "description": "List your apps' windows that opened off the display, and your windows that left it." }
                 }),
                 &["display_id"],
             ),
