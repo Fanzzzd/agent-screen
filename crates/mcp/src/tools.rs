@@ -270,6 +270,7 @@ pub fn definitions() -> Vec<Value> {
                 "theirs. Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
                 "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
+                "One the app opens later by itself moves there too while none of its other windows is on the user's screen.",
                 "x, y, width and height set the window's frame, in screenshot pixels from the display's top-left corner,",
                 "as list_windows reports bounds; each one left out keeps the window's own. Pass a window_id already on the",
                 "display to resize or move it there. The frame stays inside the display, and apps hold to their own minimum",

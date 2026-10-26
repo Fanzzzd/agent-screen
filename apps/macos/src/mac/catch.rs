@@ -221,12 +221,24 @@ enum Owner {
     Unknown,
 }
 
-fn owner(agent: bool, user: bool) -> Owner {
+/// `only_here`: none of the app's other windows is off the display, so
+/// the user isn't using it: a window it makes on its own while nobody
+/// acted, as a VM viewer does when its guest reboots, is the agent's (#46).
+fn owner(agent: bool, user: bool, only_here: bool) -> Owner {
     match (agent, user) {
         (true, false) => Owner::Agent,
         (false, true) => Owner::User,
+        (false, false) if only_here => Owner::Agent,
         _ => Owner::Unknown,
     }
+}
+
+/// Whether every window of `pid` but `new` is on the display.
+fn only_on(pid: i32, bounds: Rect, new: Option<u32>) -> bool {
+    windows::all()
+        .iter()
+        .filter(|w| w.target.pid == pid && w.layer == 0 && Some(w.target.window_id) != new)
+        .all(|w| bounds.contains(w.bounds.mid()))
 }
 
 /// CFRunLoopSourceContext, version 0.
@@ -552,7 +564,9 @@ extern "C" fn created(
         let agent = acted_recently(target.display, target.pid)
             && !others_acted_recently(target.display, target.pid);
         let user = user_acted_recently(target.pid);
-        match owner(agent, user) {
+        let only_here =
+            !agent && !user && only_on(target.pid, target.bounds, ax::window_id(window));
+        match owner(agent, user, only_here) {
             Owner::Agent => {}
             Owner::User => {
                 log::info!(
@@ -658,17 +672,23 @@ mod tests {
 
     #[test]
     fn a_window_is_the_agents_only_when_the_user_did_nothing() {
-        assert_eq!(owner(true, false), Owner::Agent);
-        assert_eq!(owner(false, true), Owner::User);
+        assert_eq!(owner(true, false, false), Owner::Agent);
+        assert_eq!(owner(false, true, false), Owner::User);
+        assert_eq!(owner(false, true, true), Owner::User);
         assert_eq!(
-            owner(true, true),
+            owner(true, true, true),
             Owner::Unknown,
             "the user's own click may have made it"
         );
         assert_eq!(
-            owner(false, false),
+            owner(false, false, false),
             Owner::Unknown,
-            "a slow window stays placeable"
+            "a slow window, with others of the app on the user's screen, stays placeable"
+        );
+        assert_eq!(
+            owner(false, false, true),
+            Owner::Agent,
+            "an app on the display alone makes a window by itself"
         );
     }
 

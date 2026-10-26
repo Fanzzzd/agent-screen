@@ -41,6 +41,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     window.makeFirstResponder(text)
     window.makeKeyAndOrderFront(nil)
     Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.save() }
+    // FIELD_REOPEN=ms: close the window after ms and open a new one, titled
+    // "Field again", as a VM viewer does when its guest reboots (#46).
+    if let ms = Double(ProcessInfo.processInfo.environment["FIELD_REOPEN"] ?? "") {
+      DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000) { [unowned self] in
+        let old: NSWindow = self.window
+        old.isReleasedWhenClosed = false
+        old.contentView = nil
+        old.close()
+        self.window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
+                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        self.window.title = "Field again"
+        self.window.contentView = self.text
+        self.window.makeKeyAndOrderFront(nil)
+      }
+    }
   }
 
   func save() {
