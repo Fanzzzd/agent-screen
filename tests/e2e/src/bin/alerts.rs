@@ -12,7 +12,7 @@
 use std::process::{Child, ExitCode};
 
 use agent_screen_tests::{
-    Control, HandsOff, check, command, instance, json, out, pid_of, probe, run, sleep_ms,
+    Control, check, command, instance, json, out, pid_of, probe, run, sign_step, sleep_ms,
     start_test_app, stop_test_app, tool,
 };
 use anyhow::{Context, Result};
@@ -25,9 +25,7 @@ fn main() -> ExitCode {
     }
     run(|| {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
-        let mut sign = HandsOff::start("system alerts show on your screen")?;
-        let result = test(&mut sign);
-        drop(sign);
+        let result = test();
         stop_test_app();
         result
     })
@@ -64,7 +62,7 @@ fn follow_up() -> Result<Child> {
     Ok(command(&named).arg("20").spawn()?)
 }
 
-fn test(sign: &mut HandsOff) -> Result<()> {
+fn test() -> Result<()> {
     let control = Control::connect()?;
     let display = control.call(
         "createDisplay",
@@ -76,7 +74,7 @@ fn test(sign: &mut HandsOff) -> Result<()> {
         .filter_map(|v| v.parse().ok())
         .collect();
 
-    sign.step("a UserNotificationCenter alert");
+    sign_step("a UserNotificationCenter alert");
     let mut alert = command(tool("alert")?).arg("20").spawn()?;
     let result = (|| {
         let mut pid = None;
@@ -97,7 +95,7 @@ fn test(sign: &mut HandsOff) -> Result<()> {
     let _ = alert.kill();
     result?;
 
-    sign.step("an Apple Account sign-in alert from FollowUpUI");
+    sign_step("an Apple Account sign-in alert from FollowUpUI");
     let mut follow = follow_up()?;
     let pid = follow.id();
     for _ in 0..30 {
