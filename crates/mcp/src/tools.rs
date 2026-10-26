@@ -1203,7 +1203,15 @@ fn launch_output(reply: &Value) -> Value {
         .cloned()
         .unwrap_or(Value::Bool(false));
     match reply.get("window") {
-        Some(window) if !window.is_null() => json!({ "window": window, "wasRunning": was_running }),
+        Some(window) if !window.is_null() => match reply.get("reason").and_then(|r| r.as_str()) {
+            Some("already_running") => json!({
+                "window": window,
+                "wasRunning": true,
+                "reason": "already_running",
+                "note": "The app was already running on your display and allows only one instance: the new one quit and passed its arguments and environment to the running one. This is the running instance's window; nothing new started.",
+            }),
+            _ => json!({ "window": window, "wasRunning": was_running }),
+        },
         _ => {
             let reason = reply
                 .get("reason")
@@ -1322,6 +1330,15 @@ mod tests {
         let placed = launch_output(&json!({ "window": { "windowId": 7 }, "wasRunning": true }));
         assert_eq!(placed["wasRunning"], true);
         assert_eq!(placed["window"]["windowId"], 7);
+        assert!(placed.get("note").is_none());
+        let single = launch_output(&json!({
+            "window": { "windowId": 8 },
+            "wasRunning": true,
+            "reason": "already_running",
+        }));
+        assert_eq!(single["window"]["windowId"], 8);
+        assert_eq!(single["reason"], "already_running");
+        assert!(single["note"].as_str().unwrap().contains("one instance"));
         for reason in [
             "still_starting",
             "existing_window",
