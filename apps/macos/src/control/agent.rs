@@ -40,7 +40,35 @@ pub async fn handle(
     .flatten()
     .map(|id| id as DisplayId);
     let timeline = recorded(method, &p);
+    let shown = Args(&p).int("displayId").map(|id| id as DisplayId);
+    if matches!(method, "click" | "mouseDown" | "key" | "type")
+        && let Some(id) = shown
+    {
+        menu_still_open(id, method, cx).await?;
+    }
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    // The menus the agent's next input may be meant for.
+    if let Some(id) = shown
+        && matches!(
+            method,
+            "screenshot"
+                | "windowState"
+                | "listWindows"
+                | "click"
+                | "mouseDown"
+                | "mouseUp"
+                | "move"
+                | "drag"
+                | "scroll"
+                | "key"
+                | "holdKey"
+                | "type"
+                | "elementAction"
+        )
+    {
+        let menus = off(cx, move || windows::menus_on(id)).await;
+        MENUS.with(|m| m.borrow_mut().insert(id, menus));
+    }
     if let Some((id, event)) = timeline
         && reply.is_ok()
     {
@@ -52,6 +80,40 @@ pub async fn handle(
         forwarder.keys_done().await;
     }
     reply
+}
+
+thread_local! {
+    /// The pop-up menus open on each display after the agent's last call.
+    static MENUS: std::cell::RefCell<std::collections::HashMap<DisplayId, Vec<u32>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Refuse a click or key meant for a menu that closed since the agent's
+/// last call. macOS ends an app's open menu at the user's next click or
+/// key anywhere, their own screen included, and the agent's input would
+/// land on the page under it instead (#48, #79).
+async fn menu_still_open(
+    id: DisplayId,
+    method: &str,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let seen = MENUS.with(|m| m.borrow().get(&id).cloned().unwrap_or_default());
+    if seen.is_empty() {
+        return Ok(());
+    }
+    let open = off(cx, move || windows::menus_on(id)).await;
+    if seen.iter().any(|w| open.contains(w)) {
+        return Ok(());
+    }
+    MENUS.with(|m| m.borrow_mut().insert(id, open));
+    let action = match method {
+        "type" => "typing",
+        "key" => "key",
+        _ => "click",
+    };
+    Err(ControlError::failed(format!(
+        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. Take a screenshot, open the menu again and choose its item in the next call, with act_on_element press on the item or a click on it; or focus the closed control and type the option's text"
+    )))
 }
 
 /// The timeline line an agent action adds to a recording of its display:

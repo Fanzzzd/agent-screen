@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dropdowns</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; margin: 30px; }
+  select, .combo { font: inherit; padding: 8px; width: 240px; }
+  .combo { border: 1px solid #888; border-radius: 6px; cursor: pointer; }
+  [role=listbox] { list-style: none; margin: 2px 0; padding: 4px 0; width: 256px; border: 1px solid #888; border-radius: 6px; background: #fff; position: absolute; }
+  [role=listbox][hidden] { display: none; }
+  [role=option] { padding: 4px 12px; cursor: pointer; }
+  [role=option][aria-selected=true], [role=option].active { background: #def; }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre; margin-top: 220px; }
+</style>
+</head>
+<body>
+<p><label for="native">Native month</label><br>
+<select id="native" aria-label="Native month">
+  <option>January</option><option>February</option><option>March</option><option>April</option><option>May</option>
+</select></p>
+<p><span id="combolabel">Custom month</span><br>
+<div class="combo" id="combo" role="combobox" tabindex="0" aria-labelledby="combolabel" aria-expanded="false" aria-controls="list">Month</div>
+<ul role="listbox" id="list" hidden aria-label="Months">
+  <li role="option" id="o1">January</li><li role="option" id="o2">February</li><li role="option" id="o3">March</li><li role="option" id="o4">April</li><li role="option" id="o5">May</li>
+</ul></p>
+<p role="radiogroup" aria-label="Address">
+  <label><input type="radio" name="addr" value="suggested"> Suggested address</label>
+  <label><input type="radio" name="addr" value="own"> Create your own</label>
+</p>
+<div id="log"></div>
+<script>
+  const log = (s) => { const l = document.getElementById('log'); l.textContent = (s + '\n' + l.textContent).slice(0, 3000); };
+  const state = () => {
+    const r = document.querySelector('input[name=addr]:checked');
+    document.title = `native=${native.value} custom=${combo.textContent} radio=${r ? r.value : '-'}`;
+  };
+  const native = document.getElementById('native');
+  const combo = document.getElementById('combo');
+  const list = document.getElementById('list');
+  native.addEventListener('change', () => { log('native change ' + native.value); state(); });
+  native.addEventListener('input', () => log('native input ' + native.value));
+  let active = -1;
+  const options = [...list.querySelectorAll('[role=option]')];
+  const open = (on) => { list.hidden = !on; combo.setAttribute('aria-expanded', on); log('custom open=' + on); };
+  const pick = (o, how) => { combo.textContent = o.textContent; options.forEach(x => x.setAttribute('aria-selected', x === o)); log('custom pick ' + o.textContent + ' by ' + how); open(false); state(); combo.focus(); };
+  const highlight = (i) => { active = (i + options.length) % options.length; options.forEach((x, j) => x.classList.toggle('active', j === active)); combo.setAttribute('aria-activedescendant', options[active].id); };
+  combo.addEventListener('click', () => open(list.hidden));
+  combo.addEventListener('keydown', (e) => {
+    log(`custom keydown ${e.key} code=${e.code} trusted=${e.isTrusted}`);
+    if (e.key === 'ArrowDown') { if (list.hidden) open(true); highlight(active + 1); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { highlight(active - 1); e.preventDefault(); }
+    else if ((e.key === 'Enter' || e.key === ' ') && !list.hidden && active >= 0) { pick(options[active], e.key); e.preventDefault(); }
+  });
+  options.forEach(o => {
+    // As Material lists do: the press must start and end on the option.
+    let downOn = null;
+    o.addEventListener('pointerdown', (e) => { downOn = o; log(`option pointerdown ${o.textContent} type=${e.pointerType} buttons=${e.buttons} trusted=${e.isTrusted}`); });
+    o.addEventListener('mousedown', (e) => { log(`option mousedown ${o.textContent} detail=${e.detail}`); e.preventDefault(); });
+    o.addEventListener('pointerup', (e) => log(`option pointerup ${o.textContent} downOn=${downOn && downOn.textContent}`));
+    o.addEventListener('click', (e) => { log(`option click ${o.textContent} detail=${e.detail} x=${e.clientX},${e.clientY}`); pick(o, 'click'); });
+  });
+  document.addEventListener('pointerdown', (e) => log(`doc pointerdown ${e.target.id || e.target.tagName} at ${e.clientX},${e.clientY}`), true);
+  document.querySelectorAll('input[name=addr]').forEach(r => r.addEventListener('change', () => { log('radio ' + r.value); state(); }));
+  window.addEventListener('blur', () => log('window blur'));
+  window.addEventListener('focus', () => log('window focus'));
+  document.addEventListener('focusout', (e) => log('focusout ' + (e.target.id || e.target.tagName)));
+  state();
+</script>
+</body>
+</html>

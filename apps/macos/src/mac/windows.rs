@@ -186,6 +186,18 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
         .collect()
 }
 
+/// Menus open on a display: an app's pop-up menus, as a web page's select
+/// shows, at the pop-up menu level (kCGPopUpMenuWindowLevel).
+pub fn menus_on(display: DisplayId) -> Vec<u32> {
+    let own = std::process::id() as i32;
+    let area = cg::display_bounds(display);
+    cg::on_screen_windows()
+        .into_iter()
+        .filter(|w| w.layer == 101 && w.target.pid != own && w.bounds.intersects(&area))
+        .map(|w| w.target.window_id)
+        .collect()
+}
+
 /// Move document windows that grew past the display's edges, such as
 /// Calculator switching to Scientific, back inside. True when one moved.
 pub fn keep_inside(display: DisplayId) -> bool {

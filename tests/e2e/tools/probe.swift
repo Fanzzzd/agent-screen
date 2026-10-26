@@ -8,6 +8,7 @@
 //   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
 //   probe span PNG Y R G B    first and last x in row Y within 40 of the color, or nothing
 //   probe strip PNG ROWS      pixels in the top ROWS rows farther than 40 from the top-left one
+//   probe cancelmenu X Y      close the menu at global point X Y through accessibility
 //   probe front               the front app's name
 //   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
 //   probe main                the main display's size in points, "w h"
@@ -140,6 +141,27 @@ case "strip":
 case "main":
   let b = CGDisplayBounds(CGMainDisplayID())
   print(Int(b.width), Int(b.height))
+case "cancelmenu":
+  // Close the menu at global point X Y through accessibility, as the user's
+  // click elsewhere closes it, without touching the pointer or keyboard.
+  var hit: AXUIElement?
+  AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(args[2])!, Float(args[3])!, &hit)
+  func role(_ e: AXUIElement) -> String {
+    var v: CFTypeRef?
+    AXUIElementCopyAttributeValue(e, "AXRole" as CFString, &v)
+    return (v as? String) ?? ""
+  }
+  var menu = hit
+  while let m = menu, role(m) != "AXMenu" {
+    var parent: CFTypeRef?
+    AXUIElementCopyAttributeValue(m, "AXParent" as CFString, &parent)
+    menu = parent.map { $0 as! AXUIElement }
+  }
+  if let m = menu {
+    print(AXUIElementPerformAction(m, "AXCancel" as CFString) == .success ? "closed" : "refused")
+  } else {
+    print("no menu")
+  }
 case "front":
   print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
 case "fronts":
