@@ -710,6 +710,24 @@ fn list_menu(
     }
 }
 
+/// The text field that has focus in `target`, when the app says what it
+/// holds: a password field doesn't.
+pub fn focused_text(target: WindowTarget) -> Option<Element> {
+    element_attribute(&application(target.pid), "AXFocusedUIElement")
+        .filter(|e| {
+            matches!(
+                string_attribute(e, "AXRole").as_deref(),
+                Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField")
+            )
+        })
+        .filter(|e| string_attribute(e, "AXValue").is_some())
+        .filter(|e| {
+            element_attribute(e, "AXWindow")
+                .and_then(|w| window_id(&w))
+                .is_some_and(|id| id == target.window_id)
+        })
+}
+
 /// Select all the text in `pid`'s focused text element. Select All in a
 /// menu acts on the key window's first responder, which an app in the
 /// background doesn't have, so neither its menu item nor a posted cmd+a
