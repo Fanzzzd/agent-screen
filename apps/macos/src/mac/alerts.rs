@@ -6,19 +6,6 @@
 use super::cg;
 use crate::model::{DisplayId, Rect};
 
-/// Processes that draw the system's alerts and prompts.
-const OWNERS: &[&str] = &[
-    "SecurityAgent",
-    "UserNotificationCenter",
-    "CoreServicesUIAgent",
-    "coreautha",
-    "AuthenticationServicesAgent",
-    "AKAuthorizationRemoteViewService",
-    "akd",
-    "universalAccessAuthWarn",
-    "Captive Network Assistant",
-];
-
 /// Move system alerts off `displays` to the middle of the main display.
 /// The ones moved, as "owner window" for the log. Blocking.
 pub fn send_home(displays: &[DisplayId]) -> Vec<String> {
@@ -29,7 +16,7 @@ pub fn send_home(displays: &[DisplayId]) -> Vec<String> {
     let home = cg::display_bounds(cg::main_display());
     let mut moved = Vec::new();
     for window in cg::on_screen_windows() {
-        if !OWNERS.contains(&window.owner_name.as_str()) {
+        if !agent_screen_model::alerts::is_system_alert(&window.owner_name) {
             continue;
         }
         let (x, y) = window.bounds.mid();

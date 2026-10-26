@@ -92,7 +92,7 @@ AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e settings  # the Settings window ope
 AGENTSCREEN_INSTANCE=e2e cargo e2e helpcard    # the Help Card: shows, Later, comes back, steps aside for the Viewer and Takeover; the Viewer lists the request's steps
 AGENTSCREEN_INSTANCE=e2e cargo e2e recording   # record_display: the video's length and size, the timeline's actions and offsets, ending the display ends it
 AGENTSCREEN_INSTANCE=e2e cargo e2e asksave     # closing a display whose app asks whether to save: the question stays on the display, which goes once the window has closed, and stays after Cancel
-AGENTSCREEN_INSTANCE=e2e cargo e2e alerts      # a system alert put on an agent display moves to the main display; it shows on your screen for a moment
+AGENTSCREEN_INSTANCE=e2e cargo e2e alerts      # a system alert put on an agent display moves to the main display: a UserNotificationCenter alert, then a stand-in for FollowUpUI's Apple Account sign-in alert; counts down on your screen first, where each shows for a moment
 AGENTSCREEN_INSTANCE=e2e cargo e2e ime         # type and key through Apple's pinyin give 你好; your front app, input source and workspace stay; waits for you to be idle 3 s
 AGENTSCREEN_INSTANCE=e2e cargo e2e timing      # how long create_display and launch_app take
 AGENTSCREEN_INSTANCE=e2e cargo e2e pointer     # records the Agent Pointer in the Viewer through moves and quick clicks, frames at 60 fps in target/e2e/pointer; needs ffmpeg
