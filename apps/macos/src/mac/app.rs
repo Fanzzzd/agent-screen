@@ -88,6 +88,69 @@ fn process_path(pid: i32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
+/// The pid of a process's parent.
+pub fn parent_pid(pid: i32) -> Option<i32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (read == size).then_some(info.pbi_ppid as i32)
+}
+
+/// A process's arguments, its own path first.
+pub fn arguments(pid: i32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    let probe = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if probe != 0 || size < 4 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size];
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    // argc, the executable's path, padding, then argc strings.
+    let argc = i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?) as usize;
+    let rest = &buffer[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    let rest = &rest[path_end..];
+    let start = rest.iter().position(|&b| b != 0)?;
+    Some(
+        rest[start..]
+            .split(|&b| b == 0)
+            .take(argc)
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect(),
+    )
+}
+
 /// Where the app with this pid is installed.
 pub fn bundle_of(pid: i32) -> Option<PathBuf> {
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;

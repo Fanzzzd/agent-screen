@@ -5,6 +5,7 @@
 pub mod budget;
 pub mod claims;
 pub mod keychord;
+pub mod launch;
 pub mod model;
 pub mod numbers;
 pub mod tree;
