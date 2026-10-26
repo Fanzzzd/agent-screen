@@ -66,11 +66,11 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent 
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e reopened   # a window an app the agent started opens by itself, long after the agent's last action, while its other windows are on the display: it opens there too; 40 s (needs Field.app from `ime`)
-AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks the user for a window the agent didn't launch; Keep refuses, Hand Over places it as a Handover (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks for a window started by a separate stage session; Keep leaves it on the stage, Hand Over places it as a Handover; 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere   # an app brought to the front with its windows only on an Agent Display gets a notification naming it, once a minute; one with a window on your screen, or one the agent started that brings itself forward, gets none (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol # request_control during a Takeover, from an agent with a long name: the card shows with both buttons inside it (debugCard), Keep Control tells the waiting agent and leaves the Takeover, Let … Continue hands the display back, a withdrawal leaves the Takeover, and without a Takeover it answers at once
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
-AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # a window that left the display is a stray place_window takes again, and place_window fails when its app keeps moving it back (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # Field moves to a user stand-in stage; place_window takes it as a stray, or fails when it keeps moving back; 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit; with AeroSpace running, the display gets none of your workspaces or windows (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front
@@ -153,9 +153,53 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 
 The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
-Debug builds accept `debugTakeover`, `debugShow`, `debugIcon`, `debugViewerInput`, `debugMoveWindow` (any window, by `pid` and `windowId`, to a global `x`, `y`), `debugPanic` (a panic on the main thread after it replies, which aborts the app), `debugFront` (macOS last named the app with `pid` the front app), `debugUserKey` (a key of the user's went to the app with `pid`, as the global key monitor reports one), `debugActivated` (the user brought the app with `pid` to the front; returns the displays the notification of where its windows are named, as `reminded`), `debugAnswerWindow` (answers the display's Window Request with `give` true or false once one is open, as the card's buttons do) and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, icon-hover and card-hover (the pointer entering, `displayId` 1, or leaving, 0), menu, hide, select, viewer, collapse, create, dismiss, dismiss-confirm (the Dismiss sheet's confirm, with the plan as it stands), answer, primary, give, take-back, help, card-open, card-later, card-take-over, card-give, card-keep (a Window Request's Hand Over and Keep), focus, quit, settings (or setup), setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex), wallpaper (the Open panel behind Settings' Wallpaper row) or stage, and a `displayId` where one applies. `debugCard` returns the Help Card's `width` and each card button's `[x, y, w, h]` from the card's corner at its last paint (`buttons`, by id). `debugIcon` returns which picture the menu bar icon shows (`state`: idle, working, asking or setup). `debugViewer` returns the Viewer's frame and its display image in screen points, whether the Viewer is the key window, and whether its display's stream last showed another screen (`misrouted`). For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
-Debug builds accept `debugTakeover`, `debugShow`, `debugIcon`, `debugViewerInput`, `debugMoveWindow` (any window, by `pid` and `windowId`, to a global `x`, `y`), `debugPanic` (a panic on the main thread after it replies, which aborts the app), `debugFront` (macOS last named the app with `pid` the front app), `debugUserKey` (a key of the user's went to the app with `pid`, as the global key monitor reports one), `debugAnswerWindow` (answers the display's Window Request with `give` true or false once one is open, as the card's buttons do) and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, icon-hover and card-hover (the pointer entering, `displayId` 1, or leaving, 0), menu, hide, select, viewer, collapse, create, dismiss, dismiss-confirm (the Dismiss sheet's confirm, with the plan as it stands), answer, primary, give, take-back, help, card-open, card-later, card-take-over, card-give, card-keep (a Window Request's Hand Over and Keep), card-continue, card-keep-control (a Control Request's Let It Continue and Keep Control), focus, quit, settings (or setup), setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex), wallpaper (the Open panel behind Settings' Wallpaper row) or stage, and a `displayId` where one applies. `debugCard` returns the Help Card's `width` and each card button's `[x, y, w, h]` from the card's corner at its last paint (`buttons`, by id). `debugIcon` returns which picture the menu bar icon shows (`state`: idle, working, asking or setup). `debugViewer` returns the Viewer's frame and its display image in screen points, whether the Viewer is the key window, and whether its display's stream last showed another screen (`misrouted`). For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
-Debug builds accept `debugTakeover`, `debugShow`, `debugIcon`, `debugViewerInput`, `debugMoveWindow` (any window, by `pid` and `windowId`, to a global `x`, `y`), `debugPanic` (a panic on the main thread after it replies, which aborts the app), `debugFront` (macOS last named the app with `pid` the front app), `debugUserKey` (a key of the user's went to the app with `pid`, as the global key monitor reports one), `debugAnswerWindow` (answers the display's Window Request with `give` true or false once one is open, as the card's buttons do) and `debugQuit` on the control socket, so scripts can drive the UI without a real click. `debugShow` takes a `surface`: peek, click, icon-hover and card-hover (the pointer entering, `displayId` 1, or leaving, 0), menu, hide, select, viewer, collapse, create, dismiss, dismiss-confirm (the Dismiss sheet's confirm, with the plan as it stands), answer, primary, give, take-back, help, card-open, card-later, card-take-over, card-give, card-keep (a Window Request's Hand Over and Keep), window-request (a Window Request for no real window, with `app` and `title`, so its card shows; card-keep ends it), focus, quit, settings (or setup), setup-close, assist-screen, assist-ax, assist-preview, assist-preview-unlisted, assist-hide, connect (runs Connect Claude Code and Codex), wallpaper (the Open panel behind Settings' Wallpaper row) or stage, and a `displayId` where one applies. `debugIcon` returns which picture the menu bar icon shows (`state`: idle, working, asking or setup). `debugViewer` returns the Viewer's frame and its display image in screen points, whether the Viewer is the key window, its header's Take Back button (`takeBack`, in points from the Viewer's corner), and whether its display's stream last showed another screen (`misrouted`). For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+### Debug control methods
+
+The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` enables them in release builds too, except for `userStage`. Scripts can drive the UI without a real click.
+
+| Method | Arguments and result |
+| --- | --- |
+| `debugTakeover` | `displayId` and `active` begin or end a Takeover. |
+| `debugShow` | `surface` selects an action from the list below. Supply `displayId` where the action needs one. |
+| `debugViewerInput` | Makes a click, key press or drag through the Viewer's own handler. See the input parameters above. |
+| `debugMoveWindow` | Moves the window named by `pid` and `windowId` to global `x`, `y`. |
+| `debugHandOver` | Hands `windowId` over to `displayId`, as from the Windows menu. |
+| `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Windows menu. |
+| `debugAnswerWindow` | Answers the display's Window Request with `give` true or false once it opens. Returns `answered`. |
+| `debugFront` | Records that macOS last named `pid` the front app. It does not activate the app. |
+| `debugUserKey` | Records a user key press to `pid`, as the global key monitor does. |
+| `debugActivated` | Simulates the user bringing `pid` to the front for the window-location reminder. Returns the displays it named as `reminded`. |
+| `debugAgentReady` | Returns the agent the setup window says loaded the tools, as `agent`. |
+| `debugCard` | Returns the Help Card's `width` and each button's `[x, y, w, h]` from the card's corner at its last paint. `buttons` maps button ids to bounds. |
+| `debugIcon` | Returns the menu bar icon's `state`: idle, working, asking or setup. |
+| `debugViewer` | Returns `frame` and `image` in screen points, `key` for whether the Viewer is the key window, `takeBack` for the header button's bounds in points from the Viewer's corner, and `misrouted` for whether its stream showed another screen. |
+| `debugPanic` | Panics on the main thread after replying. This aborts the test app. |
+| `debugQuit` | Quits the test app after replying. |
+
+`debugShow` accepts these surfaces:
+
+| Surfaces | Action |
+| --- | --- |
+| `peek`, `click`, `menu`, `hide` | Open Peek held, click the menu bar icon, open its menu, or hide Peek. |
+| `icon-hover`, `card-hover` | Simulate pointer entry with `displayId` 1, or exit with 0. |
+| `select`, `viewer`, `collapse`, `focus` | Select a display, open or close its Viewer, or take the keyboard. |
+| `create`, `dismiss`, `dismiss-confirm` | Create a display, open Dismissal, or confirm the Dismiss sheet's current plan. |
+| `primary`, `give`, `take-back`, `help` | Invoke the display's primary action, open its Give or Take Back menu, or open it for help. |
+| `answer` | Confirm the Viewer's Dismiss sheet with `displayId` nonzero, or cancel it with 0. |
+| `card-open`, `card-later`, `card-take-over` | Open the Help Card's display, put the card off, or take over its display. |
+| `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
+| `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
+| `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
+| `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |
+| `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
+| `assist-preview`, `assist-preview-unlisted`, `assist-hide` | Show the helper preview, preview an app absent from the permission list, or hide the helper. |
+| `connect`, `wallpaper`, `quit` | Run Connect Claude Code and Codex, open Settings' wallpaper picker, or quit. |
+| `stage` | Select the test display that stands in for the user's screen. `displayId` 0 clears the selection. |
+| `userStage` | Supply the selected stage's user-display role to window ownership rules. Only debug-assertion builds compile this surface. |
+
+`userStage` requires a selected, live stage owned by the same connection. Layout, capture and the independent sighting watcher keep the real hardware identity. Ending or releasing the stage, closing its connection, or changing the selected stage clears the role. Release builds contain no role override, even with `AGENTSCREEN_DEBUG=1`.
+
+For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
 ## Install a local build
 

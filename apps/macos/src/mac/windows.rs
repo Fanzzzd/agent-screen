@@ -220,13 +220,16 @@ pub fn find(window_id: u32) -> Option<Window> {
 /// Whether the window sits on a virtual display of Agent Screen's, any
 /// instance's, rather than on one of the user's screens. Blocking.
 pub fn on_virtual_display(window_id: u32) -> bool {
-    let Some(window) = find(window_id) else {
-        return false;
-    };
+    find(window_id).is_some_and(|w| display_role(&w) == crate::model::DisplayRole::Agent)
+}
+
+pub fn display_role(window: &Window) -> crate::model::DisplayRole {
     let mid = window.bounds.mid();
     cg::active_displays()
         .into_iter()
-        .any(|id| cg::is_agent_screen(id) && cg::display_bounds(id).contains(mid))
+        .find(|&id| cg::display_bounds(id).contains(mid))
+        .map(cg::window_display_role)
+        .unwrap_or(crate::model::DisplayRole::User)
 }
 
 /// Windows on any of `displays` that AeroSpace leaves there. With
@@ -239,6 +242,7 @@ pub fn on_virtual_display(window_id: u32) -> bool {
 pub fn kept_on(displays: &[DisplayId]) -> std::collections::HashSet<u32> {
     let mut on: std::collections::HashSet<u32> = displays
         .iter()
+        .filter(|&&d| cg::window_display_role(d) == crate::model::DisplayRole::Agent)
         .flat_map(|&d| on_display(d))
         .map(|w| w.target.window_id)
         .collect();

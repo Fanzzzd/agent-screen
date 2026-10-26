@@ -12,6 +12,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
                       styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.title = "Field"
+    // Tests name real Agent Displays. A missing or released stage must
+    // never fall back to the user's primary display.
+    let env = ProcessInfo.processInfo.environment
+    func testScreen(_ key: String) -> NSScreen? {
+      guard let value = env[key] else { return nil }
+      guard let id = UInt32(value), CGDisplayVendorNumber(id) == 0x5353,
+            let screen = NSScreen.screens.first(where: {
+              ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+            }) else { exit(2) }
+      return screen
+    }
+    if let screen = testScreen("FIELD_DISPLAY") {
+      window.setFrameOrigin(NSPoint(x: screen.frame.minX + 80, y: screen.frame.minY + 80))
+    }
+    _ = testScreen("FIELD_MOVE_DISPLAY")
+    if let ms = Double(env["FIELD_LIFETIME_MS"] ?? "") {
+      DispatchQueue.main.asyncAfter(deadline: .now() + min(ms, 60000) / 1000) { exit(0) }
+    }
     // FIELD_MIN_SIZE="width,height" in points, for a test of an app that
     // holds to a minimum size.
     if let min = ProcessInfo.processInfo.environment["FIELD_MIN_SIZE"]?.split(separator: ","),
@@ -21,12 +39,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     // As an app that resizes its window past a small display does (#19,
     // #47): SIGUSR1 puts the window on the main screen once, now; after
     // SIGUSR2, each time it lands on another screen, 300 ms later.
-    let main = { NSPoint(x: NSScreen.screens[0].frame.minX + 200, y: NSScreen.screens[0].frame.minY + 200) }
+    let destination = { testScreen("FIELD_MOVE_DISPLAY") ?? NSScreen.screens[0] }
+    let main = { NSPoint(x: destination().frame.minX + 80, y: destination().frame.minY + 80) }
     var back = false
     NotificationCenter.default.addObserver(
       forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
     ) { [unowned self] _ in
-      guard back, self.window.screen != NSScreen.screens[0] else { return }
+      guard back, self.window.screen != destination() else { return }
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.window.setFrameOrigin(main()) }
     }
     signal(SIGUSR1, SIG_IGN)

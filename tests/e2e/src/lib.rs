@@ -1123,6 +1123,17 @@ pub fn open_stage(control: &Control) -> Result<u64> {
     stage["displayId"].as_u64().context("no stage display id")
 }
 
+/// A stage that supplies the user-display role to the normal window
+/// ownership rules. The independent sighting watcher still sees hardware.
+pub fn open_user_stage(control: &Control) -> Result<u64> {
+    let id = open_stage(control)?;
+    control.call(
+        "debugShow",
+        json!({ "surface": "userStage", "displayId": id }),
+    )?;
+    Ok(id)
+}
+
 /// Start recording the stage display, the stand-in for the user's screen,
 /// through Agent Screen's own recording. `stage` is the connection that opened
 /// it. Unlike `screencapture -R`, it lays no dimming veil over the other

@@ -819,7 +819,7 @@ async fn handle_one(
                                     (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
                                     (None, None) => false,
                                 }
-                                && !windows::on_virtual_display(w.target.window_id)
+                                && windows::display_role(w).accepts_window_request()
                         })
                     }
                 })
@@ -1424,6 +1424,23 @@ async fn handle_one(
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            #[cfg(debug_assertions)]
+            if surface == "userStage" {
+                usable(&core, connection, id, "debugShow", cx)?;
+                let shell =
+                    crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+                let selected = shell
+                    .update(cx, |shell, _| shell.stage_display() == Some(id))
+                    .unwrap_or(false);
+                let held = core.read_with(cx, |c, _| c.displays.get(id).is_some());
+                if !held || !selected || !cg::is_agent_screen(id) || !cg::is_online(id) {
+                    return Err(ControlError::invalid(
+                        "userStage requires this session's selected live stage display",
+                    ));
+                }
+                cg::debug_user_stage(id, connection);
+                return reply(json!({}));
+            }
             // A Window Request for no real window, so scripts can look at
             // the card with any `app` and `title`. Keep answers it.
             if surface == "window-request" {
@@ -1974,14 +1991,20 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
         c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>()
     });
     // AeroSpace may answer late: off the main thread.
-    let off_displays: Vec<windows::Window> = off(cx, move || {
-        let placed = windows::kept_on(&displays);
-        windows::all()
-            .into_iter()
-            .filter(|w| w.layer == 0 && !placed.contains(&w.target.window_id))
-            .collect()
-    })
-    .await;
+    let off_displays: Vec<(windows::Window, bool, crate::model::DisplayRole)> =
+        off(cx, move || {
+            let placed = windows::kept_on(&displays);
+            windows::all()
+                .into_iter()
+                .filter(|w| w.layer == 0)
+                .map(|w| {
+                    let held = placed.contains(&w.target.window_id);
+                    let role = windows::display_role(&w);
+                    (w, held, role)
+                })
+                .collect()
+        })
+        .await;
     core.update(cx, |c, _| {
         sync_user_made(c, id);
         // This display's own records count as its strays once off it.
@@ -1989,7 +2012,9 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
             .displays
             .list
             .iter()
-            .filter(|d| d.id != id)
+            .filter(|d| {
+                d.id != id && cg::window_display_role(d.id) == crate::model::DisplayRole::Agent
+            })
             .flat_map(|d| d.records.keys().copied())
             .collect();
         let Some(display) = c.displays.get(id) else {
@@ -1997,7 +2022,15 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
         };
         off_displays
             .into_iter()
-            .filter(|w| display.is_stray(w.target, recorded.contains(&w.target.window_id)))
+            .filter(|(w, held, role)| {
+                display.is_stray_from(
+                    w.target,
+                    recorded.contains(&w.target.window_id),
+                    *role,
+                    *held,
+                )
+            })
+            .map(|(w, _, _)| w)
             .collect()
     })
 }

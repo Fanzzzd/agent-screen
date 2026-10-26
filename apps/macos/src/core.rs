@@ -550,6 +550,8 @@ impl Core {
     }
 
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        crate::mac::cg::clear_user_stage(id);
         if self.displays.end(id, reason) {
             // An ended display takes no more windows, from catches either.
             self.kept_catches.retain(|(display, _)| *display != id);
@@ -575,6 +577,8 @@ impl Core {
     }
 
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        crate::mac::cg::clear_user_stage_connection(connection);
         self.closed.insert(connection);
         self.sessions.remove(&connection);
         let ended = self.displays.connection_closed(connection);
@@ -593,6 +597,8 @@ impl Core {
     /// Drop a display. An empty one stays connected as a spare while there
     /// is room; otherwise macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        crate::mac::cg::clear_user_stage(id);
         stop_recording(id, cx);
         if let Some(display) = self.displays.remove(id) {
             let size = (display.width, display.height);

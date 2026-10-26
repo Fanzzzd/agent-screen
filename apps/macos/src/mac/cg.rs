@@ -94,6 +94,49 @@ pub fn is_agent_screen(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x5353 }
 }
 
+/// Ownership classification only. Layout, capture and the independent e2e
+/// watcher keep using the actual hardware identity.
+pub fn window_display_role(id: DisplayId) -> crate::model::DisplayRole {
+    #[cfg(debug_assertions)]
+    let simulated_user = DEBUG_USER_STAGE
+        .lock()
+        .unwrap()
+        .is_some_and(|(stage, _)| stage == id);
+    #[cfg(not(debug_assertions))]
+    let simulated_user = false;
+    unsafe {
+        crate::model::DisplayRole::from_hardware(
+            CGDisplayVendorNumber(id),
+            CGDisplayModelNumber(id),
+            simulated_user,
+        )
+    }
+}
+
+#[cfg(debug_assertions)]
+static DEBUG_USER_STAGE: std::sync::Mutex<Option<(DisplayId, u64)>> = std::sync::Mutex::new(None);
+
+#[cfg(debug_assertions)]
+pub fn debug_user_stage(id: DisplayId, connection: u64) {
+    *DEBUG_USER_STAGE.lock().unwrap() = Some((id, connection));
+}
+
+#[cfg(debug_assertions)]
+pub fn clear_user_stage(id: DisplayId) {
+    let mut stage = DEBUG_USER_STAGE.lock().unwrap();
+    if stage.is_some_and(|(held, _)| held == id) {
+        *stage = None;
+    }
+}
+
+#[cfg(debug_assertions)]
+pub fn clear_user_stage_connection(connection: u64) {
+    let mut stage = DEBUG_USER_STAGE.lock().unwrap();
+    if stage.is_some_and(|(_, owner)| owner == connection) {
+        *stage = None;
+    }
+}
+
 /// Whether a display is AeroSpace's closet, where it keeps the windows of
 /// invisible workspaces. Nobody looks at it: Agent Screen treats it as if it
 /// weren't there.
@@ -387,4 +430,22 @@ pub fn screen_locked() -> bool {
         .objectForKey(&NSString::from_str("CGSSessionScreenIsLocked"))
         .and_then(|v| v.downcast::<NSNumber>().ok())
         .is_some_and(|n| n.boolValue())
+}
+
+#[cfg(all(test, debug_assertions))]
+mod stage_tests {
+    use super::*;
+
+    #[test]
+    fn the_user_stage_role_ends_with_its_display_or_connection() {
+        debug_user_stage(7, 11);
+        clear_user_stage(8);
+        clear_user_stage_connection(12);
+        assert_eq!(*DEBUG_USER_STAGE.lock().unwrap(), Some((7, 11)));
+        clear_user_stage(7);
+        assert_eq!(*DEBUG_USER_STAGE.lock().unwrap(), None);
+        debug_user_stage(7, 11);
+        clear_user_stage_connection(11);
+        assert_eq!(*DEBUG_USER_STAGE.lock().unwrap(), None);
+    }
 }

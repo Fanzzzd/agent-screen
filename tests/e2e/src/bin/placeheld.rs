@@ -2,19 +2,19 @@
 //! and a window of the agent's that left its display is a stray it can
 //! place again (#47, #19). UTM put a VM window back on the user's screen
 //! after place_window had answered placed, and the agent could not place it
-//! again. Field here moves its window to the main screen, as an app
+//! again. Field here moves its window to a user stand-in stage, as an app
 //! resizing its window past a small display does: once when told, then
 //! each time 300 ms after it lands on another screen.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld
 //!
-//! Makes 1 display. Field's window shows on your screen for moments.
+//! Makes 2 displays. Field moves between the target and the user stand-in stage.
 
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    McpClient, allow_on_your_screen, check, field_app, instance, json, pid_of, run, sh_lenient,
-    sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, McpClient, check, field_app, instance, json, open_user_stage, pid_of, run, sh_lenient,
+    sign_step, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -26,24 +26,40 @@ fn main() -> ExitCode {
     run(|| {
         let field = field_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
-        // Field's window moves to the user's screen.
-        let result = test(field.to_str().unwrap());
-        quit_field();
+        // Field moves to the user stand-in stage.
+        let mut process = FieldProcess::default();
+        let result = test(field.to_str().unwrap(), &mut process);
+        drop(process);
         stop_test_app();
         result
     })
 }
 
-fn quit_field() {
-    let _ = sh_lenient("/usr/bin/pkill", &["-f", "Field.app/Contents/MacOS/Field"]);
-    sleep_ms(500);
+/// The one Field instance this run started. Never signal another checkout's
+/// Field, or one left by an earlier script in this checkout.
+#[derive(Default)]
+struct FieldProcess {
+    pid: Option<u32>,
 }
 
-/// Where Field's windows are, for the report.
-fn whereabouts() -> String {
-    pid_of("Field.app/Contents/MacOS/Field")
-        .map(|pid| format!("{:?}", windows_of(pid)))
-        .unwrap_or_default()
+impl FieldProcess {
+    fn signal(&self, name: &str) {
+        if let Some(pid) = self.pid {
+            sh_lenient("/bin/kill", &[name, &pid.to_string()]);
+        }
+    }
+
+    fn whereabouts(&self) -> String {
+        self.pid
+            .map(|pid| format!("{:?}", windows_of(pid)))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for FieldProcess {
+    fn drop(&mut self) {
+        self.signal("-TERM");
+    }
 }
 
 fn on_display(client: &McpClient, id: u64, window: u64) -> Result<bool> {
@@ -64,38 +80,46 @@ fn stray(client: &McpClient, id: u64, window: u64) -> Result<bool> {
         .any(|w| w.window_id == window))
 }
 
-fn signal(name: &str) {
-    let _ = sh_lenient(
-        "/usr/bin/pkill",
-        &[name, "-f", "Field.app/Contents/MacOS/Field"],
+fn launch(
+    client: &McpClient,
+    id: u64,
+    stage: u64,
+    field: &str,
+    process: &mut FieldProcess,
+) -> Result<u64> {
+    // AppKit ignores this argument. It identifies only this launch even if
+    // another script has Field running from the same checkout.
+    let marker = format!("--placeheld-{}", std::process::id());
+    let launched = client.call(
+        "launch_app",
+        json!({ "display_id": id, "app": field, "arguments": [marker], "environment": { "FIELD_DISPLAY": id.to_string(), "FIELD_MOVE_DISPLAY": stage.to_string(), "FIELD_LIFETIME_MS": "60000" } }),
     );
+    let executable = format!("{field}/Contents/MacOS/Field");
+    process.pid = pid_of(&format!("^{} {}( |$)", regex::escape(&executable), marker));
+    process
+        .pid
+        .context("the Field instance this script started")?;
+    Ok(launched?.window().context("Field's window")?.window_id)
 }
 
-fn launch(client: &McpClient, id: u64, field: &str) -> Result<u64> {
-    quit_field();
-    let launched = client.call("launch_app", json!({ "display_id": id, "app": field }))?;
-    Ok(launched.window().context("Field's window")?.window_id)
-}
-
-fn test(field: &str) -> Result<()> {
+fn test(field: &str, process: &mut FieldProcess) -> Result<()> {
+    sign_step("opening the user stand-in stage / 打开模拟用户显示器");
+    let stage = Control::connect()?;
+    let stage_id = open_user_stage(&stage)?;
     let client = McpClient::start(&[])?;
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
 
     // Once, 5 s after launch, when the launch's watch has ended.
-    let window = launch(&client, id, field)?;
+    let window = launch(&client, id, stage_id, field, process)?;
     sleep_ms(5000);
-    allow_on_your_screen(
-        "Field",
-        u64::MAX,
-        "Field moves its window to your screen itself from here, as UTM did (#47)",
-    );
-    signal("-USR1");
+    sign_step("moving Field to the stage / 将 Field 移到模拟用户显示器");
+    process.signal("-USR1");
     sleep_ms(1000);
     check(
         "the launched window that left the display is listed as a stray",
         !on_display(&client, id, window)? && stray(&client, id, window)?,
-        format!("window {window} at {}", whereabouts()),
+        format!("window {window} at {}", process.whereabouts()),
     );
     let placed = client.tool(
         "place_window",
@@ -108,9 +132,10 @@ fn test(field: &str) -> Result<()> {
         placed.text(),
     );
 
+    sign_step("Field refuses placement / Field 持续移回模拟用户显示器");
     // Each time, 300 ms after it lands: place_window can't keep it there.
-    signal("-USR1");
-    signal("-USR2");
+    process.signal("-USR1");
+    process.signal("-USR2");
     sleep_ms(1000);
     let placed = client.tool(
         "place_window",
@@ -124,7 +149,7 @@ fn test(field: &str) -> Result<()> {
         format!(
             "{} (on display: {there}) at {}",
             placed.text(),
-            whereabouts()
+            process.whereabouts()
         ),
     );
     check(
@@ -132,7 +157,11 @@ fn test(field: &str) -> Result<()> {
         stray(&client, id, window)?,
         format!("window {window}"),
     );
+    process.signal("-TERM");
+    process.pid = None;
+    sleep_ms(300);
     client.call("end_display", json!({ "display_id": id }))?;
+    stage.call("endDisplay", json!({ "displayId": stage_id }))?;
     client.close();
     Ok(())
 }
