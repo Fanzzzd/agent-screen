@@ -10,6 +10,39 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// Menus and alerts the user has open. AppKit runs a loop of its own while
+/// one tracks, so the watcher's block waits until it closes. That is the
+/// user reading a menu, not a stall, and it goes unlogged.
+static MODALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How many menus and alerts have opened, so one that opened and closed
+/// within a wait is noticed too.
+static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Held while a menu or alert tracks on the main thread.
+pub struct Modal(());
+
+impl Modal {
+    pub fn open() -> Modal {
+        use std::sync::atomic::Ordering::SeqCst;
+        OPENED.fetch_add(1, SeqCst);
+        MODALS.fetch_add(1, SeqCst);
+        Modal(())
+    }
+}
+
+impl Drop for Modal {
+    fn drop(&mut self) {
+        MODALS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Whether a wait spanned a menu or alert: one was open when it began or
+/// ended, or one opened in between.
+fn modal_during(opened_before: u64, open_before: bool) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    open_before || MODALS.load(SeqCst) != 0 || OPENED.load(SeqCst) != opened_before
+}
+
 const EVERY: Duration = Duration::from_millis(100);
 const NOTE: Duration = Duration::from_millis(150);
 /// The main thread is taken as stuck from here, and sampled.
@@ -29,6 +62,8 @@ pub fn watch() {
             loop {
                 std::thread::sleep(EVERY);
                 let (answered, answer) = mpsc::channel::<()>();
+                let opened = OPENED.load(std::sync::atomic::Ordering::SeqCst);
+                let open = MODALS.load(std::sync::atomic::Ordering::SeqCst) != 0;
                 let posted = Instant::now();
                 dispatch2::DispatchQueue::main().exec_async(move || {
                     let _ = answered.send(());
@@ -45,7 +80,7 @@ pub fn watch() {
                     }
                 }
                 let waited = posted.elapsed();
-                if waited >= NOTE {
+                if waited >= NOTE && !modal_during(opened, open) {
                     let (summary, full) = profile(&samples);
                     crate::lifecycle::line(&format!(
                         "main thread busy {} ms, {} displays online, in {summary}",
@@ -262,5 +297,29 @@ fn keep(waited: Duration, report: &str) {
     old.sort();
     while old.len() > SAMPLES_KEPT {
         let _ = std::fs::remove_file(old.remove(0));
+    }
+}
+
+#[cfg(test)]
+mod modal_tests {
+    use super::*;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    #[test]
+    fn a_wait_spanning_an_open_menu_is_not_a_stall() {
+        let opened = OPENED.load(SeqCst);
+        // Nothing opened: a real stall is still logged.
+        assert!(!modal_during(opened, false));
+        // A menu opened and closed during the wait.
+        drop(Modal::open());
+        assert!(modal_during(opened, false));
+        // A menu still open when the wait ends, or open when it began.
+        let opened = OPENED.load(SeqCst);
+        let menu = Modal::open();
+        assert!(modal_during(opened, false));
+        drop(menu);
+        assert!(modal_during(OPENED.load(SeqCst), true));
+        assert_eq!(MODALS.load(SeqCst), 0);
+        assert!(!modal_during(OPENED.load(SeqCst), false));
     }
 }

@@ -2731,7 +2731,10 @@ impl Shell {
         // allowedContentTypes needs UTType; the file-type list still works.
         let _: () = unsafe { objc2::msg_send![&panel, setAllowedFileTypes: &*types] };
         cx.activate(true);
-        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+        let modal = crate::mac::hang::Modal::open();
+        let chosen = panel.runModal();
+        drop(modal);
+        if chosen != objc2_app_kit::NSModalResponseOK {
             return;
         }
         let Some(path) = panel.URL().and_then(|url| url.path()) else {

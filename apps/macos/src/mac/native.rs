@@ -400,6 +400,7 @@ impl StatusIcon {
             let mtm = MainThreadMarker::new().expect("main thread");
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
+                let _menu = super::hang::Modal::open();
                 unsafe { button.performClick(None) };
             }
             item.setMenu(None);
@@ -499,6 +500,7 @@ impl Menu {
     pub fn pop_up_at(self, x: f64, y: f64) {
         let menu = self.menu;
         main_async(move || {
+            let _menu = super::hang::Modal::open();
             menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), None);
         });
     }
@@ -541,6 +543,7 @@ pub fn alert(title: &str, text: &str) {
     // A menu bar app is never active on its own.
     #[allow(deprecated)]
     objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let _alert = super::hang::Modal::open();
     alert.runModal();
 }
 
@@ -556,6 +559,7 @@ pub fn confirm(title: &str, text: &str, go: &str) -> bool {
     alert.addButtonWithTitle(&NSString::from_str(t("Cancel", "取消")));
     #[allow(deprecated)]
     objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let _alert = super::hang::Modal::open();
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
@@ -935,11 +939,41 @@ pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
         .collect()
 }
 
+/// Menu bar heights measured since the screens last changed. Measuring asks
+/// WindowServer for the display's spaces, which blocks while displays are
+/// being added or removed; the Viewer reads it every frame.
+static MENU_BARS: std::sync::Mutex<Vec<(u32, f64)>> = std::sync::Mutex::new(Vec::new());
+
+/// The cached height for `display`, or `measure`'s, kept for next time.
+/// Without a measurement (off the main thread, or no such screen) it's the
+/// standard 24 pt and nothing is kept.
+fn cached_menu_bar(display: u32, measure: impl FnOnce() -> Option<f64>) -> f64 {
+    let mut bars = MENU_BARS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, height)) = bars.iter().find(|(id, _)| *id == display) {
+        return height;
+    }
+    match measure() {
+        Some(height) => {
+            bars.push((display, height));
+            height
+        }
+        None => 24.0,
+    }
+}
+
+/// Measure again after the screens change.
+pub fn forget_menu_bars() {
+    MENU_BARS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// Height of the menu bar on a display, in points.
 pub fn menu_bar_height(display: u32) -> f64 {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return 24.0;
-    };
+    cached_menu_bar(display, || {
+        MainThreadMarker::new().and_then(|mtm| measure_menu_bar(mtm, display))
+    })
+}
+
+fn measure_menu_bar(mtm: MainThreadMarker, display: u32) -> Option<f64> {
     for screen in objc2_app_kit::NSScreen::screens(mtm).iter() {
         let number = screen
             .deviceDescription()
@@ -953,10 +987,10 @@ pub fn menu_bar_height(display: u32) -> f64 {
             let visible = screen.visibleFrame();
             let bar =
                 (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height);
-            return bar.max(24.0);
+            return Some(bar.max(24.0));
         }
     }
-    24.0
+    None
 }
 
 /// Force light or dark for screenshots in debug builds:
@@ -1024,8 +1058,10 @@ pub fn accent() -> Option<([f32; 3], [f32; 3])> {
 
 pub fn watch_screens() {
     let center = objc2_foundation::NSNotificationCenter::defaultCenter();
-    let block =
-        RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| send(Native::ScreensChanged));
+    let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
+        forget_menu_bars();
+        send(Native::ScreensChanged)
+    });
     let observer = unsafe {
         center.addObserverForName_object_queue_usingBlock(
             Some(objc2_app_kit::NSApplicationDidChangeScreenParametersNotification),
@@ -1113,5 +1149,35 @@ mod peek_activation_tests {
                 right: false
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod menu_bar_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_frame_after_the_first_does_not_ask_window_server_again() {
+        // Display ids no real screen uses, so the shared cache can't clash.
+        let (display, other) = (0xA5A5_0001, 0xA5A5_0002);
+        let asked = Cell::new(0);
+        let measure = || {
+            asked.set(asked.get() + 1);
+            Some(33.0)
+        };
+        assert_eq!(cached_menu_bar(display, measure), 33.0);
+        for _ in 0..60 {
+            assert_eq!(cached_menu_bar(display, measure), 33.0);
+        }
+        assert_eq!(asked.get(), 1, "a Viewer frame measured again");
+        // No measurement, as off the main thread: the default, not kept.
+        assert_eq!(cached_menu_bar(other, || None), 24.0);
+        assert_eq!(cached_menu_bar(other, || Some(40.0)), 40.0);
+        // The screens changed: measure once more.
+        forget_menu_bars();
+        assert_eq!(cached_menu_bar(display, || Some(37.0)), 37.0);
+        assert_eq!(cached_menu_bar(display, measure), 37.0);
+        assert_eq!(asked.get(), 1);
     }
 }
