@@ -26,7 +26,7 @@ use std::ptr::NonNull;
 /// Things that happened on the native side.
 #[derive(Debug, Clone)]
 pub enum Native {
-    /// The button owns both phases. Down captures intent; only up commits.
+    /// The button owns both left-button phases. Down captures; only up commits.
     IconPressed {
         gesture: u64,
     },
@@ -177,7 +177,7 @@ define_class!(
             let event = NSApplication::sharedApplication(mtm).currentEvent();
             let kind = event.as_ref().map(|e| e.r#type());
             let gesture = event.as_ref().map_or(0, |e| e.eventNumber() as u64);
-            send(status_icon_event(kind, gesture));
+            if let Some(event) = status_icon_event(kind, gesture) { send(event); }
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -222,17 +222,17 @@ const ICON_PLACE: &str = "NSStatusItem Preferred Position Item-0";
 const ICON_PLACE_SHOWN: &str = "AgentScreen Icon Position Shown";
 
 fn status_icon_mask() -> NSEventMask {
-    NSEventMask::LeftMouseDown
-        | NSEventMask::LeftMouseUp
-        | NSEventMask::RightMouseDown
-        | NSEventMask::RightMouseUp
+    NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp
 }
 
-pub(crate) fn status_icon_event(kind: Option<NSEventType>, gesture: u64) -> Native {
-    match kind {
-        Some(NSEventType::LeftMouseDown | NSEventType::RightMouseDown) => {
-            Native::IconPressed { gesture }
-        }
+pub(crate) fn status_icon_event(kind: Option<NSEventType>, gesture: u64) -> Option<Native> {
+    // A cancelled right press may not send a valid button-up action. It
+    // must never freeze the left-button transaction or become a left click.
+    if kind == Some(NSEventType::RightMouseDown) {
+        return None;
+    }
+    Some(match kind {
+        Some(NSEventType::LeftMouseDown) => Native::IconPressed { gesture },
         Some(NSEventType::LeftMouseUp) => Native::IconClicked {
             right: false,
             mouse: true,
@@ -245,7 +245,7 @@ pub(crate) fn status_icon_event(kind: Option<NSEventType>, gesture: u64) -> Nati
             right: false,
             mouse: false,
         },
-    }
+    })
 }
 
 impl StatusIcon {
@@ -1078,15 +1078,25 @@ mod peek_activation_tests {
     #[test]
     fn status_button_down_and_up_share_one_action_owner_and_commit_once() {
         assert!(status_icon_mask().contains(NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp));
+        assert!(!status_icon_mask().contains(NSEventMask::RightMouseDown));
+        assert!(status_icon_mask().contains(NSEventMask::RightMouseUp));
+        assert!(status_icon_event(Some(NSEventType::RightMouseDown), 9).is_none());
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::RightMouseUp), 10),
+            Some(Native::IconClicked {
+                right: true,
+                mouse: true
+            })
+        ));
         let mut intent = Intent::default();
         if let Native::IconPressed { gesture } =
-            status_icon_event(Some(NSEventType::LeftMouseDown), 7)
+            status_icon_event(Some(NSEventType::LeftMouseDown), 7).unwrap()
         {
             intent.press(gesture);
         }
         assert_eq!(intent.mode(), Mode::Closed);
         assert!(matches!(
-            status_icon_event(Some(NSEventType::LeftMouseUp), 8),
+            status_icon_event(Some(NSEventType::LeftMouseUp), 8).unwrap(),
             Native::IconClicked {
                 mouse: true,
                 right: false
@@ -1095,7 +1105,7 @@ mod peek_activation_tests {
         assert_eq!(intent.release(true), Effect::Show);
         assert_eq!(intent.release(true), Effect::None);
         assert!(matches!(
-            status_icon_event(None, 0),
+            status_icon_event(None, 0).unwrap(),
             Native::IconClicked {
                 mouse: false,
                 right: false

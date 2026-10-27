@@ -3798,10 +3798,36 @@ mod peek_input_tests {
     }
 
     #[test]
+    fn peek_shell_right_down_without_valid_up_does_not_freeze_hover() {
+        let mut intent = hover();
+        // A right press dragged out may never yield the button's valid-up
+        // action. It must not arm the left-click transaction at all.
+        if let Some(down) = status_icon_event(Some(NSEventType::RightMouseDown), 9) {
+            peek_activation(&mut intent, &down, ICON, 301);
+        }
+        intent.pointer(OUT, 302, Timing::default());
+        let close = intent
+            .pending()
+            .expect("right down must not freeze hover departure");
+        assert_eq!(
+            peek_timer_effect(&mut intent, close, OUT, close.due_ms, true),
+            Effect::Hide
+        );
+        assert_eq!(intent.mode(), Mode::Closed);
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::RightMouseUp), 10),
+            Some(crate::mac::native::Native::IconClicked {
+                right: true,
+                mouse: true
+            })
+        ));
+    }
+
+    #[test]
     fn peek_shell_native_hover_click_pins_without_a_hide_effect() {
         let mut intent = hover();
-        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1);
-        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2);
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
         assert_eq!(peek_activation(&mut intent, &down, ICON, 301), Effect::None);
         assert_eq!(
             peek_outside_press(&mut intent, ICON, ICON, 301),
@@ -3810,7 +3836,7 @@ mod peek_input_tests {
         assert_eq!(peek_activation(&mut intent, &up, ICON, 302), Effect::Show);
         assert_eq!(intent.mode(), Mode::Pinned);
         assert_eq!(peek_activation(&mut intent, &up, ICON, 303), Effect::None);
-        let next_down = status_icon_event(Some(NSEventType::LeftMouseDown), 3);
+        let next_down = status_icon_event(Some(NSEventType::LeftMouseDown), 3).unwrap();
         peek_activation(&mut intent, &next_down, ICON, 1000);
         assert_eq!(peek_activation(&mut intent, &up, ICON, 1001), Effect::Hide);
         assert_eq!(intent.mode(), Mode::Closed);
@@ -3821,8 +3847,8 @@ mod peek_input_tests {
         let mut intent = Intent::default();
         intent.pointer(ICON, 0, Timing::default());
         let timer = intent.pending().unwrap();
-        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1);
-        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2);
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
         assert_eq!(
             peek_activation(&mut intent, &down, ICON, OPEN_DELAY_MS - 1),
             Effect::None
@@ -3842,10 +3868,10 @@ mod peek_input_tests {
     #[test]
     fn peek_shell_dismiss_between_down_and_up_cannot_reopen() {
         let mut intent = hover();
-        let keyboard = status_icon_event(None, 0);
+        let keyboard = status_icon_event(None, 0).unwrap();
         peek_activation(&mut intent, &keyboard, ICON, 301);
-        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1);
-        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2);
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
         peek_activation(&mut intent, &down, ICON, 400);
         assert_eq!(peek_outside_press(&mut intent, OUT, OUT, 401), Effect::Hide);
         assert_eq!(peek_activation(&mut intent, &up, ICON, 402), Effect::None);
@@ -3868,7 +3894,7 @@ mod peek_input_tests {
         let mut intent = hover();
         intent.pointer(OUT, 400, Timing::default());
         let close = intent.pending().unwrap();
-        let activate = status_icon_event(None, 0);
+        let activate = status_icon_event(None, 0).unwrap();
         assert_eq!(
             peek_activation(&mut intent, &activate, ICON, 450),
             Effect::Show

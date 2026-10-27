@@ -161,7 +161,7 @@ CARGO_INCREMENTAL=0 cargo test -p agent-screen peek_shell
 CARGO_INCREMENTAL=0 cargo test -p agent-screen status_button_down_and_up
 ```
 
-The model uses a virtual monotonic clock. Native event values drive the same shell policy seams used by the status button, mouse monitor and hover callbacks. These checks do not construct a window or install an input monitor. Down captures the current open/pin/close intent and invalidates hover timers; only a valid up commits it once. Keyboard, accessibility and `debugShow click` use logical activation without synthesizing a press.
+The model uses a virtual monotonic clock. Native event values drive the same shell policy seams used by the status button, mouse monitor and hover callbacks. These checks do not construct a window or install an input monitor. Left-button down captures the current open/pin/close intent and invalidates hover timers; only a valid up commits it once. Keyboard, accessibility and `debugShow click` use logical activation without synthesizing a press.
 
 The initial dwell and leave constants are 300 ms and 500 ms. The [research notes](research/hover-click-intent.md) distinguish NN/g's web-content recommendations from Apple's APIs and macOS app source. These are candidate values, not Apple thresholds or measured Peek latency. Pointer sampling runs every 100 ms to repair missed exit notifications, so actual dismissal can add detection, scheduling and animation time. Native event ordering, visual transitions and user preference still need separately authorized GUI checks.
 
