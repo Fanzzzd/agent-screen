@@ -68,14 +68,103 @@ fn send(input: &mut ChildStdin, op: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+fn parse_ready(line: &str, pid: u32, token: &str) -> Result<u64> {
+    if line.len() > 1024 || !line.ends_with('\n') {
+        bail!("incomplete fixture readiness frame");
+    }
+    let ready: crate::Value = serde_json::from_str(line).context("invalid fixture readiness")?;
+    if ready["pid"].as_u64() != Some(pid as u64) || ready["token"].as_str() != Some(token) {
+        bail!("fixture readiness identity mismatch");
+    }
+    let window = ready["window"]
+        .as_u64()
+        .context("fixture window unavailable")?;
+    if window == 0 || window > u32::MAX as u64 {
+        bail!("fixture window id outside CG range");
+    }
+    Ok(window)
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn offline_gate_rejects_out_of_range_ready_windows_before_claim() {
+        let token = "0".repeat(64);
+        for window in [0, u32::MAX as u64 + 1] {
+            let line = format!(
+                "{}\n",
+                json!({ "pid": 42, "token": token, "window": window })
+            );
+            assert!(
+                parse_ready(&line, 42, &token).is_err(),
+                "invalid CG window id must not reach claim"
+            );
+        }
+    }
+
+    #[test]
+    fn offline_gate_rejects_wrong_ready_identity_without_echoing_tokens() {
+        let token = "0".repeat(64);
+        for (pid, supplied) in [(99, token.clone()), (42, "1".repeat(64))] {
+            let line = format!("{}\n", json!({ "pid":pid,"window":7,"token":supplied }));
+            let error = parse_ready(&line, 42, &token).unwrap_err();
+            let detail = format!("{error:#}");
+            assert!(
+                !detail.contains(&token) && !detail.contains(&supplied),
+                "errors must not echo private tokens"
+            );
+        }
+        let line = format!("{}\n", json!({ "pid":42,"window":7,"token":token }));
+        assert_eq!(parse_ready(&line, 42, &token).unwrap(), 7);
+    }
+
+    #[test]
+    fn offline_gate_rejects_partial_and_truncated_readiness_frames() {
+        let token = "0".repeat(64);
+        let frame = json!({ "pid": 42, "token": token, "window": 7 }).to_string();
+        assert!(
+            parse_ready(&frame, 42, &token).is_err(),
+            "EOF cannot complete readiness without a newline"
+        );
+        let truncated = format!("{frame: <1024}");
+        assert!(
+            parse_ready(&truncated, 42, &token).is_err(),
+            "bounded reads must not accept a JSON prefix as a full frame"
+        );
+    }
+}
+
+fn configure_input(input: &ChildStdin) -> Result<()> {
+    let fd = input.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        bail!("fixture pipe configuration failed");
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos", debug_assertions))]
+#[path = "stage_fixture_offline.rs"]
+mod offline;
+
 impl StageFixture {
     pub fn prepare(stage: Arc<Control>, display: u64) -> Result<Self> {
+        Self::prepare_program(stage, display, &our_binary("Field"))
+    }
+
+    fn prepare_program(
+        stage: Arc<Control>,
+        display: u64,
+        program: &std::path::Path,
+    ) -> Result<Self> {
         let reply = call(&stage, display, "prepare", "", 0, 0)?;
         let token = reply["token"]
             .as_str()
             .context("stage token unavailable")?
             .to_string();
-        let mut child = Command::new(our_binary("Field"))
+        let mut child = Command::new(program)
             .env_remove("FIELD_REOPEN")
             .env_remove("FIELD_OUT")
             .env_remove("FIELD_MOVE_DISPLAY")
@@ -100,12 +189,7 @@ impl StageFixture {
             closed: false,
         };
         // Configure only after the Child is protected by the cleanup guard.
-        let fd = fixture.input.lock().unwrap().as_ref().unwrap().as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
-        {
-            bail!("fixture pipe configuration failed");
-        }
+        configure_input(fixture.input.lock().unwrap().as_ref().unwrap())?;
         send(
             fixture
                 .input
@@ -128,16 +212,7 @@ impl StageFixture {
         let line = rx
             .recv_timeout(Duration::from_secs(2))
             .context("fixture readiness deadline or EOF")??;
-        let ready: crate::Value =
-            serde_json::from_str(&line).context("invalid fixture readiness")?;
-        if ready["pid"].as_u64() != Some(fixture.child.id() as u64)
-            || ready["token"].as_str() != Some(&fixture.token)
-        {
-            bail!("fixture readiness identity mismatch");
-        }
-        fixture.window = ready["window"]
-            .as_u64()
-            .context("fixture window unavailable")?;
+        fixture.window = parse_ready(&line, fixture.child.id(), &fixture.token)?;
         call(
             &fixture.stage,
             display,

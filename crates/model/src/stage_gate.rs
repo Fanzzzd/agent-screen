@@ -26,6 +26,25 @@ pub struct Identity {
     pub window: u32,
 }
 
+/// Require the same live process on both sides of the owner lookup.
+/// Unknown queries and a recycled pid/window cannot identify a fixture.
+pub fn resolve_identity(
+    pid: i32,
+    window: u32,
+    first: ProcessState,
+    owner: Option<i32>,
+    last: ProcessState,
+) -> Option<Identity> {
+    let ProcessState::Running(started) = first else {
+        return None;
+    };
+    (pid > 0 && window > 0 && owner == Some(pid) && last == first).then_some(Identity {
+        pid,
+        started,
+        window,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Prepared,
@@ -299,6 +318,30 @@ mod tests {
             assert_eq!(state.desired().generation_of(7), Some(current));
             assert_eq!(state.published().display_of(7), Some(destination));
         }
+    }
+
+    #[test]
+    fn offline_gate_identity_requires_a_stable_live_pid_and_real_owner() {
+        let live = ProcessState::Running(100);
+        assert_eq!(
+            resolve_identity(9, 7, live, Some(9), live),
+            Some(identity())
+        );
+        for first in [ProcessState::Unknown, ProcessState::Exited] {
+            assert!(resolve_identity(9, 7, first, Some(9), live).is_none());
+        }
+        for last in [
+            ProcessState::Unknown,
+            ProcessState::Exited,
+            ProcessState::Running(101),
+        ] {
+            assert!(resolve_identity(9, 7, live, Some(9), last).is_none());
+        }
+        for owner in [None, Some(99)] {
+            assert!(resolve_identity(9, 7, live, owner, live).is_none());
+        }
+        assert!(resolve_identity(0, 7, live, Some(0), live).is_none());
+        assert!(resolve_identity(9, 0, live, Some(9), live).is_none());
     }
 
     #[test]

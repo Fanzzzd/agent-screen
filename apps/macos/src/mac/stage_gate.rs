@@ -3,7 +3,9 @@
 
 use super::app::process_state;
 use super::{app, cg, claims};
-use agent_screen_model::stage_gate::{Gate, Identity, ProcessState, may_release_fixture};
+use agent_screen_model::stage_gate::{
+    Gate, Identity, ProcessState, may_release_fixture, resolve_identity,
+};
 use std::{
     collections::HashMap,
     io::Read,
@@ -58,16 +60,17 @@ pub fn prepare(connection: u64, display: u32, peer: i32) -> Result<String, &'sta
 }
 
 fn identity(pid: i32, window: u32) -> Option<Identity> {
-    let ProcessState::Running(started) = process_state(pid) else {
+    let first = process_state(pid);
+    if !matches!(first, ProcessState::Running(_)) {
         return None;
-    };
-    (cg::hidden_window_owner(window) == Some(pid)
-        && process_state(pid) == ProcessState::Running(started))
-    .then_some(Identity {
+    }
+    resolve_identity(
         pid,
         window,
-        started,
-    })
+        first,
+        cg::hidden_window_owner(window),
+        process_state(pid),
+    )
 }
 
 pub fn step(

@@ -451,3 +451,70 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
     })
 }
+
+#[cfg(all(test, debug_assertions))]
+mod stage_identity_tests {
+    use super::*;
+    use agent_screen_model::stage_gate::ProcessState;
+
+    #[test]
+    fn offline_gate_process_query_confirms_an_owned_child_exit() {
+        use std::{
+            process::{Child, Command, Stdio},
+            time::{Duration, Instant},
+        };
+        struct Owned(Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.stdin.take();
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < deadline {
+                        if self.0.try_wait().ok().flatten().is_some() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+        }
+        // A pipe reader, not an app. No AppKit or WindowServer is involved.
+        let mut child = Owned(
+            Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id() as i32;
+        let ProcessState::Running(started) = process_state(pid) else {
+            panic!("owned child must be queryable");
+        };
+        assert_eq!(parent_pid(pid), Some(std::process::id() as i32));
+        child.0.stdin.take();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child.0.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "owned child EOF deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(process_state(pid).confirmed_gone(started));
+    }
+
+    #[test]
+    fn offline_gate_process_queries_identify_only_this_test_process() {
+        let pid = std::process::id() as i32;
+        let first = process_state(pid);
+        assert!(matches!(first, ProcessState::Running(_)));
+        assert_eq!(process_state(pid), first);
+        assert_eq!(parent_pid(pid), Some(unsafe { libc::getppid() }));
+        let executable = arguments(pid).unwrap().first().unwrap().clone();
+        assert_eq!(
+            std::path::PathBuf::from(executable).canonicalize().unwrap(),
+            std::env::current_exe().unwrap().canonicalize().unwrap()
+        );
+        assert_eq!(process_state(0), ProcessState::Unknown);
+        assert_eq!(process_state(-1), ProcessState::Unknown);
+    }
+}

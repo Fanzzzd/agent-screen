@@ -1,61 +1,91 @@
-// A window with one text view, for input tests. Each change to the text,
-// marked text included, is written to $FIELD_OUT as "text\tmarked".
-import AppKit
+// A text window for input tests, plus a shared Foundation-only gate transport.
+import Foundation
+import Dispatch
 
-// Bound even AppKit startup, before a window or the main run loop exists.
-if ProcessInfo.processInfo.environment["FIELD_GATE"] == "1" {
-  Thread { Thread.sleep(forTimeInterval: 60); exit(0) }.start()
+private enum FixtureFrame {
+  case message([String: String]), eof, invalid
 }
 
-// The gate token travels only on this fixture's private stdin/stdout pipes.
-// Nothing is shown on EOF, a malformed message, or a missed deadline.
+// No partial frame is accepted on EOF. Limit memory before parsing JSON.
+private func readFixtureFrame() -> FixtureFrame {
+  var bytes = Data()
+  while true {
+    guard let next = try? FileHandle.standardInput.read(upToCount: 1), !next.isEmpty else {
+      return bytes.isEmpty ? .eof : .invalid
+    }
+    if next[0] == 10 {
+      guard let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: String] else { return .invalid }
+      return .message(object)
+    }
+    if bytes.count >= 1023 { return .invalid }
+    bytes.append(next)
+  }
+}
+
+// This is the transport used by Field. The compile-time offline adapter
+// below substitutes only the window callback, never the protocol/state.
 final class FixtureGate {
   let lock = NSLock()
-  var last = Date()
+  var last = ProcessInfo.processInfo.systemUptime
   var shown = false
-  func start(_ window: NSWindow, valid: @escaping () -> Bool) {
-    let expectedWindow = window.windowNumber
+  func start(windowNumber: Int, heartbeat: Double = 2, lifetime: Double = 60,
+             show: @escaping () -> Bool) {
+    guard windowNumber > 0, windowNumber <= Int(UInt32.max) else { exit(2) }
     Thread { [self] in
-      guard let line = readLine(), line.utf8.count < 1024,
-            let data = line.data(using: .utf8),
-            let hello = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-            hello["op"] == "hello", let token = hello["token"], token.count == 64 else { exit(2) }
-      let ready: [String: Any] = ["pid": getpid(), "window": window.windowNumber, "token": token]
+      guard case .message(let hello) = readFixtureFrame(), hello["op"] == "hello",
+            let token = hello["token"], token.count == 64 else { exit(2) }
+      let ready: [String: Any] = ["pid": getpid(), "window": windowNumber, "token": token]
       guard let data = try? JSONSerialization.data(withJSONObject: ready) else { exit(2) }
       FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10]))
-      while let line = readLine() {
-        guard line.utf8.count < 1024, let data = line.data(using: .utf8),
-              let message = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-              message["token"] == token else { exit(2) }
+      while true {
+        let frame = readFixtureFrame()
+        if case .eof = frame { exit(0) }
+        guard case .message(let message) = frame, message["token"] == token else { exit(2) }
         lock.lock()
         let op = message["op"]
         if op == "show", !shown {
           shown = true
-          last = Date()
+          last = ProcessInfo.processInfo.systemUptime
           lock.unlock()
-          DispatchQueue.main.async {
-            guard window.windowNumber == expectedWindow, valid() else { exit(2) }
-            window.orderFront(nil)
-          }
+          DispatchQueue.main.async { if !show() { exit(2) } }
         } else if op == "hold", shown {
-          last = Date()
+          last = ProcessInfo.processInfo.systemUptime
           lock.unlock()
         } else {
           lock.unlock(); exit(2)
         }
       }
-      exit(0)
     }.start()
     Thread { [self] in
-      let deadline = Date().addingTimeInterval(60)
-      while Date() < deadline {
-        lock.lock(); let elapsed = Date().timeIntervalSince(last); lock.unlock()
-        if elapsed > 2 { exit(2) }
-        Thread.sleep(forTimeInterval: 0.1)
+      let deadline = ProcessInfo.processInfo.systemUptime + lifetime
+      while ProcessInfo.processInfo.systemUptime < deadline {
+        lock.lock(); let elapsed = ProcessInfo.processInfo.systemUptime - last; lock.unlock()
+        if elapsed > heartbeat { exit(2) }
+        Thread.sleep(forTimeInterval: min(heartbeat / 4, 0.1))
       }
       exit(0)
     }.start()
   }
+}
+
+#if FIELD_PROTOCOL_TEST
+// This binary has no AppKit import, application object, window or display.
+// A synthetic window number permits offline tests of the actual pipes.
+let protocolGate = FixtureGate()
+protocolGate.start(windowNumber: 7, heartbeat: 0.75, lifetime: 4) {
+  if CommandLine.arguments.contains("--deny-show") { return false }
+  if CommandLine.arguments.contains("--trace-show") {
+    FileHandle.standardOutput.write(Data("{\"event\":\"show\"}\n".utf8))
+  }
+  return true
+}
+dispatchMain()
+#else
+import AppKit
+
+// Bound AppKit startup before a window or the main run loop exists.
+if ProcessInfo.processInfo.environment["FIELD_GATE"] == "1" {
+  Thread { Thread.sleep(forTimeInterval: 60); exit(0) }.start()
 }
 
 final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
@@ -106,9 +136,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     if gated {
       let gate = FixtureGate()
       self.gate = gate
-      gate.start(window) { [unowned self] in
+      let expectedWindow = window.windowNumber
+      gate.start(windowNumber: expectedWindow) { [unowned self] in
         guard let screen = testScreen("FIELD_DISPLAY") else { return false }
-        return screen.frame.contains(self.window.frame)
+        guard self.window.windowNumber == expectedWindow, screen.frame.contains(self.window.frame) else { return false }
+        self.window.orderFront(nil)
+        return true
       }
     } else {
       window.makeKeyAndOrderFront(nil)
@@ -162,3 +195,5 @@ let delegate = Delegate()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()
+
+#endif
