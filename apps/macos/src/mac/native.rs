@@ -91,6 +91,7 @@ pub enum MenuAction {
     CreateDisplay,
     OpenSettings,
     OpenRecordings,
+    ReportProblem,
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,

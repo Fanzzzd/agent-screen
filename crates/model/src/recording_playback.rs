@@ -237,6 +237,136 @@ pub fn sidecar_name(name: &str) -> Option<String> {
         .then(|| format!("{stem}.timeline.jsonl"))
 }
 
+/// What the player should do for a step of a drag on the progress bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrubCommand {
+    Pause,
+    Seek(f64),
+    Play,
+}
+
+/// A drag on the progress bar, as a desktop video player handles one: the
+/// video pauses while the bar is held, the playhead follows the pointer
+/// instead of the player's last reported time, and playback resumes on
+/// release if it was playing when the drag began. The picture keeps its
+/// last frame throughout; see `retained_frame`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scrub {
+    target: Option<f64>,
+    resume: bool,
+}
+
+impl Scrub {
+    pub fn dragging(&self) -> bool {
+        self.target.is_some()
+    }
+
+    /// The press that starts a drag, `fraction` along the bar.
+    pub fn press(&mut self, fraction: f64, duration: f64, playing: bool) -> Vec<ScrubCommand> {
+        let Some(at) = position(fraction, duration) else {
+            return Vec::new();
+        };
+        let mut commands = Vec::new();
+        if self.target.is_none() {
+            self.resume = playing;
+            if playing {
+                commands.push(ScrubCommand::Pause);
+            }
+        }
+        self.target = Some(at);
+        commands.push(ScrubCommand::Seek(at));
+        commands
+    }
+
+    /// A move while held. Nothing when the position hasn't changed.
+    pub fn drag(&mut self, fraction: f64, duration: f64) -> Option<ScrubCommand> {
+        let current = self.target?;
+        let at = position(fraction, duration)?;
+        (at != current).then(|| {
+            self.target = Some(at);
+            ScrubCommand::Seek(at)
+        })
+    }
+
+    /// The release, wherever the pointer is.
+    pub fn release(&mut self) -> Vec<ScrubCommand> {
+        let Some(at) = self.target.take() else {
+            return Vec::new();
+        };
+        let mut commands = vec![ScrubCommand::Seek(at)];
+        if std::mem::take(&mut self.resume) {
+            commands.push(ScrubCommand::Play);
+        }
+        commands
+    }
+
+    /// The time to show on the bar and to sample the pointer at.
+    pub fn shown(&self, player_seconds: f64) -> f64 {
+        self.target.unwrap_or(player_seconds)
+    }
+}
+
+fn position(fraction: f64, duration: f64) -> Option<f64> {
+    (fraction.is_finite() && duration.is_finite() && duration > 0.0)
+        .then(|| fraction.clamp(0.0, 1.0) * duration)
+}
+
+/// The frame to show: a newly decoded one, otherwise the last. A seek in
+/// flight never blanks the picture.
+pub fn retained_frame<T>(last: Option<T>, fresh: Option<T>) -> Option<T> {
+    fresh.or(last)
+}
+
+/// A recording file's display label and local start time, read from the
+/// `<label> YYYY-MM-DD HH-MM-SS[-…].mp4` name the recorder writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingName {
+    pub label: String,
+    /// `YYYY-MM-DD HH:MM:SS`, which also sorts in time order.
+    pub started: Option<String>,
+}
+
+pub fn recording_name(file: &str) -> RecordingName {
+    let stem = file
+        .rsplit_once('.')
+        .map_or(file, |(stem, _)| stem)
+        .to_string();
+    let bytes = stem.as_bytes();
+    let stamp = |at: usize| {
+        let s = bytes.get(at..at + 19)?;
+        let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+        let ok = digits.iter().all(|&i| s[i].is_ascii_digit())
+            && s[4] == b'-'
+            && s[7] == b'-'
+            && s[10] == b' '
+            && s[13] == b'-'
+            && s[16] == b'-';
+        ok.then(|| {
+            let s = &stem[at..at + 19];
+            format!("{} {}:{}:{}", &s[..10], &s[11..13], &s[14..16], &s[17..19])
+        })
+    };
+    // The last stamp wins, so a label that happens to contain a date
+    // keeps it.
+    for at in (0..bytes.len()).rev() {
+        if let Some(started) = stamp(at) {
+            let label = stem[..at].trim().to_string();
+            return RecordingName {
+                label: if label.is_empty() {
+                    stem.clone()
+                } else {
+                    label
+                },
+                started: Some(started),
+            };
+        }
+    }
+    RecordingName {
+        label: stem,
+        started: None,
+    }
+}
+
 /// A supported, bounded recording configuration. This selects a codec,
 /// not an encoder implementation or a verified quality/size trade-off.
 pub fn preferred_codec(available: &[&str]) -> Option<&'static str> {
@@ -309,6 +439,78 @@ mod tests {
 
     fn header() -> &'static str {
         r#"{"event":"recording","version":1,"logicalSize":[1280,800],"videoSize":[2560,1600],"shotScale":1,"pointerClock":"recorded_duration","coordinateSpace":"logical"}"#
+    }
+
+    #[test]
+    fn a_drag_pauses_follows_the_pointer_and_resumes_on_release() {
+        use ScrubCommand::*;
+        let mut scrub = Scrub::default();
+        assert_eq!(scrub.press(0.5, 10.0, true), [Pause, Seek(5.0)]);
+        assert!(scrub.dragging());
+        // The bar shows the dragged position, not the player's stale time.
+        assert_eq!(scrub.shown(1.0), 5.0);
+        assert_eq!(scrub.drag(0.8, 10.0), Some(Seek(8.0)));
+        assert_eq!(scrub.drag(0.8, 10.0), None);
+        // Past either end of the bar clamps to it.
+        assert_eq!(scrub.drag(1.7, 10.0), Some(Seek(10.0)));
+        assert_eq!(scrub.release(), [Seek(10.0), Play]);
+        assert!(!scrub.dragging());
+        assert_eq!(scrub.shown(3.0), 3.0);
+        assert_eq!(scrub.release(), []);
+    }
+
+    #[test]
+    fn a_paused_video_stays_paused_and_unknown_lengths_do_nothing() {
+        use ScrubCommand::*;
+        let mut scrub = Scrub::default();
+        assert_eq!(scrub.press(0.25, 8.0, false), [Seek(2.0)]);
+        assert_eq!(scrub.release(), [Seek(2.0)]);
+        assert_eq!(scrub.press(0.5, 0.0, true), []);
+        assert_eq!(scrub.press(f64::NAN, 8.0, true), []);
+        assert!(!scrub.dragging());
+        assert_eq!(scrub.drag(0.5, 8.0), None);
+    }
+
+    #[test]
+    fn a_seek_keeps_the_last_frame_until_a_new_one_decodes() {
+        assert_eq!(retained_frame(Some("last"), None), Some("last"));
+        assert_eq!(retained_frame(Some("last"), Some("new")), Some("new"));
+        assert_eq!(retained_frame::<&str>(None, None), None);
+    }
+
+    #[test]
+    fn recording_names_split_label_and_start_time() {
+        assert_eq!(
+            recording_name("Fix login 2026-10-27 08-03-09.mp4"),
+            RecordingName {
+                label: "Fix login".into(),
+                started: Some("2026-10-27 08:03:09".into()),
+            }
+        );
+        // The current recorder appends the display id and a unique suffix.
+        assert_eq!(
+            recording_name("Demo 2026-10-27 14-05-00-7-1793000000000000000.mp4"),
+            RecordingName {
+                label: "Demo".into(),
+                started: Some("2026-10-27 14:05:00".into()),
+            }
+        );
+        // A date inside the label stays part of the label.
+        assert_eq!(
+            recording_name("Report 2025-01-01 00-00-00 2026-10-27 09-10-11.mp4").label,
+            "Report 2025-01-01 00-00-00"
+        );
+        assert_eq!(
+            recording_name("notes.mp4"),
+            RecordingName {
+                label: "notes".into(),
+                started: None,
+            }
+        );
+        assert_eq!(
+            recording_name("2026-10-27 09-10-11.mp4").label,
+            "2026-10-27 09-10-11"
+        );
     }
 
     #[test]

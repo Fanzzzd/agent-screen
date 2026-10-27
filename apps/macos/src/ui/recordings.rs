@@ -3,13 +3,19 @@
 use super::{pointer, setup, theme};
 use crate::i18n::t;
 use crate::mac::{playback, recording};
-use agent_screen_model::recording_playback::{Size, Support, Timeline};
-use core_video::pixel_buffer::CVPixelBuffer;
-use gpui::{
-    AppContext, Bounds, Context, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Pixels, Render, StatefulInteractiveElement, Styled, Window, canvas, div, px,
-    surface,
+use agent_screen_model::recording_playback::{
+    Scrub, ScrubCommand, Size, Support, Timeline, retained_frame,
 };
+use core_video::pixel_buffer::CVPixelBuffer;
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, ObjectFit, ParentElement, Pixels, Render, StatefulInteractiveElement, Styled,
+    Window, canvas, div, px, surface,
+};
+
+/// How far the arrow keys move the playhead.
+const ARROW_SEEK: f64 = 5.0;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -24,7 +30,7 @@ pub struct Recordings {
     playing: bool,
     status: playback::Status,
     show_pointer: bool,
-    dragging: bool,
+    scrub: Scrub,
     seeking: bool,
     error: bool,
     library_error: bool,
@@ -33,6 +39,8 @@ pub struct Recordings {
     catalog_generation: u64,
     selection_generation: u64,
     seek_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    focus: FocusHandle,
+    focused: bool,
 }
 
 impl Recordings {
@@ -48,7 +56,7 @@ impl Recordings {
             playing: false,
             status: playback::Status::Loading,
             show_pointer: true,
-            dragging: false,
+            scrub: Scrub::default(),
             seeking: false,
             error: false,
             library_error: false,
@@ -57,9 +65,97 @@ impl Recordings {
             catalog_generation: 0,
             selection_generation: 0,
             seek_bounds: Rc::new(Cell::new(None)),
+            focus: cx.focus_handle(),
+            focused: false,
         };
         this.refresh(cx);
         this
+    }
+
+    fn toggle_play(&mut self) {
+        if let Some(player) = &self.player {
+            if self.duration > 0.0 && self.seconds >= self.duration {
+                player.seek(0.0, self.duration);
+            }
+            player.set_playing(!self.playing);
+        }
+    }
+
+    fn seek_by(&mut self, delta: f64) {
+        if !self.duration.is_finite() || self.duration <= 0.0 {
+            return;
+        }
+        if let Some(player) = &self.player {
+            player.seek(self.seconds + delta, self.duration);
+            self.seeking = true;
+        }
+    }
+
+    /// Run what a step of a progress-bar drag asks of the player. The
+    /// picture keeps its last frame while a seek is in flight.
+    fn apply(&mut self, commands: impl IntoIterator<Item = ScrubCommand>) {
+        let Some(player) = &self.player else {
+            return;
+        };
+        for command in commands {
+            match command {
+                ScrubCommand::Pause => player.set_playing(false),
+                ScrubCommand::Play => player.set_playing(true),
+                ScrubCommand::Seek(seconds) => {
+                    player.seek(seconds, self.duration);
+                    self.seeking = true;
+                }
+            }
+        }
+    }
+
+    /// Where `x` falls along the progress bar, 0 to 1.
+    fn fraction_at(&self, x: Pixels) -> Option<f64> {
+        let bounds = self.seek_bounds.get()?;
+        Some(
+            (f32::from(x - bounds.origin.x) / f32::from(bounds.size.width).max(1.0)).clamp(0.0, 1.0)
+                as f64,
+        )
+    }
+
+    /// Space plays or pauses, ←/→ seek, ↑/↓ pick the neighbouring
+    /// recording, and ⌘W closes the window. Only this window's keys: the
+    /// app menu has no shortcuts, as keys in the Viewer belong to the agent.
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = &event.keystroke;
+        match keys.key.as_str() {
+            "w" if keys.modifiers.platform => {
+                window.remove_window();
+                return;
+            }
+            _ if keys.modifiers.modified() => return,
+            "space" => self.toggle_play(),
+            "left" => self.seek_by(-ARROW_SEEK),
+            "right" => self.seek_by(ARROW_SEEK),
+            "up" | "down" => {
+                let next = match (self.selected, keys.key.as_str()) {
+                    (Some(i), "up") => i.checked_sub(1),
+                    (Some(i), _) => Some(i + 1),
+                    (None, _) => Some(0),
+                };
+                match next {
+                    Some(i) if i < self.files.len() => self.select(i, cx),
+                    _ => return,
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn reveal_selected(&self) {
+        if let Some(video) = self.selected.and_then(|i| self.files.get(i)) {
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg("-R")
+                .arg(&video.path)
+                .spawn();
+        }
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -128,6 +224,7 @@ impl Recordings {
         self.timeline = Timeline::unavailable(Support::Missing);
         self.loading_timeline = true;
         self.selected = Some(index);
+        self.scrub = Scrub::default();
         self.frame = None;
         self.seconds = 0.0;
         self.duration = 0.0;
@@ -150,22 +247,6 @@ impl Recordings {
         })
         .detach();
     }
-
-    fn seek_at(&mut self, x: Pixels) {
-        let Some(bounds) = self.seek_bounds.get() else {
-            return;
-        };
-        let fraction = (f32::from(x - bounds.origin.x) / f32::from(bounds.size.width).max(1.0))
-            .clamp(0.0, 1.0);
-        if !self.duration.is_finite() || self.duration <= 0.0 {
-            return;
-        }
-        if let Some(player) = &self.player {
-            player.seek(fraction as f64 * self.duration, self.duration);
-            self.frame = None;
-            self.seeking = true;
-        }
-    }
 }
 
 fn time(seconds: f64) -> String {
@@ -180,6 +261,10 @@ fn time(seconds: f64) -> String {
 impl Render for Recordings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
+        if !self.focused {
+            window.focus(&self.focus, cx);
+            self.focused = true;
+        }
         if let Some(player) = &self.player {
             let state = player.snapshot();
             self.seconds = state.seconds;
@@ -187,12 +272,7 @@ impl Render for Recordings {
             self.playing = state.playing;
             self.status = state.status;
             self.seeking = state.seeking;
-            if let Some(frame) = state.frame {
-                self.frame = Some(frame);
-            }
-            if state.seeking {
-                self.frame = None;
-            }
+            self.frame = retained_frame(self.frame.take(), state.frame);
             if state.status != playback::Status::Failed
                 && (state.playing
                     || state.status == playback::Status::Loading
@@ -214,10 +294,11 @@ impl Render for Recordings {
                 width: 1280.0,
                 height: 800.0,
             });
+        // While the bar is held, show the dragged time, and the pointer there.
+        let shown = self.scrub.shown(self.seconds);
         let sample = self.timeline.sample(
-            self.seconds,
+            shown,
             self.show_pointer
-                && !self.seeking
                 && !self.error
                 && self.status != playback::Status::Failed
                 && self.frame.is_some(),
@@ -290,8 +371,28 @@ impl Render for Recordings {
                     })
                     .hover(move |s| s.bg(theme.control_hover))
                     .cursor_pointer()
-                    .text_size(px(12.))
-                    .child(video.name.clone())
+                    .tooltip({
+                        let name = video.name.clone();
+                        move |_, cx| super::shell::hint(name.clone(), cx)
+                    })
+                    .tooltip_show_delay(super::shell::HINT_DELAY)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .truncate()
+                            .child(video.label.clone()),
+                    )
+                    .when_some(video.started.clone(), |d, started| {
+                        d.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.secondary)
+                                .child(started),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(index, cx);
                         cx.notify();
@@ -311,27 +412,37 @@ impl Render for Recordings {
             &theme,
             move |cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    if let Some(player) = &this.player {
-                        if this.duration > 0.0 && this.seconds >= this.duration {
-                            player.seek(0.0, this.duration);
-                        }
-                        player.set_playing(!this.playing);
-                    }
+                    this.toggle_play();
                     cx.notify();
                 });
             },
         );
         let weak = cx.entity().downgrade();
-        let pointer_enabled = self.timeline.support == Support::Ready;
-        let pointer_title = tf!(
-            "Show Pointer: {}",
-            "显示指针：{}",
-            if self.show_pointer && pointer_enabled {
-                t("On", "开")
-            } else {
-                t("Off", "关")
-            }
+        let reveal = setup::button(
+            "reveal-recording",
+            t("Show in Finder", "在访达中显示").into(),
+            None,
+            &theme,
+            move |cx| {
+                let _ = weak.update(cx, |this, _| this.reveal_selected());
+            },
         );
+        let weak = cx.entity().downgrade();
+        let pointer_enabled = self.timeline.support == Support::Ready;
+        // A switch that can't switch says so instead of reading "Off".
+        let pointer_title = if pointer_enabled {
+            tf!(
+                "Show Pointer: {}",
+                "显示指针：{}",
+                if self.show_pointer {
+                    t("On", "开")
+                } else {
+                    t("Off", "关")
+                }
+            )
+        } else {
+            t("Pointer Unavailable", "无法显示指针").to_string()
+        };
         let toggle = setup::button(
             "recording-pointer",
             pointer_title.into(),
@@ -349,7 +460,7 @@ impl Render for Recordings {
         );
         let layout = self.seek_bounds.clone();
         let fraction = if self.duration > 0.0 {
-            (self.seconds / self.duration).clamp(0.0, 1.0) as f32
+            (shown / self.duration).clamp(0.0, 1.0) as f32
         } else {
             0.0
         };
@@ -364,24 +475,44 @@ impl Render for Recordings {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.dragging = true;
-                    this.seek_at(event.position.x);
+                    if let Some(fraction) = this.fraction_at(event.position.x) {
+                        let commands = this.scrub.press(fraction, this.duration, this.playing);
+                        this.apply(commands);
+                    }
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if this.dragging && event.pressed_button == Some(MouseButton::Left) {
-                    this.seek_at(event.position.x);
-                    cx.notify();
+                if !this.scrub.dragging() {
+                    return;
                 }
-                if event.pressed_button.is_none() {
-                    this.dragging = false;
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some(command) = this
+                        .fraction_at(event.position.x)
+                        .and_then(|f| this.scrub.drag(f, this.duration))
+                    {
+                        this.apply([command]);
+                    }
+                } else {
+                    // The button came up where no mouse-up reached us.
+                    let commands = this.scrub.release();
+                    this.apply(commands);
                 }
+                cx.notify();
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.dragging = false;
+                    let commands = this.scrub.release();
+                    this.apply(commands);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    let commands = this.scrub.release();
+                    this.apply(commands);
                     cx.notify();
                 }),
             )
@@ -434,6 +565,11 @@ impl Render for Recordings {
             }
         };
         div()
+            .id("recordings")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.key(event, window, cx)
+            }))
             .flex()
             .size_full()
             .bg(theme.card)
@@ -513,8 +649,9 @@ impl Render for Recordings {
                             .items_center()
                             .gap(px(12.))
                             .child(play)
-                            .child(format!("{} / {}", time(self.seconds), time(self.duration)))
+                            .child(format!("{} / {}", time(shown), time(self.duration)))
                             .child(div().flex_1())
+                            .when(self.selected.is_some(), |d| d.child(reveal))
                             .child(toggle),
                     )
                     .child(
@@ -522,7 +659,11 @@ impl Render for Recordings {
                             .text_size(px(11.))
                             .text_color(theme.secondary)
                             .child(pointer_note),
-                    ),
+                    )
+                    .child(div().text_size(px(11.)).text_color(theme.secondary).child(t(
+                        "Space plays or pauses. ← and → move 5 s. ↑ and ↓ pick a recording. ⌘W closes.",
+                        "空格播放或暂停。← → 跳 5 秒。↑ ↓ 切换录制。⌘W 关闭。",
+                    ))),
             )
     }
 }

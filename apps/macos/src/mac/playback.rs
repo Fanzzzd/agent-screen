@@ -1,7 +1,7 @@
 //! Local file library and AVPlayer bridge. No display or input dependencies.
 
 use agent_screen_model::recording_playback::{
-    MAX_BYTES, Support, Timeline, seek_time, sidecar_name,
+    MAX_BYTES, Support, Timeline, recording_name, seek_time, sidecar_name,
 };
 use core_foundation::base::TCFType;
 use core_video::pixel_buffer::{CVPixelBuffer, CVPixelBufferRef};
@@ -108,6 +108,8 @@ impl Drop for Player {
 pub struct Video {
     pub path: PathBuf,
     pub name: String,
+    pub label: String,
+    pub started: Option<String>,
 }
 
 pub fn library(folder: &Path) -> std::io::Result<Vec<Video>> {
@@ -120,15 +122,29 @@ pub fn library(folder: &Path) -> std::io::Result<Vec<Video>> {
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             sidecar_name(&name)?;
+            let parsed = recording_name(&name);
             Some(Video {
                 path: entry.path(),
                 name,
+                label: parsed.label,
+                started: parsed.started,
             })
         })
         .take(2000)
         .collect::<Vec<_>>();
-    files.sort_by(|a, b| b.name.cmp(&a.name));
+    sort_newest_first(&mut files);
     Ok(files)
+}
+
+/// Newest start time first; files without one go last, by name.
+fn sort_newest_first(files: &mut [Video]) {
+    files.sort_by(|a, b| {
+        b.started
+            .is_some()
+            .cmp(&a.started.is_some())
+            .then_with(|| b.started.cmp(&a.started))
+            .then_with(|| a.name.cmp(&b.name))
+    });
 }
 
 pub fn timeline(video: &Path) -> Timeline {
@@ -237,6 +253,33 @@ mod tests {
         std::fs::remove_file(&companion).unwrap();
         std::fs::create_dir(&companion).unwrap();
         assert_eq!(timeline(&video).support, Support::Invalid);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn library_lists_newest_recording_first_regardless_of_label() {
+        let folder = std::env::temp_dir().join(format!(
+            "agent-screen-playback-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        for name in [
+            "Zebra 2026-10-01 09-00-00.mp4",
+            "Alpha 2026-10-27 08-03-09.mp4",
+            "Middle 2026-10-15 12-00-00-3-17930.mp4",
+            "untitled.mp4",
+        ] {
+            std::fs::write(folder.join(name), b"synthetic").unwrap();
+        }
+        let files = library(&folder).unwrap();
+        let labels: Vec<&str> = files.iter().map(|v| v.label.as_str()).collect();
+        assert_eq!(labels, ["Alpha", "Middle", "Zebra", "untitled"]);
+        assert_eq!(files[0].started.as_deref(), Some("2026-10-27 08:03:09"));
+        assert_eq!(files[3].started, None);
         std::fs::remove_dir_all(folder).unwrap();
     }
 }

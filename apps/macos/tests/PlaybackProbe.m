@@ -62,6 +62,19 @@ int main(int argc, const char **argv) {
         beforeSeek = frames;
         double rapid = pump(player, 0.7, &frames, &duration, &status);
         int rapidFrames = frames - beforeSeek;
+        // A drag across the bar: a seek every 15 ms. Frames must keep
+        // arriving during the drag, then land exactly on release.
+        beforeSeek = frames;
+        for (int i = 0; i < 20; i++) {
+            ASPlaybackSeek(player, 0.2 + i * 0.07);
+            pump(player, 0.015, &frames, &duration, &status);
+        }
+        int dragFrames = frames - beforeSeek;
+        ASPlaybackSeek(player, 1.4);
+        beforeSeek = frames;
+        double settled = pump(player, 0.7, &frames, &duration, &status);
+        int settledFrames = frames - beforeSeek;
+        bool settledSeeking = lastSeeking;
         ASPlaybackSeek(player, expectedDuration);
         beforeSeek = frames;
         double end = pump(player, 0.7, &frames, &duration, &status);
@@ -73,9 +86,10 @@ int main(int argc, const char **argv) {
         bool passed = status == 1 && fabs(duration - expectedDuration) < 0.1 && frames > 0 && posterFrames > 0 && !badFrame && !lastPlaying && !lastSeeking &&
             running > 0.1 && fabs(still - paused) < 0.04 &&
             fabs(forward - 1.2) < 0.05 && fabs(backward - 0.2) < 0.05 &&
-            forwardFrames > 0 && backwardFrames > 0 && rapidFrames > 0 && fabs(rapid - 1.0) < 0.05 && endFrames > 0 && fabs(end - expectedDuration) < 0.05 && replay > 0.1 && replay < 0.5;
-        printf("status=%d duration=%.3f size=%zux%zu frames=%d poster_frames=%d playing_time=%.3f paused_delta=%.6f forward=%.3f forward_frames=%d backward=%.3f backward_frames=%d rapid=%.3f rapid_frames=%d end=%.3f end_frames=%d replay=%.3f result=%s\n",
-            status, duration, width, height, frames, posterFrames, running, still-paused, forward, forwardFrames, backward, backwardFrames, rapid, rapidFrames, end, endFrames, replay, passed ? "PASS" : "FAIL");
+            forwardFrames > 0 && backwardFrames > 0 && rapidFrames > 0 && fabs(rapid - 1.0) < 0.05 && endFrames > 0 && fabs(end - expectedDuration) < 0.05 && replay > 0.1 && replay < 0.5 &&
+            dragFrames >= 3 && settledFrames > 0 && !settledSeeking && fabs(settled - 1.4) < 0.05;
+        printf("status=%d duration=%.3f size=%zux%zu frames=%d poster_frames=%d playing_time=%.3f paused_delta=%.6f forward=%.3f forward_frames=%d backward=%.3f backward_frames=%d rapid=%.3f rapid_frames=%d drag_frames=%d settled=%.3f settled_frames=%d end=%.3f end_frames=%d replay=%.3f result=%s\n",
+            status, duration, width, height, frames, posterFrames, running, still-paused, forward, forwardFrames, backward, backwardFrames, rapid, rapidFrames, dragFrames, settled, settledFrames, end, endFrames, replay, passed ? "PASS" : "FAIL");
         ASPlaybackDestroy(player);
         return passed ? 0 : 1;
     }

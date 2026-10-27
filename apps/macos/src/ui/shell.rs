@@ -137,6 +137,10 @@ impl Render for Hint {
 /// How long the pointer rests on a control before its hint shows.
 pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// The repository's bug report form, which asks for the diagnostics.
+const REPORT_FORM: &str =
+    "https://github.com/Fanzzzd/agent-screen/issues/new?template=bug_report.yml";
+
 /// Hints over thumbnails wait longer, so scanning the tiles shows none.
 pub const TILE_HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
 
@@ -2000,14 +2004,18 @@ impl Shell {
             )),
         };
         menu.separator();
+        // What to do with displays and their videos, then the app itself.
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
-        menu.separator();
         menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
         menu.separator();
         // Agents, wallpaper, AeroSpace and the optional helpers.
         let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
         native::set_key_equivalent(&settings, ",", true, false, false, false);
+        menu.action(
+            t("Report a Problem…", "报告问题…"),
+            MenuAction::ReportProblem,
+        );
         menu.separator();
         let quit = menu.action(
             t("Quit Agent Screen", "退出 Agent Screen"),
@@ -2168,6 +2176,7 @@ impl Shell {
             MenuAction::CreateDisplay => self.create_display(cx),
             MenuAction::OpenSettings => self.open_setup(cx),
             MenuAction::OpenRecordings => self.open_recordings(cx),
+            MenuAction::ReportProblem => self.report_problem(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let pinned: Vec<String> = self
                     .conflicts
@@ -2455,6 +2464,46 @@ impl Shell {
     }
 
     // MARK: Permissions
+
+    /// The official bug report: with the user's consent, put this app's
+    /// read-only diagnostics on the clipboard and open the issue form. It
+    /// reads only build and connection metadata, starts nothing and uploads
+    /// nothing; the user pastes and submits it.
+    fn report_problem(&mut self, cx: &mut Context<Self>) {
+        let go = native::confirm(
+            t("Report a Problem", "报告问题"),
+            t(
+                "Agent Screen copies its diagnostics to the clipboard and opens the bug report form on GitHub. They name this build and whether the app answered, with no screens, recordings, window titles or account details. Paste them into the form. For a problem in an agent session, also ask that agent to run get_diagnostics.",
+                "Agent Screen 会把诊断信息复制到剪贴板，并在 GitHub 打开问题报告表单。诊断只包含当前构建和 app 是否响应，不含画面、录制、窗口标题或账号信息。请粘贴到表单里。如果问题出在某个 agent 会话里，也请让那个 agent 运行 get_diagnostics。",
+            ),
+            t("Copy Diagnostics and Open Form", "复制诊断并打开表单"),
+        );
+        if !go {
+            return;
+        }
+        cx.spawn(async move |_, cx| {
+            // A separate read-only connection to this app's own socket,
+            // off the main thread that answers it.
+            let report = cx
+                .background_executor()
+                .spawn(async move {
+                    agent_screen_mcp::diagnostics::cli(
+                        &["--json".into()],
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                })
+                .await;
+            let text = match report {
+                Ok(report) => report,
+                Err(error) => format!("diagnostics unavailable: {error}"),
+            };
+            native::copy(&text);
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg(REPORT_FORM)
+                .spawn();
+        })
+        .detach();
+    }
 
     fn open_recordings(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.recordings
