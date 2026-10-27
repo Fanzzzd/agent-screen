@@ -375,35 +375,12 @@ fn script_name() -> String {
 /// Count down from 3 and return once the count is over, the sign shrunk to
 /// its badge. A sign that can't start leaves the script to run without.
 fn start_sign(name: &str) {
-    if env_is("E2E_NO_SIGN", "1") {
+    if !open_sign() {
         return;
     }
-    let started = tool("overlay").and_then(|overlay| {
-        Ok(command(overlay)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?)
-    });
-    let mut child = match started {
-        Ok(child) => child,
-        Err(e) => {
-            println!("no sign: {e:#}");
-            return;
-        }
-    };
-    let Some(stdout) = child.stdout.take() else {
+    let Some(mut sign) = self::sign().take() else {
         return;
     };
-    let mut sign = Sign {
-        child,
-        acks: std::io::BufReader::new(stdout),
-        hidden: 0,
-    };
-    {
-        use std::io::BufRead;
-        let mut ready = String::new();
-        let _ = sign.acks.read_line(&mut ready);
-    }
     if HANDS_OFF.contains(&name) {
         sign.say(&format!(
             "count 3 {name}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
@@ -416,6 +393,75 @@ fn start_sign(name: &str) {
     sleep_ms(3000);
     sign.say(&format!("badge {name}"));
     *self::sign() = Some(sign);
+    watch_for_you();
+}
+
+/// Start the sign's process, once: the wait for the user shows on it too.
+/// False when there is none.
+fn open_sign() -> bool {
+    if env_is("E2E_NO_SIGN", "1") {
+        return false;
+    }
+    if sign().is_some() {
+        return true;
+    }
+    let started = tool("overlay").and_then(|overlay| {
+        Ok(command(overlay)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?)
+    });
+    let mut child = match started {
+        Ok(child) => child,
+        Err(e) => {
+            println!("no sign: {e:#}");
+            return false;
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return false;
+    };
+    let mut sign = Sign {
+        child,
+        acks: std::io::BufReader::new(stdout),
+        hidden: 0,
+    };
+    {
+        use std::io::BufRead;
+        let mut ready = String::new();
+        let _ = sign.acks.read_line(&mut ready);
+    }
+    sign.say(&format!("badge {}", script_name()));
+    *self::sign() = Some(sign);
+    true
+}
+
+/// When the script last sent real pointer or key input itself, in ms since
+/// 1970: the watch for the user's input leaves it out.
+static OWN_INPUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the user first used the Mac during the run, in seconds into it.
+static YOU_ACTED: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Watch for the user's mouse and keyboard while the script runs. A run
+/// they touched may fail for that alone: the sign and the result say so.
+fn watch_for_you() {
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        loop {
+            sleep_ms(500);
+            let own = OWN_INPUT.load(Ordering::SeqCst) as u128;
+            let ours = own > 0 && now_ms().saturating_sub(own) < 1500;
+            if idle_seconds() == 0 && !ours && started.elapsed() > Duration::from_secs(1) {
+                let at = started.elapsed().as_secs();
+                *YOU_ACTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(at);
+                println!(
+                    "     you used the mouse or keyboard {at} s into the run; results may be off"
+                );
+                sign_step("you used the Mac: results may be off / 检测到你的操作，结果可能不准");
+                return;
+            }
+        }
+    });
 }
 
 /// What the script does now, on the sign's badge.
@@ -491,7 +537,10 @@ impl Drop for SignHidden {
 /// the sign.
 pub fn hid(args: &[&str]) -> Result<String> {
     let _hidden = (args.first() == Some(&"hover") && args.len() > 3).then(hide_sign);
-    sh(tool("hid")?, args)
+    OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
+    let result = sh(tool("hid")?, args);
+    OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
+    result
 }
 
 pub fn fixture(name: &str) -> PathBuf {
@@ -654,6 +703,11 @@ pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
         }
     }
     finish_sighting();
+    if let Some(at) = *YOU_ACTED.lock().unwrap_or_else(|e| e.into_inner()) {
+        println!(
+            "note: you used the mouse or keyboard {at} s into the run; a failure may come from that"
+        );
+    }
     let n = failed();
     if n > 0 {
         println!("{n} failed");
@@ -841,16 +895,41 @@ pub fn on_screen(image: Rect, (width, height): (f64, f64), x: f64, y: f64) -> (f
 
 // MARK: Waiting for the user
 
-fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
+/// Wait for `ready`, which says what it still waits for. The sign shows
+/// that from the start, so the user knows the script will begin as soon as
+/// they stop, and can stop now rather than leave.
+fn wait_until(limit: Duration, mut ready: impl FnMut() -> Option<&'static str>) -> bool {
     let start = Instant::now();
+    let mut shown = None;
     while start.elapsed() < limit {
-        if ready() {
+        let Some(waiting) = ready() else {
             return true;
+        };
+        if shown != Some(waiting) {
+            println!("waiting: {waiting}");
+            if open_sign() {
+                sign_step(&format!("waiting / 等待中: {waiting}"));
+            }
+            shown = Some(waiting);
         }
-        sleep_ms(5000);
+        sleep_ms(500);
     }
     false
 }
+
+/// Seconds without mouse or keyboard input before a script starts:
+/// E2E_IDLE_SECS, 3 by default.
+fn quiet_seconds() -> u64 {
+    std::env::var("E2E_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
+
+const YOU: &str = "starts 3 s after you stop using the mouse and keyboard / 停手 3 秒后自动开始";
+const LOCK: &str = "the screen is locked / 屏幕已锁定";
+const DISPLAYS: &str =
+    "close your Agent Displays first; restarting the app ends them / 请先关闭 Agent Display";
 
 fn idle_seconds() -> u64 {
     probe(&["idle"])
@@ -859,19 +938,25 @@ fn idle_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-/// Wait until the user has been idle for 45 s, has no Agent Display open
-/// (restarting the app ends every display) and the screen is unlocked.
-/// E2E_NOW=1 skips the wait.
+/// Wait until the user has stopped for a moment (`quiet_seconds`), has no
+/// Agent Display open (restarting the app ends every display) and the
+/// screen is unlocked. E2E_NOW=1 skips the wait.
 pub fn wait_for_quiet() -> bool {
     if env_is("E2E_NOW", "1") {
         return true;
     }
     wait_until(Duration::from_secs(3600), || {
-        idle_seconds() >= 45 && probe(&["displays"]).is_ok_and(|s| s == "0") && !locked()
+        if locked() {
+            Some(LOCK)
+        } else if !probe(&["displays"]).is_ok_and(|s| s == "0") {
+            Some(DISPLAYS)
+        } else {
+            (idle_seconds() < quiet_seconds()).then_some(YOU)
+        }
     })
 }
 
-/// Wait until the user has been idle for 45 s with the screen unlocked.
+/// Wait until the user has stopped for a moment with the screen unlocked.
 /// Tests beside the user's app that open windows need it: macOS shows a new
 /// window on the user's screen for a moment before Agent Screen moves it.
 pub fn wait_for_idle() -> bool {
@@ -879,13 +964,17 @@ pub fn wait_for_idle() -> bool {
         return !locked();
     }
     wait_until(Duration::from_secs(3600), || {
-        idle_seconds() >= 45 && !locked()
+        if locked() {
+            Some(LOCK)
+        } else {
+            (idle_seconds() < quiet_seconds()).then_some(YOU)
+        }
     })
 }
 
 /// Wait until the screen is unlocked.
 pub fn wait_for_unlocked() -> bool {
-    wait_until(Duration::from_secs(3600), || !locked())
+    wait_until(Duration::from_secs(3600), || locked().then_some(LOCK))
 }
 
 /// What the tests must leave as they found it.
