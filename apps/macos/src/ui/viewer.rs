@@ -622,6 +622,13 @@ impl Viewer {
         outline: Option<(Hsla, f32)>,
         theme: &Theme,
     ) -> impl IntoElement {
+        let frame_pixels = crate::mac::click_diagnostics::enabled()
+            .then(|| {
+                frame
+                    .as_ref()
+                    .map(|f| [f.get_width_of_plane(0), f.get_height_of_plane(0)])
+            })
+            .flatten();
         let picture = match frame {
             Some(frame) => surface(frame)
                 .object_fit(ObjectFit::Contain)
@@ -647,7 +654,7 @@ impl Viewer {
                 });
                 let rect = [c.origin.x, c.origin.y, c.size.width, c.size.height]
                     .map(|v| f32::from(v) as f64);
-                viewer_input::layout(Some(rect), blocked);
+                viewer_input::layout(Some(rect), blocked, frame_pixels);
             },
         )
         .absolute()

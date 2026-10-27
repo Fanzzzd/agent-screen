@@ -7,6 +7,7 @@
 //! sleeps, and window list lookups stay off the main thread.
 
 use super::cg;
+use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, Phase};
 use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
@@ -187,12 +188,23 @@ impl Forwarder {
     // NSEvent's own modifier flags, whose bits match CGEventFlags, so Caps
     // Lock and the left/right device bits survive.
 
-    pub fn mouse_down(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
+    pub fn mouse_down(
+        &self,
+        at: (f64, f64),
+        button: Button,
+        clicks: i64,
+        flags: CGEventFlags,
+        trace: Option<Click>,
+    ) {
         self.send(move |w| {
-            if !w.grab(at, button) {
-                let target = w.mouse_down(at, button, clicks, flags);
-                w.pressed = target.and_then(|t| held(t, at));
-            }
+            diagnostics::within(trace, Phase::Down, || {
+                let grabbed = w.grab(at, button);
+                diagnostics::emit(|| ClickEvent::Grab { held: grabbed });
+                if !grabbed {
+                    let target = w.mouse_down(at, button, clicks, flags);
+                    w.pressed = target.and_then(|t| held(t, at));
+                }
+            })
         });
     }
 
@@ -208,23 +220,32 @@ impl Forwarder {
         });
     }
 
-    pub fn mouse_up(&self, at: (f64, f64), button: Button, clicks: i64, flags: CGEventFlags) {
-        self.send(move |w| match w.grab.take() {
-            Some(grab) if std::mem::take(&mut w.grab_moved) => {
-                grab.drag_to(at);
-            }
-            // Pressed and released in place: a click on the title bar,
-            // such as a double click that zooms the window.
-            Some(grab) => {
-                w.mouse_down(grab.from(), button, clicks, flags);
-                w.mouse_up(grab.from(), button, clicks, flags);
-            }
-            None => {
-                w.mouse_up(at, button, clicks, flags);
-                if let Some(press) = w.pressed.take() {
-                    keep_on_display(press, at);
+    pub fn mouse_up(
+        &self,
+        at: (f64, f64),
+        button: Button,
+        clicks: i64,
+        flags: CGEventFlags,
+        trace: Option<Click>,
+    ) {
+        self.send(move |w| {
+            diagnostics::within(trace, Phase::Up, || match w.grab.take() {
+                Some(grab) if std::mem::take(&mut w.grab_moved) => {
+                    grab.drag_to(at);
                 }
-            }
+                // Pressed and released in place: a click on the title bar,
+                // such as a double click that zooms the window.
+                Some(grab) => {
+                    w.mouse_down(grab.from(), button, clicks, flags);
+                    w.mouse_up(grab.from(), button, clicks, flags);
+                }
+                None => {
+                    w.mouse_up(at, button, clicks, flags);
+                    if let Some(press) = w.pressed.take() {
+                        keep_on_display(press, at);
+                    }
+                }
+            })
         });
     }
 
@@ -737,6 +758,15 @@ struct Hit {
     layer: i64,
 }
 
+fn record_hit(hit: Option<Hit>) {
+    diagnostics::emit(|| ClickEvent::Hit {
+        target: hit.map(|h| h.target),
+        host: hit.map(|h| h.host),
+        layer: hit.map(|h| h.layer),
+        bounds: hit.map(|h| h.bounds),
+    });
+}
+
 impl Worker {
     fn new() -> Self {
         Worker {
@@ -784,6 +814,10 @@ impl Worker {
     /// as in a drag by the title bar.
     fn focus_waking(&mut self, target: WindowTarget, wake: bool) {
         let before = super::ax::focused_window_id(target.pid);
+        diagnostics::emit(|| ClickEvent::Focus {
+            target,
+            ax_focused_window: before,
+        });
         if let Some(other) = before.filter(|&id| id != target.window_id) {
             let other = WindowTarget {
                 pid: target.pid,
@@ -823,7 +857,9 @@ impl Worker {
     fn send_focus(&mut self, target: WindowTarget) {
         // Let AppKit in the target update its key-window routing before
         // events arrive (cua uses the same 50 ms settle).
-        if unsafe { SSFocusWithoutRaise(target.pid, target.window_id) } {
+        let accepted = unsafe { SSFocusWithoutRaise(target.pid, target.window_id) };
+        diagnostics::emit(|| ClickEvent::FocusRecord { target, accepted });
+        if accepted {
             thread::sleep(Duration::from_millis(50));
         }
         self.focused = Some(target);
@@ -881,7 +917,9 @@ impl Worker {
         // A button an agent left held is released before anyone presses
         // again, such as the user taking over.
         self.release_agent_button();
-        let Some(hit) = self.hit(at, true).or_else(|| self.edge_hit(at)) else {
+        let hit = self.hit(at, true).or_else(|| self.edge_hit(at));
+        record_hit(hit);
+        let Some(hit) = hit else {
             log::info!("input: no window at {at:?}");
             return None;
         };
@@ -938,7 +976,9 @@ impl Worker {
             return false;
         }
         self.release_agent_button();
-        let Some(hit) = self.hit(at, true) else {
+        let hit = self.hit(at, true);
+        record_hit(hit);
+        let Some(hit) = hit else {
             return false;
         };
         let Some(area) = cg::active_displays()
@@ -1289,7 +1329,24 @@ impl Worker {
                 SSEventSetIntegerField(&event, 58, group); // click group: coalesces one gesture
             }
         }
-        stamp_routing(&event, at, target);
+        let (bounds, local) = stamp_routing(&event, at, target);
+        if matches!(
+            kind,
+            CGEventType::LeftMouseDown
+                | CGEventType::LeftMouseUp
+                | CGEventType::RightMouseDown
+                | CGEventType::RightMouseUp
+                | CGEventType::OtherMouseDown
+                | CGEventType::OtherMouseUp
+        ) {
+            diagnostics::emit(|| ClickEvent::Stamp {
+                event_type: kind.0,
+                target,
+                global: at,
+                bounds,
+                local,
+            });
+        }
         // One route only: posting through SkyLight and the public API both
         // delivers every event twice to AppKit targets.
         deliver(&event, target.pid, false);
@@ -1334,19 +1391,40 @@ impl Worker {
 
 /// Fields WindowServer and Chromium use to route an event to a window that
 /// is neither key nor under the real cursor.
-fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
+fn stamp_routing(
+    event: &CGEvent,
+    at: (f64, f64),
+    target: WindowTarget,
+) -> (Option<Rect>, (f64, f64)) {
+    stamp_routing_using(
+        at,
+        target,
+        |_| cg::routing_window_bounds(target),
+        |field, value| unsafe {
+            SSEventSetIntegerField(event, field, value);
+        },
+        |local| unsafe {
+            SSEventSetWindowLocation(event, CGPoint::new(local.0, local.1));
+        },
+    )
+}
+
+fn stamp_routing_using(
+    at: (f64, f64),
+    target: WindowTarget,
+    lookup: impl FnOnce(u32) -> Option<Rect>,
+    mut field: impl FnMut(u32, i64),
+    location: impl FnOnce((f64, f64)),
+) -> (Option<Rect>, (f64, f64)) {
+    let bounds = lookup(target.window_id);
+    let local = diagnostics::local_point(at, bounds);
     let window = target.window_id as i64;
-    // The point in the window, from its top-left corner. AppKit takes it as
-    // is for an event with a time, where it would work it out for one
-    // without.
-    let origin = cg::window_bounds(target.window_id).map_or((0.0, 0.0), |b| (b.x, b.y));
-    unsafe {
-        SSEventSetIntegerField(event, 40, target.pid as i64); // target pid
-        SSEventSetIntegerField(event, 51, window); // window number
-        SSEventSetIntegerField(event, 91, window); // window under pointer
-        SSEventSetIntegerField(event, 92, window); // window under pointer that can handle it
-        SSEventSetWindowLocation(event, CGPoint::new(at.0 - origin.0, at.1 - origin.1));
-    }
+    field(40, target.pid as i64); // target pid
+    field(51, window); // window number
+    field(91, window); // window under pointer
+    field(92, window); // window under pointer that can handle it
+    location(local);
+    (bounds, local)
 }
 
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
@@ -1388,7 +1466,16 @@ fn wheel_steps(delta: f64) -> i32 {
 fn hits() -> Vec<Hit> {
     let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
     let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
-    let mut list = cg::on_screen_windows()
+    hit_list(cg::on_screen_windows(), cg::remote_panels(), menu, status)
+}
+
+fn hit_list(
+    on_screen: Vec<cg::WindowInfo>,
+    panels: Vec<cg::WindowInfo>,
+    menu: i64,
+    status: i64,
+) -> Vec<Hit> {
+    let mut list = on_screen
         .into_iter()
         .filter(|w| {
             // From 1000 up are overlays that take no clicks, such as the
@@ -1409,7 +1496,6 @@ fn hits() -> Vec<Hit> {
         .collect::<Vec<_>>();
     // An app's file panel is drawn by another process, behind an empty
     // window of the app's: input sent to the app never reaches it.
-    let panels = cg::remote_panels();
     for hit in &mut list {
         let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
         if let Some(panel) = panels.iter().find(|p| {
@@ -1514,5 +1600,259 @@ mod typing_tests {
     #[test]
     fn a_windows_line_ending_is_one_return() {
         assert_eq!(super::typed_text("a\r\nb\nc\rd"), "a\nb\nc\rd");
+    }
+}
+
+#[cfg(test)]
+mod click_diagnostics_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn real_hit_observer_records_only_routing_metadata() {
+        let target = WindowTarget {
+            pid: 12,
+            window_id: 34,
+        };
+        let hit = Hit {
+            target,
+            host: target,
+            bounds: Rect::new(4680.0, -1981.0, 497.0, 182.0),
+            layer: 8,
+        };
+        let rows = diagnostics::tests::capture(|| {
+            diagnostics::within(Click::when(false), Phase::Down, || record_hit(Some(hit)));
+            diagnostics::within(Click::when(true), Phase::Down, || record_hit(Some(hit)));
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["target"], json!({"pid": 12, "window_id": 34}));
+        assert_eq!(rows[0]["layer"], 8);
+        assert_eq!(rows[0]["bounds"], json!([4680.0, -1981.0, 497.0, 182.0]));
+        assert_eq!(rows[0].as_object().unwrap().len(), 8);
+        for key in ["text", "value", "title", "owner_name", "keys", "screenshot"] {
+            assert!(rows[0].get(key).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_panel_tests {
+    use super::*;
+    use objc2_core_graphics::CGWindowListOption;
+    use serde_json::Value;
+
+    #[test]
+    fn captured_remote_panel_keeps_window_local_coordinates() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/remote-panel-click.json"))
+                .unwrap();
+        let target = |name: &str| WindowTarget {
+            pid: fixture[name]["pid"].as_i64().unwrap() as i32,
+            window_id: fixture[name]["window_id"].as_u64().unwrap() as u32,
+        };
+        let b = fixture["bounds"].as_array().unwrap();
+        let bounds = Rect::new(
+            b[0].as_f64().unwrap(),
+            b[1].as_f64().unwrap(),
+            b[2].as_f64().unwrap(),
+            b[3].as_f64().unwrap(),
+        );
+        let at = (
+            fixture["global"][0].as_f64().unwrap(),
+            fixture["global"][1].as_f64().unwrap(),
+        );
+        let window = |target| cg::WindowInfo {
+            target,
+            owner_name: "Fixture".into(),
+            title: String::new(),
+            bounds,
+            layer: 0,
+            alpha: 1.0,
+        };
+        let remote = window(target("remote"));
+        let hits = hit_list(vec![window(target("host"))], vec![remote.clone()], 24, 25);
+        let hit = hits.into_iter().find(|h| h.bounds.contains(at)).unwrap();
+        assert_eq!(hit.host, target("host"));
+        assert_eq!(hit.target, target("remote"));
+        let mut fields = Vec::new();
+        let mut written_local = None;
+        let (resolved, local) = stamp_routing_using(
+            at,
+            hit.target,
+            |id| {
+                cg::window_bounds_using(id, Some(hit.target.pid), |option, relative| {
+                    if option == CGWindowListOption::OptionAll {
+                        vec![remote.clone()]
+                    } else {
+                        assert_eq!(option, CGWindowListOption::OptionIncludingWindow);
+                        assert_eq!(relative, remote.target.window_id);
+                        assert!(fixture["targeted_lookup_bounds"].is_null());
+                        Vec::new()
+                    }
+                })
+            },
+            |field, value| fields.push((field, value)),
+            |local| written_local = Some(local),
+        );
+        assert_eq!(fields, [(40, 6587), (51, 8440), (91, 8440), (92, 8440)]);
+        assert_eq!(written_local, Some(local));
+        assert_eq!(
+            resolved,
+            Some(bounds),
+            "a matched remote panel must retain its geometry"
+        );
+        let expected = &fixture["expected_local"];
+        assert!((local.0 - expected[0].as_f64().unwrap()).abs() < 0.000001);
+        assert!((local.1 - expected[1].as_f64().unwrap()).abs() < 0.000001);
+    }
+}
+
+#[cfg(test)]
+mod routing_bounds_tests {
+    use super::*;
+    use objc2_core_graphics::CGWindowListOption;
+
+    fn window(target: WindowTarget, bounds: Rect) -> cg::WindowInfo {
+        cg::WindowInfo {
+            target,
+            bounds,
+            layer: 0,
+            alpha: 1.0,
+            owner_name: "Fixture".into(),
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn ordinary_hit_and_mismatched_remote_keep_their_original_target() {
+        let host = window(
+            WindowTarget {
+                pid: 12,
+                window_id: 34,
+            },
+            Rect::new(4000.0, -2000.0, 497.0, 182.0),
+        );
+        let mut remote = window(
+            WindowTarget {
+                pid: 13,
+                window_id: 35,
+            },
+            host.bounds,
+        );
+        remote.bounds.width += 2.0;
+        for panels in [Vec::new(), vec![remote]] {
+            // An ordinary/non-XPC process is not in the remote-panel list.
+            let list = hit_list(vec![host.clone()], panels, 24, 25);
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].target, host.target);
+            assert_eq!(list[0].bounds, host.bounds);
+        }
+    }
+
+    #[test]
+    fn targeted_frame_wins_and_does_not_scan_the_full_list() {
+        let target = WindowTarget {
+            pid: 13,
+            window_id: 35,
+        };
+        let expected = Rect::new(4000.0, -2000.0, 497.0, 182.0);
+        let mut calls = 0;
+        let got = cg::window_bounds_using(target.window_id, Some(target.pid), |option, id| {
+            calls += 1;
+            assert_eq!(option, CGWindowListOption::OptionIncludingWindow);
+            assert_eq!(id, target.window_id);
+            vec![window(target, expected)]
+        });
+        assert_eq!(got, Some(expected));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn moved_remote_uses_its_current_frame_not_the_host_or_an_old_frame() {
+        let target = WindowTarget {
+            pid: 13,
+            window_id: 35,
+        };
+        let moved = Rect::new(4200.0, -1800.0, 497.0, 182.0);
+        let host = window(
+            WindowTarget {
+                pid: 12,
+                window_id: 34,
+            },
+            Rect::new(4000.0, -2000.0, 497.0, 182.0),
+        );
+        let (bounds, local) = stamp_routing_using(
+            (4645.0, -1639.0),
+            target,
+            |id| {
+                cg::window_bounds_using(id, Some(target.pid), |option, relative| {
+                    if option == CGWindowListOption::OptionIncludingWindow {
+                        Vec::new()
+                    } else {
+                        assert_eq!(relative, 0);
+                        vec![host.clone(), window(target, moved)]
+                    }
+                })
+            },
+            |_, _| {},
+            |_| {},
+        );
+        assert_eq!(bounds, Some(moved));
+        assert_eq!(local, (445.0, 161.0));
+    }
+
+    #[test]
+    fn missing_remote_does_not_borrow_a_host_or_reused_window_id() {
+        let target = WindowTarget {
+            pid: 13,
+            window_id: 35,
+        };
+        let other = window(
+            WindowTarget {
+                pid: 14,
+                window_id: 35,
+            },
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+        );
+        let host = window(
+            WindowTarget {
+                pid: 12,
+                window_id: 34,
+            },
+            Rect::new(4000.0, -2000.0, 497.0, 182.0),
+        );
+        let at = (4445.0, -1839.0);
+        let (bounds, local) = stamp_routing_using(
+            at,
+            target,
+            |id| {
+                cg::window_bounds_using(id, Some(target.pid), |option, _| {
+                    if option == CGWindowListOption::OptionIncludingWindow {
+                        vec![other.clone()]
+                    } else {
+                        vec![host.clone(), other.clone()]
+                    }
+                })
+            },
+            |_, _| {},
+            |_| {},
+        );
+        assert_eq!(bounds, None);
+        // This is the pre-existing missing-window behavior, not a claim
+        // that sending global-as-local to a vanished target is safe.
+        assert_eq!(local, at);
+    }
+
+    #[test]
+    fn ordinary_bounds_queries_do_not_scan_offscreen_windows() {
+        let mut queries = Vec::new();
+        assert_eq!(
+            cg::window_bounds_using(8440, None, |option, relative| {
+                queries.push((option, relative));
+                Vec::new()
+            }),
+            None
+        );
+        assert_eq!(queries, [(CGWindowListOption::OptionIncludingWindow, 8440)]);
     }
 }

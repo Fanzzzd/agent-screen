@@ -14,3 +14,5 @@ pub mod numbers;
 pub mod recording_playback;
 pub mod tree;
 pub mod typing;
+
+pub mod diagnostics;

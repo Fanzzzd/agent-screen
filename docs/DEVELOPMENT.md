@@ -42,6 +42,120 @@ Development switches for the Rust app:
 - `AGENTSCREEN_DEBUG=1` enables the debug control methods in a release build, for measuring.
 - `AGENTSCREEN_APPEARANCE=light` or `dark` forces the app's appearance in debug builds, for screenshots.
 
+For build identities, stale MCP clients and evidence to attach to a bug, follow [Reporting bugs](REPORTING_BUGS.md). The build embeds a full source revision when git is available, dirty state, Cargo profile and target. Cargo watches the worktree gitfile, git HEAD/index/refs, tracked files and source directories. Source archives have unknown git metadata. A dirty build never counts as a verified metadata match.
+## Viewer click diagnostics
+
+`AGENTSCREEN_VIEWER_CLICK_DIAGNOSTICS=1` enables metadata for mouse down/up
+through the Viewer. It is off by default, including in debug builds. The
+first stderr line says that it is enabled. The release Logger allows only
+this diagnostic target at Info; other release log levels stay unchanged.
+The switch is read once at startup. Setting it in a shell cannot enable it
+in an app that is already running.
+
+Each JSON record has a `click` id, `phase` (`down` or `up`) and `unix_ms`.
+The id follows the click from the Viewer to its input worker. It is unique
+within that app run. Stages record these fields:
+
+- `mapping`: the Viewer window frame, content-view height, aspect-fit image
+  rect, frame size in pixels, display bounds, event point and mapped global
+  point. `window_frame` and `point` use AppKit's bottom-left coordinates;
+  `content` uses top-left window points. Display bounds and `global` use
+  top-left global CG points. A point outside the image still records
+  `accepted=false`, with `global=null` and `display_bounds=null`. Rejection
+  keeps the existing behavior and does not query display bounds.
+- `hit`: the chosen CG target and host PID/window id, layer and bounds.
+  A left press can have two hit records: the title-bar grab check and the
+  actual press each use their existing fresh query. No extra query is added.
+- `focus`: the result of the existing `AXFocusedWindow` query as a window id.
+  `null` means the query or window-id lookup was unavailable. It accepts
+  sheets as well as windows. `focus_record` records whether SkyLight accepted
+  the existing focus handshake.
+- `grab`: whether the press held a window by its title bar.
+- `stamp`: the down/up event type, target, global point, target bounds and
+  window-local point written into the event. Wake clicks generated during
+  the job also appear. `phase` identifies the Viewer job, while `event_type`
+  identifies the generated event. Missing bounds retain the existing
+  zero-origin fallback.
+
+These records contain no text, AX values, titles, key contents or screenshots.
+There is no new tap or global input monitor. Moves, drags, scrolls and keys
+have no diagnostic scope. With the switch off, the diagnostic closures do
+not run and add no AX or CG queries. Enabled logging adds stderr I/O and
+can affect timing. A stamp records preparation for posting; it does not
+prove that the target app received the event or executed a button action.
+This diagnostic does not fix or reproduce a button action failure.
+
+To retain stderr, start a build containing this change directly from a
+terminal. Finder launches normally discard stderr. For a release build
+beside the installed app, use a separate instance:
+
+```sh
+# Build only. This does not install or start the app.
+apps/macos/scripts/bundle.sh release
+mkdir -p "$HOME/Library/Logs/Agent Screen"
+umask 077
+AGENTSCREEN_INSTANCE=e2e AGENTSCREEN_VIEWER_CLICK_DIAGNOSTICS=1 \
+  "target/Agent Screen.app/Contents/MacOS/AgentScreen" \
+  2> "$HOME/Library/Logs/Agent Screen/viewer-click-diagnostics.log"
+```
+
+Do not run a second process for an instance that is already running. The
+second process exits without enabling diagnostics in the first one. For a
+production capture, first ask the user before quitting the installed app
+and starting the new build with the switch and stderr redirection. Quitting
+ends its existing Agent Displays. Replacing or restarting the installed app
+requires separate user confirmation. Remove the switch at the next launch
+to disable diagnostics. stderr also contains ordinary warnings, so review
+the file before sharing it. The log file has no automatic rotation.
+
+The offline checks do not create displays, post events or read live AX:
+
+```sh
+cargo test -p agent-screen --bin AgentScreen click_diagnostics
+cargo test -p agent-screen --bin AgentScreen logger_tests
+```
+
+They exercise the real mapping arithmetic, window-local coordinate helper,
+hit observer, scoped emission and Logger filter with metadata fixtures.
+They do not exercise Xcode or prove that an app runs a button's action.
+
+### Remote-panel coordinate replay
+
+A visible app window can host a panel drawn by another process. Input goes
+to the remote window. macOS can omit that off-screen remote window from
+`OptionIncludingWindow` while `OptionAll` still reports its geometry. The
+input stamper first uses the targeted query. When it misses, it reads the
+full list and matches both the target PID and window id. It uses the
+current remote frame, never the host frame or a cached frame. Ordinary
+`window_bounds` callers retain their targeted-only lookup.
+
+Each stamp with a missing targeted result adds one full-list query. The
+fallback filters descriptions to the target process. Runtime cost has not
+been measured. If both queries miss, the stamper still has its old
+zero-origin behavior. This change does not make that vanished-target path
+safe; refusing such input needs a separate change that handles held-button
+release too.
+
+The metadata fixture in `apps/macos/tests/fixtures/remote-panel-click.json`
+replays a captured Viewer hit and stamp without reading live windows or
+posting input:
+
+```sh
+cargo test -p agent-screen --bin AgentScreen captured_remote_panel_keeps_window_local_coordinates
+cargo test -p agent-screen --bin AgentScreen routing_bounds
+```
+
+The first test went red with missing bounds before the fallback, then green
+with window-local coordinates. The tests use the actual hit-list matcher,
+lookup resolver and stamping writer seam. Other cases cover current frames
+after movement, PID mismatch, disappearance and unchanged ordinary routes.
+They do not verify private CGEvent setters or an AppKit button action.
+
+Live validation needs an owned Host/Remote fixture with a verified canonical
+hardware claim before the Host's first show. Creating a window at virtual
+display coordinates alone does not prevent AeroSpace reclaiming it. No live
+fixture is included or run until that pre-show containment is available.
+
 ## How it works
 
 - **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks it diagonally off the top-right corner of your physical screens so the real cursor rarely wanders onto it. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.
@@ -52,7 +166,8 @@ Development switches for the Rust app:
 ## Test
 
 ```sh
-cargo test                    # unit tests
+cargo test                    # unit and isolated integration tests
+cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated endpoint; no app, display or input
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup

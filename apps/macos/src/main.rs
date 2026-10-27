@@ -25,12 +25,12 @@ struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level()
-            <= if cfg!(debug_assertions) {
-                log::Level::Debug
-            } else {
-                log::Level::Warn
-            }
+        Self::allows(
+            metadata.level(),
+            metadata.target(),
+            cfg!(debug_assertions),
+            mac::click_diagnostics::enabled(),
+        )
     }
 
     fn log(&self, record: &log::Record) {
@@ -46,6 +46,20 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+impl Logger {
+    fn allows(level: log::Level, target: &str, debug: bool, diagnostics: bool) -> bool {
+        if target == mac::click_diagnostics::TARGET {
+            return diagnostics && level <= log::Level::Info;
+        }
+        level
+            <= if debug {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            }
+    }
+}
+
 const USAGE: &str = "Agent Screen gives AI agents their own virtual displays.
 
 Usage:
@@ -56,7 +70,10 @@ Usage:
   AgentScreen colorsync setup | remove | reclaim
                           set it up or remove it (asks for an administrator password),
                           or run it now
-  AgentScreen --version     print the version
+  AgentScreen diagnostics [--json]
+                          report this CLI and the responding app without starting it
+                          for the failing MCP process, use get_diagnostics in that session
+  AgentScreen --version     print compiled package/build metadata (older-build fallback)
 ";
 
 /// `AgentScreen colorsync [setup|remove|reclaim]`: the helper that keeps
@@ -121,7 +138,23 @@ fn main() {
             return;
         }
         Some("--version" | "-V") => {
-            println!("Agent Screen {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "{}",
+                agent_screen_mcp::diagnostics::version(env!("CARGO_PKG_VERSION"))
+            );
+            return;
+        }
+        Some("diagnostics") => {
+            match agent_screen_mcp::diagnostics::cli(
+                &std::env::args().skip(2).collect::<Vec<_>>(),
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                Ok(report) => print!("{report}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            }
             return;
         }
         // --setup: reopened from the setup window, which shows again.
@@ -166,6 +199,10 @@ fn main() {
     }
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
+    if mac::click_diagnostics::enabled() {
+        log::info!(target: mac::click_diagnostics::TARGET,
+            "Viewer click diagnostics enabled. Metadata only; no text, titles, keys or screenshots. Stamps do not confirm that the app executed an action.");
+    }
     // A panic in an AppKit callback can't unwind and aborts the app, and
     // the crash report keeps no message: the log keeps it, and where.
     let report = std::panic::take_hook();
@@ -243,4 +280,50 @@ fn main() {
             Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
         }
     });
+}
+
+#[cfg(test)]
+mod cli_tests {
+    #[test]
+    fn help_names_the_supported_diagnostics_paths() {
+        assert!(super::USAGE.contains("AgentScreen diagnostics [--json]"));
+        assert!(super::USAGE.contains("get_diagnostics"));
+        assert!(super::USAGE.contains("AgentScreen --version"));
+        let help =
+            agent_screen_mcp::diagnostics::cli(&["--help".into()], env!("CARGO_PKG_VERSION"))
+                .unwrap();
+        assert!(help.contains("REPORTING_BUGS.md"));
+    }
+}
+
+#[cfg(test)]
+mod logger_tests {
+    use super::*;
+
+    #[test]
+    fn viewer_diagnostics_are_explicit_and_do_not_enable_other_release_logs() {
+        use log::Level::{Debug, Info, Warn};
+        let target = mac::click_diagnostics::TARGET;
+        assert!(!Logger::allows(Info, target, false, false));
+        assert!(!Logger::allows(Info, target, true, false));
+        assert!(Logger::allows(Info, target, false, true));
+        assert!(!Logger::allows(
+            Debug,
+            "AgentScreen::mac::input",
+            false,
+            true
+        ));
+        assert!(!Logger::allows(
+            Info,
+            "AgentScreen::mac::input",
+            false,
+            true
+        ));
+        assert!(Logger::allows(
+            Warn,
+            "AgentScreen::mac::input",
+            false,
+            false
+        ));
+    }
 }
