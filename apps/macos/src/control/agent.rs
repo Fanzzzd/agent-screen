@@ -381,11 +381,10 @@ async fn handle_one(
                     HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
                     return reply(json!({}));
                 }
-                Some(Hold::Refused(app)) => {
-                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(app.clone())));
+                Some(Hold::Refused(why)) => {
+                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(why.clone())));
                     return Err(ControlError::failed(format!(
-                        "{} The left button is still down where you pressed: left_mouse_up lets go, and the page may take that as a click.",
-                        devtools::refused_message(&app)
+                        "{why} The left button is still down where you pressed: left_mouse_up lets go, and the page may take that as a click."
                     )));
                 }
                 None => {}
@@ -419,7 +418,7 @@ async fn handle_one(
                     return pipe_drag(&core, id, page, from, to, modifiers, cx).await;
                 }
                 Route::Refused(app) => {
-                    return Err(ControlError::failed(devtools::refused_message(&app)));
+                    return Err(ControlError::failed(app));
                 }
                 Route::Unmapped(why) => return Err(unmapped(why)),
                 Route::Posted => {}
@@ -3909,7 +3908,8 @@ async fn drag_to(grab: Grab, to: (f64, f64), cx: &mut AsyncApp) -> bool {
 enum Hold {
     /// Through the app's DevTools pipe.
     Pipe(devtools::Drag),
-    /// In an app with no pipe: the app's name. Its moves are refused.
+    /// In a web page with no way in: what the agent hears. Its moves are
+    /// refused.
     Refused(String),
 }
 
@@ -3935,6 +3935,13 @@ async fn web_route(at: (f64, f64), cx: &mut AsyncApp) -> Route {
 }
 
 fn unmapped(why: String) -> ControlError {
+    // The extension's own words when the user pressed Cancel on the
+    // browser's bar (ADR 0012).
+    if why.contains("canceled Agent Screen's access") {
+        return ControlError::failed(format!(
+            "The user stopped Agent Screen's extension in this browser: {why}. Nothing was sent. Don't try another way into this window; call request_help for the user to do the drag."
+        ));
+    }
     ControlError::failed(format!(
         "the app shows a web page there, but Agent Screen couldn't tell which of its pages is under the point ({why}), so nothing was sent. Take a screenshot and try again."
     ))

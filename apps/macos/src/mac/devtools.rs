@@ -188,7 +188,8 @@ pub fn spawn(
     }
     let channel = Arc::new(Channel {
         pid,
-        writer: Mutex::new(unsafe { std::fs::File::from_raw_fd(to_app.1) }),
+        extension: false,
+        writer: Mutex::new(Box::new(unsafe { std::fs::File::from_raw_fd(to_app.1) })),
         next_id: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
         events: Mutex::new(VecDeque::new()),
@@ -260,7 +261,9 @@ type Answer = Result<Value, String>;
 
 pub struct Channel {
     pid: i32,
-    writer: Mutex<std::fs::File>,
+    /// The extension in the user's browser (ADR 0012), not a pipe.
+    extension: bool,
+    writer: Mutex<Box<dyn Write + Send>>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Answer>>>,
     /// Recent events, for `Input.dragIntercepted`.
@@ -294,6 +297,53 @@ pub fn channel(pid: i32, wait: Duration) -> Option<Arc<Channel>> {
     (*state == State::Ready).then(|| channel.clone())
 }
 
+/// Take the connection from the extension in the browser `pid` as its
+/// channel (ADR 0012). A pipe, where the app has one, stays: it shows no
+/// bar in the browser.
+pub fn adopt_extension(pid: i32, stream: std::os::unix::net::UnixStream) {
+    let Ok(reader) = stream.try_clone() else {
+        return;
+    };
+    let prefer_extension =
+        std::env::var_os("AGENTSCREEN_TEST_EXTENSION_FIRST").is_some() && cfg!(debug_assertions);
+    {
+        let mut all = channels();
+        if all.get(&pid).is_some_and(|c| !c.extension) && !prefer_extension {
+            log::info!("devtools: pid {pid} has a pipe; its extension stays unused");
+            return;
+        }
+        all.insert(
+            pid,
+            Arc::new(Channel {
+                pid,
+                extension: true,
+                writer: Mutex::new(Box::new(stream)),
+                next_id: AtomicU64::new(1),
+                pending: Mutex::new(HashMap::new()),
+                events: Mutex::new(VecDeque::new()),
+                state: Mutex::new(State::Ready),
+                changed: Condvar::new(),
+                sessions: Mutex::new(HashMap::new()),
+            }),
+        );
+    }
+    let Some(channel) = channels().get(&pid).cloned() else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("agent-screen-extension".into())
+        .spawn(move || channel.read(reader));
+}
+
+/// The browsers whose extension is connected.
+pub fn extension_pids() -> Vec<i32> {
+    channels()
+        .iter()
+        .filter(|(_, c)| c.extension)
+        .map(|(&pid, _)| pid)
+        .collect()
+}
+
 impl Channel {
     fn set_state(&self, state: State) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -303,7 +353,7 @@ impl Channel {
         self.changed.notify_all();
     }
 
-    fn read(&self, mut reader: std::fs::File) {
+    fn read(&self, mut reader: impl Read) {
         let mut buffer = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
@@ -319,7 +369,11 @@ impl Channel {
                 self.take(message);
             }
         }
-        log::debug!("devtools: pid {}'s pipe closed", self.pid);
+        log::debug!(
+            "devtools: pid {}'s {} closed",
+            self.pid,
+            if self.extension { "extension" } else { "pipe" }
+        );
         self.set_state(State::Dead);
         for (_, waiting) in self
             .pending
@@ -354,6 +408,11 @@ impl Channel {
         if message["method"] == "Target.detachedFromTarget"
             && let Some(session) = message["params"]["sessionId"].as_str()
         {
+            log::debug!(
+                "devtools: pid {} let go of a page ({})",
+                self.pid,
+                message["params"]["reason"].as_str().unwrap_or("detached")
+            );
             self.sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -490,19 +549,43 @@ fn page_at(
     at: (f64, f64),
 ) -> Result<Page, String> {
     let targets = channel.call("Target.getTargets", json!({}), None)?;
+    // The extension says where each page's window is: only the one in
+    // this window is attached, not the pages of the user's own windows.
+    let in_window = |t: &Value| {
+        let w = &t["window"];
+        let n = |k: &str| w[k].as_f64();
+        match (n("x"), n("y"), n("width"), n("height")) {
+            (Some(x), Some(y), Some(width), Some(height)) => {
+                rules::same_frame(Rect::new(x, y, width, height), bounds)
+            }
+            _ => true,
+        }
+    };
     let targets: Vec<String> = targets["targetInfos"]
         .as_array()
         .map(|t| {
             t.iter()
                 .filter(|t| matches!(t["type"].as_str(), Some("page" | "webview")))
+                .filter(|t| in_window(t))
                 .filter_map(|t| t["targetId"].as_str().map(String::from))
                 .collect()
         })
         .unwrap_or_default();
+    let mut refusal = None;
     let sessions: Vec<String> = targets
         .iter()
-        .filter_map(|t| channel.session(t).ok())
+        .filter_map(|t| {
+            channel
+                .session(t)
+                .map_err(|e| refusal.get_or_insert(e).clone())
+                .ok()
+        })
         .collect();
+    if sessions.is_empty()
+        && let Some(refusal) = refusal
+    {
+        return Err(refusal);
+    }
     // Ask every page at once: a busy background tab mustn't hold up the
     // one in front.
     let asked: Vec<_> = sessions
@@ -558,7 +641,7 @@ fn page_at(
 pub enum Route {
     Pipe(Page),
     Posted,
-    /// A web page with no pipe: the app's name.
+    /// A web page with no way in: what the agent hears.
     Refused(String),
     /// A pipe, but no page of the app's matches the point.
     Unmapped(String),
@@ -590,7 +673,8 @@ pub fn route(window: Option<(WindowTarget, Rect)>, at: (f64, f64)) -> Route {
     match rules::drag_route(area.is_some(), engine, piped.is_some()) {
         DragRoute::Posted => Route::Posted,
         DragRoute::Refused => {
-            Route::Refused(super::app::name(target.pid).unwrap_or_else(|| "the app".into()))
+            let app = super::app::name(target.pid).unwrap_or_else(|| "the app".into());
+            Route::Refused(refused_message(&app, engine == Some(Engine::Chromium)))
         }
         DragRoute::Pipe => match piped.map(|c| page_at(c, target, bounds, area, at)) {
             Some(Ok(page)) => Route::Pipe(page),
@@ -723,10 +807,18 @@ impl Drag {
 }
 
 /// What an agent hears when its drag lands in a web page of an app that
-/// has no pipe.
-pub fn refused_message(app: &str) -> String {
+/// has no way in: neither a pipe nor, in a Chromium browser, Agent
+/// Screen's extension.
+pub fn refused_message(app: &str, chromium: bool) -> String {
+    let extension = if chromium {
+        format!(
+            " The way to drag in this window as it is, signed in as the user: ask the user to add Agent Screen's extension to {app}, from Agent Screen's Settings, Your Browser. It works once {app} shows the extension, with no restart."
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{app} shows a web page there, and a drag in a web page needs a DevTools pipe into the app, which {app} doesn't have: launch_app didn't start it with one. Agent Screen won't press the user's own mouse button for it, so nothing was sent. To drag here, start a new instance with launch_app (for a browser, with arguments such as --user-data-dir=/tmp/profile, as a browser's default profile takes no pipe). A fresh profile has separate sign-ins and does not keep the user's existing login session. If that session is required, keep this window and call request_help for the user to do the drag; starting another profile will not add a pipe to this window. To select text, click and then shift-click, or use the keyboard."
+        "{app} shows a web page there, and a drag in a web page needs a way into the app that {app} doesn't have: launch_app didn't start it with a DevTools pipe, and it has no Agent Screen extension. Agent Screen won't press the user's own mouse button for it, so nothing was sent.{extension} Otherwise, start a new instance with launch_app (for a browser, with arguments such as --user-data-dir=/tmp/profile, as a browser's default profile takes no pipe); a fresh profile has separate sign-ins and does not keep the user's existing login session. If that session is required, keep this window and call request_help for the user to do the drag. To select text, click and then shift-click, or use the keyboard."
     )
 }
 
@@ -734,10 +826,11 @@ pub fn refused_message(app: &str) -> String {
 mod refusal_tests {
     #[test]
     fn an_unpiped_page_has_no_promise_of_existing_login_or_a_new_drag_capability() {
-        let message = super::refused_message("Dia");
+        let message = super::refused_message("Dia", true);
+        assert!(message.contains("add Agent Screen's extension to Dia"));
+        assert!(!super::refused_message("Safari", false).contains("extension to"));
         assert!(message.contains("does not keep the user's existing login session"));
         assert!(message.contains("keep this window and call request_help"));
-        assert!(message.contains("will not add a pipe to this window"));
         assert!(message.contains("won't press the user's own mouse button"));
     }
 }

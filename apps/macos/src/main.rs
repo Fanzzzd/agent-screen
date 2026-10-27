@@ -157,6 +157,9 @@ fn main() {
             }
             return;
         }
+        // A browser started this binary as its extension's native host
+        // (ADR 0012).
+        Some(origin) if mac::browser::is_host_invocation(Some(origin)) => mac::browser::host(),
         // --setup: reopened from the setup window, which shows again.
         Some("colorsync") => {
             colorsync(std::env::args().nth(2).as_deref());
@@ -249,6 +252,10 @@ fn main() {
         app_menu(cx);
         match server::start() {
             Ok(mut events) => {
+                if let Err(error) = mac::browser::listen() {
+                    log::warn!("browser: couldn't listen for the extension: {error}");
+                }
+                std::thread::spawn(mac::browser::register_host);
                 let core = core.clone();
                 cx.spawn(async move |cx: &mut AsyncApp| {
                     while let Some(event) = events.next().await {

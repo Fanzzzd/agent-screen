@@ -2220,6 +2220,7 @@ impl Shell {
             MenuAction::IgnoreInAeroSpace => self.ignore_in_aerospace(cx),
             MenuAction::ConnectAgents => self.connect_agents(cx),
             MenuAction::ChooseWallpaper => self.choose_wallpaper(cx),
+            MenuAction::AddBrowserExtension => add_browser_extension(),
             MenuAction::DefaultWallpaper => self.set_wallpaper(None, cx),
             MenuAction::Quit => self.quit(cx),
             MenuAction::HandOver {
@@ -4034,5 +4035,43 @@ mod peek_input_tests {
             Effect::None
         );
         assert_eq!(intent.mode(), Mode::Pinned);
+    }
+}
+
+/// Show the user how to add Agent Screen's extension to their browser
+/// (ADR 0012): its folder in Finder, its path on the clipboard.
+fn add_browser_extension() {
+    let dir = match crate::mac::browser::copy_extension() {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::warn!("browser: couldn't copy the extension: {e}");
+            return;
+        }
+    };
+    let go = native::confirm(
+        t(
+            "Add Agent Screen to your browser",
+            "把 Agent Screen 加到浏览器",
+        ),
+        t(
+            "In Chrome, Dia, Arc or Edge, open the Extensions page and turn on Developer mode. Click Load unpacked, press Command-Shift-G, paste and press Return, then click Open. The folder's path is on the clipboard.\n\nWhile an agent drags in a page, the browser shows a bar saying Agent Screen started debugging it. Cancel on that bar stops it until the browser restarts.",
+            "在 Chrome、Dia、Arc 或 Edge 里打开扩展程序页面，打开开发者模式。点「加载已解压的扩展程序」，按 Command-Shift-G，粘贴后按回车，再点「打开」。文件夹路径已经复制到剪贴板。\n\nagent 在网页里拖动时，浏览器会显示一条提示，说 Agent Screen 开始调试此浏览器。点提示上的「取消」可以停止，直到浏览器重启。",
+        ),
+        t("Show in Finder", "在访达中显示"),
+    );
+    if let Ok(mut copy) = std::process::Command::new("/usr/bin/pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(stdin) = copy.stdin.as_mut() {
+            let _ = stdin.write_all(dir.to_string_lossy().as_bytes());
+        }
+        let _ = copy.wait();
+    }
+    if go {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg(&dir)
+            .status();
     }
 }

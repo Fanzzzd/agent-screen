@@ -189,7 +189,10 @@ impl Render for Setup {
             .child(section(t("Permissions", "权限"), permissions, &theme))
             .child(section(
                 t("Agents", "Agent"),
-                vec![self.agent_row(&theme).into_any_element()],
+                vec![
+                    self.agent_row(&theme).into_any_element(),
+                    browser_row(&theme).into_any_element(),
+                ],
                 &theme,
             ))
             .child(section(
@@ -303,6 +306,52 @@ fn section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> impl IntoElemen
                         .child(row)
                 })),
         )
+}
+
+/// Agent Screen's extension in the user's browser (ADR 0012): drags in
+/// pages signed in as them.
+fn browser_row(theme: &Theme) -> impl IntoElement {
+    let connected = crate::mac::browser::connected();
+    let on = !connected.is_empty();
+    let detail: SharedString = if on {
+        tf!(
+            "Connected in {}. Agents drag in its pages, signed in as you",
+            "已在 {} 里接入。agent 可以在网页里拖动，用的是你的登录",
+            connected.join(", ")
+        )
+        .into()
+    } else {
+        t(
+            "Add Agent Screen's extension to Chrome, Dia, Arc or Edge so agents can drag in pages signed in as you",
+            "把 Agent Screen 的扩展加到 Chrome、Dia、Arc 或 Edge，agent 就能在你登录的网页里拖动",
+        )
+        .into()
+    };
+    let action = button(
+        "setup-browser",
+        if on {
+            t("Add Again…", "再次添加…")
+        } else {
+            t("Add…", "添加…")
+        }
+        .into(),
+        None,
+        theme,
+        |_| native::send(Native::Menu(MenuAction::AddBrowserExtension)),
+    )
+    .into_any_element();
+    item(
+        badge(
+            "icons/pointer.svg",
+            if on { green() } else { theme.accent },
+            on,
+        ),
+        t("Your Browser", "你的浏览器").into(),
+        detail,
+        None,
+        action,
+        theme,
+    )
 }
 
 /// A row's icon on a tint of its color: green once it's on.

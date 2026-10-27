@@ -68,6 +68,12 @@ fn near(a: f64, b: f64) -> bool {
     (a - b).abs() <= 3.0
 }
 
+/// Whether a browser window's frame, as its extension reports it, is the
+/// window's frame in global points.
+pub fn same_frame(a: Rect, b: Rect) -> bool {
+    near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height)
+}
+
 /// The page under a point, of the pages one app shows, and its viewport.
 ///
 /// `window` is the window under the point, in global points. `area` is the
@@ -182,6 +188,13 @@ pub fn path(from: (f64, f64), to: (f64, f64), steps: u32) -> Vec<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_the_extension_reports_matches_its_frame_within_a_few_points() {
+        let frame = Rect::new(2923., -1880., 1100., 700.);
+        assert!(same_frame(Rect::new(2924., -1879., 1100., 700.), frame));
+        assert!(!same_frame(Rect::new(0., 33., 1100., 700.), frame));
+    }
 
     fn page(screen: (f64, f64), outer: (f64, f64), inner: (f64, f64)) -> PageView {
         PageView {
