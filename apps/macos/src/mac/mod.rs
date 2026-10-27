@@ -20,6 +20,7 @@ pub mod mux;
 pub mod native;
 pub mod notify;
 pub mod permissions;
+pub mod playback;
 pub mod recording;
 pub mod screenshot;
 pub mod viewer_input;

@@ -13,6 +13,7 @@
 //! sound goes into the video (`mux`).
 
 use agent_screen_model::model::DisplayId;
+use agent_screen_model::recording_playback::{self, Size};
 use screencapturekit::prelude::*;
 use screencapturekit::recording_output::{
     RecordingCallbacks, SCRecordingOutput, SCRecordingOutputCodec, SCRecordingOutputConfiguration,
@@ -20,7 +21,7 @@ use screencapturekit::recording_output::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,10 @@ struct Recording {
     output: SCRecordingOutput,
     video: PathBuf,
     timeline: PathBuf,
+    writer: BufWriter<std::fs::File>,
+    logical: Size,
+    codec: &'static str,
+    timeline_failed: bool,
     /// When the first frame went into the video; offsets count from it.
     began: Arc<Mutex<Option<Instant>>>,
     asked: Instant,
@@ -65,6 +70,7 @@ fn with<T>(f: impl FnOnce(&mut HashMap<DisplayId, Recording>) -> T) -> T {
 
 /// What a finished recording left.
 pub struct Done {
+    pub codec: &'static str,
     pub video: PathBuf,
     pub timeline: PathBuf,
     pub seconds: f64,
@@ -240,7 +246,7 @@ pub fn is_recording(id: DisplayId) -> bool {
 }
 
 /// Start recording display `id`, whose label names the files. Blocking.
-pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
+pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf, &'static str), String> {
     if is_recording(id) {
         return Err("display is already being recorded; stop that recording first".into());
     }
@@ -265,7 +271,11 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
         .chars()
         .take(60)
         .collect();
-    let base = format!("{name} {stamp}");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let base = format!("{name} {stamp}-{id}-{unique}");
     let video = folder.join(format!("{base}.mp4"));
     let sound_file = folder.join(format!(".{base}.sound.mov"));
     let timeline = folder.join(format!("{base}.timeline.jsonl"));
@@ -286,11 +296,26 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
         .with_shows_cursor(false)
         .with_queue_depth(6);
     let stream = SCStream::new(&filter, &configuration).map_err(|e| e.to_string())?;
-    let output_configuration = SCRecordingOutputConfiguration::new()
-        .map_err(|e| e.to_string())?
+    let output_configuration = SCRecordingOutputConfiguration::new().map_err(|e| e.to_string())?;
+    let codecs = output_configuration.available_video_codecs();
+    let identifiers = codecs.iter().map(|c| c.identifier()).collect::<Vec<_>>();
+    let codec = recording_playback::preferred_codec(&identifiers)
+        .ok_or("ScreenCaptureKit lists neither HEVC nor H.264 for recording")?;
+    if !output_configuration
+        .available_output_file_types()
+        .contains(&SCRecordingOutputFileType::MP4)
+    {
+        return Err("ScreenCaptureKit does not list MP4 recording support".into());
+    }
+    let selected = if codec == "hvc1" {
+        SCRecordingOutputCodec::HEVC
+    } else {
+        SCRecordingOutputCodec::H264
+    };
+    let output_configuration = output_configuration
         .with_output_url(&video)
         .map_err(|e| e.to_string())?
-        .with_video_codec(SCRecordingOutputCodec::H264)
+        .with_video_codec(selected)
         .with_output_file_type(SCRecordingOutputFileType::MP4);
     let began = Arc::new(Mutex::new(None));
     let (done, finished) = mpsc::channel();
@@ -312,9 +337,35 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
     stream
         .add_recording_output(&output)
         .map_err(|e| e.to_string())?;
+    let logical = Size {
+        width: bounds.width,
+        height: bounds.height,
+    };
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut writer = BufWriter::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&timeline)
+            .map_err(|e| format!("can't write {}: {e}", timeline.display()))?,
+    );
+    writeln!(
+        writer,
+        "{}",
+        recording_playback::metadata(
+            logical,
+            Size {
+                width: pixels.0 as f64,
+                height: pixels.1 as f64
+            },
+            agent_screen_model::model::shot_scale((bounds.width, bounds.height)),
+            codec
+        )
+    )
+    .map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
     stream.start_capture().map_err(|e| e.to_string())?;
-    std::fs::write(&timeline, "")
-        .map_err(|e| format!("can't write {}: {e}", timeline.display()))?;
     let sound = match start_sound(id, &sound_file) {
         Ok(sound) => Some(sound),
         Err(error) => {
@@ -322,7 +373,10 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
             None
         }
     };
-    log::info!("recording display {id} to {}", video.display());
+    log::info!(
+        "recording display {id} to {}, selected codec {codec}; hardware encoder use is unverified",
+        video.display()
+    );
     let asked = Instant::now();
     with(|all| {
         all.insert(
@@ -333,6 +387,10 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
                 output,
                 video: video.clone(),
                 timeline: timeline.clone(),
+                writer,
+                logical,
+                codec,
+                timeline_failed: false,
                 began,
                 asked,
                 finished,
@@ -351,31 +409,80 @@ pub fn start(id: DisplayId, label: &str) -> Result<(PathBuf, PathBuf), String> {
             stop(id);
         }
     });
-    Ok((video, timeline))
+    Ok((video, timeline, codec))
 }
 
 /// Add a line to display `id`'s timeline, if it is being recorded:
 /// `event` with `t`, the seconds into the video.
+fn clock(recording: &Recording) -> Option<f64> {
+    (*recording.began.lock().unwrap())?;
+    recording
+        .output
+        .recorded_duration()
+        .as_seconds()
+        .filter(|t| t.is_finite() && *t >= 0.0)
+}
+
+fn append(recording: &mut Recording, event: &Value) {
+    if let Err(error) = writeln!(recording.writer, "{event}") {
+        recording.timeline_failed = true;
+        log::warn!("timeline of {}: {error}", recording.video.display());
+    }
+}
+
 pub fn note(id: DisplayId, mut event: Value) {
     with(|all| {
         let Some(recording) = all.get_mut(&id) else {
             return;
         };
-        let began = *recording.began.lock().unwrap();
-        let t = began.map_or(0.0, |b| b.elapsed().as_secs_f64());
-        if let Value::Object(map) = &mut event {
-            map.insert("t".into(), json!((t * 1000.0).round() / 1000.0));
-        }
-        let line = event.to_string();
-        match std::fs::OpenOptions::new()
-            .append(true)
-            .open(&recording.timeline)
+        let action = event["action"].as_str();
+        let time = clock(recording);
+        let Some(time) = time else { return };
+        if action == Some("takeoverStart")
+            && let Some(hidden) = recording_playback::pointer_event(
+                Some(time),
+                None,
+                recording.logical,
+                recording.logical,
+                false,
+            )
         {
-            Ok(mut file) => {
-                let _ = writeln!(file, "{line}");
-                recording.actions += 1;
-            }
-            Err(error) => log::warn!("timeline of display {id}: {error}"),
+            append(recording, &hidden);
+        }
+        if let Value::Object(map) = &mut event {
+            map.insert("t".into(), json!(time));
+        }
+        append(recording, &event);
+        recording.actions += 1;
+    });
+}
+
+/// Resolved agent points from this display's existing control path only.
+/// User input during Takeover is unknown, so it is hidden, not synthesized.
+pub fn pointer(
+    id: DisplayId,
+    point: (f64, f64),
+    current: (f64, f64),
+    click: bool,
+    active_agent: bool,
+) {
+    with(|all| {
+        let Some(recording) = all.get_mut(&id) else {
+            return;
+        };
+        let logical = recording.logical;
+        if let Some(event) = recording_playback::agent_pointer_event(
+            active_agent,
+            || clock(recording),
+            point,
+            Size {
+                width: current.0,
+                height: current.1,
+            },
+            logical,
+            click,
+        ) {
+            append(recording, &event);
         }
     });
 }
@@ -383,12 +490,9 @@ pub fn note(id: DisplayId, mut event: Value) {
 /// Stop recording display `id` and wait, at most 5 s, for the video to be
 /// written. None if it wasn't being recorded. Blocking.
 pub fn stop(id: DisplayId) -> Option<Done> {
-    let recording = with(|all| all.remove(&id))?;
-    let seconds = recording
-        .began
-        .lock()
-        .unwrap()
-        .map_or(0.0, |b| b.elapsed().as_secs_f64());
+    let mut recording = with(|all| all.remove(&id))?;
+    let last_clock = clock(&recording).unwrap_or(0.0);
+    // Stop capture before any sidecar flush can wait on disk I/O.
     let _ = recording.stream.remove_recording_output(&recording.output);
     let _ = recording.stream.stop_capture();
     let problem = match recording.finished.recv_timeout(Duration::from_secs(5)) {
@@ -396,6 +500,19 @@ pub fn stop(id: DisplayId) -> Option<Done> {
         Ok(Err(error)) => Some(error),
         Err(_) => Some("the video took more than 5 s to finish writing".into()),
     };
+    let seconds = clock(&recording).unwrap_or(last_clock).max(last_clock);
+    if let Err(error) = recording.writer.flush() {
+        recording.timeline_failed = true;
+        log::warn!("timeline flush: {error}");
+    }
+    let complete = !recording.timeline_failed && problem.is_none();
+    append(
+        &mut recording,
+        &recording_playback::timeline_end(seconds, complete),
+    );
+    if let Err(error) = recording.writer.flush() {
+        log::warn!("timeline footer flush: {error}");
+    }
     let video_began = *recording.began.lock().unwrap();
     let (heard, left_out, sound_problem) = match recording.sound {
         Some(sound) => finish_sound(sound, &recording.video, video_began, problem.is_none()),
@@ -412,6 +529,7 @@ pub fn stop(id: DisplayId) -> Option<Done> {
         recording.video.display()
     );
     Some(Done {
+        codec: recording.codec,
         video: recording.video,
         timeline: recording.timeline,
         seconds,
@@ -447,7 +565,8 @@ fn finish_sound(
             } else {
                 -(v - a).as_secs_f64()
             };
-            let joined = video.with_extension("joined.mp4");
+            let stem = video.file_stem().unwrap_or_default().to_string_lossy();
+            let joined = video.with_file_name(format!(".{stem}.joined.mp4"));
             match super::mux::merge(video, &sound.file, offset, &joined) {
                 Ok(true) => {
                     // AVFoundation writes the file for its owner alone.

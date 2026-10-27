@@ -733,7 +733,7 @@ impl Setup {
     }
 }
 
-fn button(
+pub(crate) fn button(
     id: &'static str,
     title: SharedString,
     prominent: Option<Hsla>,

@@ -282,6 +282,56 @@ fn advance(display: DisplayId, pointer: Option<AgentPointer>) -> Option<Frame> {
     })
 }
 
+/// A recorded pointer sampled at AVPlayer media time. It has no live
+/// DisplayId, wall clock, shared animation state or input side effects.
+pub fn playback_layer(
+    sample: Option<agent_screen_model::recording_playback::Sample>,
+    video: agent_screen_model::recording_playback::Size,
+    accent: Hsla,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window: &mut Window, _: &mut App| {
+            let Some(sample) = sample else { return };
+            let viewport = agent_screen_model::recording_playback::Size {
+                width: f32::from(bounds.size.width) as f64,
+                height: f32::from(bounds.size.height) as f64,
+            };
+            let Some((x, y)) =
+                agent_screen_model::recording_playback::project(sample, video, viewport)
+            else {
+                return;
+            };
+            let scale = ((viewport.width / video.width).min(viewport.height / video.height) * 1.6)
+                .clamp(0.55, 1.0) as f32;
+            let tip = point(
+                bounds.origin.x + px(x as f32),
+                bounds.origin.y + px(y as f32),
+            );
+            let frame = Frame {
+                at: (x, y),
+                lean: 0.0,
+                stretch: 1.0,
+                press: sample
+                    .click_age
+                    .filter(|age| *age < 0.26)
+                    .map_or(1.0, |age| 1.0 - 0.16 * (PI * age as f32 / 0.26).sin()),
+                ripple: sample.click_age.map(|age| (age / 0.48) as f32),
+                opacity: 1.0,
+                changing: false,
+            };
+            if let Some(progress) = frame.ripple {
+                draw_ripple(window, tip, scale, progress, accent, 1.0);
+            }
+            draw_arrow(window, tip, scale, &frame, accent);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
 pub fn forget(display: DisplayId) {
     GLIDES.with(|g| g.borrow_mut().remove(&display));
 }

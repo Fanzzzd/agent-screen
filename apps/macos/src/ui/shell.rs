@@ -5,6 +5,7 @@
 use super::help_card::{self, HelpCard};
 use super::peek::{self, Peek};
 use super::pointer;
+use super::recordings::Recordings;
 use super::setup::{self, Setup};
 use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer, WindowMenu};
@@ -176,6 +177,7 @@ pub struct Shell {
     /// Test hook: the setup window shows both permissions missing.
     setup_preview: bool,
     setup: Option<WindowHandle<Setup>>,
+    recordings: Option<WindowHandle<Recordings>>,
     /// The agents whose MCP servers loaded the tools, first to last.
     agent_ready: Vec<String>,
     /// The permission whose pane the user was sent to.
@@ -346,6 +348,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             colorsync_error: None,
             setup_preview: false,
             setup: None,
+            recordings: None,
             agent_ready: Vec::new(),
             waiting: None,
             restart: false,
@@ -1704,6 +1707,17 @@ impl Shell {
                 self.latched = true;
                 self.show_peek(cx);
             }
+            "recordings" => self.open_recordings(cx),
+            "recordings-close" => {
+                if let Some(handle) = self.recordings.take() {
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    });
+                }
+                if self.setup.is_none() {
+                    leave_dock(cx);
+                }
+            }
             "setup" | "settings" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
             // The open setup window as with both permissions missing, the
@@ -1856,6 +1870,8 @@ impl Shell {
         menu.separator();
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
+        menu.separator();
+        menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
         menu.separator();
         // Agents, wallpaper, AeroSpace and the optional helpers.
         let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
@@ -2019,6 +2035,7 @@ impl Shell {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
             MenuAction::OpenSettings => self.open_setup(cx),
+            MenuAction::OpenRecordings => self.open_recordings(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let pinned: Vec<String> = self
                     .conflicts
@@ -2305,6 +2322,41 @@ impl Shell {
 
     // MARK: Permissions
 
+    fn open_recordings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.recordings
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            cx.activate(true);
+            return;
+        }
+        cx.set_activation_policy(gpui::ActivationPolicy::Regular);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1060.), px(680.)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(t("Recordings", "录制回看").into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(720.), px(440.))),
+            focus: true,
+            show: true,
+            kind: WindowKind::Normal,
+            ..Default::default()
+        };
+        match cx.open_window(options, |_, cx| cx.new(Recordings::new)) {
+            Ok(handle) => {
+                self.recordings = Some(handle);
+                cx.activate(true);
+            }
+            Err(error) => log::warn!("recordings window: {error}"),
+        }
+    }
+
     pub fn open_setup(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.setup
             && handle
@@ -2421,7 +2473,9 @@ impl Shell {
         self.waiting = None;
         self.setup_preview = false;
         assist::hide();
-        leave_dock(cx);
+        if self.recordings.is_none() {
+            leave_dock(cx);
+        }
     }
 
     /// The setup window closed with its close button.
@@ -2430,7 +2484,15 @@ impl Shell {
             self.setup = None;
             self.waiting = None;
             assist::hide();
-            leave_dock(cx);
+            if self.recordings.is_none() {
+                leave_dock(cx);
+            }
+        }
+        if self.recordings.is_some_and(|h| h.window_id() == id) {
+            self.recordings = None;
+            if self.setup.is_none() {
+                leave_dock(cx);
+            }
         }
     }
 

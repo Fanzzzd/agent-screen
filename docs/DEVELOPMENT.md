@@ -153,6 +153,122 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 
 The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
+### Recording playback and pointer timelines
+
+The menu bar icon's Recordings… entry opens a normal GPUI window. It lists
+local MP4 files in `~/Movies/Agent Screen`; Refresh reloads the list.
+Directory discovery and sidecar parsing run off the UI thread. Selection
+and refresh generations discard stale asynchronous results. The list is
+limited to 2,000 videos. Hidden files, directories and symlinks are excluded.
+No sidecar can choose a media URL or execute an action.
+
+`mac::playback::Player` owns one AVPlayer and AVPlayerItemVideoOutput. It
+returns IOSurface-backed 420f CVPixelBuffers for GPUI's `surface` element.
+AVPlayer supplies the media time for the image and pointer sample. It also
+owns audio playback. Pause, forward/backward seek and repeated seeks use
+that same player. Seek completions carry a generation; an old completion
+cannot release a newer seek. No frame is exposed while a seek is pending.
+Show Pointer only changes overlay visibility. It does not recreate the
+player, change rate, seek, encode video or send input to any app.
+
+`ui::pointer::playback_layer` reuses the current arrow drawing. Its position,
+click press and ripple are pure samples of media time. It has no live
+DisplayId, shared live-pointer state or Instant-based animation. This keeps
+pause, reverse seeks and toggles deterministic and leaves the style
+replaceable. No system cursor replacement is involved.
+
+New recordings keep the MP4 and the same-stem `.timeline.jsonl` file.
+The sidecar begins with an `event: recording` header at schema version 1:
+
+- `logicalSize`, `videoSize`, `videoScale` and `shotScale` describe points,
+  video pixels and the screenshot-to-points conversion.
+- `coordinateSpace: logical` and `pointerClock: recorded_duration` identify
+  the pointer units and clock. Resolved points are recorded from the
+  existing agent pointer path on that display, before gesture forwarding.
+  They annotate the agent's requested point, not proof of input delivery or
+  a button action. Their `t` comes from SCRecordingOutput's recorded media
+  duration, not the tool call's completion or a playback wall clock.
+- Pointer records contain `event`, `actor`, `visible`, `t`, `x`, `y` and
+  `click`. `x` and `y` are recording-relative logical points. A current
+  display-size change maps through normalized coordinates. The additional
+  pointer records contain no text, keys or account fields. Existing action
+  records retain their prior fields; they never drive pointer playback.
+- `userPointerRecorded: false` means Takeover hides the unknown user pointer.
+  A hidden pointer event marks its start. The producer checks the current
+  Core display/Takeover state at each point, not a startup snapshot. Handing
+  back control does not
+  resurrect the previous agent pointer; the next agent point makes it visible.
+- `completeAtEnd: true` requires a final `recordingEnd` with
+  `pointerTimelineComplete: true`. Missing or failed completion disables the
+  pointer, including a truncated file that ends on a valid JSON boundary.
+
+Pointer/action writes use one buffered file per recording. No pointer write
+occurs before the recording clock starts, after removal from the active
+recordings map, or for an unrecorded display. New sidecars are owner-only and
+use a unique recording stem. The reader caps each sidecar at 16 MiB and
+100,000 event rows plus its header. Sidecars must be regular files; no-follow,
+nonblocking open plus descriptor validation rejects links, FIFOs and devices.
+It parses lines independently; any
+malformed row, invalid coordinate, incompatible schema or limit violation
+makes the pointer unavailable. Video playback remains independent. Old
+unversioned JSONL stays readable as legacy data, but lacks reliable pointer
+units and timing, so no coordinates are guessed.
+
+The recorder asks ScreenCaptureKit for available codecs and MP4 support.
+It requests HEVC when advertised, otherwise H.264 when available. Unsupported
+configuration/start failures remain errors; it does not silently restart an
+active recording or fall back on a permission/disk error. `recordStart` and
+`recordStop` report `selectedCodec` (`hvc1` or `avc1`) and
+`hardwareEncoderVerified: false`. The header records the same selection.
+This is a requested codec, not proof of the encoder implementation. The
+frame interval remains explicitly 1/30. Audio filtering and the passthrough
+join remain unchanged. See [the codec research](research/efficient-screen-recording.md)
+for hardware API limits and the bounded synthetic capability experiment.
+No same-quality space or CPU improvement is claimed for ScreenCaptureKit.
+
+Offline checks use synthetic sidecars and temporary files, not the user's
+recordings:
+
+```sh
+cargo test -p agent-screen-model recording_playback
+cargo test -p agent-screen --bin AgentScreen mac::playback
+```
+
+`apps/macos/tests/PlaybackProbe.m` is a headless test of the production
+`native/Playback.m` bridge. It creates no NSApplication, window, display,
+capture or input event. It checks a paused poster frame, 420f/IOSurface
+buffers, native media-time advance, pause, forward/backward and rapid seeks,
+end seeking and replay. For a generated silent H.264 fixture, from the repo
+root:
+
+```sh
+media=$(mktemp -d)
+helper=$(mktemp -d)
+ffmpeg -hide_banner -loglevel error -f lavfi \
+  -i testsrc2=size=640x400:rate=30:duration=2 -an \
+  -c:v libx264 -pix_fmt yuv420p -movflags +faststart "$media/synthetic.mp4"
+clang -fobjc-arc -framework Foundation -framework AVFoundation \
+  -framework CoreMedia -framework CoreVideo \
+  apps/macos/native/Playback.m apps/macos/tests/PlaybackProbe.m \
+  -o "$helper/playback-probe"
+"$helper/playback-probe" "$media/synthetic.mp4" 2
+rm -rf "$media" "$helper"
+```
+
+The optional final argument is the fixture's expected duration in seconds.
+Only use owned, silent synthetic fixtures for this probe. The H.264 and HEVC
+10-second fixtures from the codec capability experiment also exercise this
+bridge. Their decode/seek results do not prove ScreenCaptureKit encoding,
+audio continuity or the GPUI controls' behavior.
+
+GUI acceptance still needs separate permission. Check menu/open/close,
+empty and populated lists, asynchronous selection, small/portrait video,
+light/dark appearance, play/pause and dragging seek in both directions.
+Toggle the pointer during video with sound and confirm no playhead or audio
+interruption. Check old, missing, damaged and oversized sidecars, then a new
+recording's media alignment and Takeover boundary. No GUI test, capture,
+installation or restart is part of the offline commands above.
+
 ### Debug control methods
 
 The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` enables them in release builds too, except for `userStage`. Scripts can drive the UI without a real click.
@@ -190,6 +306,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
 | `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
 | `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
+| `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
 | `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
 | `assist-preview`, `assist-preview-unlisted`, `assist-hide` | Show the helper preview, preview an app absent from the permission list, or hide the helper. |

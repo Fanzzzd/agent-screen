@@ -11,5 +11,6 @@ pub mod keychord;
 pub mod launch;
 pub mod model;
 pub mod numbers;
+pub mod recording_playback;
 pub mod tree;
 pub mod typing;

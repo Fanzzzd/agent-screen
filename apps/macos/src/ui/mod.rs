@@ -3,6 +3,7 @@
 pub mod help_card;
 pub mod peek;
 pub mod pointer;
+pub mod recordings;
 pub mod setup;
 pub mod shell;
 pub mod status;

@@ -86,6 +86,7 @@ pub enum Native {
 pub enum MenuAction {
     CreateDisplay,
     OpenSettings,
+    OpenRecordings,
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,

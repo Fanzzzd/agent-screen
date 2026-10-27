@@ -218,13 +218,18 @@ async fn handle_one(
             let label = core.read_with(cx, |c, _| {
                 c.displays.get(id).map(|d| d.label()).unwrap_or_default()
             });
-            let (video, timeline) = cx
+            let (video, timeline, codec) = cx
                 .background_executor()
                 .spawn(async move { crate::mac::recording::start(id, &label) })
                 .await
                 .map_err(ControlError::failed)?;
             core.update(cx, |_, cx| cx.notify());
-            Ok(json!({ "video": video, "timeline": timeline }))
+            Ok(
+                json!({ "video": video, "timeline": timeline, "selectedCodec": codec,
+                    "hardwareEncoderVerified": false,
+                    "codecNote": if codec == "avc1" { "HEVC is unavailable; using H.264. Hardware encoder use has not been verified." } else { "Configured HEVC. Hardware encoder use has not been verified." }
+                }),
+            )
         }
         "recordStop" => {
             let id = display(&core, &p, false, cx)?;
@@ -237,6 +242,8 @@ async fn handle_one(
             Ok(json!({
                 "video": done.video,
                 "timeline": done.timeline,
+                "selectedCodec": done.codec,
+                "hardwareEncoderVerified": false,
                 "seconds": (done.seconds * 10.0).round() / 10.0,
                 "actions": done.actions,
                 "problem": done.problem,
@@ -4131,6 +4138,18 @@ fn show_pointer(
     cx: &mut AsyncApp,
 ) -> crate::mac::input::Forwarder {
     let bounds = cg::display_bounds(id);
+    let active_agent = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .is_some_and(|d| !d.takeover && !d.is_ended())
+    });
+    crate::mac::recording::pointer(
+        id,
+        (at.0 - bounds.x, at.1 - bounds.y),
+        (bounds.width, bounds.height),
+        click,
+        active_agent,
+    );
     core.update(cx, |c, cx| {
         c.displays
             .point(id, at.0 - bounds.x, at.1 - bounds.y, click);
