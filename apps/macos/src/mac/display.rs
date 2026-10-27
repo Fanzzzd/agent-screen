@@ -122,6 +122,32 @@ pub fn filler_ids() -> Vec<u32> {
         .collect()
 }
 
+/// Whether `id` shares its unit number with a display of Agent Screen's,
+/// any instance's. Capture refuses both of a pair, so a filler like that
+/// would leave a display in use with no picture for as long as it stays.
+fn twins_ours(id: u32) -> bool {
+    cg::unit_twin(id).is_some_and(cg::is_agent_screen)
+}
+
+/// Release kept twins that share a unit number with a display of Agent
+/// Screen's: the displays changed, and a filler that filled a gap may now
+/// pair with one in use.
+pub fn release_fillers_twinning_ours() {
+    let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
+    let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *fillers)
+        .into_iter()
+        .partition(|f| twins_ours(f.id));
+    *fillers = kept;
+    drop(fillers);
+    for filler in gone {
+        log::warn!(
+            "released filler {}: it shared a unit number with an Agent Display",
+            filler.id
+        );
+        crate::lifecycle::note("released", filler.id, "filler twinning an agent display");
+    }
+}
+
 /// Release the kept twins, once Agent Screen has no other display.
 pub fn release_fillers() {
     let fillers = std::mem::take(&mut *FILLERS.lock().unwrap_or_else(|e| e.into_inner()));
@@ -149,7 +175,7 @@ impl VirtualDisplay {
             let Some(twin) = cg::unit_twin(display.id) else {
                 let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
                 for twinned in twinned {
-                    if fillers.len() < MAX_FILLERS {
+                    if fillers.len() < MAX_FILLERS && !twins_ours(twinned.id) {
                         crate::lifecycle::note("kept", twinned.id, "filler");
                         fillers.push(twinned);
                     } else {

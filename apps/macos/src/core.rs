@@ -758,6 +758,7 @@ pub fn watch_alerts(core: Entity<Core>, cx: &mut App) {
 
 /// Park the kept twins out of the way like any display of Agent Screen's.
 pub fn park_fillers(virtual_ids: &[DisplayId]) {
+    display::release_fillers_twinning_ours();
     for id in display::filler_ids() {
         if !display::is_tucked(id, virtual_ids) {
             display::tuck_away(id, virtual_ids);
