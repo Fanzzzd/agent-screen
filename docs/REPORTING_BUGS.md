@@ -24,6 +24,14 @@ Say which app or MCP identities remain unknown. An old `--version` may print onl
 
 Diagnostics opens a separate read-only control connection with a two-second connection-and-reply deadline. It does not start the app, create a display, register or end a session, send input, change settings, restart clients, enumerate other sessions or upload anything. A missing app remains stopped. The caller receives an explicit unavailable, timeout, unsupported, malformed or refused status instead of a guessed app identity.
 
+## Shared-browser reports
+
+The current `place_window` schema has `x`, `y`, `width` and `height` in screenshot pixels. If a client does not expose them, retain its same-session `get_diagnostics` output or record the tool as unavailable. A newly started CLI cannot prove which tool schema that failing session loaded. Do not restart an active session just to collect this evidence.
+
+An explicit frame request can move or shrink a zoomed window below the reserved menu strip. Read the returned actual frame and any constraint note. This does not automatically correct every zoom operation. For a window already on the target Agent Display, a call without frame arguments leaves its frame unchanged. Initial placement still moves or fits a window onto that display as before.
+
+For a shared browser's refused keys, record whether the error reports a different focused window or an unknown focused window. Neither error proves that the user was typing. Keep the refusal intact; user idleness does not establish safe keyboard routing. For small scrolls in a virtualized list, include the requested amounts and observed movement. Event metadata alone does not prove how the browser received or applied a scroll. A browser without a private DevTools pipe still cannot receive a conflict-free page drag. A fresh profile has separate sign-ins.
+
 ## Read the identity correctly
 
 - **`collector: "mcp"`** identifies the MCP process serving this tool call. This is the report to collect from the failing session.
