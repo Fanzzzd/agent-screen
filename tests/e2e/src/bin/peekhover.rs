@@ -1,6 +1,6 @@
 //! Peek opened by hovering the menu bar icon closes once the pointer has
-//! left the icon and Peek, however it left, or at the first click on the
-//! icon. Hover is reported to the app
+//! left the icon and Peek. The first icon click pins it, and the next
+//! independent click closes it. Hover is reported to the app
 //! the way AppKit and GPUI report it, so the user's pointer is untouched
 //! and this runs at any time. Peek opens on a stage display.
 //!
@@ -53,8 +53,13 @@ fn test() -> Result<()> {
     // The pointer goes onto Peek, and Escape closes it there. The pointer
     // then leaves Peek's spot, which is gone, so nothing reports that.
     show("icon-hover", 1)?;
-    show("icon-hover", 0)?;
     show("card-hover", 1)?;
+    show("icon-hover", 0)?;
+    check(
+        "moving from the icon into Peek keeps it open",
+        peek_shown(),
+        "",
+    );
     show("hide", 0)?;
     check("Escape closes Peek", !peek_shown(), "");
     show("icon-hover", 1)?;
@@ -62,20 +67,45 @@ fn test() -> Result<()> {
     show("icon-hover", 0)?;
     check("leaving the icon closes it again", !peek_shown(), "");
 
-    // Opened by hover, the first click on the icon closes it, and hover
-    // doesn't bring it back until the pointer leaves the icon.
+    // Hover is transient. The first click pins it; leaving cannot close
+    // the pin. A later independent click closes it and blocks stationary
+    // hover until the pointer exits and enters again.
     show("icon-hover", 1)?;
     show("click", 0)?;
-    check("a click closes Peek opened by hover", !peek_shown(), "");
+    check(
+        "the first click pins Peek opened by hover",
+        peek_shown(),
+        "",
+    );
+    show("icon-hover", 0)?;
     show("card-hover", 0)?;
-    check("it stays closed under the pointer", !peek_shown(), "");
+    check("pinned Peek ignores pointer departure", peek_shown(), "");
+    show("icon-hover", 1)?;
+    show("click", 0)?;
+    check(
+        "the next independent click closes pinned Peek",
+        !peek_shown(),
+        "",
+    );
+    show("card-hover", 0)?;
+    check(
+        "it stays closed under the stationary pointer",
+        !peek_shown(),
+        "",
+    );
     show("icon-hover", 0)?;
     show("icon-hover", 1)?;
     check("hovering after leaving opens it", peek_shown(), "");
     show("click", 0)?;
+    check("a new hover preview can be pinned again", peek_shown(), "");
+    show("click", 0)?;
     show("icon-hover", 0)?;
     show("click", 0)?;
-    check("a click on the closed icon opens it", peek_shown(), "");
+    check(
+        "a click on the closed icon opens it pinned",
+        peek_shown(),
+        "",
+    );
     show("click", 0)?;
     check("the next click closes it", !peek_shown(), "");
     Ok(())

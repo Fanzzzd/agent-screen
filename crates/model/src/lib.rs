@@ -16,4 +16,5 @@ pub mod tree;
 pub mod typing;
 
 pub mod diagnostics;
+pub mod peek;
 pub mod pointer_geometry;
