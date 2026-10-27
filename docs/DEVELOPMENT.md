@@ -118,6 +118,43 @@ They exercise the real mapping arithmetic, window-local coordinate helper,
 hit observer, scoped emission and Logger filter with metadata fixtures.
 They do not exercise Xcode or prove that an app runs a button's action.
 
+### Remote-panel coordinate replay
+
+A visible app window can host a panel drawn by another process. Input goes
+to the remote window. macOS can omit that off-screen remote window from
+`OptionIncludingWindow` while `OptionAll` still reports its geometry. The
+input stamper first uses the targeted query. When it misses, it reads the
+full list and matches both the target PID and window id. It uses the
+current remote frame, never the host frame or a cached frame. Ordinary
+`window_bounds` callers retain their targeted-only lookup.
+
+Each stamp with a missing targeted result adds one full-list query. The
+fallback filters descriptions to the target process. Runtime cost has not
+been measured. If both queries miss, the stamper still has its old
+zero-origin behavior. This change does not make that vanished-target path
+safe; refusing such input needs a separate change that handles held-button
+release too.
+
+The metadata fixture in `apps/macos/tests/fixtures/remote-panel-click.json`
+replays a captured Viewer hit and stamp without reading live windows or
+posting input:
+
+```sh
+cargo test -p agent-screen --bin AgentScreen captured_remote_panel_keeps_window_local_coordinates
+cargo test -p agent-screen --bin AgentScreen routing_bounds
+```
+
+The first test went red with missing bounds before the fallback, then green
+with window-local coordinates. The tests use the actual hit-list matcher,
+lookup resolver and stamping writer seam. Other cases cover current frames
+after movement, PID mismatch, disappearance and unchanged ordinary routes.
+They do not verify private CGEvent setters or an AppKit button action.
+
+Live validation needs an owned Host/Remote fixture with a verified canonical
+hardware claim before the Host's first show. Creating a window at virtual
+display coordinates alone does not prevent AeroSpace reclaiming it. No live
+fixture is included or run until that pre-show containment is available.
+
 ## How it works
 
 - **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks it diagonally off the top-right corner of your physical screens so the real cursor rarely wanders onto it. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.

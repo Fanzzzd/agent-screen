@@ -1,0 +1,10 @@
+{
+  "source": "Viewer click 25, metadata only; titles and account data omitted",
+  "global": [5125.00419465947, -1769.952845982143],
+  "host": {"pid": 99233, "window_id": 8442},
+  "remote": {"pid": 6587, "window_id": 8440},
+  "bounds": [4680.0, -1931.0, 497.0, 182.0],
+  "layer": 0,
+  "targeted_lookup_bounds": null,
+  "expected_local": [445.00419465947, 161.047154017857]
+}

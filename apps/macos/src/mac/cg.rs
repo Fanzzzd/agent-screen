@@ -261,13 +261,39 @@ fn is_xpc_service(pid: i32) -> bool {
 
 /// A window's global bounds, while it exists.
 pub fn window_bounds(window_id: u32) -> Option<Rect> {
-    window_list_where(
-        CGWindowListOption::OptionIncludingWindow,
-        window_id,
-        |_, _, _| true,
-    )
-    .first()
-    .map(|w| w.bounds)
+    window_bounds_using(window_id, None, |options, relative| {
+        window_list_where(options, relative, |_, _, _| true)
+    })
+}
+
+/// Bounds for stamping input. A remote panel may be absent from a targeted
+/// lookup while the full window list still has its current frame. Check
+/// both owner and id; never substitute the host's frame or a cached frame.
+pub fn routing_window_bounds(target: WindowTarget) -> Option<Rect> {
+    window_bounds_using(target.window_id, Some(target.pid), |options, relative| {
+        window_list_where(options, relative, |pid, _, _| pid == target.pid)
+    })
+}
+
+pub(super) fn window_bounds_using(
+    window_id: u32,
+    owner: Option<i32>,
+    mut query: impl FnMut(CGWindowListOption, u32) -> Vec<WindowInfo>,
+) -> Option<Rect> {
+    let matches = |w: &WindowInfo| {
+        w.target.window_id == window_id && owner.is_none_or(|pid| pid == w.target.pid)
+    };
+    query(CGWindowListOption::OptionIncludingWindow, window_id)
+        .into_iter()
+        .find(matches)
+        .map(|w| w.bounds)
+        .or_else(|| {
+            owner?;
+            query(CGWindowListOption::OptionAll, 0)
+                .into_iter()
+                .find(matches)
+                .map(|w| w.bounds)
+        })
 }
 
 fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
