@@ -831,6 +831,38 @@ fn finish_custody(
     Ok(())
 }
 
+// This grants permission to dispatch an opener, not delivery or effect.
+fn publish_open_authorization(shared: &Shared, elapsed: Duration, publish: impl FnOnce()) -> bool {
+    if elapsed.saturating_add(CLOSE_RESERVE) >= agent_screen_model::menu_guard::DEADLINE {
+        shared.fail(5);
+    }
+    if shared.cancel.load(Ordering::Acquire) {
+        return false;
+    }
+    publish();
+    true
+}
+
+fn read_parent_commands(reader: impl BufRead, commands: mpsc::Sender<String>, shared: &Shared) {
+    for line in reader.lines() {
+        match line {
+            Ok(line) => {
+                let cancelled = line == "cancel";
+                if cancelled {
+                    shared.fail(3);
+                }
+                if commands.send(line).is_err() || cancelled {
+                    return;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if !shared.done.load(Ordering::Acquire) {
+        shared.fail(3);
+    }
+}
+
 fn worker_started<T>(
     result: std::io::Result<T>,
     abort: impl FnOnce() -> Result<(), String>,
@@ -1047,19 +1079,11 @@ pub fn helper_main() -> Result<(), String> {
         attach(port)?;
     }
     let (commands, input) = mpsc::channel();
+    let parent_shared = shared.clone();
     thread::Builder::new()
         .name("agent-screen-guard-parent".into())
         .spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                match line {
-                    Ok(line) => {
-                        if commands.send(line).is_err() {
-                            return;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            read_parent_commands(std::io::stdin().lock(), commands, &parent_shared);
         })
         .map_err(|e| e.to_string())?;
     output(json!({"ready":true,"pid":std::process::id()}));
@@ -1143,10 +1167,12 @@ pub fn helper_main() -> Result<(), String> {
             )
         },
     )?;
-    output(json!({"opened":true}));
+    let authorized = publish_open_authorization(&shared, started.elapsed(), || {
+        output(json!({"opened":true}))
+    });
     let mut closed = false;
     let mut picked = None;
-    let mut error = None;
+    let mut error = (!authorized).then(|| "native menu opening was not authorized".to_string());
     let panicked = {
         let mut drive = || {
             loop {
@@ -1330,6 +1356,123 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    // Static-stage tests: no helper process, NSApp, window, tap or post.
+    // These exercise the actual authorization boundary called above.
+    #[test]
+    fn parent_cancel_before_grant_must_not_authorize_open() {
+        let shared = Shared::new();
+        shared.fail(3); // existing active-loop code for parent EOF/cancel
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, Duration::ZERO, || sent.set(true));
+        assert!(
+            !sent.get(),
+            "cancelled private request still emitted opened authorization"
+        );
+    }
+
+    #[test]
+    fn timeout_before_grant_must_not_authorize_open() {
+        let shared = Shared::new();
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, agent_screen_model::menu_guard::DEADLINE, || {
+            sent.set(true)
+        });
+        assert!(
+            !sent.get(),
+            "expired private request still emitted opened authorization"
+        );
+    }
+
+    #[test]
+    fn parent_eof_before_grant_must_not_authorize_open() {
+        let shared = Shared::new();
+        let (commands, input) = mpsc::channel();
+        read_parent_commands(std::io::Cursor::new("open\n"), commands, &shared);
+        assert_eq!(input.try_recv().unwrap(), "open");
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, Duration::ZERO, || sent.set(true));
+        assert!(!sent.get(), "parent EOF still authorized a queued opening");
+    }
+
+    #[test]
+    fn parent_cancel_before_grant_stops_the_reader() {
+        let shared = Shared::new();
+        let (commands, input) = mpsc::channel();
+        let mut reader = std::io::Cursor::new("cancel\nopen\n");
+        read_parent_commands(&mut reader, commands, &shared);
+        assert_eq!(input.try_recv().unwrap(), "cancel");
+        assert_eq!(reader.position(), 7, "read past terminal cancellation");
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, Duration::ZERO, || sent.set(true));
+        assert!(!sent.get());
+    }
+
+    #[test]
+    fn close_reserve_before_grant_must_not_authorize_open() {
+        let shared = Shared::new();
+        let elapsed = agent_screen_model::menu_guard::DEADLINE - CLOSE_RESERVE;
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, elapsed, || sent.set(true));
+        assert!(!sent.get(), "opening consumed the reserved cleanup time");
+    }
+
+    #[test]
+    fn authorization_reserves_cleanup_and_preserves_the_first_fault() {
+        let boundary = agent_screen_model::menu_guard::DEADLINE - CLOSE_RESERVE;
+        let shared = Shared::new();
+        let sent = std::cell::Cell::new(false);
+        assert!(publish_open_authorization(
+            &shared,
+            boundary - Duration::from_nanos(1),
+            || sent.set(true),
+        ));
+        assert!(sent.get());
+        assert_eq!(shared.fault.load(Ordering::Acquire), 0);
+
+        shared.fail(1);
+        assert!(!publish_open_authorization(&shared, Duration::MAX, || {
+            panic!("faulted request authorized an opening")
+        }));
+        assert_eq!(shared.fault.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn parent_eof_does_not_change_a_completed_request() {
+        let shared = Shared::new();
+        shared.done.store(true, Ordering::Release);
+        let (commands, _input) = mpsc::channel();
+        read_parent_commands(std::io::Cursor::new(""), commands, &shared);
+        assert!(!shared.cancel.load(Ordering::Acquire));
+        assert_eq!(shared.fault.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn parent_read_failure_cancels_before_authorization() {
+        struct FailedRead;
+        impl std::io::Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected parent read failure"))
+            }
+        }
+        let shared = Shared::new();
+        let (commands, _input) = mpsc::channel();
+        read_parent_commands(std::io::BufReader::new(FailedRead), commands, &shared);
+        assert_eq!(shared.fault.load(Ordering::Acquire), 3);
+        assert!(!publish_open_authorization(&shared, Duration::ZERO, || {
+            panic!("failed parent authorized an opening")
+        }));
+    }
+
+    #[test]
+    fn unexpired_grant_is_not_menu_delivery_or_effect_evidence() {
+        let shared = Shared::new();
+        let sent = std::cell::Cell::new(false);
+        publish_open_authorization(&shared, Duration::ZERO, || sent.set(true));
+        assert!(sent.get());
+        assert_eq!(shared.own_theft.load(Ordering::Acquire), 0);
+        // No MenuEvent, AX action, menu observation or effect probe ran.
     }
 
     #[test]
