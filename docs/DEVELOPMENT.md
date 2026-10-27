@@ -165,6 +165,8 @@ fixture is included or run until that pre-show containment is available.
 
 ## Test
 
+The frame-placement regression injects the actual AX writer callback to check reserved-strip constraints without touching a window. The scroll regression constructs synthetic CGEvents through the production constructor and reads their fields. It does not post them or inspect a browser. These tests do not verify Dia's real zoom, focus or virtualized-list behavior.
+
 ```sh
 cargo test                    # unit and isolated integration tests
 cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated endpoint; no app, display or input

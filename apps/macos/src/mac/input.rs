@@ -1090,43 +1090,17 @@ impl Worker {
             let _held = AppKeys::hold(hit.target.pid);
             self.focus(hit.target);
         }
-        let units = if continuous {
-            CGScrollEventUnit::Pixel
-        } else {
-            CGScrollEventUnit::Line
-        };
-        let Some(event) = CGEvent::new_scroll_wheel_event2(
+        let Some(event) = scroll_event(
             self.source.as_deref(),
-            units,
-            2,
-            wheel_steps(delta.1),
-            wheel_steps(delta.0),
-            0,
+            at,
+            delta,
+            continuous,
+            phase,
+            momentum,
+            flags,
         ) else {
             return;
         };
-        let e = Some(&*event);
-        CGEvent::set_location(e, CGPoint::new(at.0, at.1));
-        CGEvent::set_flags(e, flags);
-        CGEvent::set_integer_value_field(
-            e,
-            CGEventField::ScrollWheelEventIsContinuous,
-            continuous as i64,
-        );
-        CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventScrollPhase, phase);
-        CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventMomentumPhase, momentum);
-        if continuous {
-            CGEvent::set_double_value_field(
-                e,
-                CGEventField::ScrollWheelEventPointDeltaAxis1,
-                delta.1,
-            );
-            CGEvent::set_double_value_field(
-                e,
-                CGEventField::ScrollWheelEventPointDeltaAxis2,
-                delta.0,
-            );
-        }
         stamp_routing(&event, at, hit.target);
         // AppKit routes a scroll by its location in the window, and drops it
         // when that point misses: give it relative to the window.
@@ -1446,6 +1420,46 @@ fn stamp_time(event: &CGEvent) {
     // Nanoseconds of uptime, which AppKit reads as the event's time.
     let now = unsafe { clock_gettime_nsec_np(libc::CLOCK_UPTIME_RAW) };
     CGEvent::set_timestamp(Some(event), now);
+}
+
+/// Construct scroll metadata without posting it or reading any app state.
+fn scroll_event(
+    source: Option<&CGEventSource>,
+    at: (f64, f64),
+    delta: (f64, f64),
+    continuous: bool,
+    phase: i64,
+    momentum: i64,
+    flags: CGEventFlags,
+) -> Option<CFRetained<CGEvent>> {
+    let units = if continuous {
+        CGScrollEventUnit::Pixel
+    } else {
+        CGScrollEventUnit::Line
+    };
+    let event = CGEvent::new_scroll_wheel_event2(
+        source,
+        units,
+        2,
+        wheel_steps(delta.1),
+        wheel_steps(delta.0),
+        0,
+    )?;
+    let e = Some(&*event);
+    CGEvent::set_location(e, CGPoint::new(at.0, at.1));
+    CGEvent::set_flags(e, flags);
+    CGEvent::set_integer_value_field(
+        e,
+        CGEventField::ScrollWheelEventIsContinuous,
+        continuous as i64,
+    );
+    CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventScrollPhase, phase);
+    CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventMomentumPhase, momentum);
+    if continuous {
+        CGEvent::set_double_value_field(e, CGEventField::ScrollWheelEventPointDeltaAxis1, delta.1);
+        CGEvent::set_double_value_field(e, CGEventField::ScrollWheelEventPointDeltaAxis2, delta.0);
+    }
+    Some(event)
 }
 
 /// Whole wheel steps, at least one for any movement.
@@ -1854,5 +1868,41 @@ mod routing_bounds_tests {
             None
         );
         assert_eq!(queries, [(CGWindowListOption::OptionIncludingWindow, 8440)]);
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn reported_scroll_amounts_reach_unposted_event_fields_without_clamping() {
+        for amount in [3, 60, 200, 400, 800] {
+            let event = scroll_event(
+                None,
+                (100.0, 100.0),
+                (0.0, -f64::from(amount)),
+                false,
+                0,
+                0,
+                CGEventFlags::empty(),
+            )
+            .unwrap();
+            let read = |field| CGEvent::integer_value_field(Some(&event), field);
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventDeltaAxis1),
+                -i64::from(amount)
+            );
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventPointDeltaAxis1),
+                -i64::from(amount) * 10
+            );
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventFixedPtDeltaAxis1),
+                -i64::from(amount) * 65536
+            );
+            assert_eq!(read(CGEventField::ScrollWheelEventDeltaAxis2), 0);
+            assert_eq!(read(CGEventField::ScrollWheelEventIsContinuous), 0);
+        }
     }
 }

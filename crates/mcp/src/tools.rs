@@ -309,8 +309,8 @@ pub fn definitions() -> Vec<Value> {
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
                 "One the app opens later by itself moves there too while none of its other windows is on the user's screen.",
                 "x, y, width and height set the window's frame, in screenshot pixels from the display's top-left corner,",
-                "as list_windows reports bounds; each one left out keeps the window's own. Pass a window_id already on the",
-                "display to resize or move it there. The frame stays inside the display, and apps hold to their own minimum",
+                "as list_windows reports bounds; each one left out keeps the window's own unless it cannot fit. Pass a window_id already on the",
+                "display to resize or move it there. An explicit frame stays below the reserved menu bar strip and inside the display. For a window already on this display, no frame arguments leaves its frame unchanged. Apps hold to their own minimum",
                 "and maximum sizes, so the result's window is the frame the window actually ended with. For a width wider",
                 "than the display, create_display with a larger width first.",
             ],
@@ -338,6 +338,7 @@ pub fn definitions() -> Vec<Value> {
                 "the app starts with them, as a development build needs, and its windows go on the display.",
                 "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
                 "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance.",
+                "A fresh profile has separate sign-ins; it does not reuse the user's existing login session. Ask before making a separate profile or signing in.",
             ],
             object(
                 json!({
@@ -874,9 +875,13 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
         .collect();
     if !missed.is_empty() {
         out["note"] = json!(format!(
-            "The window didn't take the whole frame you asked for: {}. Apps keep to their own minimum and maximum sizes, the frame stays inside the display, and macOS keeps windows below the menu bar strip.",
+            "The window didn't take the whole frame you asked for: {}. Apps keep to their own minimum and maximum sizes. Agent Screen constrains explicit frames to the display below the reserved menu bar strip; read window for the actual frame.",
             missed.join(", ")
         ));
+    } else if reply.get("frameConstrained") == Some(&Value::Bool(true)) {
+        out["note"] = json!(
+            "Agent Screen adjusted the frame to fit below the reserved menu bar strip. This can shrink a dimension you left out; read window for the actual frame."
+        );
     }
     out
 }
@@ -1351,6 +1356,18 @@ mod tests {
         let note = clamped["note"].as_str().unwrap();
         assert!(note.contains("width 700 for 600"), "{note}");
         assert!(!note.contains("height"), "{note}");
+        // A top-strip constraint can shrink an omitted height while the
+        // explicitly requested width still matches. It must still be disclosed.
+        let constrained = place_output(
+            json!({ "window": { "x": 0, "y": 31, "width": 600, "height": 817 }, "frameConstrained": true }).as_object().unwrap(),
+            &[("x", None), ("y", None), ("width", Some(600.0)), ("height", None)],
+        );
+        assert!(
+            constrained["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reserved menu bar strip")
+        );
         // A plain place has no frame to compare.
         assert_eq!(
             place_output(
@@ -1408,6 +1425,33 @@ mod tests {
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }
+    }
+
+    #[test]
+    fn current_schema_exposes_frame_recovery_and_separate_profile_signins() {
+        let tools = definitions();
+        let place = tools
+            .iter()
+            .find(|tool| tool["name"] == "place_window")
+            .unwrap();
+        for key in ["x", "y", "width", "height"] {
+            assert_eq!(place["inputSchema"]["properties"][key]["type"], "number");
+        }
+        let description = place["description"].as_str().unwrap();
+        assert!(description.contains("reserved menu bar strip"));
+        assert!(description.contains(
+            "For a window already on this display, no frame arguments leaves its frame unchanged"
+        ));
+        let launch = tools
+            .iter()
+            .find(|tool| tool["name"] == "launch_app")
+            .unwrap();
+        assert!(
+            launch["description"]
+                .as_str()
+                .unwrap()
+                .contains("does not reuse the user's existing login session")
+        );
     }
 
     #[test]
