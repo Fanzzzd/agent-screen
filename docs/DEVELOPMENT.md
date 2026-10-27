@@ -161,6 +161,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | --- | --- |
 | `debugTakeover` | `displayId` and `active` begin or end a Takeover. |
 | `debugShow` | `surface` selects an action from the list below. Supply `displayId` where the action needs one. |
+| `debugStageClaim` | Debug-assertion builds only. Prepare, claim, permit show, check status or release a supervised Field fixture on the connection's own `userStage`. |
 | `debugViewerInput` | Makes a click, key press or drag through the Viewer's own handler. See the input parameters above. |
 | `debugMoveWindow` | Moves the window named by `pid` and `windowId` to global `x`, `y`. |
 | `debugHandOver` | Hands `windowId` over to `displayId`, as from the Windows menu. |
@@ -198,6 +199,22 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `userStage` | Supply the selected stage's user-display role to window ownership rules. Only debug-assertion builds compile this surface. |
 
 `userStage` requires a selected, live stage owned by the same connection. Layout, capture and the independent sighting watcher keep the real hardware identity. Ending or releasing the stage, closing its connection, or changing the selected stage clears the role. Release builds contain no role override, even with `AGENTSCREEN_DEBUG=1`.
+
+`launchhere` prepares Field outside `launchApp`, as a child of the test script. Field constructs its hidden window on the stage and exchanges a per-fixture token over private stdin/stdout pipes. `debugStageClaim` takes `displayId` and `action`: `prepare` returns the token; `claim` checks the real window owner, child pid and fixture executable; `show` permits the first show only after the canonical claim publisher succeeds; `status` checks the lease; `release` withdraws it after the fixture exits. Actions after `prepare` take `token`, `pid` and `windowId`. Tokens are not command-line arguments or log output.
+
+Preparation expires after 10 s. The fixture exits on stdin EOF, control failure, a 2 s heartbeat gap or its 60 s lifetime. Hardware claims do not add session `started` or window records. A normal launcher Handover still decides the target session's ownership. Cleanup compares the stage and claim generation under the canonical claims mutex, so it cannot delete a later Handover or a reused window id's claim. An in-flight Handover keeps the source display until its window has actually moved. If the hidden window's real owner cannot be read, the gate fails and Field stays hidden. A failed process identity query is Unknown, not proof of exit. Unknown queries retain both the hardware claim and the source display. Gated Field ignores SIGUSR1 and SIGUSR2 and does not install their legacy movement handlers or the screen-change callback. This path still needs an authorized live run; unit tests and a Swift compile do not establish macOS pre-show owner visibility or a zero-sighting result.
+
+Offline stage-gate contracts need no Agent Display or running app:
+
+```sh
+CARGO_INCREMENTAL=0 cargo test -p agent-screen-tests --lib offline_gate
+CARGO_INCREMENTAL=0 cargo test -p agent-screen-model offline_gate_identity
+CARGO_INCREMENTAL=0 cargo test -p agent-screen offline_gate_process_
+```
+
+The first command compiles `field.swift` with `FIELD_PROTOCOL_TEST`. That compile-time adapter excludes AppKit, `NSApplication` and `NSWindow`; tests check the linked dependencies too. It uses the same Swift framing, handshake, state and watchdog code as Field. Only its window callback and window number are synthetic. Tests drive the actual Rust `StageFixture` over private pipes and isolated 0700-directory/0600-socket control services. Those services reuse the actual gate, identity and candidate-publication rules. They never connect to an Agent Screen socket or create a display. Each compiler and child has a deadline; failures never print tokens.
+
+These tests cover hello/show, EOF before and after show, partial or oversized frames, wrong identities/tokens, duplicate messages, heartbeat and lifetime limits, failed or unacknowledged claims, missing owners, control EOF and stale release after Handover or window-id reuse. Readiness must end in a newline and name a positive 32-bit CG window id. The process-query tests inspect only their own test process and a child pipe reader. Physical hidden-window ownership, AppKit's first show and AeroSpace layout timing still require an authorized live run. Offline transport success is not a zero-sighting measurement.
 
 For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 

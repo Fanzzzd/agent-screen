@@ -217,11 +217,19 @@ fn main() {
                     while let Some(event) = events.next().await {
                         match event {
                             Event::Request {
+                                #[cfg(debug_assertions)]
+                                peer_pid,
                                 connection,
                                 method,
                                 params,
                                 reply,
                             } => {
+                                #[cfg(debug_assertions)]
+                                if let Some(pid) = peer_pid {
+                                    core.update(cx, |c, _| {
+                                        c.debug_peers.insert(connection, pid);
+                                    });
+                                }
                                 let core = core.clone();
                                 cx.spawn(async move |cx: &mut AsyncApp| {
                                     let result = control::agent::handle(

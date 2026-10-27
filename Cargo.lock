@@ -179,8 +179,10 @@ dependencies = [
 name = "agent-screen-tests"
 version = "0.0.0"
 dependencies = [
+ "agent-screen-model",
  "anyhow",
  "base64 0.22.1",
+ "libc",
  "md-5",
  "regex",
  "serde",

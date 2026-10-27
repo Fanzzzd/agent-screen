@@ -1421,6 +1421,59 @@ async fn handle_one(
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({ "state": state }))
         }
+        #[cfg(debug_assertions)]
+        "debugStageClaim" => {
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            usable(&core, connection, id, "debugStageClaim", cx)?;
+            let selected = crate::ui::shell::current()
+                .and_then(|s| s.update(cx, |s, _| s.stage_display()).ok())
+                .flatten();
+            let peer = core.read_with(cx, |c, _| c.debug_peers.get(&connection).copied());
+            if selected != Some(id)
+                || peer.is_none()
+                || !core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .and_then(|d| d.owner.as_ref())
+                        .is_some_and(|o| o.connection == connection)
+                })
+                || !cg::is_online(id)
+                || !cg::is_agent_screen(id)
+                || cg::window_display_role(id) != crate::model::DisplayRole::User
+            {
+                return Err(ControlError::invalid(
+                    "stage gate requires this connection's live userStage",
+                ));
+            }
+            let action = p.string("action").unwrap_or_default();
+            if action == "prepare" {
+                let token = crate::mac::stage_gate::prepare(connection, id, peer.unwrap())
+                    .map_err(ControlError::failed)?;
+                return reply(json!({ "token": token }));
+            }
+            let token = p.string("token").unwrap_or_default();
+            if action == "release" {
+                crate::mac::stage_gate::release(connection, &token)
+                    .map_err(ControlError::failed)?;
+            } else {
+                let pid = p.int("pid").unwrap_or(0) as i32;
+                let window = p.int("windowId").unwrap_or(0) as u32;
+                let recorded = core.read_with(cx, |c, _| {
+                    c.displays
+                        .list
+                        .iter()
+                        .any(|d| d.records.contains_key(&window))
+                });
+                if action == "claim" && recorded {
+                    return Err(ControlError::invalid(
+                        "fixture window already has session ownership",
+                    ));
+                }
+                crate::mac::stage_gate::step(connection, &token, &action, pid, window)
+                    .map_err(ControlError::failed)?;
+            }
+            Ok(json!({}))
+        }
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
             let id = p.int("displayId").unwrap_or(0) as DisplayId;

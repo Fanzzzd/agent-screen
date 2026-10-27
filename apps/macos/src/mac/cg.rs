@@ -259,6 +259,19 @@ fn is_xpc_service(pid: i32) -> bool {
     xpc
 }
 
+/// A pre-show gate cannot infer ownership from a caller-supplied pid.
+#[cfg(debug_assertions)]
+pub fn hidden_window_owner(window: u32) -> Option<i32> {
+    window_list_where(
+        CGWindowListOption::OptionIncludingWindow,
+        window,
+        |_, _, _| true,
+    )
+    .into_iter()
+    .find(|w| w.target.window_id == window)
+    .map(|w| w.target.pid)
+}
+
 /// A window's global bounds, while it exists.
 pub fn window_bounds(window_id: u32) -> Option<Rect> {
     window_list_where(

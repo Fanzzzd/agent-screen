@@ -46,6 +46,33 @@ fn write_at(claims: &Claims, path: &std::path::Path) -> std::io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
+/// The stage gate uses the same publisher and mutex as production moves.
+/// Unlike best-effort production calls, it cannot acknowledge a failed write.
+#[cfg(debug_assertions)]
+pub fn stage_claim(window: u32, display: u32) -> std::io::Result<u64> {
+    let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    if !claims.desired().has_display(display)
+        || std::env::var("AGENTSCREEN_NO_CLAIMS").as_deref() == Ok("1")
+    {
+        return Err(std::io::Error::other("stage claims are unavailable"));
+    }
+    agent_screen_model::stage_gate::publish_fixture_claim(&mut claims, window, display, write)?
+        .ok_or_else(|| std::io::Error::other("stage claim has no generation"))
+}
+
+#[cfg(debug_assertions)]
+pub fn release_stage(window: u32, display: u32, generation: u64) -> std::io::Result<()> {
+    let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    claims.publish(false, |c| c.release_if(window, display, generation), write)
+}
+
+#[cfg(debug_assertions)]
+pub fn still_stage(window: u32, display: u32, generation: u64) -> bool {
+    let claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    claims.desired().display_of(window) == Some(display)
+        && claims.desired().generation_of(window) == Some(generation)
+}
+
 pub fn add_display(display: u32) {
     change(|c| c.add_display(display));
 }
@@ -136,6 +163,44 @@ mod publication_tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             state.published().to_json()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod stage_publication_tests {
+    use super::*;
+    use agent_screen_model::stage_gate::publish_fixture_claim;
+
+    #[test]
+    fn failed_stage_write_is_absent_from_the_next_real_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-screen-stage-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("claims.json");
+        let mut state = Publication::new();
+        state
+            .publish(false, |c| c.add_display(3), |c| write_at(c, &path))
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(publish_fixture_claim(&mut state, 7, 3, |c| write_at(c, &path)).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // The unacknowledged fixture exits. There is no binding to release.
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        state
+            .publish(false, |c| c.claim(8, 3), |c| write_at(c, &path))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"version":1,"displays":[3],"windows":[8]}"#
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -61,6 +61,8 @@ pub type Reply = Result<Map<String, Value>, ControlError>;
 
 pub enum Event {
     Request {
+        #[cfg(debug_assertions)]
+        peer_pid: Option<i32>,
         connection: u64,
         method: String,
         params: Map<String, Value>,
@@ -120,6 +122,8 @@ async fn serve(
     connection: u64,
     events: mpsc::UnboundedSender<Event>,
 ) {
+    #[cfg(debug_assertions)]
+    let peer_pid = stream.peer_cred().ok().and_then(|c| c.pid());
     let (reader, mut writer) = stream.into_split();
     // Replies are written in the order they finish, from one task.
     let (lines, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -157,6 +161,8 @@ async fn serve(
         let (reply, answer) = oneshot::channel();
         if events
             .unbounded_send(Event::Request {
+                #[cfg(debug_assertions)]
+                peer_pid,
                 connection,
                 method,
                 params,
