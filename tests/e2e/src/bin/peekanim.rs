@@ -162,20 +162,23 @@ fn test(log: &Path) -> Result<()> {
         .find(|w| !before.contains(&w.id))
         .context("Peek didn't open")?;
 
+    // Peek's window has room around the card for the shadow it draws:
+    // 28 pt each side.
+    let card = peek.width - 56.0;
     let asked = now_ms();
     let created = asked;
     control.call("debugShow", json!({ "surface": "create" }))?;
     let grew = drawn(log, asked, 2500);
     let first = grew
         .iter()
-        .find(|&&(_, w)| w > peek.width + 0.5)
+        .find(|&&(_, w)| w > card + 0.5)
         .map(|&(t, _)| t - asked);
     check(
         "a tile for the new display shows at once, before macOS has made it",
         first.is_some_and(|t| t < 100),
         format!("Peek drawn wider after {first:?} ms"),
     );
-    let growing = steps(&grew, peek.width);
+    let growing = steps(&grew, card);
     check(
         "Peek grows in steps at the display's rate as the tile grows in",
         growing.len() >= 8 && longest_wait(&grew) < 40,

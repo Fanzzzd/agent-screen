@@ -312,6 +312,17 @@ fn keep_inside(card: NSRect, screen: NSRect) -> NSRect {
     rect(x, y, w, h)
 }
 
+/// Peek's card, in Cocoa coordinates: its window less the margin where the
+/// card's shadow is drawn.
+fn peek_card(window: &NSWindow) -> NSRect {
+    native::inset(native::frame(window), peek::MARGIN)
+}
+
+/// Peek's window frame for a card frame.
+fn outset_card(card: NSRect) -> NSRect {
+    native::outset(card, peek::MARGIN)
+}
+
 fn offset(r: NSRect, dy: f64) -> NSRect {
     rect(r.origin.x, r.origin.y + dy, r.size.width, r.size.height)
 }
@@ -456,6 +467,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .update(cx, |_, window, _| native::ns_window(window))?
         .expect("Viewer window");
     native::style_panel(&peek_ns, native::LEVEL_POP_UP_MENU);
+    native::own_shadow(&peek_ns, peek::MARGIN);
     native::style_panel(&viewer_ns, native::LEVEL_FLOATING);
     // Peek never takes the keyboard from the user's app; neither panel
     // becomes the main window.
@@ -672,7 +684,7 @@ impl Shell {
                     .peek
                     .as_ref()
                     .filter(|_| self.peek_shown)
-                    .is_some_and(|(_, w)| contains(native::frame(w), (x, y)));
+                    .is_some_and(|(_, w)| contains(peek_card(w), (x, y)));
                 let (pointer, now) = (self.peek_pointer(), self.peek_now());
                 let effect = peek_outside_press(
                     &mut self.peek_intent,
@@ -1159,7 +1171,7 @@ impl Shell {
             .filter(|_| self.peek_shown)
             .is_some_and(|(_, w)| {
                 // Up to the menu bar: Peek hangs 6 pt below the icon.
-                let mut f = native::frame(w);
+                let mut f = peek_card(w);
                 f.size.height += 8.0;
                 contains(f, at)
             });
@@ -1335,7 +1347,7 @@ impl Shell {
         }
         self.peek_generation += 1;
         if self.peek_shown {
-            let now = native::frame(&window);
+            let now = peek_card(&window);
             if now.size.width != frame.size.width && now.size.height == frame.size.height {
                 self.slide_peek(now, frame, cx);
             } else {
@@ -1345,8 +1357,7 @@ impl Shell {
                     self.slide_card = None;
                     let _ = peek.update(cx, |peek, _, _| peek.slide = None);
                 }
-                native::set_frame_later(&window, frame);
-                native::set_shadow_later(&window, true);
+                native::set_frame_later(&window, outset_card(frame));
             }
         } else {
             self.watch_pointer(cx);
@@ -1359,9 +1370,9 @@ impl Shell {
                     return;
                 }
                 native::set_alpha(&window, 0.0);
-                native::set_frame(&window, offset(frame, 10.0));
+                native::set_frame(&window, offset(outset_card(frame), 10.0));
                 native::order_front(&window);
-                native::animate(&window, frame, 1.0, 0.24);
+                native::animate(&window, outset_card(frame), 1.0, 0.24);
             });
         }
         self.peek_shown = true;
@@ -1394,8 +1405,7 @@ impl Shell {
             peek.slide = Some(slide);
             cx.notify();
         });
-        native::set_shadow_later(&window, false);
-        native::set_frame_later(&window, span);
+        native::set_frame_later(&window, outset_card(span));
         self.after(
             peek::RESIZE + Duration::from_millis(30),
             cx,
@@ -1407,8 +1417,7 @@ impl Shell {
                 // Peek draws the card where the slide left it until the
                 // window has this frame, then fills the window.
                 if let Some((_, window)) = shell.peek.clone() {
-                    native::set_frame_later(&window, to);
-                    native::set_shadow_later(&window, true);
+                    native::set_frame_later(&window, outset_card(to));
                 }
             },
         );
@@ -1422,9 +1431,6 @@ impl Shell {
         // A slide going stops where it is; the next show sizes afresh.
         self.peek_slides += 1;
         self.slide_card = None;
-        if let Some((_, window)) = &self.peek {
-            native::set_shadow_later(window, true);
-        }
         if let Some((peek, _)) = &self.peek {
             let _ = peek.update(cx, |peek, _, _| {
                 peek.keys = false;
@@ -1482,7 +1488,7 @@ impl Shell {
         let index = peek::ordered(self.core.read(cx))
             .iter()
             .position(|&d| d == id)?;
-        let card = native::frame(window);
+        let card = peek_card(window);
         let tile = self.peek.as_ref()?.0.read(cx).ok()?.tile;
         let thumb = peek::thumb_height(tile) as f64;
         let step = (tile + peek::SPACING) as f64;

@@ -31,6 +31,14 @@ pub const SPACING: f32 = 10.;
 /// With displays around, adding one is a narrow "+" at the end.
 pub const NARROW: f32 = 44.;
 pub const RADIUS: f32 = 18.;
+/// Room around the card in Peek's window, top, left, bottom, right, for
+/// the shadow Peek draws itself (`native::own_shadow`).
+pub const MARGIN: [f64; 4] = [8., 28., 40., 28.];
+const SHADOW: [(f32, f32, f32); 2] = [
+    // Opacity, drop, blur: a tight contact shadow and a soft wide one.
+    (0.12, 1., 2.5),
+    (0.28, 10., 28.),
+];
 /// A tile grows in or shrinks out over this, as Peek's frame changes with
 /// it (`Shell::show_peek`).
 pub const RESIZE: Duration = Duration::from_millis(260);
@@ -38,10 +46,9 @@ pub const RESIZE: Duration = Duration::from_millis(260);
 /// The card sliding to a new width inside Peek's window, which spans both
 /// the card's old and new frames meanwhile: resizing the window itself
 /// every frame costs WindowServer a new backing store each time, about
-/// 40 ms a step, where GPUI redraws at the display's rate. The window has
-/// no system shadow meanwhile: WindowServer draws it, and its outline, from
-/// the window's last picture, so it trailed the card. Left edge and width,
-/// in the window. Peek times it itself: a `with_animation` around
+/// 40 ms a step, where GPUI redraws at the display's rate. Peek draws the
+/// card's shadow itself, so it moves with the card in the same frame. Left
+/// edge and width, in the window less its margin. Peek times it itself: a `with_animation` around
 /// the card would put its id in every tile's element path, so the tiles'
 /// own grow and shrink would start over when the slide ends.
 #[derive(Clone, Copy, PartialEq)]
@@ -349,11 +356,24 @@ impl Render for Peek {
         let narrow = !ids.is_empty() || self.pending > 0;
         let shell = self.shell.clone();
         let add_focused = self.focused == Some(ids.len());
+        let [top, left, bottom, right] = MARGIN.map(|m| m as f32);
         let card = div()
             .id("card")
             .absolute()
-            .top_0()
-            .bottom_0()
+            .top(px(top))
+            .bottom(px(bottom))
+            .shadow(
+                SHADOW
+                    .iter()
+                    .map(|&(opacity, drop, blur)| gpui::BoxShadow {
+                        color: gpui::black().opacity(opacity),
+                        offset: gpui::point(px(0.), px(drop)),
+                        blur_radius: px(blur),
+                        spread_radius: px(0.),
+                        inset: false,
+                    })
+                    .collect(),
+            )
             .flex()
             .gap(px(SPACING))
             .p(px(PADDING))
@@ -373,7 +393,7 @@ impl Render for Peek {
                 &theme,
                 &self.shell,
             ));
-        let viewport = f32::from(window.viewport_size().width);
+        let viewport = f32::from(window.viewport_size().width) - left - right;
         // A slide that has ended keeps the card where it stopped until the
         // window takes the card's frame.
         let slid = self.slide.filter(|slide| {
@@ -391,13 +411,14 @@ impl Render for Peek {
                 if self.shown {
                     log_card(width);
                 }
-                card.left(px(mix(slide.from.0, slide.to.0))).w(px(width))
+                card.left(px(left + mix(slide.from.0, slide.to.0)))
+                    .w(px(width))
             }
             None => {
                 if self.shown {
                     log_card(viewport);
                 }
-                card.left_0().right_0()
+                card.left(px(left)).right(px(right))
             }
         };
         div()

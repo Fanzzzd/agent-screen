@@ -652,6 +652,80 @@ pub fn watch_mouse() {
     }
 }
 
+// MARK: Windows that draw their own shadow
+
+thread_local! {
+    /// Windows with a transparent margin around their content, where the
+    /// app draws the content's shadow, by margin: top, left, bottom, right.
+    /// WindowServer's own shadow is drawn from a window's last picture, a
+    /// frame behind, so it trails content that changes size in the window.
+    static MARGINS: RefCell<Vec<(Retained<NSWindow>, [f64; 4])>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Draw `window`'s shadow in the app: no system shadow, and over the
+/// margin, mouse events go to what is below, as they would around a
+/// system shadow. The window takes them only over its content.
+pub fn own_shadow(window: &NSWindow, margin: [f64; 4]) {
+    window.setHasShadow(false);
+    let first = MARGINS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.push((window.retain(), margin));
+        m.len() == 1
+    });
+    if first {
+        let follow = |_: &NSEvent| follow_pointer(NSEvent::mouseLocation());
+        let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged;
+        let global = RcBlock::new(move |event: NonNull<NSEvent>| follow(unsafe { event.as_ref() }));
+        if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global)
+        {
+            keep(monitor);
+        }
+        let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            follow(unsafe { event.as_ref() });
+            event.as_ptr()
+        });
+        if let Some(monitor) =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local) }
+        {
+            keep(monitor);
+        }
+    }
+    follow_pointer(NSEvent::mouseLocation());
+}
+
+/// `frame` less a margin of top, left, bottom, right, in Cocoa coordinates.
+pub fn inset(frame: NSRect, [top, left, bottom, right]: [f64; 4]) -> NSRect {
+    NSRect::new(
+        NSPoint::new(frame.origin.x + left, frame.origin.y + bottom),
+        NSSize::new(
+            frame.size.width - left - right,
+            frame.size.height - top - bottom,
+        ),
+    )
+}
+
+/// `content` with a margin of top, left, bottom, right around it.
+pub fn outset(content: NSRect, [top, left, bottom, right]: [f64; 4]) -> NSRect {
+    inset(content, [-top, -left, -bottom, -right])
+}
+
+/// Each window with a margin takes mouse events only with the pointer over
+/// its content. Called on every move, and when a window moves or resizes.
+pub fn follow_pointer(at: NSPoint) {
+    MARGINS.with(|m| {
+        for (window, margin) in m.borrow().iter() {
+            let content = inset(window.frame(), *margin);
+            let over = at.x >= content.origin.x
+                && at.x <= content.origin.x + content.size.width
+                && at.y >= content.origin.y
+                && at.y <= content.origin.y + content.size.height;
+            if window.ignoresMouseEvents() == over {
+                window.setIgnoresMouseEvents(!over);
+            }
+        }
+    });
+}
+
 /// The pointer, in Cocoa screen coordinates.
 pub fn mouse_location() -> (f64, f64) {
     let at = NSEvent::mouseLocation();
@@ -811,19 +885,7 @@ pub const LEVEL_POP_UP_MENU: isize = 101;
 pub fn set_frame(window: &NSWindow, frame: NSRect) {
     window.setFrame_display(frame, true);
     window.invalidateShadow();
-}
-
-/// Turn a window's system shadow, with the outline drawn in it, on or off,
-/// once the GPUI update in progress has returned. WindowServer draws it
-/// from the window's last picture, a frame behind GPUI.
-pub fn set_shadow_later(window: &NSWindow, on: bool) {
-    let window: Retained<NSWindow> = window.retain();
-    later(move || {
-        window.setHasShadow(on);
-        if on {
-            window.invalidateShadow();
-        }
-    });
+    follow_pointer(NSEvent::mouseLocation());
 }
 
 /// Resize a GPUI window that is showing, once the GPUI update in progress
