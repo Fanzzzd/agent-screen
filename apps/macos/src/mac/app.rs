@@ -165,6 +165,13 @@ pub fn is_electron(pid: i32) -> bool {
     })
 }
 
+/// Whether the app is built on VS Code, as Cursor and Windsurf are: its
+/// workbench ships inside. VS Code runs a menu item Electron reports as a
+/// shortcut as its key binding in whatever has focus (#39).
+pub fn is_vs_code_based(pid: i32) -> bool {
+    bundle_of(pid).is_some_and(|b| b.join("Contents/Resources/app/out/vs/workbench").exists())
+}
+
 /// Whether the app started less than `span` ago.
 pub fn launched_within(pid: i32, span: std::time::Duration) -> bool {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)

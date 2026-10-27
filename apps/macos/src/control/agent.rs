@@ -1031,13 +1031,20 @@ async fn handle_one(
             // and Electron reads only a mouse event as a click (#39).
             if action == "press" {
                 let (item, pid) = (ax::Sendable(element.clone()), window.target.pid);
-                let electron_menu = off(cx, move || {
-                    ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem")
-                        && app::is_electron(pid)
+                let note = off(cx, move || {
+                    let menu =
+                        ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem");
+                    if !menu || !app::is_electron(pid) {
+                        None
+                    } else if app::is_vs_code_based(pid) {
+                        Some(VS_CODE_MENU_NOTE)
+                    } else {
+                        Some(ELECTRON_MENU_NOTE)
+                    }
                 })
                 .await;
-                if electron_menu {
-                    return reply(json!({ "note": ELECTRON_MENU_NOTE }));
+                if let Some(note) = note {
+                    return reply(json!({ "note": note }));
                 }
             }
             Ok(json!({}))
@@ -3696,6 +3703,11 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     }
     keep_counting(id, cx);
 }
+
+/// What an agent hears after pressing a menu item of an app built on VS
+/// Code, such as Cursor: with the terminal focused, Edit > Find opened the
+/// terminal's find box (`cargo e2e cursormenu`).
+const VS_CODE_MENU_NOTE: &str = "This app is built on VS Code. It ran this menu item as the item's keyboard shortcut in whatever has focus, not as the menu's own command, because Electron reports a menu item pressed through accessibility as its shortcut. With the terminal, a panel or an input box focused, the result can differ: Edit > Find opened the terminal's find box. Check the window. To run the command itself, open the Command Palette with key cmd+shift+p, type the command's name and press Return.";
 
 /// What an agent hears after pressing an Electron app's menu item.
 const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, move focus out of the text field, with a click on an empty part of the window, then press the item again.";
