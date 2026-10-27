@@ -2,6 +2,7 @@
 //! (the same interface DeskPad and BetterDisplay use).
 
 use super::cg;
+use agent_screen_model::arrangement;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -359,15 +360,11 @@ pub async fn create_parked(
     Some(made)
 }
 
-/// Park a virtual display diagonally off the top-right corner of the
-/// physical displays, so the real cursor rarely wanders onto it. Further
-/// virtual displays stack to the right of earlier ones.
+/// Park Agent Screen's displays where `arrangement::plan` puts them: a
+/// compact grid off the top-right corner of the user's displays, out of
+/// the real cursor's way.
 ///
-/// Not the bottom corners: AeroSpace hides the windows of other workspaces
-/// in a monitor's bottom corner, hanging off screen, and a display there
-/// would show the user's hidden windows to agents.
-///
-/// True once the display sits there. A display WindowServer has only just
+/// True once display `id` sits there. A display WindowServer has only just
 /// added ignores the configuration, so callers try again.
 pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     if knob("AGENTSCREEN_NO_PARK").is_some() {
@@ -405,82 +402,78 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
             d != id && online.contains(&d) && (now.x, now.y) != (x, y)
         })
         .collect();
-    let bounds_of = |d: u32| {
-        let now = cg::display_bounds(d);
-        match restore.iter().find(|(r, _)| *r == d) {
-            Some(&(_, (x, y))) => crate::model::Rect::new(x, y, now.width, now.height),
-            None => now,
-        }
-    };
-    let others: Vec<u32> = online.into_iter().filter(|&d| d != id).collect();
-    let anchor = others
-        .iter()
-        .copied()
-        .filter(|&d| !virtual_ids.contains(&d) && !cg::is_agent_screen(d))
-        .map(bounds_of)
-        .reduce(|a, b| a.union(&b))
-        .unwrap_or_else(|| cg::display_bounds(cg::main_display()));
-    let occupied = others
-        .iter()
-        .filter(|&&d| virtual_ids.contains(&d) || cg::is_agent_screen(d))
-        .map(|&d| bounds_of(d))
-        .fold(anchor, |a, b| a.union(&b));
-    let height = cg::display_bounds(id).height;
-    let origin = (occupied.max_x() as i32, (anchor.y - height) as i32);
+    let screens = screens(&online, virtual_ids, &restore);
+    let moves: Vec<(u32, (f64, f64))> = arrangement::plan(&screens)
+        .into_iter()
+        .filter(|&(d, (x, y))| {
+            let now = cg::display_bounds(d);
+            (now.x, now.y) != (x, y)
+        })
+        .chain(restore.iter().copied())
+        .collect();
     if !restore.is_empty() {
         log::info!("display {id}: putting back displays macOS moved for it: {restore:?}");
     }
-    unsafe {
-        let mut config = std::ptr::null_mut();
-        if CGBeginDisplayConfiguration(&mut config) == 0 {
-            CGConfigureDisplayOrigin(config, id, origin.0, origin.1);
-            for &(d, (x, y)) in &restore {
-                CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
+    if !moves.is_empty() {
+        unsafe {
+            let mut config = std::ptr::null_mut();
+            if CGBeginDisplayConfiguration(&mut config) == 0 {
+                for &(d, (x, y)) in &moves {
+                    CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
+                }
+                // For this session only. Made permanent, macOS took a second
+                // longer to finish, 2.3 s against 1.3 s, and still showed the
+                // next display with the serial at its default spot first.
+                CGCompleteDisplayConfiguration(config, 1);
             }
-            // For this session only. Made permanent, macOS took a second
-            // longer to finish, 2.3 s against 1.3 s, and still showed the
-            // next display with the serial at its default spot first.
-            CGCompleteDisplayConfiguration(config, 1);
         }
     }
+    let planned = arrangement::plan(&self::screens(&cg::active_displays(), virtual_ids, &[]))
+        .into_iter()
+        .find(|&(d, _)| d == id);
     let now = cg::display_bounds(id);
-    (now.x as i32, now.y as i32) == origin
+    planned.is_none_or(|(_, (x, y))| (now.x, now.y) == (x, y))
 }
 
-/// The union of the user's own displays, or of the main display when all
-/// are virtual.
-fn physical_bounds(id: u32, others: &[u32], virtual_ids: &[u32]) -> Option<crate::model::Rect> {
-    let physical: Vec<u32> = others
+/// The displays `online`, as the arrangement sees them, with the user's at
+/// the origins in `restore` where it has one.
+fn screens(
+    online: &[u32],
+    virtual_ids: &[u32],
+    restore: &[(u32, (f64, f64))],
+) -> Vec<arrangement::Screen> {
+    online
         .iter()
-        .copied()
-        .filter(|&d| d != id && !virtual_ids.contains(&d) && !cg::is_agent_screen(d))
-        .collect();
-    let anchor_ids = if physical.is_empty() {
-        vec![cg::main_display()]
-    } else {
-        physical
-    };
-    anchor_ids
-        .iter()
-        .map(|&d| cg::display_bounds(d))
-        .reduce(|a, b| a.union(&b))
+        .map(|&d| {
+            let mut rect = cg::display_bounds(d);
+            if let Some(&(_, (x, y))) = restore.iter().find(|(r, _)| *r == d) {
+                (rect.x, rect.y) = (x, y);
+            }
+            let role = if virtual_ids.contains(&d) {
+                arrangement::Role::Ours {
+                    order: u64::from(cg::serial(d)),
+                }
+            } else if cg::is_agent_screen(d) {
+                arrangement::Role::Fixed
+            } else {
+                arrangement::Role::User
+            };
+            arrangement::Screen { id: d, rect, role }
+        })
+        .collect()
 }
 
-/// Whether display `id` still sits where `tuck_away` parks displays: above
-/// and right of the user's displays, out of the cursor's way. The user may
-/// have dragged it elsewhere in System Settings.
+/// Whether display `id` is still out of the cursor's way, above and right
+/// of the user's displays. The user may have dragged it elsewhere in System
+/// Settings.
 pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
-    let others = cg::active_displays();
-    let Some(anchor) = physical_bounds(id, &others, virtual_ids) else {
+    let online = cg::active_displays();
+    let Some(user) = arrangement::user_bounds(&screens(&online, virtual_ids, &[])) else {
         return true;
     };
-    let bounds = cg::display_bounds(id);
-    bounds.max_y() <= anchor.y && bounds.x >= anchor.max_x()
+    arrangement::out_of_the_way(&cg::display_bounds(id), &user)
 }
 
-/// Refresh rate and backing scale of new displays. Test builds read them
-/// from AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE, to measure
-/// what each costs.
 /// A setting a test build takes from the environment, to measure what a
 /// choice costs (`cargo e2e changecost`). None in a release build.
 fn knob(name: &str) -> Option<String> {
@@ -489,6 +482,9 @@ fn knob(name: &str) -> Option<String> {
         .flatten()
 }
 
+/// Refresh rate and backing scale of new displays. Test builds read them
+/// from AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE, to measure
+/// what each costs.
 fn mode_settings() -> (f64, u32) {
     let read = |name: &str| {
         cfg!(debug_assertions)

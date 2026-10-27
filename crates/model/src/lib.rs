@@ -4,6 +4,7 @@
 //! Nothing here touches the OS.
 
 pub mod alerts;
+pub mod arrangement;
 pub mod budget;
 pub mod claims;
 pub mod devtools;

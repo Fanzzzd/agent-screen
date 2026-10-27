@@ -16,6 +16,7 @@ pub fn rect(r: CGRect) -> Rect {
 
 unsafe extern "C" {
     fn CGDisplayVendorNumber(display: u32) -> u32;
+    fn CGDisplaySerialNumber(display: u32) -> u32;
     fn CGDisplayModelNumber(display: u32) -> u32;
     fn CGDisplayUnitNumber(display: u32) -> u32;
     fn CGDisplayPixelsWide(display: u32) -> usize;
@@ -140,6 +141,12 @@ pub fn clear_user_stage_connection(connection: u64) {
 /// Whether a display is AeroSpace's closet, where it keeps the windows of
 /// invisible workspaces. Nobody looks at it: Agent Screen treats it as if it
 /// weren't there.
+/// A display's serial number: Agent Screen numbers its own in the order it
+/// makes them.
+pub fn serial(id: DisplayId) -> u32 {
+    unsafe { CGDisplaySerialNumber(id) }
+}
+
 pub fn is_closet(id: DisplayId) -> bool {
     unsafe { CGDisplayVendorNumber(id) == 0x4145 && CGDisplayModelNumber(id) == 1 }
 }

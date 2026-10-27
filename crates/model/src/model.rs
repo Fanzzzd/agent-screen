@@ -525,8 +525,7 @@ impl FrameRequest {
         reserved_top: f64,
     ) -> Rect {
         let points = |px: Option<f64>| px.map(|v| v / scale);
-        let top = reserved_top.clamp(0.0, area.height);
-        let usable = Rect::new(area.x, area.y + top, area.width, area.height - top);
+        let usable = usable_area(area, reserved_top);
         Rect::new(
             points(self.x).map_or(current.x, |x| area.x + x),
             points(self.y).map_or(current.y, |y| area.y + y),
@@ -535,6 +534,14 @@ impl FrameRequest {
         )
         .kept_inside(&usable)
     }
+}
+
+/// Where a display's windows may sit: all of it but the strip at the top
+/// that holds the user's menu bar. A window's top edge under the strip
+/// can't be clicked: a click there reaches the user's front app.
+pub fn usable_area(area: Rect, reserved_top: f64) -> Rect {
+    let top = reserved_top.clamp(0.0, area.height);
+    Rect::new(area.x, area.y + top, area.width, area.height - top)
 }
 
 /// A global frame in points as screenshot pixels from the top-left corner
@@ -892,6 +899,19 @@ mod tests {
         );
         let huge = Rect::new(-50.0, 10.0, 2000.0, 900.0);
         assert_eq!(huge.kept_inside(&area), area);
+    }
+
+    #[test]
+    fn a_zoomed_window_is_kept_below_the_reserved_strip() {
+        // Zoom fills the whole display, toolbar under the menu bar (#103).
+        let area = usable_area(Rect::new(0.0, 0.0, 1280.0, 800.0), 24.0);
+        let zoomed = Rect::new(0.0, 0.0, 1280.0, 800.0);
+        assert_eq!(
+            zoomed.kept_inside(&area),
+            Rect::new(0.0, 24.0, 1280.0, 776.0)
+        );
+        let below = Rect::new(100.0, 200.0, 400.0, 300.0);
+        assert_eq!(below.kept_inside(&area), below);
     }
 
     #[test]
