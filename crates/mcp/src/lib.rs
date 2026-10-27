@@ -2,6 +2,7 @@
 //! stdio; it serves the tools and forwards them to the menu bar app.
 
 mod control;
+pub mod diagnostics;
 pub mod endpoint;
 pub mod install;
 mod session;
@@ -28,6 +29,8 @@ const INSTRUCTIONS: &[&str] = &[
     "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
     "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
+    "For an Agent Screen bug, collect get_diagnostics in the failing session before restarting the client,",
+    "then attach the report and reproduction steps to a GitHub bug report. Do not auto-submit or upload user content.",
 ];
 
 #[derive(Default)]

@@ -19,6 +19,8 @@ Use either toolset on windows that are on your display:
 
 ## While you work
 
+For an Agent Screen bug or an unverified fix, collect `get_diagnostics` in the failing session and follow [Reporting bugs](https://github.com/Fanzzzd/agent-screen/blob/main/docs/REPORTING_BUGS.md).
+
 - After each window's purpose is clear, call `set_disposition`: `keep` for results the user should see, `close` for scratch windows. Your session can end without warning.
 - A `takeover` error means the user is operating the display: call `wait_for_control`. When you need the display back to go on, call `request_control` with a short reason; the user answers Let … Continue or Keep Control.
 - An error saying the user closed your display means they want you to stop working on screen. Ask them before calling `create_display` again.

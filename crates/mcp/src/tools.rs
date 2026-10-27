@@ -91,6 +91,19 @@ fn tool(name: &str, title: &str, description: &[&str], input: Value, hints: Hint
 pub fn definitions() -> Vec<Value> {
     vec![
         tool(
+            "get_diagnostics",
+            "Collect bug report diagnostics",
+            &[
+                "Collect compiled build metadata for THIS MCP process and the responding Agent Screen app.",
+                "On a bug, collect this in the failing session and attach the report to a GitHub bug report.",
+                "Works before create_display and preserves ongoing sessions. Does not start the app, send input,",
+                "change settings, restart clients, submit an issue or upload user content.",
+                "Missing or legacy apps and unknown builds are reported explicitly. See docs/REPORTING_BUGS.md.",
+            ],
+            object(json!({}), &[]),
+            READ_ONLY,
+        ),
+        tool(
             "create_display",
             "Create Agent Display",
             &[
@@ -526,6 +539,14 @@ pub async fn run(
 ) -> Result<Output, ControlError> {
     let a = Args(args);
     match name {
+        "get_diagnostics" => Ok(Output::Object(
+            crate::diagnostics::collect(
+                crate::diagnostics::Collector::Mcp,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            .to_json(),
+        )),
         "create_display" => {
             let title = a.string("title")?.unwrap_or_else(|| session.folder.clone());
             // A display ended by the app quitting hands its apps on, so
@@ -1374,9 +1395,16 @@ mod tests {
     }
 
     #[test]
-    fn thirteen_tools_with_object_schemas() {
+    fn fourteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
+        let diagnostics = tools
+            .iter()
+            .find(|t| t["name"] == "get_diagnostics")
+            .unwrap();
+        assert_eq!(diagnostics["annotations"]["readOnlyHint"], true);
+        assert_eq!(diagnostics["inputSchema"]["properties"], json!({}));
+        assert_eq!(diagnostics["inputSchema"]["required"], json!([]));
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
         }

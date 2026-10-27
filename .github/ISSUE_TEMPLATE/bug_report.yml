@@ -5,13 +5,19 @@ body:
   - type: markdown
     attributes:
       value: |
-        Report a vulnerability privately instead, as SECURITY.md says.
-  - type: input
-    id: version
+        Reports are public. Remove secrets, account details and unrelated user content from logs, screenshots and recordings.
+        Report vulnerabilities privately through [Security Advisories](https://github.com/Fanzzzd/agent-screen/security/advisories/new), as [SECURITY.md](https://github.com/Fanzzzd/agent-screen/blob/main/SECURITY.md) says.
+        Follow [Reporting bugs](https://github.com/Fanzzzd/agent-screen/blob/main/docs/REPORTING_BUGS.md). You can report older builds without upgrading first.
+  - type: textarea
+    id: diagnostics
     attributes:
-      label: Agent Screen version
-      description: '`"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" --version`'
-      placeholder: "0.1.18"
+      label: App and MCP diagnostics, versions and builds
+      description: |
+        In the failing MCP session, call `get_diagnostics` with `{}` and paste the report.
+        Also run `"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" diagnostics --json` if useful. This identifies that CLI and the responding app, not the failing session's MCP.
+        If either command/tool is unavailable on an older build, write `unavailable`, paste `"/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" --version`, and say which app/MCP versions or builds remain unknown. Keep the original failure; no upgrade is required.
+      render: text
+      placeholder: "MCP get_diagnostics report, CLI diagnostics report, or unavailable with --version output and unknown app/MCP identities."
     validations:
       required: true
   - type: input
@@ -26,7 +32,7 @@ body:
     id: agent
     attributes:
       label: MCP client and agent
-      description: The client that ran the tools, and its version.
+      description: The client that ran the tools, its version, and the Agent Screen MCP registration used. Say whether this was before or after a client/MCP restart.
       placeholder: Claude Code 2.1, Codex CLI 0.50
     validations:
       required: true
@@ -66,7 +72,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: The lines from `~/Library/Logs/Agent Screen/displays.log` around the problem, and any Agent Screen messages from Console.
+      description: Paste only the relevant lines from `~/Library/Logs/Agent Screen/displays.log` or Console. Review and redact secrets, paths and user content first.
       render: text
   - type: textarea
     id: more
