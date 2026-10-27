@@ -10,8 +10,8 @@
 // (vendor 0x5353) or AeroSpace's closet (vendor 0x4145, model 1). A process
 // is the test's when it descends from the script, when its executable or
 // command line holds <mark> (the checkout: its target/e2e tools, fixtures
-// and throwaway browser profiles), or when it started after <since>, as the
-// apps launch_app opens do, unless it lives in /System/Library or /usr,
+// and throwaway browser profiles), or when launchd started it after <since>,
+// as the apps launch_app opens are, unless it lives in /System/Library or /usr,
 // where macOS keeps the services that show alerts and notifications, or in
 // another checkout's target folder, where another script runs. A
 // process whose executable starts with a <skip path> is left out: the
@@ -91,7 +91,11 @@ func isTests(_ pid: pid_t) -> Bool {
     // Another checkout's test tools and apps belong to the script running there.
     let others =
       !ours && ["/target/e2e/", "/target/Agent Screen Dev.app/"].contains { p.commandLine.contains($0) }
-    v = descends(pid) || ours || (p.started >= since && !system && !others)
+    // A late app is the test's when launchd started it, as `open` and
+    // launch_app do; another tool's child, such as Playwright's browser
+    // under node, is not.
+    let opened = p.parent == 1
+    v = descends(pid) || ours || (p.started >= since && opened && !system && !others)
   }
   verdicts[pid] = v
   return v
