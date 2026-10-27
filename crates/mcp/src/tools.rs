@@ -381,8 +381,12 @@ pub fn definitions() -> Vec<Value> {
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
                 "For a popupbutton, including an HTML select, set_value takes the exact full item title: it focuses the closed",
-                "control, types the title and verifies the value without opening a menu. A combobox takes AXValue and",
-                "AXConfirm. Type-ahead may select a different item before verification fails; inspect the returned value.",
+                "control, types the title and verifies the value without opening a menu. An editable combobox must support",
+                "AXValue and AXConfirm. A custom web combobox or radio may not support that path; no click/menu fallback",
+                "is sent on failure. Its value may have changed, so inspect before retrying or use request_help.",
+                "set_value on a menu-only button refuses while the runtime guard is disabled. Native and Electron use the",
+                "same AX-role paths; this does not establish support for every web control. Type-ahead mismatch may have",
+                "changed the choice. Ordinary click/right_click/show_menu are not protected by the prototype guard.",
                 "Titles starting with whitespace or containing control or function-key characters are rejected.",
                 "Closed-control selection waits 1.2 seconds for an earlier search to expire, so a call may take about",
                 "1.3 seconds or longer. This path does not intercept user input. A guard for menus that must open is",
@@ -1266,6 +1270,236 @@ fn launch_output(reply: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// The fake app is the OS boundary. These tests cover the MCP contract,
+    /// not native input routing, menu behavior, or user-input safety.
+    async fn act_contract(
+        args: Value,
+        script: Vec<(&str, Value, Value)>,
+    ) -> Result<Output, ControlError> {
+        let (control, app) = Control::attached_duplex();
+        let session = Session {
+            key: "offline-contract".into(),
+            client: "Unit test".into(),
+            folder: "offline".into(),
+        };
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        let dispatch = async {
+            let output = run(
+                "act_on_element",
+                args.as_object().unwrap(),
+                &session,
+                &control,
+            )
+            .await;
+            completed.send(()).unwrap();
+            output
+        };
+        let fake_app = async {
+            let (reader, mut writer) = tokio::io::split(app);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            for (index, (method, params, mut reply)) in script.into_iter().enumerate() {
+                line.clear();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                assert!(line.ends_with('\n'), "request must be NDJSON");
+                let id = index as u64 + 1;
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap(),
+                    json!({ "id": id, "method": method, "params": params })
+                );
+                reply["id"] = json!(id);
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                // Read boundaries need not match lines or UTF-8 characters.
+                for chunk in bytes.chunks(7) {
+                    writer.write_all(chunk).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }
+            line.clear();
+            tokio::select! {
+                biased;
+                received = reader.read_line(&mut line) => {
+                    panic!("unexpected follow-up call {received:?}: {line}");
+                }
+                finished = completion => finished.unwrap(),
+            }
+            // Keep both halves alive until the dispatcher has returned.
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (output, ()) = tokio::join!(dispatch, fake_app);
+            output
+        })
+        .await
+        .expect("offline dispatcher contract timed out")
+    }
+
+    fn element_params(action: &str, value: Value) -> Value {
+        json!({
+            "displayId": 9007199254740991_i64,
+            "windowId": 4294967301_i64,
+            "element": 7301,
+            "action": action,
+            "value": value,
+        })
+    }
+
+    fn element_args(action: &str) -> Value {
+        json!({
+            "display_id": 9007199254740991_i64,
+            "window_id": 4294967301_i64,
+            "element": 7301,
+            "action": action,
+        })
+    }
+
+    fn state_reply() -> Value {
+        json!({ "result": {
+            "window": "Offline fixture", "elements": 1,
+            "tree": "[7301] popupbutton value=四月 🌸 at (17,29)",
+            "data": "offline-image", "mimeType": "image/png",
+        } })
+    }
+
+    fn content(output: Output) -> Vec<Value> {
+        match output {
+            Output::Content(content) => content,
+            Output::Object(value) => panic!("expected content, got {value}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn act_on_element_set_value_preserves_full_unicode_title_and_ids() {
+        let title = "四月 🌸 / Avril e\u{301} \\\"完整标题\\\" trailing  ";
+        let mut args = element_args("set_value");
+        args["value"] = json!(title);
+        args["result"] = json!("none");
+        let output = act_contract(
+            args,
+            vec![
+                (
+                    "elementAction",
+                    element_params("set_value", json!(title)),
+                    json!({ "result": {} }),
+                ),
+                (
+                    "settle",
+                    json!({ "displayId": 9007199254740991_i64 }),
+                    json!({ "result": {} }),
+                ),
+                (
+                    "windowState",
+                    json!({ "displayId": 9007199254740991_i64, "windowId": 4294967301_i64 }),
+                    state_reply(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(content(output), vec![text("Done.")]);
+    }
+
+    #[tokio::test]
+    async fn act_on_element_errors_stop_without_follow_up_or_click_fallback() {
+        for code in ["takeover", "failed"] {
+            for action in ["set_value", "press"] {
+                for result in ["state", "changes", "none"] {
+                    let message = "User owns input; 当前值=五月 🌸";
+                    let mut args = element_args(action);
+                    args["value"] = json!("五月 🌸");
+                    args["result"] = json!(result);
+                    let output = act_contract(
+                        args,
+                        vec![(
+                            "elementAction",
+                            element_params(action, json!("五月 🌸")),
+                            json!({ "error": { "code": code, "message": message } }),
+                        )],
+                    )
+                    .await;
+                    let error = match output {
+                        Err(error) => error,
+                        Ok(_) => panic!("{code} must stop {action} with result {result}"),
+                    };
+                    assert_eq!(error.code, code);
+                    assert_eq!(error.message, message);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn act_on_element_closed_menubar_menu_returns_list_without_follow_up() {
+        let menu = "[7302] menuitem 新建 ⌘N\n[7303] menuitem Open Recent…";
+        for result in ["state", "changes", "none"] {
+            let mut args = element_args("press");
+            args["result"] = json!(result);
+            let output = act_contract(
+                args,
+                vec![(
+                    "elementAction",
+                    element_params("press", Value::Null),
+                    json!({ "result": { "menu": menu } }),
+                )],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                content(output),
+                vec![text(format!(
+                    "The menu's items, still closed; press one to choose it. Numbers continue the window's tree.\n\n{menu}"
+                ))]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn act_on_element_electron_press_preserves_accelerator_warning() {
+        let note = "Electron takes this menu press as its keyboard shortcut; it may do nothing while a text field has focus. Click outside the field first.";
+        for result in ["state", "changes", "none"] {
+            let mut args = element_args("press");
+            args["result"] = json!(result);
+            let output = act_contract(
+                args,
+                vec![
+                    (
+                        "elementAction",
+                        element_params("press", Value::Null),
+                        json!({ "result": { "note": note } }),
+                    ),
+                    (
+                        "settle",
+                        json!({ "displayId": 9007199254740991_i64 }),
+                        json!({ "result": {} }),
+                    ),
+                    (
+                        "windowState",
+                        json!({ "displayId": 9007199254740991_i64, "windowId": 4294967301_i64 }),
+                        state_reply(),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+            let blocks = content(output);
+            assert_eq!(blocks[0], text(note));
+            assert_eq!(blocks.len(), if result == "none" { 2 } else { 3 });
+        }
+        let description = definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "act_on_element")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            description
+                .contains("Electron apps take a pressed menu item for its keyboard shortcut")
+        );
+        assert!(description.contains("some ignore while a text field has focus"));
+    }
 
     fn state(before: Option<&str>, tree: &str) -> WindowState {
         WindowState {
