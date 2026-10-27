@@ -4,14 +4,15 @@
 //! the Viewer and Peek only, never on the display, so agent screenshots
 //! never contain it.
 //!
-//! The look and the motion follow Codex's computer-use cursor: a drawn
-//! arrow with a shadow and a glow, quick to start and soft to land, turning
-//! a little with the way it moves.
+//! The original cubic outline has a soft cap, shoulder and heel. Constant
+//! screen-space light and dark strokes keep its accent fill readable.
+//! Existing glide, lean, press, ripple and display-shared motion are reused.
 
-use crate::model::{AgentPointer, DisplayId};
+use crate::model::{AgentPointer, DisplayId, Rect};
+use agent_screen_model::pointer_geometry as geometry;
 use gpui::{
-    App, Bounds, Hsla, IntoElement, PathBuilder, Pixels, Point, Styled, Window, canvas,
-    linear_color_stop, linear_gradient, point, px,
+    App, Bounds, ContentMask, Hsla, IntoElement, PathBuilder, Pixels, Point, Styled, Window,
+    canvas, linear_color_stop, linear_gradient, point, px,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -349,28 +350,35 @@ pub fn layer(
             let Some(frame) = advance(display, pointer) else {
                 return;
             };
-            // The image is aspect-fit inside the layer.
-            let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-            let fit = (w / size.0 as f32).min(h / size.1 as f32);
-            let bounds = Bounds::new(
-                point(
-                    bounds.origin.x + px((w - size.0 as f32 * fit) / 2.),
-                    bounds.origin.y + px((h - size.1 as f32 * fit) / 2.),
+            // The same aspect-fit geometry is tested without WindowServer.
+            let container = Rect::new(
+                f32::from(bounds.origin.x) as f64,
+                f32::from(bounds.origin.y) as f64,
+                f32::from(bounds.size.width) as f64,
+                f32::from(bounds.size.height) as f64,
+            );
+            let Some(fitted) = geometry::fit_image(container, size) else {
+                return;
+            };
+            let Some(clip) = geometry::clip_bounds(fitted, container) else {
+                return;
+            };
+            let at = geometry::image_point(fitted, size, frame.at);
+            let tip = point(px(at.0 as f32), px(at.1 as f32));
+            // Keep the existing Viewer/thumbnail size policy.
+            let scale = (fitted.width / size.0 * 1.6).clamp(0.55, 1.0) as f32;
+            let mask = ContentMask {
+                bounds: Bounds::new(
+                    point(px(clip.x as f32), px(clip.y as f32)),
+                    gpui::size(px(clip.width as f32), px(clip.height as f32)),
                 ),
-                gpui::size(px(size.0 as f32 * fit), px(size.1 as f32 * fit)),
-            );
-            let at = frame.at;
-            let width = f32::from(bounds.size.width) as f64;
-            let tip = point(
-                bounds.origin.x + px((at.0 / size.0 * width) as f32),
-                bounds.origin.y + px((at.1 / size.1 * f32::from(bounds.size.height) as f64) as f32),
-            );
-            // Full size in the Viewer, smaller on thumbnails.
-            let scale = (width / size.0 * 1.6).clamp(0.55, 1.0) as f32;
-            if let Some(progress) = frame.ripple {
-                draw_ripple(window, tip, scale, progress, accent, frame.opacity);
-            }
-            draw_arrow(window, tip, scale, &frame, accent);
+            };
+            window.with_content_mask(Some(mask), |window| {
+                if let Some(progress) = frame.ripple {
+                    draw_ripple(window, tip, scale, progress, accent, frame.opacity);
+                }
+                draw_arrow(window, tip, scale, &frame, accent);
+            });
             if frame.changing {
                 window.request_animation_frame();
             }
@@ -382,114 +390,57 @@ pub fn layer(
     .size_full()
 }
 
-/// The arrow's corners with the tip at (0, 0), y down, and each corner's
-/// rounding radius: a tip, a wing, a notch between the wings, a wing.
-const SHAPE: [((f32, f32), f32); 4] = [
-    ((0.0, 0.0), 1.4),
-    ((26.4, 7.6), 5.0),
-    ((13.4, 12.0), 3.0),
-    ((10.2, 24.8), 5.0),
-];
-/// The arrow's length runs from the tip toward the notch.
-const AXIS: (f32, f32) = (13.4, 12.0);
+/// Motion follows the original geometry's axis, with no new clock or state.
+const AXIS: (f32, f32) = (geometry::AXIS.0 as f32, geometry::AXIS.1 as f32);
 
-/// How far each edge bows out from a straight line, from the corner of the
-/// same index to the next: the outer edges swell a little, as a drawn
-/// arrow's do.
-const BOWS: [f32; 4] = [0.7, 0.0, 0.0, 0.7];
-
-/// The rounded outline, mapped through `map`.
-fn outline(builder: &mut PathBuilder, map: &impl Fn((f32, f32)) -> Point<Pixels>) {
-    let n = SHAPE.len();
-    let toward = |a: (f32, f32), b: (f32, f32), r: f32| {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let len = dx.hypot(dy).max(0.001);
-        (a.0 + dx / len * r, a.1 + dy / len * r)
-    };
-    let center = (
-        SHAPE.iter().map(|c| c.0.0).sum::<f32>() / n as f32,
-        SHAPE.iter().map(|c| c.0.1).sum::<f32>() / n as f32,
-    );
-    let ends: Vec<((f32, f32), (f32, f32))> = (0..n)
-        .map(|i| {
-            let (corner, r) = SHAPE[i];
-            let prev = SHAPE[(i + n - 1) % n].0;
-            let next = SHAPE[(i + 1) % n].0;
-            (toward(corner, prev, r), toward(corner, next, r))
-        })
-        .collect();
-    builder.move_to(map(ends[0].0));
-    for i in 0..n {
-        let (_, leave) = ends[i];
-        builder.curve_to(map(leave), map(SHAPE[i].0));
-        let enter = ends[(i + 1) % n].0;
-        // The edge's middle, pushed along its outward normal.
-        let mid = ((leave.0 + enter.0) / 2.0, (leave.1 + enter.1) / 2.0);
-        let (dx, dy) = (enter.0 - leave.0, enter.1 - leave.1);
-        let len = dx.hypot(dy).max(0.001);
-        let mut normal = (dy / len, -dx / len);
-        if normal.0 * (mid.0 - center.0) + normal.1 * (mid.1 - center.1) < 0.0 {
-            normal = (-normal.0, -normal.1);
-        }
-        // A quadratic's control sits twice as far out as its middle.
-        let control = (
-            mid.0 + normal.0 * BOWS[i] * 2.0,
-            mid.1 + normal.1 * BOWS[i] * 2.0,
-        );
-        builder.curve_to(map(enter), map(control));
+fn outline(builder: &mut PathBuilder, map: &impl Fn(geometry::Vertex) -> Point<Pixels>) {
+    builder.move_to(map(geometry::TIP));
+    for curve in geometry::OUTLINE {
+        builder.cubic_bezier_to(map(curve.to), map(curve.control_a), map(curve.control_b));
     }
     builder.close();
 }
 
 fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, frame: &Frame, accent: Hsla) {
     let opacity = frame.opacity;
-    let axis = AXIS.1.atan2(AXIS.0);
-    let (along, across) = (frame.stretch, 1.0 / frame.stretch.sqrt());
-    let size = scale * frame.press;
-    let (sin_a, cos_a) = axis.sin_cos();
-    let (sin_t, cos_t) = (axis + frame.lean).sin_cos();
-    // Stretch along the axis, then turn by the lean, about the tip.
-    let map = |(x, y): (f32, f32), dy: f32| {
-        let u = (x * cos_a + y * sin_a) * along * size;
-        let v = (-x * sin_a + y * cos_a) * across * size;
-        point(
-            tip.x + px(u * cos_t - v * sin_t),
-            tip.y + px(u * sin_t + v * cos_t + dy),
-        )
+    let transform = geometry::Transform {
+        hotspot: (f32::from(tip.x) as f64, f32::from(tip.y) as f64),
+        size: geometry::DESIGN_SIZE * (scale * frame.press) as f64,
+        stretch: frame.stretch as f64,
+        lean: frame.lean as f64,
     };
-
-    // Layers of the shape grown about its middle, faintest and largest
-    // first: strokes would poke spikes out at the corners.
-    let center = (11.5f32, 11.0f32);
-    let grown = |window: &mut Window, by: f32, dy: f32, color: Hsla| {
-        let mut layer = PathBuilder::fill();
-        let k = 1.0 + by / 12.0;
-        outline(&mut layer, &|(x, y)| {
-            map(
-                (center.0 + (x - center.0) * k, center.1 + (y - center.1) * k),
-                dy,
-            )
-        });
-        if let Ok(path) = layer.build() {
+    let map = |p: geometry::Vertex, dy: f32| {
+        let p = transform.map(p);
+        point(px(p.0 as f32), px(p.1 as f32 + dy))
+    };
+    let (inner, outer) = geometry::stroke_widths(transform.size);
+    // Strokes are applied after stretching the curve, keeping their screen
+    // width uniform around its cap, concave neck and rounded heel.
+    let stroke = |window: &mut Window, width: f64, dy: f32, color: Hsla| {
+        let mut path = PathBuilder::stroke(px(width as f32));
+        outline(&mut path, &|p| map(p, dy));
+        if let Ok(path) = path.build() {
             window.paint_path(path, color);
         }
     };
-    // A soft shadow below, which shows on light screens.
-    for (by, alpha) in [(4.5, 0.04), (2.8, 0.07), (1.4, 0.10), (0.4, 0.14)] {
-        grown(
+    for (extra, alpha) in [(7.0, 0.035), (4.0, 0.06), (1.8, 0.10)] {
+        stroke(
             window,
-            by,
+            outer + extra * scale as f64,
             2.4 * scale,
             gpui::black().opacity(alpha * opacity),
         );
     }
-    // A glow in the accent color, which shows on dark ones.
-    for (by, alpha) in [(8.0, 0.05), (5.5, 0.08), (3.6, 0.12), (2.0, 0.18)] {
-        grown(window, by, 0.0, accent.opacity(alpha * opacity));
+    for (extra, alpha) in [(5.0, 0.05), (2.5, 0.08)] {
+        stroke(
+            window,
+            outer + extra * scale as f64,
+            0.0,
+            accent.opacity(alpha * opacity),
+        );
     }
-
-    // Deep accent at the tip, washing toward a pale, warmer tint at the
-    // wings, as Codex's cursor runs from cyan to a pink white.
+    // A dark outer edge reads on light content; the light rim reads on dark.
+    stroke(window, outer, 0.0, gpui::black().opacity(0.82 * opacity));
     let deep = Hsla {
         l: accent.l * 0.92,
         ..accent
@@ -500,11 +451,7 @@ fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, frame: &Frame
         l: 0.9,
         ..accent
     };
-    let mid = Hsla {
-        l: accent.l + (1.0 - accent.l) * 0.3,
-        ..accent
-    };
-    let heading = (axis + frame.lean).to_degrees() + 90.0;
+    let heading = (AXIS.1.atan2(AXIS.0) + frame.lean).to_degrees() + 90.0;
     let mut fill = PathBuilder::fill();
     outline(&mut fill, &|p| map(p, 0.0));
     if let Ok(path) = fill.build() {
@@ -517,26 +464,7 @@ fn draw_arrow(window: &mut Window, tip: Point<Pixels>, scale: f32, frame: &Frame
             ),
         );
     }
-    // A brighter sheen across the middle gives it depth.
-    let mut sheen = PathBuilder::fill();
-    outline(&mut sheen, &|(x, y)| {
-        map((x * 0.6 + 4.0, y * 0.6 + 3.4), 0.0)
-    });
-    if let Ok(path) = sheen.build() {
-        window.paint_path(
-            path,
-            linear_gradient(
-                heading,
-                linear_color_stop(mid.opacity(0.0), 0.0),
-                linear_color_stop(gpui::white().opacity(0.45 * opacity), 1.0),
-            ),
-        );
-    }
-    let mut rim = PathBuilder::stroke(px(1.9 * scale));
-    outline(&mut rim, &|p| map(p, 0.0));
-    if let Ok(path) = rim.build() {
-        window.paint_path(path, gpui::white().opacity(0.95 * opacity));
-    }
+    stroke(window, inner, 0.0, gpui::white().opacity(0.95 * opacity));
 }
 
 /// A ring that spreads from the tip.

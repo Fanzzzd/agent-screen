@@ -433,6 +433,17 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 
 For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
 
+## Agent Pointer geometry preview
+
+`ui/pointer.rs` remains the shared drawing entry for the Viewer and Peek. Its original cubic controls, stroke sizes, hotspot transform and aspect-fit geometry live in `crates/model/src/pointer_geometry.rs`. They add no clock or per-display state. The existing pointer animation remains in the shared drawing entry.
+
+```sh
+python3 -I apps/macos/scripts/preview-pointer.py --output /tmp/agent-screen-rounded-pointer-preview
+cargo test -p agent-screen-model pointer_geometry::tests
+```
+
+The preview generator parses the production Rust control points and stroke constants directly. It writes `index.html` and `preview.svg` locally, records the source hash, and includes 18/24/32 logical-pixel canvases, light/dark content, clipping examples and preview-only hotspot guides. It imports no third-party cursor paths. Its sample accent and SVG paint are not a GPUI screenshot or an anti-aliasing test. Opening it in Orca needs no Agent Display or app replacement.
+
 ## Install a local build
 
 `apps/macos/scripts/install.sh` builds a release app, quits any running Agent Screen, installs it as `/Applications/Agent Screen.app` and opens it. Debug builds in `target` don't touch the installed copy. An app started from a terminal borrows the terminal's privacy grants, so a build that works from the shell can still lack its own.
