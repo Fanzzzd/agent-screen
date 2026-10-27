@@ -813,6 +813,19 @@ pub fn set_frame(window: &NSWindow, frame: NSRect) {
     window.invalidateShadow();
 }
 
+/// Turn a window's system shadow, with the outline drawn in it, on or off,
+/// once the GPUI update in progress has returned. WindowServer draws it
+/// from the window's last picture, a frame behind GPUI.
+pub fn set_shadow_later(window: &NSWindow, on: bool) {
+    let window: Retained<NSWindow> = window.retain();
+    later(move || {
+        window.setHasShadow(on);
+        if on {
+            window.invalidateShadow();
+        }
+    });
+}
+
 /// Resize a GPUI window that is showing, once the GPUI update in progress
 /// has returned. Resizing redraws the window at its new size on the spot,
 /// and inside an update GPUI can't draw, so the window would show its old

@@ -38,8 +38,10 @@ pub const RESIZE: Duration = Duration::from_millis(260);
 /// The card sliding to a new width inside Peek's window, which spans both
 /// the card's old and new frames meanwhile: resizing the window itself
 /// every frame costs WindowServer a new backing store each time, about
-/// 40 ms a step, where GPUI redraws at the display's rate. Left edge and
-/// width, in the window. Peek times it itself: a `with_animation` around
+/// 40 ms a step, where GPUI redraws at the display's rate. The window has
+/// no system shadow meanwhile: WindowServer draws it, and its outline, from
+/// the window's last picture, so it trailed the card. Left edge and width,
+/// in the window. Peek times it itself: a `with_animation` around
 /// the card would put its id in every tile's element path, so the tiles'
 /// own grow and shrink would start over when the slide ends.
 #[derive(Clone, Copy, PartialEq)]
@@ -82,6 +84,18 @@ pub struct Peek {
     /// Displays that went while Peek was up, by where their tile stood,
     /// shrinking out.
     leaving: Vec<(DisplayId, usize)>,
+    /// How each tile looked when last drawn: a closed display's tile
+    /// shrinks out as it was, not as a blank box.
+    looks: HashMap<DisplayId, Look>,
+}
+
+/// A tile's picture and words, kept for its shrinking out.
+#[derive(Clone)]
+struct Look {
+    label: String,
+    status: Status,
+    frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
+    size: (f64, f64),
 }
 
 impl Peek {
@@ -120,6 +134,7 @@ impl Peek {
             following: false,
             entering: HashSet::new(),
             leaving: Vec::new(),
+            looks: HashMap::new(),
         }
     }
 
@@ -171,6 +186,7 @@ impl Peek {
             self.known.clear();
             self.entering.clear();
             self.leaving.clear();
+            self.looks.clear();
             self.arrived.clear();
             self.following = false;
             return;
@@ -193,6 +209,7 @@ impl Peek {
                         .await;
                     let _ = peek.update(cx, |peek, cx| {
                         peek.leaving.retain(|(l, _)| *l != id);
+                        peek.looks.remove(&id);
                         cx.notify();
                     });
                 })
@@ -243,12 +260,22 @@ impl Render for Peek {
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();
+            let frame = streams.frame(*id);
+            self.looks.insert(
+                *id,
+                Look {
+                    label: display.label(),
+                    status: status.clone(),
+                    frame: frame.clone(),
+                    size: (display.width, display.height),
+                },
+            );
             let built = tile(
                 *id,
                 display.label(),
                 crate::mac::recording::is_recording(*id),
                 status,
-                streams.frame(*id),
+                frame,
                 pointer,
                 (display.width, display.height),
                 self.active == Some(*id),
@@ -264,11 +291,34 @@ impl Render for Peek {
             });
         }
         for (id, index) in &self.leaving {
-            let ghost = div()
-                .w(px(self.tile))
-                .h(px(thumb_height(self.tile)))
-                .rounded(px(9.))
-                .bg(theme.screen_empty);
+            // As it last looked, deaf to clicks: its display is gone.
+            let look = self.looks.get(id).cloned();
+            if cfg!(debug_assertions) {
+                log::debug!("peek leaving {id} as drawn {}", look.is_some());
+            }
+            let ghost = match look {
+                Some(look) => tile(
+                    *id,
+                    look.label,
+                    false,
+                    look.status,
+                    look.frame,
+                    None,
+                    look.size,
+                    false,
+                    false,
+                    self.tile,
+                    &theme,
+                    &WeakEntity::new_invalid(),
+                )
+                .into_any_element(),
+                None => div()
+                    .w(px(self.tile))
+                    .h(px(thumb_height(self.tile)))
+                    .rounded(px(9.))
+                    .bg(theme.screen_empty)
+                    .into_any_element(),
+            };
             let at = (*index).min(tiles.len());
             tiles.insert(
                 at,
@@ -334,10 +384,6 @@ impl Render for Peek {
                 let t = (slide.started.elapsed().as_secs_f32() / RESIZE.as_secs_f32()).min(1.);
                 if t < 1. {
                     window.request_animation_frame();
-                }
-                // The system shadow follows the card's shape as it slides.
-                if let Some(ns) = crate::mac::native::ns_window(window) {
-                    crate::mac::native::later(move || ns.invalidateShadow());
                 }
                 let t = gpui::ease_out_quint()(t);
                 let mix = |a: f32, b: f32| a + (b - a) * t;

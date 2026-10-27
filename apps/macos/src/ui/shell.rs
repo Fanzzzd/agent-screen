@@ -1346,6 +1346,7 @@ impl Shell {
                     let _ = peek.update(cx, |peek, _, _| peek.slide = None);
                 }
                 native::set_frame_later(&window, frame);
+                native::set_shadow_later(&window, true);
             }
         } else {
             self.watch_pointer(cx);
@@ -1393,6 +1394,7 @@ impl Shell {
             peek.slide = Some(slide);
             cx.notify();
         });
+        native::set_shadow_later(&window, false);
         native::set_frame_later(&window, span);
         self.after(
             peek::RESIZE + Duration::from_millis(30),
@@ -1406,6 +1408,7 @@ impl Shell {
                 // window has this frame, then fills the window.
                 if let Some((_, window)) = shell.peek.clone() {
                     native::set_frame_later(&window, to);
+                    native::set_shadow_later(&window, true);
                 }
             },
         );
@@ -1419,6 +1422,9 @@ impl Shell {
         // A slide going stops where it is; the next show sizes afresh.
         self.peek_slides += 1;
         self.slide_card = None;
+        if let Some((_, window)) = &self.peek {
+            native::set_shadow_later(window, true);
+        }
         if let Some((peek, _)) = &self.peek {
             let _ = peek.update(cx, |peek, _, _| {
                 peek.keys = false;

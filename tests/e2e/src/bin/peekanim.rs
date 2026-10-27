@@ -3,7 +3,8 @@
 //! 30 fps for windows that aren't key, never two frames late in a row: the new display
 //! is made only once the tile has grown in, as making one stops every
 //! window on the Mac from drawing for a moment. A closed display's tile
-//! shrinks out the same way, and once it has, Peek stays at its new width:
+//! shrinks out the same way, as it last looked, and once it has, Peek
+//! stays at its new width:
 //! neither the card it draws nor its window grows back for a frame. Peek is
 //! open on a stage display while the shell makes a display, as a click on
 //! "+" does, and then dismisses it. The stage recording of Peek is kept.
@@ -221,6 +222,16 @@ fn test(log: &Path) -> Result<()> {
         "the card Peek draws never grows back while the closed display's tile shrinks out",
         regrowth(&widths, 0.5).is_none(),
         format!("grew back {:?}: {shrank:?}", regrowth(&widths, 0.5)),
+    );
+    let as_drawn = std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains(&format!("peek leaving {id} as drawn")))
+        .all(|l| l.ends_with("true"));
+    check(
+        "the closed display's tile shrinks out with its picture and label, not as a blank box",
+        as_drawn,
+        "a leaving tile was drawn blank",
     );
     let went = tile(log, "tile-out", id, asked);
     check(

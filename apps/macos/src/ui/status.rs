@@ -16,6 +16,7 @@ pub enum Kind {
     Disconnected,
 }
 
+#[derive(Clone)]
 pub struct Status {
     pub kind: Kind,
     /// Short form for Peek: "需要帮助：输入验证码".
