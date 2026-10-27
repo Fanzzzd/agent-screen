@@ -7,7 +7,7 @@ Chromium and WebKit take a mouse event's `buttons` from `[NSEvent pressedMouseBu
 ## Which apps get a pipe
 
 - An app is Chromium when a framework in its bundle ships `chrome_100_percent.pak`. That covers Chrome, Edge, Brave, Arc, CEF apps and every Electron app.
-- Only an app that starts here gets one. A running app opens a new window through its menus, as before, and gets none. For a browser, the agent starts a new instance with its own `--user-data-dir`, since Chrome ignores the switch on its default profile.
+- Only an app that starts here gets one. A running app opens a new window through its menus, as before, and gets none. For a browser, the agent starts a new instance with its own `--user-data-dir`, since Chrome ignores the switch on its default profile. A fresh profile has separate sign-ins. It does not preserve the user's current login or add a pipe to a window already running. When that login session is required, the agent keeps the window and asks the user to do the drag through `request_help`.
 - An app that strips the switch, such as Claude.app or Figma, never answers on the pipe. After 30 s without an answer, Agent Screen closes its end and the app counts as one without a pipe.
 - A non-browser app given a file or URL with `open` starts through `open` without a pipe, since only a browser takes a target as an argument.
 
