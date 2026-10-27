@@ -9,6 +9,7 @@ pub mod capture;
 pub mod catch;
 pub mod cg;
 pub mod claims;
+pub mod click_diagnostics;
 pub mod colorsync;
 pub mod devtools;
 pub mod display;
