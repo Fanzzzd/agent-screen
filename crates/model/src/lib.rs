@@ -13,3 +13,5 @@ pub mod model;
 pub mod numbers;
 pub mod tree;
 pub mod typing;
+
+pub mod peek;

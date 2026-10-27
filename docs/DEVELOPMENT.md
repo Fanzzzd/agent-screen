@@ -75,7 +75,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_dept
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit; with AeroSpace running, the display gets none of your workspaces or windows (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; its sign shows each of the three steps (needs Electron.app and Field.app)
-AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves, or at the first click on the icon
+AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # hover opens a preview; the first icon click pins it, a later click closes it; pointer departure closes only an unpinned preview
 AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from tests/e2e/fixtures/electron: launch with arguments, an accessory app's window that opens on the display, clicks, typing, edge resize, late redraws, a window larger than the display, and one its app grows past the display or moves to the main screen after it shows; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchagain    # launch_app with arguments on an Electron app that allows one instance and already runs on the display answers with its window, not "did not start"; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e menupress      # act_on_element press on an Electron menu item reaches it, as Electron's shortcut, and answers with a note saying so; needs target/e2e/Electron.app
@@ -152,6 +152,18 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 `cargo e2e run` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
 
 The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
+
+### Peek intent checks without UI
+
+```sh
+CARGO_INCREMENTAL=0 cargo test -p agent-screen-model peek::tests
+CARGO_INCREMENTAL=0 cargo test -p agent-screen peek_shell
+CARGO_INCREMENTAL=0 cargo test -p agent-screen status_button_down_and_up
+```
+
+The model uses a virtual monotonic clock. Native event values drive the same shell policy seams used by the status button, mouse monitor and hover callbacks. These checks do not construct a window or install an input monitor. Down captures the current open/pin/close intent and invalidates hover timers; only a valid up commits it once. Keyboard, accessibility and `debugShow click` use logical activation without synthesizing a press.
+
+The initial dwell and leave constants are 300 ms and 500 ms. The [research notes](research/hover-click-intent.md) distinguish NN/g's web-content recommendations from Apple's APIs and macOS app source. These are candidate values, not Apple thresholds or measured Peek latency. Pointer sampling runs every 100 ms to repair missed exit notifications, so actual dismissal can add detection, scheduling and animation time. Native event ordering, visual transitions and user preference still need separately authorized GUI checks.
 
 ### Debug control methods
 

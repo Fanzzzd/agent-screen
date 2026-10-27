@@ -26,9 +26,13 @@ use std::ptr::NonNull;
 /// Things that happened on the native side.
 #[derive(Debug, Clone)]
 pub enum Native {
-    /// A click on the menu bar icon; `right` for a right click.
+    /// The button owns both phases. Down captures intent; only up commits.
+    IconPressed {
+        gesture: u64,
+    },
     IconClicked {
         right: bool,
+        mouse: bool,
     },
     /// The pointer entered or left the menu bar icon.
     IconHover(bool),
@@ -170,10 +174,10 @@ define_class!(
         #[unsafe(method(clicked:))]
         fn clicked(&self, _sender: &AnyObject) {
             let mtm = MainThreadMarker::from(self);
-            let right = NSApplication::sharedApplication(mtm)
-                .currentEvent()
-                .is_some_and(|e| e.r#type() == NSEventType::RightMouseUp);
-            send(Native::IconClicked { right });
+            let event = NSApplication::sharedApplication(mtm).currentEvent();
+            let kind = event.as_ref().map(|e| e.r#type());
+            let gesture = event.as_ref().map_or(0, |e| e.eventNumber() as u64);
+            send(status_icon_event(kind, gesture));
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -217,6 +221,33 @@ fn template_svg(svg: &str) -> Option<Retained<NSImage>> {
 const ICON_PLACE: &str = "NSStatusItem Preferred Position Item-0";
 const ICON_PLACE_SHOWN: &str = "AgentScreen Icon Position Shown";
 
+fn status_icon_mask() -> NSEventMask {
+    NSEventMask::LeftMouseDown
+        | NSEventMask::LeftMouseUp
+        | NSEventMask::RightMouseDown
+        | NSEventMask::RightMouseUp
+}
+
+pub(crate) fn status_icon_event(kind: Option<NSEventType>, gesture: u64) -> Native {
+    match kind {
+        Some(NSEventType::LeftMouseDown | NSEventType::RightMouseDown) => {
+            Native::IconPressed { gesture }
+        }
+        Some(NSEventType::LeftMouseUp) => Native::IconClicked {
+            right: false,
+            mouse: true,
+        },
+        Some(NSEventType::RightMouseUp) => Native::IconClicked {
+            right: true,
+            mouse: true,
+        },
+        _ => Native::IconClicked {
+            right: false,
+            mouse: false,
+        },
+    }
+}
+
 impl StatusIcon {
     pub fn install(mtm: MainThreadMarker) -> StatusIcon {
         // Back where the user last saw it, before AppKit places it.
@@ -230,7 +261,7 @@ impl StatusIcon {
             unsafe {
                 button.setTarget(Some(&target));
                 button.setAction(Some(sel!(clicked:)));
-                let _: isize = msg_send![&button, sendActionOn: (NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp).0];
+                let _: isize = msg_send![&button, sendActionOn: status_icon_mask().0];
             }
             let options = NSTrackingAreaOptions::MouseEnteredAndExited
                 | NSTrackingAreaOptions::ActiveAlways
@@ -1037,4 +1068,38 @@ pub fn watch_activations() {
     };
     let observer: Retained<AnyObject> = observer.into();
     keep(observer);
+}
+
+#[cfg(test)]
+mod peek_activation_tests {
+    use super::*;
+    use agent_screen_model::peek::{Effect, Intent, Mode};
+
+    #[test]
+    fn status_button_down_and_up_share_one_action_owner_and_commit_once() {
+        assert!(status_icon_mask().contains(NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp));
+        let mut intent = Intent::default();
+        if let Native::IconPressed { gesture } =
+            status_icon_event(Some(NSEventType::LeftMouseDown), 7)
+        {
+            intent.press(gesture);
+        }
+        assert_eq!(intent.mode(), Mode::Closed);
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::LeftMouseUp), 8),
+            Native::IconClicked {
+                mouse: true,
+                right: false
+            }
+        ));
+        assert_eq!(intent.release(true), Effect::Show);
+        assert_eq!(intent.release(true), Effect::None);
+        assert!(matches!(
+            status_icon_event(None, 0),
+            Native::IconClicked {
+                mouse: false,
+                right: false
+            }
+        ));
+    }
 }
