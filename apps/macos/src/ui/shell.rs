@@ -1339,6 +1339,12 @@ impl Shell {
             if now.size.width != frame.size.width && now.size.height == frame.size.height {
                 self.slide_peek(now, frame, cx);
             } else {
+                // A new height jumps: the card fills the window again.
+                if now.size.width != frame.size.width {
+                    self.peek_slides += 1;
+                    self.slide_card = None;
+                    let _ = peek.update(cx, |peek, _, _| peek.slide = None);
+                }
                 native::set_frame_later(&window, frame);
             }
         } else {
@@ -1381,7 +1387,7 @@ impl Shell {
         let slide = peek::Slide {
             from: ((from.origin.x - left) as f32, from.size.width as f32),
             to: ((to.origin.x - left) as f32, to.size.width as f32),
-            generation,
+            started: std::time::Instant::now(),
         };
         let _ = peek.update(cx, |peek, _, cx| {
             peek.slide = Some(slide);
@@ -1391,16 +1397,14 @@ impl Shell {
         self.after(
             peek::RESIZE + Duration::from_millis(30),
             cx,
-            move |shell, cx| {
+            move |shell, _| {
                 if shell.peek_slides != generation || !shell.peek_shown {
                     return;
                 }
                 shell.slide_card = None;
-                if let Some((peek, window)) = shell.peek.clone() {
-                    let _ = peek.update(cx, |peek, _, cx| {
-                        peek.slide = None;
-                        cx.notify();
-                    });
+                // Peek draws the card where the slide left it until the
+                // window has this frame, then fills the window.
+                if let Some((_, window)) = shell.peek.clone() {
                     native::set_frame_later(&window, to);
                 }
             },

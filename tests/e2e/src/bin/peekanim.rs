@@ -3,8 +3,10 @@
 //! 30 fps for windows that aren't key, never two frames late in a row: the new display
 //! is made only once the tile has grown in, as making one stops every
 //! window on the Mac from drawing for a moment. A closed display's tile
-//! shrinks out the same way. Peek is open on a stage display while the shell makes a
-//! display, as a click on "+" does, and then dismisses it.
+//! shrinks out the same way, and once it has, Peek stays at its new width:
+//! neither the card it draws nor its window grows back for a frame. Peek is
+//! open on a stage display while the shell makes a display, as a click on
+//! "+" does, and then dismisses it. The stage recording of Peek is kept.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e peekanim
 //!
@@ -14,8 +16,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, capture, check, debug_pid, instance, json, now_ms, open_stage, out, record_stage, run,
-    sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, Frame, capture, check, cut_stage, debug_pid, instance, json, now_ms, open_stage, out,
+    record_stage, run, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -56,6 +58,20 @@ fn drawn(log: &Path, from: u128, ms: u64) -> Vec<(u128, f64)> {
         .collect()
 }
 
+/// How far the tile `kind` of display `id` had grown in, 0 to 1, each
+/// frame from `from` on, from the test app's log.
+fn tile(log: &Path, kind: &str, id: u64, from: u128) -> Vec<f64> {
+    let key = format!("peek {kind} {id} ");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (shown, at) = l.split(&key).nth(1)?.split_once(" at ")?;
+            (at.trim().parse::<u128>().ok()? >= from).then_some(shown.parse::<f64>().ok()?)
+        })
+        .collect()
+}
+
 /// Widths strictly between the first and the last.
 fn steps(seen: &[(u128, f64)], from: f64) -> Vec<f64> {
     let Some(&(_, to)) = seen.last() else {
@@ -84,6 +100,32 @@ fn longest_wait(seen: &[(u128, f64)]) -> u128 {
         .unwrap_or(0)
 }
 
+/// The first width in `seen` larger than one before it, past `slack`.
+fn regrowth(seen: &[f64], slack: f64) -> Option<(f64, f64)> {
+    let mut least = f64::INFINITY;
+    for &w in seen {
+        if w > least + slack {
+            return Some((least, w));
+        }
+        least = least.min(w);
+    }
+    None
+}
+
+/// Peek's window frame, read as fast as the probe answers, for `ms`.
+fn watch_window(pid: u32, id: u64, ms: u128) -> std::thread::JoinHandle<Vec<(u128, Frame)>> {
+    std::thread::spawn(move || {
+        let start = now_ms();
+        let mut seen = Vec::new();
+        while now_ms() - start < ms {
+            if let Some(w) = windows_of(pid).into_iter().find(|w| w.id == id) {
+                seen.push((now_ms(), w));
+            }
+        }
+        seen
+    })
+}
+
 fn newest_display() -> Option<u64> {
     let log = std::fs::read_to_string(
         std::path::PathBuf::from(std::env::var("HOME").ok()?)
@@ -107,7 +149,7 @@ fn test(log: &Path) -> Result<()> {
     let stage = open_stage(&control)?;
     // Watched, as a screen someone looks at: macOS slows the display link
     // of a display nothing shows to 20 Hz.
-    record_stage(&control, stage)?;
+    let video = record_stage(&control, stage)?;
     let before: Vec<u64> = windows_of(pid).iter().map(|w| w.id).collect();
     control.call(
         "debugShow",
@@ -120,6 +162,7 @@ fn test(log: &Path) -> Result<()> {
         .context("Peek didn't open")?;
 
     let asked = now_ms();
+    let created = asked;
     control.call("debugShow", json!({ "surface": "create" }))?;
     let grew = drawn(log, asked, 2500);
     let first = grew
@@ -144,13 +187,23 @@ fn test(log: &Path) -> Result<()> {
 
     let id = newest_display().context("no display made")?;
     sleep_ms(1500);
+    // "+" grows a waiting tile, which the new display takes the place of.
+    let mut came = tile(log, "pending", 0, created);
+    came.extend(tile(log, "tile-in", id, created));
+    check(
+        "the new display's tile grows in once, not again when the card stops sliding",
+        regrowth(&came.iter().map(|t| -t).collect::<Vec<_>>(), 0.01).is_none(),
+        format!("{came:?}"),
+    );
     let wide = grew.last().map_or(0., |&(_, w)| w);
     let asked = now_ms();
+    let frames = watch_window(pid, peek.id, 2500);
     control.call(
         "debugShow",
         json!({ "surface": "dismiss-confirm", "displayId": id }),
     )?;
     let shrank = drawn(log, asked, 2500);
+    let frames = frames.join().unwrap_or_default();
     let shrinking = steps(&shrank, wide);
     check(
         "Peek shrinks in steps at the display's rate as the closed display's tile shrinks out",
@@ -162,6 +215,32 @@ fn test(log: &Path) -> Result<()> {
             shrinking.len(),
             longest_wait(&shrank)
         ),
+    );
+    let widths: Vec<f64> = shrank.iter().map(|&(_, w)| w).collect();
+    check(
+        "the card Peek draws never grows back while the closed display's tile shrinks out",
+        regrowth(&widths, 0.5).is_none(),
+        format!("grew back {:?}: {shrank:?}", regrowth(&widths, 0.5)),
+    );
+    let went = tile(log, "tile-out", id, asked);
+    check(
+        "the closed display's tile shrinks out once, not again when the card stops sliding",
+        regrowth(&went, 0.01).is_none() && went.last().is_some_and(|&t| t < 0.01),
+        format!("{went:?}"),
+    );
+    let sized: Vec<(u128, f64)> = frames.iter().map(|(t, w)| (t - asked, w.width)).collect();
+    let mut changes = sized.clone();
+    changes.dedup_by(|a, b| a.1 == b.1);
+    // The window first spans the old and new card, then takes the new one.
+    let narrowest = sized.iter().map(|&(_, w)| w).fold(f64::INFINITY, f64::min);
+    let back = sized
+        .iter()
+        .skip_while(|&&(_, w)| w > narrowest + 0.5)
+        .find(|&&(_, w)| w > narrowest + 0.5);
+    check(
+        "Peek's window doesn't widen again once it has shrunk",
+        back.is_none(),
+        format!("window widths (ms, width): {changes:?}"),
     );
     sleep_ms(1000);
     let after = windows_of(pid)
@@ -181,5 +260,15 @@ fn test(log: &Path) -> Result<()> {
         "debugShow",
         json!({ "surface": "icon-hover", "displayId": 0 }),
     )?;
+    let clip = out().join("peekanim-peek.mp4");
+    // The widest the window was, which holds the card throughout.
+    let widest = frames
+        .iter()
+        .map(|(_, w)| w)
+        .max_by(|a, b| a.width.total_cmp(&b.width))
+        .unwrap_or(&after);
+    let region = [widest.x, widest.y, widest.width, widest.height];
+    cut_stage(&control, stage, &video, region, &clip, 1200)?;
+    println!("     clip: {}", clip.display());
     Ok(())
 }

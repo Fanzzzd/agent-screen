@@ -39,12 +39,14 @@ pub const RESIZE: Duration = Duration::from_millis(260);
 /// the card's old and new frames meanwhile: resizing the window itself
 /// every frame costs WindowServer a new backing store each time, about
 /// 40 ms a step, where GPUI redraws at the display's rate. Left edge and
-/// width, in the window.
+/// width, in the window. Peek times it itself: a `with_animation` around
+/// the card would put its id in every tile's element path, so the tiles'
+/// own grow and shrink would start over when the slide ends.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Slide {
     pub from: (f32, f32),
     pub to: (f32, f32),
-    pub generation: u64,
+    pub started: std::time::Instant,
 }
 
 pub struct Peek {
@@ -75,8 +77,6 @@ pub struct Peek {
     known: Vec<DisplayId>,
     /// Peek was up for the last render too.
     following: bool,
-    /// The width the last render drew at, for the log.
-    drawn: Option<f32>,
     /// Displays that came while Peek was up, which grow in.
     entering: HashSet<DisplayId>,
     /// Displays that went while Peek was up, by where their tile stood,
@@ -118,7 +118,6 @@ impl Peek {
             arrived: HashSet::new(),
             known: Vec::new(),
             following: false,
-            drawn: None,
             entering: HashSet::new(),
             leaving: Vec::new(),
         }
@@ -230,13 +229,6 @@ pub fn ordered(core: &Core) -> Vec<DisplayId> {
 impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
-        if self.shown && self.slide.is_none() {
-            let width = f32::from(window.viewport_size().width);
-            if self.drawn != Some(width) {
-                self.drawn = Some(width);
-                log_card(width);
-            }
-        }
         let ids = ordered(self.core.read(cx));
         self.follow(&ids, cx);
         let core = self.core.read(cx);
@@ -331,25 +323,36 @@ impl Render for Peek {
                 &theme,
                 &self.shell,
             ));
-        let card = match self.slide {
+        let viewport = f32::from(window.viewport_size().width);
+        // A slide that has ended keeps the card where it stopped until the
+        // window takes the card's frame.
+        let slid = self.slide.filter(|slide| {
+            slide.started.elapsed() < RESIZE || (viewport - slide.to.1).abs() > 0.5
+        });
+        let card = match slid {
             Some(slide) => {
+                let t = (slide.started.elapsed().as_secs_f32() / RESIZE.as_secs_f32()).min(1.);
+                if t < 1. {
+                    window.request_animation_frame();
+                }
                 // The system shadow follows the card's shape as it slides.
                 if let Some(ns) = crate::mac::native::ns_window(window) {
                     crate::mac::native::later(move || ns.invalidateShadow());
                 }
-                card.with_animation(
-                    gpui::ElementId::NamedInteger("slide".into(), slide.generation),
-                    gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
-                    move |card, t| {
-                        let mix = |a: f32, b: f32| a + (b - a) * t;
-                        let width = mix(slide.from.1, slide.to.1);
-                        log_card(width);
-                        card.left(px(mix(slide.from.0, slide.to.0))).w(px(width))
-                    },
-                )
-                .into_any_element()
+                let t = gpui::ease_out_quint()(t);
+                let mix = |a: f32, b: f32| a + (b - a) * t;
+                let width = mix(slide.from.1, slide.to.1);
+                if self.shown {
+                    log_card(width);
+                }
+                card.left(px(mix(slide.from.0, slide.to.0))).w(px(width))
             }
-            None => card.left_0().right_0().into_any_element(),
+            None => {
+                if self.shown {
+                    log_card(viewport);
+                }
+                card.left_0().right_0()
+            }
         };
         div()
             .id("peek")
@@ -363,13 +366,25 @@ impl Render for Peek {
     }
 }
 
-/// For peekanim, in test builds: the card's width as a frame draws it.
+/// For peekanim, in test builds: the card's width as a frame draws it,
+/// each time it changes.
 fn log_card(width: f32) {
-    if cfg!(debug_assertions) {
+    thread_local!(static DRAWN: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) });
+    if cfg!(debug_assertions) && DRAWN.replace(Some(width)) != Some(width) {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         log::debug!("peek drawn {width} at {ms}");
+    }
+}
+
+/// For peekanim, in test builds: how far a tile has grown in, 0 to 1.
+fn log_tile((kind, id): (&'static str, DisplayId), shown: f32) {
+    if cfg!(debug_assertions) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        log::debug!("peek {kind} {id} {shown} at {ms}");
     }
 }
 
@@ -390,6 +405,7 @@ fn grow(
             gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
             move |d, t| {
                 let t = if entering { t } else { 1. - t };
+                log_tile(key, t);
                 // The gap beside it closes with it.
                 d.w(px(width * t)).mr(px((t - 1.) * SPACING)).opacity(t)
             },
