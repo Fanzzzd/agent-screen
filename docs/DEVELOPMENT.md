@@ -42,6 +42,8 @@ Development switches for the Rust app:
 - `AGENTSCREEN_DEBUG=1` enables the debug control methods in a release build, for measuring.
 - `AGENTSCREEN_APPEARANCE=light` or `dark` forces the app's appearance in debug builds, for screenshots.
 
+For build identities, stale MCP clients and evidence to attach to a bug, follow [Reporting bugs](REPORTING_BUGS.md). The build embeds a full source revision when git is available, dirty state, Cargo profile and target. Cargo watches the worktree gitfile, git HEAD/index/refs, tracked files and source directories. Source archives have unknown git metadata. A dirty build never counts as a verified metadata match.
+
 ## How it works
 
 - **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks it diagonally off the top-right corner of your physical screens so the real cursor rarely wanders onto it. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.
@@ -52,7 +54,8 @@ Development switches for the Rust app:
 ## Test
 
 ```sh
-cargo test                    # unit tests
+cargo test                    # unit and isolated integration tests
+cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated endpoint; no app, display or input
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup

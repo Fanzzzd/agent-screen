@@ -82,6 +82,7 @@ Then ask your agent something like "Use Agent Screen to open Calculator on your 
 | `get_window_state`, `act_on_element`         | One window's screenshot and accessibility tree, and actions on its numbered elements: press, click, set or insert text, read text. Numbers stay put while the element stays in the window. `max_depth` leaves out deeper elements, and `act_on_element` with `result: "changes"` returns only the elements that changed, or with `"none"` just that it's done. |
 | `set_disposition`                            | Keep or close a window when the user closes the display.                                                                                                                                   |
 | `wait_for_control`, `request_help`           | Wait out a Takeover, or ask the user to step in.                                                                                                                                           |
+| `get_diagnostics` | Collect this MCP process's compiled build identity and the responding app's identity, without starting the app or creating a display. |
 | `request_control`                            | During a Takeover, ask the user to hand the display back. They answer from a card under the menu bar icon.                                                                                 |
 
 A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/agents/AGENTS.md) is a convention you can paste into a project's `AGENTS.md` or `CLAUDE.md`.
@@ -125,6 +126,8 @@ Agent Screen runs on your Mac and sends nothing anywhere. Screen & System Audio 
 - The Viewer shows a display at one pixel per point, scaled up, so small text in it looks soft. Agents' screenshots are unaffected.
 
 ## Troubleshooting
+
+For a bug, collect diagnostics in the failing session and follow [Reporting bugs](docs/REPORTING_BUGS.md). The guide covers stale MCP clients and older builds too.
 
 - **The agent has no Agent Screen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get agent-screen` shows whether Claude Code has it.
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on.

@@ -150,6 +150,17 @@ async fn serve(
             continue;
         };
         let id = request.get("id").cloned().unwrap_or(Value::Null);
+        // Diagnostics never registers a session or touches the main/UI thread.
+        if let Some(reply) = agent_screen_mcp::diagnostics::control_reply(
+            id.clone(),
+            &method,
+            env!("CARGO_PKG_VERSION"),
+        ) {
+            let mut bytes = serde_json::to_vec(&reply).unwrap_or_default();
+            bytes.push(b'\n');
+            let _ = lines.send(bytes);
+            continue;
+        }
         let params = match request.get("params") {
             Some(Value::Object(params)) => params.clone(),
             _ => Map::new(),

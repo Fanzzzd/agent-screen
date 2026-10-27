@@ -56,7 +56,10 @@ Usage:
   AgentScreen colorsync setup | remove | reclaim
                           set it up or remove it (asks for an administrator password),
                           or run it now
-  AgentScreen --version     print the version
+  AgentScreen diagnostics [--json]
+                          report this CLI and the responding app without starting it
+                          for the failing MCP process, use get_diagnostics in that session
+  AgentScreen --version     print compiled package/build metadata (older-build fallback)
 ";
 
 /// `AgentScreen colorsync [setup|remove|reclaim]`: the helper that keeps
@@ -121,7 +124,23 @@ fn main() {
             return;
         }
         Some("--version" | "-V") => {
-            println!("Agent Screen {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "{}",
+                agent_screen_mcp::diagnostics::version(env!("CARGO_PKG_VERSION"))
+            );
+            return;
+        }
+        Some("diagnostics") => {
+            match agent_screen_mcp::diagnostics::cli(
+                &std::env::args().skip(2).collect::<Vec<_>>(),
+                env!("CARGO_PKG_VERSION"),
+            ) {
+                Ok(report) => print!("{report}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            }
             return;
         }
         // --setup: reopened from the setup window, which shows again.
@@ -243,4 +262,18 @@ fn main() {
             Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
         }
     });
+}
+
+#[cfg(test)]
+mod cli_tests {
+    #[test]
+    fn help_names_the_supported_diagnostics_paths() {
+        assert!(super::USAGE.contains("AgentScreen diagnostics [--json]"));
+        assert!(super::USAGE.contains("get_diagnostics"));
+        assert!(super::USAGE.contains("AgentScreen --version"));
+        let help =
+            agent_screen_mcp::diagnostics::cli(&["--help".into()], env!("CARGO_PKG_VERSION"))
+                .unwrap();
+        assert!(help.contains("REPORTING_BUGS.md"));
+    }
 }

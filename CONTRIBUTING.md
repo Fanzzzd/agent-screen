@@ -6,6 +6,8 @@ Agent Screen gives each AI agent a virtual display of its own on a Mac. The agen
 
 Use [GitHub Issues](https://github.com/Fanzzzd/agent-screen/issues) for bugs, feature ideas and questions. The repo has no Discussions. Open an issue before a large change, so we agree on the behavior before you write it. Report a vulnerability privately, as [SECURITY.md](SECURITY.md) says, and not in an issue.
 
+For a bug report or a fix-verification report, follow [Reporting bugs](docs/REPORTING_BUGS.md). Keep the failing session's diagnostics and the reproduction result.
+
 ## Build and check
 
 Agent Screen builds on a Mac with macOS 26's SDK. The toolchain is pinned in `rust-toolchain.toml`. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) has the layout, the build and every test script.
