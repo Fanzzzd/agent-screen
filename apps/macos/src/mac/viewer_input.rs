@@ -7,6 +7,7 @@
 //! Events outside the image, and every event while the Dismissal sheet is
 //! up, go on to GPUI.
 
+use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, Phase};
 use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
@@ -29,6 +30,8 @@ struct State {
     blocked: bool,
     /// The button the user pressed on the image, until it comes up.
     pressed: Option<Button>,
+    click: Option<Click>,
+    frame_pixels: Option<[usize; 2]>,
     /// Keys sent with Command, whose release AppKit may never report.
     sent_up: HashSet<u16>,
 }
@@ -144,6 +147,7 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         let mut s = s.borrow_mut();
         s.display = display;
         s.pressed = None;
+        s.click = None;
     });
 }
 
@@ -154,18 +158,19 @@ pub fn show(display: Option<(u32, Forwarder)>) {
 /// key. When that is the input handler, which holds the state, the report
 /// waits for the event to finish: a second borrow would panic inside an
 /// AppKit callback and abort the app (issue #40).
-pub fn layout(content: Option<[f64; 4]>, blocked: bool) {
+pub fn layout(content: Option<[f64; 4]>, blocked: bool, frame_pixels: Option<[usize; 2]>) {
     let busy = STATE.with(|s| match s.try_borrow_mut() {
         Ok(mut s) => {
             s.content = content;
             s.blocked = blocked;
+            s.frame_pixels = frame_pixels;
             false
         }
         Err(_) => true,
     });
     if busy {
         log::debug!("viewer: layout reported during input handling, applied after it");
-        native::main_async(move || layout(content, blocked));
+        native::main_async(move || layout(content, blocked, frame_pixels));
     }
 }
 
@@ -229,10 +234,56 @@ fn remote(
     content: [f64; 4],
     display: u32,
     clamp: bool,
+    frame_pixels: Option<[usize; 2]>,
 ) -> Option<(f64, f64)> {
     let at = event.locationInWindow();
     let height = window.contentView()?.frame().size.height;
-    let (x, y) = (at.x, height - at.y);
+    remote_point(
+        (at.x, at.y),
+        height,
+        content,
+        clamp,
+        || cg::display_bounds(display),
+        |bounds, global| {
+            let f = window.frame();
+            ClickEvent::Mapping {
+                display,
+                window_frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
+                frame_pixels,
+                content,
+                view_height: height,
+                point: [at.x, at.y],
+                display_bounds: bounds,
+                global,
+            }
+        },
+    )
+}
+
+// The real mapping seam. A rejected point still emits opt-in metadata,
+// without querying display bounds. The metadata closure stays lazy.
+fn remote_point(
+    at: (f64, f64),
+    height: f64,
+    content: [f64; 4],
+    clamp: bool,
+    bounds: impl FnOnce() -> crate::model::Rect,
+    metadata: impl FnOnce(Option<crate::model::Rect>, Option<(f64, f64)>) -> ClickEvent,
+) -> Option<(f64, f64)> {
+    let normalized = normalized_point(at, height, content, clamp);
+    let bounds = normalized.map(|_| bounds());
+    let global = normalized.zip(bounds).map(|(n, b)| mapped_point(n, b));
+    diagnostics::emit(|| metadata(bounds, global));
+    global
+}
+
+fn normalized_point(
+    at: (f64, f64),
+    height: f64,
+    content: [f64; 4],
+    clamp: bool,
+) -> Option<(f64, f64)> {
+    let (x, y) = (at.0, height - at.1);
     let [cx, cy, cw, ch] = content;
     let mut nx = (x - cx) / cw;
     let mut ny = (y - cy) / ch;
@@ -242,8 +293,14 @@ fn remote(
     } else if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
         return None;
     }
-    let b = cg::display_bounds(display);
-    Some((b.x + nx * (b.width - 1.0), b.y + ny * (b.height - 1.0)))
+    Some((nx, ny))
+}
+
+fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64) {
+    (
+        bounds.x + normalized.0 * (bounds.width - 1.0),
+        bounds.y + normalized.1 * (bounds.height - 1.0),
+    )
 }
 
 /// Handle one event; false lets it go on to GPUI.
@@ -288,7 +345,10 @@ fn handle_in(
             NSEventType::LeftMouseDown
             | NSEventType::RightMouseDown
             | NSEventType::OtherMouseDown => {
-                let Some(at) = remote(event, &window, content, display, false) else {
+                let click = Click::begin();
+                let Some(at) = diagnostics::within(click, Phase::Down, || {
+                    remote(event, &window, content, display, false, s.frame_pixels)
+                }) else {
                     return false;
                 };
                 if !INJECTING.with(|i| i.get()) || TAKE_KEY.with(|k| k.get()) {
@@ -313,7 +373,8 @@ fn handle_in(
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
                 s.pressed = Some(button);
-                forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event));
+                s.click = click;
+                forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event), click);
                 true
             }
             NSEventType::LeftMouseDragged
@@ -322,7 +383,7 @@ fn handle_in(
                 let Some(pressed) = s.pressed else {
                     return false;
                 };
-                if let Some(at) = remote(event, &window, content, display, true) {
+                if let Some(at) = remote(event, &window, content, display, true, s.frame_pixels) {
                     forwarder.mouse_dragged(at, pressed, flags(event));
                 }
                 true
@@ -333,21 +394,26 @@ fn handle_in(
                 let Some(pressed) = s.pressed.take() else {
                     return false;
                 };
-                if let Some(at) = remote(event, &window, content, display, true) {
-                    forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event));
+                let click = s.click.take();
+                if let Some(at) = diagnostics::within(click, Phase::Up, || {
+                    remote(event, &window, content, display, true, s.frame_pixels)
+                }) {
+                    forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
                 }
                 true
             }
             NSEventType::MouseMoved => {
                 if s.pressed.is_none()
-                    && let Some(at) = remote(event, &window, content, display, false)
+                    && let Some(at) =
+                        remote(event, &window, content, display, false, s.frame_pixels)
                 {
                     forwarder.mouse_moved(at, flags(event));
                 }
                 false
             }
             NSEventType::ScrollWheel => {
-                let Some(at) = remote(event, &window, content, display, false) else {
+                let Some(at) = remote(event, &window, content, display, false, s.frame_pixels)
+                else {
                     return false;
                 };
                 // Fingers resting on the trackpad send MayBegin and empty
@@ -426,5 +492,124 @@ pub fn install() {
         unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
     {
         native::keep_monitor(monitor);
+    }
+}
+
+#[cfg(test)]
+mod click_diagnostics_tests {
+    use super::*;
+    use crate::model::Rect;
+    use serde_json::json;
+
+    const CONTENT: [f64; 4] = [20.0, 60.0, 640.0, 450.0];
+
+    fn metadata(point: (f64, f64), bounds: Option<Rect>, global: Option<(f64, f64)>) -> ClickEvent {
+        ClickEvent::Mapping {
+            display: 66,
+            window_frame: [10.0, 20.0, 680.0, 530.0],
+            frame_pixels: Some([1280, 900]),
+            content: CONTENT,
+            view_height: 530.0,
+            point: [point.0, point.1],
+            display_bounds: bounds,
+            global,
+        }
+    }
+
+    #[test]
+    fn real_mapping_and_stamp_coordinates_remain_correlated() {
+        let point = (438.0, 215.5);
+        let display = Rect::new(4288.0, -2340.0, 1280.0, 900.0);
+        let mut mapped = None;
+        let rows = diagnostics::tests::capture(|| {
+            diagnostics::within(Click::when(true), Phase::Down, || {
+                mapped = remote_point(
+                    point,
+                    530.0,
+                    CONTENT,
+                    false,
+                    || display,
+                    |b, g| metadata(point, b, g),
+                );
+            })
+        });
+        let global = mapped.unwrap();
+        let modal = Rect::new(4680.0, -1981.0, 497.0, 182.0);
+        let local = diagnostics::local_point(global, Some(modal));
+        assert!((global.0 - 5123.346875).abs() < 0.000001);
+        assert!((global.1 + 1831.565555555556).abs() < 0.000001);
+        assert!(Rect::new(5090.0, -1844.0, 68.0, 26.0).contains(global));
+        assert_eq!((local.0 + modal.x, local.1 + modal.y), global);
+        assert_eq!(rows[0]["global"], json!([global.0, global.1]));
+        assert_eq!(rows[0]["content"], json!(CONTENT));
+        assert_eq!(rows[0]["accepted"], true);
+    }
+
+    #[test]
+    fn rejected_mapping_keeps_the_click_id_without_a_bounds_query() {
+        let click = Click::when(true);
+        let point = (0.0, 600.0);
+        let rows = diagnostics::tests::capture(|| {
+            diagnostics::within(click, Phase::Down, || {
+                assert!(
+                    remote_point(
+                        point,
+                        530.0,
+                        CONTENT,
+                        false,
+                        || panic!("rejected point queried CG bounds"),
+                        |b, g| metadata(point, b, g)
+                    )
+                    .is_none()
+                );
+            });
+            diagnostics::within(click, Phase::Up, || {
+                assert!(
+                    remote_point(
+                        point,
+                        530.0,
+                        CONTENT,
+                        true,
+                        || Rect::new(4288.0, -2340.0, 1280.0, 900.0),
+                        |b, g| metadata(point, b, g)
+                    )
+                    .is_some()
+                );
+            });
+        });
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["click"], rows[1]["click"]);
+        assert_eq!(rows[0]["accepted"], false);
+        assert_eq!(rows[0]["point"], json!([0.0, 600.0]));
+        assert_eq!(rows[0]["content"], json!(CONTENT));
+        assert!(rows[0]["global"].is_null());
+        assert!(rows[0]["display_bounds"].is_null());
+        assert_eq!(rows[1]["global"], json!([4288.0, -2340.0]));
+    }
+
+    #[test]
+    fn disabled_mapping_does_not_collect_metadata_or_change_query_order() {
+        let point = (438.0, 215.5);
+        let queries = std::cell::Cell::new(0);
+        let rows = diagnostics::tests::capture(|| {
+            diagnostics::within(Click::when(false), Phase::Down, || {
+                assert!(
+                    remote_point(
+                        point,
+                        530.0,
+                        CONTENT,
+                        false,
+                        || {
+                            queries.set(queries.get() + 1);
+                            Rect::new(0.0, 0.0, 1280.0, 900.0)
+                        },
+                        |_, _| panic!("disabled metadata collected")
+                    )
+                    .is_some()
+                );
+            })
+        });
+        assert_eq!(queries.get(), 1);
+        assert!(rows.is_empty());
     }
 }

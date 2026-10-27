@@ -25,12 +25,12 @@ struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level()
-            <= if cfg!(debug_assertions) {
-                log::Level::Debug
-            } else {
-                log::Level::Warn
-            }
+        Self::allows(
+            metadata.level(),
+            metadata.target(),
+            cfg!(debug_assertions),
+            mac::click_diagnostics::enabled(),
+        )
     }
 
     fn log(&self, record: &log::Record) {
@@ -44,6 +44,20 @@ impl log::Log for Logger {
     }
 
     fn flush(&self) {}
+}
+
+impl Logger {
+    fn allows(level: log::Level, target: &str, debug: bool, diagnostics: bool) -> bool {
+        if target == mac::click_diagnostics::TARGET {
+            return diagnostics && level <= log::Level::Info;
+        }
+        level
+            <= if debug {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            }
+    }
 }
 
 const USAGE: &str = "Agent Screen gives AI agents their own virtual displays.
@@ -166,6 +180,10 @@ fn main() {
     }
     log::set_logger(&Logger).ok();
     log::set_max_level(log::LevelFilter::Debug);
+    if mac::click_diagnostics::enabled() {
+        log::info!(target: mac::click_diagnostics::TARGET,
+            "Viewer click diagnostics enabled. Metadata only; no text, titles, keys or screenshots. Stamps do not confirm that the app executed an action.");
+    }
     // A panic in an AppKit callback can't unwind and aborts the app, and
     // the crash report keeps no message: the log keeps it, and where.
     let report = std::panic::take_hook();
@@ -243,4 +261,36 @@ fn main() {
             Err(error) => eprintln!("Agent Screen: control socket failed: {error}"),
         }
     });
+}
+
+#[cfg(test)]
+mod logger_tests {
+    use super::*;
+
+    #[test]
+    fn viewer_diagnostics_are_explicit_and_do_not_enable_other_release_logs() {
+        use log::Level::{Debug, Info, Warn};
+        let target = mac::click_diagnostics::TARGET;
+        assert!(!Logger::allows(Info, target, false, false));
+        assert!(!Logger::allows(Info, target, true, false));
+        assert!(Logger::allows(Info, target, false, true));
+        assert!(!Logger::allows(
+            Debug,
+            "AgentScreen::mac::input",
+            false,
+            true
+        ));
+        assert!(!Logger::allows(
+            Info,
+            "AgentScreen::mac::input",
+            false,
+            true
+        ));
+        assert!(Logger::allows(
+            Warn,
+            "AgentScreen::mac::input",
+            false,
+            false
+        ));
+    }
 }

@@ -42,6 +42,82 @@ Development switches for the Rust app:
 - `AGENTSCREEN_DEBUG=1` enables the debug control methods in a release build, for measuring.
 - `AGENTSCREEN_APPEARANCE=light` or `dark` forces the app's appearance in debug builds, for screenshots.
 
+## Viewer click diagnostics
+
+`AGENTSCREEN_VIEWER_CLICK_DIAGNOSTICS=1` enables metadata for mouse down/up
+through the Viewer. It is off by default, including in debug builds. The
+first stderr line says that it is enabled. The release Logger allows only
+this diagnostic target at Info; other release log levels stay unchanged.
+The switch is read once at startup. Setting it in a shell cannot enable it
+in an app that is already running.
+
+Each JSON record has a `click` id, `phase` (`down` or `up`) and `unix_ms`.
+The id follows the click from the Viewer to its input worker. It is unique
+within that app run. Stages record these fields:
+
+- `mapping`: the Viewer window frame, content-view height, aspect-fit image
+  rect, frame size in pixels, display bounds, event point and mapped global
+  point. `window_frame` and `point` use AppKit's bottom-left coordinates;
+  `content` uses top-left window points. Display bounds and `global` use
+  top-left global CG points. A point outside the image still records
+  `accepted=false`, with `global=null` and `display_bounds=null`. Rejection
+  keeps the existing behavior and does not query display bounds.
+- `hit`: the chosen CG target and host PID/window id, layer and bounds.
+  A left press can have two hit records: the title-bar grab check and the
+  actual press each use their existing fresh query. No extra query is added.
+- `focus`: the result of the existing `AXFocusedWindow` query as a window id.
+  `null` means the query or window-id lookup was unavailable. It accepts
+  sheets as well as windows. `focus_record` records whether SkyLight accepted
+  the existing focus handshake.
+- `grab`: whether the press held a window by its title bar.
+- `stamp`: the down/up event type, target, global point, target bounds and
+  window-local point written into the event. Wake clicks generated during
+  the job also appear. `phase` identifies the Viewer job, while `event_type`
+  identifies the generated event. Missing bounds retain the existing
+  zero-origin fallback.
+
+These records contain no text, AX values, titles, key contents or screenshots.
+There is no new tap or global input monitor. Moves, drags, scrolls and keys
+have no diagnostic scope. With the switch off, the diagnostic closures do
+not run and add no AX or CG queries. Enabled logging adds stderr I/O and
+can affect timing. A stamp records preparation for posting; it does not
+prove that the target app received the event or executed a button action.
+This diagnostic does not fix or reproduce a button action failure.
+
+To retain stderr, start a build containing this change directly from a
+terminal. Finder launches normally discard stderr. For a release build
+beside the installed app, use a separate instance:
+
+```sh
+# Build only. This does not install or start the app.
+apps/macos/scripts/bundle.sh release
+mkdir -p "$HOME/Library/Logs/Agent Screen"
+umask 077
+AGENTSCREEN_INSTANCE=e2e AGENTSCREEN_VIEWER_CLICK_DIAGNOSTICS=1 \
+  "target/Agent Screen.app/Contents/MacOS/AgentScreen" \
+  2> "$HOME/Library/Logs/Agent Screen/viewer-click-diagnostics.log"
+```
+
+Do not run a second process for an instance that is already running. The
+second process exits without enabling diagnostics in the first one. For a
+production capture, first ask the user before quitting the installed app
+and starting the new build with the switch and stderr redirection. Quitting
+ends its existing Agent Displays. Replacing or restarting the installed app
+requires separate user confirmation. Remove the switch at the next launch
+to disable diagnostics. stderr also contains ordinary warnings, so review
+the file before sharing it. The log file has no automatic rotation.
+
+The offline checks do not create displays, post events or read live AX:
+
+```sh
+cargo test -p agent-screen --bin AgentScreen click_diagnostics
+cargo test -p agent-screen --bin AgentScreen logger_tests
+```
+
+They exercise the real mapping arithmetic, window-local coordinate helper,
+hit observer, scoped emission and Logger filter with metadata fixtures.
+They do not exercise Xcode or prove that an app runs a button's action.
+
 ## How it works
 
 - **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks it diagonally off the top-right corner of your physical screens so the real cursor rarely wanders onto it. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.
