@@ -265,6 +265,11 @@ pub fn login_app() -> Result<PathBuf> {
     swift_app("login", "Login")
 }
 
+/// A native menu-choice fixture.
+pub fn menu_choice_app() -> Result<PathBuf> {
+    swift_app("menuchoice", "MenuChoice")
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));
@@ -301,6 +306,7 @@ pub fn probe(args: &[&str]) -> Result<String> {
 /// screen. Their sign asks the user to keep their hands off; the others'
 /// only says a test runs.
 const HANDS_OFF: &[&str] = &[
+    "nativeguard",
     "alerts",
     "appwhere",
     "browsers",
@@ -531,6 +537,74 @@ pub fn pid_of(pattern: &str) -> Option<u32> {
 
 pub fn running(name: &str) -> bool {
     !sh_lenient("/usr/bin/pgrep", &["-x", name]).is_empty()
+}
+
+/// Stop a pid returned by this script's launchApp, and wait before ending
+/// its display so macOS cannot move a still-closing window onto the user.
+/// The caller must never pass a process it did not start.
+pub fn stop_started_pid(pid: u32) -> Result<()> {
+    let pid = pid.to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let _ = Command::new("/bin/kill").args(["-TERM", &pid]).status();
+    loop {
+        if sh_lenient("/bin/ps", &["-p", &pid, "-o", "args="])
+            .trim()
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "the test process {pid} did not exit after the five-second TERM wait; preserve its display, backend and custody"
+            );
+        }
+        sleep_ms(remaining.min(Duration::from_millis(100)).as_millis() as u64);
+    }
+}
+
+/// Ending a display is permitted only after every owned fixture stopped.
+/// On Err the caller must record cleanupVerified=false and preserve backend.
+pub fn finish_fixture_cleanup(
+    stop: impl FnOnce() -> Result<()>,
+    end_display: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    stop()?;
+    end_display()
+}
+
+/// Compile the native fixture only; this does not launch it or create UI.
+pub fn native_guard_fixture_binary(output: &Path) -> Result<()> {
+    sh(
+        "/usr/bin/clang",
+        &[
+            "-fobjc-arc",
+            "-Wall",
+            "-Werror",
+            "-mmacosx-version-min=26.0",
+            "-I",
+            root().join("apps/macos/native").to_str().unwrap(),
+            root()
+                .join("tests/e2e/tools/nativeguard.m")
+                .to_str()
+                .unwrap(),
+            root()
+                .join("apps/macos/native/SkyLight.m")
+                .to_str()
+                .unwrap(),
+            "-framework",
+            "AppKit",
+            "-framework",
+            "ApplicationServices",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "Carbon",
+            "-o",
+            output.to_str().unwrap(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// `name` is running with windows: a headless browser that a script on this
@@ -1043,6 +1117,47 @@ pub fn in_test_app(body: impl FnOnce() -> Result<()>) -> Result<()> {
     result
 }
 
+/// Finish a new isolated test. On an error, keep the instance alive: a
+/// fixture may still have a window on its display or lack a returned pid.
+pub fn finish_test_app(result: Result<()>) -> Result<()> {
+    finish_after_test(result, stop_test_app)
+}
+
+fn finish_after_test(result: Result<()>, quit: impl FnOnce()) -> Result<()> {
+    if result.is_ok() {
+        quit();
+    } else {
+        eprintln!(
+            "test cleanup did not complete; the e2e instance stays running to keep any fixture windows off the user's screen"
+        );
+    }
+    result
+}
+
+#[cfg(test)]
+mod isolated_cleanup_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn failed_cleanup_does_not_quit_the_instance() {
+        let quit = Cell::new(false);
+        let result = finish_after_test(Err(anyhow::anyhow!("fixture still alive")), || {
+            quit.set(true)
+        });
+        assert!(result.is_err());
+        assert!(!quit.get());
+    }
+
+    #[test]
+    fn successful_cleanup_can_quit() {
+        let quit = Cell::new(false);
+        let result = finish_after_test(Ok(()), || quit.set(true));
+        assert!(result.is_ok());
+        assert!(quit.get());
+    }
+}
+
 /// Quit the test instance through its socket; AppleScript would find the
 /// user's app by bundle id.
 pub fn stop_test_app() {
@@ -1331,5 +1446,102 @@ mod tests {
         for name in super::HANDS_OFF {
             assert!(bin.join(format!("{name}.rs")).exists(), "no script {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fixture_term_process_tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        io::{BufRead, BufReader, Write},
+        sync::mpsc,
+    };
+
+    struct RepairOnDrop {
+        child: std::process::Child,
+        input: Option<std::process::ChildStdin>,
+    }
+    impl RepairOnDrop {
+        fn repair(&mut self) -> Result<()> {
+            if let Some(mut input) = self.input.take() {
+                writeln!(input, "repair")?;
+            }
+            let status = self.child.wait()?;
+            anyhow::ensure!(status.success(), "offline custody child could not drain");
+            Ok(())
+        }
+    }
+    impl Drop for RepairOnDrop {
+        fn drop(&mut self) {
+            let _ = self.repair();
+        }
+    }
+
+    #[test]
+    fn term_timeout_preserves_live_custodian_display_and_backend() -> Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("as-guard-term-{}-{}", std::process::id(), now_ms()));
+        std::fs::DirBuilder::new().create(&path)?;
+        let binary = path.join("custody-child");
+        native_guard_fixture_binary(&binary)?;
+        let mut child = command(&binary)
+            .arg("--custody-term-child")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let input = child.stdin.take();
+        let output = child.stdout.take().context("offline child stdout")?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut child = RepairOnDrop { child, input };
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5))?, "ready retained=1");
+        let end_called = Cell::new(false);
+        let quit_called = Cell::new(false);
+        let began = Instant::now();
+        let cleanup = finish_fixture_cleanup(
+            || stop_started_pid(child.child.id()),
+            || {
+                end_called.set(true);
+                Ok(())
+            },
+        );
+        let elapsed = began.elapsed();
+        let cleanup_verified = cleanup.is_ok();
+        let result = finish_after_test(cleanup, || quit_called.set(true));
+        assert!(result.is_err());
+        assert!(!cleanup_verified);
+        assert!(!end_called.get());
+        assert!(!quit_called.get());
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+            "TERM wait took {elapsed:?}"
+        );
+        assert!(
+            child.child.try_wait()?.is_none(),
+            "parent forcibly killed the custodian"
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))?,
+            "term-refused retained=1"
+        );
+        child.repair()?;
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))?,
+            "repaired retained=0"
+        );
+        println!(
+            "offline TERM wait={} ms; Err; child alive; cleanupVerified=false; endDisplay=0; backendQuit=0; repaired without kill",
+            elapsed.as_millis()
+        );
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }

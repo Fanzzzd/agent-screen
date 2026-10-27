@@ -99,6 +99,157 @@ pub fn flags(m: Modifiers) -> CGEventFlags {
     flags
 }
 
+fn focus_popup(
+    stopped: &std::sync::atomic::AtomicBool,
+    allowed: impl FnOnce() -> bool,
+    focus: impl FnOnce(),
+    focus_control: impl FnOnce() -> bool,
+) -> bool {
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) || !allowed() {
+        return false;
+    }
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    focus();
+    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    focus_control()
+}
+
+fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < until {
+        if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(
+            Duration::from_millis(10).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    !stopped.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod popup_wait_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    #[test]
+    fn an_initially_cancelled_popup_runs_no_callbacks() {
+        let stopped = AtomicBool::new(true);
+        assert!(!focus_popup(
+            &stopped,
+            || panic!("target check ran"),
+            || panic!("window focus ran"),
+            || panic!("control focus ran")
+        ));
+    }
+
+    #[test]
+    fn a_rejected_target_runs_no_focus_callbacks() {
+        let stopped = AtomicBool::new(false);
+        assert!(!focus_popup(
+            &stopped,
+            || false,
+            || panic!("window focus ran"),
+            || panic!("control focus ran")
+        ));
+    }
+
+    #[test]
+    fn a_control_focus_failure_is_reported() {
+        let stopped = AtomicBool::new(false);
+        assert!(!focus_popup(&stopped, || true, || {}, || false));
+    }
+
+    #[test]
+    fn takeover_during_target_check_prevents_focus() {
+        let stopped = AtomicBool::new(false);
+        let focused = std::cell::Cell::new(false);
+        let control = std::cell::Cell::new(false);
+        let result = focus_popup(
+            &stopped,
+            || {
+                stopped.store(true, Ordering::Relaxed);
+                true
+            },
+            || focused.set(true),
+            || {
+                control.set(true);
+                true
+            },
+        );
+        assert!(!result);
+        assert!(!focused.get());
+        assert!(!control.get());
+    }
+
+    #[test]
+    fn takeover_during_handshake_prevents_control_focus() {
+        let stopped = AtomicBool::new(false);
+        let control = std::cell::Cell::new(false);
+        let result = focus_popup(
+            &stopped,
+            || true,
+            || stopped.store(true, Ordering::Relaxed),
+            || {
+                control.set(true);
+                true
+            },
+        );
+        assert!(!result);
+        assert!(!control.get());
+    }
+
+    #[test]
+    fn an_uncancelled_popup_can_focus() {
+        let stopped = AtomicBool::new(false);
+        let focused = std::cell::Cell::new(false);
+        let control = std::cell::Cell::new(false);
+        assert!(focus_popup(
+            &stopped,
+            || true,
+            || focused.set(true),
+            || {
+                control.set(true);
+                true
+            }
+        ));
+        assert!(focused.get());
+        assert!(control.get());
+    }
+
+    #[test]
+    fn takeover_interrupts_the_typeahead_wait() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        assert!(!wait_typeahead(&stopped));
+        trigger.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+}
+
+/// Check the explicit window, not whichever window this display last typed
+/// into. PID-posted keys in a foreground app otherwise reach its key window.
+fn popup_keys_allowed(target: WindowTarget) -> bool {
+    let Some(front) = front() else {
+        return false;
+    };
+    agent_screen_model::typing::keys_reach_target(
+        front == target.pid,
+        front != target.pid || super::ax::focused_window_id(target.pid) == Some(target.window_id),
+    )
+}
+
 type Job = Box<dyn FnOnce(&mut Worker) + Send>;
 
 /// How much of an agent's drag or text went out.
@@ -443,6 +594,83 @@ impl Forwarder {
         })
         .await
         .unwrap_or(Sent::Nowhere)
+    }
+
+    /// Type-select a closed pop-up. Unlike general text entry, this targets
+    /// exactly one window and never wakes it with a click or sends arrows.
+    pub async fn choose_closed_popup(
+        &self,
+        target: WindowTarget,
+        element: super::ax::Sendable,
+        title: String,
+        within: Rect,
+    ) -> bool {
+        let stopped = self.stopped.clone();
+        self.run(move |w| {
+            if !hits()
+                .iter()
+                .any(|h| h.host == target && within.contains(h.bounds.mid()))
+            {
+                return false;
+            }
+            let _held = AppKeys::hold(target.pid);
+            // AppKit and Chromium retain a type-ahead search across calls.
+            // A second title sent during that interval appends to the first.
+            // Wait without opening a menu, then recheck placement before keys.
+            if !wait_typeahead(&stopped) {
+                return false;
+            }
+            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
+            if !hits()
+                .iter()
+                .any(|h| h.host == target && within.contains(h.bounds.mid()))
+            {
+                return false;
+            }
+            if !focus_popup(
+                &stopped,
+                || popup_keys_allowed(target),
+                || w.focus_waking(target, false),
+                || {
+                    super::ax::set_attribute(
+                        element.get(),
+                        "AXFocused",
+                        objc2_core_foundation::CFBoolean::new(true),
+                    )
+                },
+            ) {
+                return false;
+            }
+            for ch in title.chars() {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) || !popup_keys_allowed(target)
+                {
+                    return false;
+                }
+                let mut units = [0u16; 2];
+                let units = ch.encode_utf16(&mut units);
+                for down in [true, false] {
+                    let Some(event) = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)
+                    else {
+                        return false;
+                    };
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    unsafe {
+                        CGEvent::keyboard_set_unicode_string(
+                            Some(&event),
+                            units.len() as _,
+                            units.as_ptr(),
+                        );
+                    }
+                    deliver(&event, target.pid, true);
+                }
+                thread::sleep(Duration::from_millis(4));
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Focus the display's window of app `pid` for a menu command: the one
@@ -1334,7 +1562,7 @@ impl Worker {
 
 /// Fields WindowServer and Chromium use to route an event to a window that
 /// is neither key nor under the real cursor.
-fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
+pub(super) fn stamp_routing(event: &CGEvent, at: (f64, f64), target: WindowTarget) {
     let window = target.window_id as i64;
     // The point in the window, from its top-left corner. AppKit takes it as
     // is for an event with a time, where it would work it out for one

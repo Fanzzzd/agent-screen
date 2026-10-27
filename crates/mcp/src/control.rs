@@ -59,6 +59,8 @@ struct Connection {
 #[derive(Default)]
 pub struct Control {
     connection: Mutex<Option<Arc<Connection>>>,
+    #[cfg(test)]
+    attached_only: bool,
     next_id: AtomicU64,
     /// Sent first on every connection, so an app that starts or restarts
     /// later still hears it.
@@ -83,6 +85,24 @@ struct Made {
 }
 
 impl Control {
+    /// Exercise the real client and receiver without an OS endpoint. Even if
+    /// the peer closes, this client cannot reconnect or auto-start the app.
+    #[cfg(test)]
+    pub(crate) fn attached_duplex() -> (Self, tokio::io::DuplexStream) {
+        let (client, app) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(client);
+        let connection = attach(Box::new(reader), Box::new(writer));
+        (
+            Self {
+                connection: Mutex::new(Some(connection)),
+                attached_only: true,
+                connections: AtomicU64::new(1),
+                ..Self::default()
+            },
+            app,
+        )
+    }
+
     /// Keep a window's latest tree; the one before it, if any.
     pub fn swap_tree(&self, display: i64, window: i64, tree: String) -> Option<String> {
         self.trees.lock().unwrap().insert((display, window), tree)
@@ -199,6 +219,10 @@ impl Control {
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
             return Some(connection.clone());
         }
+        #[cfg(test)]
+        if self.attached_only {
+            return None;
+        }
         let (reader, writer) = endpoint::connect().await.ok()?;
         self.connections.fetch_add(1, Ordering::Relaxed);
         let connection = attach(reader, writer);
@@ -211,6 +235,10 @@ impl Control {
         let mut slot = self.connection.lock().await;
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
             return Ok(connection.clone());
+        }
+        #[cfg(test)]
+        if self.attached_only {
+            return Err(closed("the attached test transport closed"));
         }
         let (reader, writer) = match endpoint::connect().await {
             Ok(ends) => ends,
@@ -340,6 +368,78 @@ fn closed(detail: &str) -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attached_duplex_frames_and_routes_replies_by_request_id() {
+        let (control, mut app) = Control::attached_duplex();
+        let client = async {
+            let (first, second) = tokio::join!(
+                control.call("first", json!({ "value": "四月 🌸" })),
+                control.call("second", json!({ "value": "五月" })),
+            );
+            assert_eq!(first.unwrap()["value"], "四月 🌸");
+            let error = second.unwrap_err();
+            assert_eq!(error.code, "takeover");
+            assert_eq!(error.message, "用户接手 🌸");
+        };
+        let fake_app = async {
+            let mut reader = BufReader::new(&mut app);
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                assert!(line.ends_with('\n'));
+                requests.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+            assert_eq!(
+                requests[0],
+                json!({ "id": 1, "method": "first", "params": { "value": "四月 🌸" } })
+            );
+            assert_eq!(
+                requests[1],
+                json!({ "id": 2, "method": "second", "params": { "value": "五月" } })
+            );
+            // Unknown ids and malformed lines must not settle another call.
+            // Coalesced replies arrive out of order, across UTF-8 boundaries.
+            let replies = concat!(
+                "not JSON\n",
+                "{\"id\":99,\"result\":{\"value\":\"wrong\"}}\n",
+                "{\"id\":2,\"error\":{\"code\":\"takeover\",\"message\":\"用户接手 🌸\"}}\n",
+                "{\"id\":1,\"result\":{\"value\":\"四月 🌸\"}}\n",
+            );
+            for chunk in replies.as_bytes().chunks(7) {
+                app.write_all(chunk).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(client, fake_app);
+        })
+        .await
+        .expect("attached client timed out");
+    }
+
+    #[tokio::test]
+    async fn attached_duplex_never_reconnects_after_peer_closes() {
+        let (control, app) = Control::attached_duplex();
+        drop(app);
+        let connection = control.connection.lock().await.as_ref().unwrap().clone();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while connection.open.load(Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver did not observe EOF");
+        let error = control
+            .call("mustNotReachApp", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unavailable");
+        assert_eq!(error.message, "the attached test transport closed");
+        assert!(control.open_running().await.is_none());
+        assert_eq!(control.connections.load(Ordering::Relaxed), 1);
+    }
 
     /// What a restart does to the counter: the next call opens a new
     /// connection.

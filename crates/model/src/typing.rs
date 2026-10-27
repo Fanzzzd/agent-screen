@@ -5,6 +5,21 @@
 //! parentheses or an autocompletion do, or change its case, but a dropped
 //! key leaves one out.
 
+/// PID-posted keys in a foreground app must target its current key window.
+pub fn keys_reach_target(target_is_front: bool, target_is_key_window: bool) -> bool {
+    !target_is_front || target_is_key_window
+}
+
+/// Space can activate a closed button before a search starts. AppKit's
+/// private-use function-key characters are commands, not item-title text.
+pub fn popup_title_is_safe(title: &str) -> bool {
+    !title.is_empty()
+        && !title.starts_with(char::is_whitespace)
+        && !title
+            .chars()
+            .any(|c| c.is_control() || ('\u{f700}'..='\u{f747}').contains(&c))
+}
+
 /// Whether `typed` shows in `shown`, in order, with anything between.
 pub fn landed(typed: &str, shown: &str) -> bool {
     let fold = |c: char| {
@@ -21,6 +36,24 @@ pub fn landed(typed: &str, shown: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::landed;
+
+    #[test]
+    fn popup_titles_cannot_start_activation_or_navigation() {
+        for title in ["", " ", " Apple", "Cherry\n", "\u{f701}Cherry"] {
+            assert!(!super::popup_title_is_safe(title));
+        }
+        for title in ["Apple", "+852 (Hong Kong)", "United States", "中文"] {
+            assert!(super::popup_title_is_safe(title));
+        }
+    }
+
+    #[test]
+    fn foreground_keys_must_not_reach_another_window() {
+        assert!(!super::keys_reach_target(true, false));
+        assert!(super::keys_reach_target(true, true));
+        assert!(super::keys_reach_target(false, false));
+        assert!(super::keys_reach_target(false, true));
+    }
 
     #[test]
     fn all_of_it_landed() {

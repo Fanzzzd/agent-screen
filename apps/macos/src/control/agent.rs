@@ -1013,6 +1013,11 @@ async fn handle_one(
                     .await;
             }
             act(&core, id, &action, &element, p.string("value"), cx).await?;
+            if forwarder_stopped(&core, id, cx) {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id} during the element action; no further focus was sent. Call wait_for_control to wait until they hand it back."
+                )));
+            }
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
@@ -2255,27 +2260,15 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
-            // Some elements, static text among them, report success and
-            // keep their value: read it back.
-            let set = off_main(
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let mut access = AxValueAccess {
+                element,
+                forwarder,
+                bounds,
+                id,
                 cx,
-                Box::new(move |e| {
-                    ax::settable(e, "AXValue")
-                        && ax::set_attribute(
-                            e,
-                            "AXValue",
-                            &objc2_core_foundation::CFString::from_str(&value),
-                        )
-                        && ax::string_attribute(e, "AXValue")
-                            .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
-                }),
-            )
-            .await;
-            if !set {
-                return Err(ControlError::failed(
-                    "the element's value cannot be set; focus it and type instead",
-                ));
-            }
+            };
+            super::values::set_value(&mut access, id, &value).await?;
         }
         "insert_text" => {
             let value =
@@ -2313,6 +2306,94 @@ async fn act(
         other => return Err(ControlError::invalid(format!("unknown action {other}"))),
     }
     Ok(())
+}
+
+struct AxValueAccess<'a> {
+    element: &'a ax::Element,
+    forwarder: crate::mac::input::Forwarder,
+    bounds: Rect,
+    id: DisplayId,
+    cx: &'a mut AsyncApp,
+}
+
+impl super::values::ValueAccess for AxValueAccess<'_> {
+    async fn role(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXRole")).await
+    }
+    fn stopped(&self) -> bool {
+        self.forwarder.agent_stopped()
+    }
+    async fn type_popup(&mut self, value: &str) -> Result<(), ControlError> {
+        let item = ax::Sendable(self.element.clone());
+        let target = off(self.cx, move || {
+            let window = ax::element_attribute(item.get(), "AXWindow")?;
+            Some(WindowTarget {
+                pid: ax::pid_of(item.get())?,
+                window_id: ax::window_id(&window)?,
+            })
+        })
+        .await
+        .ok_or_else(|| ControlError::failed("the pop-up button has no window"))?;
+        if !self
+            .forwarder
+            .choose_closed_popup(
+                target,
+                ax::Sendable(self.element.clone()),
+                value.to_owned(),
+                self.bounds,
+            )
+            .await
+        {
+            if self.forwarder.agent_stopped() {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {} during type-ahead; no further keys were sent. Call wait_for_control to wait until they hand it back.",
+                    self.id
+                )));
+            }
+            return Err(ControlError::failed(
+                "type-ahead could not safely reach the closed pop-up button; its value may have changed. No menu was opened. If the user is working in another window of this app, wait until they leave it before retrying",
+            ));
+        }
+        Ok(())
+    }
+    async fn set_attribute(&mut self, value: &str) -> bool {
+        let item = ax::Sendable(self.element.clone());
+        let value = value.to_owned();
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            super::values::set_if_current(
+                || forwarder.agent_stopped(),
+                || ax::settable(item.get(), "AXValue"),
+                || {
+                    ax::set_attribute(
+                        item.get(),
+                        "AXValue",
+                        &objc2_core_foundation::CFString::from_str(&value),
+                    )
+                },
+            )
+        })
+        .await
+    }
+    async fn read_value(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXValue")).await
+    }
+    async fn confirm(&mut self) -> bool {
+        let item = ax::Sendable(self.element.clone());
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            super::values::mutate_if_current(
+                || forwarder.agent_stopped(),
+                || ax::try_action(item.get(), "AXConfirm"),
+            )
+        })
+        .await
+    }
+    async fn pause(&mut self, duration: Duration) {
+        self.cx.background_executor().timer(duration).await;
+    }
 }
 
 /// Open an app in the background and place its new window on a display.

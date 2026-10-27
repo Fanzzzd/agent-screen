@@ -124,6 +124,20 @@ fn main() {
             println!("Agent Screen {}", env!("CARGO_PKG_VERSION"));
             return;
         }
+        Some("--native-menu-recovery-summary") => {
+            if let Err(error) = mac::menu_guard::recovery_summary() {
+                eprintln!("Agent Screen input recovery: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--native-menu-guard") => {
+            if let Err(error) = mac::menu_guard::helper_main() {
+                eprintln!("Agent Screen native menu guard: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // --setup: reopened from the setup window, which shows again.
         Some("colorsync") => {
             colorsync(std::env::args().nth(2).as_deref());

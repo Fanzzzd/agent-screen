@@ -17,6 +17,8 @@ Use either toolset on windows that are on your display:
 - A large window's tree costs thousands of tokens. Pass `max_depth` to `get_window_state` to see the top levels first, and `result: "changes"` to `act_on_element` to get back only the elements that changed.
 - **Built-in computer use** (Codex `get_app_state`, `click`, `type_text`, ...): works on the app's window wherever it is, so place the window first.
 
+- For a pop-up button or HTML select, use `act_on_element set_value` with the exact full item title. It chooses by typing into the closed control and verifies the value. A failed verification names the current value, which may have changed. Editable combo boxes with AXValue and AXConfirm set and confirm the value in one call. Unsupported custom web controls fail without a click/menu fallback; inspect any partial value change before retrying. A menu-only button refuses set_value while the runtime guard is disabled. Use request_help if selection requires opening it. Ordinary menu-opening click/right_click/show_menu calls are not guarded by the prototype.
+
 ## While you work
 
 - After each window's purpose is clear, call `set_disposition`: `keep` for results the user should see, `close` for scratch windows. Your session can end without warning.
