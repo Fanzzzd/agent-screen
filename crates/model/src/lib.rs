@@ -10,5 +10,6 @@ pub mod launch;
 pub mod menu_guard;
 pub mod model;
 pub mod numbers;
+pub mod selection;
 pub mod tree;
 pub mod typing;

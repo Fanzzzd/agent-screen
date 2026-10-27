@@ -2132,117 +2132,15 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
-            let item = ax::Sendable(element.clone());
-            let role = off(cx, move || ax::string_attribute(item.get(), "AXRole")).await;
-            if role.as_deref() == Some("AXPopUpButton") {
-                let item = ax::Sendable(element.clone());
-                let target = off(cx, move || {
-                    let window = ax::element_attribute(item.get(), "AXWindow")?;
-                    Some(WindowTarget {
-                        pid: ax::pid_of(item.get())?,
-                        window_id: ax::window_id(&window)?,
-                    })
-                })
-                .await
-                .ok_or_else(|| ControlError::failed("the pop-up button has no window"))?;
-                if !agent_screen_model::typing::popup_title_is_safe(&value) {
-                    return Err(ControlError::invalid(
-                        "a pop-up choice needs the full, nonempty item title without control characters, function-key characters or leading whitespace",
-                    ));
-                }
-                let forwarder = core.update(cx, |c, _| c.forwarder(id));
-                if !forwarder
-                    .choose_closed_popup(
-                        target,
-                        ax::Sendable(element.clone()),
-                        value.clone(),
-                        bounds,
-                    )
-                    .await
-                {
-                    if forwarder.agent_stopped() {
-                        return Err(ControlError::takeover(format!(
-                            "the user took over display {id} during type-ahead; no further keys were sent. Call wait_for_control to wait until they hand it back."
-                        )));
-                    }
-                    return Err(ControlError::failed(
-                        "type-ahead could not safely reach the closed pop-up button; its value may have changed. No menu was opened. If the user is working in another window of this app, wait until they leave it before retrying",
-                    ));
-                }
-                let mut shown = String::new();
-                for _ in 0..100 {
-                    let item = ax::Sendable(element.clone());
-                    shown = off(cx, move || {
-                        ax::string_attribute(item.get(), "AXValue").unwrap_or_default()
-                    })
-                    .await;
-                    if shown == value {
-                        return Ok(());
-                    }
-                    cx.background_executor()
-                        .timer(Duration::from_millis(25))
-                        .await;
-                }
-                return Err(ControlError::failed(format!(
-                    "typed {value:?} into the closed pop-up button, but it shows {shown:?}; type-ahead may have selected a different item. Use the full item title. No menu was opened"
-                )));
-            }
-            let combo = role.as_deref() == Some("AXComboBox");
-            // Some elements, static text among them, report success and
-            // keep their value: read it back.
-            let committed = value.clone();
-            let set = off_main(
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let mut access = AxValueAccess {
+                element,
+                forwarder,
+                bounds,
+                id,
                 cx,
-                Box::new(move |e| {
-                    ax::settable(e, "AXValue")
-                        && ax::set_attribute(
-                            e,
-                            "AXValue",
-                            &objc2_core_foundation::CFString::from_str(&value),
-                        )
-                        && ax::string_attribute(e, "AXValue")
-                            .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
-                }),
-            )
-            .await;
-            if !set {
-                return Err(ControlError::failed(
-                    "the element's value cannot be set; focus it and type instead",
-                ));
-            }
-            if combo {
-                let forwarder = core.update(cx, |c, _| c.forwarder(id));
-                let may_confirm = forwarder.clone();
-                let confirmed = off_main(
-                    cx,
-                    Box::new(move |e| {
-                        !may_confirm.agent_stopped() && ax::try_action(e, "AXConfirm")
-                    }),
-                )
-                .await;
-                if forwarder.agent_stopped() {
-                    return Err(ControlError::takeover(format!(
-                        "the user took over display {id} while the combo value was being set; no further confirmation was sent. Call wait_for_control to wait until they hand it back."
-                    )));
-                }
-                if !confirmed {
-                    return Err(ControlError::failed(
-                        "the combo box accepted its value but refused AXConfirm; check the window before retrying",
-                    ));
-                }
-                // Confirmation runs the app's commit handler, which may
-                // reject the text. Check after that handler has had a turn.
-                cx.background_executor()
-                    .timer(Duration::from_millis(250))
-                    .await;
-                let item = ax::Sendable(element.clone());
-                let shown = off(cx, move || ax::string_attribute(item.get(), "AXValue")).await;
-                if shown.as_deref() != Some(&committed) {
-                    return Err(ControlError::failed(format!(
-                        "the combo box confirmed {committed:?}, but now shows {shown:?}; the app may have rejected or changed the value"
-                    )));
-                }
-            }
+            };
+            super::values::set_value(&mut access, id, &value).await?;
         }
         "insert_text" => {
             let value =
@@ -2280,6 +2178,94 @@ async fn act(
         other => return Err(ControlError::invalid(format!("unknown action {other}"))),
     }
     Ok(())
+}
+
+struct AxValueAccess<'a> {
+    element: &'a ax::Element,
+    forwarder: crate::mac::input::Forwarder,
+    bounds: Rect,
+    id: DisplayId,
+    cx: &'a mut AsyncApp,
+}
+
+impl super::values::ValueAccess for AxValueAccess<'_> {
+    async fn role(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXRole")).await
+    }
+    fn stopped(&self) -> bool {
+        self.forwarder.agent_stopped()
+    }
+    async fn type_popup(&mut self, value: &str) -> Result<(), ControlError> {
+        let item = ax::Sendable(self.element.clone());
+        let target = off(self.cx, move || {
+            let window = ax::element_attribute(item.get(), "AXWindow")?;
+            Some(WindowTarget {
+                pid: ax::pid_of(item.get())?,
+                window_id: ax::window_id(&window)?,
+            })
+        })
+        .await
+        .ok_or_else(|| ControlError::failed("the pop-up button has no window"))?;
+        if !self
+            .forwarder
+            .choose_closed_popup(
+                target,
+                ax::Sendable(self.element.clone()),
+                value.to_owned(),
+                self.bounds,
+            )
+            .await
+        {
+            if self.forwarder.agent_stopped() {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {} during type-ahead; no further keys were sent. Call wait_for_control to wait until they hand it back.",
+                    self.id
+                )));
+            }
+            return Err(ControlError::failed(
+                "type-ahead could not safely reach the closed pop-up button; its value may have changed. No menu was opened. If the user is working in another window of this app, wait until they leave it before retrying",
+            ));
+        }
+        Ok(())
+    }
+    async fn set_attribute(&mut self, value: &str) -> bool {
+        let item = ax::Sendable(self.element.clone());
+        let value = value.to_owned();
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            super::values::set_if_current(
+                || forwarder.agent_stopped(),
+                || ax::settable(item.get(), "AXValue"),
+                || {
+                    ax::set_attribute(
+                        item.get(),
+                        "AXValue",
+                        &objc2_core_foundation::CFString::from_str(&value),
+                    )
+                },
+            )
+        })
+        .await
+    }
+    async fn read_value(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXValue")).await
+    }
+    async fn confirm(&mut self) -> bool {
+        let item = ax::Sendable(self.element.clone());
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            super::values::mutate_if_current(
+                || forwarder.agent_stopped(),
+                || ax::try_action(item.get(), "AXConfirm"),
+            )
+        })
+        .await
+    }
+    async fn pause(&mut self, duration: Duration) {
+        self.cx.background_executor().timer(duration).await;
+    }
 }
 
 /// Open an app in the background and place its new window on a display.

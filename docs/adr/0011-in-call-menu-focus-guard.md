@@ -12,6 +12,18 @@ An AppKit menu steals the session's key focus and captures clicks and scrolls ou
 
 For a pop-up button or HTML select, focus the closed control through AX, type the full item title through per-process events, and verify its value. Type-ahead cannot distinguish equal titles and may change the choice before verification fails. Let an earlier search expire before typing another title. For a combo box, set `AXValue` and perform `AXConfirm`. Menu bar items keep the existing AX press path unless the Electron mouse-event path is verified.
 
+## Actual tool-call contract
+
+`crates/mcp/src/tools.rs::run` forwards `act_on_element` as `elementAction` through the existing NDJSON client. `apps/macos/src/control/agent.rs::act` delegates set_value to `control/values.rs`; its AX adapter is the production IO boundary. Neither path starts the helper or supplies its live-validation flag.
+
+The role routes are shared by native and Electron apps. AXPopUpButton uses focused type-ahead and exact-value verification. Editable AXComboBox requires AXValue, pre-confirm verification and AXConfirm, then verifies the committed value. An unsupported custom web combo or radio is not equivalent to either contract. AXMenuButton set_value now refuses before any value write because selection requires an unvalidated open-menu path. Failures report possible partial changes and never turn into an opening click. Takeover is checked after role lookup, at the dispatched mutation closure and through verification.
+
+#39 remains open because AXPress on a closed Electron menu item still reports accelerator semantics; the returned warning is not a mouse-menu fix. #79 remains unproved because its signup custom controls/radios and the Dia-specific flow have no corresponding verified implementation here. Native or Electron closed select support does not establish that flow.
+
+Ordinary click/right_click/show_menu can still open menus and are not guarded. Menu snapshots, stable opener/item references, reopen-and-pick, live-backed helper admission and ordinary-request cancellation linkage remain absent. They must not be represented as enabled simply because helper or transport tests pass.
+
+Offline dispatcher tests use the actual tools::run and Control NDJSON framing with a preattached in-memory app endpoint. Workflow tests invoke the same set_value orchestration as production and replace AX/input IO only. These tests verify data flow, cancellation and failure contracts; they prove no real app support or input safety.
+
 ## Measured closed-control duration
 
 Closed-control selection currently waits 1.2 s for an earlier type-ahead search to expire. The last Chromium checks took 1303 ms and 1312 ms after startup. These are total tool-call durations, not input-interception durations. This path installs no HID or per-pid tap and holds no user events. It does not implement or demonstrate the proposed 500 ms interception target. Native type-ahead can also defer its committed value, so verification may wait longer.
