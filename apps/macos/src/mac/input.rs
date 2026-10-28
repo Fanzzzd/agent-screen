@@ -377,9 +377,23 @@ impl Forwarder {
         .await;
     }
 
+    /// Wheel clicks as a wheel sends them: a few lines per event, a frame
+    /// apart. Chrome scrolls at most a page for one event, so 800 clicks in
+    /// one event moved a long list no further than 3 (#104).
     pub async fn wheel(&self, at: (f64, f64), delta: (f64, f64), m: Modifiers) {
-        self.run(move |w| w.scroll(at, delta, false, 0, 0, flags(m)))
-            .await;
+        let stopped = self.stopped.clone();
+        self.run(move |w| {
+            for (i, step) in wheel_chunks(delta).into_iter().enumerate() {
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                if i > 0 {
+                    thread::sleep(WHEEL_GAP);
+                }
+                w.scroll(at, step, false, 0, 0, flags(m));
+            }
+        })
+        .await;
     }
 
     /// Type text as Unicode, independent of the keyboard layout. One
@@ -1090,43 +1104,17 @@ impl Worker {
             let _held = AppKeys::hold(hit.target.pid);
             self.focus(hit.target);
         }
-        let units = if continuous {
-            CGScrollEventUnit::Pixel
-        } else {
-            CGScrollEventUnit::Line
-        };
-        let Some(event) = CGEvent::new_scroll_wheel_event2(
+        let Some(event) = scroll_event(
             self.source.as_deref(),
-            units,
-            2,
-            wheel_steps(delta.1),
-            wheel_steps(delta.0),
-            0,
+            at,
+            delta,
+            continuous,
+            phase,
+            momentum,
+            flags,
         ) else {
             return;
         };
-        let e = Some(&*event);
-        CGEvent::set_location(e, CGPoint::new(at.0, at.1));
-        CGEvent::set_flags(e, flags);
-        CGEvent::set_integer_value_field(
-            e,
-            CGEventField::ScrollWheelEventIsContinuous,
-            continuous as i64,
-        );
-        CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventScrollPhase, phase);
-        CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventMomentumPhase, momentum);
-        if continuous {
-            CGEvent::set_double_value_field(
-                e,
-                CGEventField::ScrollWheelEventPointDeltaAxis1,
-                delta.1,
-            );
-            CGEvent::set_double_value_field(
-                e,
-                CGEventField::ScrollWheelEventPointDeltaAxis2,
-                delta.0,
-            );
-        }
         stamp_routing(&event, at, hit.target);
         // AppKit routes a scroll by its location in the window, and drops it
         // when that point misses: give it relative to the window.
@@ -1448,7 +1436,64 @@ fn stamp_time(event: &CGEvent) {
     CGEvent::set_timestamp(Some(event), now);
 }
 
+/// Construct scroll metadata without posting it or reading any app state.
+fn scroll_event(
+    source: Option<&CGEventSource>,
+    at: (f64, f64),
+    delta: (f64, f64),
+    continuous: bool,
+    phase: i64,
+    momentum: i64,
+    flags: CGEventFlags,
+) -> Option<CFRetained<CGEvent>> {
+    let units = if continuous {
+        CGScrollEventUnit::Pixel
+    } else {
+        CGScrollEventUnit::Line
+    };
+    let event = CGEvent::new_scroll_wheel_event2(
+        source,
+        units,
+        2,
+        wheel_steps(delta.1),
+        wheel_steps(delta.0),
+        0,
+    )?;
+    let e = Some(&*event);
+    CGEvent::set_location(e, CGPoint::new(at.0, at.1));
+    CGEvent::set_flags(e, flags);
+    CGEvent::set_integer_value_field(
+        e,
+        CGEventField::ScrollWheelEventIsContinuous,
+        continuous as i64,
+    );
+    CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventScrollPhase, phase);
+    CGEvent::set_integer_value_field(e, CGEventField::ScrollWheelEventMomentumPhase, momentum);
+    if continuous {
+        CGEvent::set_double_value_field(e, CGEventField::ScrollWheelEventPointDeltaAxis1, delta.1);
+        CGEvent::set_double_value_field(e, CGEventField::ScrollWheelEventPointDeltaAxis2, delta.0);
+    }
+    Some(event)
+}
+
 /// Whole wheel steps, at least one for any movement.
+/// Lines in one wheel event, at most: 200 px in Chrome, under a page of
+/// any list worth scrolling.
+const WHEEL_LINES: i32 = 5;
+const WHEEL_GAP: Duration = Duration::from_millis(12);
+
+/// A scroll of `delta` lines as events of at most `WHEEL_LINES` lines on
+/// each axis, adding up to the same clicks.
+fn wheel_chunks(delta: (f64, f64)) -> Vec<(f64, f64)> {
+    let (x, y) = (wheel_steps(delta.0), wheel_steps(delta.1));
+    let count = (x.abs().max(y.abs()) + WHEEL_LINES - 1) / WHEEL_LINES;
+    let share = |total: i32, i: i32| total * (i + 1) / count.max(1) - total * i / count.max(1);
+    (0..count.max(1))
+        .map(|i| (share(x, i) as f64, share(y, i) as f64))
+        .filter(|&(x, y)| x != 0.0 || y != 0.0)
+        .collect()
+}
+
 fn wheel_steps(delta: f64) -> i32 {
     if delta == 0.0 {
         0
@@ -1593,6 +1638,31 @@ fn title_bar_point(target: WindowTarget, bounds: Rect) -> Option<(f64, f64)> {
         .map(|f| (bounds.x + bounds.width * f, bounds.y + 6.0))
         .into_iter()
         .find(|&at| super::ax::on_title_bar(target, bounds, at))
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn many_wheel_clicks_go_as_events_of_a_few_lines_adding_up_to_them() {
+        let chunks = wheel_chunks((0.0, -800.0));
+        assert_eq!(chunks.len(), 160);
+        assert!(
+            chunks
+                .iter()
+                .all(|&(x, y)| x == 0.0 && (-5.0..=-1.0).contains(&y))
+        );
+        assert_eq!(chunks.iter().map(|c| c.1).sum::<f64>(), -800.0);
+        // Both axes at once share the events.
+        let both = wheel_chunks((7.0, -12.0));
+        assert_eq!(both.len(), 3);
+        assert_eq!(both.iter().map(|c| c.0).sum::<f64>(), 7.0);
+        assert_eq!(both.iter().map(|c| c.1).sum::<f64>(), -12.0);
+        // A few clicks stay one event, as before.
+        assert_eq!(wheel_chunks((0.0, 3.0)), vec![(0.0, 3.0)]);
+        assert!(wheel_chunks((0.0, 0.0)).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1854,5 +1924,41 @@ mod routing_bounds_tests {
             None
         );
         assert_eq!(queries, [(CGWindowListOption::OptionIncludingWindow, 8440)]);
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn reported_scroll_amounts_reach_unposted_event_fields_without_clamping() {
+        for amount in [3, 60, 200, 400, 800] {
+            let event = scroll_event(
+                None,
+                (100.0, 100.0),
+                (0.0, -f64::from(amount)),
+                false,
+                0,
+                0,
+                CGEventFlags::empty(),
+            )
+            .unwrap();
+            let read = |field| CGEvent::integer_value_field(Some(&event), field);
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventDeltaAxis1),
+                -i64::from(amount)
+            );
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventPointDeltaAxis1),
+                -i64::from(amount) * 10
+            );
+            assert_eq!(
+                read(CGEventField::ScrollWheelEventFixedPtDeltaAxis1),
+                -i64::from(amount) * 65536
+            );
+            assert_eq!(read(CGEventField::ScrollWheelEventDeltaAxis2), 0);
+            assert_eq!(read(CGEventField::ScrollWheelEventIsContinuous), 0);
+        }
     }
 }

@@ -726,6 +726,18 @@ impl Drag {
 /// has no pipe.
 pub fn refused_message(app: &str) -> String {
     format!(
-        "{app} shows a web page there, and a drag in a web page needs a DevTools pipe into the app, which {app} doesn't have: launch_app didn't start it with one. Agent Screen won't press the user's own mouse button for it, so nothing was sent. To drag here, start a new instance with launch_app (for a browser, with arguments such as --user-data-dir=/tmp/profile, as a browser's default profile takes no pipe), or call request_help for the user to do the drag. To select text, click and then shift-click, or use the keyboard."
+        "{app} shows a web page there, and a drag in a web page needs a DevTools pipe into the app, which {app} doesn't have: launch_app didn't start it with one. Agent Screen won't press the user's own mouse button for it, so nothing was sent. To drag here, start a new instance with launch_app (for a browser, with arguments such as --user-data-dir=/tmp/profile, as a browser's default profile takes no pipe). A fresh profile has separate sign-ins and does not keep the user's existing login session. If that session is required, keep this window and call request_help for the user to do the drag; starting another profile will not add a pipe to this window. To select text, click and then shift-click, or use the keyboard."
     )
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    #[test]
+    fn an_unpiped_page_has_no_promise_of_existing_login_or_a_new_drag_capability() {
+        let message = super::refused_message("Dia");
+        assert!(message.contains("does not keep the user's existing login session"));
+        assert!(message.contains("keep this window and call request_help"));
+        assert!(message.contains("will not add a pipe to this window"));
+        assert!(message.contains("won't press the user's own mouse button"));
+    }
 }

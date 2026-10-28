@@ -199,10 +199,15 @@ pub fn menus_on(display: DisplayId) -> Vec<u32> {
 }
 
 /// Move document windows that grew past the display's edges, such as
-/// Calculator switching to Scientific, back inside. True when one moved.
+/// Calculator switching to Scientific, or under the strip that holds the
+/// user's menu bar, as a zoomed window does, back inside. True when one
+/// moved.
 pub fn keep_inside(display: DisplayId) -> bool {
     let area = cg::display_bounds(display);
-    let local = Rect::new(0.0, 0.0, area.width, area.height);
+    let local = crate::model::usable_area(
+        Rect::new(0.0, 0.0, area.width, area.height),
+        super::menubar_height(display),
+    );
     let mut moved = false;
     for window in on_display(display).into_iter().filter(|w| w.layer == 0) {
         let kept = window.bounds.kept_inside(&local);

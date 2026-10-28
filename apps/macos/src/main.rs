@@ -246,6 +246,7 @@ fn main() {
         if let Err(error) = ui::shell::start(core.clone(), cx) {
             eprintln!("Agent Screen: UI failed: {error}");
         }
+        mac::update::start();
         app_menu(cx);
         match server::start() {
             Ok(mut events) => {

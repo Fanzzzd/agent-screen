@@ -235,6 +235,14 @@ impl Streams {
                             log::debug!("capture for display {id} failed again: {error}");
                         }
                         stream.starting = false;
+                        // A display macOS mixes up with another isn't
+                        // captured: its last frame, maybe a thumbnail
+                        // scaled up, would pass for a live picture. The
+                        // surfaces say why instead (`peek::waiting`).
+                        if crate::mac::cg::unit_twin(id).is_some() {
+                            streams.frames.remove(&id);
+                            cx.notify();
+                        }
                         // A just-created display can take a moment to show
                         // up; without Screen Recording it never does, so the
                         // wait doubles up to 30 s.

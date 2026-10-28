@@ -5,6 +5,7 @@
 use super::help_card::{self, HelpCard};
 use super::peek::{self, Peek};
 use super::pointer;
+use super::recordings::Recordings;
 use super::setup::{self, Setup};
 use super::stream::Streams;
 use super::viewer::{self, Sheet, Viewer, WindowMenu};
@@ -15,8 +16,9 @@ use crate::mac::aerospace::{self, AeroSpace};
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
-use crate::mac::{app, assist, ax, cg, menubar, notify, viewer_input, windows};
+use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
+use agent_screen_model::peek as peek_intent;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
@@ -30,6 +32,7 @@ use objc2_app_kit::NSWindow;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Run `f` on the shell once the current update is done. Views call this
@@ -60,6 +63,57 @@ pub fn current() -> Option<WeakEntity<Shell>> {
     CURRENT.with(|c| c.borrow().as_ref().map(Entity::downgrade))
 }
 
+// Shell policy seams accept observed geometry/events and return render effects.
+// Tests drive these same functions without constructing a panel or app.
+fn peek_activation(
+    intent: &mut peek_intent::Intent,
+    event: &Native,
+    pointer: peek_intent::Pointer,
+    now: u64,
+) -> peek_intent::Effect {
+    intent.pointer(pointer, now, peek_intent::Timing::default());
+    match event {
+        Native::IconPressed { gesture } => {
+            intent.press(*gesture);
+            peek_intent::Effect::None
+        }
+        Native::IconClicked {
+            right: false,
+            mouse: true,
+        } => intent.release(true),
+        Native::IconClicked {
+            right: false,
+            mouse: false,
+        } => intent.activate(),
+        _ => peek_intent::Effect::None,
+    }
+}
+
+fn peek_outside_press(
+    intent: &mut peek_intent::Intent,
+    pointer: peek_intent::Pointer,
+    hit: peek_intent::Pointer,
+    now: u64,
+) -> peek_intent::Effect {
+    intent.pointer(pointer, now, peek_intent::Timing::default());
+    intent.outside_press(hit)
+}
+
+fn peek_timer_effect(
+    intent: &mut peek_intent::Intent,
+    timer: peek_intent::Timer,
+    pointer: peek_intent::Pointer,
+    now: u64,
+    allowed: bool,
+) -> peek_intent::Effect {
+    if !allowed {
+        intent.cancel_timer();
+        return peek_intent::Effect::None;
+    }
+    intent.pointer(pointer, now, peek_intent::Timing::default());
+    intent.fire(timer, now)
+}
+
 /// A hover hint.
 struct Hint(SharedString);
 
@@ -82,6 +136,10 @@ impl Render for Hint {
 
 /// How long the pointer rests on a control before its hint shows.
 pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The repository's bug report form, which asks for the diagnostics.
+const REPORT_FORM: &str =
+    "https://github.com/Fanzzzd/agent-screen/issues/new?template=bug_report.yml";
 
 /// Hints over thumbnails wait longer, so scanning the tiles shows none.
 pub const TILE_HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
@@ -111,6 +169,8 @@ pub struct Shell {
     card_later: HashMap<DisplayId, String>,
     /// When the user was last told where an app's windows are, by pid.
     reminded: HashMap<i32, Instant>,
+    /// A downloaded update waits for no Agent Display to be open.
+    watching_updates: bool,
 
     peek_shown: bool,
     /// Some display is in use: the icon's front screen is filled.
@@ -120,18 +180,19 @@ pub struct Shell {
     /// Peek's card while it slides: where it ends, and which slide.
     slide_card: Option<NSRect>,
     peek_slides: u64,
-    /// Opened by a click: stays until another click.
-    latched: bool,
-    /// Closed by a click on the icon: hover opens it again only after the
-    /// pointer has left the icon.
-    clicked_shut: bool,
+    peek_intent: peek_intent::Intent,
+    peek_clock: Instant,
+    peek_timer: Option<peek_intent::Timer>,
+    /// Cancels a queued native show without cancelling a visible resize.
+    peek_native_generation: Rc<Cell<u64>>,
     /// Hover as AppKit and GPUI report it. An exit can go unreported (Peek
     /// ordered out under the pointer, a menu tracking), so Peek decides to
     /// stay by where the pointer is; see `pointer_over`.
     over_icon: bool,
     over_card: bool,
-    hover_generation: u64,
     peek_generation: u64,
+    /// Counts Peek's reminders of where an app's windows are.
+    remind_seq: u64,
     watch_generation: u64,
     /// No hover Peek until then: the pointer is still on its way.
     settle_until: Option<Instant>,
@@ -150,6 +211,9 @@ pub struct Shell {
     resting: Option<NSRect>,
 
     known: HashSet<DisplayId>,
+    /// Where the icon last stood on the user's screen, for while macOS
+    /// draws it in an Agent Display's menu bar.
+    icon_home: Cell<Option<NSRect>>,
     /// Tests: an Agent Display that stands in for the user's screen, so
     /// panels open where the user can't see them.
     stage: Option<DisplayId>,
@@ -176,6 +240,7 @@ pub struct Shell {
     /// Test hook: the setup window shows both permissions missing.
     setup_preview: bool,
     setup: Option<WindowHandle<Setup>>,
+    recordings: Option<WindowHandle<Recordings>>,
     /// The agents whose MCP servers loaded the tools, first to last.
     agent_ready: Vec<String>,
     /// The permission whose pane the user was sent to.
@@ -254,6 +319,17 @@ fn keep_inside(card: NSRect, screen: NSRect) -> NSRect {
     rect(x, y, w, h)
 }
 
+/// Peek's card, in Cocoa coordinates: its window less the margin where the
+/// card's shadow is drawn.
+fn peek_card(window: &NSWindow) -> NSRect {
+    native::inset(native::frame(window), peek::MARGIN)
+}
+
+/// Peek's window frame for a card frame.
+fn outset_card(card: NSRect) -> NSRect {
+    native::outset(card, peek::MARGIN)
+}
+
 fn offset(r: NSRect, dy: f64) -> NSRect {
     rect(r.origin.x, r.origin.y + dy, r.size.width, r.size.height)
 }
@@ -309,18 +385,21 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             card: None,
             card_shown: None,
             reminded: HashMap::new(),
+            watching_updates: false,
             card_later: HashMap::new(),
             peek_shown: false,
             working: false,
             creating: 0,
             slide_card: None,
             peek_slides: 0,
-            latched: false,
-            clicked_shut: false,
+            peek_intent: peek_intent::Intent::default(),
+            peek_clock: Instant::now(),
+            peek_timer: None,
+            peek_native_generation: Rc::new(Cell::new(0)),
             over_icon: false,
             over_card: false,
-            hover_generation: 0,
             peek_generation: 0,
+            remind_seq: 0,
             watch_generation: 0,
             settle_until: None,
             viewer_display: None,
@@ -331,6 +410,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer_generation: 0,
             resting: None,
             known: HashSet::new(),
+            icon_home: Cell::new(None),
             stage: None,
             drag: None,
             drag_from: None,
@@ -346,6 +426,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             colorsync_error: None,
             setup_preview: false,
             setup: None,
+            recordings: None,
             agent_ready: Vec::new(),
             waiting: None,
             restart: false,
@@ -396,6 +477,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .update(cx, |_, window, _| native::ns_window(window))?
         .expect("Viewer window");
     native::style_panel(&peek_ns, native::LEVEL_POP_UP_MENU);
+    native::own_shadow(&peek_ns, peek::MARGIN);
     native::style_panel(&viewer_ns, native::LEVEL_FLOATING);
     // Peek never takes the keyboard from the user's app; neither panel
     // becomes the main window.
@@ -552,65 +634,88 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
 
 impl Shell {
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
+        if TIDIED.with(Cell::get) {
+            self.peek_intent.stop();
+        }
+        if self.peek_intent.stopped()
+            && matches!(
+                &event,
+                Native::IconHover(_) | Native::IconPressed { .. } | Native::IconClicked { .. }
+            )
+        {
+            return;
+        }
         match event {
+            event @ Native::IconPressed { .. } => {
+                let (pointer, now) = (self.peek_pointer(), self.peek_now());
+                peek_activation(&mut self.peek_intent, &event, pointer, now);
+                self.schedule_peek_timer(cx);
+            }
             Native::IconHover(over) => {
                 // Before the menu opens; AeroSpace may have changed since.
                 if over && !self.over_icon {
                     self.check_aerospace(cx);
                 }
                 self.over_icon = over;
-                if !over {
-                    self.clicked_shut = false;
-                }
                 self.hover_changed(cx);
             }
-            Native::IconClicked { right: true } => {
+            Native::IconClicked { right: true, .. } => {
+                self.peek_intent.release(false);
                 self.hide_peek(cx);
                 self.status_menu();
             }
-            Native::IconClicked { right: false } if !self.permissions.complete() => {
+            Native::IconClicked { right: false, .. } if !self.permissions.complete() => {
+                self.hide_peek(cx);
                 self.open_setup(cx);
             }
-            Native::IconClicked { right: false } => {
-                // Shown by hover or by a click, a click hides it.
-                if self.peek_shown {
-                    self.hide_peek(cx);
-                    self.clicked_shut = true;
-                } else {
-                    self.clicked_shut = false;
-                    self.latched = true;
-                    self.show_peek(cx);
-                    // Opened on purpose: the keyboard can drive it. Peek is a
-                    // non-activating panel, so the user's app stays active.
-                    if let Some((peek, window)) = self.peek.clone() {
-                        native::make_key(&window);
-                        let _ = peek.update(cx, |peek, window, cx| {
-                            peek.focused = None;
-                            peek.keys = true;
-                            window.focus(&peek.focus, cx);
-                            cx.notify();
-                        });
-                    }
+            event @ Native::IconClicked { right: false, .. } => {
+                let (pointer, now) = (self.peek_pointer(), self.peek_now());
+                let effect = peek_activation(&mut self.peek_intent, &event, pointer, now);
+                self.apply_peek_effect(effect, cx);
+                // A deliberate open/pin can take keys; hover never does.
+                if effect == peek_intent::Effect::Show
+                    && self.peek_shown
+                    && let Some((peek, window)) = self.peek.clone()
+                {
+                    native::make_key(&window);
+                    let _ = peek.update(cx, |peek, window, cx| {
+                        peek.focused = None;
+                        peek.keys = true;
+                        window.focus(&peek.focus, cx);
+                        cx.notify();
+                    });
                 }
             }
             Native::MouseDown { x, y } => {
-                // A click anywhere else unlatches Peek; hover decides the rest.
+                // The status button captures its own down. A monitor must
+                // never dismiss it before that same gesture's release.
                 let on_icon = self.icon.frame().is_some_and(|f| contains(f, (x, y)));
                 let on_card = self
                     .peek
                     .as_ref()
-                    .is_some_and(|(_, w)| contains(native::frame(w), (x, y)));
-                // Under the pointer, it stays until the pointer leaves.
-                if self.latched && !on_icon && !on_card {
-                    self.latched = false;
-                    if !self.pointer_over() {
-                        self.hide_peek(cx);
-                    }
-                }
+                    .filter(|_| self.peek_shown)
+                    .is_some_and(|(_, w)| contains(peek_card(w), (x, y)));
+                let (pointer, now) = (self.peek_pointer(), self.peek_now());
+                let effect = peek_outside_press(
+                    &mut self.peek_intent,
+                    pointer,
+                    peek_intent::Pointer {
+                        icon: on_icon,
+                        peek: on_card,
+                    },
+                    now,
+                );
+                self.apply_peek_effect(effect, cx);
             }
             Native::LeftDown { x, y } => self.drag_began((x, y)),
             Native::LeftDragged { x, y } => self.drag_moved((x, y), cx),
-            Native::LeftUp { x, y } => self.drag_ended((x, y), cx),
+            Native::LeftUp { x, y } => {
+                if !self.icon.frame().is_some_and(|f| contains(f, (x, y))) {
+                    self.peek_intent.release(false);
+                    self.hover_changed(cx);
+                }
+                self.drag_ended((x, y), cx);
+            }
             Native::Menu(action) => self.menu(action, cx),
             // A notification only opens the display; the user's first
             // input there, or its Take Over button, starts a Takeover.
@@ -631,6 +736,8 @@ impl Shell {
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::LauncherTyped => self.launcher_typed(cx),
             Native::Activated { pid, previous } => self.activated(pid, previous, cx),
+            Native::UserClicked { x, y } => self.user_clicked((x, y), cx).detach(),
+            Native::UpdateReady => self.watch_updates(cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, cx| {
@@ -992,37 +1099,81 @@ impl Shell {
 
     // MARK: Peek
 
+    fn peek_now(&self) -> u64 {
+        self.peek_clock.elapsed().as_millis() as u64
+    }
+
     fn hover_changed(&mut self, cx: &mut Context<Self>) {
-        self.hover_generation += 1;
-        let generation = self.hover_generation;
-        // Without permissions Peek has nothing to show; a click opens setup.
-        if !self.permissions.complete() && !self.peek_shown {
-            return;
+        if TIDIED.with(Cell::get) {
+            self.peek_intent.stop();
         }
-        if self.latched
-            || self.clicked_shut
+        if (!self.permissions.complete() && !self.peek_shown)
             || self.settle_until.is_some_and(|t| t > Instant::now())
         {
+            self.peek_intent.cancel_timer();
+        } else {
+            self.peek_intent.pointer(
+                self.peek_pointer(),
+                self.peek_now(),
+                peek_intent::Timing::default(),
+            );
+        }
+        self.schedule_peek_timer(cx);
+    }
+
+    fn schedule_peek_timer(&mut self, cx: &mut Context<Self>) {
+        let pending = self.peek_intent.pending();
+        if pending == self.peek_timer {
             return;
         }
-        // Peek closes by `watch_pointer`.
-        if self.over_icon && !self.peek_shown {
-            self.after(Duration::from_millis(120), cx, move |shell, cx| {
-                let still = shell.hover_generation == generation && shell.over_icon;
-                // Hover only means something on a visible icon. Tests hover
-                // an icon that sits off the stage.
-                if still && (shell.icon_rect().is_some() || shell.stage.is_some()) {
-                    shell.show_peek(cx);
+        self.peek_timer = pending;
+        let Some(timer) = pending else {
+            return;
+        };
+        self.after(
+            Duration::from_millis(timer.due_ms.saturating_sub(self.peek_now())),
+            cx,
+            move |shell, cx| {
+                if shell.peek_timer == Some(timer) {
+                    shell.peek_timer = None;
                 }
-            });
+                if TIDIED.with(Cell::get) {
+                    shell.peek_intent.stop();
+                    return;
+                }
+                let allowed = (shell.permissions.complete() || shell.peek_shown)
+                    && !shell.settle_until.is_some_and(|t| t > Instant::now())
+                    && (shell.peek_shown || shell.icon_rect().is_some() || shell.stage.is_some());
+                let (pointer, now) = (shell.peek_pointer(), shell.peek_now());
+                let effect =
+                    peek_timer_effect(&mut shell.peek_intent, timer, pointer, now, allowed);
+                shell.apply_peek_effect(effect, cx);
+                shell.schedule_peek_timer(cx);
+            },
+        );
+    }
+
+    fn apply_peek_effect(&mut self, effect: peek_intent::Effect, cx: &mut Context<Self>) {
+        match effect {
+            peek_intent::Effect::Show => {
+                if !self.show_peek(cx) {
+                    self.peek_intent.dismiss();
+                    self.peek_timer = None;
+                }
+            }
+            peek_intent::Effect::Hide => self.hide_peek(cx),
+            peek_intent::Effect::None => {}
         }
     }
 
     /// Whether the pointer is on the icon, on Peek, or in the gap between.
     /// Tests on a stage report hover by hand, away from the real pointer.
-    fn pointer_over(&self) -> bool {
+    fn peek_pointer(&self) -> peek_intent::Pointer {
         if self.stage.is_some() {
-            return self.over_icon || self.over_card;
+            return peek_intent::Pointer {
+                icon: self.over_icon,
+                peek: self.over_card,
+            };
         }
         let at = native::mouse_location();
         let on_icon = self.icon.frame().is_some_and(|f| contains(f, at));
@@ -1032,20 +1183,22 @@ impl Shell {
             .filter(|_| self.peek_shown)
             .is_some_and(|(_, w)| {
                 // Up to the menu bar: Peek hangs 6 pt below the icon.
-                let mut f = native::frame(w);
+                let mut f = peek_card(w);
                 f.size.height += 8.0;
                 contains(f, at)
             });
-        on_icon || on_card
+        peek_intent::Pointer {
+            icon: on_icon,
+            peek: on_card,
+        }
     }
 
-    /// While Peek shows without a click holding it, close it once the
-    /// pointer has been off the icon and Peek for 280 ms.
+    /// Position sampling repairs missed AppKit/GPUI exit reports. The model
+    /// owns the close deadline and keeps icon/Peek/their gap as one region.
     fn watch_pointer(&mut self, cx: &mut Context<Self>) {
         self.watch_generation += 1;
         let generation = self.watch_generation;
         cx.spawn(async move |this, cx| {
-            let mut away: Option<Instant> = None;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
@@ -1054,17 +1207,8 @@ impl Shell {
                     if shell.watch_generation != generation || !shell.peek_shown {
                         return false;
                     }
-                    let settling = shell.settle_until.is_some_and(|t| t > Instant::now());
-                    if shell.latched || settling || shell.pointer_over() {
-                        away = None;
-                        return true;
-                    }
-                    if away.get_or_insert_with(Instant::now).elapsed() < Duration::from_millis(280)
-                    {
-                        return true;
-                    }
-                    shell.hide_peek(cx);
-                    false
+                    shell.hover_changed(cx);
+                    true
                 });
                 if !matches!(go_on, Ok(true)) {
                     break;
@@ -1125,16 +1269,43 @@ impl Shell {
 
     fn icon_rect(&self) -> Option<NSRect> {
         let icon = self.icon.frame()?;
-        self.user_screens()
+        let shown = self
+            .user_screens()
             .iter()
-            .any(|(frame, _)| intersects(*frame, icon))
-            .then_some(icon)
+            .any(|(frame, _)| intersects(*frame, icon));
+        if shown {
+            self.icon_home.set(Some(icon));
+        }
+        shown.then_some(icon)
+    }
+
+    /// Where the icon stands on the user's screen while an app on an Agent
+    /// Display is frontmost, and macOS draws it in that display's menu bar:
+    /// where it last stood on theirs, or as far from the right edge of
+    /// their main screen as it is from that display's.
+    fn icon_away(&self) -> Option<NSRect> {
+        let icon = self.icon.frame()?;
+        let (_, there, _) = native::screens()
+            .into_iter()
+            .find(|(id, frame, _)| self.known.contains(id) && intersects(*frame, icon))?;
+        if let Some(home) = self.icon_home.get() {
+            return Some(home);
+        }
+        let (frame, _) = self.user_screens().first().copied()?;
+        let right = there.origin.x + there.size.width - icon.origin.x;
+        let top = there.origin.y + there.size.height - icon.origin.y;
+        Some(rect(
+            frame.origin.x + frame.size.width - right,
+            frame.origin.y + frame.size.height - top,
+            icon.size.width,
+            icon.size.height,
+        ))
     }
 
     /// Where the panels drop from: the icon, or the top center of the
     /// user's screen under the pointer.
     fn anchor(&self) -> NSRect {
-        if let Some(icon) = self.icon_rect() {
+        if let Some(icon) = self.icon_rect().or_else(|| self.icon_away()) {
             return icon;
         }
         let screens = self.user_screens();
@@ -1164,9 +1335,12 @@ impl Shell {
             .copied()
     }
 
-    fn show_peek(&mut self, cx: &mut Context<Self>) {
+    fn show_peek(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.peek_intent.mode() == peek_intent::Mode::Closed {
+            return false;
+        }
         let Some((peek, window)) = self.peek.clone() else {
-            return;
+            return false;
         };
         if !self.peek_shown {
             // Ended displays whose windows are all gone close before Peek
@@ -1175,7 +1349,7 @@ impl Shell {
         }
         let ids = peek::ordered(self.core.read(cx));
         let Some((screen, _)) = self.host_screen() else {
-            return;
+            return false;
         };
         let (w, h, tile) = Peek::size(ids.len() + self.creating, screen.size.width - 16.0);
         let anchor = self.anchor();
@@ -1212,25 +1386,38 @@ impl Shell {
         }
         self.peek_generation += 1;
         if self.peek_shown {
-            let now = native::frame(&window);
+            let now = peek_card(&window);
             if now.size.width != frame.size.width && now.size.height == frame.size.height {
                 self.slide_peek(now, frame, cx);
             } else {
-                native::set_frame_later(&window, frame);
+                // A new height jumps: the card fills the window again.
+                if now.size.width != frame.size.width {
+                    self.peek_slides += 1;
+                    self.slide_card = None;
+                    let _ = peek.update(cx, |peek, _, _| peek.slide = None);
+                }
+                native::set_frame_later(&window, outset_card(frame));
             }
         } else {
             self.watch_pointer(cx);
             // It slides 10 pt down out of the menu bar and fades in.
+            let guard = self.peek_native_generation.clone();
+            guard.set(guard.get().wrapping_add(1));
+            let generation = guard.get();
             native::later(move || {
+                if guard.get() != generation || TIDIED.with(Cell::get) {
+                    return;
+                }
                 native::set_alpha(&window, 0.0);
-                native::set_frame(&window, offset(frame, 10.0));
+                native::set_frame(&window, offset(outset_card(frame), 10.0));
                 native::order_front(&window);
-                native::animate(&window, frame, 1.0, 0.24);
+                native::animate(&window, outset_card(frame), 1.0, 0.24);
             });
         }
         self.peek_shown = true;
         self.refresh_counts(cx);
         self.sync_card(cx);
+        true
     }
 
     /// A tile grows in or shrinks out, and the card follows it from `from`
@@ -1251,33 +1438,35 @@ impl Shell {
         let slide = peek::Slide {
             from: ((from.origin.x - left) as f32, from.size.width as f32),
             to: ((to.origin.x - left) as f32, to.size.width as f32),
-            generation,
+            started: std::time::Instant::now(),
         };
         let _ = peek.update(cx, |peek, _, cx| {
             peek.slide = Some(slide);
             cx.notify();
         });
-        native::set_frame_later(&window, span);
+        native::set_frame_later(&window, outset_card(span));
         self.after(
             peek::RESIZE + Duration::from_millis(30),
             cx,
-            move |shell, cx| {
+            move |shell, _| {
                 if shell.peek_slides != generation || !shell.peek_shown {
                     return;
                 }
                 shell.slide_card = None;
-                if let Some((peek, window)) = shell.peek.clone() {
-                    let _ = peek.update(cx, |peek, _, cx| {
-                        peek.slide = None;
-                        cx.notify();
-                    });
-                    native::set_frame_later(&window, to);
+                // Peek draws the card where the slide left it until the
+                // window has this frame, then fills the window.
+                if let Some((_, window)) = shell.peek.clone() {
+                    native::set_frame_later(&window, outset_card(to));
                 }
             },
         );
     }
 
     pub fn hide_peek(&mut self, cx: &mut Context<Self>) {
+        self.peek_intent.dismiss();
+        self.peek_timer = None;
+        self.peek_native_generation
+            .set(self.peek_native_generation.get().wrapping_add(1));
         // A slide going stops where it is; the next show sizes afresh.
         self.peek_slides += 1;
         self.slide_card = None;
@@ -1286,9 +1475,9 @@ impl Shell {
                 peek.keys = false;
                 peek.focused = None;
                 peek.slide = None;
+                peek.remind = None;
             });
         }
-        self.latched = false;
         // Gone from under the pointer, which GPUI won't report.
         self.over_card = false;
         if !self.peek_shown {
@@ -1339,7 +1528,7 @@ impl Shell {
         let index = peek::ordered(self.core.read(cx))
             .iter()
             .position(|&d| d == id)?;
-        let card = native::frame(window);
+        let card = peek_card(window);
         let tile = self.peek.as_ref()?.0.read(cx).ok()?.tile;
         let thumb = peek::thumb_height(tile) as f64;
         let step = (tile + peek::SPACING) as f64;
@@ -1701,8 +1890,19 @@ impl Shell {
         match surface {
             // Held open, as a click holds it, so scripts can look at it.
             "peek" => {
-                self.latched = true;
-                self.show_peek(cx);
+                let effect = self.peek_intent.pin();
+                self.apply_peek_effect(effect, cx);
+            }
+            "recordings" => self.open_recordings(cx),
+            "recordings-close" => {
+                if let Some(handle) = self.recordings.take() {
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    });
+                }
+                if self.setup.is_none() {
+                    leave_dock(cx);
+                }
             }
             "setup" | "settings" => self.open_setup(cx),
             "setup-close" => self.close_setup(cx),
@@ -1751,7 +1951,13 @@ impl Shell {
             }
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "wallpaper" => self.choose_wallpaper(cx),
-            "click" => self.native(Native::IconClicked { right: false }, cx),
+            "click" => self.native(
+                Native::IconClicked {
+                    right: false,
+                    mouse: false,
+                },
+                cx,
+            ),
             // The pointer entering (1) or leaving (0) the icon or Peek, as
             // AppKit and GPUI report it.
             "icon-hover" => self.native(Native::IconHover(id != 0), cx),
@@ -1854,12 +2060,29 @@ impl Shell {
             )),
         };
         menu.separator();
+        // What to do with displays and their videos, then the app itself.
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
+        menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
         menu.separator();
         // Agents, wallpaper, AeroSpace and the optional helpers.
         let settings = menu.action(t("Settings…", "设置…"), MenuAction::OpenSettings);
         native::set_key_equivalent(&settings, ",", true, false, false, false);
+        menu.action(
+            t("Report a Problem…", "报告问题…"),
+            MenuAction::ReportProblem,
+        );
+        if let Some(version) = update::pending() {
+            menu.action(
+                &tf!("Restart to Update to {version}…", "重启以更新到 {version}…"),
+                MenuAction::InstallUpdate,
+            );
+        } else if update::available() {
+            menu.action(
+                t("Check for Updates…", "检查更新…"),
+                MenuAction::CheckForUpdates,
+            );
+        }
         menu.separator();
         let quit = menu.action(
             t("Quit Agent Screen", "退出 Agent Screen"),
@@ -2019,6 +2242,10 @@ impl Shell {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
             MenuAction::OpenSettings => self.open_setup(cx),
+            MenuAction::OpenRecordings => self.open_recordings(cx),
+            MenuAction::ReportProblem => self.report_problem(cx),
+            MenuAction::CheckForUpdates => update::check(),
+            MenuAction::InstallUpdate => self.install_update(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let pinned: Vec<String> = self
                     .conflicts
@@ -2300,10 +2527,153 @@ impl Shell {
 
     /// Quit. The tidy-up runs in the quit hook, so logout gets it too.
     fn quit(&mut self, cx: &mut Context<Self>) {
+        self.hide_peek(cx);
+        self.peek_intent.stop();
         cx.quit();
     }
 
     // MARK: Permissions
+
+    /// The official bug report: with the user's consent, put this app's
+    /// read-only diagnostics on the clipboard and open the issue form. It
+    /// reads only build and connection metadata, starts nothing and uploads
+    /// nothing; the user pastes and submits it.
+    /// Restart to Update: with Agent Displays open, the user confirms
+    /// first, as the restart ends them.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = update::pending() else {
+            return;
+        };
+        let open = self.core.read(cx).displays.list.len();
+        if open > 0
+            && !native::confirm(
+                &tf!(
+                    "Update to Agent Screen {version}?",
+                    "更新到 Agent Screen {version}？"
+                ),
+                &tf!(
+                    "Agent Screen restarts to update, which ends the {open} Agent Displays open now and the agents' work on them. Otherwise the update installs by itself once no Agent Display is open, or when you quit.",
+                    "Agent Screen 更新时要重启，会结束现在打开的 {open} 块 Agent 显示器，agent 在上面的工作也会中断。不更新的话，等没有 Agent 显示器打开时，或者你退出时，更新会自动安装。"
+                ),
+                t("Restart and Update", "重启并更新"),
+            )
+        {
+            self.watch_updates(cx);
+            return;
+        }
+        update::install();
+    }
+
+    /// A downloaded update installs once no Agent Display has been open for
+    /// a while: the restart ends none, and agents' MCP servers reconnect.
+    fn watch_updates(&mut self, cx: &mut Context<Self>) {
+        if self.watching_updates {
+            return;
+        }
+        self.watching_updates = true;
+        let every = Duration::from_secs(
+            std::env::var("AGENTSCREEN_UPDATE_IDLE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|_| {
+                    cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some()
+                })
+                .unwrap_or(30),
+        );
+        cx.spawn(async move |this, cx| {
+            let mut idle = 0;
+            loop {
+                cx.background_executor().timer(every).await;
+                let Ok(open) = this.update(cx, |shell, cx| shell.core.read(cx).displays.list.len())
+                else {
+                    return;
+                };
+                update::set_open_displays(open);
+                if update::pending().is_none() {
+                    let _ = this.update(cx, |shell, _| shell.watching_updates = false);
+                    return;
+                }
+                idle = if open == 0 { idle + 1 } else { 0 };
+                // Twice in a row, so a display that is being made isn't cut off.
+                if idle >= 2 {
+                    update::install();
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn report_problem(&mut self, cx: &mut Context<Self>) {
+        let go = native::confirm(
+            t("Report a Problem", "报告问题"),
+            t(
+                "Agent Screen copies its diagnostics to the clipboard and opens the bug report form on GitHub. They name this build and whether the app answered, with no screens, recordings, window titles or account details. Paste them into the form. For a problem in an agent session, also ask that agent to run get_diagnostics.",
+                "Agent Screen 会把诊断信息复制到剪贴板，并在 GitHub 打开问题报告表单。诊断只包含当前构建和 app 是否响应，不含画面、录制、窗口标题或账号信息。请粘贴到表单里。如果问题出在某个 agent 会话里，也请让那个 agent 运行 get_diagnostics。",
+            ),
+            t("Copy Diagnostics and Open Form", "复制诊断并打开表单"),
+        );
+        if !go {
+            return;
+        }
+        cx.spawn(async move |_, cx| {
+            // A separate read-only connection to this app's own socket,
+            // off the main thread that answers it.
+            let report = cx
+                .background_executor()
+                .spawn(async move {
+                    agent_screen_mcp::diagnostics::cli(
+                        &["--json".into()],
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                })
+                .await;
+            let text = match report {
+                Ok(report) => report,
+                Err(error) => format!("diagnostics unavailable: {error}"),
+            };
+            native::copy(&text);
+            let _ = std::process::Command::new("/usr/bin/open")
+                .arg(REPORT_FORM)
+                .spawn();
+        })
+        .detach();
+    }
+
+    fn open_recordings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.recordings
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            cx.activate(true);
+            return;
+        }
+        cx.set_activation_policy(gpui::ActivationPolicy::Regular);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1060.), px(680.)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(t("Recordings", "录制回看").into()),
+                ..Default::default()
+            }),
+            window_min_size: Some(size(px(720.), px(440.))),
+            focus: true,
+            show: true,
+            kind: WindowKind::Normal,
+            ..Default::default()
+        };
+        match cx.open_window(options, |_, cx| cx.new(Recordings::new)) {
+            Ok(handle) => {
+                self.recordings = Some(handle);
+                cx.activate(true);
+            }
+            Err(error) => log::warn!("recordings window: {error}"),
+        }
+    }
 
     pub fn open_setup(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.setup
@@ -2421,16 +2791,42 @@ impl Shell {
         self.waiting = None;
         self.setup_preview = false;
         assist::hide();
-        leave_dock(cx);
+        if self.recordings.is_none() {
+            leave_dock(cx);
+        }
     }
 
     /// The setup window closed with its close button.
     fn window_closed(&mut self, id: gpui::WindowId, cx: &mut Context<Self>) {
+        if self.peek.as_ref().is_some_and(|(h, _)| h.window_id() == id) {
+            self.peek_intent.dismiss();
+            self.peek_timer = None;
+            self.peek_native_generation
+                .set(self.peek_native_generation.get().wrapping_add(1));
+            self.peek_generation += 1;
+            self.watch_generation += 1;
+            self.peek_shown = false;
+            self.over_card = false;
+            self.peek = None;
+            for id in self.known.iter().copied() {
+                self.streams
+                    .update(cx, |s, cx| s.want(id, "peek", 0, (0, 0), cx));
+            }
+            self.sync_card(cx);
+        }
         if self.setup.is_some_and(|h| h.window_id() == id) {
             self.setup = None;
             self.waiting = None;
             assist::hide();
-            leave_dock(cx);
+            if self.recordings.is_none() {
+                leave_dock(cx);
+            }
+        }
+        if self.recordings.is_some_and(|h| h.window_id() == id) {
+            self.recordings = None;
+            if self.setup.is_none() {
+                leave_dock(cx);
+            }
         }
     }
 
@@ -2470,7 +2866,10 @@ impl Shell {
         // allowedContentTypes needs UTType; the file-type list still works.
         let _: () = unsafe { objc2::msg_send![&panel, setAllowedFileTypes: &*types] };
         cx.activate(true);
-        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+        let modal = crate::mac::hang::Modal::open();
+        let chosen = panel.runModal();
+        drop(modal);
+        if chosen != objc2_app_kit::NSModalResponseOK {
             return;
         }
         let Some(path) = panel.URL().and_then(|url| url.path()) else {
@@ -2789,8 +3188,17 @@ impl Shell {
     /// Agent Displays, where they can't see it: a notification names those
     /// displays, and a click on it opens the first in the Viewer (#51). At
     /// most once a minute for an app. The displays named.
-    pub fn remind_where(&mut self, pid: i32, cx: &mut Context<Self>) -> gpui::Task<Vec<DisplayId>> {
-        const AGAIN: Duration = Duration::from_secs(60);
+    ///
+    /// `docked`: the user clicked the app's Dock icon, which says they want
+    /// it even when it was already the front app and nothing activated
+    /// (#51): told again after 5 s.
+    pub fn remind_where(
+        &mut self,
+        pid: i32,
+        docked: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Vec<DisplayId>> {
+        let again = Duration::from_secs(if docked { 5 } else { 60 });
         let core = self.core.read(cx);
         let places: Vec<(DisplayId, Rect, String)> = core
             .displays
@@ -2804,7 +3212,7 @@ impl Shell {
         let recent = self
             .reminded
             .get(&pid)
-            .is_some_and(|at| at.elapsed() < AGAIN);
+            .is_some_and(|at| at.elapsed() < again);
         if places.is_empty() || recent || pid == std::process::id() as i32 {
             return gpui::Task::ready(Vec::new());
         }
@@ -2812,7 +3220,7 @@ impl Shell {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    if agents && !crate::mac::catch::user_acted_recently(pid) {
+                    if agents && !docked && !crate::mac::catch::user_acted_recently(pid) {
                         return None;
                     }
                     // Windows on screen: an app keeps windows it never
@@ -2842,16 +3250,42 @@ impl Shell {
                         .filter_map(|id| places.iter().find(|p| p.0 == *id))
                         .map(|p| p.2.clone())
                         .collect();
-                    Some((app, ids, labels))
+                    // The windows on the first of them, in its points.
+                    let first = ids.first().and_then(|id| places.iter().find(|p| p.0 == *id));
+                    let frames: Vec<(WindowTarget, Rect)> = first
+                        .map(|(_, area, _)| {
+                            windows
+                                .iter()
+                                .filter(|w| area.contains(w.bounds.mid()))
+                                .map(|w| {
+                                    let b = w.bounds;
+                                    (
+                                        w.target,
+                                        Rect::new(b.x - area.x, b.y - area.y, b.width, b.height),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((app, ids, labels, frames))
                 })
                 .await;
-            let Some((app, ids, places)) = found.filter(|(_, ids, _)| !ids.is_empty()) else {
+            let Some((app, ids, places, frames)) =
+                found.filter(|(_, ids, _, _)| !ids.is_empty())
+            else {
                 return Vec::new();
             };
-            let _ = this.update(cx, |shell, _| {
-                shell.reminded.insert(pid, Instant::now());
-            });
+            let shown = this
+                .update(cx, |shell, cx| {
+                    shell.reminded.insert(pid, Instant::now());
+                    shell.remind_in_peek(ids[0], app.clone(), frames, cx)
+                })
+                .unwrap_or(false);
             log::info!("{app} came to the front with its windows only on displays {ids:?}; telling the user");
+            if shown {
+                return ids;
+            }
+            // Peek can't come down, as before setup is done: a notification.
             let first = ids[0];
             notify::withdraw_where(first);
             notify::update(first, "", "", Some(Note::Elsewhere { app, places }));
@@ -2859,8 +3293,109 @@ impl Shell {
         })
     }
 
+    /// Peek comes down to show where `app`'s windows are: display `id`'s
+    /// tile glows, its windows outlined, and goes after a few seconds
+    /// unless the pointer comes onto it. False when Peek can't show.
+    fn remind_in_peek(
+        &mut self,
+        id: DisplayId,
+        app: String,
+        windows: Vec<(WindowTarget, Rect)>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.permissions.complete() || self.peek_intent.stopped() {
+            return false;
+        }
+        let Some((peek, _)) = self.peek.clone() else {
+            return false;
+        };
+        self.remind_seq += 1;
+        let remind = peek::Remind {
+            display: id,
+            app,
+            windows,
+            seq: self.remind_seq,
+        };
+        let _ = peek.update(cx, |peek, _, cx| {
+            peek.remind = Some(remind);
+            cx.notify();
+        });
+        let effect = self
+            .peek_intent
+            .remind(self.peek_now(), peek_intent::REMIND_MS);
+        self.apply_peek_effect(effect, cx);
+        self.schedule_peek_timer(cx);
+        if !self.peek_shown {
+            let _ = peek.update(cx, |peek, _, _| peek.remind = None);
+        }
+        self.peek_shown
+    }
+
+    /// What Peek shows of a reminder now, for scripts: the display, the
+    /// app and how many of its windows are outlined.
+    pub fn reminder(&self, cx: &App) -> Option<serde_json::Value> {
+        if !self.peek_shown {
+            return None;
+        }
+        let (peek, _) = self.peek.as_ref()?;
+        let peek = peek.read(cx).ok()?;
+        let remind = peek.remind.as_ref()?;
+        Some(serde_json::json!({
+            "displayId": remind.display,
+            "app": remind.app,
+            "windows": remind.windows.len(),
+        }))
+    }
+
+    /// Take Back on a reminder: the app's windows come to the user's
+    /// screen, and Peek goes.
+    pub fn take_back_reminded(
+        &mut self,
+        id: DisplayId,
+        targets: Vec<WindowTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        for target in targets {
+            self.take_back(target, id, cx);
+        }
+        self.hide_peek(cx);
+    }
+
+    /// A left click of the user's outside Agent Screen: on an app's Dock
+    /// icon, where its windows are. The app may already be the front app,
+    /// so no activation says so.
+    pub fn user_clicked(
+        &mut self,
+        at: (f64, f64),
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Vec<DisplayId>> {
+        if self.core.read(cx).displays.list.is_empty() {
+            return gpui::Task::ready(Vec::new());
+        }
+        cx.spawn(async move |this, cx| {
+            let pids = cx
+                .background_executor()
+                .spawn(async move {
+                    let dock = crate::mac::app::dock_pid()?;
+                    let name = crate::mac::ax::dock_app_at(dock, at)?;
+                    Some(crate::mac::app::pids_named(&name))
+                })
+                .await
+                .unwrap_or_default();
+            let mut told = Vec::new();
+            for pid in pids {
+                let Ok(task) = this.update(cx, |shell, cx| shell.remind_where(pid, true, cx))
+                else {
+                    break;
+                };
+                told.extend(task.await);
+            }
+            told
+        })
+    }
+
     fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
-        self.remind_where(pid, cx).detach();
+        self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
             return;
@@ -3618,5 +4153,141 @@ mod tests {
             keep_inside(card, screen),
             rect(100.0, -125.0, 800.0, 1000.0)
         ));
+    }
+}
+
+#[cfg(test)]
+mod peek_input_tests {
+    use super::{peek_activation, peek_outside_press, peek_timer_effect};
+    use crate::mac::native::status_icon_event;
+    use agent_screen_model::peek::{Effect, Intent, Mode, OPEN_DELAY_MS, Pointer, Timing};
+    use objc2_app_kit::NSEventType;
+
+    const ICON: Pointer = Pointer {
+        icon: true,
+        peek: false,
+    };
+    const OUT: Pointer = Pointer {
+        icon: false,
+        peek: false,
+    };
+    fn hover() -> Intent {
+        let mut intent = Intent::default();
+        intent.pointer(ICON, 0, Timing::default());
+        let timer = intent.pending().unwrap();
+        assert_eq!(
+            peek_timer_effect(&mut intent, timer, ICON, OPEN_DELAY_MS, true),
+            Effect::Show
+        );
+        intent
+    }
+
+    #[test]
+    fn peek_shell_right_down_without_valid_up_does_not_freeze_hover() {
+        let mut intent = hover();
+        // A right press dragged out may never yield the button's valid-up
+        // action. It must not arm the left-click transaction at all.
+        if let Some(down) = status_icon_event(Some(NSEventType::RightMouseDown), 9) {
+            peek_activation(&mut intent, &down, ICON, 301);
+        }
+        intent.pointer(OUT, 302, Timing::default());
+        let close = intent
+            .pending()
+            .expect("right down must not freeze hover departure");
+        assert_eq!(
+            peek_timer_effect(&mut intent, close, OUT, close.due_ms, true),
+            Effect::Hide
+        );
+        assert_eq!(intent.mode(), Mode::Closed);
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::RightMouseUp), 10),
+            Some(crate::mac::native::Native::IconClicked {
+                right: true,
+                mouse: true
+            })
+        ));
+    }
+
+    #[test]
+    fn peek_shell_native_hover_click_pins_without_a_hide_effect() {
+        let mut intent = hover();
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
+        assert_eq!(peek_activation(&mut intent, &down, ICON, 301), Effect::None);
+        assert_eq!(
+            peek_outside_press(&mut intent, ICON, ICON, 301),
+            Effect::None
+        );
+        assert_eq!(peek_activation(&mut intent, &up, ICON, 302), Effect::Show);
+        assert_eq!(intent.mode(), Mode::Pinned);
+        assert_eq!(peek_activation(&mut intent, &up, ICON, 303), Effect::None);
+        let next_down = status_icon_event(Some(NSEventType::LeftMouseDown), 3).unwrap();
+        peek_activation(&mut intent, &next_down, ICON, 1000);
+        assert_eq!(peek_activation(&mut intent, &up, ICON, 1001), Effect::Hide);
+        assert_eq!(intent.mode(), Mode::Closed);
+    }
+
+    #[test]
+    fn peek_shell_press_crosses_hover_deadline_without_timer_activation() {
+        let mut intent = Intent::default();
+        intent.pointer(ICON, 0, Timing::default());
+        let timer = intent.pending().unwrap();
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
+        assert_eq!(
+            peek_activation(&mut intent, &down, ICON, OPEN_DELAY_MS - 1),
+            Effect::None
+        );
+        assert_eq!(
+            peek_timer_effect(&mut intent, timer, ICON, OPEN_DELAY_MS + 1, true),
+            Effect::None
+        );
+        assert_eq!(intent.mode(), Mode::Closed);
+        assert_eq!(
+            peek_activation(&mut intent, &up, ICON, OPEN_DELAY_MS + 20),
+            Effect::Show
+        );
+        assert_eq!(intent.mode(), Mode::Pinned);
+    }
+
+    #[test]
+    fn peek_shell_dismiss_between_down_and_up_cannot_reopen() {
+        let mut intent = hover();
+        let keyboard = status_icon_event(None, 0).unwrap();
+        peek_activation(&mut intent, &keyboard, ICON, 301);
+        let down = status_icon_event(Some(NSEventType::LeftMouseDown), 1).unwrap();
+        let up = status_icon_event(Some(NSEventType::LeftMouseUp), 2).unwrap();
+        peek_activation(&mut intent, &down, ICON, 400);
+        assert_eq!(peek_outside_press(&mut intent, OUT, OUT, 401), Effect::Hide);
+        assert_eq!(peek_activation(&mut intent, &up, ICON, 402), Effect::None);
+        assert_eq!(intent.mode(), Mode::Closed);
+    }
+
+    #[test]
+    fn peek_shell_timer_rechecks_permission_and_stale_close_after_pin() {
+        let mut intent = Intent::default();
+        intent.pointer(ICON, 0, Timing::default());
+        let open = intent.pending().unwrap();
+        assert_eq!(
+            peek_timer_effect(&mut intent, open, ICON, 300, false),
+            Effect::None
+        );
+        assert_eq!(
+            peek_timer_effect(&mut intent, open, ICON, 301, true),
+            Effect::None
+        );
+        let mut intent = hover();
+        intent.pointer(OUT, 400, Timing::default());
+        let close = intent.pending().unwrap();
+        let activate = status_icon_event(None, 0).unwrap();
+        assert_eq!(
+            peek_activation(&mut intent, &activate, ICON, 450),
+            Effect::Show
+        );
+        assert_eq!(
+            peek_timer_effect(&mut intent, close, OUT, 1000, true),
+            Effect::None
+        );
+        assert_eq!(intent.mode(), Mode::Pinned);
     }
 }

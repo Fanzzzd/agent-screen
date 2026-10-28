@@ -5,6 +5,7 @@ fn main() {
     // The private CoreGraphics and SkyLight shims, shared with the Swift app.
     cc::Build::new()
         .file("native/SkyLight.m")
+        .file("native/Playback.m")
         .include("native")
         .flag("-fobjc-arc")
         .compile("agent_screen_private");
@@ -15,6 +16,9 @@ fn main() {
         "AppKit",
         "ScreenCaptureKit",
         "ImageIO",
+        "AVFoundation",
+        "CoreMedia",
+        "CoreVideo",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

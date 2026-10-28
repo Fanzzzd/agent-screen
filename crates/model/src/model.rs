@@ -512,15 +512,36 @@ impl FrameRequest {
     /// per point. The frame stays inside the display: past an edge, part of
     /// the window would show on the user's screen.
     pub fn resolve(&self, current: Rect, area: Rect, scale: f64) -> Rect {
+        self.resolve_with_top_inset(current, area, scale, 0.0)
+    }
+
+    /// Resolve against the display's usable area while keeping screenshot
+    /// coordinates relative to the full display, including its reserved top.
+    pub fn resolve_with_top_inset(
+        &self,
+        current: Rect,
+        area: Rect,
+        scale: f64,
+        reserved_top: f64,
+    ) -> Rect {
         let points = |px: Option<f64>| px.map(|v| v / scale);
+        let usable = usable_area(area, reserved_top);
         Rect::new(
             points(self.x).map_or(current.x, |x| area.x + x),
             points(self.y).map_or(current.y, |y| area.y + y),
             points(self.width).unwrap_or(current.width),
             points(self.height).unwrap_or(current.height),
         )
-        .kept_inside(&area)
+        .kept_inside(&usable)
     }
+}
+
+/// Where a display's windows may sit: all of it but the strip at the top
+/// that holds the user's menu bar. A window's top edge under the strip
+/// can't be clicked: a click there reaches the user's front app.
+pub fn usable_area(area: Rect, reserved_top: f64) -> Rect {
+    let top = reserved_top.clamp(0.0, area.height);
+    Rect::new(area.x, area.y + top, area.width, area.height - top)
 }
 
 /// A global frame in points as screenshot pixels from the top-left corner
@@ -878,6 +899,19 @@ mod tests {
         );
         let huge = Rect::new(-50.0, 10.0, 2000.0, 900.0);
         assert_eq!(huge.kept_inside(&area), area);
+    }
+
+    #[test]
+    fn a_zoomed_window_is_kept_below_the_reserved_strip() {
+        // Zoom fills the whole display, toolbar under the menu bar (#103).
+        let area = usable_area(Rect::new(0.0, 0.0, 1280.0, 800.0), 24.0);
+        let zoomed = Rect::new(0.0, 0.0, 1280.0, 800.0);
+        assert_eq!(
+            zoomed.kept_inside(&area),
+            Rect::new(0.0, 24.0, 1280.0, 776.0)
+        );
+        let below = Rect::new(100.0, 200.0, 400.0, 300.0);
+        assert_eq!(below.kept_inside(&area), below);
     }
 
     #[test]
@@ -1301,6 +1335,51 @@ mod tests {
         );
         assert!(FrameRequest::default().is_empty());
         assert!(!size.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_frame_stays_below_the_same_reserved_strip_that_rejects_input() {
+        use super::{FrameRequest, frame_in_shot, shot_scale};
+        let area = Rect::new(4448.0, -1931.0, 1440.0, 900.0);
+        let scale = shot_scale((1440.0, 900.0));
+        let asked = FrameRequest {
+            x: Some(0.0),
+            y: Some(0.0),
+            width: Some(1356.0),
+            height: Some(848.0),
+        };
+        let resolved = asked.resolve_with_top_inset(area, area, scale, 33.0);
+        assert_eq!(
+            resolved.y, -1898.0,
+            "a requested full-display frame must not keep its toolbar in the reserved strip"
+        );
+        assert_eq!(resolved.max_y(), area.max_y());
+        assert!(resolved.width <= area.width);
+        let response = frame_in_shot(resolved, area, scale);
+        assert!(response.y >= 31.0);
+        assert!(response.height < 848.0);
+        let oversized = FrameRequest {
+            width: Some(3000.0),
+            height: Some(2000.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            oversized.resolve_with_top_inset(area, area, scale, 33.0),
+            Rect::new(4448.0, -1898.0, 1440.0, 867.0)
+        );
+        let ordinary = Rect::new(4500.0, -1800.0, 800.0, 600.0);
+        let partial = FrameRequest {
+            y: Some(60.0),
+            ..Default::default()
+        };
+        let moved = partial.resolve_with_top_inset(ordinary, area, scale, 33.0);
+        assert_eq!(
+            moved.y,
+            area.y + 60.0 / scale,
+            "the inset is a constraint, not an extra coordinate offset"
+        );
+        assert_eq!(moved.height, ordinary.height);
+        assert_eq!(moved.x, ordinary.x);
     }
 
     #[test]

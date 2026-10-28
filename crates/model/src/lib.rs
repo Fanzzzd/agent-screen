@@ -4,6 +4,7 @@
 //! Nothing here touches the OS.
 
 pub mod alerts;
+pub mod arrangement;
 pub mod budget;
 pub mod claims;
 pub mod devtools;
@@ -11,7 +12,10 @@ pub mod keychord;
 pub mod launch;
 pub mod model;
 pub mod numbers;
+pub mod recording_playback;
 pub mod tree;
 pub mod typing;
 
 pub mod diagnostics;
+pub mod peek;
+pub mod pointer_geometry;

@@ -26,9 +26,13 @@ use std::ptr::NonNull;
 /// Things that happened on the native side.
 #[derive(Debug, Clone)]
 pub enum Native {
-    /// A click on the menu bar icon; `right` for a right click.
+    /// The button owns both left-button phases. Down captures; only up commits.
+    IconPressed {
+        gesture: u64,
+    },
     IconClicked {
         right: bool,
+        mouse: bool,
     },
     /// The pointer entered or left the menu bar icon.
     IconHover(bool),
@@ -53,6 +57,14 @@ pub enum Native {
     Menu(MenuAction),
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
+    /// A left click of the user's at a global point (top-left origin),
+    /// outside Agent Screen: maybe on the Dock.
+    UserClicked {
+        x: f64,
+        y: f64,
+    },
+    /// Sparkle downloaded an update, which waits to be installed.
+    UpdateReady,
     /// App `pid` became the front app, after `previous`.
     Activated {
         pid: i32,
@@ -86,6 +98,11 @@ pub enum Native {
 pub enum MenuAction {
     CreateDisplay,
     OpenSettings,
+    OpenRecordings,
+    ReportProblem,
+    CheckForUpdates,
+    /// Install the downloaded update and restart.
+    InstallUpdate,
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,
@@ -170,10 +187,10 @@ define_class!(
         #[unsafe(method(clicked:))]
         fn clicked(&self, _sender: &AnyObject) {
             let mtm = MainThreadMarker::from(self);
-            let right = NSApplication::sharedApplication(mtm)
-                .currentEvent()
-                .is_some_and(|e| e.r#type() == NSEventType::RightMouseUp);
-            send(Native::IconClicked { right });
+            let event = NSApplication::sharedApplication(mtm).currentEvent();
+            let kind = event.as_ref().map(|e| e.r#type());
+            let gesture = event.as_ref().map_or(0, |e| e.eventNumber() as u64);
+            if let Some(event) = status_icon_event(kind, gesture) { send(event); }
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -217,6 +234,33 @@ fn template_svg(svg: &str) -> Option<Retained<NSImage>> {
 const ICON_PLACE: &str = "NSStatusItem Preferred Position Item-0";
 const ICON_PLACE_SHOWN: &str = "AgentScreen Icon Position Shown";
 
+fn status_icon_mask() -> NSEventMask {
+    NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp
+}
+
+pub(crate) fn status_icon_event(kind: Option<NSEventType>, gesture: u64) -> Option<Native> {
+    // A cancelled right press may not send a valid button-up action. It
+    // must never freeze the left-button transaction or become a left click.
+    if kind == Some(NSEventType::RightMouseDown) {
+        return None;
+    }
+    Some(match kind {
+        Some(NSEventType::LeftMouseDown) => Native::IconPressed { gesture },
+        Some(NSEventType::LeftMouseUp) => Native::IconClicked {
+            right: false,
+            mouse: true,
+        },
+        Some(NSEventType::RightMouseUp) => Native::IconClicked {
+            right: true,
+            mouse: true,
+        },
+        _ => Native::IconClicked {
+            right: false,
+            mouse: false,
+        },
+    })
+}
+
 impl StatusIcon {
     pub fn install(mtm: MainThreadMarker) -> StatusIcon {
         // Back where the user last saw it, before AppKit places it.
@@ -230,7 +274,7 @@ impl StatusIcon {
             unsafe {
                 button.setTarget(Some(&target));
                 button.setAction(Some(sel!(clicked:)));
-                let _: isize = msg_send![&button, sendActionOn: (NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp).0];
+                let _: isize = msg_send![&button, sendActionOn: status_icon_mask().0];
             }
             let options = NSTrackingAreaOptions::MouseEnteredAndExited
                 | NSTrackingAreaOptions::ActiveAlways
@@ -367,6 +411,7 @@ impl StatusIcon {
             let mtm = MainThreadMarker::new().expect("main thread");
             item.setMenu(Some(&menu));
             if let Some(button) = item.button(mtm) {
+                let _menu = super::hang::Modal::open();
                 unsafe { button.performClick(None) };
             }
             item.setMenu(None);
@@ -466,6 +511,7 @@ impl Menu {
     pub fn pop_up_at(self, x: f64, y: f64) {
         let menu = self.menu;
         main_async(move || {
+            let _menu = super::hang::Modal::open();
             menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), None);
         });
     }
@@ -508,6 +554,7 @@ pub fn alert(title: &str, text: &str) {
     // A menu bar app is never active on its own.
     #[allow(deprecated)]
     objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let _alert = super::hang::Modal::open();
     alert.runModal();
 }
 
@@ -523,6 +570,7 @@ pub fn confirm(title: &str, text: &str, go: &str) -> bool {
     alert.addButtonWithTitle(&NSString::from_str(t("Cancel", "取消")));
     #[allow(deprecated)]
     objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    let _alert = super::hang::Modal::open();
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
@@ -585,11 +633,20 @@ pub fn watch_mouse() {
     // windows from an agent's. Events posted to a pid never reach these.
     let user = RcBlock::new(|event: NonNull<NSEvent>| {
         use super::catch::Towards;
-        let towards = if unsafe { event.as_ref() }.r#type() == NSEventType::KeyDown {
+        let kind = unsafe { event.as_ref() }.r#type();
+        let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
             return;
         } else {
             let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
+            if kind == NSEventType::LeftMouseDown {
+                let at = NSEvent::mouseLocation();
+                let top = super::cg::display_bounds(super::cg::main_display()).height;
+                send(Native::UserClicked {
+                    x: at.x,
+                    y: top - at.y,
+                });
+            }
             let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
                 NSEvent::mouseLocation(),
                 0,
@@ -613,6 +670,80 @@ pub fn watch_mouse() {
     {
         keep(monitor);
     }
+}
+
+// MARK: Windows that draw their own shadow
+
+thread_local! {
+    /// Windows with a transparent margin around their content, where the
+    /// app draws the content's shadow, by margin: top, left, bottom, right.
+    /// WindowServer's own shadow is drawn from a window's last picture, a
+    /// frame behind, so it trails content that changes size in the window.
+    static MARGINS: RefCell<Vec<(Retained<NSWindow>, [f64; 4])>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Draw `window`'s shadow in the app: no system shadow, and over the
+/// margin, mouse events go to what is below, as they would around a
+/// system shadow. The window takes them only over its content.
+pub fn own_shadow(window: &NSWindow, margin: [f64; 4]) {
+    window.setHasShadow(false);
+    let first = MARGINS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.push((window.retain(), margin));
+        m.len() == 1
+    });
+    if first {
+        let follow = |_: &NSEvent| follow_pointer(NSEvent::mouseLocation());
+        let mask = NSEventMask::MouseMoved | NSEventMask::LeftMouseDragged;
+        let global = RcBlock::new(move |event: NonNull<NSEvent>| follow(unsafe { event.as_ref() }));
+        if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global)
+        {
+            keep(monitor);
+        }
+        let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            follow(unsafe { event.as_ref() });
+            event.as_ptr()
+        });
+        if let Some(monitor) =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local) }
+        {
+            keep(monitor);
+        }
+    }
+    follow_pointer(NSEvent::mouseLocation());
+}
+
+/// `frame` less a margin of top, left, bottom, right, in Cocoa coordinates.
+pub fn inset(frame: NSRect, [top, left, bottom, right]: [f64; 4]) -> NSRect {
+    NSRect::new(
+        NSPoint::new(frame.origin.x + left, frame.origin.y + bottom),
+        NSSize::new(
+            frame.size.width - left - right,
+            frame.size.height - top - bottom,
+        ),
+    )
+}
+
+/// `content` with a margin of top, left, bottom, right around it.
+pub fn outset(content: NSRect, [top, left, bottom, right]: [f64; 4]) -> NSRect {
+    inset(content, [-top, -left, -bottom, -right])
+}
+
+/// Each window with a margin takes mouse events only with the pointer over
+/// its content. Called on every move, and when a window moves or resizes.
+pub fn follow_pointer(at: NSPoint) {
+    MARGINS.with(|m| {
+        for (window, margin) in m.borrow().iter() {
+            let content = inset(window.frame(), *margin);
+            let over = at.x >= content.origin.x
+                && at.x <= content.origin.x + content.size.width
+                && at.y >= content.origin.y
+                && at.y <= content.origin.y + content.size.height;
+            if window.ignoresMouseEvents() == over {
+                window.setIgnoresMouseEvents(!over);
+            }
+        }
+    });
 }
 
 /// The pointer, in Cocoa screen coordinates.
@@ -774,6 +905,7 @@ pub const LEVEL_POP_UP_MENU: isize = 101;
 pub fn set_frame(window: &NSWindow, frame: NSRect) {
     window.setFrame_display(frame, true);
     window.invalidateShadow();
+    follow_pointer(NSEvent::mouseLocation());
 }
 
 /// Resize a GPUI window that is showing, once the GPUI update in progress
@@ -902,11 +1034,41 @@ pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
         .collect()
 }
 
+/// Menu bar heights measured since the screens last changed. Measuring asks
+/// WindowServer for the display's spaces, which blocks while displays are
+/// being added or removed; the Viewer reads it every frame.
+static MENU_BARS: std::sync::Mutex<Vec<(u32, f64)>> = std::sync::Mutex::new(Vec::new());
+
+/// The cached height for `display`, or `measure`'s, kept for next time.
+/// Without a measurement (off the main thread, or no such screen) it's the
+/// standard 24 pt and nothing is kept.
+fn cached_menu_bar(display: u32, measure: impl FnOnce() -> Option<f64>) -> f64 {
+    let mut bars = MENU_BARS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(_, height)) = bars.iter().find(|(id, _)| *id == display) {
+        return height;
+    }
+    match measure() {
+        Some(height) => {
+            bars.push((display, height));
+            height
+        }
+        None => 24.0,
+    }
+}
+
+/// Measure again after the screens change.
+pub fn forget_menu_bars() {
+    MENU_BARS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// Height of the menu bar on a display, in points.
 pub fn menu_bar_height(display: u32) -> f64 {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return 24.0;
-    };
+    cached_menu_bar(display, || {
+        MainThreadMarker::new().and_then(|mtm| measure_menu_bar(mtm, display))
+    })
+}
+
+fn measure_menu_bar(mtm: MainThreadMarker, display: u32) -> Option<f64> {
     for screen in objc2_app_kit::NSScreen::screens(mtm).iter() {
         let number = screen
             .deviceDescription()
@@ -920,10 +1082,10 @@ pub fn menu_bar_height(display: u32) -> f64 {
             let visible = screen.visibleFrame();
             let bar =
                 (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height);
-            return bar.max(24.0);
+            return Some(bar.max(24.0));
         }
     }
-    24.0
+    None
 }
 
 /// Force light or dark for screenshots in debug builds:
@@ -991,8 +1153,10 @@ pub fn accent() -> Option<([f32; 3], [f32; 3])> {
 
 pub fn watch_screens() {
     let center = objc2_foundation::NSNotificationCenter::defaultCenter();
-    let block =
-        RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| send(Native::ScreensChanged));
+    let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
+        forget_menu_bars();
+        send(Native::ScreensChanged)
+    });
     let observer = unsafe {
         center.addObserverForName_object_queue_usingBlock(
             Some(objc2_app_kit::NSApplicationDidChangeScreenParametersNotification),
@@ -1037,4 +1201,78 @@ pub fn watch_activations() {
     };
     let observer: Retained<AnyObject> = observer.into();
     keep(observer);
+}
+
+#[cfg(test)]
+mod peek_activation_tests {
+    use super::*;
+    use agent_screen_model::peek::{Effect, Intent, Mode};
+
+    #[test]
+    fn status_button_down_and_up_share_one_action_owner_and_commit_once() {
+        assert!(status_icon_mask().contains(NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp));
+        assert!(!status_icon_mask().contains(NSEventMask::RightMouseDown));
+        assert!(status_icon_mask().contains(NSEventMask::RightMouseUp));
+        assert!(status_icon_event(Some(NSEventType::RightMouseDown), 9).is_none());
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::RightMouseUp), 10),
+            Some(Native::IconClicked {
+                right: true,
+                mouse: true
+            })
+        ));
+        let mut intent = Intent::default();
+        if let Native::IconPressed { gesture } =
+            status_icon_event(Some(NSEventType::LeftMouseDown), 7).unwrap()
+        {
+            intent.press(gesture);
+        }
+        assert_eq!(intent.mode(), Mode::Closed);
+        assert!(matches!(
+            status_icon_event(Some(NSEventType::LeftMouseUp), 8).unwrap(),
+            Native::IconClicked {
+                mouse: true,
+                right: false
+            }
+        ));
+        assert_eq!(intent.release(true), Effect::Show);
+        assert_eq!(intent.release(true), Effect::None);
+        assert!(matches!(
+            status_icon_event(None, 0).unwrap(),
+            Native::IconClicked {
+                mouse: false,
+                right: false
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod menu_bar_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_frame_after_the_first_does_not_ask_window_server_again() {
+        // Display ids no real screen uses, so the shared cache can't clash.
+        let (display, other) = (0xA5A5_0001, 0xA5A5_0002);
+        let asked = Cell::new(0);
+        let measure = || {
+            asked.set(asked.get() + 1);
+            Some(33.0)
+        };
+        assert_eq!(cached_menu_bar(display, measure), 33.0);
+        for _ in 0..60 {
+            assert_eq!(cached_menu_bar(display, measure), 33.0);
+        }
+        assert_eq!(asked.get(), 1, "a Viewer frame measured again");
+        // No measurement, as off the main thread: the default, not kept.
+        assert_eq!(cached_menu_bar(other, || None), 24.0);
+        assert_eq!(cached_menu_bar(other, || Some(40.0)), 40.0);
+        // The screens changed: measure once more.
+        forget_menu_bars();
+        assert_eq!(cached_menu_bar(display, || Some(37.0)), 37.0);
+        assert_eq!(cached_menu_bar(display, measure), 37.0);
+        assert_eq!(asked.get(), 1);
+    }
 }

@@ -218,13 +218,18 @@ async fn handle_one(
             let label = core.read_with(cx, |c, _| {
                 c.displays.get(id).map(|d| d.label()).unwrap_or_default()
             });
-            let (video, timeline) = cx
+            let (video, timeline, codec) = cx
                 .background_executor()
                 .spawn(async move { crate::mac::recording::start(id, &label) })
                 .await
                 .map_err(ControlError::failed)?;
             core.update(cx, |_, cx| cx.notify());
-            Ok(json!({ "video": video, "timeline": timeline }))
+            Ok(
+                json!({ "video": video, "timeline": timeline, "selectedCodec": codec,
+                    "hardwareEncoderVerified": false,
+                    "codecNote": if codec == "avc1" { "HEVC is unavailable; using H.264. Hardware encoder use has not been verified." } else { "Configured HEVC. Hardware encoder use has not been verified." }
+                }),
+            )
         }
         "recordStop" => {
             let id = display(&core, &p, false, cx)?;
@@ -237,6 +242,8 @@ async fn handle_one(
             Ok(json!({
                 "video": done.video,
                 "timeline": done.timeline,
+                "selectedCodec": done.codec,
+                "hardwareEncoderVerified": false,
                 "seconds": (done.seconds * 10.0).round() / 10.0,
                 "actions": done.actions,
                 "problem": done.problem,
@@ -1024,13 +1031,20 @@ async fn handle_one(
             // and Electron reads only a mouse event as a click (#39).
             if action == "press" {
                 let (item, pid) = (ax::Sendable(element.clone()), window.target.pid);
-                let electron_menu = off(cx, move || {
-                    ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem")
-                        && app::is_electron(pid)
+                let note = off(cx, move || {
+                    let menu =
+                        ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem");
+                    if !menu || !app::is_electron(pid) {
+                        None
+                    } else if app::is_vs_code_based(pid) {
+                        Some(VS_CODE_MENU_NOTE)
+                    } else {
+                        Some(ELECTRON_MENU_NOTE)
+                    }
                 })
                 .await;
-                if electron_menu {
-                    return reply(json!({ "note": ELECTRON_MENU_NOTE }));
+                if let Some(note) = note {
+                    return reply(json!({ "note": note }));
                 }
             }
             Ok(json!({}))
@@ -1368,9 +1382,39 @@ async fn handle_one(
             let pid = p.int("pid").unwrap_or(0) as i32;
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             let task = shell
-                .update(cx, |shell, cx| shell.remind_where(pid, cx))
+                .update(cx, |shell, cx| shell.remind_where(pid, false, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "reminded": task.await }))
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
+        }
+        // Test hooks for updates: check the feed now without a window, and
+        // what is waiting to be installed.
+        "debugCheckForUpdates" if debug_methods() => {
+            crate::mac::update::check_in_background();
+            Ok(json!({ "available": crate::mac::update::available() }))
+        }
+        "debugUpdateState" if debug_methods() => Ok(json!({
+            "available": crate::mac::update::available(),
+            "pending": crate::mac::update::pending(),
+        })),
+        // Test hook: the user's left click at a global point, as the global
+        // monitor reports it, such as on an app's Dock icon.
+        "debugUserClick" if debug_methods() => {
+            let at = (p.require("x")?, p.require("y")?);
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let task = shell
+                .update(cx, |shell, cx| shell.user_clicked(at, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
         }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
@@ -2106,6 +2150,24 @@ async fn request_window(
     )))
 }
 
+/// Apply only an explicit frame request. The callback is the real AX writer
+/// in frame_window and an offline capture in the geometry regression tests.
+fn apply_frame_request(
+    asked: FrameRequest,
+    current: Rect,
+    area: Rect,
+    scale: f64,
+    reserved_top: f64,
+    set: impl FnOnce(Rect) -> Result<(), String>,
+) -> Result<bool, String> {
+    if asked.is_empty() {
+        return Ok(false);
+    }
+    let frame = asked.resolve_with_top_inset(current, area, scale, reserved_top);
+    set(frame)?;
+    Ok(frame != asked.resolve(current, area, scale))
+}
+
 /// Give a window on display `id` the frame the agent asked for, if any, and
 /// say where it ended up, in screenshot pixels: apps hold to their own
 /// minimum and maximum sizes.
@@ -2117,14 +2179,19 @@ async fn frame_window(
     cx: &mut AsyncApp,
 ) -> Result<Map<String, Value>, ControlError> {
     let scale = display_scale(core, id, cx);
+    // Use the same main-thread policy as outside_menu_bar, not a second
+    // hard-coded strip height. Empty frame requests still leave it unchanged.
+    let reserved_top = crate::mac::menubar_height(id);
     let frame = off(cx, move || {
         let area = cg::display_bounds(id);
         let now = || windows::find(target.window_id).map(|w| w.bounds);
         let closed = || "the window closed".to_string();
         let mut bounds = now().ok_or_else(closed)?;
+        let constrained = apply_frame_request(asked, bounds, area, scale, reserved_top, |frame| {
+            ax::set_frame_asked(target, frame)
+                .map_err(|e| format!("could not set the window's frame: {e}"))
+        })?;
         if !asked.is_empty() {
-            ax::set_frame_asked(target, asked.resolve(bounds, area, scale))
-                .map_err(|e| format!("could not set the window's frame: {e}"))?;
             // Some apps, Electron's among them, answer a resize a moment
             // later: wait until two reads agree, up to half a second.
             let mut last = None;
@@ -2138,19 +2205,22 @@ async fn frame_window(
             }
             bounds = last.unwrap_or(bounds);
         }
-        Ok::<_, String>(frame_in_shot(bounds, area, scale))
+        Ok::<_, String>((frame_in_shot(bounds, area, scale), constrained))
     })
     .await;
-    let frame = frame.map_err(ControlError::failed)?;
-    Ok(Map::from_iter([(
-        "window".into(),
-        json!({
-            "x": frame.x as i64,
-            "y": frame.y as i64,
-            "width": frame.width as i64,
-            "height": frame.height as i64,
-        }),
-    )]))
+    let (frame, constrained) = frame.map_err(ControlError::failed)?;
+    Ok(Map::from_iter([
+        ("frameConstrained".into(), json!(constrained)),
+        (
+            "window".into(),
+            json!({
+                "x": frame.x as i64,
+                "y": frame.y as i64,
+                "width": frame.width as i64,
+                "height": frame.height as i64,
+            }),
+        ),
+    ]))
 }
 
 /// Record a window Agent Screen put on a display.
@@ -3664,6 +3734,11 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
     keep_counting(id, cx);
 }
 
+/// What an agent hears after pressing a menu item of an app built on VS
+/// Code, such as Cursor: with the terminal focused, Edit > Find opened the
+/// terminal's find box (`cargo e2e cursormenu`).
+const VS_CODE_MENU_NOTE: &str = "This app is built on VS Code. It ran this menu item as the item's keyboard shortcut in whatever has focus, not as the menu's own command, because Electron reports a menu item pressed through accessibility as its shortcut. With the terminal, a panel or an input box focused, the result can differ: Edit > Find opened the terminal's find box. Check the window. To run the command itself, open the Command Palette with key cmd+shift+p, type the command's name and press Return.";
+
 /// What an agent hears after pressing an Electron app's menu item.
 const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, move focus out of the text field, with a click on an empty part of the window, then press the item again.";
 
@@ -3709,19 +3784,30 @@ async fn keys_allowed(
     // In front with the agent's window focused, as when an app it started
     // activates itself, keys go to that window: fine.
     let pid = target.pid;
-    let elsewhere = crate::mac::input::front() == Some(pid)
-        && cx
-            .background_executor()
-            .spawn(async move { ax::focused_window_id(pid) })
-            .await
-            != Some(target.window_id);
-    if elsewhere {
+    if crate::mac::input::front() != Some(pid) {
+        return Ok(());
+    }
+    let focused = cx
+        .background_executor()
+        .spawn(async move { ax::focused_window_id(pid) })
+        .await;
+    if focused != Some(target.window_id) {
         let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
-        return Err(ControlError::failed(format!(
-            "the user is working in {name} right now, so keys would reach their window, not yours. Set text with act_on_element (set_value) instead, or wait and try again."
-        )));
+        return Err(key_route_error(&name, focused.is_some()));
     }
     Ok(())
+}
+
+/// Explain routing evidence without claiming to have observed user activity.
+fn key_route_error(app: &str, focused_known: bool) -> ControlError {
+    let reason = if focused_known {
+        "its focused window is different from the agent's keyboard target"
+    } else {
+        "Accessibility could not verify its focused window"
+    };
+    ControlError::failed(format!(
+        "{app} is the foreground app, but {reason}, so posted keys could reach the user's window. User idleness does not make this routing safe. The pending keys were refused. Use act_on_element set_value or a supported press action, or ask the user to switch their foreground app before retrying. Agent Screen will not switch it for them."
+    ))
 }
 
 fn forwarder_stopped(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
@@ -4115,8 +4201,10 @@ fn global(
 fn outside_menu_bar(id: DisplayId, (_, y): (f64, f64)) -> Result<(), ControlError> {
     if y - cg::display_bounds(id).y < crate::mac::menubar_height(id) {
         return Err(ControlError::invalid(
-            "that is the menu bar strip at the top, which belongs to the user's app, not yours; \
-             press a menubaritem from get_window_state to use your app's menus",
+            "that is the reserved menu bar strip at the top, which belongs to the user's app. \
+             For app menus, press a menubaritem from get_window_state. If a zoomed window's toolbar is here, \
+             use place_window with its window_id and x, y, width, height to move or shrink it below the strip; \
+             read the returned window frame. If those arguments are missing, collect get_diagnostics in this MCP session before restarting its client.",
         ));
     }
     Ok(())
@@ -4131,6 +4219,18 @@ fn show_pointer(
     cx: &mut AsyncApp,
 ) -> crate::mac::input::Forwarder {
     let bounds = cg::display_bounds(id);
+    let active_agent = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .is_some_and(|d| !d.takeover && !d.is_ended())
+    });
+    crate::mac::recording::pointer(
+        id,
+        (at.0 - bounds.x, at.1 - bounds.y),
+        (bounds.width, bounds.height),
+        click,
+        active_agent,
+    );
     core.update(cx, |c, cx| {
         c.displays
             .point(id, at.0 - bounds.x, at.1 - bounds.y, click);
@@ -4273,5 +4373,92 @@ mod launch_tests {
         // ...and 4 s from the request at most, even while `open` runs.
         assert!(!waited_long_enough(false, ago(0), ago(3000), None));
         assert!(waited_long_enough(false, ago(0), ago(4500), None));
+    }
+}
+
+#[cfg(test)]
+mod frame_request_tests {
+    use super::*;
+
+    #[test]
+    fn actual_frame_writer_receives_usable_geometry_and_no_default_write() {
+        let area = Rect::new(4448.0, -1931.0, 1440.0, 900.0);
+        let scale = shot_scale((1440.0, 900.0));
+        let full = FrameRequest {
+            x: Some(0.0),
+            y: Some(0.0),
+            width: Some(1356.0),
+            height: Some(848.0),
+        };
+        let mut written = None;
+        assert!(
+            apply_frame_request(full, area, area, scale, 33.0, |frame| {
+                written = Some(frame);
+                Ok(())
+            })
+            .unwrap()
+        );
+        let frame = written.unwrap();
+        assert_eq!(frame.y, -1898.0);
+        assert_eq!(frame.height, 867.0);
+        assert_eq!(frame.max_y(), area.max_y());
+        let mut again = None;
+        apply_frame_request(full, frame, area, scale, 33.0, |frame| {
+            again = Some(frame);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            again, written,
+            "repeating the same explicit placement is idempotent"
+        );
+        assert!(
+            !apply_frame_request(
+                FrameRequest::default(),
+                area,
+                area,
+                scale,
+                33.0,
+                |_| panic!("a default placement must not resize a window")
+            )
+            .unwrap()
+        );
+        let ordinary = Rect::new(4500.0, -1800.0, 800.0, 600.0);
+        let partial = FrameRequest {
+            x: Some(80.0),
+            ..Default::default()
+        };
+        assert!(
+            !apply_frame_request(partial, ordinary, area, scale, 33.0, |frame| {
+                assert_eq!(frame.x, area.x + 80.0 / scale);
+                assert_eq!(frame.y, ordinary.y);
+                assert_eq!(frame.width, ordinary.width);
+                assert_eq!(frame.height, ordinary.height);
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert!(
+            !apply_frame_request(full, area, area, scale, 0.0, |frame| {
+                assert_eq!(frame, full.resolve(area, area, scale));
+                Ok(())
+            })
+            .unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyboard_refusal_tests {
+    #[test]
+    fn refusal_distinguishes_routing_evidence_from_user_activity() {
+        let different = super::key_route_error("Dia", true).message;
+        assert!(different.contains("focused window is different"));
+        assert!(different.contains("User idleness does not make this routing safe"));
+        assert!(different.contains("ask the user to switch"));
+        assert!(!different.contains("user is working"));
+        let unknown = super::key_route_error("Dia", false).message;
+        assert!(unknown.contains("Accessibility could not verify"));
+        assert!(!unknown.contains("focused window is different"));
     }
 }

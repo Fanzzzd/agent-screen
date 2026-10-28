@@ -7,7 +7,7 @@ use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
-use crate::model::DisplayId;
+use crate::model::{DisplayId, Rect, WindowTarget};
 use gpui::{
     AnimationExt, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
@@ -31,6 +31,14 @@ pub const SPACING: f32 = 10.;
 /// With displays around, adding one is a narrow "+" at the end.
 pub const NARROW: f32 = 44.;
 pub const RADIUS: f32 = 18.;
+/// Room around the card in Peek's window, top, left, bottom, right, for
+/// the shadow Peek draws itself (`native::own_shadow`).
+pub const MARGIN: [f64; 4] = [8., 28., 40., 28.];
+const SHADOW: [(f32, f32, f32); 2] = [
+    // Opacity, drop, blur: a tight contact shadow and a soft wide one.
+    (0.12, 1., 2.5),
+    (0.28, 10., 28.),
+];
 /// A tile grows in or shrinks out over this, as Peek's frame changes with
 /// it (`Shell::show_peek`).
 pub const RESIZE: Duration = Duration::from_millis(260);
@@ -38,13 +46,16 @@ pub const RESIZE: Duration = Duration::from_millis(260);
 /// The card sliding to a new width inside Peek's window, which spans both
 /// the card's old and new frames meanwhile: resizing the window itself
 /// every frame costs WindowServer a new backing store each time, about
-/// 40 ms a step, where GPUI redraws at the display's rate. Left edge and
-/// width, in the window.
+/// 40 ms a step, where GPUI redraws at the display's rate. Peek draws the
+/// card's shadow itself, so it moves with the card in the same frame. Left
+/// edge and width, in the window less its margin. Peek times it itself: a `with_animation` around
+/// the card would put its id in every tile's element path, so the tiles'
+/// own grow and shrink would start over when the slide ends.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Slide {
     pub from: (f32, f32),
     pub to: (f32, f32),
-    pub generation: u64,
+    pub started: std::time::Instant,
 }
 
 pub struct Peek {
@@ -68,6 +79,8 @@ pub struct Peek {
     pub pending: usize,
     /// The card is sliding to a new width.
     pub slide: Option<Slide>,
+    /// Peek came down to say where an app's windows are.
+    pub remind: Option<Remind>,
     /// Displays that take the place of a pending tile: they show without
     /// growing in again.
     pub arrived: HashSet<DisplayId>,
@@ -75,13 +88,36 @@ pub struct Peek {
     known: Vec<DisplayId>,
     /// Peek was up for the last render too.
     following: bool,
-    /// The width the last render drew at, for the log.
-    drawn: Option<f32>,
     /// Displays that came while Peek was up, which grow in.
     entering: HashSet<DisplayId>,
     /// Displays that went while Peek was up, by where their tile stood,
     /// shrinking out.
     leaving: Vec<(DisplayId, usize)>,
+    /// How each tile looked when last drawn: a closed display's tile
+    /// shrinks out as it was, not as a blank box.
+    looks: HashMap<DisplayId, Look>,
+}
+
+/// Where an app the user went to has its windows: Peek came down to show
+/// it, and rings that display's tile and outlines the windows on it.
+#[derive(Clone)]
+pub struct Remind {
+    pub display: DisplayId,
+    pub app: String,
+    /// The app's windows on the display, with their frames in the
+    /// display's points.
+    pub windows: Vec<(WindowTarget, Rect)>,
+    /// Counts reminders, so each one's glow plays from its start.
+    pub seq: u64,
+}
+
+/// A tile's picture and words, kept for its shrinking out.
+#[derive(Clone)]
+struct Look {
+    label: String,
+    status: Status,
+    frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
+    size: (f64, f64),
 }
 
 impl Peek {
@@ -115,12 +151,13 @@ impl Peek {
             keys: false,
             pending: 0,
             slide: None,
+            remind: None,
             arrived: HashSet::new(),
             known: Vec::new(),
             following: false,
-            drawn: None,
             entering: HashSet::new(),
             leaving: Vec::new(),
+            looks: HashMap::new(),
         }
     }
 
@@ -172,6 +209,7 @@ impl Peek {
             self.known.clear();
             self.entering.clear();
             self.leaving.clear();
+            self.looks.clear();
             self.arrived.clear();
             self.following = false;
             return;
@@ -194,6 +232,7 @@ impl Peek {
                         .await;
                     let _ = peek.update(cx, |peek, cx| {
                         peek.leaving.retain(|(l, _)| *l != id);
+                        peek.looks.remove(&id);
                         cx.notify();
                     });
                 })
@@ -230,13 +269,6 @@ pub fn ordered(core: &Core) -> Vec<DisplayId> {
 impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
-        if self.shown && self.slide.is_none() {
-            let width = f32::from(window.viewport_size().width);
-            if self.drawn != Some(width) {
-                self.drawn = Some(width);
-                log_card(width);
-            }
-        }
         let ids = ordered(self.core.read(cx));
         self.follow(&ids, cx);
         let core = self.core.read(cx);
@@ -251,16 +283,27 @@ impl Render for Peek {
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();
+            let frame = streams.frame(*id);
+            self.looks.insert(
+                *id,
+                Look {
+                    label: display.label(),
+                    status: status.clone(),
+                    frame: frame.clone(),
+                    size: (display.width, display.height),
+                },
+            );
             let built = tile(
                 *id,
                 display.label(),
                 crate::mac::recording::is_recording(*id),
                 status,
-                streams.frame(*id),
+                frame,
                 pointer,
                 (display.width, display.height),
                 self.active == Some(*id),
                 self.focused == Some(index),
+                self.remind.as_ref().filter(|r| r.display == *id),
                 self.tile,
                 &theme,
                 &self.shell,
@@ -272,11 +315,35 @@ impl Render for Peek {
             });
         }
         for (id, index) in &self.leaving {
-            let ghost = div()
-                .w(px(self.tile))
-                .h(px(thumb_height(self.tile)))
-                .rounded(px(9.))
-                .bg(theme.screen_empty);
+            // As it last looked, deaf to clicks: its display is gone.
+            let look = self.looks.get(id).cloned();
+            if cfg!(debug_assertions) {
+                log::debug!("peek leaving {id} as drawn {}", look.is_some());
+            }
+            let ghost = match look {
+                Some(look) => tile(
+                    *id,
+                    look.label,
+                    false,
+                    look.status,
+                    look.frame,
+                    None,
+                    look.size,
+                    false,
+                    false,
+                    None,
+                    self.tile,
+                    &theme,
+                    &WeakEntity::new_invalid(),
+                )
+                .into_any_element(),
+                None => div()
+                    .w(px(self.tile))
+                    .h(px(thumb_height(self.tile)))
+                    .rounded(px(9.))
+                    .bg(theme.screen_empty)
+                    .into_any_element(),
+            };
             let at = (*index).min(tiles.len());
             tiles.insert(
                 at,
@@ -307,11 +374,24 @@ impl Render for Peek {
         let narrow = !ids.is_empty() || self.pending > 0;
         let shell = self.shell.clone();
         let add_focused = self.focused == Some(ids.len());
+        let [top, left, bottom, right] = MARGIN.map(|m| m as f32);
         let card = div()
             .id("card")
             .absolute()
-            .top_0()
-            .bottom_0()
+            .top(px(top))
+            .bottom(px(bottom))
+            .shadow(
+                SHADOW
+                    .iter()
+                    .map(|&(opacity, drop, blur)| gpui::BoxShadow {
+                        color: gpui::black().opacity(opacity),
+                        offset: gpui::point(px(0.), px(drop)),
+                        blur_radius: px(blur),
+                        spread_radius: px(0.),
+                        inset: false,
+                    })
+                    .collect(),
+            )
             .flex()
             .gap(px(SPACING))
             .p(px(PADDING))
@@ -331,25 +411,33 @@ impl Render for Peek {
                 &theme,
                 &self.shell,
             ));
-        let card = match self.slide {
+        let viewport = f32::from(window.viewport_size().width) - left - right;
+        // A slide that has ended keeps the card where it stopped until the
+        // window takes the card's frame.
+        let slid = self.slide.filter(|slide| {
+            slide.started.elapsed() < RESIZE || (viewport - slide.to.1).abs() > 0.5
+        });
+        let card = match slid {
             Some(slide) => {
-                // The system shadow follows the card's shape as it slides.
-                if let Some(ns) = crate::mac::native::ns_window(window) {
-                    crate::mac::native::later(move || ns.invalidateShadow());
+                let t = (slide.started.elapsed().as_secs_f32() / RESIZE.as_secs_f32()).min(1.);
+                if t < 1. {
+                    window.request_animation_frame();
                 }
-                card.with_animation(
-                    gpui::ElementId::NamedInteger("slide".into(), slide.generation),
-                    gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
-                    move |card, t| {
-                        let mix = |a: f32, b: f32| a + (b - a) * t;
-                        let width = mix(slide.from.1, slide.to.1);
-                        log_card(width);
-                        card.left(px(mix(slide.from.0, slide.to.0))).w(px(width))
-                    },
-                )
-                .into_any_element()
+                let t = gpui::ease_out_quint()(t);
+                let mix = |a: f32, b: f32| a + (b - a) * t;
+                let width = mix(slide.from.1, slide.to.1);
+                if self.shown {
+                    log_card(width);
+                }
+                card.left(px(left + mix(slide.from.0, slide.to.0)))
+                    .w(px(width))
             }
-            None => card.left_0().right_0().into_any_element(),
+            None => {
+                if self.shown {
+                    log_card(viewport);
+                }
+                card.left(px(left)).right(px(right))
+            }
         };
         div()
             .id("peek")
@@ -363,13 +451,25 @@ impl Render for Peek {
     }
 }
 
-/// For peekanim, in test builds: the card's width as a frame draws it.
+/// For peekanim, in test builds: the card's width as a frame draws it,
+/// each time it changes.
 fn log_card(width: f32) {
-    if cfg!(debug_assertions) {
+    thread_local!(static DRAWN: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) });
+    if cfg!(debug_assertions) && DRAWN.replace(Some(width)) != Some(width) {
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         log::debug!("peek drawn {width} at {ms}");
+    }
+}
+
+/// For peekanim, in test builds: how far a tile has grown in, 0 to 1.
+fn log_tile((kind, id): (&'static str, DisplayId), shown: f32) {
+    if cfg!(debug_assertions) {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        log::debug!("peek {kind} {id} {shown} at {ms}");
     }
 }
 
@@ -390,6 +490,7 @@ fn grow(
             gpui::Animation::new(RESIZE).with_easing(gpui::ease_out_quint()),
             move |d, t| {
                 let t = if entering { t } else { 1. - t };
+                log_tile(key, t);
                 // The gap beside it closes with it.
                 d.w(px(width * t)).mr(px((t - 1.) * SPACING)).opacity(t)
             },
@@ -407,11 +508,22 @@ fn tile(
     size: (f64, f64),
     active: bool,
     focused: bool,
+    remind: Option<&Remind>,
     width: f32,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
 ) -> impl IntoElement {
     let group = format!("tile-{id}");
+    let status_line = match remind {
+        Some(remind) => div()
+            .text_size(px(10.5))
+            .text_color(theme.orange)
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .truncate()
+            .child(tf!("{} is here", "{}在这里", remind.app))
+            .into_any_element(),
+        None => status.line(&status.short, 10.5).into_any_element(),
+    };
     let picture = match frame {
         Some(frame) => surface(frame)
             .object_fit(ObjectFit::Contain)
@@ -469,6 +581,9 @@ fn tile(
                         .child(picture)
                         .child(theme::round_corners(9., theme.card))
                         .child(pointer::layer(id, pointer, size, theme.accent))
+                        .when_some(remind, |d, remind| {
+                            d.child(reminder(remind, size, fit, theme, shell))
+                        })
                         // Hover and "currently open" both show as a ring.
                         .child(
                             div()
@@ -563,7 +678,93 @@ fn tile(
                         .max_w_full()
                         .flex()
                         .justify_center()
-                        .child(status.line(&status.short, 10.5)),
+                        .child(status_line),
+                ),
+        )
+}
+
+/// The reminded app on a tile, `fit` big for a display `size` points: its
+/// windows outlined, a ring that glows twice, and Take Back.
+fn reminder(
+    remind: &Remind,
+    size: (f64, f64),
+    fit: (f32, f32),
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> impl IntoElement {
+    let scale = fit.0 / size.0 as f32;
+    let orange = theme.orange;
+    let outlines = remind.windows.iter().map(move |(_, frame)| {
+        div()
+            .absolute()
+            .left(px(frame.x as f32 * scale))
+            .top(px(frame.y as f32 * scale))
+            .w(px(frame.width as f32 * scale))
+            .h(px(frame.height as f32 * scale))
+            .rounded(px(3.))
+            .border(px(1.5))
+            .border_color(orange)
+    });
+    let targets: Vec<WindowTarget> = remind.windows.iter().map(|(t, _)| *t).collect();
+    let (display, shell) = (remind.display, shell.clone());
+    let seq = remind.seq;
+    div()
+        .absolute()
+        .inset_0()
+        .children(outlines)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(9.))
+                .border(px(2.))
+                .border_color(orange)
+                // A glow that swells twice, then stays as a ring.
+                .with_animation(
+                    gpui::ElementId::NamedInteger("remind".into(), seq),
+                    gpui::Animation::new(Duration::from_millis(2400)),
+                    move |d, t| {
+                        let swell = (t * 2. * std::f32::consts::TAU).cos() * -0.5 + 0.5;
+                        d.shadow(vec![gpui::BoxShadow {
+                            color: orange.opacity(0.85 * swell),
+                            offset: gpui::point(px(0.), px(0.)),
+                            blur_radius: px(4. + 10. * swell),
+                            spread_radius: px(2. * swell),
+                            inset: true,
+                        }])
+                    },
+                ),
+        )
+        .child(
+            div()
+                .id(gpui::ElementId::Name(format!("take-back-{display}").into()))
+                .role(Role::Button)
+                .aria_label(t("Take Back", "取回"))
+                .absolute()
+                .bottom(px(6.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let targets = targets.clone();
+                    tell(&shell, cx, move |shell, cx| {
+                        shell.take_back_reminded(display, targets, cx)
+                    });
+                })
+                .child(
+                    div()
+                        .px(px(10.))
+                        .py(px(3.))
+                        .rounded_full()
+                        .bg(gpui::black().opacity(0.6))
+                        .hover(|s| s.bg(gpui::black().opacity(0.8)))
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(gpui::white())
+                        .child(t("Take Back", "取回")),
                 ),
         )
 }

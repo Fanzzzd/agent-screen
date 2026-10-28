@@ -158,12 +158,14 @@ fixture is included or run until that pre-show containment is available.
 
 ## How it works
 
-- **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks it diagonally off the top-right corner of your physical screens so the real cursor rarely wanders onto it. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.
+- **Virtual displays** come from the private `CGVirtualDisplay` API, the same one DeskPad and BetterDisplay use. Each display is 1280 × 800 points by default, at one pixel per point: macOS lists a two-pixel mode, but refuses to switch a virtual display to it (`CGDisplaySetDisplayMode` returns 1001), so the Viewer scales the image up. The app parks its displays in a compact grid off the top-right corner of your physical screens (`agent_screen_model::arrangement`): the first touches them only at that corner, so the real cursor rarely wanders onto it, and the rest fill rows no wider than your screens, in serial order. Your screens stay where you put them, and System Settings shows them at a usable size. Not a bottom corner: AeroSpace hides other workspaces' windows there, hanging off screen, and they would show on the display.
 - **Display changes are expensive.** Adding, removing or moving a display is a reconfiguration every app on the Mac handles. Each one also makes WindowServer (SkyLight's `CAWSManager::restore_color_preferences`) ask `colorsync.displayservices` for every online display's profile, and wait 50 ms for the answer. A later answer is dropped, and WindowServer asks again 5 s later, until one comes in time; every display change starts another such loop, and no setting takes a display out of the request. For each online display, the service has colorsyncd read and parse its whole registry of displays, `/Library/Caches/ColorSync/com.apple.colorsync.devices`, five times. The registry keeps a record for every display serial macOS has ever seen, each with the display's name in 39 languages, 97% of what gets parsed. So an answer takes about online displays × records × 0.2 ms: with 84 records and four displays online, 66 to 91 ms, and no loop ever ended; they piled up to hundreds of requests a minute, and apps that ask for display information hung (issue #26). A new virtual display also kept sRGB until an answer came in time. Agent Screen gives each display the lowest serial none of its displays holds (`display::Serial`), so its records are as many as the displays it holds at once. ADR 0009's helper, set up once with the user's password and run with `sudo -n`, removes the records of displays not connected that hold only factory data and keeps each record's names in English and the Mac's languages; macOS leaves a trimmed record as it is when its display comes back. The app runs it 3 s after a display is created or released, every 30 minutes and 10 s after launch, and writes its JSON line to `displays.log`. After that, 13 displays online took 19 ms, where 4 took 23 ms with untrimmed records; neither unregistering nor the rewrite starts a request. A late answer still happens under load, at 60 to 130 ms, and its loop ends at the next try. Before a new display, the app estimates the answer's time from the displays online and the records left and refuses `create_display` over 40 ms (`Core::budget_allows`). `AgentScreen colorsync [setup|remove|reclaim]` drives the helper by hand. Agent Screen also keeps its changes few: an ended, empty display stays connected as a spare for the next display of its size, two at most for ten minutes; agents get ten new displays per ten minutes; and a new display is parked once, while a reused one already sits in place. `~/Library/Logs/Agent Screen/displays.log` (`displays-e2e.log` for the test instance) records each display created, kept, reused and released, with its unit number, frame and serial, so a slow Mac can be checked against it.
 - **Live frames** come from ScreenCaptureKit as 420f pixel buffers that GPUI draws without a copy. One stream per display runs at the highest frame rate and size any view asks for: 60 fps at full size for the Viewer, 12 fps at 416 px wide for thumbnails. ScreenCaptureKit tells displays apart by unit number, and WindowServer gives a new virtual display the unit 5 plus the number of virtual displays already there, without checking that no display has it. Once virtual displays come and go out of order, a new one can get the unit of AeroSpace's closet, and every stream and screenshot of it then shows the closet, the user's hidden windows. `VirtualDisplay::create` keeps such a display until another one comes, so that one gets the next unit, then lets it go. `screenshot::filter` refuses a display that still shares its unit (`cg::unit_twin`), so neither the Viewer nor an agent gets a picture of it, and each streamed frame's screen rect is checked against the display's bounds: frames of another screen are dropped.
 - **Input** in the panel goes to the target process through SkyLight's `SLEventPostToPid`, stamped with window-routing fields, plus a focus record that tells the target window it has focus without raising it. The recipe is ported from [trycua/cua](https://github.com/trycua/cua) (MIT), minus its defocus record to the front app: that one ends the user's input method session. Your cursor stays put, and your front app keeps its place and its key window. Each event carries the time it is sent and its point in the target window, as hardware input does: with no time, Chromium kills a page whose click changes its URL, and AppKit reads the window point only from an event that has a time. A drag's first move goes in steps of a point, then waits 100 ms, since AppKit starts a resize or drag only after a few points and loses a move that jumps past that.
 
 ## Test
+
+The frame-placement regression injects the actual AX writer callback to check reserved-strip constraints without touching a window. The scroll regression constructs synthetic CGEvents through the production constructor and reads their fields. It does not post them or inspect a browser. These tests do not verify Dia's real zoom, focus or virtualized-list behavior.
 
 ```sh
 cargo test                    # unit and isolated integration tests
@@ -182,7 +184,8 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits,
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e reopened   # a window an app the agent started opens by itself, long after the agent's last action, while its other windows are on the display: it opens there too; 40 s (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks for a window started by a separate stage session; Keep leaves it on the stage, Hand Over places it as a Handover; 2 displays, nothing on your screen
-AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere   # an app brought to the front with its windows only on an Agent Display gets a notification naming it, once a minute; one with a window on your screen, or one the agent started that brings itself forward, gets none (needs Field.app from `ime`)
+SPARKLE_ED_KEY_FILE=<key file> cargo e2e selfupdate   # a release build updates itself through Sparkle (ADR 0012): 0.0.1 under a test bundle id, with a feed on 127.0.0.1 naming a signed 0.0.2 DMG, downloads it, holds it while an Agent Display is open and installs it in place once the display ends; builds the release bundle; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere   # an app brought to the front with its windows only on an Agent Display brings Peek down at that display's tile with its window outlined, once a minute, and so does a click on its Dock icon while it is already the front app, and Peek goes by itself; one with a window on your screen, or one the agent started that brings itself forward, gets none (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol # request_control during a Takeover, from an agent with a long name: the card shows with both buttons inside it (debugCard), Keep Control tells the waiting agent and leaves the Takeover, Let … Continue hands the display back, a withdrawal leaves the Takeover, and without a Takeover it answers at once
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
 AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # Field moves to a user stand-in stage; place_window takes it as a stray, or fails when it keeps moving back; 2 displays, nothing on your screen
@@ -190,9 +193,10 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_dept
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit; with AeroSpace running, the display gets none of your workspaces or windows (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; its sign shows each of the three steps (needs Electron.app and Field.app)
-AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # Peek opened by hover closes once the pointer leaves, or at the first click on the icon
+AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover   # hover opens a preview; the first icon click pins it, a later click closes it; pointer departure closes only an unpinned preview
 AGENTSCREEN_INSTANCE=e2e cargo e2e electron       # an Electron window, from tests/e2e/fixtures/electron: launch with arguments, an accessory app's window that opens on the display, clicks, typing, edge resize, late redraws, a window larger than the display, and one its app grows past the display or moves to the main screen after it shows; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchagain    # launch_app with arguments on an Electron app that allows one instance and already runs on the display answers with its window, not "did not start"; needs target/e2e/Electron.app
+AGENTSCREEN_INSTANCE=e2e cargo e2e cursormenu     # Cursor, a VS Code fork, on a throwaway profile: Edit > Find pressed through accessibility with the terminal focused runs as ⌘F there, and the press answers with a note naming the Command Palette (#39); skips when Cursor runs; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e menupress      # act_on_element press on an Electron menu item reaches it, as Electron's shortcut, and answers with a note saying so; needs target/e2e/Electron.app
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # a display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e secondwindow   # an Electron app on the display that brings itself to the front to show a window, at launch and for a window.open: your front app is back within 300 ms; shows the sign first; needs target/e2e/Electron.app
@@ -203,6 +207,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e barleak        # screenshots right after the 
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the serial a released one freed
+AGENTSCREEN_INSTANCE=e2e cargo e2e arrangement    # new displays park in a grid off the top-right corner of your screens, beside each other while the row fits; nothing already there moves; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerpicture  # new displays get unit numbers of their own, and the Viewer shows each
 AGENTSCREEN_INSTANCE=e2e cargo e2e shared      # an app you and an agent both use: its keys reach only its window
 AGENTSCREEN_INSTANCE=e2e cargo e2e openpanel   # a file Open panel: keys, clicks, window state, picking a file by path
@@ -219,13 +224,16 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e pointer     # records the Agent Pointer in th
 AGENTSCREEN_INSTANCE=e2e cargo e2e load        # with no displays, then LOAD_DISPLAYS (12) showing Chrome pages, or the Electron fixture's when Chrome is yours: CPU of WindowServer, replayd and Agent Screen, how late a plain AppKit app runs, and every agent typing and taking its screenshot at once; LOAD_SECONDS; AGENTSCREEN_DISPLAY_HZ and AGENTSCREEN_DISPLAY_SCALE (1 or 2) set the test build's display mode
 AGENTSCREEN_INSTANCE=e2e cargo e2e perf        # what agents and you wait for, over ROUNDS rounds: a new and a reused display, launching Calculator, clicks, screenshots, window states, display changes, the test app's main-thread stalls and how late a plain AppKit app runs meanwhile; JSON in target/e2e/perf. Two agents measuring at once wrap each run in `/usr/bin/lockf /tmp/agent-screen-perf.lock env AGENTSCREEN_INSTANCE=NAME cargo e2e perf`, so runs never overlap
 AGENTSCREEN_INSTANCE=e2e cargo e2e changecost     # how long every window on the Mac stops drawing when a display is added and removed, by Core Animation and by a main thread; the test build's AGENTSCREEN_NO_PARK, AGENTSCREEN_MAX_PIXELS=fit, AGENTSCREEN_DISPLAY_SCALE and AGENTSCREEN_DISPLAY_HZ compare choices; 1 display
-AGENTSCREEN_INSTANCE=e2e cargo e2e peekanim       # "+" shows a waiting tile at once and grows it in at the display's rate, the new display made once it has grown; a closed display's tile shrinks out the same way; 2 displays
+AGENTSCREEN_INSTANCE=e2e cargo e2e peekanim       # "+" shows a waiting tile at once and grows it in at the display's rate, the new display made once it has grown; a closed display's tile shrinks out the same way; neither tile's animation starts over when the card stops sliding, and the stage clip of Peek is kept; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e peekrapid      # three + in a row with Peek opened by a click: Peek ends as one card filling its window; GAP_MS (1500) between them; 4 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e statusicon     # the menu bar icon's front screen fills while a display is in use and empties once it ends (debugIcon); the pictures come from `apps/macos/assets/status/make.py`; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange  # a display comes and goes while Peek is open: Peek draws at its new size at once, with no draw GPUI skipped (AGENTSCREEN_LOG_ALL=1 logs GPUI's own errors), keeps drawing, and the new display gets its wallpaper; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e chrome      # Chrome on a throwaway profile while Firefox starts on another display: a click focuses a page's field, typing lands in it, a button runs the page's script
 AGENTSCREEN_INSTANCE=e2e cargo e2e menuclosed  # a select menu in Chrome on a throwaway profile: typing into the open menu chooses its item; once the menu has closed, as at your click or key anywhere, the next click or key fails and says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e typedrops   # typing into address fields in Chrome on a throwaway profile: a busy page and a controlled field get every character; a page that drops fast keys makes the type action fail and say what the field holds; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e firstclick  # a page opened in a running Chrome by launch_app runs its button's script on one click (#79); 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e signupcontrols # a Google-style signup page in Chrome: a custom combobox's option chosen by press, click and arrow keys, and radios by press and click (#79); 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e scrolljump  # 3, 60, 200 and 800 wheel clicks move a long virtualized list in Chrome 40 px each, not one page at most (#104); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e keys        # the key action in Chrome: a page sees ], }, cmd+[ and cmd+] as those characters on any keyboard type, and the brackets land in the field; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e webdrag     # drags in web pages go through the DevTools pipe launch_app gives Chromium apps (ADR 0010): the Electron harness's splitter, which follows pointermove only while buttons holds the left button, and an HTML5 drop; the same harness started with open fails with a message and sends nothing; Chrome on a throwaway profile (left out while Chrome runs); the session's left button never reads down; needs target/e2e/Electron.app; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e sound       # a recording has the sound of an app on its display (440 Hz, from the Electron fixture) and not of a process elsewhere (2000 Hz); mutes your output while it runs; needs Electron.app
@@ -240,7 +248,7 @@ Every script shows a sign on your main screen (`tests/e2e/tools/overlay.swift`, 
 
 `run` also watches your screen for the whole script (`tests/e2e/tools/sighting.swift`). Every 10 ms it lists the windows on your displays, every display but Agent Displays and AeroSpace's closet, and keeps those of the test's processes: the script's descendants, anything whose executable or command line is in this checkout (`target/e2e` tools and apps, fixtures, throwaway browser profiles), and any app that started after the script did, outside `/System/Library` and `/usr` and other checkouts. The sign and the test app's own windows (Peek, cards, the Viewer, Settings) don't count. The script ends with the check "nothing the test started showed on your screen", which lists each window with its owner, title, frame, when it showed and for how long, and fails for any of them. `target/e2e/sightings-<script>.jsonl` keeps the list. A script may allow an owner's windows for some milliseconds with `allow_on_your_screen(owner, ms, why)`, only for a window macOS shows before Agent Screen can move it or one the script puts there on purpose, and says why in the call. `E2E_NO_SIGHTING=1` turns the watch off.
 
-`robust`, `timing` and `shared` skip when TextEdit is already open, `openpanel` when Preview is, and `browsers` when Safari is, since it may be yours. `robust` and `timing` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust` waits until you have been idle for 45 s; `E2E_NOW=1` skips the wait.
+`robust`, `timing` and `shared` skip when TextEdit is already open, `openpanel` when Preview is, and `browsers` when Safari is, since it may be yours. `robust` and `timing` launch TextEdit, whose new windows can show on your screen for a frame or two. `robust` starts 3 s after you stop using the mouse and keyboard; `E2E_NOW=1` skips the wait.
 
 `timing` on an M-series MacBook with a second monitor and AeroSpace ignoring agent displays, two debug-build runs on 2026-10-12 at load average 33 to 50. This Mac rarely drops below 20, so the numbers include that contention:
 
@@ -264,9 +272,136 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 
 `AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. A click with `key` 1 takes the keyboard as the user's click does. A key takes `shift` 1 and `command` 1 for those modifiers. `E2E_LOG=FILE` keeps the debug app's log.
 
-`cargo e2e run` posts real pointer events, so it borrows your cursor. It waits until you have been idle for 45 s with no Agent Display open (`E2E_NOW=1` skips the wait), then puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
+`cargo e2e run` posts real pointer events, so it borrows your cursor. It starts 3 s after you stop using the mouse and keyboard, with no Agent Display open (`E2E_IDLE_SECS` changes the 3 s, `E2E_NOW=1` skips the wait). The sign shows what it waits for from the first moment, so you know it is about to begin. A script that sees your mouse or keyboard while it runs says so on the sign and in its result, since a failure may come from that. It puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
 
 The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
+
+### Recording playback and pointer timelines
+
+The menu bar icon's Recordings… entry opens a normal GPUI window. It lists
+local MP4 files in `~/Movies/Agent Screen`; Refresh reloads the list.
+Directory discovery and sidecar parsing run off the UI thread. Selection
+and refresh generations discard stale asynchronous results. The list is
+limited to 2,000 videos. Hidden files, directories and symlinks are excluded.
+No sidecar can choose a media URL or execute an action.
+
+`mac::playback::Player` owns one AVPlayer and AVPlayerItemVideoOutput. It
+returns IOSurface-backed 420f CVPixelBuffers for GPUI's `surface` element.
+AVPlayer supplies the media time for the image and pointer sample. It also
+owns audio playback. Pause, forward/backward seek and repeated seeks use
+that same player. Seek completions carry a generation; an old completion
+cannot release a newer seek. No frame is exposed while a seek is pending.
+Show Pointer only changes overlay visibility. It does not recreate the
+player, change rate, seek, encode video or send input to any app.
+
+`ui::pointer::playback_layer` reuses the current arrow drawing. Its position,
+click press and ripple are pure samples of media time. It has no live
+DisplayId, shared live-pointer state or Instant-based animation. This keeps
+pause, reverse seeks and toggles deterministic and leaves the style
+replaceable. No system cursor replacement is involved.
+
+New recordings keep the MP4 and the same-stem `.timeline.jsonl` file.
+The sidecar begins with an `event: recording` header at schema version 1:
+
+- `logicalSize`, `videoSize`, `videoScale` and `shotScale` describe points,
+  video pixels and the screenshot-to-points conversion.
+- `coordinateSpace: logical` and `pointerClock: recorded_duration` identify
+  the pointer units and clock. Resolved points are recorded from the
+  existing agent pointer path on that display, before gesture forwarding.
+  They annotate the agent's requested point, not proof of input delivery or
+  a button action. Their `t` comes from SCRecordingOutput's recorded media
+  duration, not the tool call's completion or a playback wall clock.
+- Pointer records contain `event`, `actor`, `visible`, `t`, `x`, `y` and
+  `click`. `x` and `y` are recording-relative logical points. A current
+  display-size change maps through normalized coordinates. The additional
+  pointer records contain no text, keys or account fields. Existing action
+  records retain their prior fields; they never drive pointer playback.
+- `userPointerRecorded: false` means Takeover hides the unknown user pointer.
+  A hidden pointer event marks its start. The producer checks the current
+  Core display/Takeover state at each point, not a startup snapshot. Handing
+  back control does not
+  resurrect the previous agent pointer; the next agent point makes it visible.
+- `completeAtEnd: true` requires a final `recordingEnd` with
+  `pointerTimelineComplete: true`. Missing or failed completion disables the
+  pointer, including a truncated file that ends on a valid JSON boundary.
+
+Pointer/action writes use one buffered file per recording. No pointer write
+occurs before the recording clock starts, after removal from the active
+recordings map, or for an unrecorded display. New sidecars are owner-only and
+use a unique recording stem. The reader caps each sidecar at 16 MiB and
+100,000 event rows plus its header. Sidecars must be regular files; no-follow,
+nonblocking open plus descriptor validation rejects links, FIFOs and devices.
+It parses lines independently; any
+malformed row, invalid coordinate, incompatible schema or limit violation
+makes the pointer unavailable. Video playback remains independent. Old
+unversioned JSONL stays readable as legacy data, but lacks reliable pointer
+units and timing, so no coordinates are guessed.
+
+The recorder asks ScreenCaptureKit for available codecs and MP4 support.
+It requests HEVC when advertised, otherwise H.264 when available. Unsupported
+configuration/start failures remain errors; it does not silently restart an
+active recording or fall back on a permission/disk error. `recordStart` and
+`recordStop` report `selectedCodec` (`hvc1` or `avc1`) and
+`hardwareEncoderVerified: false`. The header records the same selection.
+This is a requested codec, not proof of the encoder implementation. The
+frame interval remains explicitly 1/30. Audio filtering and the passthrough
+join remain unchanged. See [the codec research](research/efficient-screen-recording.md)
+for hardware API limits and the bounded synthetic capability experiment.
+No same-quality space or CPU improvement is claimed for ScreenCaptureKit.
+
+Offline checks use synthetic sidecars and temporary files, not the user's
+recordings:
+
+```sh
+cargo test -p agent-screen-model recording_playback
+cargo test -p agent-screen --bin AgentScreen mac::playback
+```
+
+`apps/macos/tests/PlaybackProbe.m` is a headless test of the production
+`native/Playback.m` bridge. It creates no NSApplication, window, display,
+capture or input event. It checks a paused poster frame, 420f/IOSurface
+buffers, native media-time advance, pause, forward/backward and rapid seeks,
+end seeking and replay. For a generated silent H.264 fixture, from the repo
+root:
+
+```sh
+media=$(mktemp -d)
+helper=$(mktemp -d)
+ffmpeg -hide_banner -loglevel error -f lavfi \
+  -i testsrc2=size=640x400:rate=30:duration=2 -an \
+  -c:v libx264 -pix_fmt yuv420p -movflags +faststart "$media/synthetic.mp4"
+clang -fobjc-arc -framework Foundation -framework AVFoundation \
+  -framework CoreMedia -framework CoreVideo \
+  apps/macos/native/Playback.m apps/macos/tests/PlaybackProbe.m \
+  -o "$helper/playback-probe"
+"$helper/playback-probe" "$media/synthetic.mp4" 2
+rm -rf "$media" "$helper"
+```
+
+The optional final argument is the fixture's expected duration in seconds.
+Only use owned, silent synthetic fixtures for this probe. The H.264 and HEVC
+10-second fixtures from the codec capability experiment also exercise this
+bridge. Their decode/seek results do not prove ScreenCaptureKit encoding,
+audio continuity or the GPUI controls' behavior.
+
+GUI acceptance still needs separate permission. Check menu/open/close,
+empty and populated lists, asynchronous selection, small/portrait video,
+light/dark appearance, play/pause and dragging seek in both directions.
+Toggle the pointer during video with sound and confirm no playhead or audio
+interruption. Check old, missing, damaged and oversized sidecars, then a new
+recording's media alignment and Takeover boundary. No GUI test, capture,
+installation or restart is part of the offline commands above.
+### Peek intent checks without UI
+
+```sh
+CARGO_INCREMENTAL=0 cargo test -p agent-screen-model peek::tests
+CARGO_INCREMENTAL=0 cargo test -p agent-screen peek_shell
+CARGO_INCREMENTAL=0 cargo test -p agent-screen status_button_down_and_up
+```
+
+The model uses a virtual monotonic clock. Native event values drive the same shell policy seams used by the status button, mouse monitor and hover callbacks. These checks do not construct a window or install an input monitor. Left-button down captures the current open/pin/close intent and invalidates hover timers; only a valid up commits it once. Keyboard, accessibility and `debugShow click` use logical activation without synthesizing a press.
+
+The initial dwell and leave constants are 300 ms and 500 ms. The [research notes](research/hover-click-intent.md) distinguish NN/g's web-content recommendations from Apple's APIs and macOS app source. These are candidate values, not Apple thresholds or measured Peek latency. Pointer sampling runs every 100 ms to repair missed exit notifications, so actual dismissal can add detection, scheduling and animation time. Native event ordering, visual transitions and user preference still need separately authorized GUI checks.
 
 ### Debug control methods
 
@@ -305,6 +440,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
 | `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
 | `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
+| `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
 | `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
 | `assist-preview`, `assist-preview-unlisted`, `assist-hide` | Show the helper preview, preview an app absent from the permission list, or hide the helper. |
@@ -315,6 +451,17 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 `userStage` requires a selected, live stage owned by the same connection. Layout, capture and the independent sighting watcher keep the real hardware identity. Ending or releasing the stage, closing its connection, or changing the selected stage clears the role. Release builds contain no role override, even with `AGENTSCREEN_DEBUG=1`.
 
 For click-level UI checks, run `codex exec` with Codex's `computer-use` server on the app `app.agentscreen.AgentScreen`. It clicks through the Viewer without moving your cursor. It cannot reach the menu bar item.
+
+## Agent Pointer geometry preview
+
+`ui/pointer.rs` remains the shared drawing entry for the Viewer and Peek. Its original cubic controls, stroke sizes, hotspot transform and aspect-fit geometry live in `crates/model/src/pointer_geometry.rs`. They add no clock or per-display state. The existing pointer animation remains in the shared drawing entry.
+
+```sh
+python3 -I apps/macos/scripts/preview-pointer.py --output /tmp/agent-screen-rounded-pointer-preview
+cargo test -p agent-screen-model pointer_geometry::tests
+```
+
+The preview generator parses the production Rust control points and stroke constants directly. It writes `index.html` and `preview.svg` locally, records the source hash, and includes 18/24/32 logical-pixel canvases, light/dark content, clipping examples and preview-only hotspot guides. It imports no third-party cursor paths. Its sample accent and SVG paint are not a GPUI screenshot or an anti-aliasing test. Opening it in Orca needs no Agent Display or app replacement.
 
 ## Install a local build
 
@@ -334,4 +481,4 @@ Commits follow Conventional Commits, and pull requests merge by squash with the 
 
 Running **Release** from the Actions tab is a dry run: checks, signing and the DMG, kept as an artifact, and nothing published.
 
-Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`), an App Store Connect API key of the same team for notarization (`APP_STORE_CONNECT_KEY_P8`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`), `TAP_DEPLOY_KEY`, a write deploy key of the tap, and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. To build a notarized DMG locally, store the key once with `xcrun notarytool store-credentials agent-screen` (see the top of `release.sh`).
+Its secrets are the Developer ID certificate (`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`), an App Store Connect API key of the same team for notarization (`APP_STORE_CONNECT_KEY_P8`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`), `TAP_DEPLOY_KEY`, a write deploy key of the tap, `SPARKLE_ED_PRIVATE_KEY`, the EdDSA key that signs the update feed's DMG (ADR 0012; its public half is `SUPublicEDKey` in `Info.plist`), and `RELEASE_DEPLOY_KEY`, a write deploy key of this repository: prepare-release pushes the `release` branch with it, so CI runs on that branch and its checks show on the pull request. To build a notarized DMG locally, store the key once with `xcrun notarytool store-credentials agent-screen` (see the top of `release.sh`).

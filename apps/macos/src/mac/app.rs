@@ -165,6 +165,13 @@ pub fn is_electron(pid: i32) -> bool {
     })
 }
 
+/// Whether the app is built on VS Code, as Cursor and Windsurf are: its
+/// workbench ships inside. VS Code runs a menu item Electron reports as a
+/// shortcut as its key binding in whatever has focus (#39).
+pub fn is_vs_code_based(pid: i32) -> bool {
+    bundle_of(pid).is_some_and(|b| b.join("Contents/Resources/app/out/vs/workbench").exists())
+}
+
 /// Whether the app started less than `span` ago.
 pub fn launched_within(pid: i32, span: std::time::Duration) -> bool {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
@@ -419,4 +426,24 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
         let number = number.downcast::<NSNumber>().ok()?;
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
     })
+}
+
+/// The Dock's pid.
+pub fn dock_pid() -> Option<i32> {
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
+        "com.apple.dock",
+    ))
+    .firstObject()
+    .map(|app| app.processIdentifier())
+}
+
+/// The running apps named `name`, as the Dock and the app switcher name
+/// them.
+pub fn pids_named(name: &str) -> Vec<i32> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .iter()
+        .filter(|app| app.localizedName().is_some_and(|n| n.to_string() == name))
+        .map(|app| app.processIdentifier())
+        .collect()
 }

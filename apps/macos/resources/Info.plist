@@ -26,5 +26,16 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Sparkle (ADR 0012): the feed of the latest release, the key its
+         updates are signed with, and silent updates installed when no
+         Agent Display is open. -->
+    <key>SUFeedURL</key>
+    <string>https://github.com/Fanzzzd/agent-screen/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>wmLC92gOBY5jtVF4ee7eUmpYU5WLXS/r6m3SF1DK7gI=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
 </dict>
 </plist>

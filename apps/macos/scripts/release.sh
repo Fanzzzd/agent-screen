@@ -14,6 +14,12 @@
 #
 # NOTARY_PROFILE picks another profile name. NOTARIZE=0 skips it, for a
 # local build no one downloads.
+#
+# The DMG is also the update Sparkle downloads (ADR 0012): appcast.xml,
+# beside it, describes it, signed with the EdDSA key whose public half is
+# SUPublicEDKey in Info.plist. SPARKLE_ED_KEY holds the private key, as CI
+# passes it, or SPARKLE_ED_KEY_FILE a file with it. Without either the
+# appcast is left out, for a local build.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -62,9 +68,44 @@ if [[ "${NOTARIZE:-1}" != 0 ]]; then
   spctl --assess --type open --context context:primary-signature --verbose "$dmg"
 fi
 sha="$(shasum -a 256 "$dmg" | cut -d' ' -f1)"
+repo="${AGENTSCREEN_REPO:-fanzzzd/agent-screen}"
+
+# The update feed: the latest release's appcast.xml names this DMG.
+appcast="$target/appcast.xml"
+rm -f "$appcast"
+key_file="${SPARKLE_ED_KEY_FILE:-}"
+if [[ -z "$key_file" && -n "${SPARKLE_ED_KEY:-}" ]]; then
+  key_file="$(mktemp)"
+  printf '%s\n' "$SPARKLE_ED_KEY" >"$key_file"
+  trap 'rm -rf "$stage" "$key_file"' EXIT
+fi
+if [[ -n "$key_file" ]]; then
+  sparkle="$(scripts/sparkle.sh)"
+  signature="$("$sparkle/bin/sign_update" --ed-key-file "$key_file" "$dmg")"
+  minimum="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$plist")"
+  cat >"$appcast" <<APPCAST
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Agent Screen</title>
+    <item>
+      <title>Agent Screen $version</title>
+      <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
+      <sparkle:version>$version</sparkle:version>
+      <sparkle:shortVersionString>$version</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>$minimum</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/$repo/releases/tag/v$version</sparkle:releaseNotesLink>
+      <enclosure url="${AGENTSCREEN_UPDATE_URL:-https://github.com/$repo/releases/download/v$version/AgentScreen-$version.dmg}" $signature type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
+APPCAST
+  echo "$appcast"
+else
+  echo "warning: no SPARKLE_ED_KEY or SPARKLE_ED_KEY_FILE; no appcast.xml" >&2
+fi
 
 # The Homebrew cask for this release, for a tap repo's Casks folder.
-repo="${AGENTSCREEN_REPO:-fanzzzd/agent-screen}"
 cask="$target/agent-screen.rb"
 cat >"$cask" <<CASK
 cask "agent-screen" do
@@ -82,6 +123,9 @@ cask "agent-screen" do
     url :url
     strategy :github_latest
   end
+
+  # Agent Screen updates itself (Sparkle), and brew leaves it to.
+  auto_updates true
 
   app "Agent Screen.app"
 
