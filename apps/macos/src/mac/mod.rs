@@ -24,6 +24,7 @@ pub mod permissions;
 pub mod playback;
 pub mod recording;
 pub mod screenshot;
+pub mod update;
 pub mod viewer_input;
 pub mod windows;
 

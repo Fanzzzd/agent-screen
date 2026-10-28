@@ -63,6 +63,8 @@ pub enum Native {
         x: f64,
         y: f64,
     },
+    /// Sparkle downloaded an update, which waits to be installed.
+    UpdateReady,
     /// App `pid` became the front app, after `previous`.
     Activated {
         pid: i32,
@@ -98,6 +100,9 @@ pub enum MenuAction {
     OpenSettings,
     OpenRecordings,
     ReportProblem,
+    CheckForUpdates,
+    /// Install the downloaded update and restart.
+    InstallUpdate,
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,

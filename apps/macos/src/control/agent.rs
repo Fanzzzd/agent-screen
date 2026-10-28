@@ -1386,6 +1386,16 @@ async fn handle_one(
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({ "reminded": task.await }))
         }
+        // Test hooks for updates: check the feed now without a window, and
+        // what is waiting to be installed.
+        "debugCheckForUpdates" if debug_methods() => {
+            crate::mac::update::check_in_background();
+            Ok(json!({ "available": crate::mac::update::available() }))
+        }
+        "debugUpdateState" if debug_methods() => Ok(json!({
+            "available": crate::mac::update::available(),
+            "pending": crate::mac::update::pending(),
+        })),
         // Test hook: the user's left click at a global point, as the global
         // monitor reports it, such as on an app's Dock icon.
         "debugUserClick" if debug_methods() => {

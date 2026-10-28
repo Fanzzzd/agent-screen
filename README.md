@@ -60,6 +60,8 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Or download the DMG from the [latest release](https://github.com/Fanzzzd/agent-screen/releases/latest) and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.
 
+   Agent Screen updates itself. It downloads a new version in the background and installs it once no Agent Display is open, so it never ends an agent's work. **Restart to Update…** in the menu bar icon's menu installs it sooner, and **Check for Updates…** checks now.
+
 2. Open Agent Screen. Its Settings window asks for Screen & System Audio Recording and Accessibility. Both stay on this Mac.
 3. Connect your agents. Press **Connect…** in Settings (right-click the menu bar icon and choose **Settings…**), or run:
 

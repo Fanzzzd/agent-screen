@@ -16,7 +16,7 @@ use crate::mac::aerospace::{self, AeroSpace};
 use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
-use crate::mac::{app, assist, ax, cg, menubar, notify, viewer_input, windows};
+use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
 use agent_screen_model::peek as peek_intent;
 use futures::StreamExt;
@@ -169,6 +169,8 @@ pub struct Shell {
     card_later: HashMap<DisplayId, String>,
     /// When the user was last told where an app's windows are, by pid.
     reminded: HashMap<i32, Instant>,
+    /// A downloaded update waits for no Agent Display to be open.
+    watching_updates: bool,
 
     peek_shown: bool,
     /// Some display is in use: the icon's front screen is filled.
@@ -378,6 +380,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             card: None,
             card_shown: None,
             reminded: HashMap::new(),
+            watching_updates: false,
             card_later: HashMap::new(),
             peek_shown: false,
             working: false,
@@ -727,6 +730,7 @@ impl Shell {
             Native::LauncherTyped => self.launcher_typed(cx),
             Native::Activated { pid, previous } => self.activated(pid, previous, cx),
             Native::UserClicked { x, y } => self.user_clicked((x, y), cx).detach(),
+            Native::UpdateReady => self.watch_updates(cx),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, cx| {
@@ -2033,6 +2037,17 @@ impl Shell {
             t("Report a Problem…", "报告问题…"),
             MenuAction::ReportProblem,
         );
+        if let Some(version) = update::pending() {
+            menu.action(
+                &tf!("Restart to Update to {version}…", "重启以更新到 {version}…"),
+                MenuAction::InstallUpdate,
+            );
+        } else if update::available() {
+            menu.action(
+                t("Check for Updates…", "检查更新…"),
+                MenuAction::CheckForUpdates,
+            );
+        }
         menu.separator();
         let quit = menu.action(
             t("Quit Agent Screen", "退出 Agent Screen"),
@@ -2194,6 +2209,8 @@ impl Shell {
             MenuAction::OpenSettings => self.open_setup(cx),
             MenuAction::OpenRecordings => self.open_recordings(cx),
             MenuAction::ReportProblem => self.report_problem(cx),
+            MenuAction::CheckForUpdates => update::check(),
+            MenuAction::InstallUpdate => self.install_update(cx),
             MenuAction::OpenAeroSpaceConfig => {
                 let pinned: Vec<String> = self
                     .conflicts
@@ -2486,6 +2503,72 @@ impl Shell {
     /// read-only diagnostics on the clipboard and open the issue form. It
     /// reads only build and connection metadata, starts nothing and uploads
     /// nothing; the user pastes and submits it.
+    /// Restart to Update: with Agent Displays open, the user confirms
+    /// first, as the restart ends them.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = update::pending() else {
+            return;
+        };
+        let open = self.core.read(cx).displays.list.len();
+        if open > 0
+            && !native::confirm(
+                &tf!(
+                    "Update to Agent Screen {version}?",
+                    "更新到 Agent Screen {version}？"
+                ),
+                &tf!(
+                    "Agent Screen restarts to update, which ends the {open} Agent Displays open now and the agents' work on them. Otherwise the update installs by itself once no Agent Display is open, or when you quit.",
+                    "Agent Screen 更新时要重启，会结束现在打开的 {open} 块 Agent 显示器，agent 在上面的工作也会中断。不更新的话，等没有 Agent 显示器打开时，或者你退出时，更新会自动安装。"
+                ),
+                t("Restart and Update", "重启并更新"),
+            )
+        {
+            self.watch_updates(cx);
+            return;
+        }
+        update::install();
+    }
+
+    /// A downloaded update installs once no Agent Display has been open for
+    /// a while: the restart ends none, and agents' MCP servers reconnect.
+    fn watch_updates(&mut self, cx: &mut Context<Self>) {
+        if self.watching_updates {
+            return;
+        }
+        self.watching_updates = true;
+        let every = Duration::from_secs(
+            std::env::var("AGENTSCREEN_UPDATE_IDLE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|_| {
+                    cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some()
+                })
+                .unwrap_or(30),
+        );
+        cx.spawn(async move |this, cx| {
+            let mut idle = 0;
+            loop {
+                cx.background_executor().timer(every).await;
+                let Ok(open) = this.update(cx, |shell, cx| shell.core.read(cx).displays.list.len())
+                else {
+                    return;
+                };
+                update::set_open_displays(open);
+                if update::pending().is_none() {
+                    let _ = this.update(cx, |shell, _| shell.watching_updates = false);
+                    return;
+                }
+                idle = if open == 0 { idle + 1 } else { 0 };
+                // Twice in a row, so a display that is being made isn't cut off.
+                if idle >= 2 {
+                    update::install();
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn report_problem(&mut self, cx: &mut Context<Self>) {
         let go = native::confirm(
             t("Report a Problem", "报告问题"),

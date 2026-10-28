@@ -16,6 +16,9 @@
 #   team, which notarizes the DMG.
 # - TAP_DEPLOY_KEY: private half of a write deploy key of
 #   Fanzzzd/homebrew-agent-screen.
+# - SPARKLE_ED_PRIVATE_KEY: the EdDSA key Sparkle updates are signed with;
+#   its public half is SUPublicEDKey in apps/macos/resources/Info.plist
+#   (ADR 0012).
 name: Release
 
 on:
@@ -83,12 +86,15 @@ jobs:
           KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
           printf '%s\n' "$KEY_P8" > "$NOTARY_KEY"
           trap 'rm -f "$NOTARY_KEY"' EXIT
           apps/macos/scripts/release.sh
+          # Installed apps find updates through it.
+          test -s target/appcast.xml
 
       - name: Keep the DMG and cask
         uses: actions/upload-artifact@v4
@@ -97,6 +103,7 @@ jobs:
           path: |
             target/AgentScreen-*.dmg
             target/agent-screen.rb
+            target/appcast.xml
           if-no-files-found: error
 
       - name: Remove the signing keychain
@@ -132,6 +139,10 @@ jobs:
             # Finishing a release: the DMG on GitHub is the one users get,
             # and a rebuild never has the same bytes, so the cask follows it.
             echo "v$VERSION is already released"
+            # This build's appcast signs a rebuilt DMG, not the one on
+            # GitHub: keep the release's own.
+            gh release view "v$VERSION" --json assets --jq '.assets[].name' | grep -qx appcast.xml ||
+              echo "::warning::v$VERSION has no appcast.xml; installed apps won't see it"
             gh release download "v$VERSION" --pattern '*.dmg' --dir "$RUNNER_TEMP/check"
             sha="$(sha256sum "$RUNNER_TEMP/check/AgentScreen-$VERSION.dmg" | cut -d' ' -f1)"
             sed -i "s/^  sha256 \".*\"/  sha256 \"$sha\"/" target/agent-screen.rb
@@ -142,6 +153,8 @@ jobs:
             notes="$(gh release view "v$VERSION" --json body --jq .body)"
             printf '%s\n\n%s\n' "$notes" "$(cat .github/release-footer.md)" > "$RUNNER_TEMP/notes.md"
             gh release edit "v$VERSION" --title "Agent Screen $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            # The feed installed apps check, signed for this DMG.
+            gh release upload "v$VERSION" target/appcast.xml --clobber
           fi
           # What users download must be what the cask names.
           rm -rf "$RUNNER_TEMP/check"
