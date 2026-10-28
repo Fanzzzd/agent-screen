@@ -1384,7 +1384,12 @@ async fn handle_one(
             let task = shell
                 .update(cx, |shell, cx| shell.remind_where(pid, false, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "reminded": task.await }))
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
         }
         // Test hooks for updates: check the feed now without a window, and
         // what is waiting to be installed.
@@ -1404,7 +1409,12 @@ async fn handle_one(
             let task = shell
                 .update(cx, |shell, cx| shell.user_clicked(at, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "reminded": task.await }))
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
         }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.

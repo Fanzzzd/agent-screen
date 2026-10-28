@@ -7,7 +7,7 @@ use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
-use crate::model::DisplayId;
+use crate::model::{DisplayId, Rect, WindowTarget};
 use gpui::{
     AnimationExt, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
     MouseButton, ObjectFit, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
@@ -79,6 +79,8 @@ pub struct Peek {
     pub pending: usize,
     /// The card is sliding to a new width.
     pub slide: Option<Slide>,
+    /// Peek came down to say where an app's windows are.
+    pub remind: Option<Remind>,
     /// Displays that take the place of a pending tile: they show without
     /// growing in again.
     pub arrived: HashSet<DisplayId>,
@@ -94,6 +96,19 @@ pub struct Peek {
     /// How each tile looked when last drawn: a closed display's tile
     /// shrinks out as it was, not as a blank box.
     looks: HashMap<DisplayId, Look>,
+}
+
+/// Where an app the user went to has its windows: Peek came down to show
+/// it, and rings that display's tile and outlines the windows on it.
+#[derive(Clone)]
+pub struct Remind {
+    pub display: DisplayId,
+    pub app: String,
+    /// The app's windows on the display, with their frames in the
+    /// display's points.
+    pub windows: Vec<(WindowTarget, Rect)>,
+    /// Counts reminders, so each one's glow plays from its start.
+    pub seq: u64,
 }
 
 /// A tile's picture and words, kept for its shrinking out.
@@ -136,6 +151,7 @@ impl Peek {
             keys: false,
             pending: 0,
             slide: None,
+            remind: None,
             arrived: HashSet::new(),
             known: Vec::new(),
             following: false,
@@ -287,6 +303,7 @@ impl Render for Peek {
                 (display.width, display.height),
                 self.active == Some(*id),
                 self.focused == Some(index),
+                self.remind.as_ref().filter(|r| r.display == *id),
                 self.tile,
                 &theme,
                 &self.shell,
@@ -314,6 +331,7 @@ impl Render for Peek {
                     look.size,
                     false,
                     false,
+                    None,
                     self.tile,
                     &theme,
                     &WeakEntity::new_invalid(),
@@ -490,11 +508,22 @@ fn tile(
     size: (f64, f64),
     active: bool,
     focused: bool,
+    remind: Option<&Remind>,
     width: f32,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
 ) -> impl IntoElement {
     let group = format!("tile-{id}");
+    let status_line = match remind {
+        Some(remind) => div()
+            .text_size(px(10.5))
+            .text_color(theme.orange)
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .truncate()
+            .child(tf!("{} is here", "{}在这里", remind.app))
+            .into_any_element(),
+        None => status.line(&status.short, 10.5).into_any_element(),
+    };
     let picture = match frame {
         Some(frame) => surface(frame)
             .object_fit(ObjectFit::Contain)
@@ -552,6 +581,9 @@ fn tile(
                         .child(picture)
                         .child(theme::round_corners(9., theme.card))
                         .child(pointer::layer(id, pointer, size, theme.accent))
+                        .when_some(remind, |d, remind| {
+                            d.child(reminder(remind, size, fit, theme, shell))
+                        })
                         // Hover and "currently open" both show as a ring.
                         .child(
                             div()
@@ -646,7 +678,93 @@ fn tile(
                         .max_w_full()
                         .flex()
                         .justify_center()
-                        .child(status.line(&status.short, 10.5)),
+                        .child(status_line),
+                ),
+        )
+}
+
+/// The reminded app on a tile, `fit` big for a display `size` points: its
+/// windows outlined, a ring that glows twice, and Take Back.
+fn reminder(
+    remind: &Remind,
+    size: (f64, f64),
+    fit: (f32, f32),
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> impl IntoElement {
+    let scale = fit.0 / size.0 as f32;
+    let orange = theme.orange;
+    let outlines = remind.windows.iter().map(move |(_, frame)| {
+        div()
+            .absolute()
+            .left(px(frame.x as f32 * scale))
+            .top(px(frame.y as f32 * scale))
+            .w(px(frame.width as f32 * scale))
+            .h(px(frame.height as f32 * scale))
+            .rounded(px(3.))
+            .border(px(1.5))
+            .border_color(orange)
+    });
+    let targets: Vec<WindowTarget> = remind.windows.iter().map(|(t, _)| *t).collect();
+    let (display, shell) = (remind.display, shell.clone());
+    let seq = remind.seq;
+    div()
+        .absolute()
+        .inset_0()
+        .children(outlines)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(9.))
+                .border(px(2.))
+                .border_color(orange)
+                // A glow that swells twice, then stays as a ring.
+                .with_animation(
+                    gpui::ElementId::NamedInteger("remind".into(), seq),
+                    gpui::Animation::new(Duration::from_millis(2400)),
+                    move |d, t| {
+                        let swell = (t * 2. * std::f32::consts::TAU).cos() * -0.5 + 0.5;
+                        d.shadow(vec![gpui::BoxShadow {
+                            color: orange.opacity(0.85 * swell),
+                            offset: gpui::point(px(0.), px(0.)),
+                            blur_radius: px(4. + 10. * swell),
+                            spread_radius: px(2. * swell),
+                            inset: true,
+                        }])
+                    },
+                ),
+        )
+        .child(
+            div()
+                .id(gpui::ElementId::Name(format!("take-back-{display}").into()))
+                .role(Role::Button)
+                .aria_label(t("Take Back", "取回"))
+                .absolute()
+                .bottom(px(6.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let targets = targets.clone();
+                    tell(&shell, cx, move |shell, cx| {
+                        shell.take_back_reminded(display, targets, cx)
+                    });
+                })
+                .child(
+                    div()
+                        .px(px(10.))
+                        .py(px(3.))
+                        .rounded_full()
+                        .bg(gpui::black().opacity(0.6))
+                        .hover(|s| s.bg(gpui::black().opacity(0.8)))
+                        .text_size(px(11.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(gpui::white())
+                        .child(t("Take Back", "取回")),
                 ),
         )
 }

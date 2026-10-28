@@ -5,6 +5,9 @@
 /// settings or measured presentation latency. See docs/research/hover-click-intent.md.
 pub const OPEN_DELAY_MS: u64 = 300;
 pub const CLOSE_DELAY_MS: u64 = 500;
+/// A reminder of where an app's windows are keeps Peek up this long, or
+/// until the pointer, having come onto it, leaves.
+pub const REMIND_MS: u64 = 5000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timing {
@@ -185,6 +188,21 @@ impl Intent {
         self.cancel_press();
         self.apply_click(self.click_intent())
     }
+    /// Shown without the pointer, to say where an app's windows are: it
+    /// goes after `hold_ms` like a hover Peek the pointer left, unless the
+    /// pointer comes onto it. A Peek already up stays as it is.
+    pub fn remind(&mut self, now: u64, hold_ms: u64) -> Effect {
+        if self.stopped || self.mode != Mode::Closed {
+            return Effect::None;
+        }
+        self.cancel_press();
+        self.mode = Mode::Hover;
+        self.cancel_timer();
+        if !self.pointer.inside() {
+            self.schedule(Kind::Close, now, hold_ms);
+        }
+        Effect::Show
+    }
     pub fn pin(&mut self) -> Effect {
         if self.stopped {
             return Effect::None;
@@ -229,12 +247,44 @@ mod tests {
         icon: false,
         peek: false,
     };
+    const PEEK: Pointer = Pointer {
+        icon: false,
+        peek: true,
+    };
     fn hovered() -> Intent {
         let mut intent = Intent::default();
         intent.pointer(ICON, 0, Timing::default());
         let timer = intent.pending().unwrap();
         assert_eq!(intent.fire(timer, OPEN_DELAY_MS), Effect::Show);
         intent
+    }
+    #[test]
+    fn a_reminder_goes_by_itself_unless_the_pointer_comes() {
+        let mut intent = Intent::default();
+        assert_eq!(intent.remind(0, REMIND_MS), Effect::Show);
+        // The pointer moving elsewhere doesn't shorten it.
+        intent.pointer(OUT, 100, Timing::default());
+        let timer = intent.pending().unwrap();
+        assert_eq!(timer.due_ms, REMIND_MS);
+        assert_eq!(intent.fire(timer, REMIND_MS), Effect::Hide);
+
+        let mut intent = Intent::default();
+        intent.remind(0, REMIND_MS);
+        let early = intent.pending().unwrap();
+        intent.pointer(PEEK, 1000, Timing::default());
+        assert_eq!(intent.fire(early, REMIND_MS), Effect::None);
+        assert_eq!(intent.mode(), Mode::Hover);
+        intent.pointer(OUT, 6000, Timing::default());
+        let late = intent.pending().unwrap();
+        assert_eq!(intent.fire(late, 6000 + CLOSE_DELAY_MS), Effect::Hide);
+    }
+    #[test]
+    fn a_reminder_leaves_a_pinned_peek_alone() {
+        let mut intent = Intent::default();
+        intent.activate();
+        assert_eq!(intent.remind(0, REMIND_MS), Effect::None);
+        assert_eq!(intent.mode(), Mode::Pinned);
+        assert!(intent.pending().is_none());
     }
     #[test]
     fn hover_then_immediate_click_pins() {

@@ -191,6 +191,8 @@ pub struct Shell {
     over_icon: bool,
     over_card: bool,
     peek_generation: u64,
+    /// Counts Peek's reminders of where an app's windows are.
+    remind_seq: u64,
     watch_generation: u64,
     /// No hover Peek until then: the pointer is still on its way.
     settle_until: Option<Instant>,
@@ -394,6 +396,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             over_icon: false,
             over_card: false,
             peek_generation: 0,
+            remind_seq: 0,
             watch_generation: 0,
             settle_until: None,
             viewer_display: None,
@@ -1441,6 +1444,7 @@ impl Shell {
                 peek.keys = false;
                 peek.focused = None;
                 peek.slide = None;
+                peek.remind = None;
             });
         }
         // Gone from under the pointer, which GPUI won't report.
@@ -3215,21 +3219,115 @@ impl Shell {
                         .filter_map(|id| places.iter().find(|p| p.0 == *id))
                         .map(|p| p.2.clone())
                         .collect();
-                    Some((app, ids, labels))
+                    // The windows on the first of them, in its points.
+                    let first = ids.first().and_then(|id| places.iter().find(|p| p.0 == *id));
+                    let frames: Vec<(WindowTarget, Rect)> = first
+                        .map(|(_, area, _)| {
+                            windows
+                                .iter()
+                                .filter(|w| area.contains(w.bounds.mid()))
+                                .map(|w| {
+                                    let b = w.bounds;
+                                    (
+                                        w.target,
+                                        Rect::new(b.x - area.x, b.y - area.y, b.width, b.height),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((app, ids, labels, frames))
                 })
                 .await;
-            let Some((app, ids, places)) = found.filter(|(_, ids, _)| !ids.is_empty()) else {
+            let Some((app, ids, places, frames)) =
+                found.filter(|(_, ids, _, _)| !ids.is_empty())
+            else {
                 return Vec::new();
             };
-            let _ = this.update(cx, |shell, _| {
-                shell.reminded.insert(pid, Instant::now());
-            });
+            let shown = this
+                .update(cx, |shell, cx| {
+                    shell.reminded.insert(pid, Instant::now());
+                    shell.remind_in_peek(ids[0], app.clone(), frames, cx)
+                })
+                .unwrap_or(false);
             log::info!("{app} came to the front with its windows only on displays {ids:?}; telling the user");
+            if shown {
+                return ids;
+            }
+            // Peek can't come down, as before setup is done: a notification.
             let first = ids[0];
             notify::withdraw_where(first);
             notify::update(first, "", "", Some(Note::Elsewhere { app, places }));
             ids
         })
+    }
+
+    /// Peek comes down to show where `app`'s windows are: display `id`'s
+    /// tile glows, its windows outlined, and goes after a few seconds
+    /// unless the pointer comes onto it. False when Peek can't show.
+    fn remind_in_peek(
+        &mut self,
+        id: DisplayId,
+        app: String,
+        windows: Vec<(WindowTarget, Rect)>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.permissions.complete() || self.peek_intent.stopped() {
+            return false;
+        }
+        let Some((peek, _)) = self.peek.clone() else {
+            return false;
+        };
+        self.remind_seq += 1;
+        let remind = peek::Remind {
+            display: id,
+            app,
+            windows,
+            seq: self.remind_seq,
+        };
+        let _ = peek.update(cx, |peek, _, cx| {
+            peek.remind = Some(remind);
+            cx.notify();
+        });
+        let effect = self
+            .peek_intent
+            .remind(self.peek_now(), peek_intent::REMIND_MS);
+        self.apply_peek_effect(effect, cx);
+        self.schedule_peek_timer(cx);
+        if !self.peek_shown {
+            let _ = peek.update(cx, |peek, _, _| peek.remind = None);
+        }
+        self.peek_shown
+    }
+
+    /// What Peek shows of a reminder now, for scripts: the display, the
+    /// app and how many of its windows are outlined.
+    pub fn reminder(&self, cx: &App) -> Option<serde_json::Value> {
+        if !self.peek_shown {
+            return None;
+        }
+        let (peek, _) = self.peek.as_ref()?;
+        let peek = peek.read(cx).ok()?;
+        let remind = peek.remind.as_ref()?;
+        Some(serde_json::json!({
+            "displayId": remind.display,
+            "app": remind.app,
+            "windows": remind.windows.len(),
+        }))
+    }
+
+    /// Take Back on a reminder: the app's windows come to the user's
+    /// screen, and Peek goes.
+    pub fn take_back_reminded(
+        &mut self,
+        id: DisplayId,
+        targets: Vec<WindowTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        for target in targets {
+            self.take_back(target, id, cx);
+        }
+        self.hide_peek(cx);
     }
 
     /// A left click of the user's outside Agent Screen: on an app's Dock

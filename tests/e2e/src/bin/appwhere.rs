@@ -1,5 +1,6 @@
 //! An app the user brings to the front whose windows are all on an Agent
-//! Display gets a notification naming that display (#51). Field opens on
+//! Display brings Peek down, that display's tile ringed in orange with the
+//! app's windows outlined, and Peek goes by itself after 5 s (#51). Field opens on
 //! the user's screen, as their own app: brought to the front, nothing to
 //! say. The agent asks for its window and the test hands it over; brought
 //! to the front again, the reminder names the display, and once more right
@@ -15,7 +16,7 @@
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere
 //!
 //! Makes 1 display. Field's window shows on your screen until handed over,
-//! and a notification shows there.
+//! and the test instance's Peek comes down under its menu bar icon.
 
 use std::process::ExitCode;
 
@@ -57,13 +58,25 @@ fn quit_field() {
     sleep_ms(500);
 }
 
-/// The displays the reminder named when `pid` came to the front.
-fn activated(control: &Control, pid: u32) -> Result<Vec<u64>> {
-    let reply = control.call("debugActivated", json!({ "pid": pid }))?;
-    Ok(reply["reminded"]
+/// The displays the reminder named when `pid` came to the front, and
+/// what Peek shows of it.
+fn activated(control: &Control, pid: u32) -> Result<(Vec<u64>, Value)> {
+    reminded(control.call("debugActivated", json!({ "pid": pid }))?)
+}
+
+fn reminded(reply: Value) -> Result<(Vec<u64>, Value)> {
+    let ids = reply["reminded"]
         .as_array()
         .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok((ids, reply["peek"].clone()))
+}
+
+/// Peek shows a reminder for display `id`, with a window outlined.
+fn peek_rings(peek: &Value, id: u64) -> bool {
+    peek["displayId"].as_u64() == Some(id)
+        && peek["app"] == "Field"
+        && peek["windows"].as_u64().unwrap_or(0) >= 1
 }
 
 /// The middle of the Dock icon named `name`, in global points, as the
@@ -91,12 +104,8 @@ for list in (get(app, "AXChildren") as? [AXUIElement]) ?? [] {{
     (v.len() == 2).then(|| (v[0], v[1]))
 }
 
-fn clicked(control: &Control, at: (f64, f64)) -> Result<Vec<u64>> {
-    let reply = control.call("debugUserClick", json!({ "x": at.0, "y": at.1 }))?;
-    Ok(reply["reminded"]
-        .as_array()
-        .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
-        .unwrap_or_default())
+fn clicked(control: &Control, at: (f64, f64)) -> Result<(Vec<u64>, Value)> {
+    reminded(control.call("debugUserClick", json!({ "x": at.0, "y": at.1 }))?)
 }
 
 fn test() -> Result<()> {
@@ -117,11 +126,11 @@ fn test() -> Result<()> {
         );
         sleep_ms(2500);
         let pid = pid_of(&field_binary()).context("Field didn't start")?;
-        let named = activated(&control, pid)?;
+        let (named, peek) = activated(&control, pid)?;
         check(
             "an app with its window on the user's screen gets no reminder",
-            named.is_empty(),
-            format!("{named:?}"),
+            named.is_empty() && peek.is_null(),
+            format!("{named:?}, Peek {peek}"),
         );
 
         // Handed over to the agent's display.
@@ -136,13 +145,18 @@ fn test() -> Result<()> {
         let _ = answer.join();
         check("the window is handed over", !placed.is_error, placed.text());
         sleep_ms(800);
-        let named = activated(&control, pid)?;
+        let (named, peek) = activated(&control, pid)?;
         check(
             "brought to the front, the reminder names the display its window is on",
             named == vec![id],
             format!("{named:?}, display {id}"),
         );
-        let again = activated(&control, pid)?;
+        check(
+            "Peek comes down with that display's tile ringed and Field's window outlined",
+            peek_rings(&peek, id),
+            peek.to_string(),
+        );
+        let (again, _) = activated(&control, pid)?;
         check(
             "right after, it stays quiet",
             again.is_empty(),
@@ -153,18 +167,25 @@ fn test() -> Result<()> {
         // nothing, and the user still means to see it.
         sleep_ms(5500);
         let icon = dock_icon("Field").context("no Dock icon for Field")?;
-        let named = clicked(&control, icon)?;
+        let (named, peek) = clicked(&control, icon)?;
         check(
             "a click on its Dock icon names the display, though nothing comes to the front",
             named == vec![id],
             format!("{named:?}, display {id}, icon at {icon:?}"),
         );
-        let elsewhere = clicked(&control, (icon.0, icon.1 - 300.0))?;
+        check(
+            "and brings Peek down at its tile",
+            peek_rings(&peek, id),
+            peek.to_string(),
+        );
+        sleep_ms(6000);
+        let (elsewhere, peek) = clicked(&control, (icon.0, icon.1 - 300.0))?;
         check(
             "a click off the Dock says nothing",
             elsewhere.is_empty(),
             format!("{elsewhere:?}"),
         );
+        check("Peek has gone by itself", peek.is_null(), peek.to_string());
 
         // A Field the agent started, bringing itself to the front.
         let launched = client.call(
@@ -185,11 +206,11 @@ fn test() -> Result<()> {
                     .find(|&p| p != pid)
             })
             .context("the agent's Field didn't start")?;
-        let named = activated(&control, started)?;
+        let (named, peek) = activated(&control, started)?;
         check(
             "an app the agent started gets no reminder when it brings itself to the front",
-            named.is_empty(),
-            format!("{named:?}"),
+            named.is_empty() && peek.is_null(),
+            format!("{named:?}, Peek {peek}"),
         );
         Ok(())
     })();
