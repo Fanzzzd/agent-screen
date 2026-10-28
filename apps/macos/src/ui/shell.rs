@@ -211,6 +211,9 @@ pub struct Shell {
     resting: Option<NSRect>,
 
     known: HashSet<DisplayId>,
+    /// Where the icon last stood on the user's screen, for while macOS
+    /// draws it in an Agent Display's menu bar.
+    icon_home: Cell<Option<NSRect>>,
     /// Tests: an Agent Display that stands in for the user's screen, so
     /// panels open where the user can't see them.
     stage: Option<DisplayId>,
@@ -407,6 +410,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer_generation: 0,
             resting: None,
             known: HashSet::new(),
+            icon_home: Cell::new(None),
             stage: None,
             drag: None,
             drag_from: None,
@@ -1265,16 +1269,43 @@ impl Shell {
 
     fn icon_rect(&self) -> Option<NSRect> {
         let icon = self.icon.frame()?;
-        self.user_screens()
+        let shown = self
+            .user_screens()
             .iter()
-            .any(|(frame, _)| intersects(*frame, icon))
-            .then_some(icon)
+            .any(|(frame, _)| intersects(*frame, icon));
+        if shown {
+            self.icon_home.set(Some(icon));
+        }
+        shown.then_some(icon)
+    }
+
+    /// Where the icon stands on the user's screen while an app on an Agent
+    /// Display is frontmost, and macOS draws it in that display's menu bar:
+    /// where it last stood on theirs, or as far from the right edge of
+    /// their main screen as it is from that display's.
+    fn icon_away(&self) -> Option<NSRect> {
+        let icon = self.icon.frame()?;
+        let (_, there, _) = native::screens()
+            .into_iter()
+            .find(|(id, frame, _)| self.known.contains(id) && intersects(*frame, icon))?;
+        if let Some(home) = self.icon_home.get() {
+            return Some(home);
+        }
+        let (frame, _) = self.user_screens().first().copied()?;
+        let right = there.origin.x + there.size.width - icon.origin.x;
+        let top = there.origin.y + there.size.height - icon.origin.y;
+        Some(rect(
+            frame.origin.x + frame.size.width - right,
+            frame.origin.y + frame.size.height - top,
+            icon.size.width,
+            icon.size.height,
+        ))
     }
 
     /// Where the panels drop from: the icon, or the top center of the
     /// user's screen under the pointer.
     fn anchor(&self) -> NSRect {
-        if let Some(icon) = self.icon_rect() {
+        if let Some(icon) = self.icon_rect().or_else(|| self.icon_away()) {
             return icon;
         }
         let screens = self.user_screens();
