@@ -95,7 +95,6 @@ pub enum MenuAction {
     OpenAeroSpaceConfig,
     IgnoreInAeroSpace,
     ConnectAgents,
-    AddBrowserExtension,
     ChooseWallpaper,
     DefaultWallpaper,
     Quit,

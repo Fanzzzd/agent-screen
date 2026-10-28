@@ -77,7 +77,7 @@ fn process_ids() -> Vec<i32> {
 }
 
 /// The executable a process runs.
-pub fn process_path(pid: i32) -> Option<PathBuf> {
+fn process_path(pid: i32) -> Option<PathBuf> {
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length =
         unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };

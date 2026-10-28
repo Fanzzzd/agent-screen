@@ -5,7 +5,6 @@ pub mod alerts;
 pub mod app;
 pub mod assist;
 pub mod ax;
-pub mod browser;
 pub mod capture;
 pub mod catch;
 pub mod cg;

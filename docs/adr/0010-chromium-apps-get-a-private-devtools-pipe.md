@@ -29,7 +29,7 @@ A text selection by drag in a page without a pipe used to half-work and is now r
 
 ## Consequences
 
-- Drags work in the pages of Chromium apps `launch_app` started. WebKit apps, Chrome on its default profile, apps the user started and apps that strip the switch have no conflict-free way to drag in a page through a pipe. ADR 0012 adds one for the browsers the user runs: Agent Screen's extension.
+- Drags work in the pages of Chromium apps `launch_app` started, and only there. WebKit apps, Chrome on its default profile, apps the user started and apps that strip the switch have no conflict-free way to drag in a page.
 - A drag through the pipe can't leave the browser. An HTML5 drag drops inside the app's own pages, never into another app.
 - `Input.insertText` could type whole strings, CJK included, but it sends no key events, and pages that act on keys would behave differently. Typing keeps the posted keys.
 - Agent Screen now parents and reaps these apps. `open` gave them launchd as parent.
