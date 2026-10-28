@@ -4,8 +4,11 @@
 //! say. The agent asks for its window and the test hands it over; brought
 //! to the front again, the reminder names the display, and once more right
 //! after, it stays quiet. A Field the agent started brings itself to the
-//! front with nobody to tell. `debugActivated` stands in for the user's
-//! click in the Dock.
+//! front with nobody to tell. `debugActivated` stands in for the app
+//! coming to the front. A click on Field's Dock icon, which the user makes
+//! while Field is already the front app and so activates nothing, names
+//! the display too: `debugUserClick` at the icon's real place stands in
+//! for the global monitor's report of the click.
 //!
 //! Needs Field.app, which `cargo e2e ime` makes.
 //!
@@ -17,8 +20,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, McpClient, Value, check, instance, json, out, pid_of, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app,
+    Control, McpClient, Value, allow_on_your_screen, check, instance, json, out, pid_of, run,
+    sh_lenient, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -63,13 +66,51 @@ fn activated(control: &Control, pid: u32) -> Result<Vec<u64>> {
         .unwrap_or_default())
 }
 
+/// The middle of the Dock icon named `name`, in global points, as the
+/// Dock's accessibility tree says.
+fn dock_icon(name: &str) -> Option<(f64, f64)> {
+    let script = format!(
+        r#"import AppKit
+let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first!
+let app = AXUIElementCreateApplication(dock.processIdentifier)
+func get(_ e: AXUIElement, _ a: String) -> AnyObject? {{ var v: AnyObject?; AXUIElementCopyAttributeValue(e, a as CFString, &v); return v }}
+for list in (get(app, "AXChildren") as? [AXUIElement]) ?? [] {{
+  for item in (get(list, "AXChildren") as? [AXUIElement]) ?? [] where (get(item, "AXTitle") as? String) == "{name}" {{
+    var p = CGPoint.zero; var s = CGSize.zero
+    AXValueGetValue(get(item, "AXPosition") as! AXValue, .cgPoint, &p)
+    AXValueGetValue(get(item, "AXSize") as! AXValue, .cgSize, &s)
+    print(p.x + s.width / 2, p.y + s.height / 2); exit(0)
+  }}
+}}"#
+    );
+    let out = sh_lenient("/usr/bin/swift", &["-e", &script]);
+    let v: Vec<f64> = out
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    (v.len() == 2).then(|| (v[0], v[1]))
+}
+
+fn clicked(control: &Control, at: (f64, f64)) -> Result<Vec<u64>> {
+    let reply = control.call("debugUserClick", json!({ "x": at.0, "y": at.1 }))?;
+    Ok(reply["reminded"]
+        .as_array()
+        .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default())
+}
+
 fn test() -> Result<()> {
     let control = Control::connect()?;
     let client = McpClient::start(&[])?;
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
     let result = (|| -> Result<()> {
-        // The user's own Field, on their screen.
+        // The user's own Field, on their screen until it is handed over.
+        allow_on_your_screen(
+            "Field",
+            8000,
+            "the script opens Field there as the user's app, then hands it over",
+        );
         sh_lenient(
             "/usr/bin/open",
             &["-g", "-n", out().join("Field.app").to_str().unwrap()],
@@ -106,6 +147,23 @@ fn test() -> Result<()> {
             "right after, it stays quiet",
             again.is_empty(),
             format!("{again:?}"),
+        );
+
+        // Field is the front app now: a click on its Dock icon activates
+        // nothing, and the user still means to see it.
+        sleep_ms(5500);
+        let icon = dock_icon("Field").context("no Dock icon for Field")?;
+        let named = clicked(&control, icon)?;
+        check(
+            "a click on its Dock icon names the display, though nothing comes to the front",
+            named == vec![id],
+            format!("{named:?}, display {id}, icon at {icon:?}"),
+        );
+        let elsewhere = clicked(&control, (icon.0, icon.1 - 300.0))?;
+        check(
+            "a click off the Dock says nothing",
+            elsewhere.is_empty(),
+            format!("{elsewhere:?}"),
         );
 
         // A Field the agent started, bringing itself to the front.

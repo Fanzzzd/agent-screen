@@ -57,6 +57,12 @@ pub enum Native {
     Menu(MenuAction),
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
+    /// A left click of the user's at a global point (top-left origin),
+    /// outside Agent Screen: maybe on the Dock.
+    UserClicked {
+        x: f64,
+        y: f64,
+    },
     /// App `pid` became the front app, after `previous`.
     Activated {
         pid: i32,
@@ -622,11 +628,20 @@ pub fn watch_mouse() {
     // windows from an agent's. Events posted to a pid never reach these.
     let user = RcBlock::new(|event: NonNull<NSEvent>| {
         use super::catch::Towards;
-        let towards = if unsafe { event.as_ref() }.r#type() == NSEventType::KeyDown {
+        let kind = unsafe { event.as_ref() }.r#type();
+        let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
             return;
         } else {
             let mtm = MainThreadMarker::new().expect("monitors run on the main thread");
+            if kind == NSEventType::LeftMouseDown {
+                let at = NSEvent::mouseLocation();
+                let top = super::cg::display_bounds(super::cg::main_display()).height;
+                send(Native::UserClicked {
+                    x: at.x,
+                    y: top - at.y,
+                });
+            }
             let number = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(
                 NSEvent::mouseLocation(),
                 0,

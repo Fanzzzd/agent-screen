@@ -427,3 +427,23 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
     })
 }
+
+/// The Dock's pid.
+pub fn dock_pid() -> Option<i32> {
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
+        "com.apple.dock",
+    ))
+    .firstObject()
+    .map(|app| app.processIdentifier())
+}
+
+/// The running apps named `name`, as the Dock and the app switcher name
+/// them.
+pub fn pids_named(name: &str) -> Vec<i32> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .iter()
+        .filter(|app| app.localizedName().is_some_and(|n| n.to_string() == name))
+        .map(|app| app.processIdentifier())
+        .collect()
+}

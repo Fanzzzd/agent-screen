@@ -1226,6 +1226,36 @@ fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
     (values.len() == NAMES.len()).then_some(values)
 }
 
+/// The app whose Dock icon is at the global point `at`: its name, as the
+/// Dock shows it. None off the Dock and for its other items, such as
+/// folders and the Trash.
+pub fn dock_app_at(dock: i32, at: (f64, f64)) -> Option<String> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(dock).copy_element_at_position(
+            at.0 as f32,
+            at.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    if error != AXError::Success {
+        return None;
+    }
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    // The icon, or a part of it, such as its running indicator.
+    for _ in 0..4 {
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXDockItem") {
+            return (string_attribute(&element, "AXSubrole").as_deref()
+                == Some("AXApplicationDockItem"))
+            .then(|| string_attribute(&element, "AXTitle"))
+            .flatten();
+        }
+        element = element_attribute(&element, "AXParent")?;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

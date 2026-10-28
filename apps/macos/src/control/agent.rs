@@ -1382,7 +1382,17 @@ async fn handle_one(
             let pid = p.int("pid").unwrap_or(0) as i32;
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             let task = shell
-                .update(cx, |shell, cx| shell.remind_where(pid, cx))
+                .update(cx, |shell, cx| shell.remind_where(pid, false, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "reminded": task.await }))
+        }
+        // Test hook: the user's left click at a global point, as the global
+        // monitor reports it, such as on an app's Dock icon.
+        "debugUserClick" if debug_methods() => {
+            let at = (p.require("x")?, p.require("y")?);
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let task = shell
+                .update(cx, |shell, cx| shell.user_clicked(at, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({ "reminded": task.await }))
         }

@@ -726,6 +726,7 @@ impl Shell {
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::LauncherTyped => self.launcher_typed(cx),
             Native::Activated { pid, previous } => self.activated(pid, previous, cx),
+            Native::UserClicked { x, y } => self.user_clicked((x, y), cx).detach(),
             Native::MenuBarClick { display, x } => self.menu_bar(display, x, cx),
             Native::ScreensChanged => {
                 self.core.update(cx, |core, cx| {
@@ -3069,8 +3070,17 @@ impl Shell {
     /// Agent Displays, where they can't see it: a notification names those
     /// displays, and a click on it opens the first in the Viewer (#51). At
     /// most once a minute for an app. The displays named.
-    pub fn remind_where(&mut self, pid: i32, cx: &mut Context<Self>) -> gpui::Task<Vec<DisplayId>> {
-        const AGAIN: Duration = Duration::from_secs(60);
+    ///
+    /// `docked`: the user clicked the app's Dock icon, which says they want
+    /// it even when it was already the front app and nothing activated
+    /// (#51): told again after 5 s.
+    pub fn remind_where(
+        &mut self,
+        pid: i32,
+        docked: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Vec<DisplayId>> {
+        let again = Duration::from_secs(if docked { 5 } else { 60 });
         let core = self.core.read(cx);
         let places: Vec<(DisplayId, Rect, String)> = core
             .displays
@@ -3084,7 +3094,7 @@ impl Shell {
         let recent = self
             .reminded
             .get(&pid)
-            .is_some_and(|at| at.elapsed() < AGAIN);
+            .is_some_and(|at| at.elapsed() < again);
         if places.is_empty() || recent || pid == std::process::id() as i32 {
             return gpui::Task::ready(Vec::new());
         }
@@ -3092,7 +3102,7 @@ impl Shell {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    if agents && !crate::mac::catch::user_acted_recently(pid) {
+                    if agents && !docked && !crate::mac::catch::user_acted_recently(pid) {
                         return None;
                     }
                     // Windows on screen: an app keeps windows it never
@@ -3139,8 +3149,41 @@ impl Shell {
         })
     }
 
+    /// A left click of the user's outside Agent Screen: on an app's Dock
+    /// icon, where its windows are. The app may already be the front app,
+    /// so no activation says so.
+    pub fn user_clicked(
+        &mut self,
+        at: (f64, f64),
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Vec<DisplayId>> {
+        if self.core.read(cx).displays.list.is_empty() {
+            return gpui::Task::ready(Vec::new());
+        }
+        cx.spawn(async move |this, cx| {
+            let pids = cx
+                .background_executor()
+                .spawn(async move {
+                    let dock = crate::mac::app::dock_pid()?;
+                    let name = crate::mac::ax::dock_app_at(dock, at)?;
+                    Some(crate::mac::app::pids_named(&name))
+                })
+                .await
+                .unwrap_or_default();
+            let mut told = Vec::new();
+            for pid in pids {
+                let Ok(task) = this.update(cx, |shell, cx| shell.remind_where(pid, true, cx))
+                else {
+                    break;
+                };
+                told.extend(task.await);
+            }
+            told
+        })
+    }
+
     fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
-        self.remind_where(pid, cx).detach();
+        self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
             return;
