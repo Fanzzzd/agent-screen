@@ -3,7 +3,7 @@
 
 use super::pointer;
 use super::shell::{Shell, tell};
-use super::status::{Kind, Status};
+use super::status::{AccessLine, Kind, Status};
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
@@ -176,6 +176,8 @@ impl Render for Viewer {
         } else {
             Vec::new()
         };
+        let access = AccessLine::of(display);
+        let instruction = display.access.last.as_ref().map(|i| i.text.clone());
         let size = (display.width, display.height);
         let pointer = (!display.takeover && !display.is_ended())
             .then_some(display.pointer)
@@ -243,6 +245,9 @@ impl Render for Viewer {
                     move |header, t| header.opacity(if morphing { 0. } else { t }),
                 )
             })
+            .when_some(access, |d, access| {
+                d.child(access_view(id, access, instruction, &theme, &self.shell))
+            })
             .when(!steps.is_empty(), |d| d.child(steps_view(&steps, &theme)))
             .child(
                 div()
@@ -289,6 +294,70 @@ pub fn recording_badge(theme: &Theme) -> gpui::Div {
         .text_color(theme.red)
         .child(div().size(px(7.)).rounded_full().bg(theme.red))
         .child(t("Recording", "录制中"))
+}
+
+/// The session's Window Access under the header: what the agent may take
+/// of the user's windows, whether a Takeover pauses it, and Revoke. The
+/// words the agent relayed show on hover.
+fn access_view(
+    id: DisplayId,
+    access: AccessLine,
+    instruction: Option<String>,
+    theme: &Theme,
+    shell: &WeakEntity<Shell>,
+) -> gpui::Div {
+    let shell = shell.clone();
+    let color = if access.paused {
+        theme.secondary
+    } else {
+        theme.orange
+    };
+    let hint = match instruction {
+        Some(words) => tf!(
+            "{}\nThe agent relayed: “{words}”",
+            "{}\nagent 转达：“{words}”",
+            access.long
+        ),
+        None => access.long.clone(),
+    };
+    div()
+        .flex_none()
+        // In line with the header's title.
+        .pl(px(16.))
+        .pr(px(12.))
+        .pb(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .id("access")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .text_size(px(12.))
+                .text_color(color)
+                .tooltip(move |_, cx| super::shell::hint(hint.clone(), cx))
+                .tooltip_show_delay(super::shell::HINT_DELAY)
+                .child(
+                    svg()
+                        .path("icons/give.svg")
+                        .flex_none()
+                        .size(px(12.))
+                        .text_color(color),
+                )
+                .child(div().min_w_0().truncate().child(access.long)),
+        )
+        .child(button(
+            "revoke-access",
+            t("Revoke", "收回授权").to_string(),
+            None,
+            None,
+            theme,
+            move |cx| tell(&shell, cx, move |shell, cx| shell.revoke_access(id, cx)),
+        ))
 }
 
 /// The steps of the Help Request the user is answering, numbered, between

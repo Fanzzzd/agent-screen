@@ -2,7 +2,7 @@
 
 use super::pointer;
 use super::shell::{Shell, tell};
-use super::status::Status;
+use super::status::{AccessLine, Status};
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
@@ -297,6 +297,7 @@ impl Render for Peek {
                 *id,
                 display.label(),
                 crate::mac::recording::is_recording(*id),
+                AccessLine::of(display),
                 status,
                 frame,
                 pointer,
@@ -325,6 +326,7 @@ impl Render for Peek {
                     *id,
                     look.label,
                     false,
+                    None,
                     look.status,
                     look.frame,
                     None,
@@ -502,6 +504,7 @@ fn tile(
     id: DisplayId,
     label: String,
     recording: bool,
+    access: Option<AccessLine>,
     status: Status,
     frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
     pointer: Option<crate::model::AgentPointer>,
@@ -538,6 +541,7 @@ fn tile(
     let fit = (size.0 as f32 * fit, size.1 as f32 * fit);
     let select = shell.clone();
     let dismiss = shell.clone();
+    let revoke = shell.clone();
     // Open in the Viewer: a full ring. Reached with the arrow keys: a
     // fainter one.
     let ring = if active {
@@ -583,6 +587,10 @@ fn tile(
                         .child(pointer::layer(id, pointer, size, theme.accent))
                         .when_some(remind, |d, remind| {
                             d.child(reminder(remind, size, fit, theme, shell))
+                        })
+                        // Keep the reminder's Take Back button visible.
+                        .when_some(access.filter(|_| remind.is_none()), |d, access| {
+                            d.child(access_pill(id, access, theme, revoke))
                         })
                         // Hover and "currently open" both show as a ring.
                         .child(
@@ -679,6 +687,73 @@ fn tile(
                         .flex()
                         .justify_center()
                         .child(status_line),
+                ),
+        )
+}
+
+/// The session's Window Access on its tile: a pill at the bottom-left of
+/// the picture, with the scope on hover and × to revoke it.
+fn access_pill(
+    id: DisplayId,
+    access: AccessLine,
+    theme: &Theme,
+    shell: WeakEntity<Shell>,
+) -> impl IntoElement {
+    let color = if access.paused {
+        gpui::white().opacity(0.75)
+    } else {
+        theme.orange
+    };
+    let hint = access.long.clone();
+    div()
+        .id(gpui::ElementId::Name(format!("access-{id}").into()))
+        .absolute()
+        .left(px(5.))
+        .bottom(px(5.))
+        .max_w(px(180.))
+        .h(px(18.))
+        .pl(px(6.))
+        .pr(px(2.))
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .rounded_full()
+        .bg(gpui::black().opacity(0.62))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color)
+        .tooltip(move |_, cx| super::shell::hint(hint.clone(), cx))
+        .tooltip_show_delay(super::shell::HINT_DELAY)
+        .child(
+            svg()
+                .path("icons/give.svg")
+                .flex_none()
+                .size(px(10.))
+                .text_color(color),
+        )
+        .child(div().min_w_0().truncate().child(access.short))
+        .child(
+            div()
+                .id(gpui::ElementId::Name(format!("revoke-{id}").into()))
+                .role(Role::Button)
+                .aria_label(t("Revoke Window Access", "收回窗口授权"))
+                .flex_none()
+                .size(px(14.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .hover(|s| s.bg(gpui::white().opacity(0.2)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    tell(&shell, cx, move |shell, cx| shell.revoke_access(id, cx));
+                })
+                .child(
+                    svg()
+                        .path("icons/close.svg")
+                        .size(px(7.))
+                        .text_color(gpui::white()),
                 ),
         )
 }

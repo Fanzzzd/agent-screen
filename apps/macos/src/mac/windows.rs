@@ -294,6 +294,157 @@ pub fn held(target: WindowTarget, display: DisplayId, screen_name: Option<&str>)
     }
 }
 
+/// What Agent Screen knows of windows the user took back, and a lane per
+/// window for the OS calls that move it. A move for the agent, a frame
+/// write and a move home of one window take its lane in turn, so one
+/// decided before a Take Back can't put the window on the display again
+/// after it went home. The state lock is held only to read or change the
+/// state, never across an OS call: the main thread reads it, and windows
+/// never wait for each other.
+#[derive(Default)]
+pub struct Lanes {
+    state: std::sync::Mutex<Returns>,
+    lanes: std::sync::Mutex<std::collections::HashMap<u32, std::sync::Arc<std::sync::Mutex<()>>>>,
+}
+
+#[derive(Default)]
+struct Returns {
+    /// Taken back and not handed over since.
+    returned: std::collections::BTreeSet<u32>,
+    /// Moves home so far, by window.
+    count: std::collections::HashMap<u32, u64>,
+}
+
+impl Lanes {
+    fn state(&self) -> std::sync::MutexGuard<'_, Returns> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run `f` in the window's lane, after the window's earlier OS calls.
+    fn in_lane<T>(&self, window: u32, f: impl FnOnce() -> T) -> T {
+        let lane = self
+            .lanes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(window)
+            .or_default()
+            .clone();
+        let held = lane.lock().unwrap_or_else(|e| e.into_inner());
+        let out = f();
+        drop(held);
+        // Nobody else waits on it: let it go.
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        if lanes
+            .get(&window)
+            .is_some_and(|l| std::sync::Arc::strong_count(l) == 2)
+        {
+            lanes.remove(&window);
+        }
+        out
+    }
+
+    /// How many times a window went home so far. Never waits for an OS call.
+    pub fn times_returned(&self, window: u32) -> u64 {
+        self.state().count.get(&window).copied().unwrap_or(0)
+    }
+
+    /// Move for the agent, unless the user took the window back.
+    pub fn agent_move<T>(
+        &self,
+        window: u32,
+        f: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.in_lane(window, || {
+            if self.state().returned.contains(&window) {
+                return Err("the user took the window back".into());
+            }
+            f()
+        })
+    }
+
+    /// Mark the window as the user's, then send it home with `home`.
+    pub fn home(&self, window: u32, home: impl FnOnce()) {
+        self.in_lane(window, || {
+            {
+                let mut state = self.state();
+                state.returned.insert(window);
+                *state.count.entry(window).or_default() += 1;
+            }
+            home()
+        })
+    }
+
+    /// Run `f`, for a hand-over or a frame write decided when the window had
+    /// gone home `seen` times, unless it went home again since. With
+    /// `handed_over`, the window is the agent's to move from now on.
+    pub fn unless_returned_since<T>(
+        &self,
+        window: u32,
+        seen: u64,
+        handed_over: bool,
+        f: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.in_lane(window, || {
+            if self.state().count.get(&window).copied().unwrap_or(0) != seen {
+                return Err("the user took the window back meanwhile".into());
+            }
+            let result = f()?;
+            if handed_over {
+                self.state().returned.remove(&window);
+            }
+            Ok(result)
+        })
+    }
+}
+
+static LANES: std::sync::LazyLock<Lanes> = std::sync::LazyLock::new(Lanes::default);
+
+/// Move a window onto a display for the agent, unless the user took it
+/// back. Blocking.
+pub fn place_for_agent(
+    target: WindowTarget,
+    display: DisplayId,
+    screen_name: Option<&str>,
+) -> Result<(), String> {
+    LANES.agent_move(target.window_id, || place(target, display, screen_name))
+}
+
+/// Mark a window as the user's, after any move for the agent in flight,
+/// then send it home with `home`, before any later one. Blocking.
+pub fn return_home(window: u32, home: impl FnOnce()) {
+    LANES.home(window, home)
+}
+
+/// How many times a window went home so far: read on the main thread when
+/// a move or frame write is decided. Doesn't wait for any OS call.
+pub fn times_returned(window: u32) -> u64 {
+    LANES.times_returned(window)
+}
+
+/// Move a window handed over onto a display, unless it went home again
+/// since the hand-over was decided (`seen` from `times_returned`). It is
+/// the agent's to keep there from now on. Blocking.
+pub fn place_handed_over(
+    target: WindowTarget,
+    display: DisplayId,
+    screen_name: Option<&str>,
+    seen: u64,
+) -> Result<(), String> {
+    LANES.unless_returned_since(target.window_id, seen, true, || {
+        place(target, display, screen_name)
+    })
+}
+
+/// Write a window's frame for the agent, unless it went home since `seen`.
+/// Blocking.
+pub fn write_frame_unless_returned<T>(
+    window: u32,
+    seen: u64,
+    write: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    LANES.unless_returned_since(window, seen, false, write)
+}
+
 pub fn place(
     target: WindowTarget,
     display: DisplayId,
@@ -314,4 +465,124 @@ pub fn place(
     }
     ax::move_into(target, cg::display_bounds(display))
         .map_err(|e| format!("Accessibility refused: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Runs `f` on a thread; whether it finished within 300 ms.
+    fn finishes(f: impl FnOnce() + Send + 'static) -> bool {
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(Duration::from_millis(300)).is_ok()
+    }
+
+    #[test]
+    fn a_stuck_move_home_blocks_neither_reads_nor_other_windows() {
+        let lanes = std::sync::Arc::new(Lanes::default());
+        let (release, held) = mpsc::channel::<()>();
+        let (entered, inside) = mpsc::channel::<()>();
+        let stuck = std::thread::spawn({
+            let lanes = lanes.clone();
+            move || {
+                lanes.home(1, move || {
+                    let _ = entered.send(());
+                    // An app that doesn't answer Accessibility.
+                    let _ = held.recv_timeout(Duration::from_secs(5));
+                })
+            }
+        });
+        inside.recv_timeout(Duration::from_secs(1)).unwrap();
+        let read = finishes({
+            let lanes = lanes.clone();
+            move || {
+                lanes.times_returned(1);
+            }
+        });
+        let other_home = finishes({
+            let lanes = lanes.clone();
+            move || lanes.home(2, || {})
+        });
+        let other_move = finishes({
+            let lanes = lanes.clone();
+            move || {
+                let _ = lanes.agent_move(3, || Ok(()));
+                let _ = lanes.unless_returned_since(4, 0, true, || Ok(()));
+            }
+        });
+        // The same window waits its turn.
+        let same = finishes({
+            let lanes = lanes.clone();
+            move || {
+                let _ = lanes.agent_move(1, || Ok(()));
+            }
+        });
+        let _ = release.send(());
+        stuck.join().unwrap();
+        assert!(read, "the main thread's read waited for an OS call");
+        assert!(
+            other_home && other_move,
+            "another window waited for this one's OS call"
+        );
+        assert!(!same, "the same window's move ran beside its move home");
+        // Once home, the agent's move is refused.
+        assert!(lanes.agent_move(1, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn a_move_decided_before_a_take_back_stays_home() {
+        let lanes = Lanes::default();
+        let seen = lanes.times_returned(5);
+        lanes.home(5, || {});
+        let mut moved = false;
+        assert!(
+            lanes
+                .unless_returned_since(5, seen, true, || {
+                    moved = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!moved);
+        // Handed over again after it: the agent's to move once more.
+        let now = lanes.times_returned(5);
+        assert!(lanes.unless_returned_since(5, now, true, || Ok(())).is_ok());
+        assert!(lanes.agent_move(5, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn a_failed_handover_keeps_the_window_returned() {
+        let lanes = Lanes::default();
+        lanes.home(6, || {});
+        let seen = lanes.times_returned(6);
+        assert!(
+            lanes
+                .unless_returned_since(6, seen, true, || {
+                    Err::<(), _>("the app refused the move".into())
+                })
+                .is_err()
+        );
+        assert!(lanes.agent_move(6, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn a_frame_write_after_the_window_went_home_doesnt_run() {
+        let seen = times_returned(900_003);
+        return_home(900_003, || {});
+        let mut wrote = false;
+        let result = write_frame_unless_returned(900_003, seen, || {
+            wrote = true;
+            Ok(())
+        });
+        assert!(!wrote && result.is_err(), "the writer ran after Take Back");
+        // Decided after the return, it writes.
+        let now = times_returned(900_003);
+        assert!(write_frame_unless_returned(900_003, now, || Ok(())).is_ok());
+    }
 }

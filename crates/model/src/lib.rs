@@ -3,6 +3,7 @@
 //! the DevTools pipe's drags.
 //! Nothing here touches the OS.
 
+pub mod access;
 pub mod alerts;
 pub mod arrangement;
 pub mod budget;

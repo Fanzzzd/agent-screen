@@ -17,14 +17,16 @@ use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
-use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Origin, Rect, WindowTarget};
+use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Rect, WindowTarget};
+use agent_screen_model::access::Authority;
 use agent_screen_model::peek as peek_intent;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
     AnyView, App, AppContext, AsyncApp, Bounds, Context, Entity, IntoElement, ParentElement,
-    Render, SharedString, Styled, TitlebarOptions, WeakEntity, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, px, size,
+    Render, SharedString, Styled, Task, TitlebarOptions, WeakEntity, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point,
+    px, size,
 };
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -1015,15 +1017,40 @@ impl Shell {
     /// the Takeover. False when there was no request.
     pub fn answer_control(&mut self, id: DisplayId, give: bool, cx: &mut Context<Self>) -> bool {
         self.core.update(cx, |core, cx| {
-            let answered = core.displays.answer_control(id, give);
-            if answered && give {
-                core.stop_agent_input(id, false);
+            let open = core
+                .displays
+                .get(id)
+                .is_some_and(|d| d.control_request.is_some());
+            if !open {
+                return false;
             }
-            if answered {
+            if give {
+                // The same hand-back as the Viewer's button and chat; it
+                // clears the request and tells its waiter.
+                core.hand_back(id, cx);
+            } else {
+                core.displays.answer_control(id, false);
                 cx.notify();
             }
-            answered
+            true
         })
+    }
+
+    /// The user's own revoke, from the Viewer or Peek: the agent takes no
+    /// more of their windows without asking. Nothing moves.
+    pub fn revoke_access(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        self.core.update(cx, |core, cx| {
+            if let Some(d) = core.displays.get_mut(id)
+                && d.access.revoke(None).unwrap_or(false)
+            {
+                log::info!("display {id}: the user revoked window access");
+                crate::mac::recording::note(
+                    id,
+                    serde_json::json!({ "action": "windowAccess", "revoke": "user" }),
+                );
+                cx.notify();
+            }
+        });
     }
 
     /// A click on the Help Card's picture opens the display, as a
@@ -1838,12 +1865,7 @@ impl Shell {
 
     /// The user's first input takes the display over from its agent.
     pub fn user_input(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        self.core.update(cx, |core, cx| {
-            if core.displays.begin_takeover(id) {
-                core.stop_agent_input(id, true);
-                cx.notify();
-            }
-        });
+        self.core.update(cx, |core, cx| core.take_over(id, cx));
     }
 
     /// The header's main button: step in, hand back, or review.
@@ -1860,12 +1882,7 @@ impl Shell {
         if ended {
             self.dismiss(id, cx);
         } else if takeover {
-            self.core.update(cx, |core, cx| {
-                if core.displays.end_takeover(id) {
-                    core.stop_agent_input(id, false);
-                    cx.notify();
-                }
-            });
+            self.core.update(cx, |core, cx| core.hand_back(id, cx));
         } else {
             self.user_input(id, cx);
             self.take_keyboard();
@@ -1949,6 +1966,10 @@ impl Shell {
             "card-keep-control" => {
                 self.answer_control(id, false, cx);
             }
+            // The Viewer's and Peek's Revoke, as a click presses it.
+            "access-revoke" => self.revoke_access(id, cx),
+            // The Viewer on a display, showing its Window Access line.
+            "access" => self.open_viewer(id, cx),
             "connect" => self.menu(MenuAction::ConnectAgents, cx),
             "wallpaper" => self.choose_wallpaper(cx),
             "click" => self.native(
@@ -2292,14 +2313,16 @@ impl Shell {
                 display,
                 pid,
                 window,
-            } => self.take_back(
-                WindowTarget {
-                    pid,
-                    window_id: window,
-                },
-                display,
-                cx,
-            ),
+            } => self
+                .take_back(
+                    WindowTarget {
+                        pid,
+                        window_id: window,
+                    },
+                    display,
+                    cx,
+                )
+                .detach(),
             MenuAction::PressProxy { index } => {
                 let Some(element) = menubar::chosen(index) else {
                     return;
@@ -2465,8 +2488,14 @@ impl Shell {
     }
 
     /// Return one window to the user: its old place for a Handover, the
-    /// main display otherwise.
-    pub fn take_back(&mut self, target: WindowTarget, id: DisplayId, cx: &mut Context<Self>) {
+    /// main display otherwise. No Window Access covers it again until the
+    /// user says so for it.
+    pub fn take_back(
+        &mut self,
+        target: WindowTarget,
+        id: DisplayId,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let home = self.core.update(cx, |core, _| {
             let display = core.displays.get_mut(id)?;
             let home = display
@@ -2474,17 +2503,30 @@ impl Shell {
                 .get(&target.window_id)
                 .and_then(|r| r.home.clone());
             display.give_back(target);
+            home
+        });
+        self.send_home(target, id, home, cx)
+    }
+
+    /// Move a window the model already gave back to its home. Input the
+    /// agent queued before goes first, and a move for the agent decided
+    /// before can't follow it. Done when the window is home.
+    pub fn send_home(
+        &mut self,
+        target: WindowTarget,
+        id: DisplayId,
+        home: Option<crate::model::Home>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.core.update(cx, |core, _| {
             // Taking a window back says the app is the user's now: its
             // later windows stay on the user's screen, even one it opens
             // beside a window of its own still on the display.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
             core.pending_returns.insert((id, target.pid));
-            home
         });
         // Keys typed in the Viewer must not follow the window home.
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
-        cx.background_spawn(async move { forwarder.forget_target(target).await })
-            .detach();
         let main_name = main_screen_name();
         // The app's new windows go to the screen this window came from.
         let screen = home
@@ -2497,8 +2539,14 @@ impl Shell {
             })
             .unwrap_or_else(|| crate::mac::cg::display_bounds(crate::mac::cg::main_display()));
         cx.spawn(async move |this, cx| {
+            // After the agent's input already queued for the display.
+            forwarder.forget_target(target).await;
             cx.background_executor()
-                .spawn(async move { dismissal::give_back(target, home.as_ref(), main_name.as_deref()) })
+                .spawn(async move {
+                    windows::return_home(target.window_id, || {
+                        dismissal::give_back(target, home.as_ref(), main_name.as_deref())
+                    })
+                })
                 .await;
             // Armed once the window is back, on the catch thread:
             // registering asks the app, which may be slow.
@@ -2522,7 +2570,6 @@ impl Shell {
                 shell.refresh_counts(cx)
             });
         })
-        .detach();
     }
 
     /// Quit. The tidy-up runs in the quit hook, so logout gets it too.
@@ -3356,7 +3403,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         for target in targets {
-            self.take_back(target, id, cx);
+            self.take_back(target, id, cx).detach();
         }
         self.hide_peek(cx);
     }
@@ -3542,31 +3589,52 @@ impl Shell {
             let claimed = this
                 .update(cx, |shell, cx| {
                     shell.core.update(cx, |core, cx| {
-                        let display = core.displays.get_mut(id)?;
-                        display.claim(target, Origin::HandedOver, home);
+                        let ticket = core
+                            .displays
+                            .hand_over(id, target, &Authority::User, home)
+                            .ok()?;
+                        cx.notify();
+                        // A Take Back after this wins over the move.
+                        Some((ticket, windows::times_returned(target.window_id)))
+                    })
+                })
+                .ok()
+                .flatten();
+            let Some((ticket, seen)) = claimed else {
+                return;
+            };
+            let placed = cx
+                .background_executor()
+                .spawn(
+                    async move { windows::place_handed_over(target, id, screen.as_deref(), seen) },
+                )
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                let landed = shell.core.update(cx, |core, cx| {
+                    cx.notify();
+                    if placed.is_err() {
+                        // Put back what the claim changed, unless a Take
+                        // Back came since.
+                        core.displays.abandon_hand_over(id, &ticket);
+                        return false;
+                    }
+                    let landed = core.displays.commit_hand_over(id, &ticket);
+                    if landed {
                         // Handed over again: the app's late windows are the
                         // agent's to have, not to send back.
                         core.returning
                             .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
                         core.pending_returns.remove(&(id, target.pid));
-                        cx.notify();
-                        Some(())
-                    })
-                })
-                .ok()
-                .flatten();
-            if claimed.is_none() {
-                return;
-            }
-            let placed = cx
-                .background_executor()
-                .spawn(async move { windows::place(target, id, screen.as_deref()) })
-                .await;
-            let _ = this.update(cx, |shell, cx| match placed {
-                Ok(()) => shell.flash(cx),
-                Err(error) => {
-                    log::warn!("handover of window {} failed: {error}", target.window_id);
-                    beep();
+                    }
+                    landed
+                });
+                match placed {
+                    Ok(()) if landed => shell.flash(cx),
+                    Ok(()) => {}
+                    Err(error) => {
+                        log::warn!("handover of window {} failed: {error}", target.window_id);
+                        beep();
+                    }
                 }
             });
         })

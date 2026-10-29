@@ -10,10 +10,11 @@ use crate::mac::screenshot::{self, Format};
 use crate::mac::windows::Grab;
 use crate::mac::{app, ax, cg, windows};
 use crate::model::{
-    DEFAULT_SIZE, DisplayId, Disposition, EndReason, FrameRequest, Origin, Owner, Rect, Wait,
-    WindowTarget, frame_in_shot, shot_scale,
+    ControlAsk, DEFAULT_SIZE, DisplayId, Disposition, EndReason, FrameRequest, Origin, Owner, Rect,
+    Wait, WindowTarget, frame_in_shot, shot_scale,
 };
 use crate::numbers;
+use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
@@ -142,6 +143,7 @@ fn recorded(method: &str, p: &Params) -> Option<(DisplayId, Value)> {
             | "withdrawHelp"
             | "requestControl"
             | "withdrawControlRequest"
+            | "windowAccess"
     );
     if !kept {
         return None;
@@ -816,30 +818,77 @@ async fn handle_one(
             let stray = strays(&core, id, cx).await.into_iter().find(|w| matches(w));
             let Some(window) = stray else {
                 // Any other window is the user's until they hand it over.
-                let theirs = off(cx, {
+                // The user's windows that match, front to back, with their
+                // apps' bundle ids, which Window Access goes by.
+                let candidates: Vec<(windows::Window, Option<String>)> = off(cx, {
                     let app = app.clone();
                     move || {
-                        windows::all().into_iter().find(|w| {
-                            w.layer == 0
-                                && match (wanted, &app) {
-                                    (Some(wanted), _) => w.target.window_id as i64 == wanted,
-                                    (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
-                                    (None, None) => false,
-                                }
-                                && windows::display_role(w).accepts_window_request()
-                        })
+                        windows::all()
+                            .into_iter()
+                            .filter(|w| {
+                                w.layer == 0
+                                    && match (wanted, &app) {
+                                        (Some(wanted), _) => w.target.window_id as i64 == wanted,
+                                        (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
+                                        (None, None) => false,
+                                    }
+                                    && windows::display_role(w).accepts_window_request()
+                            })
+                            .map(|w| {
+                                let bundle = app::bundle_id(w.target.pid);
+                                (w, bundle)
+                            })
+                            .collect()
                     }
                 })
-                .await
-                .ok_or_else(|| {
-                    ControlError::not_found(match &app {
+                .await;
+                if candidates.is_empty() {
+                    return Err(ControlError::not_found(match &app {
                         Some(app) => format!("no {app} window on the user's screen"),
                         None => "no window with that id on the user's screen".into(),
-                    })
-                })?;
+                    }));
+                }
+                let words = p
+                    .string("userInstruction")
+                    .map(|w| access::user_instruction(&w))
+                    .transpose()
+                    .map_err(ControlError::invalid)?;
+                // The user's word names its window: the front one. A grant
+                // takes the first window it covers, past one the user just
+                // took back; with none, the user is asked for the front one.
+                let pick = if words.is_some() {
+                    0
+                } else {
+                    let keys: Vec<(WindowTarget, Option<String>)> = candidates
+                        .iter()
+                        .map(|(w, b)| (w.target, b.clone()))
+                        .collect();
+                    core.read_with(cx, |c, _| c.displays.grantable(id, &keys))
+                        .unwrap_or(0)
+                };
+                let (theirs, bundle_id) = candidates.into_iter().nth(pick).expect("a candidate");
                 let target = theirs.target;
-                let mut reply =
-                    request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await?;
+                let authority = match &words {
+                    Some(_) => Authority::Once,
+                    None => Authority::Grant { bundle_id },
+                };
+                let allowed =
+                    core.read_with(cx, |c, _| c.displays.may_hand_over(id, target, &authority));
+                let mut reply = match allowed {
+                    Ok(()) => hand_over(&core, id, theirs, authority, words, cx).await?,
+                    // Not covered by the grant: the user answers on a card.
+                    Err(Refusal::NotGranted | Refusal::Excluded) if words.is_none() => {
+                        request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await?
+                    }
+                    Err(Refusal::Takeover) => {
+                        return Err(ControlError::takeover(
+                            Refusal::Takeover.message(&theirs.app),
+                        ));
+                    }
+                    Err(refusal) => {
+                        return Err(ControlError::failed(refusal.message(&theirs.app)));
+                    }
+                };
                 reply.extend(frame_window(&core, id, target, asked, cx).await?);
                 return Ok(reply);
             };
@@ -1125,20 +1174,29 @@ async fn handle_one(
         // During a Takeover, ask the user to hand the display back. The
         // agent then waits with waitForControl.
         "requestControl" => {
+            if let Some(words) = p.string("userInstruction") {
+                let id = display(&core, &p, true, cx)?;
+                return chat_control(&core, id, &words, p.string("control").as_deref(), cx)
+                    .and_then(reply);
+            }
             let id = display(&core, &p, false, cx)?;
             let reason = p
                 .string("reason")
                 .filter(|r| !r.is_empty())
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            let requested = core.update(cx, |c, cx| {
-                let requested = c.displays.request_control(id, reason);
-                if requested {
+            let asked = core.update(cx, |c, cx| {
+                let asked = c.displays.request_control(id, reason);
+                if asked == ControlAsk::Asked {
                     cx.notify();
                 }
-                requested
+                asked
             });
-            Ok(json!({ "requested": requested }))
+            Ok(json!({
+                "requested": asked != ControlAsk::NotNeeded,
+                "alreadyAsked": asked == ControlAsk::AlreadyAsked,
+            }))
         }
+        "windowAccess" => window_access(&core, &p, cx).await,
         "withdrawControlRequest" => {
             let id = display(&core, &p, false, cx)?;
             let withdrawn = core.update(cx, |c, cx| {
@@ -1201,14 +1259,10 @@ async fn handle_one(
             let id = display(&core, &p, false, cx)?;
             let active = p.0.get("active") == Some(&Value::Bool(true));
             core.update(cx, |c, cx| {
-                let changed = if active {
-                    c.displays.begin_takeover(id)
+                if active {
+                    c.take_over(id, cx)
                 } else {
-                    c.displays.end_takeover(id)
-                };
-                if changed {
-                    c.stop_agent_input(id, active);
-                    cx.notify();
+                    c.hand_back(id, cx)
                 }
             });
             Ok(json!({}))
@@ -1356,10 +1410,55 @@ async fn handle_one(
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
                 .update(cx, |shell, cx| shell.take_back(target, id, cx))
-                .map_err(|e| ControlError::failed(e.to_string()))?;
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .await;
             cx.background_executor()
                 .timer(Duration::from_millis(500))
                 .await;
+            Ok(json!({}))
+        }
+        // Test hook: the session that holds the user stand-in stage gives
+        // up a window it launched there, so the window counts as the user's
+        // own, as on a real screen of theirs. The claim stays, so AeroSpace
+        // leaves the window on the stage.
+        #[cfg(debug_assertions)]
+        "debugUserWindow" if debug_methods() => {
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            usable(&core, connection, id, "debugUserWindow", cx)?;
+            if !cg::window_display_role(id).accepts_window_request() {
+                return Err(ControlError::invalid(
+                    "debugUserWindow needs this session's user stand-in stage (debugShow userStage)",
+                ));
+            }
+            let window = p
+                .int("windowId")
+                .ok_or_else(|| ControlError::invalid("windowId is required"))?
+                as u32;
+            let here = off(cx, move || {
+                windows::on_display(id)
+                    .iter()
+                    .any(|w| w.target.window_id == window)
+            })
+            .await;
+            if !here {
+                return Err(ControlError::not_found(
+                    "no window with that id on the stage",
+                ));
+            }
+            // Only a window the claim file holds on the stage: AeroSpace
+            // would take any other for the user's workspace.
+            let claimed = off(cx, move || crate::mac::claims::claim_confirmed(window, id)).await;
+            if !claimed {
+                return Err(ControlError::failed(
+                    "the window's claim for the stage wasn't published",
+                ));
+            }
+            core.update(cx, |c, _| {
+                if let Some(d) = c.displays.get_mut(id) {
+                    d.forget(window);
+                    d.user_made.insert(window);
+                }
+            });
             Ok(json!({}))
         }
         // Test hook: which agent the setup window says loaded the tools.
@@ -1535,6 +1634,7 @@ fn needs_permissions(method: &str) -> bool {
             | "withdrawControlRequest"
             | "waitForControl"
             | "setDisposition"
+            | "windowAccess"
             | "listWindows"
             | "agentReady"
     ) && !method.starts_with("debug")
@@ -2150,6 +2250,360 @@ async fn request_window(
     )))
 }
 
+/// Hand one of the user's windows over on their word or under the
+/// session's Window Access: claimed with the check in one step, checked
+/// again right before it moves, and given up if a revoke, a Takeover, a
+/// Take Back or the display ending came in between.
+async fn hand_over(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    authority: Authority,
+    words: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let target = window.target;
+    let app_name = window.app.clone();
+    let by = if words.is_some() { "chat" } else { "grant" };
+    let home = off(cx, move || crate::dismissal::home_of(target, None)).await;
+    let ticket = core
+        .update(cx, |c, cx| {
+            let ticket = c.displays.hand_over(id, target, &authority, home)?;
+            if let (Some(d), Some(text)) = (c.displays.get_mut(id), words.clone()) {
+                d.access.last = Some(Instruction {
+                    action: ChatAction::Place,
+                    text,
+                });
+            }
+            cx.notify();
+            Ok::<_, Refusal>(ticket)
+        })
+        .map_err(|r| ControlError::failed(r.message(&app_name)))?;
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    // The last word before the move, on the main thread, where revokes,
+    // Takeovers and Take Backs happen.
+    let confirmed = core.update(cx, |c, _| {
+        let confirmed = c.displays.confirm_hand_over(id, target, &ticket);
+        if confirmed.is_err() {
+            c.displays.abandon_hand_over(id, &ticket);
+        }
+        confirmed
+    });
+    // Read with the confirmation: a Take Back after it bumps the count,
+    // and the move then stays home.
+    let seen = windows::times_returned(target.window_id);
+    if let Err(refusal) = confirmed {
+        core.update(cx, |_, cx| cx.notify());
+        return Err(match refusal {
+            Refusal::Takeover => ControlError::takeover(refusal.message(&app_name)),
+            _ => ControlError::failed(refusal.message(&app_name)),
+        });
+    }
+    log::info!(
+        "display {id}: window {} ({app_name}) handed over by {by}{}",
+        target.window_id,
+        words
+            .as_deref()
+            .map(|w| format!(" on the user's words {w:?}"))
+            .unwrap_or_default()
+    );
+    let placed = off(cx, move || {
+        windows::place_handed_over(target, id, screen.as_deref(), seen)
+    })
+    .await;
+    if let Err(e) = placed {
+        core.update(cx, |c, cx| {
+            c.displays.abandon_hand_over(id, &ticket);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "could not move the {app_name} window: {e}"
+        )));
+    }
+    let landed = core.update(cx, |c, cx| {
+        let landed = c.displays.commit_hand_over(id, &ticket);
+        if landed {
+            // The app's late windows are the agent's to have, not to send
+            // back, as after the user's own Hand Over.
+            c.returning
+                .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
+            c.pending_returns.remove(&(id, target.pid));
+        }
+        cx.notify();
+        landed
+    });
+    if !landed {
+        return Err(ControlError::failed(format!(
+            "the user took the {app_name} window back while it moved; it stays theirs"
+        )));
+    }
+    guard_placed(core, target, id, cx);
+    Ok(Map::from_iter([
+        ("handedOver".into(), Value::Bool(true)),
+        ("by".into(), json!(by)),
+    ]))
+}
+
+/// requestControl on the user's word: hand the display back, or take it
+/// over for them. The same actions as the Viewer's buttons.
+fn chat_control(
+    core: &Entity<Core>,
+    id: DisplayId,
+    words: &str,
+    control: Option<&str>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let words = access::user_instruction(words).map_err(ControlError::invalid)?;
+    let to_user = match control {
+        None | Some("agent") => false,
+        Some("user") => true,
+        Some(_) => return Err(ControlError::invalid("control must be agent or user")),
+    };
+    let action = if to_user {
+        ChatAction::Pause
+    } else {
+        ChatAction::HandBack
+    };
+    let changed = core.update(cx, |c, cx| {
+        let changed = if to_user {
+            c.take_over(id, cx)
+        } else {
+            c.hand_back(id, cx)
+        };
+        if let Some(d) = c.displays.get_mut(id) {
+            d.access.last = Some(Instruction {
+                action,
+                text: words.clone(),
+            });
+        }
+        cx.notify();
+        changed
+    });
+    log::info!(
+        "display {id}: {} on the user's words as the agent relayed them: {words:?} (changed: {changed})",
+        action.as_str()
+    );
+    Ok(json!({
+        "control": if to_user { "user" } else { "agent" },
+        "changed": changed,
+    }))
+}
+
+/// The display's Window Access as the agent and scripts read it.
+fn access_status(c: &Core, id: DisplayId) -> Value {
+    let Some(d) = c.displays.get(id) else {
+        return json!({ "scope": "none", "apps": [], "paused": false, "excluded": [], "handovers": [], "lastInstruction": null });
+    };
+    let shown = windows::all();
+    let handovers: Vec<Value> = d
+        .handovers()
+        .into_iter()
+        .map(|t| {
+            let w = shown.iter().find(|w| w.target.window_id == t.window_id);
+            json!({
+                "windowId": t.window_id,
+                "app": w.map(|w| w.app.clone()),
+                "title": w.map(|w| w.title.clone()),
+            })
+        })
+        .collect();
+    json!({
+        "scope": d.access.scope_name(),
+        "apps": d.access.apps().iter().map(|a| json!({ "bundleId": a.bundle_id, "name": a.name })).collect::<Vec<_>>(),
+        "paused": d.access_paused(),
+        "excluded": d.access.excluded,
+        "handovers": handovers,
+        "lastInstruction": d.access.last.as_ref().map(|i| json!({ "action": i.action.as_str(), "text": i.text })),
+    })
+}
+
+/// window_access: grant, revoke, return or status, on the user's word.
+async fn window_access(
+    core: &Entity<Core>,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let id = display(core, p, true, cx)?;
+    let action = p
+        .string("action")
+        .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let words = p
+        .string("userInstruction")
+        .map(|w| access::user_instruction(&w))
+        .transpose()
+        .map_err(ControlError::invalid)?;
+    let all = p.0.get("all") == Some(&Value::Bool(true));
+    let apps: Vec<String> =
+        p.0.get("apps")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    let needs_words = || {
+        ControlError::invalid(format!(
+            "{action} needs userInstruction: the user's words from the chat"
+        ))
+    };
+    let mut extra = Map::new();
+    match action.as_str() {
+        "status" => {}
+        "grant" => {
+            let words = words.clone().ok_or_else(needs_words)?;
+            let resolved = if all {
+                None
+            } else {
+                if apps.is_empty() {
+                    return Err(ControlError::invalid("grant needs apps or all"));
+                }
+                let names = apps.clone();
+                let found = off(cx, move || {
+                    names
+                        .into_iter()
+                        .map(|n| app::identify(&n).ok_or(n))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                let missing: Vec<String> = found.iter().filter_map(|f| f.clone().err()).collect();
+                if !missing.is_empty() {
+                    return Err(ControlError::not_found(format!(
+                        "no app named {} on this Mac; nothing was granted. Use the app's name as the Dock shows it, or its bundle id",
+                        missing.join(", ")
+                    )));
+                }
+                Some(found.into_iter().filter_map(Result::ok).collect::<Vec<_>>())
+            };
+            let changed = core.update(cx, |c, cx| {
+                let d = c.displays.get_mut(id)?;
+                let before = d.access.scope.clone();
+                match resolved.clone() {
+                    None => d.access.grant_all(),
+                    Some(list) => d.access.grant_apps(list),
+                }
+                d.access.last = Some(Instruction {
+                    action: ChatAction::Grant,
+                    text: words.clone(),
+                });
+                cx.notify();
+                Some(d.access.scope != before)
+            });
+            log::info!(
+                "display {id}: window access granted for {} on the user's words as the agent relayed them: {words:?}",
+                if all {
+                    "all apps".to_string()
+                } else {
+                    apps.join(", ")
+                }
+            );
+            extra.insert("changed".into(), json!(changed.unwrap_or(false)));
+        }
+        "revoke" => {
+            let granted: Vec<(String, Option<String>)> = core.read_with(cx, |c, _| {
+                let access = c.displays.get(id).map(|d| d.access.clone());
+                apps.iter()
+                    .map(|a| (a.clone(), access.as_ref().and_then(|x| x.granted_id(a))))
+                    .collect()
+            });
+            // Names the grant doesn't hold by name: their bundle ids.
+            let ids: Vec<String> = off(cx, move || {
+                granted
+                    .into_iter()
+                    .map(|(name, id)| {
+                        id.or_else(|| app::identify(&name).map(|a| a.bundle_id))
+                            .unwrap_or(name)
+                    })
+                    .collect()
+            })
+            .await;
+            let changed = core.update(cx, |c, cx| {
+                let d = c
+                    .displays
+                    .get_mut(id)
+                    .ok_or_else(|| ControlError::failed("the display has ended"))?;
+                let changed = d
+                    .access
+                    .revoke((!ids.is_empty()).then_some(ids.as_slice()))
+                    .map_err(ControlError::invalid)?;
+                if let Some(text) = words.clone() {
+                    d.access.last = Some(Instruction {
+                        action: ChatAction::Revoke,
+                        text,
+                    });
+                }
+                cx.notify();
+                Ok::<_, ControlError>(changed)
+            })?;
+            log::info!("display {id}: window access revoked by the agent (changed: {changed})");
+            extra.insert("changed".into(), json!(changed));
+        }
+        "return" => {
+            let words = words.clone().ok_or_else(needs_words)?;
+            let wanted: Vec<u32> = match p.int("windowId") {
+                Some(w) if !all => vec![w as u32],
+                None if all => core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .map(|d| d.handovers().iter().map(|t| t.window_id).collect())
+                        .unwrap_or_default()
+                }),
+                _ => {
+                    return Err(ControlError::invalid(
+                        "return needs windowId or all, one of them",
+                    ));
+                }
+            };
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let mut returned = Vec::new();
+            // One at a time, each after the input queued before it.
+            for window in wanted {
+                let record = core.update(cx, |c, cx| {
+                    let record = c.displays.return_handover(id, window);
+                    if record.is_ok() {
+                        if let Some(d) = c.displays.get_mut(id) {
+                            d.access.last = Some(Instruction {
+                                action: ChatAction::Return,
+                                text: words.clone(),
+                            });
+                        }
+                        cx.notify();
+                    }
+                    record
+                });
+                let record = match record {
+                    Ok(record) => record,
+                    Err(e) if !all => return Err(ControlError::not_found(e)),
+                    Err(_) => continue,
+                };
+                let task = shell
+                    .update(cx, |shell, cx| {
+                        shell.send_home(record.target, id, record.home.clone(), cx)
+                    })
+                    .map_err(|e| ControlError::failed(e.to_string()))?;
+                task.await;
+                log::info!(
+                    "display {id}: window {window} returned on the user's words as the agent relayed them: {words:?}"
+                );
+                returned.push(window);
+            }
+            extra.insert("returned".into(), json!(returned));
+        }
+        other => {
+            return Err(ControlError::invalid(format!(
+                "action must be grant, revoke, return or status, not {other}"
+            )));
+        }
+    }
+    let mut status = core.read_with(cx, |c, _| access_status(c, id));
+    if let Value::Object(map) = &mut status {
+        map.extend(extra);
+    }
+    Ok(status)
+}
+
 /// Apply only an explicit frame request. The callback is the real AX writer
 /// in frame_window and an offline capture in the geometry regression tests.
 fn apply_frame_request(
@@ -2179,6 +2633,20 @@ async fn frame_window(
     cx: &mut AsyncApp,
 ) -> Result<Map<String, Value>, ControlError> {
     let scale = display_scale(core, id, cx);
+    // A window the user took back is theirs: no frame of the agent's
+    // follows it home. A Take Back after this read bumps the count, and
+    // the write in the window's lane then doesn't happen.
+    let taken_back = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .is_none_or(|d| d.returned.contains(&target.window_id))
+    });
+    if taken_back && !asked.is_empty() {
+        return Err(ControlError::failed(
+            "the user took the window back; it stays where they put it",
+        ));
+    }
+    let seen = windows::times_returned(target.window_id);
     // Use the same main-thread policy as outside_menu_bar, not a second
     // hard-coded strip height. Empty frame requests still leave it unchanged.
     let reserved_top = crate::mac::menubar_height(id);
@@ -2188,8 +2656,10 @@ async fn frame_window(
         let closed = || "the window closed".to_string();
         let mut bounds = now().ok_or_else(closed)?;
         let constrained = apply_frame_request(asked, bounds, area, scale, reserved_top, |frame| {
-            ax::set_frame_asked(target, frame)
-                .map_err(|e| format!("could not set the window's frame: {e}"))
+            windows::write_frame_unless_returned(target.window_id, seen, || {
+                ax::set_frame_asked(target, frame)
+                    .map_err(|e| format!("could not set the window's frame: {e}"))
+            })
         })?;
         if !asked.is_empty() {
             // Some apps, Electron's among them, answer a resize a moment
@@ -2247,10 +2717,12 @@ async fn held(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> bool {
         .await
 }
 
+/// Move a window onto a display for the agent, off the main thread. A
+/// window the user took back stays where it went.
 pub async fn place(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> Result<(), String> {
     let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
     cx.background_executor()
-        .spawn(async move { windows::place(target, id, screen.as_deref()) })
+        .spawn(async move { windows::place_for_agent(target, id, screen.as_deref()) })
         .await
 }
 
@@ -3605,6 +4077,16 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
                 continue;
             }
             if !held(target, id, cx).await {
+                // Taken back while we looked: home is where it goes.
+                let still = core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| {
+                        d.records.contains_key(&target.window_id)
+                            && !d.returned.contains(&target.window_id)
+                    })
+                });
+                if !still {
+                    return;
+                }
                 let now = off(cx, move || {
                     windows::find(target.window_id).map(|w| (w.app, w.bounds))
                 })
