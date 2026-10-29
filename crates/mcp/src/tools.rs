@@ -51,6 +51,10 @@ fn max_depth() -> Value {
     json!({ "type": "integer", "description": "Leave out elements nested deeper than this many levels; 0 keeps only the window's direct children. Default: all." })
 }
 
+fn user_instruction(purpose: &str) -> Value {
+    json!({ "type": "string", "description": format!("The user's own words from the chat that tell you to {purpose}, quoted as they wrote them. Agent Screen trusts you to relay them: it can't see the chat, and it shows and records these words.") })
+}
+
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
 }
@@ -263,17 +267,52 @@ pub fn definitions() -> Vec<Value> {
                 "back, with a short reason. The user gets a notification and a card with Let <agent> Continue and Keep",
                 "Control. The call then waits like wait_for_control. Returns control: agent at once if you have control",
                 "already. control: user with kept: true means the user chose to keep control: don't ask again right",
-                "away. On a timeout the request stays open; call wait_for_control to keep waiting, or request_control",
-                "with withdraw: true when you no longer need the display. Only the user ends a Takeover.",
+                "away. One request per display: asking again while one is open changes nothing and waits on. On a timeout",
+                "the request stays open; call wait_for_control to keep waiting, or request_control with withdraw: true",
+                "when you no longer need the display. Only the user ends a Takeover: by a button, or by telling you in chat.",
+                "When the user tells you in this chat to continue (\"好了，继续\", \"go ahead\"), pass their words as",
+                "user_instruction: the Takeover ends at once, as with Let <agent> Continue. When they tell you to stop and",
+                "let them take over (\"先停一下\"), pass their words with control: user: a Takeover starts, your input",
+                "stops, and window access pauses. Use user_instruction only for an explicit instruction the user gave in",
+                "this chat, never on your own judgment.",
             ],
             object(
                 json!({
                     "display_id": display_id(),
                     "reason": { "type": "string", "description": "Why you need the display back, in one short sentence." },
                     "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
+                    "user_instruction": user_instruction("continue, or to stop and let them take over"),
+                    "control": { "type": "string", "enum": ["agent", "user"], "description": "With user_instruction: agent (default) hands the display back to you; user starts a Takeover." },
                     "timeout_seconds": timeout()
                 }),
                 &["display_id"],
+            ),
+            PLAIN,
+        ),
+        tool(
+            "window_access",
+            "Use the user's windows on their word",
+            &[
+                "Act on what the user told you in this chat about their windows. Agent Screen trusts you to relay their",
+                "words and can't check them: use it only for an explicit instruction, quoted in user_instruction.",
+                "grant lets this session take the user's windows of the named apps, or all: true for every app, with",
+                "place_window and no request card. It lasts until revoke, end_display or the end of this session; it covers",
+                "no window on another agent's display, and pauses while the user is in control. A window the user took",
+                "back stays out of it until they tell you to take that window again (place_window with user_instruction).",
+                "revoke takes the grant back, or some of its apps; windows already here stay. return gives Handovers back",
+                "to where they came from, by window_id or all: true; your own windows never go this way. status says",
+                "what the grant covers. Every action returns the status.",
+            ],
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "action": { "type": "string", "enum": ["grant", "revoke", "return", "status"] },
+                    "apps": { "type": "array", "items": { "type": "string" }, "description": "For grant and revoke: app names or bundle ids, e.g. \"Safari\" or \"com.utmapp.UTM\"." },
+                    "all": { "type": "boolean", "description": "For grant: every app. For return: every Handover." },
+                    "window_id": { "type": "integer", "description": "For return: the Handover to give back." },
+                    "user_instruction": user_instruction("do this; required for grant and return")
+                }),
+                &["display_id", "action"],
             ),
             PLAIN,
         ),
@@ -304,7 +343,9 @@ pub fn definitions() -> Vec<Value> {
                 "moves at once: get ids from list_windows with strays: true. Any other window is the user's, such as one an app",
                 "opened that you started with a shell command like open -a: Agent Screen asks the user, and the call waits for",
                 "their answer, up to timeout_seconds. Handed over, the window is on the display as a Handover; turned down, it stays",
-                "theirs. Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
+                "theirs. When the user told you in this chat to take that window, pass their words as user_instruction: it goes",
+                "over as a Handover at once, without asking again. Under window_access granted for its app, it does too.",
+                "Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
                 "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
                 "One the app opens later by itself moves there too while none of its other windows is on the user's screen.",
@@ -323,7 +364,8 @@ pub fn definitions() -> Vec<Value> {
                     "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
                     "width": { "type": "number", "description": "Width in screenshot pixels." },
                     "height": { "type": "number", "description": "Height in screenshot pixels." },
-                    "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." }
+                    "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." },
+                    "user_instruction": user_instruction("take this window")
                 }),
                 &["display_id"],
             ),
@@ -644,6 +686,24 @@ pub async fn run(
         }
         "request_control" => {
             let display = a.require_int("display_id")?;
+            let control_arg = a.one_of("control", &["agent", "user"])?;
+            if let Some(words) = a.string("user_instruction")? {
+                let words = agent_screen_model::access::user_instruction(&words)
+                    .map_err(ControlError::invalid)?;
+                let to = control_arg.unwrap_or_else(|| "agent".into());
+                let reply = control
+                    .call(
+                        "requestControl",
+                        json!({ "displayId": display, "userInstruction": words, "control": to }),
+                    )
+                    .await?;
+                return Ok(Output::Object(chat_control_output(&reply, &to)));
+            }
+            if control_arg.is_some() {
+                return Err(ControlError::invalid(
+                    "control needs user_instruction: the user's words from the chat",
+                ));
+            }
             if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
                 let reply = control
                     .call("withdrawControlRequest", json!({ "displayId": display }))
@@ -654,7 +714,7 @@ pub async fn run(
             let reason = a
                 .string("reason")?
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            control
+            let asked = control
                 .call(
                     "requestControl",
                     json!({ "displayId": display, "reason": reason }),
@@ -666,7 +726,17 @@ pub async fn run(
                     json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            Ok(Output::Object(describe_wait(&reply, false)))
+            let mut out = describe_wait(&reply, false);
+            if asked.get("alreadyAsked") == Some(&Value::Bool(true)) {
+                out["alreadyAsked"] = json!(true);
+            }
+            Ok(Output::Object(out))
+        }
+        "window_access" => {
+            let params = window_access_params(&a)?;
+            let action = params["action"].as_str().unwrap_or_default().to_string();
+            let reply = control.call("windowAccess", params).await?;
+            Ok(Output::Object(access_output(&action, reply)))
         }
         "list_windows" => {
             let reply = control
@@ -694,6 +764,11 @@ pub async fn run(
                 "windowId": a.int("window_id")?,
                 "app": a.string("app")?,
                 "timeoutSeconds": a.number("timeout_seconds")?,
+                "userInstruction": a
+                    .string("user_instruction")?
+                    .map(|w| agent_screen_model::access::user_instruction(&w))
+                    .transpose()
+                    .map_err(ControlError::invalid)?,
             });
             for (key, value) in asked {
                 params[key] = json!(value);
@@ -882,6 +957,129 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
         out["note"] = json!(
             "Agent Screen adjusted the frame to fit below the reserved menu bar strip. This can shrink a dimension you left out; read window for the actual frame."
         );
+    }
+    out
+}
+
+/// What request_control on the user's word did: the app answers with who
+/// has control now and whether that changed.
+fn chat_control_output(reply: &Object, to: &str) -> Value {
+    let changed = reply.get("changed") == Some(&Value::Bool(true));
+    match (to, changed) {
+        ("user", _) => json!({
+            "control": "user",
+            "paused": true,
+            "note": if changed {
+                "Done: the user is in control and your input is refused, as in any Takeover; window access is paused. Agent Screen acted on the words you relayed and didn't check them against the chat. Call wait_for_control, or request_control with user_instruction once they tell you to continue."
+            } else {
+                "The user was in control already; nothing changed."
+            }
+        }),
+        (_, true) => json!({
+            "control": "agent",
+            "handedBack": "chat",
+            "note": "The Takeover ended on the user's words as you relayed them; Agent Screen didn't check them against the chat. Take a screenshot before you continue: the user may have changed things."
+        }),
+        _ => json!({ "control": "agent", "note": "You had control already; nothing changed." }),
+    }
+}
+
+/// window_access's control call, checked here so a mistake costs no
+/// round trip: grant and return need the user's words and a target.
+fn window_access_params(a: &Args<'_>) -> Result<Value, ControlError> {
+    let action = a
+        .one_of("action", &["grant", "revoke", "return", "status"])?
+        .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let all = match a.0.get("all") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ControlError::invalid("all must be true or false")),
+    };
+    let apps: Option<Vec<String>> = match a.0.get("apps") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| ControlError::invalid("apps are non-empty strings"))
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+        Some(_) => return Err(ControlError::invalid("apps is a list of app names")),
+    };
+    let window = a.int("window_id")?;
+    let words = a
+        .string("user_instruction")?
+        .map(|w| agent_screen_model::access::user_instruction(&w))
+        .transpose()
+        .map_err(ControlError::invalid)?;
+    let needs_words = || {
+        ControlError::invalid(format!(
+            "{action} needs user_instruction: the user's words from this chat that tell you to. Without them, place_window asks the user with a card"
+        ))
+    };
+    match action.as_str() {
+        "grant" => {
+            words.as_ref().ok_or_else(needs_words)?;
+            match (all, apps.as_ref().is_some_and(|a| !a.is_empty())) {
+                (true, true) => {
+                    return Err(ControlError::invalid("pass apps or all: true, not both"));
+                }
+                (false, false) => {
+                    return Err(ControlError::invalid(
+                        "grant needs apps, or all: true when the user allowed every app",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        "return" => {
+            words.as_ref().ok_or_else(needs_words)?;
+            if all == window.is_some() {
+                return Err(ControlError::invalid(
+                    "return needs window_id or all: true, one of them",
+                ));
+            }
+        }
+        "revoke" if all && apps.as_ref().is_some_and(|a| !a.is_empty()) => {
+            return Err(ControlError::invalid(
+                "pass apps or nothing, not all with apps",
+            ));
+        }
+        _ => {}
+    }
+    Ok(json!({
+        "displayId": a.require_int("display_id")?,
+        "action": action,
+        "all": all,
+        "apps": apps,
+        "windowId": window,
+        "userInstruction": words,
+    }))
+}
+
+/// window_access's result: the app's status, and a word on what changed.
+fn access_output(action: &str, reply: Object) -> Value {
+    let mut out = Value::Object(reply);
+    let changed = out.get("changed") != Some(&Value::Bool(false));
+    let note = match action {
+        "grant" => Some(
+            "Granted on the user's words as you relayed them; Agent Screen didn't check them against the chat. place_window takes covered windows of theirs without a card while you have control.",
+        ),
+        "revoke" if changed => {
+            Some("Revoked. Windows already on your display stay; place_window asks the user again.")
+        }
+        "revoke" => Some("Nothing to revoke."),
+        "return" => Some(
+            "Those windows are back where they came from, and window access no longer covers them until the user tells you to take them again.",
+        ),
+        _ => None,
+    };
+    if let Some(note) = note {
+        out["note"] = json!(note);
     }
     out
 }
@@ -1412,9 +1610,9 @@ mod tests {
     }
 
     #[test]
-    fn fourteen_tools_with_object_schemas() {
+    fn fifteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         let diagnostics = tools
             .iter()
             .find(|t| t["name"] == "get_diagnostics")
@@ -1475,6 +1673,137 @@ mod tests {
         let state = description("get_window_state");
         assert!(state.contains("screenshot pixels"), "{state}");
         assert!(!state.contains("display coordinates"), "{state}");
+    }
+
+    fn args(value: Value) -> Object {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn grant_and_return_need_the_users_words_and_a_target() {
+        let check = |v: Value| {
+            let o = args(v);
+            window_access_params(&Args(&o))
+        };
+        let words = "你可以用我的 Safari 窗口";
+        let err =
+            check(json!({ "display_id": 1, "action": "grant", "apps": ["Safari"] })).unwrap_err();
+        assert!(err.message.contains("user_instruction"), "{}", err.message);
+        assert!(
+            check(json!({ "display_id": 1, "action": "grant", "user_instruction": words }))
+                .is_err()
+        );
+        assert!(
+            check(json!({ "display_id": 1, "action": "grant", "all": true, "apps": ["Safari"], "user_instruction": words }))
+                .is_err()
+        );
+        assert!(
+            check(json!({ "display_id": 1, "action": "grant", "user_instruction": "   ", "all": true })).is_err(),
+            "blank words are no words"
+        );
+        let grant = check(json!({ "display_id": 1, "action": "grant", "apps": [" Safari "], "user_instruction": format!(" {words} ") })).unwrap();
+        assert_eq!(grant["apps"], json!(["Safari"]));
+        assert_eq!(grant["userInstruction"], words);
+        assert_eq!(grant["displayId"], 1);
+        assert!(check(json!({ "display_id": 1, "action": "grant", "apps": [""], "user_instruction": words })).is_err());
+
+        assert!(check(json!({ "display_id": 1, "action": "return", "all": true })).is_err());
+        assert!(
+            check(json!({ "display_id": 1, "action": "return", "user_instruction": "还给我" }))
+                .is_err()
+        );
+        assert!(
+            check(json!({ "display_id": 1, "action": "return", "all": true, "window_id": 4, "user_instruction": "还给我" }))
+                .is_err()
+        );
+        let back = check(json!({ "display_id": 1, "action": "return", "window_id": 4, "user_instruction": "还给我" })).unwrap();
+        assert_eq!(back["windowId"], 4);
+
+        // Taking access back needs no words, and nothing else does either.
+        assert_eq!(
+            check(json!({ "display_id": 1, "action": "revoke" })).unwrap()["apps"],
+            Value::Null
+        );
+        assert!(check(json!({ "display_id": 1, "action": "status" })).is_ok());
+        assert!(check(json!({ "display_id": 1, "action": "take" })).is_err());
+    }
+
+    #[test]
+    fn chat_control_says_who_has_control_and_that_nothing_was_checked() {
+        let reply = |changed: bool| args(json!({ "changed": changed }));
+        let back = chat_control_output(&reply(true), "agent");
+        assert_eq!(back["control"], "agent");
+        assert_eq!(back["handedBack"], "chat");
+        assert!(back["note"].as_str().unwrap().contains("didn't check"));
+        let already = chat_control_output(&reply(false), "agent");
+        assert_eq!(already["control"], "agent");
+        assert!(already.get("handedBack").is_none());
+        let paused = chat_control_output(&reply(true), "user");
+        assert_eq!(paused["control"], "user");
+        assert_eq!(paused["paused"], true);
+        assert!(
+            paused["note"]
+                .as_str()
+                .unwrap()
+                .contains("window access is paused")
+        );
+    }
+
+    #[test]
+    fn access_output_passes_the_status_through() {
+        let status = args(json!({
+            "scope": "apps",
+            "apps": [{ "bundleId": "com.apple.Safari", "name": "Safari" }],
+            "paused": false,
+            "excluded": [],
+            "handovers": [],
+            "lastInstruction": null,
+            "changed": true
+        }));
+        let out = access_output("grant", status.clone());
+        assert_eq!(out["apps"][0]["bundleId"], "com.apple.Safari");
+        assert!(out["note"].as_str().unwrap().contains("didn't check"));
+        let mut none = status.clone();
+        none.insert("changed".into(), json!(false));
+        assert_eq!(access_output("revoke", none)["note"], "Nothing to revoke.");
+        assert!(access_output("status", status).get("note").is_none());
+    }
+
+    #[test]
+    fn chat_paths_are_only_for_the_users_explicit_words() {
+        let tools = definitions();
+        let find = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap().clone();
+        let control = find("request_control");
+        assert_eq!(
+            control["inputSchema"]["properties"]["control"]["enum"],
+            json!(["agent", "user"])
+        );
+        let description = control["description"].as_str().unwrap();
+        assert!(
+            description.contains("never on your own judgment"),
+            "{description}"
+        );
+        assert!(
+            description.contains("One request per display"),
+            "{description}"
+        );
+        assert_eq!(control["inputSchema"]["required"], json!(["display_id"]));
+        let place = find("place_window");
+        assert_eq!(
+            place["inputSchema"]["properties"]["user_instruction"]["type"],
+            "string"
+        );
+        let access = find("window_access");
+        assert_eq!(
+            access["inputSchema"]["properties"]["action"]["enum"],
+            json!(["grant", "revoke", "return", "status"])
+        );
+        let text = access["description"].as_str().unwrap();
+        assert!(text.contains("can't check them"), "{text}");
+        assert!(
+            text.contains("pauses while the user is in control"),
+            "{text}"
+        );
     }
 
     #[test]

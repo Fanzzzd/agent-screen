@@ -561,6 +561,30 @@ impl Core {
         }
     }
 
+    /// The user takes the display over: by their first input in the
+    /// Viewer, Take Over, or by telling the agent in chat. The agent's
+    /// input stops and Window Access pauses. False when nothing changed.
+    pub fn take_over(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
+        let changed = self.displays.begin_takeover(id);
+        if changed {
+            self.stop_agent_input(id, true);
+            cx.notify();
+        }
+        changed
+    }
+
+    /// The user hands the display back: by Let … Continue in the Viewer or
+    /// on the card, or by telling the agent in chat. One action for all of
+    /// them. False when the user wasn't in control.
+    pub fn hand_back(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
+        let changed = self.displays.end_takeover(id);
+        if changed {
+            self.stop_agent_input(id, false);
+            cx.notify();
+        }
+        changed
+    }
+
     /// The user took the display over, or handed it back: an agent's
     /// typing or drag in flight stops while they're in control.
     pub fn stop_agent_input(&self, id: DisplayId, stop: bool) {

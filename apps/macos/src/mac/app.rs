@@ -186,6 +186,45 @@ pub fn name(pid: i32) -> Option<String> {
         .map(|name| name.to_string())
 }
 
+/// A running app's bundle id, which Window Access goes by.
+pub fn bundle_id(pid: i32) -> Option<String> {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.bundleIdentifier())
+        .map(|id| id.to_string())
+}
+
+/// An app the user named, by name or bundle id, as Window Access keeps it:
+/// a running app first, then one installed. None when no app has it.
+pub fn identify(app: &str) -> Option<agent_screen_model::access::AppId> {
+    use agent_screen_model::access::AppId;
+    let wanted = app.trim();
+    let running = NSWorkspace::sharedWorkspace().runningApplications();
+    for candidate in running.iter() {
+        let Some(id) = candidate.bundleIdentifier().map(|i| i.to_string()) else {
+            continue;
+        };
+        let name = candidate.localizedName().map(|n| n.to_string());
+        if id.eq_ignore_ascii_case(wanted)
+            || name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(wanted))
+        {
+            return Some(AppId {
+                name: name.unwrap_or_else(|| id.clone()),
+                bundle_id: id,
+            });
+        }
+    }
+    let bundle = resolve(wanted)?;
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    let bundle_id = info_value(&plist, "CFBundleIdentifier")?;
+    let name = info_value(&plist, "CFBundleDisplayName")
+        .or_else(|| info_value(&plist, "CFBundleName"))
+        .or_else(|| bundle.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| bundle_id.clone());
+    Some(AppId { bundle_id, name })
+}
+
 /// Bring an app to the front through NSRunningApplication; false when
 /// macOS refuses.
 pub fn activate(pid: i32) -> bool {

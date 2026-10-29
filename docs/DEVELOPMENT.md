@@ -187,6 +187,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e requestwindow # place_window by app asks for 
 SPARKLE_ED_KEY_FILE=<key file> cargo e2e selfupdate   # a release build updates itself through Sparkle (ADR 0012): 0.0.1 under a test bundle id, with a feed on 127.0.0.1 naming a signed 0.0.2 DMG, downloads it, holds it while an Agent Display is open and installs it in place once the display ends; builds the release bundle; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere   # an app brought to the front with its windows only on an Agent Display brings Peek down at that display's tile with its window outlined, once a minute, and so does a click on its Dock icon while it is already the front app, and Peek goes by itself; one with a window on your screen, or one the agent started that brings itself forward, gets none (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol # request_control during a Takeover, from an agent with a long name: the card shows with both buttons inside it (debugCard), Keep Control tells the waiting agent and leaves the Takeover, Let … Continue hands the display back, a withdrawal leaves the Takeover, and without a Takeover it answers at once
+AGENTSCREEN_INSTANCE=e2e cargo e2e conversation # chat pause and hand-back, session window authorization, Takeover suspension, revocation and cross-session rejection through MCP; one empty display, no app launches or user-window movement
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
 AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # Field moves to a user stand-in stage; place_window takes it as a stray, or fails when it keeps moving back; 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
@@ -403,6 +404,30 @@ The model uses a virtual monotonic clock. Native event values drive the same she
 
 The initial dwell and leave constants are 300 ms and 500 ms. The [research notes](research/hover-click-intent.md) distinguish NN/g's web-content recommendations from Apple's APIs and macOS app source. These are candidate values, not Apple thresholds or measured Peek latency. Pointer sampling runs every 100 ms to repair missed exit notifications, so actual dismissal can add detection, scheduling and animation time. Native event ordering, visual transitions and user preference still need separately authorized GUI checks.
 
+### Conversation control and window authorization
+
+```sh
+cargo test -p agent-screen-model access
+cargo test -p agent-screen-model model
+cargo test -p agent-screen-mcp tools::tests
+AGENTSCREEN_INSTANCE=e2e cargo e2e conversation
+```
+
+The offline tests exercise authorization scope, Takeover suspension, explicit
+hand-back, revocation, exclusions and MCP argument validation. The `conversation`
+script uses one empty Agent Display and separate MCP sessions to check chat
+pause/continue, authorization status, direct user revocation and session isolation.
+It does not launch apps or move user windows. Run it against this checkout's
+build; an already running test instance may be older than the bundle just built.
+
+Those checks do not prove real-window Handover, return-location restoration or
+Viewer/Peek layout. For those, use owned fixture windows and the `access` and
+`access-revoke` debug surfaces below. Check all-app and app-specific scopes,
+Takeover's paused state, exclusion after Take Back, and explicit reauthorization
+of that one window. Regranting its app must leave the exclusion intact. Returning
+Handovers must leave agent-created windows on the display. Do not use the user's
+working windows as fixtures.
+
 ### Debug control methods
 
 The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` enables them in release builds too, except for `userStage`. Scripts can drive the UI without a real click.
@@ -439,6 +464,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `card-open`, `card-later`, `card-take-over` | Open the Help Card's display, put the card off, or take over its display. |
 | `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
 | `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
+| `access`, `access-revoke` | Open the display's Viewer to inspect its window authorization, or revoke it through the user's action. Supply `displayId`. |
 | `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
 | `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
 | `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |

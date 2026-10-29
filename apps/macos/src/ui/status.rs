@@ -135,6 +135,53 @@ impl Status {
     }
 }
 
+/// What the Viewer and Peek say about the session's Window Access, while
+/// it has one: what it covers, and whether a Takeover pauses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessLine {
+    /// Peek's pill: "Your windows" or "Paused".
+    pub short: String,
+    /// The Viewer's line and Peek's hint.
+    pub long: String,
+    pub paused: bool,
+}
+
+impl AccessLine {
+    pub fn of<H>(display: &Display<H>) -> Option<AccessLine> {
+        if !display.is_live() || display.access.scope.is_none() {
+            return None;
+        }
+        let agent = display.agent_name();
+        let apps = match display.access.app_names() {
+            None => t("all apps", "所有应用").to_string(),
+            Some(names) => names.join(t(", ", "、")),
+        };
+        let paused = display.access_paused();
+        let long = if paused {
+            tf!(
+                "{agent} may take your windows of {apps}. Paused while you’re in control.",
+                "{agent} 可以拿你的窗口：{apps}。你操作期间暂停"
+            )
+        } else {
+            tf!(
+                "{agent} may take your windows of {apps} without asking.",
+                "{agent} 可以直接拿你的窗口：{apps}"
+            )
+        };
+        let short = if paused {
+            t("Window access paused", "窗口授权已暂停")
+        } else {
+            t("Takes your windows", "可拿你的窗口")
+        }
+        .to_string();
+        Some(AccessLine {
+            short,
+            long,
+            paused,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +236,45 @@ mod tests {
         let mut lost = display(true);
         lost.end(7, EndReason::Disconnected);
         assert_eq!(status(&lost, 1).long, "Codex 的连接中断了，窗口还在这里");
+    }
+
+    #[test]
+    fn the_access_line_names_the_scope_and_the_pause() {
+        use agent_screen_model::access::AppId;
+        crate::i18n::set_for_test(Lang::ZhHans);
+        let mut d = display(true);
+        assert_eq!(AccessLine::of(d.get(7).unwrap()), None, "no grant");
+        let access = &mut d.get_mut(7).unwrap().access;
+        access.grant_apps([
+            AppId {
+                bundle_id: "com.apple.Safari".into(),
+                name: "Safari".into(),
+            },
+            AppId {
+                bundle_id: "com.utmapp.UTM".into(),
+                name: "UTM".into(),
+            },
+        ]);
+        let line = AccessLine::of(d.get(7).unwrap()).unwrap();
+        assert_eq!(line.long, "Codex 可以直接拿你的窗口：Safari、UTM");
+        assert!(!line.paused);
+        d.begin_takeover(7);
+        let line = AccessLine::of(d.get(7).unwrap()).unwrap();
+        assert!(line.paused);
+        assert_eq!(line.short, "窗口授权已暂停");
+        crate::i18n::set_for_test(Lang::En);
+        d.end_takeover(7);
+        d.get_mut(7).unwrap().access.grant_all();
+        assert_eq!(
+            AccessLine::of(d.get(7).unwrap()).unwrap().long,
+            "Codex may take your windows of all apps without asking."
+        );
+        d.end(7, EndReason::Finished);
+        assert_eq!(
+            AccessLine::of(d.get(7).unwrap()),
+            None,
+            "ends with the display"
+        );
     }
 
     #[test]

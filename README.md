@@ -32,12 +32,13 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
 ## What you get
 
-- **A display per agent session.** Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move.
+- **A display per agent session.** Run three agents at once and each gets its own screen. Subagents of one session share theirs. Each display can hold several apps and windows. Your windows stay put unless you give them to an agent.
 - **Peek.** Hover the menu bar icon to see every agent's screen live.
-- **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue.
+- **Takeover.** Click into an agent's screen to take the wheel. The agent pauses until you press Let … Continue or explicitly tell it to continue in the conversation.
 - **Help Request.** An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits.
 - **Menus and controls through accessibility.** Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.
-- **Handover.** Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back.
+- **Handover.** Drag one of your windows onto an agent's screen, or tell the agent to take it in the conversation. Take it back with Take Back or ask the agent to return it.
+- **Window authorization.** Tell the agent it may take windows for this session, from all apps or selected apps. It can then take matching windows without another confirmation. You can revoke that access from the conversation, Viewer or Peek.
 
 |                                      | Agent Screen            | Built-in computer use | A virtual machine     |
 | ------------------------------------ | --------------------- | --------------------- | --------------------- |
@@ -85,14 +86,15 @@ Then ask your agent something like "Use Agent Screen to open Calculator on your 
 | `set_disposition`                            | Keep or close a window when the user closes the display.                                                                                                                                   |
 | `wait_for_control`, `request_help`           | Wait out a Takeover, or ask the user to step in.                                                                                                                                           |
 | `get_diagnostics` | Collect this MCP process's compiled build identity and the responding app's identity, without starting the app or creating a display. |
-| `request_control`                            | During a Takeover, ask the user to hand the display back. They answer from a card under the menu bar icon.                                                                                 |
+| `request_control`                            | During a Takeover, ask the user to hand the display back. With `user_instruction`, relay their explicit chat instruction to hand it back, or with `control: "user"` to pause. |
+| `window_access` | Grant, inspect or revoke session window authorization, or return handed-over windows. Grant and return require the user's explicit `user_instruction`. |
 
-A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/agents/AGENTS.md) is a convention you can paste into a project's `AGENTS.md` or `CLAUDE.md`.
+A session can only see and drive its own display. `place_window` with `user_instruction` relays your instruction to hand over that window without another confirmation. Agent Screen trusts the agent's relay and records it; it does not read or independently verify your conversation. [docs/agents/AGENTS.md](docs/agents/AGENTS.md) is a convention you can paste into a project's `AGENTS.md` or `CLAUDE.md`.
 
 ## Your side
 
 - **Peek.** Hover the menu bar icon for 300 ms to start opening Peek. Click the icon to pin it, including when hover already showed it. A later click closes pinned Peek; a click on the closed icon opens it pinned without the hover wait. Unpinned Peek waits 500 ms outside both the icon and Peek before starting to close. Moving between them keeps it open. Click outside or press Esc to dismiss. Right-click the icon for the menu: New Display, Recordings…, Settings…, Report a Problem… and Quit, and anything that needs fixing. Report a Problem… asks first, then copies this build's diagnostics and opens the bug report form; you paste and submit them. Displays in use come first, then those waiting for review. The narrow + creates a display of your own.
-- **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent. Its input tools fail until you press Let … Continue. Collapsing the Viewer keeps the Takeover.
+- **Takeover.** Your first click, scroll or key press in the Viewer, or Take Over, pauses the agent, including automatic window acquisition. Its input tools fail until you press Let … Continue or explicitly tell the agent to continue in the conversation. Collapsing the Viewer keeps the Takeover. The agent can ask you to hand control back; a request or timeout never resumes it by itself.
 - **Help Request.** `request_help` drops a card from the menu bar icon with the display's picture and the agent's reason, and posts a notification. Take Over, on the card or the notification, opens the display in Takeover. Clicking the picture or the notification only opens it. Later puts the card away; the icon stays orange. When the agent gives steps, the Viewer lists them under its header while you are in control.
 - **Notifications.** Besides Help Requests, Agent Screen tells you when an agent leaves windows on its display, by finishing or by disconnecting. Allow them in Settings.
 - **Where an app's windows went.** When you bring an app to the front, from the Dock or a launcher, and all its windows are on Agent Displays, Peek comes down from the menu bar icon. That display's tile glows orange, with the app's windows outlined on it. Click the tile to open it in the Viewer, or Take Back to bring the windows to your screen. Peek goes after 5 seconds unless the pointer is on it. A click on the app's Dock icon does this too, also when the app is already the front app. Before setup is done, a notification names the displays instead.
@@ -103,7 +105,8 @@ A session can only see and drive its own display. [docs/agents/AGENTS.md](docs/a
 - **Agent Pointer.** The Viewer and Peek share an original rounded arrow with an even light rim and dark edge. It keeps the theme accent, glide and click ripple. The pointer is clipped to the display image, not drawn on the display itself, so agent screenshots don't contain it. Your Mac's system cursor is unchanged.
 - **Wallpaper.** Choose… on the Wallpaper row in Settings sets the picture agent displays show in the Viewer and in recordings. Use Default puts back Agent Screen's own, which names each display in System Settings. Agents' screenshots leave the wallpaper out either way.
 - **Handover.** Drag one of your windows onto the Viewer, or pick it under Give in the Viewer's header. Take Back brings any window back. A handed-over window returns to where it was. The × beside them closes the display.
-- **Window Requests.** An agent can ask for one of your windows, such as an app it opened with a script. A card drops from the menu bar icon, with a notification, naming the window. Hand Over gives it the window as a Handover; Keep leaves it with you.
+- **Window Requests.** An agent can ask for one of your windows, such as an app it opened with a script. A card drops from the menu bar icon, with a notification, naming the window. Hand Over gives it the window as a Handover; Keep leaves it with you. If you already explicitly told the agent to take that window, or gave it matching continuing authorization, it can take the window without asking again.
+- **Window authorization.** A continuing authorization covers this session's display and the apps you named, or all apps. Viewer and Peek show its scope, whether Takeover has paused it, and a way to revoke it. Revoking prevents future automatic acquisition; existing windows stay where they are. Ask the agent to return one or all handed-over windows separately. A window you take back, including one returned through the conversation, stays excluded until you explicitly authorize that window again. Unknown app names fail without granting access. Authorization ends when the display ends or the agent disconnects. It never permits taking another agent's windows, borrowing your keyboard or approving unrelated actions such as purchases.
 - **Review.** When the agent stops using a display, the display closes by itself if it is empty, and otherwise shows Needs Review until you press Review Windows…. See [ADR 0004](docs/adr/0004-display-lifecycle.md).
 - **Closing a display** lists its windows with what the agent suggested for each, keep or close, and you can change any of them. Esc cancels, ⌘Return confirms. Quitting Agent Screen applies the same plan without asking.
 

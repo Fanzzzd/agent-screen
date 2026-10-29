@@ -3,6 +3,7 @@
 //!
 //! `H` is the platform's handle that keeps a display alive. Tests use `()`.
 
+use crate::access::{Access, Authority, Refusal};
 use futures::channel::oneshot;
 use std::collections::{BTreeMap, HashSet};
 
@@ -242,6 +243,31 @@ impl ControlWait {
     }
 }
 
+/// A hand-over claimed and not yet moved: what authorized it, and the
+/// grant's revoke count then.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Ticket {
+    serial: u64,
+    pub target: WindowTarget,
+    pub authority: Authority,
+    pub revokes: u64,
+    /// The record the claim replaced.
+    pub before: Option<Record>,
+    /// The user had taken the window back before.
+    pub was_returned: bool,
+}
+
+/// What asking for control did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ControlAsk {
+    /// A new Control Request is open.
+    Asked,
+    /// One was open already; it stands as it was.
+    AlreadyAsked,
+    /// The agent has control, or the display isn't live.
+    NotNeeded,
+}
+
 /// What `wait_for_control` gets right away, or a receiver to await.
 pub enum Wait {
     Now(ControlWait),
@@ -286,6 +312,11 @@ pub struct Display<H> {
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
     pub pointer: Option<AgentPointer>,
+    /// The session's Window Access: what it may take of the user's
+    /// windows on their word. Ends with the display.
+    pub access: Access,
+    handover_serial: u64,
+    handing_over: BTreeMap<WindowId, u64>,
     waiters: Vec<oneshot::Sender<ControlWait>>,
     /// The platform display. Only held: dropping it removes the display.
     #[allow(dead_code)]
@@ -348,14 +379,17 @@ impl<H> Display<H> {
 
     pub fn forget(&mut self, window: WindowId) {
         self.records.remove(&window);
+        self.handing_over.remove(&window);
     }
 
     /// The user takes a window back: it leaves the records for good.
     /// Taking one window back makes its app the user's: none of its
-    /// windows is the agent's to place any more.
+    /// windows is the agent's to place any more, and no Window Access
+    /// covers the window again until the user says so for it.
     pub fn give_back(&mut self, target: WindowTarget) {
-        self.records.remove(&target.window_id);
+        self.forget(target.window_id);
         self.returned.insert(target.window_id);
+        self.access.excluded.insert(target.window_id);
         if self.started.remove(&target.pid) {
             self.released.insert(target.pid);
         }
@@ -386,6 +420,20 @@ impl<H> Display<H> {
         source != DisplayRole::Closet
             && !(source == DisplayRole::Agent && held_on_source)
             && self.is_stray(target, recorded_elsewhere)
+    }
+
+    /// The user's windows on this display, which go back to them.
+    pub fn handovers(&self) -> Vec<WindowTarget> {
+        self.records
+            .values()
+            .filter(|r| r.origin == Origin::HandedOver)
+            .map(|r| r.target)
+            .collect()
+    }
+
+    /// Whether the user is in control, which pauses Window Access.
+    pub fn access_paused(&self) -> bool {
+        self.takeover
     }
 
     /// The Agent Session's verdict on a window. It can change its mind any time.
@@ -597,6 +645,9 @@ impl<H> Displays<H> {
             control_request: None,
             keyboard_borrowed: false,
             pointer: None,
+            access: Access::default(),
+            handover_serial: 0,
+            handing_over: BTreeMap::new(),
             waiters: Vec::new(),
             handle,
         });
@@ -651,6 +702,8 @@ impl<H> Displays<H> {
         display.window_request = None;
         display.control_request = None;
         display.pointer = None;
+        // Window Access is the session's, and the session is done here.
+        display.access.clear();
         display.resume_waiters(ControlWait::Ended);
         true
     }
@@ -740,17 +793,219 @@ impl<H> Displays<H> {
         Some(rx)
     }
 
-    /// During a Takeover, ask the user to hand the display back, replacing
-    /// an earlier request's reason. False when the agent has control
-    /// already, or the display isn't live: nothing to ask.
-    pub fn request_control(&mut self, id: DisplayId, reason: String) -> bool {
+    /// During a Takeover, ask the user to hand the display back. One
+    /// request per display: asking again while one is open changes
+    /// nothing, so the user isn't notified twice, and the agent waits on.
+    pub fn request_control(&mut self, id: DisplayId, reason: String) -> ControlAsk {
         match self.get_mut(id) {
             Some(d) if d.is_live() && d.takeover => {
-                d.control_request = Some(reason);
-                true
+                if d.control_request.is_some() {
+                    ControlAsk::AlreadyAsked
+                } else {
+                    d.control_request = Some(reason);
+                    ControlAsk::Asked
+                }
             }
-            _ => false,
+            _ => ControlAsk::NotNeeded,
         }
+    }
+
+    /// Whether another display holds this window: in its records, or as a
+    /// window of an app its session started that the user didn't make or
+    /// take back. Window Access never reaches such a window.
+    pub fn owned_elsewhere(&self, id: DisplayId, target: WindowTarget) -> bool {
+        self.list.iter().filter(|d| d.id != id).any(|d| {
+            d.records.contains_key(&target.window_id)
+                || (d.started.contains(&target.pid)
+                    && !d.user_made.contains(&target.window_id)
+                    && !d.returned.contains(&target.window_id))
+        })
+    }
+
+    /// Whether `authority` lets one of the user's windows go onto display
+    /// `id` now. Checked again when the window is claimed, so a revoke, a
+    /// Takeover or the display ending in between wins.
+    pub fn may_hand_over(
+        &self,
+        id: DisplayId,
+        target: WindowTarget,
+        authority: &Authority,
+    ) -> Result<(), Refusal> {
+        let d = self.get(id).ok_or(Refusal::Ended)?;
+        if d.handing_over.contains_key(&target.window_id) {
+            return Err(Refusal::Busy);
+        }
+        if *authority == Authority::User {
+            return Ok(());
+        }
+        if !d.is_live() {
+            return Err(Refusal::Ended);
+        }
+        if d.takeover {
+            return Err(Refusal::Takeover);
+        }
+        if self.owned_elsewhere(id, target) {
+            return Err(Refusal::Elsewhere);
+        }
+        if let Authority::Grant { bundle_id } = authority {
+            if d.access.excluded.contains(&target.window_id) {
+                return Err(Refusal::Excluded);
+            }
+            if !d.access.covers(bundle_id.as_deref()) {
+                return Err(Refusal::NotGranted);
+            }
+        }
+        Ok(())
+    }
+
+    /// Of the user's windows of an app, front to back with their bundle
+    /// ids, the one the session's grant may take now.
+    pub fn grantable(
+        &self,
+        id: DisplayId,
+        candidates: &[(WindowTarget, Option<String>)],
+    ) -> Option<usize> {
+        candidates.iter().position(|(target, bundle_id)| {
+            let authority = Authority::Grant {
+                bundle_id: bundle_id.clone(),
+            };
+            self.may_hand_over(id, *target, &authority).is_ok()
+        })
+    }
+
+    /// Claim one of the user's windows as a Handover, if `authority` still
+    /// allows it, in one step with the check, so a Take Back while it
+    /// moves knows its home. The ticket remembers what the claim changed:
+    /// `abandon_hand_over` puts it back if the move doesn't happen, and
+    /// `commit_hand_over` finishes it once the window is there.
+    pub fn hand_over(
+        &mut self,
+        id: DisplayId,
+        target: WindowTarget,
+        authority: &Authority,
+        home: Option<Home>,
+    ) -> Result<Ticket, Refusal> {
+        self.may_hand_over(id, target, authority)?;
+        let d = self.get_mut(id).ok_or(Refusal::Ended)?;
+        let before = d.records.get(&target.window_id).cloned();
+        let was_returned = d.returned.contains(&target.window_id);
+        d.claim(target, Origin::HandedOver, home);
+        d.handover_serial += 1;
+        let serial = d.handover_serial;
+        d.handing_over.insert(target.window_id, serial);
+        Ok(Ticket {
+            serial,
+            target,
+            authority: authority.clone(),
+            revokes: d.access.revokes,
+            before,
+            was_returned,
+        })
+    }
+
+    /// Whether the record is still the one this ticket made: a Take Back
+    /// or another hand-over since replaced it.
+    fn still_ours(&self, id: DisplayId, ticket: &Ticket) -> bool {
+        self.get(id).is_some_and(|d| {
+            d.handing_over.get(&ticket.target.window_id) == Some(&ticket.serial)
+                && d.records
+                    .get(&ticket.target.window_id)
+                    .is_some_and(|r| r.target == ticket.target)
+                && !self.returned_now(id, ticket)
+        })
+    }
+
+    fn returned_now(&self, id: DisplayId, ticket: &Ticket) -> bool {
+        self.get(id)
+            .is_some_and(|d| d.returned.contains(&ticket.target.window_id))
+    }
+
+    /// Right before the window moves: whether the hand-over still stands.
+    /// A Takeover, the display ending, the user taking the window back or,
+    /// for a grant, a revoke since the claim all stop it; the caller then
+    /// calls `abandon_hand_over`. Changes nothing.
+    pub fn confirm_hand_over(
+        &self,
+        id: DisplayId,
+        target: WindowTarget,
+        ticket: &Ticket,
+    ) -> Result<(), Refusal> {
+        let d = self.get(id).ok_or(Refusal::Ended)?;
+        if ticket.authority == Authority::User {
+            return Ok(());
+        }
+        if !d.is_live() {
+            return Err(Refusal::Ended);
+        }
+        if d.takeover {
+            return Err(Refusal::Takeover);
+        }
+        if target != ticket.target || !self.still_ours(id, ticket) {
+            return Err(Refusal::Excluded);
+        }
+        if let Authority::Grant { bundle_id } = &ticket.authority
+            && (d.access.revokes != ticket.revokes || !d.access.covers(bundle_id.as_deref()))
+        {
+            return Err(Refusal::NotGranted);
+        }
+        Ok(())
+    }
+
+    /// The window is on the display: the user's own Hand Over, or their
+    /// word for it, brings it back under Window Access. False when a Take
+    /// Back or another hand-over came first; that one stands.
+    pub fn commit_hand_over(&mut self, id: DisplayId, ticket: &Ticket) -> bool {
+        if !self.still_ours(id, ticket) {
+            return false;
+        }
+        if let Some(d) = self.get_mut(id) {
+            d.handing_over.remove(&ticket.target.window_id);
+            if matches!(ticket.authority, Authority::User | Authority::Once) {
+                d.access.excluded.remove(&ticket.target.window_id);
+            }
+        }
+        true
+    }
+
+    /// The window didn't move: put back what the claim changed, unless a
+    /// Take Back or another hand-over has replaced it since.
+    pub fn abandon_hand_over(&mut self, id: DisplayId, ticket: &Ticket) {
+        if !self.still_ours(id, ticket) {
+            return;
+        }
+        let Some(d) = self.get_mut(id) else { return };
+        let window = ticket.target.window_id;
+        d.handing_over.remove(&window);
+        match ticket.before.clone() {
+            Some(record) => {
+                d.records.insert(window, record);
+            }
+            None => d.forget(window),
+        }
+        if ticket.was_returned {
+            d.returned.insert(window);
+        }
+    }
+
+    /// Give a Handover back to the user on their word, as Take Back does.
+    /// Only a window the user handed over: never one the agent opened or
+    /// placed. Returns its record, with its home.
+    pub fn return_handover(&mut self, id: DisplayId, window: WindowId) -> Result<Record, String> {
+        let d = self
+            .get_mut(id)
+            .ok_or_else(|| "the display has ended".to_string())?;
+        let record = d
+            .records
+            .get(&window)
+            .filter(|r| r.origin == Origin::HandedOver)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "window {window} isn't a Handover on this display; only windows the user handed over go back this way"
+                )
+            })?;
+        d.give_back(record.target);
+        Ok(record)
     }
 
     /// The agent no longer needs the display back. The Takeover goes on.
@@ -927,6 +1182,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::access::{Access, Authority, Refusal};
 
     #[test]
     fn screenshots_fit_the_image_budget() {
@@ -1059,8 +1315,9 @@ mod tests {
     #[test]
     fn a_control_request_needs_a_takeover() {
         let mut d = displays();
-        assert!(
-            !d.request_control(7, "继续订票".into()),
+        assert_eq!(
+            d.request_control(7, "继续订票".into()),
+            ControlAsk::NotNeeded,
             "the agent has control already"
         );
         assert!(d.get(7).unwrap().control_request.is_none());
@@ -1070,10 +1327,16 @@ mod tests {
     fn continue_hands_the_display_back() {
         let mut d = displays();
         assert!(d.begin_takeover(7));
-        assert!(d.request_control(7, "继续订票".into()));
-        assert!(
+        assert_eq!(d.request_control(7, "继续订票".into()), ControlAsk::Asked);
+        assert_eq!(
             d.request_control(7, "继续订票，已登录".into()),
-            "a new reason replaces the old"
+            ControlAsk::AlreadyAsked,
+            "one request per display"
+        );
+        assert_eq!(
+            d.get(7).unwrap().control_request.as_deref(),
+            Some("继续订票"),
+            "the open request stands as it was, so nothing is posted again"
         );
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
@@ -1085,10 +1348,31 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_request_keeps_waiting_for_the_answer() {
+        let mut d = displays();
+        assert!(d.begin_takeover(7));
+        assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
+        let Wait::Later(mut first) = d.wait_for_control(7) else {
+            panic!("should wait")
+        };
+        assert_eq!(
+            d.request_control(7, "继续".into()),
+            ControlAsk::AlreadyAsked
+        );
+        let Wait::Later(mut second) = d.wait_for_control(7) else {
+            panic!("still waits")
+        };
+        assert_eq!(first.try_recv(), Ok(None), "no answer yet");
+        assert!(d.end_takeover(7), "the Viewer's button, or chat");
+        assert_eq!(first.try_recv().unwrap(), Some(ControlWait::Returned));
+        assert_eq!(second.try_recv().unwrap(), Some(ControlWait::Returned));
+    }
+
+    #[test]
     fn keep_control_leaves_the_takeover_and_tells_the_waiter() {
         let mut d = displays();
         assert!(d.begin_takeover(7));
-        assert!(d.request_control(7, "继续订票".into()));
+        assert_eq!(d.request_control(7, "继续订票".into()), ControlAsk::Asked);
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
         };
@@ -1103,19 +1387,453 @@ mod tests {
     fn a_control_request_ends_with_the_takeover_or_its_withdrawal() {
         let mut d = displays();
         assert!(d.begin_takeover(7));
-        assert!(d.request_control(7, "继续".into()));
+        assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         assert!(d.withdraw_control_request(7));
         assert!(
             d.get(7).unwrap().takeover,
             "withdrawing doesn't end the Takeover"
         );
-        assert!(d.request_control(7, "继续".into()));
+        assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         assert!(d.end_takeover(7));
         assert!(d.get(7).unwrap().control_request.is_none());
         assert!(d.begin_takeover(7));
-        assert!(d.request_control(7, "继续".into()));
+        assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         d.end(7, EndReason::Finished);
         assert!(d.get(7).unwrap().control_request.is_none());
+    }
+
+    /// Claim and confirm, as place_window does around the move.
+    fn over(
+        d: &mut Displays<()>,
+        id: DisplayId,
+        target: WindowTarget,
+        authority: &Authority,
+    ) -> Result<(), Refusal> {
+        let ticket = d.hand_over(id, target, authority, None)?;
+        d.confirm_hand_over(id, target, &ticket)?;
+        assert!(d.commit_hand_over(id, &ticket));
+        Ok(())
+    }
+
+    #[test]
+    fn what_happens_between_the_claim_and_the_move_wins() {
+        let mut d = displays();
+        grant_safari(&mut d);
+        // A revoke, even with the app granted again after it.
+        let ticket = d.hand_over(7, users(1), &safari(), None).unwrap();
+        d.get_mut(7).unwrap().access.revoke(None).unwrap();
+        grant_safari(&mut d);
+        assert_eq!(
+            d.confirm_hand_over(7, users(1), &ticket),
+            Err(Refusal::NotGranted)
+        );
+        d.abandon_hand_over(7, &ticket);
+        assert!(d.get(7).unwrap().records.is_empty(), "no record left");
+        // A Takeover.
+        let ticket = d.hand_over(7, users(1), &safari(), None).unwrap();
+        assert!(d.begin_takeover(7));
+        assert_eq!(
+            d.confirm_hand_over(7, users(1), &ticket),
+            Err(Refusal::Takeover)
+        );
+        d.abandon_hand_over(7, &ticket);
+        assert!(d.end_takeover(7));
+        // The user taking it back.
+        let ticket = d.hand_over(7, users(2), &Authority::Once, None).unwrap();
+        d.get_mut(7).unwrap().give_back(users(2));
+        assert_eq!(
+            d.confirm_hand_over(7, users(2), &ticket),
+            Err(Refusal::Excluded)
+        );
+        assert!(
+            d.get(7).unwrap().access.excluded.contains(&2),
+            "their word doesn't outlast their own Take Back"
+        );
+        // The display ending.
+        let ticket = d.hand_over(7, users(3), &Authority::Once, None).unwrap();
+        d.end(7, EndReason::Disconnected);
+        assert_eq!(
+            d.confirm_hand_over(7, users(3), &ticket),
+            Err(Refusal::Ended)
+        );
+    }
+
+    #[test]
+    fn a_hand_over_that_never_moved_keeps_the_exclusion() {
+        let mut d = displays();
+        d.get_mut(7).unwrap().give_back(users(1));
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.get(7).unwrap().access.excluded.contains(&1));
+        assert!(d.begin_takeover(7));
+        assert!(d.confirm_hand_over(7, users(1), &ticket).is_err());
+        d.abandon_hand_over(7, &ticket);
+        assert!(d.get(7).unwrap().access.excluded.contains(&1));
+    }
+
+    fn users(window: WindowId) -> WindowTarget {
+        WindowTarget {
+            pid: 60,
+            window_id: window,
+        }
+    }
+
+    fn safari() -> Authority {
+        Authority::Grant {
+            bundle_id: Some("com.apple.Safari".into()),
+        }
+    }
+
+    fn grant_safari(d: &mut Displays<()>) {
+        d.get_mut(7)
+            .unwrap()
+            .access
+            .grant_apps([crate::access::AppId {
+                bundle_id: "com.apple.Safari".into(),
+                name: "Safari".into(),
+            }]);
+    }
+
+    #[test]
+    fn a_grant_hands_over_only_the_apps_it_names() {
+        let mut d = displays();
+        assert_eq!(
+            over(&mut d, 7, users(1), &safari()),
+            Err(Refusal::NotGranted)
+        );
+        grant_safari(&mut d);
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Ok(()));
+        assert_eq!(d.get(7).unwrap().records[&1].origin, Origin::HandedOver);
+        let notes = Authority::Grant {
+            bundle_id: Some("com.apple.Notes".into()),
+        };
+        assert_eq!(over(&mut d, 7, users(2), &notes), Err(Refusal::NotGranted));
+        assert_eq!(
+            over(&mut d, 7, users(2), &Authority::Once),
+            Ok(()),
+            "the user's word for one window needs no grant"
+        );
+    }
+
+    #[test]
+    fn a_takeover_pauses_window_access_until_handed_back() {
+        let mut d = displays();
+        grant_safari(&mut d);
+        assert!(d.begin_takeover(7));
+        assert!(d.get(7).unwrap().access_paused());
+        for authority in [safari(), Authority::Once] {
+            assert_eq!(
+                over(&mut d, 7, users(1), &authority),
+                Err(Refusal::Takeover)
+            );
+        }
+        assert!(d.get(7).unwrap().records.is_empty());
+        assert!(d.end_takeover(7));
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Ok(()));
+    }
+
+    #[test]
+    fn a_revoke_between_asking_and_claiming_wins() {
+        let mut d = displays();
+        grant_safari(&mut d);
+        assert_eq!(d.may_hand_over(7, users(1), &safari()), Ok(()));
+        d.get_mut(7).unwrap().access.revoke(None).unwrap();
+        assert_eq!(
+            over(&mut d, 7, users(1), &safari()),
+            Err(Refusal::NotGranted)
+        );
+        assert!(d.get(7).unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn window_access_ends_with_the_display() {
+        for reason in [
+            EndReason::Finished,
+            EndReason::Disconnected,
+            EndReason::ClosedByUser,
+        ] {
+            let mut d = displays();
+            grant_safari(&mut d);
+            d.get_mut(7).unwrap().access.excluded.insert(3);
+            assert!(d.end(7, reason));
+            let access = &d.get(7).unwrap().access;
+            assert_eq!(access.scope, None, "{reason:?}");
+            assert!(access.excluded.is_empty() && access.last.is_none());
+            assert_eq!(over(&mut d, 7, users(1), &safari()), Err(Refusal::Ended));
+            assert_eq!(
+                over(&mut d, 7, users(1), &Authority::Once),
+                Err(Refusal::Ended)
+            );
+        }
+        // A display that comes back as a spare starts with none.
+        let mut d = displays();
+        grant_safari(&mut d);
+        d.connection_closed(1);
+        d.remove(7);
+        d.add(7, "Agent Screen 1".into(), DEFAULT_SIZE, owner(2), ());
+        assert_eq!(d.get(7).unwrap().access, Access::default());
+    }
+
+    #[test]
+    fn a_window_taken_back_leaves_the_grant_until_the_user_says_so() {
+        let mut d = displays();
+        d.get_mut(7).unwrap().access.grant_all();
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Ok(()));
+        d.get_mut(7).unwrap().give_back(users(1));
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Err(Refusal::Excluded));
+        // Granting all apps again, or the app, doesn't undo it.
+        d.get_mut(7).unwrap().access.revoke(None).unwrap();
+        d.get_mut(7).unwrap().access.grant_all();
+        grant_safari(&mut d);
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Err(Refusal::Excluded));
+        // Another window of the app is still covered.
+        assert_eq!(over(&mut d, 7, users(2), &safari()), Ok(()));
+        // The user's word for that window brings it back.
+        assert_eq!(over(&mut d, 7, users(1), &Authority::Once), Ok(()));
+        assert!(!d.get(7).unwrap().access.excluded.contains(&1));
+        d.get_mut(7).unwrap().give_back(users(1));
+        // So does their own Hand Over.
+        assert_eq!(over(&mut d, 7, users(1), &Authority::User), Ok(()));
+        assert_eq!(over(&mut d, 7, users(1), &safari()), Ok(()));
+    }
+
+    #[test]
+    fn window_access_never_reaches_another_displays_windows() {
+        let mut d = displays();
+        d.add(
+            8,
+            "Agent Screen 2".into(),
+            DEFAULT_SIZE,
+            Some(Owner {
+                session_key: "other".into(),
+                client: "Claude Code".into(),
+                title: "别的".into(),
+                connection: 2,
+            }),
+            (),
+        );
+        d.get_mut(7).unwrap().access.grant_all();
+        let other = d.get_mut(8).unwrap();
+        other.claim(users(1), Origin::HandedOver, None);
+        other.started.insert(70);
+        let launched = WindowTarget {
+            pid: 70,
+            window_id: 5,
+        };
+        for target in [users(1), launched] {
+            for authority in [safari(), Authority::Once] {
+                assert_eq!(over(&mut d, 7, target, &authority), Err(Refusal::Elsewhere));
+            }
+        }
+        // Still held once that display waits for review.
+        d.end(8, EndReason::Finished);
+        assert_eq!(
+            over(&mut d, 7, users(1), &safari()),
+            Err(Refusal::Elsewhere)
+        );
+        // A window the user made in that app is theirs to give.
+        d.get_mut(8).unwrap().user_made.insert(6);
+        let made = WindowTarget {
+            pid: 70,
+            window_id: 6,
+        };
+        assert_eq!(over(&mut d, 7, made, &safari()), Ok(()));
+    }
+
+    #[test]
+    fn only_a_handover_goes_back_on_the_users_word() {
+        let mut d = displays();
+        let home = Home {
+            frame: Rect::new(10.0, 20.0, 300.0, 200.0),
+            workspace: Some("2".into()),
+        };
+        assert_eq!(
+            d.hand_over(7, users(1), &Authority::Once, Some(home.clone()))
+                .map(|_| ()),
+            Ok(())
+        );
+        let display = d.get_mut(7).unwrap();
+        display.claim(
+            WindowTarget {
+                pid: 5,
+                window_id: 2,
+            },
+            Origin::Launched,
+            None,
+        );
+        display.claim(
+            WindowTarget {
+                pid: 6,
+                window_id: 3,
+            },
+            Origin::Placed,
+            None,
+        );
+        assert_eq!(display.handovers(), vec![users(1)]);
+        assert!(d.return_handover(7, 2).is_err(), "the agent's own window");
+        assert!(d.return_handover(7, 3).is_err(), "a placed window");
+        assert!(d.get(7).unwrap().records.contains_key(&2));
+        let record = d.return_handover(7, 1).unwrap();
+        assert_eq!(record.home, Some(home));
+        let display = d.get(7).unwrap();
+        assert!(display.handovers().is_empty());
+        assert!(display.access.excluded.contains(&1), "as after Take Back");
+        assert!(d.return_handover(7, 1).is_err(), "already back");
+    }
+
+    #[test]
+    fn a_failed_move_leaves_what_the_user_took_back_as_it_was() {
+        let mut d = displays();
+        let launched = WindowTarget {
+            pid: 5,
+            window_id: 1,
+        };
+        let display = d.get_mut(7).unwrap();
+        display.started.insert(5);
+        display.claim(launched, Origin::Launched, None);
+        display.give_back(launched);
+        let before = (
+            display.returned.clone(),
+            display.access.excluded.clone(),
+            display.released.clone(),
+        );
+        let ticket = d.hand_over(7, launched, &Authority::Once, None).unwrap();
+        assert!(d.confirm_hand_over(7, launched, &ticket).is_ok());
+        // The OS move fails.
+        d.abandon_hand_over(7, &ticket);
+        let display = d.get(7).unwrap();
+        assert_eq!(
+            (
+                display.returned.clone(),
+                display.access.excluded.clone(),
+                display.released.clone()
+            ),
+            before
+        );
+        assert!(!display.records.contains_key(&1));
+        assert!(!display.is_stray(launched, false), "still the user's");
+    }
+
+    #[test]
+    fn a_window_has_only_one_pending_handover() {
+        let mut d = displays();
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(matches!(
+            d.hand_over(7, users(1), &Authority::User, None),
+            Err(Refusal::Busy)
+        ));
+        d.abandon_hand_over(7, &ticket);
+        assert!(d.hand_over(7, users(1), &Authority::Once, None).is_ok());
+    }
+
+    #[test]
+    fn a_disposition_change_does_not_cancel_the_handover() {
+        let mut d = displays();
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        d.get_mut(7)
+            .unwrap()
+            .set_disposition(users(1), Disposition::Keep);
+        assert!(d.commit_hand_over(7, &ticket));
+        assert_eq!(
+            d.get(7).unwrap().records[&1].disposition,
+            Some(Disposition::Keep)
+        );
+    }
+
+    #[test]
+    fn an_old_failure_does_not_remove_a_new_identical_handover() {
+        let mut d = displays();
+        let old = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.commit_hand_over(7, &old));
+        let new = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.commit_hand_over(7, &new));
+        d.abandon_hand_over(7, &old);
+        assert!(d.get(7).unwrap().records.contains_key(&1));
+    }
+
+    #[test]
+    fn a_failed_move_keeps_an_earlier_record_and_its_home() {
+        let mut d = displays();
+        let home = Home {
+            frame: Rect::new(1.0, 2.0, 3.0, 4.0),
+            workspace: None,
+        };
+        let placed = WindowTarget {
+            pid: 6,
+            window_id: 4,
+        };
+        d.get_mut(7)
+            .unwrap()
+            .claim(placed, Origin::Placed, Some(home.clone()));
+        d.get_mut(7).unwrap().access.grant_all();
+        let ticket = d.hand_over(7, placed, &safari(), None).unwrap();
+        assert!(d.confirm_hand_over(7, placed, &ticket).is_ok());
+        d.abandon_hand_over(7, &ticket);
+        let record = &d.get(7).unwrap().records[&4];
+        assert_eq!(
+            (record.origin, record.home.clone()),
+            (Origin::Placed, Some(home))
+        );
+    }
+
+    #[test]
+    fn a_take_back_during_the_move_outlasts_the_failure() {
+        let mut d = displays();
+        d.get_mut(7).unwrap().access.grant_all();
+        let ticket = d.hand_over(7, users(1), &safari(), None).unwrap();
+        assert!(d.confirm_hand_over(7, users(1), &ticket).is_ok());
+        d.get_mut(7).unwrap().give_back(users(1));
+        d.abandon_hand_over(7, &ticket);
+        let display = d.get(7).unwrap();
+        assert!(display.returned.contains(&1) && display.access.excluded.contains(&1));
+        assert!(!display.records.contains_key(&1));
+    }
+
+    #[test]
+    fn a_grant_by_app_skips_the_window_the_user_just_took_back() {
+        let mut d = displays();
+        grant_safari(&mut d);
+        let candidates = |ids: &[WindowId]| -> Vec<(WindowTarget, Option<String>)> {
+            ids.iter()
+                .map(|&w| (users(w), Some("com.apple.Safari".to_string())))
+                .collect()
+        };
+        assert_eq!(d.grantable(7, &candidates(&[1, 2])), Some(0));
+        d.get_mut(7).unwrap().give_back(users(1));
+        assert_eq!(
+            d.grantable(7, &candidates(&[1, 2])),
+            Some(1),
+            "the front window was taken back; the next is covered"
+        );
+        assert_eq!(d.grantable(7, &candidates(&[1])), None, "ask instead");
+        assert_eq!(d.grantable(7, &[]), None);
+        assert!(d.begin_takeover(7));
+        assert_eq!(d.grantable(7, &candidates(&[1, 2])), None, "paused");
+    }
+
+    #[test]
+    fn only_a_hand_over_that_landed_commits() {
+        let mut d = displays();
+        d.get_mut(7).unwrap().give_back(users(1));
+        // A Takeover after the claim: no commit, so the caller keeps the
+        // app's returning catch and the exclusion stays.
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.begin_takeover(7));
+        assert!(d.confirm_hand_over(7, users(1), &ticket).is_err());
+        d.abandon_hand_over(7, &ticket);
+        assert!(!d.commit_hand_over(7, &ticket));
+        assert!(d.get(7).unwrap().access.excluded.contains(&1));
+        assert!(d.end_takeover(7));
+        // Taken back after the move: the Take Back stands.
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.confirm_hand_over(7, users(1), &ticket).is_ok());
+        d.get_mut(7).unwrap().give_back(users(1));
+        assert!(!d.commit_hand_over(7, &ticket));
+        assert!(d.get(7).unwrap().access.excluded.contains(&1));
+        // Landed: their word for it lifts the exclusion.
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        assert!(d.confirm_hand_over(7, users(1), &ticket).is_ok());
+        assert!(d.commit_hand_over(7, &ticket));
+        assert!(!d.get(7).unwrap().access.excluded.contains(&1));
     }
 
     #[test]

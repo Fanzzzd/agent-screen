@@ -64,6 +64,17 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
             .into_iter()
             .find(|w| w.width == 320.0 && w.layer > 0)
     };
+    // Wait for the observed state; the control reply can precede the UI update.
+    let wait_card = |visible: bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let frame = card();
+            if frame.is_some() == visible || std::time::Instant::now() >= deadline {
+                return frame;
+            }
+            sleep_ms(50);
+        }
+    };
     let ask = |timeout: u64| {
         json!({
             "display_id": display_id,
@@ -94,8 +105,7 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         r.get("control") == "user" && r.text().contains("stays open"),
         r.text(),
     );
-    sleep_ms(300);
-    let shown = card();
+    let shown = wait_card(true);
     check(
         "the request shows the card",
         shown.is_some(),
@@ -132,8 +142,11 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         r.get("control") == "user" && r.get("kept") == true,
         r.text(),
     );
-    sleep_ms(300);
-    check("Keep Control puts the card away", card().is_none(), "");
+    check(
+        "Keep Control puts the card away",
+        wait_card(false).is_none(),
+        "",
+    );
     check("Keep Control leaves the Takeover", user_has_it()?, "");
 
     // Let … Continue while the agent waits.
@@ -146,8 +159,11 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         r.get("control") == "agent",
         r.text(),
     );
-    sleep_ms(300);
-    check("Let … Continue puts the card away", card().is_none(), "");
+    check(
+        "Let … Continue puts the card away",
+        wait_card(false).is_none(),
+        "",
+    );
     check("the agent has the display", !user_has_it()?, "");
 
     // Withdrawn.
@@ -157,10 +173,9 @@ fn test(control: &Control, client: &McpClient, pid: u32, display_id: u64) -> Res
         "request_control",
         json!({ "display_id": display_id, "withdraw": true }),
     )?;
-    sleep_ms(300);
     check(
         "a withdrawn request puts the card away and leaves the Takeover",
-        r.get("withdrawn") == true && card().is_none() && user_has_it()?,
+        r.get("withdrawn") == true && wait_card(false).is_none() && user_has_it()?,
         r.text(),
     );
     takeover(false)?;

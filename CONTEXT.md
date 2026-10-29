@@ -33,7 +33,7 @@ The strip of live thumbnails of every Agent Display that appears when the user h
 _Avoid_: preview, hover panel
 
 **Takeover**:
-A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It ends only when the user hands control back; collapsing the Viewer or switching displays keeps it.
+A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It pauses any Window Authorization. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
 _Avoid_: pause, lock, manual mode
 
 **Help Request**:
@@ -61,7 +61,7 @@ Moving an app window onto or off an Agent Display. Either the Agent Session or t
 _Avoid_: pull, move, send back
 
 **Handover**:
-The user placing one of their own windows onto an Agent Display so the Agent Session can work in it. A handed-over window always returns to the user when its display is dismissed.
+The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user when its display is dismissed.
 _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
 **Window Request**:
@@ -69,8 +69,12 @@ The Agent Session asking the user for one of their windows, by app or window. Th
 _Avoid_: window permission, borrow
 
 **Control Request**:
-During a Takeover, the Agent Session asking the user to hand its display back, with a reason. The user answers Let … Continue, which ends the Takeover, or Keep Control, and the Takeover goes on. Only the user's answer ends it (ADR 0004).
+During a Takeover, the Agent Session asking the user to hand its display back, with a reason. The user answers Let … Continue, which ends the Takeover, or Keep Control, and the Takeover goes on. They can also explicitly hand control back in the conversation through the Agent Session. A request alone never ends the Takeover (ADR 0004).
 _Avoid_: resume request, reclaim
+
+**Window Authorization**:
+The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. Ending the display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
+_Avoid_: full access, unattended mode, blanket permission
 
 **Disposition**:
 The Agent Session's standing verdict on one of its windows: keep it for the user to review, or close it. The agent can revise it at any time; the user has the final say when dismissing the display.
