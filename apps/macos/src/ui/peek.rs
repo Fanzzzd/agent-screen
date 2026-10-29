@@ -709,7 +709,7 @@ fn access_pill(
         .absolute()
         .left(px(5.))
         .bottom(px(5.))
-        .max_w(px(150.))
+        .max_w(px(180.))
         .h(px(18.))
         .pl(px(6.))
         .pr(px(2.))

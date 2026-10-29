@@ -122,6 +122,12 @@ pub fn debug_user_stage(id: DisplayId, connection: u64) {
     *DEBUG_USER_STAGE.lock().unwrap() = Some((id, connection));
 }
 
+/// The user stand-in stage scripts set with `userStage`, if any.
+#[cfg(debug_assertions)]
+pub fn user_stage() -> Option<DisplayId> {
+    DEBUG_USER_STAGE.lock().unwrap().map(|(id, _)| id)
+}
+
 #[cfg(debug_assertions)]
 pub fn clear_user_stage(id: DisplayId) {
     let mut stage = DEBUG_USER_STAGE.lock().unwrap();

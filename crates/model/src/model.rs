@@ -832,7 +832,11 @@ impl<H> Displays<H> {
         authority: &Authority,
     ) -> Result<(), Refusal> {
         let d = self.get(id).ok_or(Refusal::Ended)?;
-        if d.handing_over.contains_key(&target.window_id) {
+        if self
+            .list
+            .iter()
+            .any(|d| d.handing_over.contains_key(&target.window_id))
+        {
             return Err(Refusal::Busy);
         }
         if *authority == Authority::User {
@@ -1723,6 +1727,22 @@ mod tests {
         ));
         d.abandon_hand_over(7, &ticket);
         assert!(d.hand_over(7, users(1), &Authority::Once, None).is_ok());
+    }
+
+    #[test]
+    fn a_pending_handover_blocks_every_display() {
+        let mut d = displays();
+        d.add(8, "Agent Screen 2".into(), DEFAULT_SIZE, owner(2), ());
+        let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
+        for authority in [Authority::User, Authority::Once, safari()] {
+            assert!(matches!(
+                d.hand_over(8, users(1), &authority, None),
+                Err(Refusal::Busy)
+            ));
+        }
+        assert!(!d.get(8).unwrap().records.contains_key(&1));
+        d.abandon_hand_over(7, &ticket);
+        assert!(d.hand_over(8, users(1), &Authority::User, None).is_ok());
     }
 
     #[test]

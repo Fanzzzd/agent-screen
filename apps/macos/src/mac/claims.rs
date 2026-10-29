@@ -73,6 +73,18 @@ pub fn claim(window: u32, display: u32) {
     change(|c| c.claim(window, display));
 }
 
+/// Claim a window that stays on a claimed display, and say whether the
+/// claim file now names it there. False when the display isn't claimed or
+/// the file couldn't be written.
+pub fn claim_confirmed(window: u32, display: u32) -> bool {
+    let mut claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(error) = claims.publish(false, |c| c.claim(window, display), write) {
+        log::warn!("claims: could not write {}: {error}", path().display());
+        return false;
+    }
+    claims.published().display_of(window) == Some(display)
+}
+
 /// A window about to leave for the user's screen.
 pub fn release(window: u32) {
     change(|c| c.release(window));

@@ -188,6 +188,7 @@ SPARKLE_ED_KEY_FILE=<key file> cargo e2e selfupdate   # a release build updates 
 AGENTSCREEN_INSTANCE=e2e cargo e2e appwhere   # an app brought to the front with its windows only on an Agent Display brings Peek down at that display's tile with its window outlined, once a minute, and so does a click on its Dock icon while it is already the front app, and Peek goes by itself; one with a window on your screen, or one the agent started that brings itself forward, gets none (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol # request_control during a Takeover, from an agent with a long name: the card shows with both buttons inside it (debugCard), Keep Control tells the waiting agent and leaves the Takeover, Let … Continue hands the display back, a withdrawal leaves the Takeover, and without a Takeover it answers at once
 AGENTSCREEN_INSTANCE=e2e cargo e2e conversation # chat pause and hand-back, session window authorization, Takeover suspension, revocation and cross-session rejection through MCP; one empty display, no app launches or user-window movement
+AGENTSCREEN_INSTANCE=e2e cargo e2e windowaccess # Window Authorization on a real Field window on a user stand-in stage: an app grant takes it without a card except during a Takeover, the user's Revoke leaves it, return all sends it home at its frame and leaves the agent's own window, a regrant of its app or all apps still asks with a card, the user's words for that window take it and clear the exclusion, and Take Back excludes it again; captures the Viewer and Peek in each state (AGENTSCREEN_LANG=zh for Chinese); 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
 AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # Field moves to a user stand-in stage; place_window takes it as a stray, or fails when it keeps moving back; 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
@@ -411,6 +412,7 @@ cargo test -p agent-screen-model access
 cargo test -p agent-screen-model model
 cargo test -p agent-screen-mcp tools::tests
 AGENTSCREEN_INSTANCE=e2e cargo e2e conversation
+AGENTSCREEN_INSTANCE=e2e cargo e2e windowaccess
 ```
 
 The offline tests exercise authorization scope, Takeover suspension, explicit
@@ -421,12 +423,14 @@ It does not launch apps or move user windows. Run it against this checkout's
 build; an already running test instance may be older than the bundle just built.
 
 Those checks do not prove real-window Handover, return-location restoration or
-Viewer/Peek layout. For those, use owned fixture windows and the `access` and
-`access-revoke` debug surfaces below. Check all-app and app-specific scopes,
-Takeover's paused state, exclusion after Take Back, and explicit reauthorization
-of that one window. Regranting its app must leave the exclusion intact. Returning
-Handovers must leave agent-created windows on the display. Do not use the user's
-working windows as fixtures.
+Viewer/Peek layout. `windowaccess` covers them with owned Field windows: a
+stage session launches the user's window on a user stand-in stage and gives it up
+with `debugUserWindow`, and the target session launches its own. It drives the user's Revoke and Take Back through the
+`access-revoke` surface and `debugTakeBack`, and captures the Viewer (`access`)
+and pinned Peek under `target/e2e/windowaccess-<lang>-*.png`. Each language is a
+separate run with its own two displays; the app picks its language at launch.
+Peek's hover hint and the Viewer's hover text with the relayed words need a real
+pointer and are not captured. Do not use the user's working windows as fixtures.
 
 ### Debug control methods
 
@@ -440,6 +444,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugMoveWindow` | Moves the window named by `pid` and `windowId` to global `x`, `y`. |
 | `debugHandOver` | Hands `windowId` over to `displayId`, as from the Windows menu. |
 | `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Windows menu. |
+| `debugUserWindow` | Debug builds only. On this session's user stand-in stage (`userStage`), makes `windowId`, a window it launched there, the user's own: the stage forgets it, and the claim keeps AeroSpace off it. |
 | `debugAnswerWindow` | Answers the display's Window Request with `give` true or false once it opens. Returns `answered`. |
 | `debugFront` | Records that macOS last named `pid` the front app. It does not activate the app. |
 | `debugUserKey` | Records a user key press to `pid`, as the global key monitor does. |

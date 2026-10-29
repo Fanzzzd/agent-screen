@@ -1417,6 +1417,50 @@ async fn handle_one(
                 .await;
             Ok(json!({}))
         }
+        // Test hook: the session that holds the user stand-in stage gives
+        // up a window it launched there, so the window counts as the user's
+        // own, as on a real screen of theirs. The claim stays, so AeroSpace
+        // leaves the window on the stage.
+        #[cfg(debug_assertions)]
+        "debugUserWindow" if debug_methods() => {
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            usable(&core, connection, id, "debugUserWindow", cx)?;
+            if !cg::window_display_role(id).accepts_window_request() {
+                return Err(ControlError::invalid(
+                    "debugUserWindow needs this session's user stand-in stage (debugShow userStage)",
+                ));
+            }
+            let window = p
+                .int("windowId")
+                .ok_or_else(|| ControlError::invalid("windowId is required"))?
+                as u32;
+            let here = off(cx, move || {
+                windows::on_display(id)
+                    .iter()
+                    .any(|w| w.target.window_id == window)
+            })
+            .await;
+            if !here {
+                return Err(ControlError::not_found(
+                    "no window with that id on the stage",
+                ));
+            }
+            // Only a window the claim file holds on the stage: AeroSpace
+            // would take any other for the user's workspace.
+            let claimed = off(cx, move || crate::mac::claims::claim_confirmed(window, id)).await;
+            if !claimed {
+                return Err(ControlError::failed(
+                    "the window's claim for the stage wasn't published",
+                ));
+            }
+            core.update(cx, |c, _| {
+                if let Some(d) = c.displays.get_mut(id) {
+                    d.forget(window);
+                    d.user_made.insert(window);
+                }
+            });
+            Ok(json!({}))
+        }
         // Test hook: which agent the setup window says loaded the tools.
         "debugAgentReady" if debug_methods() => {
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;

@@ -141,6 +141,25 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
 /// A window returns to where it came from when we know that, otherwise to
 /// the main display. Blocking.
 pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) {
+    if let Some((stage, home)) = user_stage_home(home) {
+        // Debug builds: the claim stays the whole way, and a window that
+        // can't go home claimed stays where it is rather than going
+        // anywhere AeroSpace or the user's screen could have it.
+        if !crate::mac::claims::claim_confirmed(target.window_id, stage) {
+            log::warn!(
+                "window {} not returned: its claim for the user stand-in stage wasn't published",
+                target.window_id
+            );
+            return;
+        }
+        if let Err(error) = ax::set_frame(target, home.frame) {
+            log::warn!(
+                "could not return window {} to the user stand-in stage: {error:?}",
+                target.window_id
+            );
+        }
+        return;
+    }
     crate::mac::claims::release(target.window_id);
     if let Some(home) = home {
         if let Some(workspace) = &home.workspace
@@ -162,6 +181,33 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
     }
 }
 
+/// Debug builds: the user stand-in stage and the home when a window's home
+/// is on it. The stage is an Agent Display in the claim file, and AeroSpace
+/// takes an unclaimed window on one for the user's workspace, onto their
+/// real screen; a window going home there stays claimed, as a window on a
+/// real screen of the user's stays where it is.
+#[cfg(debug_assertions)]
+fn user_stage_home(home: Option<&Home>) -> Option<(crate::model::DisplayId, &Home)> {
+    let stage = cg::user_stage()?;
+    let home = home?;
+    stage_home(Some((stage, cg::display_bounds(stage))), Some(home)).map(|stage| (stage, home))
+}
+
+#[cfg(not(debug_assertions))]
+fn user_stage_home(_: Option<&Home>) -> Option<(crate::model::DisplayId, &Home)> {
+    None
+}
+
+/// The stage, when the home's middle is on it.
+#[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+fn stage_home(
+    stage: Option<(crate::model::DisplayId, Rect)>,
+    home: Option<&Home>,
+) -> Option<crate::model::DisplayId> {
+    let (id, bounds) = stage?;
+    home.filter(|h| bounds.contains(h.frame.mid())).map(|_| id)
+}
+
 /// Where a window is now, for a Handover: its frame and AeroSpace
 /// workspace. Blocking.
 pub fn home_of(target: WindowTarget, frame: Option<Rect>) -> Option<Home> {
@@ -169,4 +215,26 @@ pub fn home_of(target: WindowTarget, frame: Option<Rect>) -> Option<Home> {
     let workspace =
         AeroSpace::current().and_then(|a| a.workspace_of(target.window_id).ok().flatten());
     Some(Home { frame, workspace })
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    fn home(x: f64, y: f64) -> Home {
+        Home {
+            frame: Rect::new(x, y, 600.0, 332.0),
+            workspace: Some("2".into()),
+        }
+    }
+
+    #[test]
+    fn a_home_on_the_user_stage_returns_there_claimed() {
+        let stage = Some((216, Rect::new(4772.0, -1884.0, 1728.0, 1117.0)));
+        assert_eq!(stage_home(stage, Some(&home(6132.0, -1804.0))), Some(216));
+        // A home on a real screen, none at all, or no stage: the normal way.
+        assert_eq!(stage_home(stage, Some(&home(868.0, 38.0))), None);
+        assert_eq!(stage_home(stage, None), None);
+        assert_eq!(stage_home(None, Some(&home(6132.0, -1804.0))), None);
+    }
 }
