@@ -1,5 +1,5 @@
 ---
-agent-screen: minor
+default: minor
 ---
 
 Tell your agent to continue, pause, take a window or return handed-over windows in the conversation. It can relay your explicit instruction without asking you to click a second confirmation. Agent Screen trusts the agent to relay your words; it does not read or independently verify the chat.

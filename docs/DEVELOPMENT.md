@@ -504,7 +504,7 @@ CI (`.github/workflows/ci.yml`) checks formatting, runs clippy and the unit test
 
 Releases follow the changesets model, with [knope](https://knope.tech) (`knope.toml`):
 
-1. With each change users will notice, add a changeset: `knope document-change` asks for the kind (patch, minor or major) and a summary, and writes `.changeset/<name>.md`. Write the summary for users. CI warns when the app changes without one; tests and refactors need none.
+1. With each change users will notice, add a changeset: `knope document-change` asks for the kind (patch, minor or major) and a summary, and writes `.changeset/<name>.md`. The single `[package]` in `knope.toml` uses the changeset key `default`, not the Rust package name `agent-screen`. Write the summary for users. CI warns when the app changes without one; tests and refactors need none.
 2. Every push to `main` with changesets runs `prepare-release.yml`. It keeps one pull request, **chore(release): Agent Screen x.y.z**, open from the `release` branch: the version in the three `Cargo.toml` files and `Cargo.lock`, and a new `CHANGELOG.md` section from the changesets, which it deletes.
 3. Merging that pull request runs `release.yml`. It runs the checks, builds, signs and notarizes the DMG with `release.sh`, has knope tag `v<version>` and publish the GitHub release with the changelog section and the DMG, checks the downloaded DMG against the cask's sha256, and pushes the cask to `Fanzzzd/homebrew-agent-screen`.
 
