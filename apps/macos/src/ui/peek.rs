@@ -588,7 +588,8 @@ fn tile(
                         .when_some(remind, |d, remind| {
                             d.child(reminder(remind, size, fit, theme, shell))
                         })
-                        .when_some(access, |d, access| {
+                        // Keep the reminder's Take Back button visible.
+                        .when_some(access.filter(|_| remind.is_none()), |d, access| {
                             d.child(access_pill(id, access, theme, revoke))
                         })
                         // Hover and "currently open" both show as a ring.
