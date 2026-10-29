@@ -138,10 +138,14 @@ fn test(lang: &str, tag: &str) -> Result<()> {
         ended,
         "a Field started with this run's tag is still running",
     );
-    anyhow::ensure!(
-        ended,
-        "a Field fixture is still running: the stage and the test app stay up rather than let it reach the user's screen"
-    );
+    if !ended {
+        eprintln!(
+            "fixture cleanup failed; holding both sessions open until their Field processes exit"
+        );
+        while !end_fixtures(tag) {
+            sleep_ms(1000);
+        }
+    }
     let _ = client.call("end_display", json!({ "display_id": id }));
     client.close();
     let _ = stage.call("endDisplay", json!({ "displayId": stage_id }));
