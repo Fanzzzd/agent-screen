@@ -9,6 +9,12 @@ pub const CLOSE_DELAY_MS: u64 = 500;
 /// until the pointer, having come onto it, leaves.
 pub const REMIND_MS: u64 = 5000;
 
+/// Explicit Dock clicks express a new user request. Automatic activations
+/// are rate-limited so an app cannot repeatedly pull Peek open.
+pub fn reminder_due(elapsed_ms: Option<u64>, docked: bool) -> bool {
+    docked || elapsed_ms.is_none_or(|elapsed| elapsed >= 60_000)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timing {
     pub open_ms: u64,
@@ -190,18 +196,24 @@ impl Intent {
     }
     /// Shown without the pointer, to say where an app's windows are: it
     /// goes after `hold_ms` like a hover Peek the pointer left, unless the
-    /// pointer comes onto it. A Peek already up stays as it is.
+    /// pointer comes onto it. A repeated reminder refreshes a hover Peek's
+    /// close deadline; a pinned Peek stays pinned.
     pub fn remind(&mut self, now: u64, hold_ms: u64) -> Effect {
-        if self.stopped || self.mode != Mode::Closed {
+        if self.stopped || self.mode == Mode::Pinned {
             return Effect::None;
         }
+        let effect = if self.mode == Mode::Closed {
+            Effect::Show
+        } else {
+            Effect::None
+        };
         self.cancel_press();
         self.mode = Mode::Hover;
         self.cancel_timer();
         if !self.pointer.inside() {
             self.schedule(Kind::Close, now, hold_ms);
         }
-        Effect::Show
+        effect
     }
     pub fn pin(&mut self) -> Effect {
         if self.stopped {
@@ -258,6 +270,40 @@ mod tests {
         assert_eq!(intent.fire(timer, OPEN_DELAY_MS), Effect::Show);
         intent
     }
+    #[test]
+    fn dock_clicks_remind_each_time_but_automatic_activations_still_wait() {
+        for elapsed in [0, 1000, 4999, 59_999, 60_000] {
+            assert!(reminder_due(Some(elapsed), true));
+        }
+        assert!(reminder_due(None, false));
+        assert!(!reminder_due(Some(59_999), false));
+        assert!(reminder_due(Some(60_000), false));
+    }
+
+    #[test]
+    fn a_repeated_reminder_refreshes_its_deadline_and_invalidates_the_old_timer() {
+        let mut intent = Intent::default();
+        assert_eq!(intent.remind(0, REMIND_MS), Effect::Show);
+        let first = intent.pending().unwrap();
+        assert_eq!(intent.remind(4000, REMIND_MS), Effect::None);
+        let repeated = intent.pending().unwrap();
+        assert_eq!(repeated.due_ms, 9000);
+        assert_eq!(intent.fire(first, 5000), Effect::None);
+        assert_eq!(intent.fire(repeated, 9000), Effect::Hide);
+    }
+
+    #[test]
+    fn a_repeated_reminder_does_not_close_while_the_pointer_is_inside() {
+        let mut intent = Intent::default();
+        intent.remind(0, REMIND_MS);
+        intent.pointer(PEEK, 100, Timing::default());
+        intent.remind(1000, REMIND_MS);
+        assert!(intent.pending().is_none());
+        intent.pointer(OUT, 2000, Timing::default());
+        let timer = intent.pending().unwrap();
+        assert_eq!(timer.due_ms, 2000 + CLOSE_DELAY_MS);
+    }
+
     #[test]
     fn a_reminder_goes_by_itself_unless_the_pointer_comes() {
         let mut intent = Intent::default();

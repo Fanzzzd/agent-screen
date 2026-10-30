@@ -439,7 +439,9 @@ pub fn drag_slider(
         return Err("The slider action stopped before setting its value; its window is no longer available for agent input.".into());
     }
     let changed = set_attribute(&element, "AXValue", &CFNumber::new_f64(value));
-    if changed && number("AXValue").is_some_and(|read| substitute::landed(slider, value, read)) {
+    if changed
+        && number("AXValue").is_some_and(|read| substitute::confirmed(slider, current, value, read))
+    {
         Ok(true)
     } else {
         Err("The slider's accessibility value change was not confirmed. Inspect its current value before retrying; no fallback drag was sent.".into())

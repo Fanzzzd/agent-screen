@@ -3318,18 +3318,17 @@ impl Shell {
     /// The user brought `pid` to the front, and every window it has is on
     /// Agent Displays, where they can't see it: a notification names those
     /// displays, and a click on it opens the first in the Viewer (#51). At
-    /// most once a minute for an app. The displays named.
+    /// most once a minute for automatic activation. The displays named.
     ///
     /// `docked`: the user clicked the app's Dock icon, which says they want
     /// it even when it was already the front app and nothing activated
-    /// (#51): told again after 5 s.
+    /// (#51): each explicit click reminds again, without a cooldown.
     pub fn remind_where(
         &mut self,
         pid: i32,
         docked: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Vec<DisplayId>> {
-        let again = Duration::from_secs(if docked { 5 } else { 60 });
         let core = self.core.read(cx);
         let places: Vec<(DisplayId, Rect, String)> = core
             .displays
@@ -3340,10 +3339,12 @@ impl Shell {
         // An app the agent started brings itself to the front, as Electron
         // does: no one to tell, unless the user just used it.
         let agents = core.displays.list.iter().any(|d| d.started.contains(&pid));
-        let recent = self
-            .reminded
-            .get(&pid)
-            .is_some_and(|at| at.elapsed() < again);
+        let recent = !peek_intent::reminder_due(
+            self.reminded
+                .get(&pid)
+                .map(|at| at.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            docked,
+        );
         if places.is_empty() || recent || pid == std::process::id() as i32 {
             return gpui::Task::ready(Vec::new());
         }

@@ -22,14 +22,14 @@ When Agent Screen quits, the pipe closes and the app keeps running. An app adopt
 For `left_click_drag` and `left_mouse_down`, Agent Screen finds the window under the start point, then the outermost `AXWebArea` there. That web area's frame is the page's viewport. Every web area Chromium and WebKit publish has this role.
 
 - **In a web area, with a pipe.** The drag goes through the pipe. The page is the visible page target whose `screenX`, `screenY`, `outerWidth` and `outerHeight` match the window. When several do, as in an Electron window with more than one web view, the one whose viewport matches the web area wins. A point maps to CSS pixels by the web area's origin and its width over `innerWidth`, which covers page zoom and `devicePixelRatio`. Without accessibility's tree, the viewport fills the window's width at its bottom, as in Chrome and Electron. The moves, the release and a takeover's release go to the same page.
-- **In a Chromium or WebKit web area, without a pipe.** The drag fails. The error says why and suggests a new instance through `launch_app` or `request_help`. Nothing is sent, and nothing at the session level either. After `left_mouse_down` there, the press goes out as half a click, and the first `mouse_move` fails the same way.
-- **Anywhere else.** The drag goes out as posted events, as before: native controls, window edges, title bars (which move the window), toolbars and tab strips. Firefox's pages also go this way, since they weren't tested.
+- **In a Chromium or WebKit web area, without a pipe.** A complete drag first tries a supported accessibility slider value change. Otherwise the action creates an approval intent in the shared Input Queue (ADR 0013), then returns `input_pending`. A `left_mouse_down` there also queues an intent without sending a press. There is no half-click and no subsequent move to continue. This build has no real-input executor: approval alone never executes the drag. `input_queue` can inspect, wait for or withdraw the request; `request_help` remains available when the user needs to perform the drag.
+- **Anywhere else.** Title bars use window placement. A complete drag on a slider with sufficient accessibility information sets and confirms its value; ambiguous controls are left to the other routes. Other native controls, window edges, toolbars, tab strips and Firefox's pages use posted events as before. Firefox's page drag behavior was not tested.
 
-A text selection by drag in a page without a pipe used to half-work and is now refused too. The error suggests click and shift-click.
+A text-selection drag in a page with no supported background route also queues an unexecuted intent. The error offers click and shift-click as a background alternative.
 
 ## Consequences
 
-- Drags work in the pages of Chromium apps `launch_app` started, and only there. WebKit apps, Chrome on its default profile, apps the user started and apps that strip the switch have no conflict-free way to drag in a page.
+- General page drags work through the private pipe of Chromium apps `launch_app` started. Some sliders can use accessibility instead. For other page drags in WebKit, a default browser profile, user-started apps or apps that strip the switch, queue approval does not add a working execution route in this build.
 - A drag through the pipe can't leave the browser. An HTML5 drag drops inside the app's own pages, never into another app.
 - `Input.insertText` could type whole strings, CJK included, but it sends no key events, and pages that act on keys would behave differently. Typing keeps the posted keys.
 - Agent Screen now parents and reaps these apps. `open` gave them launchd as parent.

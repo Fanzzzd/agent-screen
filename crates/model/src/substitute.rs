@@ -52,8 +52,8 @@ pub fn slider_value(slider: Slider, to: (f64, f64)) -> Option<f64> {
     Some(min + fraction.clamp(0.0, 1.0) * (max - min))
 }
 
-/// Whether the value the slider reads back after setting `wanted` is it,
-/// give or take a step: sliders snap to their own steps.
+/// Geometry tolerance for matching a thumb position to its current value.
+/// This alone is not sufficient to confirm a write: use `confirmed`.
 pub fn landed(slider: Slider, wanted: f64, read: f64) -> bool {
     let span = slider.max - slider.min;
     span.is_finite()
@@ -80,6 +80,20 @@ pub fn drag_value(slider: Slider, from: (f64, f64), to: (f64, f64), current: f64
     }
 }
 
+/// Confirmation seam for a value write, separate from source-geometry
+/// matching. The caller supplies the value read before the write too.
+pub fn confirmed(slider: Slider, before: f64, wanted: f64, read: f64) -> bool {
+    if !before.is_finite() || !landed(slider, wanted, read) {
+        return false;
+    }
+    if wanted == before {
+        return read == wanted;
+    }
+    // A short drag's old value can already be inside the geometry
+    // tolerance. Require actual progress closer to the requested value.
+    (read - wanted).abs() < (read - before).abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +105,22 @@ mod tests {
             max: 100.0,
             vertical,
         }
+    }
+
+    #[test]
+    fn an_unchanged_value_does_not_confirm_a_short_drag() {
+        let s = slider(false);
+        let wanted = drag_value(s, (150.0, 210.0), (158.0, 210.0), 25.0).unwrap();
+        assert!((wanted - 29.0).abs() < 1e-9);
+        assert!(!confirmed(s, 25.0, wanted, 25.0));
+        assert!(confirmed(s, 25.0, wanted, 28.0));
+        assert!(!confirmed(s, 75.0, 71.0, 75.0));
+    }
+
+    #[test]
+    fn confirming_a_noop_does_not_accept_an_unexpected_change() {
+        assert!(confirmed(slider(false), 25.0, 25.0, 25.0));
+        assert!(!confirmed(slider(false), 25.0, 25.0, 26.0));
     }
 
     #[test]

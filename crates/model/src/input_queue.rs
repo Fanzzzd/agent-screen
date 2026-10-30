@@ -185,6 +185,9 @@ impl Queue {
             Status::Queued => {
                 r.status = Status::Stopped(Stop::Withdrawn);
                 self.waiting.retain(|queued| *queued != id);
+                if self.grant.is_none() {
+                    self.approval = self.approval.saturating_add(1);
+                }
             }
             Status::Running if self.active == Some(id) => {
                 r.status = Status::Stopping(Stop::Withdrawn);
@@ -495,6 +498,7 @@ impl Queue {
         if self.active().is_some_and(|r| matches(&r.owner)) {
             self.stop_active(why);
         }
+        let waiting = self.waiting.len();
         self.waiting.retain(|id| {
             let Some(r) = self.requests.get_mut(id) else {
                 return false;
@@ -506,6 +510,9 @@ impl Queue {
                 true
             }
         });
+        if self.grant.is_none() && self.waiting.len() != waiting {
+            self.approval = self.approval.saturating_add(1);
+        }
         if let Some(grant) = self.grant.as_mut() {
             grant.participants.retain(|owner| !matches(owner));
             grant.done.retain(|owner| !matches(owner));
@@ -1005,6 +1012,33 @@ mod tests {
         assert_eq!(add(&mut q, "a", 1, "drag", 2 + IDLE_MS), a);
         assert!(q.allow(q.approval(), 3 + IDLE_MS));
         assert_eq!(q.start(3 + IDLE_MS), Some(a));
+    }
+
+    #[test]
+    fn a_card_from_a_withdrawn_batch_cannot_approve_a_later_request() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "drag", 0);
+        let card = q.approval();
+        assert!(q.withdraw(a, &owner("a", 1), 1));
+        add(&mut q, "b", 2, "drag", 2);
+        assert!(!q.allow(card, 3));
+        assert!(q.allow(q.approval(), 3));
+    }
+
+    #[test]
+    fn a_card_from_an_ended_owner_cannot_approve_a_later_request() {
+        for disconnected in [false, true] {
+            let mut q = queue();
+            add(&mut q, "a", 1, "drag", 0);
+            let card = q.approval();
+            if disconnected {
+                q.disconnect(owner("a", 1).connection, 1);
+            } else {
+                q.end_display(1, 1);
+            }
+            add(&mut q, "b", 2, "drag", 2);
+            assert!(!q.allow(card, 3));
+        }
     }
 
     #[test]
