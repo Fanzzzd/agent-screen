@@ -87,6 +87,7 @@ pub enum Native {
         take_over: bool,
     },
     /// What macOS says about notifying, after `notify::check`.
+    InputQueueOpened,
     NotificationAuth(super::notify::Auth),
     /// Screens were added, removed or rearranged.
     ScreensChanged,

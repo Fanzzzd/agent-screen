@@ -361,6 +361,91 @@ pub fn web_area_at(target: WindowTarget, at: (f64, f64)) -> Option<Rect> {
     frame(&outermost?.clone())
 }
 
+/// Substitute a slider value change for a drag only when AX publishes a
+/// numeric range, orientation and a thumb position that identifies its
+/// direction. After attempting a set, uncertainty is an error, never a
+/// reason to issue a second drag through another route.
+pub fn drag_slider(
+    target: WindowTarget,
+    from: (f64, f64),
+    to: (f64, f64),
+    allowed: impl Fn() -> bool,
+) -> Result<bool, String> {
+    use agent_screen_model::substitute::{self, Slider};
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let result = unsafe {
+        application(target.pid).copy_element_at_position(
+            from.0 as f32,
+            from.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    if result != AXError::Success {
+        return Ok(false);
+    }
+    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+        return Ok(false);
+    };
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    for _ in 0..8 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXSlider") => break,
+            Some("AXWindow" | "AXSheet" | "AXApplication" | "AXWebArea") => return Ok(false),
+            _ => {}
+        }
+        let Some(parent) = element_attribute(&element, "AXParent") else {
+            return Ok(false);
+        };
+        element = parent;
+    }
+    if string_attribute(&element, "AXRole").as_deref() != Some("AXSlider")
+        || !settable(&element, "AXValue")
+        || element_attribute(&element, "AXWindow").and_then(|window| window_id(&window))
+            != Some(target.window_id)
+    {
+        return Ok(false);
+    }
+    let number = |name: &str| {
+        attribute(&element, name)?
+            .downcast_ref::<CFNumber>()?
+            .as_f64()
+    };
+    let (Some(min), Some(max), Some(current), Some(frame)) = (
+        number("AXMinValue"),
+        number("AXMaxValue"),
+        number("AXValue"),
+        frame(&element),
+    ) else {
+        return Ok(false);
+    };
+    let vertical = match string_attribute(&element, "AXOrientation").as_deref() {
+        Some("AXHorizontalOrientation") => false,
+        Some("AXVerticalOrientation") => true,
+        _ => return Ok(false),
+    };
+    let slider = Slider {
+        frame,
+        min,
+        max,
+        vertical,
+    };
+    if !frame.contains(from) {
+        return Ok(false);
+    }
+    let Some(value) = substitute::drag_value(slider, from, to, current) else {
+        return Ok(false);
+    };
+    if !allowed() {
+        return Err("The slider action stopped before setting its value; its window is no longer available for agent input.".into());
+    }
+    let changed = set_attribute(&element, "AXValue", &CFNumber::new_f64(value));
+    if changed && number("AXValue").is_some_and(|read| substitute::landed(slider, value, read)) {
+        Ok(true)
+    } else {
+        Err("The slider's accessibility value change was not confirmed. Inspect its current value before retrying; no fallback drag was sent.".into())
+    }
+}
+
 /// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates
 /// window moves and resizes, slowly. Turn it off around a move.
 fn with_moves_direct<T>(window: &AXUIElement, f: impl FnOnce() -> T) -> T {

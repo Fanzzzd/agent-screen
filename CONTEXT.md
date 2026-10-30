@@ -52,6 +52,22 @@ _Avoid_: capture, screencast
 One `type` or `key` call that goes through the user's input method. For the call, the agent's app has keyboard focus and the user's keys reach it (ADR 0008).
 _Avoid_: focus steal, IME mode
 
+**Input Request** (申请指针和键盘):
+An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now.
+_Avoid_: borrow, lease, takeover
+
+**Input Queue**:
+The Input Requests of every Agent Session waiting their turn, one at a time, in the order they came.
+_Avoid_: pool, lock
+
+**Input Grant** (放行期):
+The user's permission for the Input Queue to run, including requests that arrive while it runs. It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission.
+_Avoid_: blanket access, Takeover
+
+**Input Loan** (借出):
+One complete operation's exclusive use of the user's pointer and keyboard on its own Agent Display during an Input Grant. Other sessions wait until it has released its inputs. Completing a loan leaves the grant open for the next operation. Normal grant completion restores the user's pointer and front window; user-initiated revocation leaves the pointer and front window where the user took control. Both release the agent's held keys and buttons.
+_Avoid_: lease, borrow. Keyboard Borrow is a different thing: one input-method call that needs no permission.
+
 **Agent Pointer**:
 The marker the Viewer and Peek draw where the Agent Session last pointed or clicked. It is never part of the display itself, so the agent's screenshots do not contain it.
 _Avoid_: agent cursor, ghost cursor

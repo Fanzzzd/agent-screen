@@ -2,6 +2,8 @@
 
 Agent Sessions and the Viewer deliver clicks and keys to windows on an Agent Display by posting events straight to the owning process with SkyLight's private `SLEventPostToPid`, plus a focus-without-raise handshake (recipe from trycua/cua, MIT). The obvious alternative, warping the real cursor onto the virtual display and clicking there, is public API and works with every app, but it takes the mouse and keyboard away from the user, which is the problem Agent Screen exists to solve.
 
+[ADR 0013](0013-user-approved-input-queue.md) records the accepted exception for operations that cannot run in the background: a visible, user-approved Input Queue shared by sessions. Its real-input executor is not implemented yet; background delivery remains the only execution path.
+
 ## Consequences
 
 - Only apps that accept per-process events work. Canvas apps and games that filter them need a brief foreground activation instead.

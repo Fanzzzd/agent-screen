@@ -42,6 +42,8 @@ pub enum Auth {
 pub enum Note {
     /// The agent asks for help, with its reason.
     Help(String),
+    /// An operation is waiting for approval in the shared input queue.
+    Input(String),
     /// The agent asks for a window of this app.
     Window(String),
     /// The user brought an app to the front whose windows are all on Agent
@@ -60,6 +62,7 @@ impl Note {
     fn prefix(&self) -> &'static str {
         match self {
             Note::Help(_) => "help",
+            Note::Input(_) => "input",
             Note::Window(_) => "window",
             Note::Elsewhere { .. } => "where",
             Note::Control(_) => "control",
@@ -100,7 +103,9 @@ define_class!(
             let id = response.notification().request().identifier().to_string();
             let display = id.split_once('-').and_then(|(_, d)| d.parse::<u32>().ok());
             let take_over = response.actionIdentifier().to_string() == TAKE_OVER;
-            if let Some(display) = display {
+            if id.starts_with("input-") {
+                native::main_async(|| native::send(Native::InputQueueOpened));
+            } else if let Some(display) = display {
                 native::main_async(move || {
                     native::send(Native::NotificationClicked { display, take_over })
                 });
@@ -190,7 +195,7 @@ pub fn request() {
 /// `task` is the rest of the Display Label.
 pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     let Some(note) = note else {
-        for prefix in ["help", "window", "where", "control", "review"] {
+        for prefix in ["help", "window", "where", "control", "review", "input"] {
             withdraw(display, prefix);
         }
         return;
@@ -202,6 +207,13 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     POSTED.with(|p| p.borrow_mut().insert(id.clone(), note.clone()));
 
     let (title, body) = match &note {
+        Note::Input(reason) => (
+            tf!("{agent} has an input request", "{agent} 有一个输入请求"),
+            tf!(
+                "{reason} Review the shared queue under the menu bar icon. This build cannot execute real input.",
+                "{reason} 在菜单栏图标下查看共享队列。本构建无法执行真实输入。"
+            ),
+        ),
         Note::Help(reason) => (
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason.clone(),
@@ -307,6 +319,10 @@ pub fn withdraw_where(display: u32) {
 /// Withdraw only the Control Request's notification of a display.
 pub fn withdraw_control(display: u32) {
     withdraw(display, "control");
+}
+
+pub fn withdraw_input(display: u32) {
+    withdraw(display, "input");
 }
 
 fn withdraw(display: u32, prefix: &str) {

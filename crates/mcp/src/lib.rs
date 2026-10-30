@@ -23,6 +23,7 @@ const INSTRUCTIONS: &[&str] = &[
     "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
     "Mark each window with set_disposition so the user knows what to keep.",
+    "If an action returns input_pending, use input_queue to inspect, wait or withdraw. Queue approval is not action completion; this build has no real-input executor.",
     "If the user takes over, tools fail with a takeover error: call wait_for_control, or request_control",
     "to ask them to hand the display back when you need it. For a login or",
     "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",

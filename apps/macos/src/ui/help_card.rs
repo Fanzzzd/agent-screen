@@ -21,6 +21,7 @@ use gpui::{
 };
 
 pub const WIDTH: f32 = 320.;
+pub const QUEUE_HEIGHT: f32 = 500.;
 const PADDING: f32 = 14.;
 const GAP: f32 = 8.;
 const TITLE: f32 = 20.;
@@ -53,6 +54,7 @@ pub struct HelpCard {
     streams: Entity<Streams>,
     /// The display whose Help Request the card shows.
     pub display: Option<DisplayId>,
+    pub input_queue: bool,
 }
 
 impl HelpCard {
@@ -77,6 +79,7 @@ impl HelpCard {
             core,
             streams,
             display: None,
+            input_queue: false,
         }
     }
 }
@@ -84,6 +87,9 @@ impl HelpCard {
 impl Render for HelpCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
+        if self.input_queue {
+            return self.render_queue(&theme, cx);
+        }
         let core = self.core.read(cx);
         let Some(display) = self.display.and_then(|id| core.displays.get(id)) else {
             return div().into_any_element();
@@ -269,6 +275,166 @@ impl Render for HelpCard {
                 ),
         )
         .into_any_element()
+    }
+}
+
+impl HelpCard {
+    fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> gpui::AnyElement {
+        let core = self.core.read(cx);
+        let input = &core.input_queue;
+        let approval = input.queue.approval();
+        let granted = input.queue.grant().is_some();
+        let elapsed = input.elapsed_seconds().unwrap_or(0);
+        let title = if granted {
+            tf!(
+                "Queue approved ({:02}:{:02})",
+                "队列已批准（{:02}:{:02}）",
+                elapsed / 60,
+                elapsed % 60
+            )
+        } else {
+            t("Approve the input queue", "审批输入队列").to_string()
+        };
+        let scope = if granted {
+            t(
+                "Waiting for an executor. No pointer or keyboard is in use.",
+                "等待执行器。当前没有使用指针或键盘。",
+            )
+        } else {
+            t(
+                "Includes new requests until the queue is idle for 30 seconds. This build cannot execute real input.",
+                "包含之后的新请求，队列空闲 30 秒后结束。本构建无法执行真实输入。",
+            )
+        };
+        let mut list = div()
+            .id("input-requests")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(8.));
+        let mut can_approve = false;
+        let mut count = 0;
+        for request in input.queue.waiting() {
+            let Some(display) = core.displays.get(request.owner.display) else {
+                continue;
+            };
+            count += 1;
+            can_approve |= !display.takeover && !display.is_ended();
+            let label = if display.takeover {
+                tf!(
+                    "{} (waiting for hand-back)",
+                    "{}（等待交还）",
+                    display.label()
+                )
+            } else {
+                display.label()
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .p(px(8.))
+                    .rounded(px(8.))
+                    .bg(theme.control)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.secondary)
+                            .child(label),
+                    )
+                    .child(div().text_size(px(12.)).child(request.reason.clone())),
+            );
+        }
+        if count == 0 {
+            list = list.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.secondary)
+                    .child(t(
+                        "No requests waiting. The grace period is still open.",
+                        "没有等待中的请求，仍在保留放行期。",
+                    )),
+            );
+        }
+        let picture = self
+            .display
+            .and_then(|id| self.streams.read(cx).frame(id))
+            .map(|frame| {
+                surface(frame)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| div().size_full().bg(theme.screen_empty).into_any_element());
+        let (allow, decline, revoke) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
+        let buttons = if granted {
+            div().h(px(BUTTONS)).child(
+                card_button(
+                    "input-revoke",
+                    t("Revoke approval", "撤销放行"),
+                    false,
+                    theme,
+                )
+                .w_full()
+                .on_click(move |_, _, cx| tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))),
+            )
+        } else {
+            div()
+                .h(px(BUTTONS))
+                .flex()
+                .gap(px(8.))
+                .child(
+                    card_button(
+                        "input-allow",
+                        if can_approve {
+                            t("Allow all", "全部允许")
+                        } else {
+                            t("Waiting for hand-back", "等待交还")
+                        },
+                        true,
+                        theme,
+                    )
+                    .flex_1()
+                    .when(!can_approve, |d| d.opacity(0.5))
+                    .on_click(move |_, _, cx| {
+                        if can_approve {
+                            tell(&allow, cx, move |shell, cx| {
+                                shell.answer_input(approval, true, cx)
+                            });
+                        }
+                    }),
+                )
+                .child(
+                    card_button("input-decline", t("Not now", "暂不"), false, theme)
+                        .px(px(12.))
+                        .on_click(move |_, _, cx| {
+                            tell(&decline, cx, move |shell, cx| {
+                                shell.answer_input(approval, false, cx)
+                            })
+                        }),
+                )
+        };
+        card(title, scope.to_string(), theme)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.secondary)
+                    .child(tf!("{count} requests waiting", "{count} 个请求等待中")),
+            )
+            .child(
+                div()
+                    .h(px(110.))
+                    .flex_none()
+                    .overflow_hidden()
+                    .rounded(px(8.))
+                    .child(picture),
+            )
+            .child(list)
+            .child(buttons)
+            .into_any_element()
     }
 }
 

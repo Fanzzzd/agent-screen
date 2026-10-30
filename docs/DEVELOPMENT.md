@@ -170,6 +170,11 @@ The frame-placement regression injects the actual AX writer callback to check re
 ```sh
 cargo test                    # unit and isolated integration tests
 cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated endpoint; no app, display or input
+cargo test -p agent-screen-mcp --test element_steps # increment/decrement schema, forwarding and errors over a mock socket; no app or input
+cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, compiled without GPUI; no app or input
+cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
+cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
+cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup
@@ -432,6 +437,14 @@ separate run with its own two displays; the app picks its language at launch.
 Peek's hover hint and the Viewer's hover text with the relayed words need a real
 pointer and are not captured. Do not use the user's working windows as fixtures.
 
+### Input Queue control protocol
+
+`inputQueue` is scoped to the connection that created the display lifetime. It takes `displayId` and `action`: `request`, `wait`, `status`, `withdraw` or `done`. `request` needs a stable `operation` token and a `reason`; repeating the token returns the same request. `wait` and `withdraw` need `requestId`. `timeout` is 0 to 60 seconds, default 60 for request/wait; timeout leaves the request queued. Responses expose only that owner's request details, plus the total waiting count. `done` withdraws that owner's pending requests and declares that participant done; it never completes another session's operation.
+
+This build has `executorAvailable: false`. A request can move from `queued` to `approved_waiting_executor`, `takeover`, `declined` or `stopped`, but approval cannot move it to `completed`. A web `drag` or `mouseDown` with no pipe or supported accessibility substitution submits an intent and returns an `input_pending` error containing the queue status. A queued press sends no half-click. `realInput: true` on drag or mouseDown bypasses background routing for a queue intent; it does not enable real input. Successful ordinary drags report their `route` as `devtools`, `accessibility`, `placement` or `posted`.
+
+The app coordinator lives in `apps/macos/src/input_queue.rs`; the isolated `queue_adapter` test compiles that same source without GPUI. `Core` registers owners at actual display adoption and forwards end, removal, Takeover and connection-close events. Each display lifetime has a fresh owner generation. The shell ticks idle expiry and elapsed presentation once a second. Because no physical state is acquired, it can acknowledge grant cleanup immediately. A future executor must replace that acknowledgment with its own confirmed cleanup and restoration. Physical-input classification, automatic user-touch revocation, real-input dispatch and restoration remain unimplemented; the approval UI must not imply that they are active.
+
 ### Debug control methods
 
 The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` enables them in release builds too, except for `userStage`. Scripts can drive the UI without a real click.
@@ -471,6 +484,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
 | `access`, `access-revoke` | Open the display's Viewer to inspect its window authorization, or revoke it through the user's action. Supply `displayId`. |
 | `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
+| `input-queue`, `input-queue-approved` | On this connection's live `displayId`, enqueue a preview intent and show the queue card, optionally approved. Only available with `AGENTSCREEN_INSTANCE=e2e`; it never executes real input. Approval includes the shared test queue, so run only under the display lock. |
 | `recordings`, `recordings-close` | Open or close the independent recording library/player. No display is required. A debug build can use `AGENTSCREEN_PLAYBACK_DIR` for owned synthetic MP4/sidecar fixtures instead of the user's recording directory. |
 | `settings`, `setup`, `setup-close`, `setup-waiting` | Open Settings, close it, or preview its waiting state with both permissions missing. `settings` and `setup` are aliases. |
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |

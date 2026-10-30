@@ -167,6 +167,7 @@ pub struct Shell {
     /// The display the Help Card shows, and whether for a Window or
     /// Control Request, which have no picture.
     card_shown: Option<(DisplayId, bool)>,
+    card_input: bool,
     /// Help Requests the user put off with Later, by display.
     card_later: HashMap<DisplayId, String>,
     /// When the user was last told where an app's windows are, by pid.
@@ -386,6 +387,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer: None,
             card: None,
             card_shown: None,
+            card_input: false,
             reminded: HashMap::new(),
             watching_updates: false,
             card_later: HashMap::new(),
@@ -602,6 +604,11 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             cx.background_executor().timer(Duration::from_secs(1)).await;
             if counted
                 .update(cx, |shell, cx| {
+                    shell.core.update(cx, |core, cx| {
+                        if core.input_queue.tick() {
+                            cx.notify();
+                        }
+                    });
                     shell.refresh_counts(cx);
                     if shell.icon_rect().is_some() {
                         shell.icon.keep_place();
@@ -734,6 +741,10 @@ impl Shell {
                     None => {}
                 }
             }
+            Native::InputQueueOpened => {
+                self.hide_peek(cx);
+                self.sync_card(cx);
+            }
             Native::NotificationAuth(auth) => self.notification_auth(auth, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
             Native::LauncherTyped => self.launcher_typed(cx),
@@ -778,10 +789,13 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core.displays.list.iter().any(|d| {
-            (d.help_request.is_some() || d.window_request.is_some() || d.control_request.is_some())
-                && !d.is_ended()
-        });
+        let asking = core.input_queue.approval_needed()
+            || core.displays.list.iter().any(|d| {
+                (d.help_request.is_some()
+                    || d.window_request.is_some()
+                    || d.control_request.is_some())
+                    && !d.is_ended()
+            });
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
@@ -793,6 +807,22 @@ impl Shell {
         }
         for display in &core.displays.list {
             let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
+            let input = core
+                .input_queue
+                .queue
+                .waiting()
+                .find(|r| r.owner.display == display.id && display.is_live() && !display.takeover)
+                .filter(|_| core.input_queue.queue.grant().is_none());
+            if let Some(input) = input {
+                notify::update(
+                    display.id,
+                    display.agent_name(),
+                    task,
+                    Some(Note::Input(input.reason.clone())),
+                );
+            } else {
+                notify::withdraw_input(display.id);
+            }
             match display
                 .help_request
                 .as_deref()
@@ -923,13 +953,13 @@ impl Shell {
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
         // Window and Control Requests wait for an answer even beside the
         // Viewer, where the user operates the display during a Takeover.
-        let requests = core
+        let mut requests = core
             .displays
             .list
             .iter()
             .filter(|d| d.is_live() && (d.window_request.is_some() || d.control_request.is_some()))
             .map(|d| (d.id, true, (d.width, d.height)));
-        let helps = core
+        let mut helps = core
             .displays
             .list
             .iter()
@@ -942,8 +972,36 @@ impl Shell {
                         .is_some_and(|r| self.card_later.get(&d.id) != Some(r))
             })
             .map(|d| (d.id, false, (d.width, d.height)));
-        let want = requests.chain(helps).find(|_| !self.peek_shown);
-        if want.map(|w| (w.0, w.1)) == self.card_shown {
+        let request = requests.next();
+        let input = request.is_none()
+            && (core.input_queue.approval_needed() || core.input_queue.queue.grant().is_some());
+        let input_display = input
+            .then(|| {
+                core.input_queue
+                    .queue
+                    .waiting()
+                    .next()
+                    .map(|r| r.owner.display)
+                    .or_else(|| {
+                        core.displays
+                            .list
+                            .iter()
+                            .find(|d| d.is_live())
+                            .map(|d| d.id)
+                    })
+                    .and_then(|id| {
+                        core.displays
+                            .get(id)
+                            .map(|d| (id, false, (d.width, d.height)))
+                    })
+            })
+            .flatten();
+        let want = request
+            .or(input_display)
+            .or_else(|| helps.next())
+            .filter(|_| !self.peek_shown);
+        let input = input && input_display.is_some();
+        if want.map(|w| (w.0, w.1)) == self.card_shown && self.card_input == input {
             return;
         }
         if let Some((old, _)) = self.card_shown.take() {
@@ -956,6 +1014,7 @@ impl Shell {
         };
         let _ = card.update(cx, |card, _, cx| {
             card.display = Some(id);
+            card.input_queue = input;
             cx.notify();
         });
         self.streams.update(cx, |s, cx| {
@@ -966,7 +1025,9 @@ impl Shell {
         };
         let (w, h) = (
             f64::from(help_card::WIDTH),
-            f64::from(if request {
+            f64::from(if input {
+                help_card::QUEUE_HEIGHT
+            } else if request {
                 help_card::REQUEST_HEIGHT
             } else {
                 help_card::height(size)
@@ -989,6 +1050,25 @@ impl Shell {
             native::animate(&shown, frame, 1.0, 0.24);
         });
         self.card_shown = Some((id, request));
+        self.card_input = input;
+    }
+
+    pub fn answer_input(&mut self, approval: u64, allow: bool, cx: &mut Context<Self>) {
+        self.core.update(cx, |core, cx| {
+            if allow {
+                core.input_queue.approve(approval);
+            } else {
+                core.input_queue.decline(approval);
+            }
+            cx.notify();
+        });
+    }
+
+    pub fn revoke_input(&mut self, cx: &mut Context<Self>) {
+        self.core.update(cx, |core, cx| {
+            core.input_queue.revoke();
+            cx.notify();
+        });
     }
 
     /// The user answers a Window Request from the card: a window given
@@ -1909,6 +1989,10 @@ impl Shell {
             "peek" => {
                 let effect = self.peek_intent.pin();
                 self.apply_peek_effect(effect, cx);
+            }
+            "input-queue" | "input-queue-approved" => {
+                self.hide_peek(cx);
+                self.sync_card(cx);
             }
             "recordings" => self.open_recordings(cx),
             "recordings-close" => {
