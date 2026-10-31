@@ -438,10 +438,49 @@ pub fn drag_slider(
     if !allowed() {
         return Err("The slider action stopped before setting its value; its window is no longer available for agent input.".into());
     }
-    let changed = set_attribute(&element, "AXValue", &CFNumber::new_f64(value));
-    if changed
-        && number("AXValue").is_some_and(|read| substitute::confirmed(slider, current, value, read))
-    {
+    let confirmed = || {
+        number("AXValue").is_some_and(|read| substitute::confirmed(slider, current, value, read))
+    };
+    if set_attribute(&element, "AXValue", &CFNumber::new_f64(value)) && confirmed() {
+        return Ok(true);
+    }
+    // Chromium reports the write as done and ignores it; its slider moves
+    // only by its own step, through AXIncrement and AXDecrement. Each step
+    // must show before the next, and must go toward the value.
+    let action = if value > current {
+        "AXIncrement"
+    } else {
+        "AXDecrement"
+    };
+    let mut at = current;
+    let mut step = None;
+    for _ in 0..substitute::MAX_STEPS {
+        if !substitute::step_closer(value, at, step) {
+            break;
+        }
+        if !allowed() {
+            return Err("The slider stopped moving partway; its window is no longer available for agent input. Inspect its current value before retrying.".into());
+        }
+        if !perform(&element, action) {
+            break;
+        }
+        let mut read = number("AXValue");
+        for _ in 0..60 {
+            if read.is_some_and(|read| read != at) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            read = number("AXValue");
+        }
+        match read {
+            Some(read) if read != at && (read - at).signum() == (value - at).signum() => {
+                step = Some((read - at).abs());
+                at = read;
+            }
+            _ => break,
+        }
+    }
+    if confirmed() {
         Ok(true)
     } else {
         Err("The slider's accessibility value change was not confirmed. Inspect its current value before retrying; no fallback drag was sent.".into())

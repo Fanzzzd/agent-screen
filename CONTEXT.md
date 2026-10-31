@@ -53,7 +53,7 @@ One `type` or `key` call that goes through the user's input method. For the call
 _Avoid_: focus steal, IME mode
 
 **Input Request** (申请指针和键盘):
-An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now.
+An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now. This build has no executor, so allowing it runs nothing: when the Input Grant ends, it stays in the queue and the user isn't asked about it again until another request arrives or they revoke.
 _Avoid_: borrow, lease, takeover
 
 **Input Queue**:
@@ -61,7 +61,7 @@ The Input Requests of every Agent Session waiting their turn, one at a time, in 
 _Avoid_: pool, lock
 
 **Input Grant** (放行期):
-The user's permission for the Input Queue to run, including requests that arrive while it runs. It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission.
+The user's permission for the Input Queue to run, including requests that arrive while it runs. It ends when the user touches the mouse or keyboard, when the queue has been idle for 30 seconds, or when no operation is waiting or running and every participating Agent Session has declared itself done. One session cannot end the others' permission. In this build the user ends it from the queue card; ending it on a touch of the mouse or keyboard is ADR 0013's design, not shipped behavior.
 _Avoid_: blanket access, Takeover
 
 **Input Loan** (借出):

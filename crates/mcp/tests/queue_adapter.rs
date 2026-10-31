@@ -267,3 +267,25 @@ fn a_help_request_outranks_an_open_grant_card() {
     d.get_mut(2).unwrap().help_request = None;
     assert_eq!(pick(&d, &input), Some(Card::Input(2)));
 }
+
+/// The card a new request brings lists every waiting request, a lapsed one
+/// included, so Not Now answers the whole batch the user saw.
+#[test]
+fn not_now_on_a_later_card_declines_a_lapsed_request_it_lists() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    input.register(2, &owner(2));
+    let a = input.owner(1, 1).unwrap();
+    let b = input.owner(2, 2).unwrap();
+    let a_id = input.submit(a.clone(), "a".into(), "Drag".into()).unwrap();
+    assert!(input.approve(input.queue.approval()));
+    expire(&mut input);
+    assert_eq!(state(&input, &a, a_id), "approval_lapsed");
+    let b_id = input.submit(b.clone(), "b".into(), "Drag".into()).unwrap();
+    assert!(input.approval_needed());
+    let listed: Vec<_> = input.queue.waiting().map(|r| r.id).collect();
+    assert_eq!(listed, vec![a_id, b_id]);
+    input.decline(input.queue.approval());
+    assert_eq!(state(&input, &a, a_id), "declined");
+    assert_eq!(state(&input, &b, b_id), "declined");
+}

@@ -8,6 +8,7 @@
       #popup { position: fixed; right: 8px; top: 8px; width: 120px; height: 30px; }
       #split { position: fixed; left: 340px; top: 200px; width: 12px; height: 160px; background: #0000ff; touch-action: none; }
       #bin { position: fixed; left: 380px; top: 380px; width: 120px; height: 50px; background: #ff00ff; }
+      #level { position: fixed; left: 380px; top: 250px; width: 200px; height: 20px; margin: 0; }
       #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
     </style>
   </head>
@@ -19,6 +20,7 @@
     <div id="page"></div>
     <div id="split"></div>
     <div id="bin"></div>
+    <input id="level" type="range" min="0" max="100" value="20" aria-label="level" />
     <input id="field" />
     <button id="later">later</button>
     <button id="popup">open window</button>
@@ -79,6 +81,12 @@
       bin.addEventListener("drop", (e) => {
         e.preventDefault();
         seen.dropped = (seen.dropped || 0) + 1;
+        show();
+      });
+      // A slider an agent sets through accessibility when the page has no
+      // pipe: level is its value after the last change.
+      document.getElementById("level").addEventListener("input", (e) => {
+        seen.level = Number(e.target.value);
         show();
       });
       addEventListener("resize", show);

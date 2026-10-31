@@ -11,8 +11,9 @@
 //! drops on the page's drop target.
 //!
 //! The same harness started with `open`, without launch_app and so without
-//! a pipe: a drag in its page fails and says why, and nothing reaches the
-//! page; after a press, a move is refused the same way.
+//! a pipe: a drag on its range input sets the value through accessibility
+//! (ADR 0013); a drag or a press on the splitter queues an Input Request,
+//! waits a minute for an answer nobody gives, and nothing reaches the page.
 //!
 //! The same page in Chrome on a throwaway profile, below its tab strip and
 //! toolbar, started by launch_app with a pipe: the splitter and the drop.
@@ -402,11 +403,50 @@ fn unpiped(control: &Control, key: &str, id: &Value, electron: &std::path::Path)
         ],
     );
     let (sx, sy) = splitter(control, id)?;
+    let window = harness(control, id)?.context("window")?;
+    let (wx, wy) = (
+        window["x"].as_i64().context("x")?,
+        window["y"].as_i64().context("y")?,
+    );
+    // Accessibility reads the page only once it is turned on.
+    let _ = control.call(
+        "windowState",
+        json!({ "sessionKey": key, "displayId": id, "windowId": window["windowId"] }),
+    );
+
+    // The range input: 380 to 580 pt across, 250 to 270 down, value 20 of
+    // 0 to 100, so its thumb is about 44 pt in. A drag from the thumb 60 pt
+    // to the right moves it by the drag's distance, about 30. A grab away
+    // from the thumb says nothing about the slider's direction and is left
+    // to the queue.
+    let (lx, ly) = (wx + 424, wy + 28 + 260);
+    let slid = control.call(
+        "drag",
+        json!({ "sessionKey": key, "displayId": id,
+                "fromX": lx, "fromY": ly, "toX": lx + 60, "toY": ly }),
+    );
+    sleep_ms(500);
+    let now = harness(control, id)?.context("window")?;
+    let level = seen(&now, "level");
+    check(
+        "a slider in a page with no pipe moves through accessibility, the way and about as far as the drag, with no press sent",
+        slid.as_ref().is_ok_and(|r| r["route"] == "accessibility")
+            && (40..=60).contains(&level)
+            && seen(&now, "down") == 0,
+        format!("{} {slid:?}", now["title"].as_str().unwrap_or_default()),
+    );
+
+    // The splitter has no accessibility value: the drag waits up to a
+    // minute for the user's answer to an Input Request, then says it sent
+    // nothing. A user who answers the card ends the wait sooner; nothing
+    // runs either way, as this build has no executor.
+    let asked = std::time::Instant::now();
     let dragged = control.call(
         "drag",
         json!({ "sessionKey": key, "displayId": id,
                 "fromX": sx, "fromY": sy, "toX": sx + 80, "toY": sy }),
     );
+    let waited = asked.elapsed().as_secs();
     sleep_ms(500);
     let now = harness(control, id)?.context("window")?;
     let message = dragged
@@ -415,33 +455,47 @@ fn unpiped(control: &Control, key: &str, id: &Value, electron: &std::path::Path)
         .map(|e| e.to_string())
         .unwrap_or_default();
     check(
-        "a drag in a page with no pipe fails, says why and what to do, and sends nothing",
-        message.contains("DevTools pipe")
-            && message.contains("launch_app")
-            && message.contains("request_help")
-            && seen(&now, "down") == 0,
-        format!("{} {dragged:?}", now["title"].as_str().unwrap_or_default()),
+        "a drag in a page with no pipe queues an Input Request, waits for an answer, and sends nothing",
+        message.contains("input_pending")
+            && message.contains("No drag or press was sent")
+            && if message.contains("\"state\":\"queued\"") {
+                (55..=70).contains(&waited)
+            } else {
+                message.contains("approved_waiting_executor") || message.contains("declined")
+            }
+            && seen(&now, "down") == 0
+            && seen(&now, "held") == 0,
+        format!(
+            "{}s {} {message}",
+            waited,
+            now["title"].as_str().unwrap_or_default()
+        ),
     );
 
-    let at = |x: i64| json!({ "sessionKey": key, "displayId": id, "x": x, "y": sy });
+    // A press there queues too, with no half-click; the moves and the
+    // release after it find nothing held.
+    let at =
+        |x: i64| json!({ "sessionKey": key, "displayId": id, "x": x, "y": sy, "realInput": false });
     let down = control.call("mouseDown", at(sx));
     let moved = control.call("move", at(sx + 30));
     let up = control.call("mouseUp", at(sx));
     sleep_ms(300);
     let now = harness(control, id)?.context("window")?;
     check(
-        "after a press in a page with no pipe, a move is refused, and the release lets go",
-        down.is_ok()
-            && moved
-                .as_ref()
-                .is_err_and(|e| e.to_string().contains("DevTools pipe"))
-            && up.is_ok()
+        "a press in a page with no pipe queues, sends no press, and the splitter never follows",
+        down.as_ref()
+            .is_err_and(|e| e.to_string().contains("input_pending"))
+            && seen(&now, "down") == 0
             && seen(&now, "held") == 0
             && seen(&now, "split") == 0,
         format!(
             "{} down {down:?} move {moved:?} up {up:?}",
             now["title"].as_str().unwrap_or_default()
         ),
+    );
+    let _ = control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
     );
     Ok(())
 }

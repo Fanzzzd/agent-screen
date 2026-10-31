@@ -84,6 +84,18 @@ pub fn drag_value(slider: Slider, from: (f64, f64), to: (f64, f64), current: f64
     Some((current + delta).clamp(slider.min, slider.max))
 }
 
+/// The most increments one drag sends to a slider that moves only by its
+/// own step.
+pub const MAX_STEPS: usize = 500;
+
+/// Whether one more step toward `wanted` gets closer, for a slider that
+/// moves only by its own step: stop within half a step, rather than pass
+/// the value. Before the first step its size is unknown, so try one.
+pub fn step_closer(wanted: f64, at: f64, step: Option<f64>) -> bool {
+    let left = (wanted - at).abs();
+    left > 0.0 && step.is_none_or(|step| step > 0.0 && left > step / 2.0)
+}
+
 /// Confirmation seam for a value write, separate from source-geometry
 /// matching. The caller supplies the value read before the write too.
 pub fn confirmed(slider: Slider, before: f64, wanted: f64, read: f64) -> bool {
@@ -109,6 +121,18 @@ mod tests {
             max: 100.0,
             vertical,
         }
+    }
+
+    #[test]
+    fn stepping_stops_within_half_a_step_without_passing_the_value() {
+        assert!(step_closer(50.0, 20.0, None));
+        assert!(step_closer(50.0, 49.0, Some(1.0)));
+        assert!(!step_closer(50.0, 50.0, Some(1.0)));
+        // A step of 10 from 20 toward 24 would pass it by more than it gains.
+        assert!(!step_closer(24.0, 20.0, Some(10.0)));
+        assert!(step_closer(26.0, 20.0, Some(10.0)));
+        assert!(step_closer(10.0, 20.0, Some(1.0)));
+        assert!(!step_closer(10.0, 20.0, Some(0.0)));
     }
 
     #[test]

@@ -422,7 +422,11 @@ impl HelpCard {
                 div()
                     .text_size(px(11.))
                     .text_color(theme.secondary)
-                    .child(tf!("{count} requests waiting", "{count} 个请求等待中")),
+                    .child(if count == 1 {
+                        t("1 request waiting", "1 个请求等待中").to_string()
+                    } else {
+                        tf!("{count} requests waiting", "{count} 个请求等待中")
+                    }),
             )
             .child(
                 div()
