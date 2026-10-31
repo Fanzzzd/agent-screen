@@ -313,6 +313,7 @@ const HANDS_OFF: &[&str] = &[
     "launchhere",
     "load",
     "menuclosed",
+    "realdrag",
     "oneclick",
     "openpanel",
     "peekanim",

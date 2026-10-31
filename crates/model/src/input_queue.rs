@@ -31,6 +31,9 @@ pub enum Stop {
     Takeover,
     /// The owning session cancelled it.
     Withdrawn,
+    /// The platform could not run it: a window left the display, or secure
+    /// input was on.
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -379,6 +382,14 @@ impl Queue {
         Some(id)
     }
 
+    /// Whether `start` would hand out a loan now.
+    pub fn ready(&self) -> bool {
+        self.grant.is_some()
+            && self.active.is_none()
+            && self.pending_end.is_none()
+            && self.waiting().any(|r| self.runnable(r))
+    }
+
     /// Checked before each real event, not just at the beginning of a drag.
     pub fn may_send(&self, id: RequestId, owner: &Owner) -> bool {
         self.grant.is_some()
@@ -519,6 +530,24 @@ impl Queue {
     /// a Takeover.
     fn runnable(&self, r: &Request) -> bool {
         r.status == Status::Queued && r.attached && !self.takeovers.contains(&r.owner.display)
+    }
+
+    /// The agent's call waits for it again.
+    pub fn attach(&mut self, id: RequestId, now: u64) {
+        if let Some(r) = self.requests.get_mut(&id)
+            && r.status == Status::Queued
+        {
+            r.attached = true;
+        }
+        self.refresh_idle(now);
+    }
+
+    /// The running loan could not be carried out. `finish` then reports it
+    /// stopped, not completed.
+    pub fn fail(&mut self, id: RequestId) {
+        if self.active == Some(id) {
+            self.stop_active(Stop::Failed);
+        }
     }
 
     /// The agent's call stopped waiting; the request keeps its place.
@@ -1353,5 +1382,23 @@ mod tests {
         q.allow(q.approval(), 0);
         q.decline(q.approval());
         assert_eq!(q.start(1), Some(a));
+    }
+
+    #[test]
+    fn a_failed_loan_is_stopped_not_completed_and_frees_the_slot() {
+        let mut q = Queue::default();
+        let a = q.register("a".into(), 1, 1).unwrap();
+        let id = q
+            .enqueue(a.clone(), "drag".into(), "Drag".into(), 0)
+            .unwrap();
+        q.detach(id, 0);
+        assert!(q.allow(q.approval(), 0));
+        assert_eq!(q.start(1), None, "a detached request does not run");
+        q.attach(id, 1);
+        assert_eq!(q.start(1), Some(id));
+        q.fail(id);
+        assert!(q.finish(id, 2));
+        assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
+        assert!(q.active().is_none());
     }
 }

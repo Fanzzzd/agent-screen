@@ -160,6 +160,12 @@ struct Drag {
 
 pub struct Shell {
     core: Entity<Core>,
+    /// The Input Queue's executor (ADR 0013): the pointer and front app at
+    /// grant start, whether a loan runs, and whether cleanup after a grant
+    /// is under way.
+    real_saved: Option<crate::mac::real_input::Saved>,
+    loan_running: bool,
+    restoring: bool,
     streams: Entity<Streams>,
     icon: StatusIcon,
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
@@ -364,6 +370,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::set_sender(events);
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
+    crate::mac::real_input::watch();
     native::watch_screens();
     native::watch_activations();
     crate::mac::cg::watch_display_changes();
@@ -426,6 +433,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             asking: false,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
+            real_saved: None,
+            loan_running: false,
+            restoring: false,
             colorsync: None,
             colorsync_busy: false,
             colorsync_error: None,
@@ -610,6 +620,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                             cx.notify();
                         }
                     });
+                    shell.drive_queue(cx);
                     shell.refresh_counts(cx);
                     if shell.icon_rect().is_some() {
                         shell.icon.keep_place();
@@ -727,6 +738,7 @@ impl Shell {
                 self.drag_ended((x, y), cx);
             }
             Native::Menu(action) => self.menu(action, cx),
+            Native::UserTookInput => self.user_took_input(cx),
             // A notification only opens the display; the user's first
             // input there, or its Take Over button, starts a Takeover.
             Native::NotificationClicked { display, take_over } => {
@@ -1025,14 +1037,20 @@ impl Shell {
     }
 
     pub fn answer_input(&mut self, approval: u64, allow: bool, cx: &mut Context<Self>) {
-        self.core.update(cx, |core, cx| {
-            if allow {
-                core.input_queue.approve(approval);
-            } else {
+        // Saved once, at grant start, to put back when it ends normally.
+        let saved = crate::mac::real_input::save();
+        let granted = self.core.update(cx, |core, cx| {
+            let granted = allow && core.input_queue.approve(approval);
+            if !allow {
                 core.input_queue.decline(approval);
             }
             cx.notify();
+            granted
         });
+        if granted {
+            self.real_saved = Some(saved);
+        }
+        self.drive_queue(cx);
     }
 
     pub fn revoke_input(&mut self, cx: &mut Context<Self>) {
@@ -1040,6 +1058,197 @@ impl Shell {
             core.input_queue.revoke();
             cx.notify();
         });
+        self.drive_queue(cx);
+    }
+
+    /// The user moved the mouse or pressed a key during a grant: the whole
+    /// grant ends, and the pointer and front app stay where they are.
+    fn user_took_input(&mut self, cx: &mut Context<Self>) {
+        if self.core.read(cx).input_queue.queue.grant().is_some() {
+            log::info!("input queue: the user took control back");
+            self.revoke_input(cx);
+        }
+    }
+
+    fn input_banner(&self, cx: &App) -> String {
+        let core = self.core.read(cx);
+        let input = &core.input_queue;
+        let request = input
+            .queue
+            .active()
+            .or_else(|| input.queue.waiting().next());
+        let detail = request
+            .map(|request| {
+                let label = core
+                    .displays
+                    .get(request.owner.display)
+                    .map(|d| d.label().to_string())
+                    .unwrap_or_default();
+                format!("{label}: {}", request.reason)
+            })
+            .unwrap_or_default();
+        let elapsed = input.elapsed_seconds().unwrap_or(0);
+        let count = input.queue.waiting().count();
+        tf!(
+            "Input approved · {:02}:{:02} · {count} waiting\n{detail}\nMove the mouse or press a key to take control back.",
+            "输入已批准 · {:02}:{:02} · {count} 个等待中\n{detail}\n移动鼠标或按任意键即可收回控制。",
+            elapsed / 60,
+            elapsed % 60
+        )
+    }
+
+    /// Run the Input Queue (ADR 0013): show the indicator during a grant,
+    /// hand each loan to the executor, and clean up after the grant ends.
+    /// Called on approval, revocation, a loan's end and once a second.
+    fn drive_queue(&mut self, cx: &mut Context<Self>) {
+        use crate::mac::real_input::{self, Outcome};
+        if self.loan_running || self.restoring {
+            return;
+        }
+        let (granted, ending) = {
+            let input = &self.core.read(cx).input_queue;
+            (input.queue.grant().is_some(), input.ending())
+        };
+        if let Some(end) = ending {
+            // Keep observing through restoration: a user touch during
+            // cleanup must prevent restoring over their new action.
+            let saved = self
+                .real_saved
+                .take()
+                .filter(|_| end.restore && !real_input::touched());
+            self.restoring = true;
+            cx.spawn(async move |this, cx| {
+                if let Some(saved) = saved {
+                    cx.background_executor()
+                        .spawn(async move { real_input::restore(saved) })
+                        .await;
+                }
+                let _ = this.update(cx, |shell, cx| {
+                    shell.restoring = false;
+                    real_input::arm(false);
+                    native::show_borders(false, "");
+                    shell.core.update(cx, |core, cx| {
+                        core.input_queue.ended(end);
+                        cx.notify();
+                    });
+                    shell.drive_queue(cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if !granted {
+            native::show_borders(false, "");
+            real_input::arm(false);
+            return;
+        }
+        // No observer or indicator, no real input.
+        if !real_input::watching() {
+            self.revoke_input(cx);
+            return;
+        }
+        let banner = self.input_banner(cx);
+        if !native::show_borders(true, &banner) {
+            return;
+        }
+        if real_input::touched() {
+            self.user_took_input(cx);
+            return;
+        }
+        // The user's hand may still be on the mouse that clicked Allow All:
+        // the first loan waits until they leave it alone for a moment, and
+        // from then on their touch takes control back.
+        if !real_input::armed() {
+            if !self.core.read(cx).input_queue.queue.ready() || crate::mac::ime::user_idle() < 1.0 {
+                return;
+            }
+            real_input::arm(true);
+        }
+        let loan = self.core.update(cx, |core, cx| {
+            let loan = core.input_queue.start_loan();
+            let display = loan
+                .and_then(|(id, _)| core.input_queue.queue.request(id).map(|r| r.owner.display));
+            cx.notify();
+            loan.zip(display)
+        });
+        let Some(((id, plan), display)) = loan else {
+            return;
+        };
+        self.loan_running = true;
+        native::show_borders(true, &self.input_banner(cx));
+        let ok = self.core.read(cx).input_queue.loan_ok.clone();
+        log::info!("input queue: running request {id} on display {display}");
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    use std::sync::atomic::Ordering;
+                    let area = cg::display_bounds(display);
+                    let Some(window) = crate::mac::windows::on_display(display)
+                        .into_iter()
+                        .find(|w| w.target == plan.target)
+                    else {
+                        return Outcome::Refused("the window is no longer on the display");
+                    };
+                    let frame = window.bounds.offset(area.x, area.y);
+                    if area != plan.area
+                        || frame != plan.frame
+                        || ![plan.from, plan.to]
+                            .iter()
+                            .all(|p| area.contains(*p) && frame.contains(*p))
+                    {
+                        return Outcome::Refused(
+                            "the drag is outside its authorized window or display",
+                        );
+                    }
+                    real_input::drag(
+                        plan.target,
+                        plan.from,
+                        plan.to,
+                        objc2_core_graphics::CGEventFlags(plan.flags),
+                        |at| {
+                            // Recheck geometry and the top window before
+                            // every event. A moved or covered target must
+                            // not receive input at its old coordinates.
+                            let why = if !ok.load(Ordering::SeqCst) {
+                                Some("the loan was cancelled")
+                            } else if cg::display_bounds(display) != area || !area.contains(at) {
+                                Some("the display geometry changed")
+                            } else if cg::window_bounds(plan.target.window_id) != Some(frame) {
+                                Some("the window geometry changed")
+                            } else if !crate::mac::input::window_at(at)
+                                .is_some_and(|(target, _)| target == plan.target)
+                            {
+                                Some("the window was covered or left the screen")
+                            } else {
+                                None
+                            };
+                            if let Some(why) = why {
+                                log::debug!("input queue containment: {why}");
+                            }
+                            why.is_none()
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.loan_running = false;
+                let failure = match outcome {
+                    Outcome::Done => None,
+                    Outcome::Refused(why) | Outcome::Stopped(why) => Some(why.to_string()),
+                };
+                log::info!("input queue: request {id} ended: {outcome:?}");
+                shell.core.update(cx, |core, cx| {
+                    if real_input::touched() && core.input_queue.queue.grant().is_some() {
+                        core.input_queue.revoke();
+                    }
+                    core.input_queue.finish_loan(id, failure);
+                    cx.notify();
+                });
+                shell.drive_queue(cx);
+            });
+        })
+        .detach();
     }
 
     /// The user answers a Window Request from the card: a window given
@@ -1961,8 +2170,20 @@ impl Shell {
                 let effect = self.peek_intent.pin();
                 self.apply_peek_effect(effect, cx);
             }
-            "input-queue" | "input-queue-approved" => {
+            "input-queue" => {
                 self.hide_peek(cx);
+                self.sync_card(cx);
+            }
+            // As the card's Allow All.
+            "input-queue-approved" | "input-queue-allow" => {
+                self.hide_peek(cx);
+                let approval = self.core.read(cx).input_queue.queue.approval();
+                self.answer_input(approval, true, cx);
+                self.sync_card(cx);
+            }
+            "input-queue-decline" => {
+                let approval = self.core.read(cx).input_queue.queue.approval();
+                self.answer_input(approval, false, cx);
                 self.sync_card(cx);
             }
             "recordings" => self.open_recordings(cx),
@@ -3498,6 +3719,10 @@ impl Shell {
     }
 
     fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
+        // The Input Queue's drag brought the app forward, not the user.
+        if crate::mac::real_input::holding(pid) {
+            return;
+        }
         self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
@@ -4226,6 +4451,11 @@ fn cursor_guard(core: Entity<Core>, cx: &mut App) {
 /// Put the cursor back where it last was off `ids`, if it is on one of
 /// them. Where it is now when that is a good place.
 fn pull_cursor_back(ids: &[DisplayId], last_good: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    // An approved Input Queue drag holds the pointer there on purpose; the
+    // grant's end puts it back, or the guard does once the user takes it.
+    if crate::mac::real_input::in_use() {
+        return last_good;
+    }
     let Some(event) = objc2_core_graphics::CGEvent::new(None) else {
         return last_good;
     };

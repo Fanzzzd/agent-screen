@@ -1416,6 +1416,8 @@ fn stamp_routing_using(
 }
 
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
+    let gate = super::real_input::process_gate(pid);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     super::ime::note_posted();
     stamp_time(event);
     if !unsafe { SSPostEventToPid(pid, event, authenticate) } {

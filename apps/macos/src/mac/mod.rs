@@ -22,6 +22,7 @@ pub mod native;
 pub mod notify;
 pub mod permissions;
 pub mod playback;
+pub mod real_input;
 pub mod recording;
 pub mod screenshot;
 pub mod update;

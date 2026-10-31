@@ -395,6 +395,10 @@ impl Channel {
     }
 
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> Answer {
+        let gate = super::real_input::process_gate(self.pid);
+        let _input = method
+            .starts_with("Input.")
+            .then(|| gate.read().unwrap_or_else(|e| e.into_inner()));
         self.send(method, params, session)
             .recv_timeout(Duration::from_secs(3))
             .unwrap_or_else(|_| Err(format!("{method} got no answer")))

@@ -13,7 +13,7 @@
 //! The same harness started with `open`, without launch_app and so without
 //! a pipe: a drag on its range input sets the value through accessibility
 //! (ADR 0013); a drag or a press on the splitter queues an Input Request,
-//! waits a minute for an answer nobody gives, and nothing reaches the page.
+//! is declined as with Not Now, and nothing reaches the page.
 //!
 //! The same page in Chrome on a throwaway profile, below its tab strip and
 //! toolbar, started by launch_app with a pipe: the splitter and the drop.
@@ -436,16 +436,23 @@ fn unpiped(control: &Control, key: &str, id: &Value, electron: &std::path::Path)
         format!("{} {slid:?}", now["title"].as_str().unwrap_or_default()),
     );
 
-    // The splitter has no accessibility value: the drag waits up to a
-    // minute for the user's answer to an Input Request, then says it sent
-    // nothing. A user who answers the card ends the wait sooner; nothing
-    // runs either way, as this build has no executor.
+    // The splitter has no accessibility value: declining its request as
+    // Not Now does must leave it untouched. Approved execution has its own
+    // realdrag script, with an explicit hands-off countdown.
     let asked = std::time::Instant::now();
-    let dragged = control.call(
+    let dragged = control.begin(
         "drag",
         json!({ "sessionKey": key, "displayId": id,
                 "fromX": sx, "fromY": sy, "toX": sx + 80, "toY": sy }),
-    );
+    )?;
+    sleep_ms(800);
+    control.call(
+        "debugShow",
+        json!({
+            "sessionKey": key, "displayId": id, "surface": "input-queue-decline",
+        }),
+    )?;
+    let dragged = dragged.wait();
     let waited = asked.elapsed().as_secs();
     sleep_ms(500);
     let now = harness(control, id)?.context("window")?;
@@ -458,11 +465,7 @@ fn unpiped(control: &Control, key: &str, id: &Value, electron: &std::path::Path)
         "a drag in a page with no pipe queues an Input Request, waits for an answer, and sends nothing",
         message.contains("input_pending")
             && message.contains("No drag or press was sent")
-            && if message.contains("\"state\":\"queued\"") {
-                (55..=70).contains(&waited)
-            } else {
-                message.contains("approved_waiting_executor") || message.contains("declined")
-            }
+            && message.contains("declined")
             && seen(&now, "down") == 0
             && seen(&now, "held") == 0,
         format!(
@@ -476,7 +479,15 @@ fn unpiped(control: &Control, key: &str, id: &Value, electron: &std::path::Path)
     // release after it find nothing held.
     let at =
         |x: i64| json!({ "sessionKey": key, "displayId": id, "x": x, "y": sy, "realInput": false });
-    let down = control.call("mouseDown", at(sx));
+    let down = control.begin("mouseDown", at(sx))?;
+    sleep_ms(800);
+    control.call(
+        "debugShow",
+        json!({
+            "sessionKey": key, "displayId": id, "surface": "input-queue-decline",
+        }),
+    )?;
+    let down = down.wait();
     let moved = control.call("move", at(sx + 30));
     let up = control.call("mouseUp", at(sx));
     sleep_ms(300);

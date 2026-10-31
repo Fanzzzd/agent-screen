@@ -117,12 +117,23 @@ pub fn settable(element: &AXUIElement, name: &str) -> bool {
     error == AXError::Success && settable != 0
 }
 
+/// Mutations into a process wait for its real-input loan to let go.
+fn input_gate(element: &AXUIElement) -> std::sync::Arc<std::sync::RwLock<()>> {
+    let mut pid = 0;
+    unsafe { element.pid(NonNull::from(&mut pid)) };
+    super::real_input::process_gate(pid)
+}
+
 pub fn set_attribute(element: &AXUIElement, name: &str, value: &CFType) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let name = CFString::from_str(name);
     unsafe { element.set_attribute_value(&name, value) == AXError::Success }
 }
 
 pub fn perform(element: &AXUIElement, action: &str) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let action = CFString::from_str(action);
     unsafe { element.perform_action(&action) == AXError::Success }
 }
@@ -132,6 +143,8 @@ pub fn perform(element: &AXUIElement, action: &str) -> bool {
 /// CannotComplete although it ran, so only an unsupported action counts as
 /// not taken: a fallback click then cannot press twice.
 pub fn try_action(element: &AXUIElement, action: &str) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let action = CFString::from_str(action);
     let error = unsafe { element.perform_action(&action) };
     !matches!(

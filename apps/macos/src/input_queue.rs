@@ -1,17 +1,19 @@
-//! App-wide admission and presentation for Input Requests. No input is sent
-//! here. This build has no real-input executor: approval remains a distinct
-//! state and must never be reported as a completed action.
+//! App-wide admission, scheduling and presentation for Input Requests. No
+//! input is sent here: the shell runs each loan this hands out through the
+//! executor, and reports back how it ended.
 
-use crate::model::{DisplayId, Displays, Owner as DisplayOwner};
-use agent_screen_model::input_queue::{EnqueueError, Owner, Queue, RequestId, Status};
+use crate::model::{DisplayId, Displays, Owner as DisplayOwner, Rect, WindowTarget};
+use agent_screen_model::input_queue::{EnqueueError, GrantEnd, Owner, Queue, RequestId, Status};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-pub const EXECUTOR_AVAILABLE: bool = false;
+pub const EXECUTOR_AVAILABLE: bool = true;
 const REASON_CHARS: usize = 300;
 const OPERATION_CHARS: usize = 2048;
-const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended with nothing run and they will not be asked about it again. Waiting or retrying the same operation returns at once. Use a background alternative or request_help, then withdraw it.";
+const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended before it ran and they will not be asked about it again. Waiting or retrying the same operation returns at once. Make a new request to ask again, use a background alternative or request_help, then withdraw this one.";
 
 pub struct InputQueue {
     pub queue: Queue,
@@ -20,6 +22,26 @@ pub struct InputQueue {
     /// executed. Presentation only: they stay queued for the agent, and
     /// only a new request or a revocation asks again.
     pub(crate) approved: BTreeSet<RequestId>,
+    /// What each runnable request does. A request without one, made with
+    /// input_queue's request action, only asks for approval.
+    plans: BTreeMap<RequestId, Plan>,
+    /// Why the executor could not carry a loan out.
+    failures: BTreeMap<RequestId, String>,
+    /// Whether the active loan may send its next event. The executor's
+    /// thread reads it before every event.
+    pub loan_ok: Arc<AtomicBool>,
+}
+
+/// One complete drag, in global points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plan {
+    pub target: WindowTarget,
+    pub frame: Rect,
+    pub area: Rect,
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    /// CGEventFlags bits.
+    pub flags: u64,
 }
 
 impl Default for InputQueue {
@@ -28,16 +50,11 @@ impl Default for InputQueue {
             queue: Queue::default(),
             clock: Instant::now(),
             approved: BTreeSet::new(),
+            plans: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            loan_ok: Arc::default(),
         }
     }
-}
-
-/// Whether a status reply still has a request waiting for the user's answer,
-/// so a wait or a blocked action should keep waiting.
-pub fn awaits_user(state: &Value) -> bool {
-    state["requests"]
-        .as_array()
-        .is_some_and(|requests| requests.iter().any(|r| r["state"] == "queued"))
 }
 
 impl InputQueue {
@@ -66,6 +83,7 @@ impl InputQueue {
         owner: Owner,
         operation: String,
         reason: String,
+        plan: Option<Plan>,
     ) -> Result<RequestId, String> {
         let reason = reason.trim();
         if reason.is_empty() || reason.chars().count() > REASON_CHARS {
@@ -87,11 +105,83 @@ impl InputQueue {
                 EnqueueError::Closed => "the queue's display lifetime has ended",
             }.to_string()
         })?;
-        // A future executor attaches only while it is ready to run the
-        // operation. An unavailable executor must not hold a grant forever.
-        self.queue.detach(id, now);
+        // The caller waits for a request it can run. One without a plan
+        // only asks, and must not hold a grant.
+        match plan {
+            Some(plan) => {
+                self.plans.entry(id).or_insert(plan);
+            }
+            None if !self.plans.contains_key(&id) => self.queue.detach(id, now),
+            None => {}
+        }
         self.tick();
         Ok(id)
+    }
+
+    /// The agent's call waits for `id` again, if it can run.
+    pub fn attach(&mut self, id: RequestId) {
+        if self.plans.contains_key(&id) {
+            let now = self.now();
+            self.queue.attach(id, now);
+            self.tick();
+        }
+    }
+
+    /// The agent's call gave up waiting; the request keeps its place.
+    pub fn detach(&mut self, id: RequestId) {
+        let now = self.now();
+        self.queue.detach(id, now);
+        self.tick();
+    }
+
+    /// The next loan to run, if the grant allows one now.
+    pub fn start_loan(&mut self) -> Option<(RequestId, Plan)> {
+        if self.queue.pending_end().is_some() {
+            return None;
+        }
+        let now = self.now();
+        let id = self.queue.start(now)?;
+        let plan = self.plans.get(&id).copied();
+        if plan.is_none() {
+            // Not reachable: a request without a plan is never attached.
+            self.queue.fail(id);
+            self.queue.finish(id, now);
+        }
+        self.tick();
+        plan.map(|plan| (id, plan))
+    }
+
+    /// The executor let go of everything the loan held. `failure` says why
+    /// it could not carry the loan out, if it couldn't.
+    pub fn finish_loan(&mut self, id: RequestId, failure: Option<String>) {
+        if let Some(why) = failure {
+            self.queue.fail(id);
+            self.failures.insert(id, why);
+        }
+        let now = self.now();
+        self.queue.finish(id, now);
+        if self
+            .queue
+            .request(id)
+            .is_some_and(|r| self.queue.owner(r.owner.display) != Some(&r.owner))
+        {
+            // End/disconnect retained the active record only until release.
+            self.queue.forget(id);
+        }
+        self.tick();
+    }
+
+    /// A grant that ended and waits for the executor's cleanup, once no
+    /// loan runs. Call `ended` after restoring.
+    pub fn ending(&self) -> Option<GrantEnd> {
+        self.queue
+            .pending_end()
+            .filter(|_| self.queue.active().is_none())
+    }
+
+    pub fn ended(&mut self, end: GrantEnd) {
+        self.queue.acknowledge_end(end.id);
+        self.tick();
     }
 
     pub fn request_for(&self, owner: &Owner, id: RequestId) -> Result<(), String> {
@@ -190,11 +280,15 @@ impl InputQueue {
                 .request(*id)
                 .is_some_and(|r| r.status == Status::Queued)
         });
-        // No physical state was acquired in this build. A future executor
-        // must own this acknowledgment after cleanup/restoration instead.
-        if !EXECUTOR_AVAILABLE && let Some(end) = self.queue.pending_end() {
-            self.queue.acknowledge_end(end.id);
-        }
+        let requests = &self.queue;
+        self.plans.retain(|id, _| requests.request(*id).is_some());
+        self.failures
+            .retain(|id, _| requests.request(*id).is_some());
+        let ok = self
+            .queue
+            .active()
+            .is_some_and(|r| self.queue.may_send(r.id, &r.owner));
+        self.loan_ok.store(ok, Ordering::Relaxed);
         was.is_some() || self.queue.grant().is_some()
     }
 
@@ -208,6 +302,22 @@ impl InputQueue {
                 .queue
                 .request(id)
                 .is_some_and(|r| r.status == Status::Queued)
+    }
+
+    /// Whether a call waiting on `id` should keep waiting: for the user's
+    /// answer, or, once allowed, for its turn and its run. A request that
+    /// only asked for approval has its answer once allowed.
+    pub fn awaits(&self, id: RequestId, paused: bool) -> bool {
+        let Some(r) = self.queue.request(id) else {
+            return false;
+        };
+        match r.status {
+            Status::Queued if paused => false,
+            Status::Queued if self.queue.grant().is_some() => self.plans.contains_key(&id),
+            Status::Queued => self.asks(id),
+            Status::Running | Status::Stopping(_) => true,
+            _ => false,
+        }
     }
 
     pub fn approval_needed(&self) -> bool {
@@ -256,7 +366,11 @@ impl InputQueue {
                     .map(|p| p + 1);
                 let state = match request.status {
                     Status::Queued if paused => "takeover",
-                    Status::Queued if self.queue.grant().is_some() => "approved_waiting_executor",
+                    Status::Queued
+                        if self.queue.grant().is_some_and(|g| g.admits(&request.owner)) =>
+                    {
+                        "approved"
+                    }
                     // Nothing will ask the user again, so nothing is left
                     // to wait for.
                     Status::Queued if self.approved.contains(&request.id) => "approval_lapsed",
@@ -277,6 +391,8 @@ impl InputQueue {
                         Status::Stopped(why) | Status::Stopping(why) => Some(format!("{why:?}")),
                         _ => None,
                     },
+                    "failure": self.failures.get(&request.id),
+                    "runnable": self.plans.contains_key(&request.id),
                 })
             })
             .collect();
@@ -286,7 +402,7 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Queue approval is not action completion. This build has no real-input executor; no pointer, key or drag is sent by this queue. Do not retry the action assuming it ran.",
+            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag with real_input while the approval lasts.",
         })
     }
 }
@@ -310,12 +426,12 @@ mod tests {
         input.register(1, &display_owner(1));
         let owner = input.owner(1, 1).unwrap();
         let id = input
-            .submit(owner.clone(), "drag".into(), "Move a card".into())
+            .submit(owner.clone(), "drag".into(), "Move a card".into(), None)
             .unwrap();
         assert!(input.approve(input.queue.approval()));
         let state = input.status(&owner, Some(id), false);
-        assert_eq!(state["executorAvailable"], false);
-        assert_eq!(state["requests"][0]["state"], "approved_waiting_executor");
+        assert_eq!(state["executorAvailable"], true);
+        assert_eq!(state["requests"][0]["state"], "approved");
         assert!(input.queue.active().is_none());
     }
 
@@ -327,7 +443,7 @@ mod tests {
         let a = input.owner(1, 1).unwrap();
         let b = input.owner(2, 2).unwrap();
         let id = input
-            .submit(a.clone(), "drag".into(), "Private reason".into())
+            .submit(a.clone(), "drag".into(), "Private reason".into(), None)
             .unwrap();
         assert!(input.withdraw(&b, id).is_err());
         assert!(
@@ -352,7 +468,11 @@ mod tests {
         let old = input.owner(1, 1).unwrap();
         input.disconnect(1);
         input.register(1, &display_owner(2));
-        assert!(input.submit(old, "late".into(), "Drag".into()).is_err());
+        assert!(
+            input
+                .submit(old, "late".into(), "Drag".into(), None)
+                .is_err()
+        );
         assert!(input.owner(1, 2).is_ok());
     }
 
@@ -363,22 +483,26 @@ mod tests {
         let owner = input.owner(1, 1).unwrap();
         for i in 0..agent_screen_model::input_queue::MAX_SESSION_REQUESTS {
             input
-                .submit(owner.clone(), format!("drag{i}"), "Drag".into())
+                .submit(owner.clone(), format!("drag{i}"), "Drag".into(), None)
                 .unwrap();
         }
         assert!(
             input
-                .submit(owner.clone(), "overflow".into(), "Drag".into())
+                .submit(owner.clone(), "overflow".into(), "Drag".into(), None)
                 .is_err()
         );
         input.done(&owner);
         assert_eq!(input.queue.requests().count(), 0);
-        input.submit(owner, "new".into(), "Drag".into()).unwrap();
+        input
+            .submit(owner, "new".into(), "Drag".into(), None)
+            .unwrap();
         input.disconnect(1);
         assert_eq!(input.queue.requests().count(), 0);
         input.register(1, &display_owner(2));
         let owner = input.owner(1, 2).unwrap();
-        input.submit(owner, "other".into(), "Drag".into()).unwrap();
+        input
+            .submit(owner, "other".into(), "Drag".into(), None)
+            .unwrap();
         input.end_display(1);
         assert_eq!(input.queue.requests().count(), 0);
     }
@@ -390,8 +514,10 @@ mod tests {
         input.register(2, &display_owner(2));
         let a = input.owner(1, 1).unwrap();
         let b = input.owner(2, 2).unwrap();
-        let id = input.submit(a.clone(), "a".into(), "Drag".into()).unwrap();
-        input.submit(b, "b".into(), "Drag".into()).unwrap();
+        let id = input
+            .submit(a.clone(), "a".into(), "Drag".into(), None)
+            .unwrap();
+        input.submit(b, "b".into(), "Drag".into(), None).unwrap();
         input.takeover(1, true);
         assert!(input.approve(input.queue.approval()));
         assert_eq!(

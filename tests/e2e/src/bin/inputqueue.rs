@@ -95,7 +95,7 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     let request = status()?;
     check(
         "Allow All keeps the card up for the grant, and the agent sees approved, not done",
-        granted.is_some() && request["state"] == "approved_waiting_executor",
+        granted.is_some() && request["state"] == "approved",
         format!("{granted:?} {request}"),
     );
     if let Some(c) = granted {

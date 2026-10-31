@@ -71,14 +71,14 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
                     let action = request["params"]["action"].as_str().unwrap();
                     let state = match action {
                         "request" => "queued",
-                        "wait" => "approved_waiting_executor",
+                        "wait" => "approved",
                         "withdraw" => "stopped",
                         _ => "none",
                     };
-                    json!({"executorAvailable":false,"grantActive":action=="wait","requests":[{"requestId":42,"state":state}],"note":"Approval does not execute the action."})
+                    json!({"executorAvailable":true,"grantActive":action=="wait","requests":[{"requestId":42,"state":state}],"note":"Approval does not execute the action."})
                 }
                 "drag" if request["params"]["realInput"] == true => {
-                    let reply = json!({"id":request["id"],"error":{"code":"input_pending","message":"requestId 42; no drag sent; executor unavailable"}});
+                    let reply = json!({"id":request["id"],"error":{"code":"input_pending","message":"requestId 42; no drag sent; waiting for user approval"}});
                     write
                         .write_all(format!("{reply}\n").as_bytes())
                         .await
@@ -125,8 +125,8 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
             if action=="done" { arguments.as_object_mut().unwrap().remove("request_id"); }
             let result=exchange(tool(index+3,"input_queue",arguments));
             assert_ne!(result["result"]["isError"],true,"{result}");
-            assert_eq!(result["result"]["structuredContent"]["executorAvailable"],false);
-            if action=="wait" { assert_eq!(result["result"]["structuredContent"]["requests"][0]["state"],"approved_waiting_executor"); }
+            assert_eq!(result["result"]["structuredContent"]["executorAvailable"],true);
+            if action=="wait" { assert_eq!(result["result"]["structuredContent"]["requests"][0]["state"],"approved"); }
         }
         let invalid=exchange(tool(7,"input_queue",json!({"display_id":7,"action":"request"})));
         assert_eq!(invalid["result"]["isError"],true);

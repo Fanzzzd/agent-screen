@@ -32,7 +32,11 @@
         document.title = `harness w=${innerWidth} ` +
           Object.entries(seen).map(([k, v]) => `${k}=${v}`).join(" ");
       };
-      addEventListener("mousedown", () => { seen.down++; show(); });
+      addEventListener("mousedown", (e) => {
+        seen.down++;
+        seen.at = `${e.target.id || e.target.tagName}@${e.clientX},${e.clientY}`;
+        show();
+      });
       addEventListener("mouseup", () => { seen.up++; show(); });
       addEventListener("click", (e) => { seen.click++; seen.ts = Math.round(e.timeStamp); show(); });
       // A soft navigation, as a single-page app's: the URL and the page

@@ -183,7 +183,7 @@ pub fn definitions() -> Vec<Value> {
                 "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available.",
                 "Sliders with enough accessibility information can instead change their value without moving your pointer.",
                 "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
-                "Use input_queue to inspect, wait or withdraw. Queue approval is not execution: this build has no real-input executor.",
+                "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
                 "cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
@@ -213,7 +213,7 @@ pub fn definitions() -> Vec<Value> {
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For left_click_drag or left_mouse_down only: queue an input request after observing a background failure. This build cannot execute real input; approval never means the action ran."
+                        "description": "For left_click_drag or left_mouse_down only: ask to use the user's pointer after observing a background failure. Complete drags run only during user approval; a split press only asks and sends nothing."
                     },
                     "via_input_method": {
                         "type": "boolean",
@@ -233,12 +233,12 @@ pub fn definitions() -> Vec<Value> {
             "Inspect or withdraw an input request",
             &[
                 "A background drag that cannot run enters the shared Input Queue and reports its request_id.",
-                "Use wait to wait up to 60 seconds for approval, status to inspect your requests, withdraw to cancel one,",
+                "Use wait to wait up to 60 seconds for approval and then for a started drag to release its inputs, status to inspect your requests, withdraw to cancel one,",
                 "or done when your session no longer needs input. done withdraws your pending requests, not another session's, clears your results and takes no request_id.",
                 "request adds an approval intent with a reason and a stable operation token; repeating the token returns its newest request, a declined one included.",
                 "A token whose request you replaced or withdrew starts a fresh request. A session holds at most 64 requests across its displays, finished ones included; done releases the requests of the display you name.",
                 "Queue approval includes new requests while it lasts, and ends after 30 idle seconds or when all participants are done.",
-                "This build has no real-input executor. approved_waiting_executor means approved but NOT executed; no drag, click or key was sent.",
+                "approved means allowed, not completed. A complete drag waits for its turn and runs with the user's pointer. Only completed means it ran. request here asks for approval but contains no executable action; once approved, submit a complete drag with real_input.",
                 "approval_lapsed means the user allowed it, the approval ended with nothing run, and they will not be asked again; wait and retry return at once.",
                 "Do not continue a split drag or assume success after input_pending. You can use a background alternative or request_help.",
                 "The tool returns only your session's requests. It does not end a Takeover or grant access to other windows.",

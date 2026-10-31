@@ -1639,13 +1639,22 @@ async fn handle_one(
                 cg::debug_user_stage(id, connection);
                 return reply(json!({}));
             }
-            if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
+            if matches!(
+                surface.as_str(),
+                "input-queue"
+                    | "input-queue-approved"
+                    | "input-queue-allow"
+                    | "input-queue-decline"
+            ) {
                 if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
                     return Err(ControlError::invalid(
                         "input queue previews require the isolated e2e instance",
                     ));
                 }
                 usable(&core, connection, id, "debugShow", cx)?;
+            }
+            // Allow All itself, through the shell, comes after this.
+            if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
                 core.update(cx, |c, cx| -> Result<(), ControlError> {
                     let owner = c
                         .input_queue
@@ -1656,11 +1665,9 @@ async fn handle_one(
                             owner,
                             format!("preview:{id}"),
                             "Preview a queued drag on this display".into(),
+                            None,
                         )
                         .map_err(ControlError::invalid)?;
-                    if surface == "input-queue-approved" {
-                        c.input_queue.approve(c.input_queue.queue.approval());
-                    }
                     cx.notify();
                     Ok(())
                 })?;
@@ -4487,7 +4494,7 @@ async fn input_queue_action(
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
             Some(
                 core.update(cx, |c, cx| {
-                    let result = c.input_queue.submit(owner.clone(), operation, reason);
+                    let result = c.input_queue.submit(owner.clone(), operation, reason, None);
                     cx.notify();
                     result
                 })
@@ -4517,32 +4524,53 @@ async fn input_queue_action(
         core.read_with(cx, |c, _| c.input_queue.request_for(&owner, request))
             .map_err(ControlError::invalid)?;
     }
-    let timeout = if matches!(action, Action::Request | Action::Wait(_)) {
+    // A wait on a drag makes it runnable again: its result comes back here.
+    if let Action::Wait(request) = action {
+        core.update(cx, |c, _| c.input_queue.attach(request));
+    }
+    let waits = matches!(action, Action::Request | Action::Wait(_));
+    let timeout = if waits {
         p.number("timeout").unwrap_or(60.0).clamp(0.0, 60.0)
     } else {
         0.0
     };
     let until = Instant::now() + Duration::from_secs_f64(timeout);
     loop {
-        let state = core.update(cx, |c, cx| -> Result<Value, ControlError> {
+        let state = core.update(cx, |c, cx| -> Result<(Value, bool), ControlError> {
             if !c
                 .input_queue
                 .owner(id, connection)
                 .is_ok_and(|current| current == owner)
             {
                 return Err(ControlError::failed(
-                    "the input request's display lifetime ended; the queue sent no input",
+                    "the input request's display lifetime ended; any running drag is stopping. Inspect its result before retrying",
                 ));
             }
             let changed = c.input_queue.tick();
             let paused = c.displays.get(id).is_some_and(|d| d.takeover);
             let state = c.input_queue.status(&owner, wait_for, paused);
+            let waiting = waits && wait_for.is_some_and(|r| c.input_queue.awaits(r, paused));
+            // A started loan must release its inputs before this call
+            // returns, even if the approval wait's deadline has passed.
+            let running = wait_for.is_some_and(|r| {
+                c.input_queue.queue.request(r).is_some_and(|r| {
+                    matches!(r.status, agent_screen_model::input_queue::Status::Running
+                        | agent_screen_model::input_queue::Status::Stopping(_))
+                })
+            });
+            if waiting && !running
+                && Instant::now() >= until
+                && let Some(r) = wait_for
+            {
+                c.input_queue.detach(r);
+            }
             if changed {
                 cx.notify();
             }
-            Ok(state)
+            Ok((state, waiting && (running || Instant::now() < until)))
         })?;
-        if !crate::input_queue::awaits_user(&state) || Instant::now() >= until {
+        let (state, waiting) = state;
+        if !waiting {
             return Ok(state);
         }
         cx.background_executor()
@@ -4561,10 +4589,9 @@ async fn queued_drag(
     cx: &mut AsyncApp,
 ) -> Reply {
     let (from, to) = path;
-    let target = off(cx, move || crate::mac::input::window_at(from))
+    let (target, frame) = off(cx, move || crate::mac::input::window_at(from))
         .await
-        .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?
-        .0;
+        .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?;
     let area = cg::display_bounds(id);
     let point = |p: (f64, f64)| ((p.0 - area.x).round() as i64, (p.1 - area.y).round() as i64);
     let reason = match to {
@@ -4575,11 +4602,32 @@ async fn queued_drag(
         ),
         None => format!("Begin dragging at {:?} on this display", point(from)),
     };
-    let params = json!({
-        "displayId": id, "action": "request", "reason": reason,
-        "operation": format!("drag:{}:{from:?}:{to:?}:{}", target.window_id, modifier_bits(modifiers)),
-        "timeout": 60,
+    // A press held across calls would keep the user's button down while the
+    // agent thinks, so only a whole drag runs; a press only asks.
+    let plan = to.map(|to| crate::input_queue::Plan {
+        target,
+        frame,
+        area,
+        from,
+        to,
+        flags: crate::mac::input::flags(modifiers).0,
     });
+    let operation = format!(
+        "drag:{}:{from:?}:{to:?}:{}",
+        target.window_id,
+        modifier_bits(modifiers)
+    );
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let result = c.input_queue.submit(owner.clone(), operation, reason, plan);
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
     let state = input_queue_action(
         core,
         connection,
@@ -4587,12 +4635,34 @@ async fn queued_drag(
         cx,
     )
     .await?;
-    Err(ControlError {
-        code: "input_pending",
-        message: format!(
-            "{why} No drag or press was sent. Input queue status: {state}. Use input_queue with the request_id to inspect, wait or withdraw. Approval does not execute this action: this build has no real-input executor."
-        ),
-    })
+    let r = &state["requests"][0];
+    match r["state"].as_str() {
+        Some("completed") => {
+            show_pointer(core, id, to.unwrap_or(from), false, cx);
+            reply(json!({ "route": "real_input", "requestId": request }))
+        }
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
+            Err(ControlError::failed(format!(
+                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying. Input queue status: {state}",
+                r["stopReason"].as_str().unwrap_or("stopped"),
+                r["failure"]
+                    .as_str()
+                    .map(|f| format!(": {f}"))
+                    .unwrap_or_default(),
+            )))
+        }
+        _ => Err(ControlError {
+            code: "input_pending",
+            message: format!(
+                "{why} No drag or press was sent. Input queue status: {state}. {}",
+                if plan.is_some() {
+                    "The drag runs with the user's pointer once they allow it and while your call waits: retry the same drag with real_input to wait again, or use input_queue to inspect or withdraw it."
+                } else {
+                    "A press held across calls can't use the user's pointer. Once they allow it, use left_click_drag with real_input for the whole drag."
+                }
+            ),
+        }),
+    }
 }
 
 // MARK: Parameters

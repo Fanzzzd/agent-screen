@@ -297,13 +297,13 @@ impl HelpCard {
         };
         let scope = if granted {
             t(
-                "Waiting for an executor. No pointer or keyboard is in use.",
-                "等待执行器。当前没有使用指针或键盘。",
+                "Agents may use your pointer for these drags, one at a time. Move the mouse or press a key to take it back.",
+                "agent 会依次用你的指针执行这些拖拽。移动鼠标或按任意键即可收回。",
             )
         } else {
             t(
-                "Includes new requests until the queue is idle for 30 seconds. This build cannot execute real input.",
-                "包含之后的新请求，队列空闲 30 秒后结束。本构建无法执行真实输入。",
+                "Allow All lets agents drag with your pointer, these requests and new ones, until the queue is idle for 30 seconds. Move the mouse or press a key to take it back.",
+                "全部允许后，agent 可以用你的指针执行这些拖拽和之后的新请求，队列空闲 30 秒后结束。移动鼠标或按任意键即可收回。",
             )
         };
         let mut list = div()
