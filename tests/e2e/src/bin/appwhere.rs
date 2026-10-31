@@ -8,8 +8,9 @@
 //! front with nobody to tell. `debugActivated` stands in for the app
 //! coming to the front. A click on Field's Dock icon, which the user makes
 //! while Field is already the front app and so activates nothing, names
-//! the display too: `debugUserClick` at the icon's real place stands in
-//! for the global monitor's report of the click.
+//! the display too, and so does a second click right after:
+//! `debugUserClick` at the icon's real place stands in for the global
+//! monitor's report of the click.
 //!
 //! Needs Field.app, which `cargo e2e ime` makes.
 //!
@@ -177,6 +178,14 @@ fn test() -> Result<()> {
             "and brings Peek down at its tile",
             peek_rings(&peek, id),
             peek.to_string(),
+        );
+        // Each explicit click reminds again, unlike the app coming to the
+        // front by itself, which is held to once a minute.
+        let (again, peek) = clicked(&control, icon)?;
+        check(
+            "a second click right after names the display again, Peek still at its tile",
+            again == vec![id] && peek_rings(&peek, id),
+            format!("{again:?}, display {id}, Peek {peek}"),
         );
         sleep_ms(6000);
         let (elsewhere, peek) = clicked(&control, (icon.0, icon.1 - 300.0))?;
