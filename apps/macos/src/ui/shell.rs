@@ -19,6 +19,7 @@ use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Rect, WindowTarget};
 use agent_screen_model::access::Authority;
+use agent_screen_model::card;
 use agent_screen_model::peek as peek_intent;
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -807,12 +808,12 @@ impl Shell {
         }
         for display in &core.displays.list {
             let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
-            let input = core
-                .input_queue
-                .queue
-                .waiting()
-                .find(|r| r.owner.display == display.id && display.is_live() && !display.takeover)
-                .filter(|_| core.input_queue.queue.grant().is_none());
+            let input = core.input_queue.queue.waiting().find(|r| {
+                r.owner.display == display.id
+                    && display.is_live()
+                    && !display.takeover
+                    && core.input_queue.asks(r.id)
+            });
             if let Some(input) = input {
                 notify::update(
                     display.id,
@@ -951,56 +952,26 @@ impl Shell {
             core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
         });
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
-        // Window and Control Requests wait for an answer even beside the
-        // Viewer, where the user operates the display during a Takeover.
-        let mut requests = core
-            .displays
-            .list
-            .iter()
-            .filter(|d| d.is_live() && (d.window_request.is_some() || d.control_request.is_some()))
-            .map(|d| (d.id, true, (d.width, d.height)));
-        let mut helps = core
-            .displays
-            .list
-            .iter()
-            .filter(|d| {
-                d.is_live()
-                    && !d.takeover
-                    && viewing != Some(d.id)
-                    && d.help_request
-                        .as_ref()
-                        .is_some_and(|r| self.card_later.get(&d.id) != Some(r))
-            })
-            .map(|d| (d.id, false, (d.width, d.height)));
-        let request = requests.next();
-        let input = request.is_none()
-            && (core.input_queue.approval_needed() || core.input_queue.queue.grant().is_some());
-        let input_display = input
-            .then(|| {
-                core.input_queue
-                    .queue
-                    .waiting()
-                    .next()
-                    .map(|r| r.owner.display)
-                    .or_else(|| {
-                        core.displays
-                            .list
-                            .iter()
-                            .find(|d| d.is_live())
-                            .map(|d| d.id)
-                    })
-                    .and_then(|id| {
-                        core.displays
-                            .get(id)
-                            .map(|d| (id, false, (d.width, d.height)))
-                    })
-            })
-            .flatten();
-        let want = request
-            .or(input_display)
-            .or_else(|| helps.next())
-            .filter(|_| !self.peek_shown);
-        let input = input && input_display.is_some();
+        let selected = card::select(
+            &core.displays,
+            viewing,
+            |id, reason| {
+                self.card_later
+                    .get(&id)
+                    .is_some_and(|later| later == reason)
+            },
+            core.input_queue.card_display(&core.displays),
+            self.peek_shown,
+        );
+        // The selected kind alone decides what the card renders.
+        let input = matches!(selected, Some(card::Card::Input(_)));
+        let want = selected.and_then(|selected| {
+            let id = selected.display();
+            let request = matches!(selected, card::Card::Request(_));
+            core.displays
+                .get(id)
+                .map(|d| (id, request, (d.width, d.height)))
+        });
         if want.map(|w| (w.0, w.1)) == self.card_shown && self.card_input == input {
             return;
         }

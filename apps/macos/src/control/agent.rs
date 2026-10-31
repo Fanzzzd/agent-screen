@@ -15,6 +15,7 @@ use crate::model::{
 };
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::input_queue::Action;
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
@@ -4460,7 +4461,6 @@ async fn input_queue_action(
     let owner = core
         .read_with(cx, |c, _| c.input_queue.owner(id, connection))
         .map_err(ControlError::invalid)?;
-    let action = p.string("action").unwrap_or_else(|| "status".into());
     let request = p
         .int("requestId")
         .map(|id| {
@@ -4470,50 +4470,54 @@ async fn input_queue_action(
                 .ok_or_else(|| ControlError::invalid("requestId must be a positive integer"))
         })
         .transpose()?;
-    let mut wait_for = request;
-    match action.as_str() {
-        "request" => {
+    // Checked before any change: done forgets results, so a request id
+    // with it would fail after the session's requests were already gone.
+    let action = Action::parse(
+        &p.string("action").unwrap_or_else(|| "status".into()),
+        request,
+    )
+    .map_err(ControlError::invalid)?;
+    let wait_for = match action {
+        Action::Request => {
             let operation = p
                 .string("operation")
                 .ok_or_else(|| ControlError::invalid("operation is required"))?;
             let reason = p
                 .string("reason")
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            wait_for = Some(
+            Some(
                 core.update(cx, |c, cx| {
                     let result = c.input_queue.submit(owner.clone(), operation, reason);
                     cx.notify();
                     result
                 })
                 .map_err(ControlError::invalid)?,
-            );
+            )
         }
-        "withdraw" => {
-            let request = request.ok_or_else(|| ControlError::invalid("requestId is required"))?;
+        Action::Withdraw(request) => {
             core.update(cx, |c, cx| {
                 let result = c.input_queue.withdraw(&owner, request);
                 cx.notify();
                 result
             })
             .map_err(ControlError::invalid)?;
+            Some(request)
         }
-        "done" => core.update(cx, |c, cx| {
-            c.input_queue.done(&owner);
-            cx.notify();
-        }),
-        "wait" if request.is_none() => return Err(ControlError::invalid("requestId is required")),
-        "wait" | "status" => {}
-        _ => {
-            return Err(ControlError::invalid(
-                "action is request, wait, status, withdraw or done",
-            ));
+        Action::Done => {
+            core.update(cx, |c, cx| {
+                c.input_queue.done(&owner);
+                cx.notify();
+            });
+            None
         }
-    }
+        Action::Wait(request) => Some(request),
+        Action::Status(request) => request,
+    };
     if let Some(request) = wait_for {
         core.read_with(cx, |c, _| c.input_queue.request_for(&owner, request))
             .map_err(ControlError::invalid)?;
     }
-    let timeout = if matches!(action.as_str(), "request" | "wait") {
+    let timeout = if matches!(action, Action::Request | Action::Wait(_)) {
         p.number("timeout").unwrap_or(60.0).clamp(0.0, 60.0)
     } else {
         0.0

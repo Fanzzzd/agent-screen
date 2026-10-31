@@ -121,13 +121,19 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
         assert!(tools["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"]=="input_queue"));
         let tool=|id, name, arguments| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}});
         for (index, action) in ["request","wait","withdraw","done"].into_iter().enumerate() {
-            let result=exchange(tool(index+3,"input_queue",json!({"display_id":7,"action":action,"request_id":42,"operation":"drag-1","reason":"Move a card","timeout_seconds":0})));
+            let mut arguments=json!({"display_id":7,"action":action,"request_id":42,"operation":"drag-1","reason":"Move a card","timeout_seconds":0});
+            if action=="done" { arguments.as_object_mut().unwrap().remove("request_id"); }
+            let result=exchange(tool(index+3,"input_queue",arguments));
             assert_ne!(result["result"]["isError"],true,"{result}");
             assert_eq!(result["result"]["structuredContent"]["executorAvailable"],false);
             if action=="wait" { assert_eq!(result["result"]["structuredContent"]["requests"][0]["state"],"approved_waiting_executor"); }
         }
         let invalid=exchange(tool(7,"input_queue",json!({"display_id":7,"action":"request"})));
         assert_eq!(invalid["result"]["isError"],true);
+        // done forgets the session's requests; it is refused with a request
+        // id before reaching the app, so it cannot succeed and then fail.
+        let done=exchange(tool(11,"input_queue",json!({"display_id":7,"action":"done","request_id":42})));
+        assert_eq!(done["result"]["isError"],true,"done with request_id must be refused: {done}");
         let drag=|real| json!({"display_id":7,"action":"left_click_drag","start_coordinate":[10,20],"coordinate":[30,40],"real_input":real});
         let pending=exchange(tool(8,"computer",drag(true)));
         assert_eq!(pending["result"]["isError"],true,"{pending}");

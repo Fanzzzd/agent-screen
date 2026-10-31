@@ -7,6 +7,7 @@ pub mod access;
 pub mod alerts;
 pub mod arrangement;
 pub mod budget;
+pub mod card;
 pub mod claims;
 pub mod devtools;
 pub mod input_queue;

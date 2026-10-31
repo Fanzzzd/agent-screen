@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const IDLE_MS: u64 = 30_000;
 pub const MAX_REQUESTS: usize = 256;
+/// One Agent Session's share of MAX_REQUESTS, kept results included, so a
+/// session that never says done cannot shut out the others.
+pub const MAX_SESSION_REQUESTS: usize = 64;
 pub type RequestId = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +72,14 @@ pub struct Grant {
     done: BTreeSet<Owner>,
 }
 
+impl Grant {
+    /// The user's approval covers this owner's requests: it was waiting
+    /// outside a Takeover at approval, or arrived during the grant.
+    pub fn admits(&self, owner: &Owner) -> bool {
+        self.participants.contains(owner)
+    }
+}
+
 /// Kept until the platform has finished restoration or user-revocation
 /// cleanup. A subsequent user touch changes restore to false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,8 +91,39 @@ pub struct GrantEnd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnqueueError {
     Full,
+    /// This session holds MAX_SESSION_REQUESTS records; done releases them.
+    SessionFull,
     Invalid,
     Closed,
+}
+
+/// An input_queue call, checked before anything changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Request,
+    Wait(RequestId),
+    Status(Option<RequestId>),
+    Withdraw(RequestId),
+    Done,
+}
+
+impl Action {
+    pub fn parse(name: &str, request: Option<RequestId>) -> Result<Self, &'static str> {
+        match (name, request) {
+            ("request", _) => Ok(Self::Request),
+            ("wait", Some(id)) => Ok(Self::Wait(id)),
+            ("status", id) => Ok(Self::Status(id)),
+            ("withdraw", Some(id)) => Ok(Self::Withdraw(id)),
+            ("wait" | "withdraw", None) => Err("wait and withdraw need a request id"),
+            // done forgets the session's results: a request id with it
+            // would name a request that is gone once done has succeeded.
+            ("done", None) => Ok(Self::Done),
+            ("done", Some(_)) => Err(
+                "done covers all of this session's requests and clears their results; call it without a request id",
+            ),
+            _ => Err("action is request, wait, status, withdraw or done"),
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -199,8 +241,12 @@ impl Queue {
         true
     }
 
-    /// A retry returns the original request, including a declined or
-    /// completed result. The platform forgets it only after delivery.
+    /// A retry returns the newest request with the same token, including a
+    /// declined or completed result, so a decline is never silently
+    /// reapproved. The one exception: a token whose newest request the same
+    /// session replaced or withdrew starts a fresh request. The old one keeps
+    /// its stopped result for any call still waiting on its id. The
+    /// platform forgets requests only after delivery.
     pub fn enqueue(
         &mut self,
         owner: Owner,
@@ -213,8 +259,10 @@ impl Queue {
         }
         if let Some(r) = self
             .requests
-            .values_mut()
+            .values()
+            .rev()
             .find(|r| r.owner == owner && r.operation == operation)
+            .filter(|r| !matches!(r.status, Status::Stopped(Stop::Replaced | Stop::Withdrawn)))
         {
             let id = r.id;
             // Expire first: a retry at or after the idle deadline must not
@@ -231,6 +279,16 @@ impl Queue {
         }
         // Expire before admitting a late arrival to an old grant.
         self.tick(now);
+        // The session's own cap first, so the session that fills it is told
+        // what to clear.
+        let held = self
+            .requests
+            .values()
+            .filter(|r| r.owner.connection == owner.connection)
+            .count();
+        if held >= MAX_SESSION_REQUESTS {
+            return Err(EnqueueError::SessionFull);
+        }
         if self.requests.len() >= MAX_REQUESTS || self.next == u64::MAX {
             return Err(EnqueueError::Full);
         }
@@ -714,6 +772,112 @@ mod tests {
     }
 
     #[test]
+    fn a_replaced_or_withdrawn_token_is_requested_afresh_and_keeps_its_history() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "A", 0);
+        let b = add(&mut q, "a", 1, "B", 1);
+        let a2 = add(&mut q, "a", 1, "A", 2);
+        assert_ne!(a2, a, "A->B->A must not return the replaced A");
+        assert_eq!(
+            q.request(a).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        assert_eq!(
+            q.request(b).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        assert_eq!(q.waiting().map(|r| r.id).collect::<Vec<_>>(), vec![a2]);
+        assert_eq!(
+            add(&mut q, "a", 1, "A", 3),
+            a2,
+            "a retry finds the newest A"
+        );
+        assert!(q.withdraw(a2, &owner("a", 1), 4));
+        let a3 = add(&mut q, "a", 1, "A", 5);
+        assert_ne!(a3, a2);
+        assert_eq!(
+            q.request(a2).unwrap().status,
+            Status::Stopped(Stop::Withdrawn)
+        );
+        assert_eq!(add(&mut q, "a", 1, "A", 6), a3);
+        assert_eq!(q.waiting().map(|r| r.id).collect::<Vec<_>>(), vec![a3]);
+    }
+
+    #[test]
+    fn declined_and_completed_tokens_stay_sticky_after_another_request() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "A", 0);
+        q.decline(q.approval());
+        add(&mut q, "a", 1, "B", 1);
+        assert_eq!(add(&mut q, "a", 1, "A", 2), a);
+        assert_eq!(q.request(a).unwrap().status, Status::Declined);
+        q.decline(q.approval());
+        let c = add(&mut q, "b", 2, "C", 3);
+        assert!(q.allow(q.approval(), 3));
+        assert_eq!(q.start(3), Some(c));
+        assert!(q.finish(c, 4));
+        add(&mut q, "b", 2, "D", 5);
+        assert_eq!(add(&mut q, "b", 2, "C", 6), c);
+        assert_eq!(q.request(c).unwrap().status, Status::Completed);
+    }
+
+    #[test]
+    fn one_session_reaches_its_own_cap_without_filling_the_queue() {
+        let mut q = queue();
+        let mut last = 0;
+        for n in 0..MAX_SESSION_REQUESTS {
+            last = add(&mut q, "a", 1, &format!("drag{n}"), 0);
+        }
+        assert_eq!(
+            q.enqueue(owner("a", 1), "more".into(), "Drag".into(), 0),
+            Err(EnqueueError::SessionFull)
+        );
+        // Retrying a request it still has needs no new room.
+        assert_eq!(
+            add(
+                &mut q,
+                "a",
+                1,
+                &format!("drag{}", MAX_SESSION_REQUESTS - 1),
+                0
+            ),
+            last
+        );
+        assert!(
+            q.enqueue(owner("b", 2), "drag".into(), "Drag".into(), 0)
+                .is_ok()
+        );
+        assert_eq!(
+            q.request(1).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        // Releasing its kept results makes room again.
+        for id in 1..last {
+            assert!(q.forget(id));
+        }
+        assert!(add(&mut q, "a", 1, "after", 1) > last);
+    }
+
+    #[test]
+    fn done_takes_no_request_id_and_wait_and_withdraw_need_one() {
+        // done forgets the session's results: a request id after it would
+        // name a request that no longer exists.
+        assert!(Action::parse("done", Some(3)).is_err());
+        assert_eq!(Action::parse("done", None), Ok(Action::Done));
+        assert_eq!(Action::parse("wait", Some(3)), Ok(Action::Wait(3)));
+        assert!(Action::parse("wait", None).is_err());
+        assert_eq!(Action::parse("withdraw", Some(3)), Ok(Action::Withdraw(3)));
+        assert!(Action::parse("withdraw", None).is_err());
+        assert_eq!(Action::parse("status", None), Ok(Action::Status(None)));
+        assert_eq!(
+            Action::parse("status", Some(3)),
+            Ok(Action::Status(Some(3)))
+        );
+        assert_eq!(Action::parse("request", None), Ok(Action::Request));
+        assert!(Action::parse("cancel", Some(3)).is_err());
+    }
+
+    #[test]
     fn active_operations_have_no_duration_limit() {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "drag", 0);
@@ -760,21 +924,38 @@ mod tests {
     #[test]
     fn request_limit_does_not_prevent_polling_or_cancellation() {
         let mut q = queue();
-        for n in 0..MAX_REQUESTS {
-            add(&mut q, "a", 1, &format!("drag{n}"), 0);
+        for (session, display) in [("d", 4), ("e", 5)] {
+            assert!(
+                q.register(session.into(), owner(session, display).connection, display)
+                    .is_some()
+            );
         }
+        for (session, display) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
+            for n in 0..MAX_SESSION_REQUESTS {
+                add(&mut q, session, display, &format!("drag{n}"), 0);
+            }
+        }
+        assert_eq!(q.requests().count(), MAX_REQUESTS);
         assert_eq!(
-            q.enqueue(owner("b", 2), "drag".into(), "Drag".into(), 0),
+            q.enqueue(owner("e", 5), "drag".into(), "Drag".into(), 0),
             Err(EnqueueError::Full)
         );
-        assert_eq!(add(&mut q, "a", 1, "drag0", 0), 1);
+        assert_eq!(
+            q.enqueue(owner("a", 1), "more".into(), "Drag".into(), 0),
+            Err(EnqueueError::SessionFull)
+        );
+        let newest = MAX_SESSION_REQUESTS as u64;
+        assert_eq!(
+            add(&mut q, "a", 1, &format!("drag{}", newest - 1), 0),
+            newest
+        );
         q.disconnect(owner("a", 1).connection, 1);
-        assert_eq!(q.waiting().count(), 0);
-        for id in 1..=MAX_REQUESTS as u64 {
+        assert_eq!(q.waiting().count(), 3);
+        for id in 1..=newest {
             assert!(q.forget(id));
         }
         assert!(
-            q.enqueue(owner("b", 2), "drag".into(), "Drag".into(), 2)
+            q.enqueue(owner("e", 5), "drag".into(), "Drag".into(), 2)
                 .is_ok()
         );
     }

@@ -2,9 +2,10 @@
 //! here. This build has no real-input executor: approval remains a distinct
 //! state and must never be reported as a completed action.
 
-use crate::model::{DisplayId, Owner as DisplayOwner};
+use crate::model::{DisplayId, Displays, Owner as DisplayOwner};
 use agent_screen_model::input_queue::{EnqueueError, Owner, Queue, RequestId, Status};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 pub const EXECUTOR_AVAILABLE: bool = false;
@@ -14,6 +15,10 @@ const OPERATION_CHARS: usize = 2048;
 pub struct InputQueue {
     pub queue: Queue,
     clock: Instant,
+    /// Requests the user already allowed whose grant ended with nothing
+    /// executed. Presentation only: they stay queued for the agent, and
+    /// only a new request or a revocation asks again.
+    approved: BTreeSet<RequestId>,
 }
 
 impl Default for InputQueue {
@@ -21,6 +26,7 @@ impl Default for InputQueue {
         Self {
             queue: Queue::default(),
             clock: Instant::now(),
+            approved: BTreeSet::new(),
         }
     }
 }
@@ -67,6 +73,7 @@ impl InputQueue {
         let id = self.queue.enqueue(owner, operation, reason.into(), now).map_err(|why| {
             match why {
                 EnqueueError::Full => "the input queue is full; use input_queue done when your session no longer needs its requests, or wait for other sessions to clear theirs",
+                EnqueueError::SessionFull => "this session holds 64 input requests, including finished ones it has not cleared; use input_queue done once it has read their results, then request again",
                 EnqueueError::Invalid => "operation and reason are required",
                 EnqueueError::Closed => "the queue's display lifetime has ended",
             }.to_string()
@@ -99,6 +106,7 @@ impl InputQueue {
 
     pub fn revoke(&mut self) {
         self.queue.user_input();
+        self.approved.clear();
         self.tick();
     }
 
@@ -157,7 +165,22 @@ impl InputQueue {
     /// open the once-a-second shell tick updates elapsed time too.
     pub fn tick(&mut self) -> bool {
         let was = self.queue.grant().map(|grant| grant.id);
+        if let Some(grant) = self.queue.grant() {
+            let admitted: Vec<_> = self
+                .queue
+                .waiting()
+                .filter(|r| grant.admits(&r.owner))
+                .map(|r| r.id)
+                .collect();
+            self.approved.extend(admitted);
+        }
         self.queue.tick(self.now());
+        let queue = &self.queue;
+        self.approved.retain(|id| {
+            queue
+                .request(*id)
+                .is_some_and(|r| r.status == Status::Queued)
+        });
         // No physical state was acquired in this build. A future executor
         // must own this acknowledgment after cleanup/restoration instead.
         if !EXECUTOR_AVAILABLE && let Some(end) = self.queue.pending_end() {
@@ -166,8 +189,39 @@ impl InputQueue {
         was.is_some() || self.queue.grant().is_some()
     }
 
+    /// A waiting request the user has not allowed yet. Status stays queued
+    /// for the agent either way; this only decides the card and the
+    /// notification.
+    pub fn asks(&self, id: RequestId) -> bool {
+        self.queue.grant().is_none()
+            && !self.approved.contains(&id)
+            && self
+                .queue
+                .request(id)
+                .is_some_and(|r| r.status == Status::Queued)
+    }
+
     pub fn approval_needed(&self) -> bool {
-        self.queue.grant().is_none() && self.queue.waiting().next().is_some()
+        self.queue.waiting().any(|r| self.asks(r.id))
+    }
+
+    /// The display the queue's card shows, while it needs one: the first
+    /// request still to ask about, or during a grant the first waiting
+    /// request's display or any live display.
+    pub fn card_display<H>(&self, displays: &Displays<H>) -> Option<DisplayId> {
+        let id = if self.queue.grant().is_some() {
+            self.queue
+                .waiting()
+                .next()
+                .map(|r| r.owner.display)
+                .or_else(|| displays.list.iter().find(|d| d.is_live()).map(|d| d.id))
+        } else {
+            self.queue
+                .waiting()
+                .find(|r| self.asks(r.id))
+                .map(|r| r.owner.display)
+        };
+        id.filter(|id| displays.get(*id).is_some())
     }
 
     pub fn elapsed_seconds(&self) -> Option<u64> {
@@ -294,7 +348,7 @@ mod tests {
         let mut input = InputQueue::default();
         input.register(1, &display_owner(1));
         let owner = input.owner(1, 1).unwrap();
-        for i in 0..agent_screen_model::input_queue::MAX_REQUESTS {
+        for i in 0..agent_screen_model::input_queue::MAX_SESSION_REQUESTS {
             input
                 .submit(owner.clone(), format!("drag{i}"), "Drag".into())
                 .unwrap();

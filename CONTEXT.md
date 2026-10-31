@@ -65,7 +65,7 @@ The user's permission for the Input Queue to run, including requests that arrive
 _Avoid_: blanket access, Takeover
 
 **Input Loan** (借出):
-One complete operation's exclusive use of the user's pointer and keyboard on its own Agent Display during an Input Grant. Other sessions wait until it has released its inputs. Completing a loan leaves the grant open for the next operation. Normal grant completion restores the user's pointer and front window; user-initiated revocation leaves the pointer and front window where the user took control. Both release the agent's held keys and buttons.
+One complete operation's exclusive use of the user's pointer and keyboard on its own Agent Display during an Input Grant. Other sessions wait until it has released its inputs. Completing a loan leaves the grant open for the next operation. Normal grant completion restores the user's pointer and front window; user-initiated revocation leaves the pointer and front window where the user took control. Both release the agent's held keys and buttons. This build has no executor, so no loan runs: touch revocation, restoration and held-input release are the design in ADR 0013, not shipped behavior.
 _Avoid_: lease, borrow. Keyboard Borrow is a different thing: one input-method call that needs no permission.
 
 **Agent Pointer**:

@@ -65,19 +65,23 @@ pub fn landed(slider: Slider, wanted: f64, read: f64) -> bool {
 
 /// Infer direction from the current thumb position and value, rather than
 /// assuming that a horizontal or vertical control is not reversed. At the
-/// midpoint both directions fit; leave that drag to another route.
+/// midpoint both directions fit; leave that drag to another route. The
+/// value moves from `current` by the drag's distance along the track, held
+/// to the ends: a grab beside the thumb's centre still moves the way the
+/// drag goes, and a drag that goes nowhere changes nothing.
 pub fn drag_value(slider: Slider, from: (f64, f64), to: (f64, f64), current: f64) -> Option<f64> {
     let at_start = slider_value(slider, from)?;
-    let at_end = slider_value(slider, to)?;
+    let delta = slider_value(slider, to)? - at_start;
     let reversed_start = slider.min + (slider.max - at_start);
-    match (
+    let delta = match (
         landed(slider, at_start, current),
         landed(slider, reversed_start, current),
     ) {
-        (true, false) => Some(at_end),
-        (false, true) => Some(slider.min + (slider.max - at_end)),
-        _ => None,
-    }
+        (true, false) => delta,
+        (false, true) => -delta,
+        _ => return None,
+    };
+    Some((current + delta).clamp(slider.min, slider.max))
 }
 
 /// Confirmation seam for a value write, separate from source-geometry
@@ -115,6 +119,63 @@ mod tests {
         assert!(!confirmed(s, 25.0, wanted, 25.0));
         assert!(confirmed(s, 25.0, wanted, 28.0));
         assert!(!confirmed(s, 75.0, 71.0, 75.0));
+    }
+
+    fn near(got: Option<f64>, want: f64) -> bool {
+        got.is_some_and(|v| (v - want).abs() < 1e-9)
+    }
+
+    #[test]
+    fn an_off_centre_grab_moves_by_the_drag_not_to_its_end() {
+        let s = slider(false);
+        // The thumb at x 150 reads 25; the value is 22, inside tolerance.
+        let left = drag_value(s, (150.0, 210.0), (148.0, 210.0), 22.0);
+        assert!(near(left, 21.0), "a left drag must not raise it: {left:?}");
+        let right = drag_value(s, (150.0, 210.0), (158.0, 210.0), 22.0);
+        assert!(near(right, 26.0), "{right:?}");
+        let still = drag_value(s, (150.0, 210.0), (150.0, 210.0), 22.0);
+        assert!(
+            near(still, 22.0),
+            "a zero drag must not change it: {still:?}"
+        );
+    }
+
+    #[test]
+    fn a_reversed_or_vertical_slider_moves_by_the_signed_drag() {
+        let s = slider(false);
+        // Reversed: the thumb at x 150 reads 75.
+        let right = drag_value(s, (150.0, 210.0), (158.0, 210.0), 77.0);
+        assert!(near(right, 73.0), "{right:?}");
+        let left = drag_value(s, (150.0, 210.0), (148.0, 210.0), 77.0);
+        assert!(near(left, 78.0), "{left:?}");
+        let v = Slider {
+            frame: Rect::new(0.0, 0.0, 20.0, 100.0),
+            ..slider(true)
+        };
+        let up = drag_value(v, (10.0, 75.0), (10.0, 70.0), 23.0);
+        assert!(near(up, 28.0), "{up:?}");
+        let down = drag_value(v, (10.0, 75.0), (10.0, 76.0), 23.0);
+        assert!(
+            near(down, 22.0),
+            "a downward drag must not raise it: {down:?}"
+        );
+    }
+
+    #[test]
+    fn a_drag_past_the_track_is_held_to_its_ends() {
+        let s = slider(false);
+        assert!(near(
+            drag_value(s, (150.0, 210.0), (900.0, 210.0), 27.0),
+            100.0
+        ));
+        assert!(near(
+            drag_value(s, (150.0, 210.0), (40.0, 210.0), 22.0),
+            0.0
+        ));
+        assert!(near(
+            drag_value(s, (150.0, 210.0), (900.0, 210.0), 73.0),
+            0.0
+        ));
     }
 
     #[test]

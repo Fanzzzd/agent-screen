@@ -234,8 +234,9 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "A background drag that cannot run enters the shared Input Queue and reports its request_id.",
                 "Use wait to wait up to 60 seconds for approval, status to inspect your requests, withdraw to cancel one,",
-                "or done when your session no longer needs input. done withdraws your pending requests, not another session's.",
-                "request adds an approval intent with a reason and a stable operation token; repeating the token keeps the same request.",
+                "or done when your session no longer needs input. done withdraws your pending requests, not another session's, clears your results and takes no request_id.",
+                "request adds an approval intent with a reason and a stable operation token; repeating the token returns its newest request, a declined one included.",
+                "A token whose request you replaced or withdrew starts a fresh request. A session holds at most 64 requests, finished ones included; done releases them.",
                 "Queue approval includes new requests while it lasts, and ends after 30 idle seconds or when all participants are done.",
                 "This build has no real-input executor. approved_waiting_executor means approved but NOT executed; no drag, click or key was sent.",
                 "Do not continue a split drag or assume success after input_pending. You can use a background alternative or request_help.",
@@ -872,9 +873,9 @@ pub async fn run(
             if request_id.is_some_and(|id| id < 1) {
                 return Err(ControlError::invalid("request_id must be positive"));
             }
-            if matches!(action.as_str(), "wait" | "withdraw") && request_id.is_none() {
-                return Err(ControlError::invalid("request_id is required"));
-            }
+            // The app checks the same rule, before anything changes.
+            agent_screen_model::input_queue::Action::parse(&action, request_id.map(|id| id as u64))
+                .map_err(ControlError::invalid)?;
             let operation = a.string("operation")?;
             let reason = a.string("reason")?;
             if action == "request"
