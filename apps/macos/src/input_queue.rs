@@ -11,6 +11,7 @@ use std::time::Instant;
 pub const EXECUTOR_AVAILABLE: bool = false;
 const REASON_CHARS: usize = 300;
 const OPERATION_CHARS: usize = 2048;
+const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended with nothing run and they will not be asked about it again. Waiting or retrying the same operation returns at once. Use a background alternative or request_help, then withdraw it.";
 
 pub struct InputQueue {
     pub queue: Queue,
@@ -18,7 +19,7 @@ pub struct InputQueue {
     /// Requests the user already allowed whose grant ended with nothing
     /// executed. Presentation only: they stay queued for the agent, and
     /// only a new request or a revocation asks again.
-    approved: BTreeSet<RequestId>,
+    pub(crate) approved: BTreeSet<RequestId>,
 }
 
 impl Default for InputQueue {
@@ -29,6 +30,14 @@ impl Default for InputQueue {
             approved: BTreeSet::new(),
         }
     }
+}
+
+/// Whether a status reply still has a request waiting for the user's answer,
+/// so a wait or a blocked action should keep waiting.
+pub fn awaits_user(state: &Value) -> bool {
+    state["requests"]
+        .as_array()
+        .is_some_and(|requests| requests.iter().any(|r| r["state"] == "queued"))
 }
 
 impl InputQueue {
@@ -73,7 +82,7 @@ impl InputQueue {
         let id = self.queue.enqueue(owner, operation, reason.into(), now).map_err(|why| {
             match why {
                 EnqueueError::Full => "the input queue is full; use input_queue done when your session no longer needs its requests, or wait for other sessions to clear theirs",
-                EnqueueError::SessionFull => "this session holds 64 input requests, including finished ones it has not cleared; use input_queue done once it has read their results, then request again",
+                EnqueueError::SessionFull => "this connection holds 64 input requests across its displays, including finished ones it has not cleared; use input_queue done on each display once it has read their results, then request again",
                 EnqueueError::Invalid => "operation and reason are required",
                 EnqueueError::Closed => "the queue's display lifetime has ended",
             }.to_string()
@@ -248,6 +257,9 @@ impl InputQueue {
                 let state = match request.status {
                     Status::Queued if paused => "takeover",
                     Status::Queued if self.queue.grant().is_some() => "approved_waiting_executor",
+                    // Nothing will ask the user again, so nothing is left
+                    // to wait for.
+                    Status::Queued if self.approved.contains(&request.id) => "approval_lapsed",
                     Status::Queued => "queued",
                     Status::Running => "running",
                     Status::Stopping(_) => "stopping",
@@ -260,6 +272,7 @@ impl InputQueue {
                     "state": state,
                     "reason": request.reason,
                     "position": position,
+                    "next": (state == "approval_lapsed").then_some(LAPSED_NEXT),
                     "stopReason": match request.status {
                         Status::Stopped(why) | Status::Stopping(why) => Some(format!("{why:?}")),
                         _ => None,

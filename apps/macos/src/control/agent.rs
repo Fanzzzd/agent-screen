@@ -4542,10 +4542,7 @@ async fn input_queue_action(
             }
             Ok(state)
         })?;
-        let waiting = state["requests"]
-            .as_array()
-            .is_some_and(|requests| requests.iter().any(|r| r["state"] == "queued"));
-        if !waiting || Instant::now() >= until {
+        if !crate::input_queue::awaits_user(&state) || Instant::now() >= until {
             return Ok(state);
         }
         cx.background_executor()
