@@ -55,6 +55,8 @@ pub enum Native {
     },
     /// A menu item was chosen.
     Menu(MenuAction),
+    /// The user touched the mouse or keyboard during an Input Grant.
+    UserTookInput,
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
     /// A left click of the user's at a global point (top-left origin),
@@ -87,6 +89,7 @@ pub enum Native {
         take_over: bool,
     },
     /// What macOS says about notifying, after `notify::check`.
+    InputQueueOpened,
     NotificationAuth(super::notify::Auth),
     /// Screens were added, removed or rearranged.
     ScreensChanged,
@@ -612,6 +615,10 @@ pub fn watch_mouse() {
         | NSEventMask::LeftMouseDragged
         | NSEventMask::LeftMouseUp;
     let report = |event: &NSEvent| {
+        // The Input Queue's own drag is not the user's.
+        if super::real_input::is_ours(event) {
+            return;
+        }
         let at = NSEvent::mouseLocation();
         let (x, y) = (at.x, at.y);
         match event.r#type() {
@@ -633,6 +640,9 @@ pub fn watch_mouse() {
     // windows from an agent's. Events posted to a pid never reach these.
     let user = RcBlock::new(|event: NonNull<NSEvent>| {
         use super::catch::Towards;
+        if super::real_input::is_ours(unsafe { event.as_ref() }) {
+            return;
+        }
         let kind = unsafe { event.as_ref() }.r#type();
         let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
@@ -670,6 +680,90 @@ pub fn watch_mouse() {
     {
         keep(monitor);
     }
+}
+
+// MARK: Input Grant indicator
+
+thread_local! {
+    static BORDERS: RefCell<Vec<(Retained<NSWindow>, Retained<objc2_app_kit::NSTextField>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A red border and banner on each of the user's screens while an Input
+/// Grant lets agents use the pointer, or none. Clicks pass through. Returns
+/// whether the indicator shows, as real input may run only while it does.
+pub fn show_borders(on: bool, text: &str) -> bool {
+    use objc2_app_kit::{
+        NSBackingStoreType, NSBox, NSBoxType, NSTextField, NSTitlePosition, NSWindowStyleMask,
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    BORDERS.with(|b| {
+        let mut borders = b.borrow_mut();
+        if !on {
+            for (window, _) in borders.drain(..) {
+                window.orderOut(None);
+            }
+            return false;
+        }
+        if !borders.is_empty() {
+            for (_, label) in borders.iter() {
+                label.setStringValue(&NSString::from_str(text));
+            }
+            return true;
+        }
+        for (id, frame, visible) in screens() {
+            if super::cg::is_agent_screen(id) {
+                continue;
+            }
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    frame,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setIgnoresMouseEvents(true);
+            window.setHasShadow(false);
+            window.setLevel(1000);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            let border = NSBox::new(mtm);
+            border.setBoxType(NSBoxType::Custom);
+            border.setTitlePosition(NSTitlePosition::NoTitle);
+            border.setBorderColor(&NSColor::systemRedColor());
+            border.setBorderWidth(6.0);
+            border.setFillColor(&NSColor::clearColor());
+            window.setContentView(Some(&border));
+            let label = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
+            label.setDrawsBackground(true);
+            label.setBackgroundColor(Some(&NSColor::systemRedColor()));
+            label.setTextColor(Some(&NSColor::whiteColor()));
+            let size = NSSize::new((frame.size.width - 48.0).clamp(200.0, 1000.0), 68.0);
+            // Just under the menu bar, centred.
+            let top = visible.origin.y + visible.size.height - frame.origin.y;
+            label.setFrame(NSRect::new(
+                NSPoint::new(
+                    (frame.size.width - size.width) / 2.0,
+                    top - size.height - 8.0,
+                ),
+                size,
+            ));
+            border.addSubview(&label);
+            window.orderFrontRegardless();
+            borders.push((window, label));
+        }
+        !borders.is_empty()
+    })
 }
 
 // MARK: Windows that draw their own shadow

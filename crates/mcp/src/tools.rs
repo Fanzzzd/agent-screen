@@ -180,9 +180,11 @@ pub fn definitions() -> Vec<Value> {
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
-                "coordinate they act at the pointer. A drag in a web page works only in a Chromium or Electron app that",
-                "launch_app started, through its private DevTools pipe; elsewhere, as in Safari or an app the user opened,",
-                "it fails and says so. cursor_position returns the pointer without a screenshot. zoom",
+                "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available.",
+                "Sliders with enough accessibility information can instead change their value without moving your pointer.",
+                "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
+                "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
+                "cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
                 "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
@@ -209,6 +211,10 @@ pub fn definitions() -> Vec<Value> {
                     "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
                     "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
+                    "real_input": {
+                        "type": "boolean",
+                        "description": "For left_click_drag or left_mouse_down only: ask to use the user's pointer after observing a background failure. Complete drags run only during user approval; a split press only asks and sends nothing."
+                    },
                     "via_input_method": {
                         "type": "boolean",
                         "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao \" for 你好. Compose and commit in one call: the user's app comes back to the front after each call, and the input method drops what it was composing. This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
@@ -217,6 +223,34 @@ pub fn definitions() -> Vec<Value> {
                         "type": "string",
                         "description": "With via_input_method: the input source to use for the call, such as com.apple.inputmethod.SCIM.ITABC; the user's own comes back after. Default: the current one."
                     }
+                }),
+                &["display_id", "action"],
+            ),
+            PLAIN,
+        ),
+        tool(
+            "input_queue",
+            "Inspect or withdraw an input request",
+            &[
+                "A background drag that cannot run enters the shared Input Queue and reports its request_id.",
+                "Use wait to wait up to 60 seconds for approval and then for a started drag to release its inputs, status to inspect your requests, withdraw to cancel one,",
+                "or done when your session no longer needs input. done withdraws your pending requests, not another session's, clears your results and takes no request_id.",
+                "request adds an approval intent with a reason and a stable operation token; repeating the token returns its newest request, a declined one included.",
+                "A token whose request you replaced or withdrew starts a fresh request. A session holds at most 64 requests across its displays, finished ones included; done releases the requests of the display you name.",
+                "Queue approval includes new requests while it lasts, and ends after 30 idle seconds or when all participants are done.",
+                "approved means allowed, not completed. A complete drag waits for its turn and runs with the user's pointer. Only completed means it ran. request here asks for approval but contains no executable action; once approved, submit a complete drag with real_input.",
+                "approval_lapsed means the user allowed it, the approval ended with nothing run, and they will not be asked again; wait and retry return at once.",
+                "Do not continue a split drag or assume success after input_pending. You can use a background alternative or request_help.",
+                "The tool returns only your session's requests. It does not end a Takeover or grant access to other windows.",
+            ],
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "action": { "type": "string", "enum": ["request", "wait", "status", "withdraw", "done"] },
+                    "request_id": { "type": "integer", "minimum": 1, "description": "The request_id reported by the blocked action or input_queue." },
+                    "operation": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "For request: a stable token for this intended action. Reuse it when retrying the same request." },
+                    "reason": { "type": "string", "minLength": 1, "maxLength": 300, "description": "For request: what the user is being asked to approve." },
+                    "timeout_seconds": { "type": "number", "minimum": 0, "maximum": 60, "description": "For request or wait: seconds to wait. Default 60. Timeout keeps the request queued." },
                 }),
                 &["display_id", "action"],
             ),
@@ -437,7 +471,7 @@ pub fn definitions() -> Vec<Value> {
             "Act on a window element",
             &[
                 "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
-                "set_value and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
+                "set_value, increment, decrement and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
                 "Electron apps take a pressed menu item for its keyboard shortcut, which some ignore while a text field has",
@@ -445,6 +479,8 @@ pub fn definitions() -> Vec<Value> {
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
                 "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
                 "Both work in background apps, where Command-C and Command-V do nothing.",
+                "increment and decrement adjust a slider or stepper by one app-defined step, with no pointer movement.",
+                "They never fall back to a click. If an action is not confirmed, inspect the current value before retrying.",
                 "result picks what comes back: state, the default, is the whole window state; changes lists only the",
                 "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
                 "none says only that it is done. Fails with a takeover error while the user operates the display.",
@@ -456,7 +492,7 @@ pub fn definitions() -> Vec<Value> {
                     "element": { "type": "integer", "description": "The bracketed number from get_window_state." },
                     "action": { "type": "string", "enum": [
                         "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "insert_text",
-                        "read_text", "scroll_into_view"
+                        "read_text", "scroll_into_view", "increment", "decrement"
                     ] },
                     "value": { "type": "string", "description": "Text for set_value and insert_text." },
                     "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
@@ -830,6 +866,43 @@ pub async fn run(
             .await?;
             Ok(Output::Content(state.content(depth)))
         }
+        "input_queue" => {
+            let action = a
+                .one_of("action", &["request", "wait", "status", "withdraw", "done"])?
+                .ok_or_else(|| ControlError::invalid("action is required"))?;
+            let request_id = a.int("request_id")?;
+            if request_id.is_some_and(|id| id < 1) {
+                return Err(ControlError::invalid("request_id must be positive"));
+            }
+            // The app checks the same rule, before anything changes.
+            agent_screen_model::input_queue::Action::parse(&action, request_id.map(|id| id as u64))
+                .map_err(ControlError::invalid)?;
+            let operation = a.string("operation")?;
+            let reason = a.string("reason")?;
+            if action == "request"
+                && (operation
+                    .as_ref()
+                    .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 2048)
+                    || reason
+                        .as_ref()
+                        .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 300))
+            {
+                return Err(ControlError::invalid(
+                    "request needs operation (1..2048 characters) and reason (1..300 characters)",
+                ));
+            }
+            let timeout = a.number("timeout_seconds")?.unwrap_or(60.0);
+            if !(0.0..=60.0).contains(&timeout) {
+                return Err(ControlError::invalid(
+                    "timeout_seconds must be between 0 and 60",
+                ));
+            }
+            let result = control.call("inputQueue", json!({
+                "displayId": a.require_int("display_id")?, "action": action,
+                "requestId": request_id, "operation": operation, "reason": reason, "timeout": timeout,
+            })).await?;
+            Ok(Output::Object(Value::Object(result)))
+        }
         "act_on_element" => {
             let display = a.require_int("display_id")?;
             let window = a.require_int("window_id")?;
@@ -851,6 +924,8 @@ pub async fn run(
                         "insert_text",
                         "read_text",
                         "scroll_into_view",
+                        "increment",
+                        "decrement",
                     ],
                 )?
                 .ok_or_else(|| ControlError::invalid("action is required"))?;
@@ -1257,6 +1332,17 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             ],
         )?
         .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let real_input = match a.0.get("real_input") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(ControlError::invalid("real_input must be true or false")),
+    };
+    if real_input && !matches!(action.as_str(), "left_click_drag" | "left_mouse_down") {
+        return Err(ControlError::invalid(
+            "real_input currently queues drag or press requests only",
+        ));
+    }
+    let mut route = None;
     let coordinate = a.coordinate("coordinate")?;
     let text_arg = a.string("text")?;
     let via_input_method = a.0.get("via_input_method") == Some(&Value::Bool(true));
@@ -1300,12 +1386,16 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             let (from_x, from_y) =
                 require_coordinate(a.coordinate("start_coordinate")?, "left_click_drag start")?;
             let (to_x, to_y) = require_coordinate(coordinate, &action)?;
-            control
+            let result = control
                 .call(
                     "drag",
-                    json!({ "displayId": display, "fromX": from_x, "fromY": from_y, "toX": to_x, "toY": to_y, "modifiers": modifiers }),
+                    json!({ "displayId": display, "fromX": from_x, "fromY": from_y, "toX": to_x, "toY": to_y, "modifiers": modifiers, "realInput": real_input }),
                 )
                 .await?;
+            route = result
+                .get("route")
+                .and_then(Value::as_str)
+                .map(String::from);
         }
         "left_mouse_down" | "left_mouse_up" => {
             let method = if action == "left_mouse_down" {
@@ -1313,7 +1403,8 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
             } else {
                 "mouseUp"
             };
-            let mut params = json!({ "displayId": display, "modifiers": modifiers });
+            let mut params =
+                json!({ "displayId": display, "modifiers": modifiers, "realInput": real_input });
             if let Some((x, y)) = coordinate {
                 params["x"] = json!(x);
                 params["y"] = json!(y);
@@ -1430,6 +1521,9 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         get("width"),
         get("height")
     );
+    if let Some(route) = route {
+        header.push_str(&format!(" Input route: {route}."));
+    }
     header.push_str(&strayed_note(&shot));
     Ok(vec![text(header), image(&get("data"), &get("mimeType"))])
 }
@@ -1610,9 +1704,9 @@ mod tests {
     }
 
     #[test]
-    fn fifteen_tools_with_object_schemas() {
+    fn sixteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
         let diagnostics = tools
             .iter()
             .find(|t| t["name"] == "get_diagnostics")

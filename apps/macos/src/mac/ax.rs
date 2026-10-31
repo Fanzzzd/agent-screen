@@ -117,12 +117,23 @@ pub fn settable(element: &AXUIElement, name: &str) -> bool {
     error == AXError::Success && settable != 0
 }
 
+/// Mutations into a process wait for its real-input loan to let go.
+fn input_gate(element: &AXUIElement) -> std::sync::Arc<std::sync::RwLock<()>> {
+    let mut pid = 0;
+    unsafe { element.pid(NonNull::from(&mut pid)) };
+    super::real_input::process_gate(pid)
+}
+
 pub fn set_attribute(element: &AXUIElement, name: &str, value: &CFType) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let name = CFString::from_str(name);
     unsafe { element.set_attribute_value(&name, value) == AXError::Success }
 }
 
 pub fn perform(element: &AXUIElement, action: &str) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let action = CFString::from_str(action);
     unsafe { element.perform_action(&action) == AXError::Success }
 }
@@ -132,6 +143,8 @@ pub fn perform(element: &AXUIElement, action: &str) -> bool {
 /// CannotComplete although it ran, so only an unsupported action counts as
 /// not taken: a fallback click then cannot press twice.
 pub fn try_action(element: &AXUIElement, action: &str) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let action = CFString::from_str(action);
     let error = unsafe { element.perform_action(&action) };
     !matches!(
@@ -359,6 +372,132 @@ pub fn web_area_at(target: WindowTarget, at: (f64, f64)) -> Option<Rect> {
         }
     }
     frame(&outermost?.clone())
+}
+
+/// Substitute a slider value change for a drag only when AX publishes a
+/// numeric range, orientation and a thumb position that identifies its
+/// direction. After attempting a set, uncertainty is an error, never a
+/// reason to issue a second drag through another route.
+pub fn drag_slider(
+    target: WindowTarget,
+    from: (f64, f64),
+    to: (f64, f64),
+    allowed: impl Fn() -> bool,
+) -> Result<bool, String> {
+    use agent_screen_model::substitute::{self, Slider};
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let result = unsafe {
+        application(target.pid).copy_element_at_position(
+            from.0 as f32,
+            from.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    if result != AXError::Success {
+        return Ok(false);
+    }
+    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+        return Ok(false);
+    };
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    for _ in 0..8 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXSlider") => break,
+            Some("AXWindow" | "AXSheet" | "AXApplication" | "AXWebArea") => return Ok(false),
+            _ => {}
+        }
+        let Some(parent) = element_attribute(&element, "AXParent") else {
+            return Ok(false);
+        };
+        element = parent;
+    }
+    if string_attribute(&element, "AXRole").as_deref() != Some("AXSlider")
+        || !settable(&element, "AXValue")
+        || element_attribute(&element, "AXWindow").and_then(|window| window_id(&window))
+            != Some(target.window_id)
+    {
+        return Ok(false);
+    }
+    let number = |name: &str| {
+        attribute(&element, name)?
+            .downcast_ref::<CFNumber>()?
+            .as_f64()
+    };
+    let (Some(min), Some(max), Some(current), Some(frame)) = (
+        number("AXMinValue"),
+        number("AXMaxValue"),
+        number("AXValue"),
+        frame(&element),
+    ) else {
+        return Ok(false);
+    };
+    let vertical = match string_attribute(&element, "AXOrientation").as_deref() {
+        Some("AXHorizontalOrientation") => false,
+        Some("AXVerticalOrientation") => true,
+        _ => return Ok(false),
+    };
+    let slider = Slider {
+        frame,
+        min,
+        max,
+        vertical,
+    };
+    if !frame.contains(from) {
+        return Ok(false);
+    }
+    let Some(value) = substitute::drag_value(slider, from, to, current) else {
+        return Ok(false);
+    };
+    if !allowed() {
+        return Err("The slider action stopped before setting its value; its window is no longer available for agent input.".into());
+    }
+    let confirmed = || {
+        number("AXValue").is_some_and(|read| substitute::confirmed(slider, current, value, read))
+    };
+    if set_attribute(&element, "AXValue", &CFNumber::new_f64(value)) && confirmed() {
+        return Ok(true);
+    }
+    // Chromium reports the write as done and ignores it; its slider moves
+    // only by its own step, through AXIncrement and AXDecrement. Each step
+    // must show before the next, and must go toward the value.
+    let action = if value > current {
+        "AXIncrement"
+    } else {
+        "AXDecrement"
+    };
+    let mut at = current;
+    let mut step = None;
+    for _ in 0..substitute::MAX_STEPS {
+        if !substitute::step_closer(value, at, step) {
+            break;
+        }
+        if !allowed() {
+            return Err("The slider stopped moving partway; its window is no longer available for agent input. Inspect its current value before retrying.".into());
+        }
+        if !perform(&element, action) {
+            break;
+        }
+        let mut read = number("AXValue");
+        for _ in 0..60 {
+            if read.is_some_and(|read| read != at) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            read = number("AXValue");
+        }
+        match read {
+            Some(read) if read != at && (read - at).signum() == (value - at).signum() => {
+                step = Some((read - at).abs());
+                at = read;
+            }
+            _ => break,
+        }
+    }
+    if confirmed() {
+        Ok(true)
+    } else {
+        Err("The slider's accessibility value change was not confirmed. Inspect its current value before retrying; no fallback drag was sent.".into())
+    }
 }
 
 /// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates

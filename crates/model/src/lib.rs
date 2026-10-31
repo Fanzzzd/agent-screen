@@ -7,13 +7,16 @@ pub mod access;
 pub mod alerts;
 pub mod arrangement;
 pub mod budget;
+pub mod card;
 pub mod claims;
 pub mod devtools;
+pub mod input_queue;
 pub mod keychord;
 pub mod launch;
 pub mod model;
 pub mod numbers;
 pub mod recording_playback;
+pub mod substitute;
 pub mod tree;
 pub mod typing;
 

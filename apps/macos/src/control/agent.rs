@@ -15,6 +15,7 @@ use crate::model::{
 };
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::input_queue::Action;
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
@@ -256,6 +257,7 @@ async fn handle_one(
                 },
             }))
         }
+        "inputQueue" => input_queue_action(&core, connection, &p, cx).await,
         "endDisplay" => {
             let id = display(&core, &p, false, cx)?;
             core.update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
@@ -383,13 +385,6 @@ async fn handle_one(
                     HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
                     return reply(json!({}));
                 }
-                Some(Hold::Refused(app)) => {
-                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(app.clone())));
-                    return Err(ControlError::failed(format!(
-                        "{} The left button is still down where you pressed: left_mouse_up lets go, and the page may take that as a click.",
-                        devtools::refused_message(&app)
-                    )));
-                }
                 None => {}
             }
             show_pointer(&core, id, point, false, cx)
@@ -403,6 +398,18 @@ async fn handle_one(
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
             outside_menu_bar(id, from)?;
             let modifiers = modifiers(&p)?;
+            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    "Requested real-input retry",
+                    cx,
+                )
+                .await;
+            }
             // A drag on a title bar moves the window, which posted events
             // can't do.
             if let Some(grab) = title_bar_at(id, from, cx).await {
@@ -412,19 +419,50 @@ async fn handle_one(
                         "the app would not let its window move",
                     ));
                 }
-                return reply(json!({ "movedWindow": true }));
+                return reply(json!({ "movedWindow": true, "route": "placement" }));
             }
             // A web page takes a drag through the app's DevTools pipe, or
             // not at all (#37, ADR 0010).
-            match web_route(from, cx).await {
+            let refused = match web_route(from, cx).await {
                 Route::Pipe(page) => {
                     return pipe_drag(&core, id, page, from, to, modifiers, cx).await;
                 }
-                Route::Refused(app) => {
-                    return Err(ControlError::failed(devtools::refused_message(&app)));
-                }
+                Route::Refused(app) => Some(app),
                 Route::Unmapped(why) => return Err(unmapped(why)),
-                Route::Posted => {}
+                Route::Posted => None,
+            };
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(from)).await {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                let guard = forwarder.clone();
+                let changed = off(cx, move || {
+                    ax::drag_slider(target, from, to, || {
+                        !guard.agent_stopped()
+                            && windows::on_display(id).iter().any(|w| w.target == target)
+                    })
+                })
+                .await;
+                if forwarder.agent_stopped() {
+                    return Err(ControlError::takeover(
+                        "input stopped during slider routing; inspect its current value before retrying",
+                    ));
+                }
+                let changed = changed.map_err(ControlError::failed)?;
+                if changed {
+                    show_pointer(&core, id, to, false, cx);
+                    return reply(json!({ "route": "accessibility" }));
+                }
+            }
+            if let Some(app) = refused {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    &devtools::refused_message(&app),
+                    cx,
+                )
+                .await;
             }
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
@@ -445,7 +483,7 @@ async fn handle_one(
                     p.number("fromY").unwrap_or(0.0) as i64
                 )));
             }
-            Ok(json!({}))
+            Ok(json!({ "route": "posted" }))
         }
         "mouseDown" | "mouseUp" => {
             let down = method == "mouseDown";
@@ -498,7 +536,18 @@ async fn handle_one(
                     return reply(json!({ "windowId": window }));
                 }
             }
-            let mut refused = None;
+            if down && p.0.get("realInput") == Some(&Value::Bool(true)) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (point, None),
+                    modifiers,
+                    "Requested real-input press",
+                    cx,
+                )
+                .await;
+            }
             if down {
                 match web_route(point, cx).await {
                     Route::Pipe(page) => {
@@ -523,18 +572,24 @@ async fn handle_one(
                         return reply(json!({ "windowId": window }));
                     }
                     Route::Unmapped(why) => return Err(unmapped(why)),
-                    Route::Refused(app) => refused = Some(app),
+                    Route::Refused(app) => {
+                        return queued_drag(
+                            &core,
+                            connection,
+                            id,
+                            (point, None),
+                            modifiers,
+                            &devtools::refused_message(&app),
+                            cx,
+                        )
+                        .await;
+                    }
                     Route::Posted => {}
                 }
             }
             let hit = show_pointer(&core, id, point, down, cx)
                 .button(point, down, modifiers)
                 .await;
-            // A press in a web page without a pipe is a click's half; a
-            // move after it is refused.
-            if let (Some(app), Some(_)) = (refused, hit.as_ref()) {
-                HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Refused(app)));
-            }
             match hit {
                 Some(window) => Ok(json!({ "windowId": window.window_id })),
                 None if down && forwarder_stopped(&core, id, cx) => {
@@ -1584,6 +1639,39 @@ async fn handle_one(
                 cg::debug_user_stage(id, connection);
                 return reply(json!({}));
             }
+            if matches!(
+                surface.as_str(),
+                "input-queue"
+                    | "input-queue-approved"
+                    | "input-queue-allow"
+                    | "input-queue-decline"
+            ) {
+                if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                    return Err(ControlError::invalid(
+                        "input queue previews require the isolated e2e instance",
+                    ));
+                }
+                usable(&core, connection, id, "debugShow", cx)?;
+            }
+            // Allow All itself, through the shell, comes after this.
+            if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue
+                        .submit(
+                            owner,
+                            format!("preview:{id}"),
+                            "Preview a queued drag on this display".into(),
+                            None,
+                        )
+                        .map_err(ControlError::invalid)?;
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
             // A Window Request for no real window, so scripts can look at
             // the card with any `app` and `title`. Keep answers it.
             if surface == "window-request" {
@@ -1637,6 +1725,7 @@ fn needs_permissions(method: &str) -> bool {
             | "windowAccess"
             | "listWindows"
             | "agentReady"
+            | "inputQueue"
     ) && !method.starts_with("debug")
 }
 
@@ -2845,6 +2934,19 @@ async fn act(
                 return Err(ControlError::failed(
                     "the element takes no inserted text; focus it and type instead",
                 ));
+            }
+        }
+        "increment" | "decrement" => {
+            let name = if action == "increment" {
+                "AXIncrement"
+            } else {
+                "AXDecrement"
+            };
+            let confirmed = off_main(cx, Box::new(move |e| ax::perform(e, name))).await;
+            if !confirmed {
+                return Err(ControlError::failed(format!(
+                    "Accessibility did not confirm {action}. The control may not support it, or the app may have acted before its response timed out. Inspect the current value before retrying; no fallback click was sent."
+                )));
             }
         }
         "scroll_into_view" => {
@@ -4354,6 +4456,215 @@ fn takes_windows(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool 
     core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| !d.is_ended()))
 }
 
+// MARK: Input Queue
+
+async fn input_queue_action(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let id = display(core, p, true, cx)?;
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = p
+        .int("requestId")
+        .map(|id| {
+            u64::try_from(id)
+                .ok()
+                .filter(|id| *id != 0)
+                .ok_or_else(|| ControlError::invalid("requestId must be a positive integer"))
+        })
+        .transpose()?;
+    // Checked before any change: done forgets results, so a request id
+    // with it would fail after the session's requests were already gone.
+    let action = Action::parse(
+        &p.string("action").unwrap_or_else(|| "status".into()),
+        request,
+    )
+    .map_err(ControlError::invalid)?;
+    let wait_for = match action {
+        Action::Request => {
+            let operation = p
+                .string("operation")
+                .ok_or_else(|| ControlError::invalid("operation is required"))?;
+            let reason = p
+                .string("reason")
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            Some(
+                core.update(cx, |c, cx| {
+                    let result = c.input_queue.submit(owner.clone(), operation, reason, None);
+                    cx.notify();
+                    result
+                })
+                .map_err(ControlError::invalid)?,
+            )
+        }
+        Action::Withdraw(request) => {
+            core.update(cx, |c, cx| {
+                let result = c.input_queue.withdraw(&owner, request);
+                cx.notify();
+                result
+            })
+            .map_err(ControlError::invalid)?;
+            Some(request)
+        }
+        Action::Done => {
+            core.update(cx, |c, cx| {
+                c.input_queue.done(&owner);
+                cx.notify();
+            });
+            None
+        }
+        Action::Wait(request) => Some(request),
+        Action::Status(request) => request,
+    };
+    if let Some(request) = wait_for {
+        core.read_with(cx, |c, _| c.input_queue.request_for(&owner, request))
+            .map_err(ControlError::invalid)?;
+    }
+    // A wait on a drag makes it runnable again: its result comes back here.
+    if let Action::Wait(request) = action {
+        core.update(cx, |c, _| c.input_queue.attach(request));
+    }
+    let waits = matches!(action, Action::Request | Action::Wait(_));
+    let timeout = if waits {
+        p.number("timeout").unwrap_or(60.0).clamp(0.0, 60.0)
+    } else {
+        0.0
+    };
+    let until = Instant::now() + Duration::from_secs_f64(timeout);
+    loop {
+        let state = core.update(cx, |c, cx| -> Result<(Value, bool), ControlError> {
+            if !c
+                .input_queue
+                .owner(id, connection)
+                .is_ok_and(|current| current == owner)
+            {
+                return Err(ControlError::failed(
+                    "the input request's display lifetime ended; any running drag is stopping. Inspect its result before retrying",
+                ));
+            }
+            let changed = c.input_queue.tick();
+            let paused = c.displays.get(id).is_some_and(|d| d.takeover);
+            let state = c.input_queue.status(&owner, wait_for, paused);
+            let waiting = waits && wait_for.is_some_and(|r| c.input_queue.awaits(r, paused));
+            // A started loan must release its inputs before this call
+            // returns, even if the approval wait's deadline has passed.
+            let running = wait_for.is_some_and(|r| {
+                c.input_queue.queue.request(r).is_some_and(|r| {
+                    matches!(r.status, agent_screen_model::input_queue::Status::Running
+                        | agent_screen_model::input_queue::Status::Stopping(_))
+                })
+            });
+            if waiting && !running
+                && Instant::now() >= until
+                && let Some(r) = wait_for
+            {
+                c.input_queue.detach(r);
+            }
+            if changed {
+                cx.notify();
+            }
+            Ok((state, waiting && (running || Instant::now() < until)))
+        })?;
+        let (state, waiting) = state;
+        if !waiting {
+            return Ok(state);
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+    }
+}
+
+async fn queued_drag(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    path: ((f64, f64), Option<(f64, f64)>),
+    modifiers: crate::keychord::Modifiers,
+    why: &str,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let (from, to) = path;
+    let (target, frame) = off(cx, move || crate::mac::input::window_at(from))
+        .await
+        .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?;
+    let area = cg::display_bounds(id);
+    let point = |p: (f64, f64)| ((p.0 - area.x).round() as i64, (p.1 - area.y).round() as i64);
+    let reason = match to {
+        Some(to) => format!(
+            "Drag from {:?} to {:?} on this display",
+            point(from),
+            point(to)
+        ),
+        None => format!("Begin dragging at {:?} on this display", point(from)),
+    };
+    // A press held across calls would keep the user's button down while the
+    // agent thinks, so only a whole drag runs; a press only asks.
+    let plan = to.map(|to| crate::input_queue::Plan {
+        target,
+        frame,
+        area,
+        from,
+        to,
+        flags: crate::mac::input::flags(modifiers).0,
+    });
+    let operation = format!(
+        "drag:{}:{from:?}:{to:?}:{}",
+        target.window_id,
+        modifier_bits(modifiers)
+    );
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let result = c.input_queue.submit(owner.clone(), operation, reason, plan);
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    match r["state"].as_str() {
+        Some("completed") => {
+            show_pointer(core, id, to.unwrap_or(from), false, cx);
+            reply(json!({ "route": "real_input", "requestId": request }))
+        }
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
+            Err(ControlError::failed(format!(
+                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying. Input queue status: {state}",
+                r["stopReason"].as_str().unwrap_or("stopped"),
+                r["failure"]
+                    .as_str()
+                    .map(|f| format!(": {f}"))
+                    .unwrap_or_default(),
+            )))
+        }
+        _ => Err(ControlError {
+            code: "input_pending",
+            message: format!(
+                "{why} No drag or press was sent. Input queue status: {state}. {}",
+                if plan.is_some() {
+                    "The drag runs with the user's pointer once they allow it and while your call waits: retry the same drag with real_input to wait again, or use input_queue to inspect or withdraw it."
+                } else {
+                    "A press held across calls can't use the user's pointer. Once they allow it, use left_click_drag with real_input for the whole drag."
+                }
+            ),
+        }),
+    }
+}
+
 // MARK: Parameters
 
 fn display(
@@ -4421,8 +4732,6 @@ async fn drag_to(grab: Grab, to: (f64, f64), cx: &mut AsyncApp) -> bool {
 enum Hold {
     /// Through the app's DevTools pipe.
     Pipe(devtools::Drag),
-    /// In an app with no pipe: the app's name. Its moves are refused.
-    Refused(String),
 }
 
 thread_local! {
@@ -4518,7 +4827,7 @@ async fn pipe_drag(
         .await
         .map_err(|e| ControlError::failed(format!("the release didn't reach the page: {e}")))?;
     show_pointer(core, id, to, false, cx);
-    reply(json!({}))
+    reply(json!({ "route": "devtools" }))
 }
 
 thread_local! {

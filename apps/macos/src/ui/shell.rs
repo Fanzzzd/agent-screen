@@ -19,6 +19,7 @@ use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
 use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Rect, WindowTarget};
 use agent_screen_model::access::Authority;
+use agent_screen_model::card;
 use agent_screen_model::peek as peek_intent;
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -159,6 +160,12 @@ struct Drag {
 
 pub struct Shell {
     core: Entity<Core>,
+    /// The Input Queue's executor (ADR 0013): the pointer and front app at
+    /// grant start, whether a loan runs, and whether cleanup after a grant
+    /// is under way.
+    real_saved: Option<crate::mac::real_input::Saved>,
+    loan_running: bool,
+    restoring: bool,
     streams: Entity<Streams>,
     icon: StatusIcon,
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
@@ -167,6 +174,7 @@ pub struct Shell {
     /// The display the Help Card shows, and whether for a Window or
     /// Control Request, which have no picture.
     card_shown: Option<(DisplayId, bool)>,
+    card_input: bool,
     /// Help Requests the user put off with Later, by display.
     card_later: HashMap<DisplayId, String>,
     /// When the user was last told where an app's windows are, by pid.
@@ -362,6 +370,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     native::set_sender(events);
     let icon = StatusIcon::install(mtm);
     native::watch_mouse();
+    crate::mac::real_input::watch();
     native::watch_screens();
     native::watch_activations();
     crate::mac::cg::watch_display_changes();
@@ -386,6 +395,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer: None,
             card: None,
             card_shown: None,
+            card_input: false,
             reminded: HashMap::new(),
             watching_updates: false,
             card_later: HashMap::new(),
@@ -423,6 +433,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             asking: false,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
+            real_saved: None,
+            loan_running: false,
+            restoring: false,
             colorsync: None,
             colorsync_busy: false,
             colorsync_error: None,
@@ -602,6 +615,12 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             cx.background_executor().timer(Duration::from_secs(1)).await;
             if counted
                 .update(cx, |shell, cx| {
+                    shell.core.update(cx, |core, cx| {
+                        if core.input_queue.tick() {
+                            cx.notify();
+                        }
+                    });
+                    shell.drive_queue(cx);
                     shell.refresh_counts(cx);
                     if shell.icon_rect().is_some() {
                         shell.icon.keep_place();
@@ -719,6 +738,7 @@ impl Shell {
                 self.drag_ended((x, y), cx);
             }
             Native::Menu(action) => self.menu(action, cx),
+            Native::UserTookInput => self.user_took_input(cx),
             // A notification only opens the display; the user's first
             // input there, or its Take Over button, starts a Takeover.
             Native::NotificationClicked { display, take_over } => {
@@ -733,6 +753,10 @@ impl Shell {
                     Some(_) => self.card_open(display, cx),
                     None => {}
                 }
+            }
+            Native::InputQueueOpened => {
+                self.hide_peek(cx);
+                self.sync_card(cx);
             }
             Native::NotificationAuth(auth) => self.notification_auth(auth, cx),
             Native::ScreenTouched { display } => self.user_input(display, cx),
@@ -778,10 +802,13 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core.displays.list.iter().any(|d| {
-            (d.help_request.is_some() || d.window_request.is_some() || d.control_request.is_some())
-                && !d.is_ended()
-        });
+        let asking = core.input_queue.approval_needed()
+            || core.displays.list.iter().any(|d| {
+                (d.help_request.is_some()
+                    || d.window_request.is_some()
+                    || d.control_request.is_some())
+                    && !d.is_ended()
+            });
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
@@ -793,6 +820,22 @@ impl Shell {
         }
         for display in &core.displays.list {
             let task = display.owner.as_ref().map_or("", |o| o.title.as_str());
+            let input = core.input_queue.queue.waiting().find(|r| {
+                r.owner.display == display.id
+                    && display.is_live()
+                    && !display.takeover
+                    && core.input_queue.asks(r.id)
+            });
+            if let Some(input) = input {
+                notify::update(
+                    display.id,
+                    display.agent_name(),
+                    task,
+                    Some(Note::Input(input.reason.clone())),
+                );
+            } else {
+                notify::withdraw_input(display.id);
+            }
             match display
                 .help_request
                 .as_deref()
@@ -921,29 +964,27 @@ impl Shell {
             core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
         });
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
-        // Window and Control Requests wait for an answer even beside the
-        // Viewer, where the user operates the display during a Takeover.
-        let requests = core
-            .displays
-            .list
-            .iter()
-            .filter(|d| d.is_live() && (d.window_request.is_some() || d.control_request.is_some()))
-            .map(|d| (d.id, true, (d.width, d.height)));
-        let helps = core
-            .displays
-            .list
-            .iter()
-            .filter(|d| {
-                d.is_live()
-                    && !d.takeover
-                    && viewing != Some(d.id)
-                    && d.help_request
-                        .as_ref()
-                        .is_some_and(|r| self.card_later.get(&d.id) != Some(r))
-            })
-            .map(|d| (d.id, false, (d.width, d.height)));
-        let want = requests.chain(helps).find(|_| !self.peek_shown);
-        if want.map(|w| (w.0, w.1)) == self.card_shown {
+        let selected = card::select(
+            &core.displays,
+            viewing,
+            |id, reason| {
+                self.card_later
+                    .get(&id)
+                    .is_some_and(|later| later == reason)
+            },
+            core.input_queue.card_display(&core.displays),
+            self.peek_shown,
+        );
+        // The selected kind alone decides what the card renders.
+        let input = matches!(selected, Some(card::Card::Input(_)));
+        let want = selected.and_then(|selected| {
+            let id = selected.display();
+            let request = matches!(selected, card::Card::Request(_));
+            core.displays
+                .get(id)
+                .map(|d| (id, request, (d.width, d.height)))
+        });
+        if want.map(|w| (w.0, w.1)) == self.card_shown && self.card_input == input {
             return;
         }
         if let Some((old, _)) = self.card_shown.take() {
@@ -956,6 +997,7 @@ impl Shell {
         };
         let _ = card.update(cx, |card, _, cx| {
             card.display = Some(id);
+            card.input_queue = input;
             cx.notify();
         });
         self.streams.update(cx, |s, cx| {
@@ -966,7 +1008,9 @@ impl Shell {
         };
         let (w, h) = (
             f64::from(help_card::WIDTH),
-            f64::from(if request {
+            f64::from(if input {
+                help_card::QUEUE_HEIGHT
+            } else if request {
                 help_card::REQUEST_HEIGHT
             } else {
                 help_card::height(size)
@@ -989,6 +1033,222 @@ impl Shell {
             native::animate(&shown, frame, 1.0, 0.24);
         });
         self.card_shown = Some((id, request));
+        self.card_input = input;
+    }
+
+    pub fn answer_input(&mut self, approval: u64, allow: bool, cx: &mut Context<Self>) {
+        // Saved once, at grant start, to put back when it ends normally.
+        let saved = crate::mac::real_input::save();
+        let granted = self.core.update(cx, |core, cx| {
+            let granted = allow && core.input_queue.approve(approval);
+            if !allow {
+                core.input_queue.decline(approval);
+            }
+            cx.notify();
+            granted
+        });
+        if granted {
+            self.real_saved = Some(saved);
+        }
+        self.drive_queue(cx);
+    }
+
+    pub fn revoke_input(&mut self, cx: &mut Context<Self>) {
+        self.core.update(cx, |core, cx| {
+            core.input_queue.revoke();
+            cx.notify();
+        });
+        self.drive_queue(cx);
+    }
+
+    /// The user moved the mouse or pressed a key during a grant: the whole
+    /// grant ends, and the pointer and front app stay where they are.
+    fn user_took_input(&mut self, cx: &mut Context<Self>) {
+        if self.core.read(cx).input_queue.queue.grant().is_some() {
+            log::info!("input queue: the user took control back");
+            self.revoke_input(cx);
+        }
+    }
+
+    fn input_banner(&self, cx: &App) -> String {
+        let core = self.core.read(cx);
+        let input = &core.input_queue;
+        let request = input
+            .queue
+            .active()
+            .or_else(|| input.queue.waiting().next());
+        let detail = request
+            .map(|request| {
+                let label = core
+                    .displays
+                    .get(request.owner.display)
+                    .map(|d| d.label().to_string())
+                    .unwrap_or_default();
+                format!("{label}: {}", request.reason)
+            })
+            .unwrap_or_default();
+        let elapsed = input.elapsed_seconds().unwrap_or(0);
+        let count = input.queue.waiting().count();
+        tf!(
+            "Input approved · {:02}:{:02} · {count} waiting\n{detail}\nMove the mouse or press a key to take control back.",
+            "输入已批准 · {:02}:{:02} · {count} 个等待中\n{detail}\n移动鼠标或按任意键即可收回控制。",
+            elapsed / 60,
+            elapsed % 60
+        )
+    }
+
+    /// Run the Input Queue (ADR 0013): show the indicator during a grant,
+    /// hand each loan to the executor, and clean up after the grant ends.
+    /// Called on approval, revocation, a loan's end and once a second.
+    fn drive_queue(&mut self, cx: &mut Context<Self>) {
+        use crate::mac::real_input::{self, Outcome};
+        if self.loan_running || self.restoring {
+            return;
+        }
+        let (granted, ending) = {
+            let input = &self.core.read(cx).input_queue;
+            (input.queue.grant().is_some(), input.ending())
+        };
+        if let Some(end) = ending {
+            // Keep observing through restoration: a user touch during
+            // cleanup must prevent restoring over their new action.
+            let saved = self
+                .real_saved
+                .take()
+                .filter(|_| end.restore && !real_input::touched());
+            self.restoring = true;
+            cx.spawn(async move |this, cx| {
+                if let Some(saved) = saved {
+                    cx.background_executor()
+                        .spawn(async move { real_input::restore(saved) })
+                        .await;
+                }
+                let _ = this.update(cx, |shell, cx| {
+                    shell.restoring = false;
+                    real_input::arm(false);
+                    native::show_borders(false, "");
+                    shell.core.update(cx, |core, cx| {
+                        core.input_queue.ended(end);
+                        cx.notify();
+                    });
+                    shell.drive_queue(cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if !granted {
+            native::show_borders(false, "");
+            real_input::arm(false);
+            return;
+        }
+        // No observer or indicator, no real input.
+        if !real_input::watching() {
+            self.revoke_input(cx);
+            return;
+        }
+        let banner = self.input_banner(cx);
+        if !native::show_borders(true, &banner) {
+            return;
+        }
+        if real_input::touched() {
+            self.user_took_input(cx);
+            return;
+        }
+        // The user's hand may still be on the mouse that clicked Allow All:
+        // the first loan waits until they leave it alone for a moment, and
+        // from then on their touch takes control back.
+        if !real_input::armed() {
+            if !self.core.read(cx).input_queue.queue.ready() || crate::mac::ime::user_idle() < 1.0 {
+                return;
+            }
+            real_input::arm(true);
+        }
+        let loan = self.core.update(cx, |core, cx| {
+            let loan = core.input_queue.start_loan();
+            let display = loan
+                .and_then(|(id, _)| core.input_queue.queue.request(id).map(|r| r.owner.display));
+            cx.notify();
+            loan.zip(display)
+        });
+        let Some(((id, plan), display)) = loan else {
+            return;
+        };
+        self.loan_running = true;
+        native::show_borders(true, &self.input_banner(cx));
+        let ok = self.core.read(cx).input_queue.loan_ok.clone();
+        log::info!("input queue: running request {id} on display {display}");
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    use std::sync::atomic::Ordering;
+                    let area = cg::display_bounds(display);
+                    let Some(window) = crate::mac::windows::on_display(display)
+                        .into_iter()
+                        .find(|w| w.target == plan.target)
+                    else {
+                        return Outcome::Refused("the window is no longer on the display");
+                    };
+                    let frame = window.bounds.offset(area.x, area.y);
+                    if area != plan.area
+                        || frame != plan.frame
+                        || ![plan.from, plan.to]
+                            .iter()
+                            .all(|p| area.contains(*p) && frame.contains(*p))
+                    {
+                        return Outcome::Refused(
+                            "the drag is outside its authorized window or display",
+                        );
+                    }
+                    real_input::drag(
+                        plan.target,
+                        plan.from,
+                        plan.to,
+                        objc2_core_graphics::CGEventFlags(plan.flags),
+                        |at| {
+                            // Recheck geometry and the top window before
+                            // every event. A moved or covered target must
+                            // not receive input at its old coordinates.
+                            let why = if !ok.load(Ordering::SeqCst) {
+                                Some("the loan was cancelled")
+                            } else if cg::display_bounds(display) != area || !area.contains(at) {
+                                Some("the display geometry changed")
+                            } else if cg::window_bounds(plan.target.window_id) != Some(frame) {
+                                Some("the window geometry changed")
+                            } else if !crate::mac::input::window_at(at)
+                                .is_some_and(|(target, _)| target == plan.target)
+                            {
+                                Some("the window was covered or left the screen")
+                            } else {
+                                None
+                            };
+                            if let Some(why) = why {
+                                log::debug!("input queue containment: {why}");
+                            }
+                            why.is_none()
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.loan_running = false;
+                let failure = match outcome {
+                    Outcome::Done => None,
+                    Outcome::Refused(why) | Outcome::Stopped(why) => Some(why.to_string()),
+                };
+                log::info!("input queue: request {id} ended: {outcome:?}");
+                shell.core.update(cx, |core, cx| {
+                    if real_input::touched() && core.input_queue.queue.grant().is_some() {
+                        core.input_queue.revoke();
+                    }
+                    core.input_queue.finish_loan(id, failure);
+                    cx.notify();
+                });
+                shell.drive_queue(cx);
+            });
+        })
+        .detach();
     }
 
     /// The user answers a Window Request from the card: a window given
@@ -1909,6 +2169,22 @@ impl Shell {
             "peek" => {
                 let effect = self.peek_intent.pin();
                 self.apply_peek_effect(effect, cx);
+            }
+            "input-queue" => {
+                self.hide_peek(cx);
+                self.sync_card(cx);
+            }
+            // As the card's Allow All.
+            "input-queue-approved" | "input-queue-allow" => {
+                self.hide_peek(cx);
+                let approval = self.core.read(cx).input_queue.queue.approval();
+                self.answer_input(approval, true, cx);
+                self.sync_card(cx);
+            }
+            "input-queue-decline" => {
+                let approval = self.core.read(cx).input_queue.queue.approval();
+                self.answer_input(approval, false, cx);
+                self.sync_card(cx);
             }
             "recordings" => self.open_recordings(cx),
             "recordings-close" => {
@@ -3234,18 +3510,17 @@ impl Shell {
     /// The user brought `pid` to the front, and every window it has is on
     /// Agent Displays, where they can't see it: a notification names those
     /// displays, and a click on it opens the first in the Viewer (#51). At
-    /// most once a minute for an app. The displays named.
+    /// most once a minute for automatic activation. The displays named.
     ///
     /// `docked`: the user clicked the app's Dock icon, which says they want
     /// it even when it was already the front app and nothing activated
-    /// (#51): told again after 5 s.
+    /// (#51): each explicit click reminds again, without a cooldown.
     pub fn remind_where(
         &mut self,
         pid: i32,
         docked: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Task<Vec<DisplayId>> {
-        let again = Duration::from_secs(if docked { 5 } else { 60 });
         let core = self.core.read(cx);
         let places: Vec<(DisplayId, Rect, String)> = core
             .displays
@@ -3256,10 +3531,12 @@ impl Shell {
         // An app the agent started brings itself to the front, as Electron
         // does: no one to tell, unless the user just used it.
         let agents = core.displays.list.iter().any(|d| d.started.contains(&pid));
-        let recent = self
-            .reminded
-            .get(&pid)
-            .is_some_and(|at| at.elapsed() < again);
+        let recent = !peek_intent::reminder_due(
+            self.reminded
+                .get(&pid)
+                .map(|at| at.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            docked,
+        );
         if places.is_empty() || recent || pid == std::process::id() as i32 {
             return gpui::Task::ready(Vec::new());
         }
@@ -3442,6 +3719,10 @@ impl Shell {
     }
 
     fn activated(&mut self, pid: i32, previous: Option<i32>, cx: &mut Context<Self>) {
+        // The Input Queue's drag brought the app forward, not the user.
+        if crate::mac::real_input::holding(pid) {
+            return;
+        }
         self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
@@ -4170,6 +4451,11 @@ fn cursor_guard(core: Entity<Core>, cx: &mut App) {
 /// Put the cursor back where it last was off `ids`, if it is on one of
 /// them. Where it is now when that is a good place.
 fn pull_cursor_back(ids: &[DisplayId], last_good: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    // An approved Input Queue drag holds the pointer there on purpose; the
+    // grant's end puts it back, or the guard does once the user takes it.
+    if crate::mac::real_input::in_use() {
+        return last_good;
+    }
     let Some(event) = objc2_core_graphics::CGEvent::new(None) else {
         return last_good;
     };

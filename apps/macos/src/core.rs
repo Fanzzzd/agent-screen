@@ -48,6 +48,7 @@ pub struct Spare {
 
 pub struct Core {
     pub displays: Displays<VirtualDisplay>,
+    pub input_queue: crate::input_queue::InputQueue,
     forwarders: HashMap<DisplayId, Forwarder>,
     /// The numbered elements of each window an agent has looked at, by
     /// display. Dropped with the display.
@@ -119,6 +120,7 @@ impl Core {
     pub fn new() -> Self {
         Core {
             displays: Displays::default(),
+            input_queue: Default::default(),
             forwarders: HashMap::new(),
             elements: HashMap::new(),
             closed: HashSet::new(),
@@ -418,6 +420,9 @@ impl Core {
         if let Some((serial, slot)) = handle.serial() {
             colorsync::remember(serial, slot, id);
         }
+        if let Some(owner) = &owner {
+            self.input_queue.register(id, owner);
+        }
         self.displays.add(id, name, size, owner, handle);
         self.last_used = Some(Instant::now());
         // Its record is new and has all 39 names.
@@ -553,6 +558,11 @@ impl Core {
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage(id);
         if self.displays.end(id, reason) {
+            self.input_queue.end_display(id);
+            if let Some(forwarder) = self.forwarders.get(&id) {
+                forwarder.stop_agent(true);
+            }
+            crate::control::agent::release_hold(id);
             // An ended display takes no more windows, from catches either.
             self.kept_catches.retain(|(display, _)| *display != id);
             stop_recording(id, cx);
@@ -566,6 +576,7 @@ impl Core {
     /// input stops and Window Access pauses. False when nothing changed.
     pub fn take_over(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
         let changed = self.displays.begin_takeover(id);
+        self.input_queue.takeover(id, true);
         if changed {
             self.stop_agent_input(id, true);
             cx.notify();
@@ -578,6 +589,7 @@ impl Core {
     /// them. False when the user wasn't in control.
     pub fn hand_back(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
         let changed = self.displays.end_takeover(id);
+        self.input_queue.takeover(id, false);
         if changed {
             self.stop_agent_input(id, false);
             cx.notify();
@@ -604,6 +616,7 @@ impl Core {
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage_connection(connection);
         self.closed.insert(connection);
+        self.input_queue.disconnect(connection);
         self.sessions.remove(&connection);
         let ended = self.displays.connection_closed(connection);
         if !ended.is_empty() {
@@ -611,6 +624,10 @@ impl Core {
             self.kept_catches
                 .retain(|(display, _)| !ended.contains(display));
             for &id in &ended {
+                if let Some(forwarder) = self.forwarders.get(&id) {
+                    forwarder.stop_agent(true);
+                }
+                crate::control::agent::release_hold(id);
                 stop_recording(id, cx);
             }
             cx.notify();
@@ -621,6 +638,7 @@ impl Core {
     /// Drop a display. An empty one stays connected as a spare while there
     /// is room; otherwise macOS removes it with its handle.
     pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        self.input_queue.end_display(id);
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage(id);
         stop_recording(id, cx);
