@@ -685,34 +685,30 @@ pub fn watch_mouse() {
 // MARK: Input Grant indicator
 
 thread_local! {
-    static BORDERS: RefCell<Vec<(Retained<NSWindow>, Retained<objc2_app_kit::NSTextField>)>> = const { RefCell::new(Vec::new()) };
+    static BORDERS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// A red border and banner on each of the user's screens while an Input
-/// Grant lets agents use the pointer, or none. Clicks pass through. Returns
+/// A thin red edge around each of the user's screens while an Input Grant
+/// lets agents use the pointer, or none. Clicks pass through. Returns
 /// whether the indicator shows, as real input may run only while it does.
-pub fn show_borders(on: bool, text: &str) -> bool {
-    use objc2_app_kit::{
-        NSBackingStoreType, NSBox, NSBoxType, NSTextField, NSTitlePosition, NSWindowStyleMask,
-    };
+/// The Input Bar says what the edge means.
+pub fn show_borders(on: bool) -> bool {
+    use objc2_app_kit::{NSBackingStoreType, NSBox, NSBoxType, NSTitlePosition, NSWindowStyleMask};
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
     BORDERS.with(|b| {
         let mut borders = b.borrow_mut();
         if !on {
-            for (window, _) in borders.drain(..) {
+            for window in borders.drain(..) {
                 window.orderOut(None);
             }
             return false;
         }
         if !borders.is_empty() {
-            for (_, label) in borders.iter() {
-                label.setStringValue(&NSString::from_str(text));
-            }
             return true;
         }
-        for (id, frame, visible) in screens() {
+        for (id, frame, _) in screens() {
             if super::cg::is_agent_screen(id) {
                 continue;
             }
@@ -741,26 +737,11 @@ pub fn show_borders(on: bool, text: &str) -> bool {
             border.setBoxType(NSBoxType::Custom);
             border.setTitlePosition(NSTitlePosition::NoTitle);
             border.setBorderColor(&NSColor::systemRedColor());
-            border.setBorderWidth(6.0);
+            border.setBorderWidth(2.0);
             border.setFillColor(&NSColor::clearColor());
             window.setContentView(Some(&border));
-            let label = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
-            label.setDrawsBackground(true);
-            label.setBackgroundColor(Some(&NSColor::systemRedColor()));
-            label.setTextColor(Some(&NSColor::whiteColor()));
-            let size = NSSize::new((frame.size.width - 48.0).clamp(200.0, 1000.0), 68.0);
-            // Just under the menu bar, centred.
-            let top = visible.origin.y + visible.size.height - frame.origin.y;
-            label.setFrame(NSRect::new(
-                NSPoint::new(
-                    (frame.size.width - size.width) / 2.0,
-                    top - size.height - 8.0,
-                ),
-                size,
-            ));
-            border.addSubview(&label);
             window.orderFrontRegardless();
-            borders.push((window, label));
+            borders.push(window);
         }
         !borders.is_empty()
     })

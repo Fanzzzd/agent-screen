@@ -42,11 +42,14 @@ fn approval_decline_withdraw_done_and_revoke_use_the_app_coordinator() {
     assert!(!input.approve(old_card));
     assert!(input.approve(input.queue.approval()));
     assert_eq!(input.elapsed_seconds(), Some(0));
+    // B only asked and nothing waits to run, so the grant idles.
+    assert_eq!(input.idle_seconds(), Some(0));
     assert!(input.withdraw(&a, b_id).is_err());
     input.done(&a);
     assert!(input.queue.grant().is_some());
     input.revoke();
     assert!(input.queue.grant().is_none());
+    assert_eq!(input.idle_seconds(), None);
     settle(&mut input);
     assert!(input.approve(input.queue.approval()));
     input.done(&b);

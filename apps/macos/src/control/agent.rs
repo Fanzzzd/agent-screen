@@ -1645,6 +1645,7 @@ async fn handle_one(
                     | "input-queue-approved"
                     | "input-queue-allow"
                     | "input-queue-decline"
+                    | "input-bar-stop"
             ) {
                 if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
                     return Err(ControlError::invalid(
@@ -1653,7 +1654,7 @@ async fn handle_one(
                 }
                 usable(&core, connection, id, "debugShow", cx)?;
             }
-            // Allow All itself, through the shell, comes after this.
+            // Allow Queue itself, through the shell, comes after this.
             if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
                 core.update(cx, |c, cx| -> Result<(), ControlError> {
                     let owner = c

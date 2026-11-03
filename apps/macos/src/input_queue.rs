@@ -349,6 +349,15 @@ impl InputQueue {
             .map(|grant| self.now().saturating_sub(grant.since_ms) / 1000)
     }
 
+    /// How long the grant has had nothing to run, which ends it at
+    /// IDLE_MS. None while a request runs or waits to run.
+    pub fn idle_seconds(&self) -> Option<u64> {
+        self.queue
+            .grant()
+            .and_then(|grant| grant.idle_since_ms)
+            .map(|idle| self.now().saturating_sub(idle) / 1000)
+    }
+
     /// Only this owner's requests cross the agent protocol. Other agents'
     /// identities, reasons and operation tokens stay in the user's UI.
     pub fn status(&self, owner: &Owner, request_id: Option<RequestId>, paused: bool) -> Value {

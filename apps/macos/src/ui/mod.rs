@@ -1,6 +1,7 @@
 //! Peek, the Viewer and the menu bar icon.
 
 pub mod help_card;
+pub mod input_bar;
 pub mod peek;
 pub mod pointer;
 pub mod recordings;

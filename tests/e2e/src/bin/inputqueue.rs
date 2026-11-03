@@ -4,8 +4,10 @@
 //! approved, and goes away when the grant idles out after 30 seconds. The
 //! agent then sees approval_lapsed, and a wait or a retry of the same
 //! operation returns at once instead of waiting a minute for a card that
-//! won't come. Captures both cards under target/e2e. The card shows on
-//! your screen for about half a minute.
+//! won't come. The card fits its content, and during the grant the Input
+//! Bar sits at the bottom of the screen, clear of the card; its Stop ends
+//! the grant. Captures both cards and the bar under target/e2e. The card
+//! shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
 //!
@@ -52,11 +54,30 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             json!({ "sessionKey": key, "surface": surface, "displayId": id }),
         )
     };
-    // The queue card is the card's 320-pt-wide window.
+    // The queue card is the card's 360-pt-wide window.
     let card = || -> Option<Frame> {
         windows_of(pid)
             .into_iter()
-            .find(|w| w.width == 320.0 && w.layer > 0)
+            .find(|w| w.width == 360.0 && w.layer > 0)
+    };
+    // The Input Bar: a short window of the app's own, below the edge's
+    // level 1000.
+    let bar = || -> Option<Frame> {
+        windows_of(pid)
+            .into_iter()
+            .find(|w| w.layer > 0 && w.layer < 1000 && w.width != 360.0 && w.height < 120.0)
+    };
+    let edges = || windows_of(pid).iter().filter(|w| w.layer == 1000).count();
+    let meets = |a: &Frame, b: &Frame| {
+        a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    };
+    // Another window of the app over the card, apart from the
+    // click-through edge.
+    let covering = |c: &Frame| -> Vec<Frame> {
+        windows_of(pid)
+            .into_iter()
+            .filter(|w| w.layer > 0 && w.layer != 1000 && w.id != c.id && meets(w, c))
+            .collect()
     };
     let status = || -> Result<Value> {
         let state = control.call(
@@ -83,7 +104,15 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         asking.is_some() && icon() == "asking" && request["state"] == "queued",
         format!("{asking:?} icon {} {request}", icon()),
     );
-    if let Some(c) = asking {
+    check(
+        "the asking card fits its content: shorter than the old 500 pt, nothing over it, no bar yet",
+        asking
+            .as_ref()
+            .is_some_and(|c| c.height > 200.0 && c.height < 500.0 && covering(c).is_empty())
+            && bar().is_none(),
+        format!("{asking:?} bar {:?}", bar()),
+    );
+    if let Some(c) = &asking {
         let file = capture("inputqueue-ask", [c.x, c.y, c.width, c.height])?;
         println!("     card: {}", file.display());
     }
@@ -94,13 +123,29 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     let granted = card();
     let request = status()?;
     check(
-        "Allow All keeps the card up for the grant, and the agent sees approved, not done",
+        "Allow Queue keeps the card up for the grant, and the agent sees approved, not done",
         granted.is_some() && request["state"] == "approved",
         format!("{granted:?} {request}"),
     );
-    if let Some(c) = granted {
+    let shown = bar();
+    check(
+        "during the grant the Input Bar and the red edge show, the bar clear of the card and nothing over the card",
+        granted
+            .as_ref()
+            .is_some_and(|c| c.height < 500.0 && covering(c).is_empty())
+            && shown
+                .as_ref()
+                .is_some_and(|b| granted.as_ref().is_some_and(|c| !meets(b, c)) && b.width < 900.0)
+            && edges() > 0,
+        format!("card {granted:?} bar {shown:?} edges {}", edges()),
+    );
+    if let Some(c) = &granted {
         let file = capture("inputqueue-granted", [c.x, c.y, c.width, c.height])?;
         println!("     card: {}", file.display());
+    }
+    if let Some(b) = &shown {
+        let file = capture("inputqueue-bar", [b.x, b.y, b.width, b.height])?;
+        println!("     bar: {}", file.display());
     }
 
     // Nothing runs, so the grant idles out after 30 seconds.
@@ -148,6 +193,35 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             && retried["requests"][0]["state"] == "approval_lapsed"
             && card().is_none(),
         format!("wait {wait_ms} ms, retry {retry_ms} ms, {retried}"),
+    );
+
+    // done forgets the lapsed request, so the preview asks afresh; the
+    // bar's Stop then ends the new grant, as the user's click would, and
+    // the card asks again.
+    control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
+    )?;
+    show("input-queue-approved")?;
+    sleep_ms(800);
+    let again = bar();
+    show("input-bar-stop")?;
+    sleep_ms(800);
+    let request = status()?;
+    check(
+        "the Input Bar's Stop ends the grant: the bar and edge go, and the card asks again",
+        again.is_some()
+            && bar().is_none()
+            && edges() == 0
+            && request["state"] == "queued"
+            && card().is_some()
+            && icon() == "asking",
+        format!(
+            "bar before {again:?}, after {:?}, edges {} {request} icon {}",
+            bar(),
+            edges(),
+            icon()
+        ),
     );
     Ok(())
 }

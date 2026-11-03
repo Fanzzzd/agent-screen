@@ -2,7 +2,10 @@
 //! open, with the display's picture, the agent's reason, and Take Over or
 //! Later. For a Window Request it names the window the agent asks for,
 //! with Hand Over or Keep. For a Control Request, during a Takeover, it
-//! gives the agent's reason, with Let … Continue or Keep Control.
+//! gives the agent's reason, with Let … Continue or Keep Control. For the
+//! Input Queue (ADR 0013) it asks to use the user's mouse, with each
+//! waiting request and the whole scope of approval, then shows the grant
+//! with Stop.
 
 use super::pointer;
 use super::shell::{Shell, tell};
@@ -11,17 +14,18 @@ use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
 use crate::model::DisplayId;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpui::{
-    Bounds, Context, Entity, InteractiveElement, IntoElement, MouseButton, ObjectFit,
-    ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement, Styled,
-    WeakEntity, Window, canvas, div, prelude::FluentBuilder, px, surface, svg,
+    Bounds, Context, Entity, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
+    ObjectFit, ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, WeakEntity, Window, canvas, div, prelude::FluentBuilder, px, surface, svg,
 };
 
 pub const WIDTH: f32 = 320.;
-pub const QUEUE_HEIGHT: f32 = 500.;
+/// The Input Queue's card is wider: its scope text is shown in full.
+pub const QUEUE_WIDTH: f32 = 360.;
 const PADDING: f32 = 14.;
 const GAP: f32 = 8.;
 const TITLE: f32 = 20.;
@@ -55,6 +59,8 @@ pub struct HelpCard {
     /// The display whose Help Request the card shows.
     pub display: Option<DisplayId>,
     pub input_queue: bool,
+    /// The tallest the queue card may get on the screen it drops onto.
+    pub max_height: f32,
 }
 
 impl HelpCard {
@@ -80,6 +86,7 @@ impl HelpCard {
             streams,
             display: None,
             input_queue: false,
+            max_height: 640.,
         }
     }
 }
@@ -87,6 +94,8 @@ impl HelpCard {
 impl Render for HelpCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::theme(window);
+        let width = if self.input_queue { QUEUE_WIDTH } else { WIDTH };
+        CARD_WIDTH.with(|w| w.set(width));
         if self.input_queue {
             return self.render_queue(&theme, cx);
         }
@@ -129,16 +138,21 @@ impl Render for HelpCard {
                     .flex()
                     .gap(px(8.))
                     .child(
-                        card_button("window-give", t("Hand Over", "交给它"), true, &theme)
-                            .flex_1()
-                            .on_click(move |_, _, cx| {
-                                tell(&give, cx, move |shell, cx| {
-                                    shell.answer_window(id, true, cx);
-                                })
-                            }),
+                        card_button(
+                            "window-give",
+                            t("Hand Over", "交给它"),
+                            Tone::Orange,
+                            &theme,
+                        )
+                        .flex_1()
+                        .on_click(move |_, _, cx| {
+                            tell(&give, cx, move |shell, cx| {
+                                shell.answer_window(id, true, cx);
+                            })
+                        }),
                     )
                     .child(
-                        card_button("window-keep", t("Keep", "留着"), false, &theme)
+                        card_button("window-keep", t("Keep", "留着"), Tone::Plain, &theme)
                             .px(px(16.))
                             .on_click(move |_, _, cx| {
                                 tell(&keep, cx, move |shell, cx| {
@@ -175,7 +189,7 @@ impl Render for HelpCard {
                         card_button(
                             "control-continue",
                             t("Let It Continue", "让它继续"),
-                            true,
+                            Tone::Orange,
                             &theme,
                         )
                         .flex_1()
@@ -186,13 +200,18 @@ impl Render for HelpCard {
                         }),
                     )
                     .child(
-                        card_button("control-keep", t("Keep Control", "继续接管"), false, &theme)
-                            .px(px(16.))
-                            .on_click(move |_, _, cx| {
-                                tell(&keep, cx, move |shell, cx| {
-                                    shell.answer_control(id, false, cx);
-                                })
-                            }),
+                        card_button(
+                            "control-keep",
+                            t("Keep Control", "继续接管"),
+                            Tone::Plain,
+                            &theme,
+                        )
+                        .px(px(16.))
+                        .on_click(move |_, _, cx| {
+                            tell(&keep, cx, move |shell, cx| {
+                                shell.answer_control(id, false, cx);
+                            })
+                        }),
                     ),
             )
             .into_any_element();
@@ -260,14 +279,19 @@ impl Render for HelpCard {
                 .flex()
                 .gap(px(8.))
                 .child(
-                    card_button("help-take-over", t("Take Over", "接手操作"), true, &theme)
-                        .flex_1()
-                        .on_click(move |_, _, cx| {
-                            tell(&take_over, cx, move |shell, cx| shell.open_for_help(id, cx))
-                        }),
+                    card_button(
+                        "help-take-over",
+                        t("Take Over", "接手操作"),
+                        Tone::Orange,
+                        &theme,
+                    )
+                    .flex_1()
+                    .on_click(move |_, _, cx| {
+                        tell(&take_over, cx, move |shell, cx| shell.open_for_help(id, cx))
+                    }),
                 )
                 .child(
-                    card_button("help-later", t("Later", "稍后"), false, &theme)
+                    card_button("help-later", t("Later", "稍后"), Tone::Plain, &theme)
                         .px(px(16.))
                         .on_click(move |_, _, cx| {
                             tell(&later, cx, move |shell, cx| shell.card_later(id, cx))
@@ -279,167 +303,485 @@ impl Render for HelpCard {
 }
 
 impl HelpCard {
+    /// The Input Queue's card: asking for approval, or during a grant,
+    /// what runs and how to take control back. Its height follows its
+    /// content, up to `max_height`; the request list scrolls past that.
     fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> gpui::AnyElement {
         let core = self.core.read(cx);
         let input = &core.input_queue;
-        let approval = input.queue.approval();
-        let granted = input.queue.grant().is_some();
-        let elapsed = input.elapsed_seconds().unwrap_or(0);
-        let title = if granted {
-            tf!(
-                "Queue approved ({:02}:{:02})",
-                "队列已批准（{:02}:{:02}）",
-                elapsed / 60,
-                elapsed % 60
-            )
-        } else {
-            t("Approve the input queue", "审批输入队列").to_string()
-        };
-        let scope = if granted {
-            t(
-                "Agents may use your pointer for these drags, one at a time. Move the mouse or press a key to take it back.",
-                "agent 会依次用你的指针执行这些拖拽。移动鼠标或按任意键即可收回。",
-            )
-        } else {
-            t(
-                "Allow All lets agents drag with your pointer, these requests and new ones, until the queue is idle for 30 seconds. Move the mouse or press a key to take it back.",
-                "全部允许后，agent 可以用你的指针执行这些拖拽和之后的新请求，队列空闲 30 秒后结束。移动鼠标或按任意键即可收回。",
-            )
-        };
-        let mut list = div()
-            .id("input-requests")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+        let shell = self.shell.clone();
+        let root = div()
+            .id("help-card")
+            .role(Role::Dialog)
+            .relative()
+            .w_full()
+            .max_h(px(self.max_height))
             .flex()
             .flex_col()
-            .gap(px(8.));
+            .overflow_hidden()
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.card_border)
+            .rounded(px(RADIUS))
+            .text_color(theme.label)
+            // The window takes the card's height once it is painted.
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        let height = f32::from(bounds.size.height).ceil();
+                        if (height - QUEUE_FIT.with(Cell::get)).abs() > 0.5 {
+                            QUEUE_FIT.with(|f| f.set(height));
+                            tell(&shell, cx, |shell, cx| shell.fit_card(cx));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        if let Some(grant) = grant_view(input) {
+            let task = input
+                .queue
+                .active()
+                .or_else(|| input.queue.waiting().next())
+                .and_then(|r| core.displays.get(r.owner.display))
+                .or_else(|| self.display.and_then(|id| core.displays.get(id)))
+                .map(|d| d.label())
+                .unwrap_or_default();
+            let (title, sub) = if grant.running {
+                (
+                    t("Using your mouse", "正在使用你的鼠标"),
+                    t(
+                        "The current action runs on an Agent Display. Queued actions follow.",
+                        "当前操作在 Agent Display 上执行，完成后继续处理队列。",
+                    ),
+                )
+            } else {
+                (
+                    t("Waiting for the next action", "等待下一步"),
+                    t(
+                        "Nothing is running. Approval ends after 30 seconds of inactivity.",
+                        "当前没有操作。空闲满 30 秒后，自动结束本次放行。",
+                    ),
+                )
+            };
+            let picture = self
+                .display
+                .and_then(|id| self.streams.read(cx).frame(id))
+                .map(|frame| {
+                    surface(frame)
+                        .object_fit(ObjectFit::Contain)
+                        .size_full()
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| div().into_any_element());
+            let revoke = self.shell.clone();
+            return root
+                .aria_label(SharedString::from(title))
+                .child(queue_header(title, sub, theme))
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .px(px(QUEUE_PAD))
+                        .pb(px(20.))
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(116.))
+                                .min_h(px(32.))
+                                .flex_shrink(1.)
+                                .rounded(px(8.))
+                                .overflow_hidden()
+                                .bg(theme.control)
+                                .child(picture)
+                                .child(theme::round_corners(8., theme.card)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .mt(px(12.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(12.))
+                                .text_size(px(11.))
+                                .text_color(theme.secondary)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .when(grant.running, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_none()
+                                                    .size(px(6.))
+                                                    .rounded_full()
+                                                    .bg(theme.red),
+                                            )
+                                        })
+                                        .child(div().min_w_0().truncate().child(task)),
+                                )
+                                .child(div().flex_none().font_features(tabular()).child(
+                                    if grant.running {
+                                        clock(grant.elapsed)
+                                    } else {
+                                        tf!(
+                                            "Idle {} / {}",
+                                            "空闲 {} / {}",
+                                            clock(grant.idle.unwrap_or(0)),
+                                            clock(IDLE_SECONDS)
+                                        )
+                                    },
+                                )),
+                        ),
+                )
+                .child(scope(
+                    "icons/pointer.svg",
+                    "",
+                    t(
+                        "Move the mouse or press any key to take control.",
+                        "移动鼠标或按任意键即可收回。",
+                    ),
+                    &format!(
+                        "\n{}",
+                        t(
+                            "New requests may run until the queue is idle for 30 seconds.",
+                            "之后的新请求仍可执行，空闲 30 秒后结束。",
+                        )
+                    ),
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .px(px(QUEUE_PAD))
+                        .pb(px(QUEUE_PAD))
+                        .child(
+                            card_button(
+                                "input-revoke",
+                                t("Stop and take control", "停止并收回"),
+                                Tone::Stop,
+                                theme,
+                            )
+                            .h(px(QUEUE_BUTTONS))
+                            .flex_1()
+                            .on_click(move |_, _, cx| {
+                                tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))
+                            }),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let approval = input.queue.approval();
+        let mut rows = Vec::new();
         let mut can_approve = false;
-        let mut count = 0;
         for request in input.queue.waiting() {
             let Some(display) = core.displays.get(request.owner.display) else {
                 continue;
             };
-            count += 1;
             can_approve |= !display.takeover && !display.is_ended();
-            let label = if display.takeover {
-                tf!(
-                    "{} (waiting for hand-back)",
-                    "{}（等待交还）",
-                    display.label()
-                )
-            } else {
-                display.label()
-            };
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .p(px(8.))
-                    .rounded(px(8.))
-                    .bg(theme.control)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.secondary)
-                            .child(label),
-                    )
-                    .child(div().text_size(px(12.)).child(request.reason.clone())),
-            );
+            rows.push(request_row(
+                display.label(),
+                request.reason.clone(),
+                display.takeover,
+                theme,
+            ));
         }
-        if count == 0 {
-            list = list.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.secondary)
-                    .child(t(
-                        "No requests waiting. The grace period is still open.",
-                        "没有等待中的请求，仍在保留放行期。",
-                    )),
-            );
-        }
-        let picture = self
-            .display
-            .and_then(|id| self.streams.read(cx).frame(id))
-            .map(|frame| {
-                surface(frame)
-                    .object_fit(ObjectFit::Contain)
-                    .size_full()
-                    .into_any_element()
-            })
-            .unwrap_or_else(|| div().size_full().bg(theme.screen_empty).into_any_element());
-        let (allow, decline, revoke) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
-        let buttons = if granted {
-            div().h(px(BUTTONS)).child(
-                card_button(
-                    "input-revoke",
-                    t("Revoke approval", "撤销放行"),
-                    false,
-                    theme,
-                )
-                .w_full()
-                .on_click(move |_, _, cx| tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))),
+        let count = rows.len();
+        let (title, sub) = if can_approve || count == 0 {
+            (
+                t("Allow use of your mouse?", "允许使用你的鼠标？"),
+                t(
+                    "These drags cannot run in the background. They need your real pointer.",
+                    "这些拖拽无法在后台完成，需要暂时使用你的真实指针。",
+                ),
             )
         } else {
-            div()
-                .h(px(BUTTONS))
-                .flex()
-                .gap(px(8.))
-                .child(
-                    card_button(
-                        "input-allow",
-                        if can_approve {
-                            t("Allow all", "全部允许")
-                        } else {
-                            t("Waiting for hand-back", "等待交还")
-                        },
-                        true,
-                        theme,
-                    )
-                    .flex_1()
-                    .when(!can_approve, |d| d.opacity(0.5))
-                    .on_click(move |_, _, cx| {
-                        if can_approve {
-                            tell(&allow, cx, move |shell, cx| {
-                                shell.answer_input(approval, true, cx)
-                            });
-                        }
-                    }),
-                )
-                .child(
-                    card_button("input-decline", t("Not now", "暂不"), false, theme)
-                        .px(px(12.))
-                        .on_click(move |_, _, cx| {
-                            tell(&decline, cx, move |shell, cx| {
-                                shell.answer_input(approval, false, cx)
-                            })
-                        }),
-                )
+            (
+                t("Waiting for hand-back", "等待你交还显示器"),
+                t(
+                    "You are using this display. Hand it back before approving these requests.",
+                    "你正在接手此显示器。交还后，才能批准这些请求。",
+                ),
+            )
         };
-        card(title, scope.to_string(), theme)
+        let (allow, decline) = (self.shell.clone(), self.shell.clone());
+        root.aria_label(SharedString::from(title))
+            .child(queue_header(title, sub, theme))
             .child(
                 div()
+                    .id("input-requests")
+                    .flex_shrink(1.)
+                    .min_h_0()
+                    .max_h(px(QUEUE_LIST))
+                    .overflow_y_scroll()
+                    .px(px(QUEUE_PAD))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(QUEUE_PAD))
+                    .pb(px(12.))
                     .text_size(px(11.))
                     .text_color(theme.secondary)
                     .child(if count == 1 {
-                        t("1 request waiting", "1 个请求等待中").to_string()
+                        t("1 request", "1 个请求").to_string()
                     } else {
-                        tf!("{count} requests waiting", "{count} 个请求等待中")
+                        tf!("{count} requests, one at a time", "{count} 个请求，依次执行")
                     }),
             )
+            .child(scope(
+                "icons/lock.svg",
+                t("Approval covers ", "批准包括"),
+                t("these and new requests", "当前及之后的新请求"),
+                t(
+                    " until 30 seconds of inactivity. Move the mouse or press any key to take control.",
+                    "。空闲 30 秒后结束。移动鼠标或按任意键即可收回。",
+                ),
+                theme,
+            ))
             .child(
                 div()
-                    .h(px(110.))
                     .flex_none()
-                    .overflow_hidden()
-                    .rounded(px(8.))
-                    .child(picture),
+                    .flex()
+                    .gap(px(8.))
+                    .px(px(QUEUE_PAD))
+                    .pb(px(QUEUE_PAD))
+                    .child(
+                        card_button("input-decline", t("Not now", "暂不允许"), Tone::Plain, theme)
+                            .h(px(QUEUE_BUTTONS))
+                            .px(px(18.))
+                            .on_click(move |_, _, cx| {
+                                tell(&decline, cx, move |shell, cx| {
+                                    shell.answer_input(approval, false, cx)
+                                })
+                            }),
+                    )
+                    .child(
+                        card_button(
+                            "input-allow",
+                            if can_approve {
+                                t("Allow queue", "允许队列")
+                            } else {
+                                t("Waiting for hand-back", "等待交还")
+                            },
+                            Tone::Accent,
+                            theme,
+                        )
+                        .h(px(QUEUE_BUTTONS))
+                        .flex_1()
+                        .when(!can_approve, |d| d.opacity(0.5))
+                        .on_click(move |_, _, cx| {
+                            if can_approve {
+                                tell(&allow, cx, move |shell, cx| {
+                                    shell.answer_input(approval, true, cx)
+                                });
+                            }
+                        }),
+                    ),
             )
-            .child(list)
-            .child(buttons)
             .into_any_element()
     }
+}
+
+const QUEUE_PAD: f32 = 24.;
+/// The request list scrolls past this.
+const QUEUE_LIST: f32 = 220.;
+const QUEUE_BUTTONS: f32 = 36.;
+const IDLE_SECONDS: u64 = agent_screen_model::input_queue::IDLE_MS / 1000;
+
+thread_local! {
+    /// The queue card's height at its last paint, which its window takes.
+    /// Before the first paint, a guess.
+    static QUEUE_FIT: Cell<f32> = const { Cell::new(420.) };
+}
+
+/// The height the queue card's window should have.
+pub fn queue_height() -> f32 {
+    QUEUE_FIT.with(Cell::get)
+}
+
+/// What the card and the status bar show of a grant.
+pub struct GrantView {
+    /// A request runs or waits to run; otherwise the grant idles toward
+    /// its end.
+    pub running: bool,
+    pub elapsed: u64,
+    pub idle: Option<u64>,
+}
+
+pub fn grant_view(input: &crate::input_queue::InputQueue) -> Option<GrantView> {
+    input.queue.grant()?;
+    let idle = input.idle_seconds();
+    Some(GrantView {
+        running: input.queue.active().is_some() || idle.is_none(),
+        elapsed: input.elapsed_seconds().unwrap_or(0),
+        idle,
+    })
+}
+
+/// Minutes and seconds: 01:05.
+pub fn clock(seconds: u64) -> String {
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// Digits of one width, so a ticking clock doesn't jitter.
+pub fn tabular() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// The queue card's top: where it comes from, the question and why.
+fn queue_header(title: &str, sub: &str, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .px(px(QUEUE_PAD))
+        .pt(px(20.))
+        .pb(px(20.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .mb(px(14.))
+                .text_size(px(11.))
+                .text_color(theme.secondary)
+                .child(
+                    svg()
+                        .path("icons/display.svg")
+                        .flex_none()
+                        .size(px(14.))
+                        .text_color(theme.secondary),
+                )
+                .child("Agent Screen"),
+        )
+        .child(
+            div()
+                .text_size(px(20.))
+                .line_height(px(26.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .mb(px(8.))
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .text_color(theme.secondary)
+                .child(sub.to_string()),
+        )
+}
+
+/// One waiting request: whose display, and what the agent wants to do.
+fn request_row(label: String, reason: String, takeover: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .flex()
+        .gap(px(12.))
+        .py(px(14.))
+        .border_t_1()
+        .border_color(theme.card_border)
+        .child(
+            div()
+                .flex_none()
+                .size(px(36.))
+                .rounded(px(10.))
+                .bg(theme.accent.opacity(0.14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    svg()
+                        .path("icons/display.svg")
+                        .size(px(18.))
+                        .text_color(theme.accent),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(theme.secondary)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(19.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(reason),
+                )
+                .when(takeover, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.secondary)
+                            .child(t("You are using this display", "你正在操作此显示器")),
+                    )
+                }),
+        )
+}
+
+/// What approval allows, in full: `strong` stands out between `before`
+/// and `after`.
+fn scope(icon: &'static str, before: &str, strong: &str, after: &str, theme: &Theme) -> gpui::Div {
+    let text = format!("{before}{strong}{after}");
+    let strong = before.len()..before.len() + strong.len();
+    div()
+        .flex_none()
+        .mx(px(QUEUE_PAD))
+        .mt(px(4.))
+        .mb(px(20.))
+        .px(px(14.))
+        .py(px(12.))
+        .rounded(px(10.))
+        .bg(theme.control)
+        .flex()
+        .gap(px(8.))
+        .child(
+            svg()
+                .path(icon)
+                .flex_none()
+                .mt(px(2.))
+                .size(px(13.))
+                .text_color(theme.secondary),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(11.5))
+                .line_height(px(18.))
+                .text_color(theme.secondary)
+                .child(StyledText::new(text).with_highlights([(
+                    strong,
+                    HighlightStyle {
+                        color: Some(theme.label),
+                        font_weight: Some(gpui::FontWeight::MEDIUM),
+                        ..Default::default()
+                    },
+                )])),
+        )
 }
 
 /// The card with its title and two lines of text; the rest follows.
@@ -499,22 +841,63 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
         )
 }
 
+/// How a button stands out.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tone {
+    /// Orange, with the hand: the Help Card's step-in buttons.
+    Orange,
+    /// The accent color: the Input Queue's approval.
+    Accent,
+    Plain,
+    /// Red text with a stop mark: ending an Input Grant.
+    Stop,
+}
+
+/// A pill-shaped button. The Help Card's buttons record where they were
+/// painted; see `painted_buttons`.
 fn card_button(
     id: &'static str,
     title: impl Into<SharedString>,
-    prominent: bool,
+    tone: Tone,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    button(id, title, tone, theme).child(
+        canvas(
+            move |bounds, _, _| {
+                BUTTONS_PAINTED.with(|b| b.borrow_mut().insert(id, bounds));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
+}
+
+pub fn button(
+    id: &'static str,
+    title: impl Into<SharedString>,
+    tone: Tone,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let title: SharedString = title.into();
-    let (bg, hover, fg) = if prominent {
-        (theme.orange.opacity(0.9), theme.orange, gpui::white())
-    } else {
-        (theme.control, theme.control_hover, theme.label)
+    let (bg, hover, fg) = match tone {
+        Tone::Orange => (theme.orange.opacity(0.9), theme.orange, gpui::white()),
+        Tone::Accent => (theme.accent.opacity(0.92), theme.accent, gpui::white()),
+        Tone::Plain => (theme.control, theme.control_hover, theme.label),
+        Tone::Stop => (theme.red.opacity(0.12), theme.red.opacity(0.2), theme.red),
+    };
+    let icon = match tone {
+        Tone::Orange => Some("icons/hand.svg"),
+        Tone::Stop => Some("icons/stop.svg"),
+        Tone::Accent | Tone::Plain => None,
     };
     div()
         .id(id)
         .role(Role::Button)
         .aria_label(title.clone())
+        .relative()
         .h(px(BUTTONS))
         .flex()
         .items_center()
@@ -528,22 +911,11 @@ fn card_button(
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(fg)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(prominent, |d| {
-            d.child(svg().path("icons/hand.svg").size(px(13.)).text_color(fg))
+        .when_some(icon, |d, icon| {
+            let size = if tone == Tone::Stop { 10. } else { 13. };
+            d.child(svg().path(icon).flex_none().size(px(size)).text_color(fg))
         })
         .child(div().whitespace_nowrap().child(title))
-        .child(
-            canvas(
-                move |bounds, _, _| {
-                    BUTTONS_PAINTED.with(|b| b.borrow_mut().insert(id, bounds));
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        )
 }
 
 thread_local! {
@@ -551,6 +923,8 @@ thread_local! {
     /// debug check that every button fits the card.
     static BUTTONS_PAINTED: RefCell<HashMap<&'static str, Bounds<Pixels>>> =
         RefCell::new(HashMap::new());
+    /// The width of the card last rendered.
+    static CARD_WIDTH: Cell<f32> = const { Cell::new(WIDTH) };
 }
 
 /// The card's width and its buttons as last painted: id and `[x, y, w,
@@ -566,5 +940,5 @@ pub fn painted_buttons() -> (f32, Vec<(&'static str, [f32; 4])>) {
             })
             .collect()
     });
-    (WIDTH, buttons)
+    (CARD_WIDTH.with(Cell::get), buttons)
 }
