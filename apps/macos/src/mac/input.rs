@@ -114,6 +114,10 @@ pub enum Sent {
     Typed(usize),
     /// All the text went out, but the field shows this, without some of it.
     Dropped(String),
+    /// The target's app came to the front partway through text, where its
+    /// focused window may be the user's: how many characters went in
+    /// before (#110).
+    Fronted(usize),
     /// No window to send it to.
     Nowhere,
 }
@@ -421,6 +425,10 @@ impl Forwarder {
             let Some(target) = w.focused else {
                 return Sent::Nowhere;
             };
+            // The caller checked where keys go with the app in the
+            // background. Brought to the front since, it sends keys to its
+            // focused window, maybe the user's: stop before the next key.
+            let front_at_start = is_front(target.pid);
             let text = typed_text(&text);
             // A field that says what it holds is read back after, unless
             // Return or Tab moves on from it.
@@ -434,6 +442,9 @@ impl Forwarder {
             for (typed, character) in text.chars().enumerate() {
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     return Sent::Typed(typed);
+                }
+                if !front_at_start && is_front(target.pid) {
+                    return Sent::Fronted(typed);
                 }
                 let code = match character {
                     '\n' | '\r' => Some(36),
@@ -623,21 +634,27 @@ impl Forwarder {
         .flatten()
     }
 
-    /// False when no window on the display can take the keys.
-    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> bool {
+    /// How many times the chord went out, or None when no window on the
+    /// display can take the keys. Fewer than `count` when the target's app
+    /// came to the front meanwhile, where its focused window may be the
+    /// user's (#110).
+    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> Option<i64> {
         self.run(move |w| {
-            let Some(_held) = w.focus_something(within) else {
-                return false;
-            };
-            for _ in 0..count.max(1) {
+            let _held = w.focus_something(within)?;
+            let pid = w.focused?.pid;
+            let front_at_start = is_front(pid);
+            for pressed in 0..count.max(1) {
+                if !front_at_start && is_front(pid) {
+                    return Some(pressed);
+                }
                 w.key(chord.code, true, flags(chord.modifiers), true);
                 thread::sleep(Duration::from_millis(20));
                 w.key(chord.code, false, flags(chord.modifiers), true);
             }
-            true
+            Some(count.max(1))
         })
         .await
-        .unwrap_or(false)
+        .flatten()
     }
 }
 
