@@ -16,6 +16,7 @@ pub mod launch;
 pub mod model;
 pub mod numbers;
 pub mod recording_playback;
+pub mod screen_edge;
 pub mod substitute;
 pub mod tree;
 pub mod typing;

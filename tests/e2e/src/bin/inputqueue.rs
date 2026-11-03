@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use agent_screen_tests::{
-    Control, Frame, Value, capture, check, debug_pid, instance, json, run, sleep_ms,
-    start_test_app, windows_of,
+    Control, Frame, Value, capture, check, debug_pid, instance, json, run, sh_lenient, sleep_ms,
+    start_test_app, tool, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -164,9 +164,11 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         granted
             .as_ref()
             .is_some_and(|c| c.height < 500.0 && covering(c).is_empty())
-            && shown
-                .as_ref()
-                .is_some_and(|b| granted.as_ref().is_some_and(|c| !meets(b, c)) && b.width < 900.0)
+            && shown.as_ref().is_some_and(|b| {
+                granted.as_ref().is_some_and(|c| !meets(b, c))
+                    && b.width < 900.0
+                    && (40.0..80.0).contains(&b.height)
+            })
             && edges() > 0,
         format!("card {granted:?} bar {shown:?} edges {}", edges()),
     );
@@ -185,6 +187,17 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     if let Some(b) = &shown {
         let file = capture("inputqueue-bar", [b.x, b.y, b.width, b.height])?;
         println!("     bar: {}", file.display());
+    }
+    // The red edge at the main screen's top-left corner and top middle,
+    // where a built-in display has its rounded corner and its notch.
+    let main: Vec<f64> = sh_lenient(tool("probe")?, &["main"])
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    if let [w, _] = main[..] {
+        let corner = capture("inputqueue-edge-corner", [0.0, 0.0, 80.0, 60.0])?;
+        let notch = capture("inputqueue-edge-notch", [w / 2.0 - 150.0, 0.0, 300.0, 60.0])?;
+        println!("     edge: {} {}", corner.display(), notch.display());
     }
 
     // Nothing runs, so the grant idles out after 30 seconds.
@@ -258,7 +271,10 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     );
     check(
         "the Input Bar's Stop ends the grant: the bar and edge go, and the card asks again",
-        again.is_some()
+        // Still its full height: a bar sized from its window shrank.
+        again
+            .as_ref()
+            .is_some_and(|b| (40.0..80.0).contains(&b.height))
             && bar().is_none()
             && edges() == 0
             && request["state"] == "queued"
