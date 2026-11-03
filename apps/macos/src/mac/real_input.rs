@@ -228,6 +228,157 @@ pub fn restore(saved: Saved) {
     }
 }
 
+/// While AeroSpace runs: how long after a loan's AX writes it keeps
+/// touching the claim file, and how long the window must then keep its
+/// frame before anything is pressed.
+const TOUCHING: Duration = Duration::from_millis(500);
+const SETTLED: Duration = Duration::from_millis(300);
+/// How long a loan waits for all that before it gives up.
+const SETTLE_LIMIT: Duration = Duration::from_millis(1500);
+
+fn write_main(target: WindowTarget) {
+    let key = objc2_core_foundation::CFString::from_static_str("AXMain");
+    let yes = objc2_core_foundation::CFBoolean::new(true);
+    if let Some(window) = super::ax::window_element(target) {
+        unsafe { window.set_attribute_value(&key, yes) };
+    }
+}
+
+fn write_front(pid: i32) {
+    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+    let yes = objc2_core_foundation::CFBoolean::new(true);
+    unsafe { super::ax::application(pid).set_attribute_value(&key, yes) };
+}
+
+/// Make the loan's window main and its app frontmost, and keep the window
+/// where it was. The caller holds the process's input gate, so the writes
+/// here skip it. `go` says the loan may go on.
+///
+/// The AX writes focus this window only: NSRunningApplication activation
+/// can make a window manager bring the app onto the user's workspace. Even
+/// so, AeroSpace refreshes when an app activates, and that refresh lays
+/// out the user's workspaces before it reads the claim file. An app it has
+/// never seen in front, such as an accessory app, gets its focused window
+/// filed in the user's focused workspace there, and laid out on their
+/// screen before AeroSpace lets go of it as claimed (issue #121). Touching
+/// the claim file starts a refresh that reads the claims first, and that
+/// one replaces the refresh for the activation. If the window moves all
+/// the same, it goes back to where it was before anything is pressed;
+/// claimed, AeroSpace leaves it alone from then on.
+pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &'static str> {
+    let home = super::cg::window_bounds(target.window_id);
+    let aerospace = super::app::is_running("bobko.aerospace");
+    let element = super::ax::window_element(target);
+    write_main(target);
+    write_front(target.pid);
+    let asked = std::time::Instant::now();
+    let mut still = asked;
+    loop {
+        if !go() {
+            return Err("the approval ended before the drag began");
+        }
+        if aerospace && asked.elapsed() < TOUCHING {
+            super::claims::touch();
+        }
+        if super::app::frontmost_pid() != Some(target.pid) {
+            if asked.elapsed() > Duration::from_secs(1) {
+                return Err("the app didn't come to the front");
+            }
+        } else if !aerospace {
+            return Ok(());
+        } else if let Some(home) = home
+            && super::cg::window_bounds(target.window_id) != Some(home)
+        {
+            log::info!(
+                "input queue: window {} moved as its app came forward; putting it back",
+                target.window_id
+            );
+            if !element
+                .as_ref()
+                .is_some_and(|w| super::ax::set_frame_holding_gate(w, home))
+            {
+                return Err("the window moved off the Agent Display and couldn't be put back");
+            }
+            still = std::time::Instant::now();
+        } else if asked.elapsed() >= TOUCHING && still.elapsed() >= SETTLED {
+            return Ok(());
+        }
+        if asked.elapsed() > SETTLE_LIMIT {
+            return Err("a window manager kept moving the window off the Agent Display");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A loan's focus step alone, for `debugLoanFocus`: whether the window
+/// moved while its app came forward, whether it was back once the step
+/// returned and stayed for `watch`, and whether other windows moved. The
+/// app that was in front comes back afterwards.
+pub fn debug_forward(target: WindowTarget, watch: Duration) -> serde_json::Value {
+    let gate = process_gate(target.pid);
+    let _process = gate.write().unwrap_or_else(|e| e.into_inner());
+    let before = super::cg::window_bounds(target.window_id);
+    let others = |frames: Vec<(u32, i64, crate::model::Rect)>| {
+        frames
+            .into_iter()
+            .filter(|(id, layer, _)| *layer == 0 && *id != target.window_id)
+            .map(|(id, _, frame)| (id, frame))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let others_before = others(super::cg::on_screen_frames());
+    let front = super::app::frontmost_pid();
+    let start = std::time::Instant::now();
+    let moved = std::sync::Mutex::new((None::<u64>, 0_u32));
+    let watcher = std::sync::atomic::AtomicBool::new(true);
+    let (came, ready_at, moved_after) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut away = false;
+            while watcher.load(Ordering::Relaxed) {
+                let off = super::cg::window_bounds(target.window_id) != before;
+                if off && !away {
+                    let mut m = moved.lock().unwrap();
+                    m.0.get_or_insert(start.elapsed().as_millis() as u64);
+                    m.1 += 1;
+                }
+                away = off;
+                thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let came = come_forward(target, || true);
+        let ready_at = start.elapsed().as_millis() as u64;
+        let mut moved_after = None;
+        while start.elapsed() < watch {
+            if moved_after.is_none() && super::cg::window_bounds(target.window_id) != before {
+                moved_after = Some(start.elapsed().as_millis() as u64);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        watcher.store(false, Ordering::Relaxed);
+        (came, ready_at, moved_after)
+    });
+    let after = super::cg::window_bounds(target.window_id);
+    let mut others_after = others(super::cg::on_screen_frames());
+    let changed: Vec<u32> = others_before
+        .iter()
+        .filter(|(id, frame)| others_after.remove(*id).is_some_and(|f| f != **frame))
+        .map(|(id, _)| *id)
+        .collect();
+    if let Some(front) = front.filter(|&p| p != target.pid) {
+        write_front(front);
+    }
+    let (moved_at, trips) = *moved.lock().unwrap();
+    serde_json::json!({
+        "before": before.map(|r| [r.x, r.y, r.width, r.height]),
+        "after": after.map(|r| [r.x, r.y, r.width, r.height]),
+        "came": came.err(),
+        "readyAtMs": ready_at,
+        "movedAtMs": moved_at,
+        "trips": trips,
+        "movedAfterReadyMs": moved_after,
+        "othersChanged": changed,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Done,
@@ -344,24 +495,9 @@ pub fn drag(
     // page never sees the press: the app comes to the front first. The
     // grant's end puts the user's app back.
     HOLDING.store(target.pid, Ordering::Relaxed);
-    // Use AX focus for this window only. NSRunningApplication activation
-    // can make a window manager bring the app onto the user's workspace.
-    // These writes run under the exclusive process gate already held.
-    let key = objc2_core_foundation::CFString::from_static_str("AXMain");
-    let yes = objc2_core_foundation::CFBoolean::new(true);
-    if let Some(window) = super::ax::window_element(target) {
-        unsafe { window.set_attribute_value(&key, yes) };
-    }
-    let application = super::ax::application(target.pid);
-    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-    unsafe { application.set_attribute_value(&key, yes) };
-    let asked = std::time::Instant::now();
-    while super::app::frontmost_pid() != Some(target.pid) {
-        if !allowed(from) || asked.elapsed() > Duration::from_secs(1) {
-            HOLDING.store(0, Ordering::Relaxed);
-            return Outcome::Refused("the app didn't come to the front");
-        }
-        thread::sleep(Duration::from_millis(20));
+    if let Err(why) = come_forward(target, || allowed(from)) {
+        HOLDING.store(0, Ordering::Relaxed);
+        return Outcome::Refused(why);
     }
     if !poster.post(CGEventType::MouseMoved, from) {
         HOLDING.store(0, Ordering::Relaxed);

@@ -90,6 +90,16 @@ pub fn release(window: u32) {
     change(|c| c.release(window));
 }
 
+/// Write the claim file again as it is: AeroSpace refreshes when its
+/// directory changes, reading the claims first.
+pub fn touch() {
+    let claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    let published = claims.published().clone();
+    if !published.is_empty() {
+        let _ = write(&published);
+    }
+}
+
 /// On quit: AeroSpace lays out what is left as the user's.
 pub fn delete() {
     let _ = std::fs::remove_file(path());

@@ -1524,6 +1524,20 @@ async fn handle_one(
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({ "agent": agent }))
         }
+        // Test hook: only an Input Loan's focus step on `windowId`, which
+        // takes the front app and gives it back, watched for `watchMs`.
+        "debugLoanFocus" if debug_methods() => {
+            let target = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?
+                .target;
+            let watch = Duration::from_millis(p.int("watchMs").unwrap_or(2000) as u64);
+            Ok(off(cx, move || {
+                crate::mac::real_input::debug_forward(target, watch)
+            })
+            .await)
+        }
         // Test hook: macOS last named `pid` the front app, as when the user
         // had just used it, without making it active.
         "debugFront" if debug_methods() => {

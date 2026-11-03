@@ -731,6 +731,25 @@ pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
     })
 }
 
+/// Put a window back at an exact frame for a caller that holds its
+/// process's input gate itself, as a real-input loan does.
+pub fn set_frame_holding_gate(window: &AXUIElement, frame: Rect) -> bool {
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| {
+        value.is_some_and(|v| unsafe {
+            window.set_attribute_value(&CFString::from_str(name), &v) == AXError::Success
+        })
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let placed = write("AXPosition", at());
+    write(
+        "AXSize",
+        ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+    );
+    // An app that keeps windows on one screen clamps a size against where
+    // the window was: place it again at its size.
+    placed && write("AXPosition", at())
+}
+
 /// Give a window the frame an agent asked for. Position, size, then
 /// position again: an app that keeps its windows on one screen clamps a
 /// size against where the window was, and the second move puts it where
