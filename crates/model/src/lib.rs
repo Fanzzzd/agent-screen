@@ -9,6 +9,7 @@ pub mod arrangement;
 pub mod budget;
 pub mod claims;
 pub mod devtools;
+pub mod key_window;
 pub mod keychord;
 pub mod launch;
 pub mod model;
