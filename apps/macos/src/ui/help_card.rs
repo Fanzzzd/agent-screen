@@ -380,7 +380,7 @@ impl HelpCard {
             let revoke = self.shell.clone();
             return queue_window(
                 root.aria_label(SharedString::from(title))
-                    .child(queue_header(title, sub, theme))
+                    .child(queue_header(title, sub, theme).min_h(px(QUEUE_GRANT_HEADER)))
                     .child(
                         div()
                             .flex_none()
@@ -611,6 +611,9 @@ fn queue_window(card: gpui::Stateful<gpui::Div>) -> gpui::AnyElement {
 }
 
 const QUEUE_PAD: f32 = 24.;
+/// The grant's header with two lines of text, running or not, so the card
+/// keeps its height when a drag starts.
+const QUEUE_GRANT_HEADER: f32 = 144.;
 /// Past this many requests, the list takes QUEUE_LIST and scrolls.
 const QUEUE_ROWS: usize = 3;
 const QUEUE_LIST: f32 = 220.;

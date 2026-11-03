@@ -68,10 +68,12 @@ impl Render for InputBar {
             )
         };
         let (shell, stop) = (self.shell.clone(), self.shell.clone());
-        // The root fills the window; the bar keeps its own width, which
-        // the window then takes.
+        // The root fills the window; the bar keeps its own size, which
+        // the window then takes. Stretched to the root's height, it would
+        // follow the window down a point a paint.
         div()
             .flex()
+            .items_start()
             .child(
                 div()
                     .id("input-bar")
@@ -108,6 +110,7 @@ impl Render for InputBar {
                     .child(
                         div()
                             .flex_none()
+                            .min_w(px(250.))
                             .flex()
                             .flex_col()
                             .gap(px(1.))
@@ -132,6 +135,11 @@ impl Render for InputBar {
                     .child(
                         div()
                             .flex_none()
+                            // Wide enough for either clock, so the bar
+                            // keeps its width when a drag starts.
+                            .min_w(px(92.))
+                            .flex()
+                            .justify_center()
                             .whitespace_nowrap()
                             .px(px(10.))
                             .border_l_1()
