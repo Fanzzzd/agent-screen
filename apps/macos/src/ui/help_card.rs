@@ -59,8 +59,6 @@ pub struct HelpCard {
     /// The display whose Help Request the card shows.
     pub display: Option<DisplayId>,
     pub input_queue: bool,
-    /// The tallest the queue card may get on the screen it drops onto.
-    pub max_height: f32,
 }
 
 impl HelpCard {
@@ -86,7 +84,6 @@ impl HelpCard {
             streams,
             display: None,
             input_queue: false,
-            max_height: 640.,
         }
     }
 }
@@ -96,6 +93,8 @@ impl Render for HelpCard {
         let theme = theme::theme(window);
         let width = if self.input_queue { QUEUE_WIDTH } else { WIDTH };
         CARD_WIDTH.with(|w| w.set(width));
+        // Only what this render draws reports its bounds.
+        BUTTONS_PAINTED.with(|b| b.borrow_mut().clear());
         if self.input_queue {
             return self.render_queue(&theme, cx);
         }
@@ -305,7 +304,9 @@ impl Render for HelpCard {
 impl HelpCard {
     /// The Input Queue's card: asking for approval, or during a grant,
     /// what runs and how to take control back. Its height follows its
-    /// content, up to `max_height`; the request list scrolls past that.
+    /// content: nothing in it shrinks, as GPUI sizes a shrinkable child of
+    /// a content-sized column at its minimum. Past a few requests the list
+    /// gets a fixed height and scrolls.
     fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> gpui::AnyElement {
         let core = self.core.read(cx);
         let input = &core.input_queue;
@@ -314,8 +315,6 @@ impl HelpCard {
             .id("help-card")
             .role(Role::Dialog)
             .relative()
-            .w_full()
-            .max_h(px(self.max_height))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -324,7 +323,8 @@ impl HelpCard {
             .border_color(theme.card_border)
             .rounded(px(RADIUS))
             .text_color(theme.label)
-            // The window takes the card's height once it is painted.
+            // The window takes the card's height once it is painted. The
+            // card has its content's height, wherever the window is.
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -378,107 +378,105 @@ impl HelpCard {
                 })
                 .unwrap_or_else(|| div().into_any_element());
             let revoke = self.shell.clone();
-            return root
-                .aria_label(SharedString::from(title))
-                .child(queue_header(title, sub, theme))
-                .child(
-                    div()
-                        .flex_shrink(1.)
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .px(px(QUEUE_PAD))
-                        .pb(px(20.))
-                        .child(
-                            div()
-                                .relative()
-                                .h(px(116.))
-                                .min_h(px(32.))
-                                .flex_shrink(1.)
-                                .rounded(px(8.))
-                                .overflow_hidden()
-                                .bg(theme.control)
-                                .child(picture)
-                                .child(theme::round_corners(8., theme.card)),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .mt(px(12.))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(12.))
-                                .text_size(px(11.))
-                                .text_color(theme.secondary)
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.))
-                                        .when(grant.running, |d| {
-                                            d.child(
-                                                div()
-                                                    .flex_none()
-                                                    .size(px(6.))
-                                                    .rounded_full()
-                                                    .bg(theme.red),
-                                            )
-                                        })
-                                        .child(div().min_w_0().truncate().child(task)),
-                                )
-                                .child(div().flex_none().font_features(tabular()).child(
-                                    if grant.running {
-                                        clock(grant.elapsed)
-                                    } else {
-                                        tf!(
-                                            "Idle {} / {}",
-                                            "空闲 {} / {}",
-                                            clock(grant.idle.unwrap_or(0)),
-                                            clock(IDLE_SECONDS)
-                                        )
-                                    },
-                                )),
-                        ),
-                )
-                .child(scope(
-                    "icons/pointer.svg",
-                    "",
-                    t(
-                        "Move the mouse or press any key to take control.",
-                        "移动鼠标或按任意键即可收回。",
-                    ),
-                    &format!(
-                        "\n{}",
-                        t(
-                            "New requests may run until the queue is idle for 30 seconds.",
-                            "之后的新请求仍可执行，空闲 30 秒后结束。",
-                        )
-                    ),
-                    theme,
-                ))
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .px(px(QUEUE_PAD))
-                        .pb(px(QUEUE_PAD))
-                        .child(
-                            card_button(
-                                "input-revoke",
-                                t("Stop and take control", "停止并收回"),
-                                Tone::Stop,
-                                theme,
+            return queue_window(
+                root.aria_label(SharedString::from(title))
+                    .child(queue_header(title, sub, theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .px(px(QUEUE_PAD))
+                            .pb(px(20.))
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .h(px(116.))
+                                    .rounded(px(8.))
+                                    .overflow_hidden()
+                                    .bg(theme.control)
+                                    .child(picture)
+                                    .child(theme::round_corners(8., theme.card)),
                             )
-                            .h(px(QUEUE_BUTTONS))
-                            .flex_1()
-                            .on_click(move |_, _, cx| {
-                                tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))
-                            }),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .mt(px(12.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(12.))
+                                    .text_size(px(11.))
+                                    .text_color(theme.secondary)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .when(grant.running, |d| {
+                                                d.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .size(px(6.))
+                                                        .rounded_full()
+                                                        .bg(theme.red),
+                                                )
+                                            })
+                                            .child(div().min_w_0().truncate().child(task)),
+                                    )
+                                    .child(div().flex_none().font_features(tabular()).child(
+                                        if grant.running {
+                                            clock(grant.elapsed)
+                                        } else {
+                                            tf!(
+                                                "Idle {} / {}",
+                                                "空闲 {} / {}",
+                                                clock(grant.idle.unwrap_or(0)),
+                                                clock(IDLE_SECONDS)
+                                            )
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(scope(
+                        "icons/pointer.svg",
+                        "",
+                        t(
+                            "Move the mouse or press any key to take control.",
+                            "移动鼠标或按任意键即可收回。",
                         ),
-                )
-                .into_any_element();
+                        &format!(
+                            "\n{}",
+                            t(
+                                "New requests may run until the queue is idle for 30 seconds.",
+                                "之后的新请求仍可执行，空闲 30 秒后结束。",
+                            )
+                        ),
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .px(px(QUEUE_PAD))
+                            .pb(px(QUEUE_PAD))
+                            .child(
+                                card_button(
+                                    "input-revoke",
+                                    t("Stop and take control", "停止并收回"),
+                                    Tone::Stop,
+                                    theme,
+                                )
+                                .h(px(QUEUE_BUTTONS))
+                                .flex_1()
+                                .on_click(move |_, _, cx| {
+                                    tell(&revoke, cx, |shell, cx| shell.revoke_input(cx))
+                                }),
+                            ),
+                    ),
+            );
         }
 
         let approval = input.queue.approval();
@@ -489,12 +487,18 @@ impl HelpCard {
                 continue;
             };
             can_approve |= !display.takeover && !display.is_ended();
-            rows.push(request_row(
+            let row = request_row(
                 display.label(),
                 request.reason.clone(),
                 display.takeover,
                 theme,
-            ));
+            );
+            // The first row reports where it was painted, as buttons do.
+            rows.push(if rows.is_empty() {
+                row.relative().child(painted("input-request"))
+            } else {
+                row
+            });
         }
         let count = rows.len();
         let (title, sub) = if can_approve || count == 0 {
@@ -515,15 +519,13 @@ impl HelpCard {
             )
         };
         let (allow, decline) = (self.shell.clone(), self.shell.clone());
-        root.aria_label(SharedString::from(title))
+        queue_window(root.aria_label(SharedString::from(title))
             .child(queue_header(title, sub, theme))
             .child(
                 div()
                     .id("input-requests")
-                    .flex_shrink(1.)
-                    .min_h_0()
-                    .max_h(px(QUEUE_LIST))
-                    .overflow_y_scroll()
+                    .flex_none()
+                    .when(count > QUEUE_ROWS, |d| d.h(px(QUEUE_LIST)).overflow_y_scroll())
                     .px(px(QUEUE_PAD))
                     .flex()
                     .flex_col()
@@ -592,12 +594,25 @@ impl HelpCard {
                         }),
                     ),
             )
-            .into_any_element()
+            )
     }
 }
 
+/// The window around the queue card. GPUI gives the window's root the
+/// window's size, so the card inside it keeps its own height, which the
+/// window then takes: a root measured instead follows the window down.
+fn queue_window(card: gpui::Stateful<gpui::Div>) -> gpui::AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(card.flex_none())
+        .into_any_element()
+}
+
 const QUEUE_PAD: f32 = 24.;
-/// The request list scrolls past this.
+/// Past this many requests, the list takes QUEUE_LIST and scrolls.
+const QUEUE_ROWS: usize = 3;
 const QUEUE_LIST: f32 = 220.;
 const QUEUE_BUTTONS: f32 = 36.;
 const IDLE_SECONDS: u64 = agent_screen_model::input_queue::IDLE_MS / 1000;
@@ -861,18 +876,21 @@ fn card_button(
     tone: Tone,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    button(id, title, tone, theme).child(
-        canvas(
-            move |bounds, _, _| {
-                BUTTONS_PAINTED.with(|b| b.borrow_mut().insert(id, bounds));
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full(),
+    button(id, title, tone, theme).child(painted(id))
+}
+
+/// Records its parent's bounds under `id` at each paint.
+fn painted(id: &'static str) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| {
+            BUTTONS_PAINTED.with(|b| b.borrow_mut().insert(id, bounds));
+        },
+        |_, _, _, _| {},
     )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 pub fn button(
@@ -927,9 +945,9 @@ thread_local! {
     static CARD_WIDTH: Cell<f32> = const { Cell::new(WIDTH) };
 }
 
-/// The card's width and its buttons as last painted: id and `[x, y, w,
-/// h]` in points from the card's corner. A button the card showed before
-/// keeps its last bounds; look at the ones the card shows now.
+/// The card's width and its buttons as last painted, with the queue card's
+/// first request row: id and `[x, y, w, h]` in points from the card's
+/// corner. Only what the last render drew is listed.
 pub fn painted_buttons() -> (f32, Vec<(&'static str, [f32; 4])>) {
     let buttons = BUTTONS_PAINTED.with(|b| {
         b.borrow()

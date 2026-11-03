@@ -465,7 +465,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugUserKey` | Records a user key press to `pid`, as the global key monitor does. |
 | `debugActivated` | Simulates the user bringing `pid` to the front for the window-location reminder. Returns the displays it named as `reminded`. |
 | `debugAgentReady` | Returns the agent the setup window says loaded the tools, as `agent`. |
-| `debugCard` | Returns the Help Card's `width` and each button's `[x, y, w, h]` from the card's corner at its last paint. `buttons` maps button ids to bounds. |
+| `debugCard` | Returns the Help Card's `width` and each button's `[x, y, w, h]` from the card's corner at its last paint, only those the last render drew. `buttons` maps button ids to bounds, and holds the queue card's first request row as `input-request`. `queueHeight` is the queue card's content height at its last paint. |
 | `debugIcon` | Returns the menu bar icon's `state`: idle, working, asking or setup. |
 | `debugViewer` | Returns `frame` and `image` in screen points, `key` for whether the Viewer is the key window, `takeBack` for the header button's bounds in points from the Viewer's corner, and `misrouted` for whether its stream showed another screen. |
 | `debugPanic` | Panics on the main thread after replying. This aborts the test app. |

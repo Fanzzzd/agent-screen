@@ -79,6 +79,29 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             .filter(|w| w.layer > 0 && w.layer != 1000 && w.id != c.id && meets(w, c))
             .collect()
     };
+    // Each of `ids` was painted by the card's last render, inside its
+    // window, and the window is as tall as the card's content.
+    let fits = |c: &Frame, ids: &[&str]| -> (bool, String) {
+        let painted = control.call("debugCard", json!({})).unwrap_or_default();
+        let content = painted["queueHeight"].as_f64().unwrap_or(0.0);
+        let mut ok = c.width > 0.0 && content > 0.0 && content <= c.height + 1.0;
+        for id in ids {
+            let b = &painted["buttons"][*id];
+            let r: Vec<f64> = (0..4).filter_map(|i| b[i].as_f64()).collect();
+            ok &= r.len() == 4
+                && r[2] > 0.0
+                && r[3] > 0.0
+                && r[0] + r[2] <= c.width + 0.5
+                && r[1] + r[3] <= c.height + 0.5;
+        }
+        (
+            ok,
+            format!(
+                "window {}x{}, content {content}, painted {}",
+                c.width, c.height, painted["buttons"]
+            ),
+        )
+    };
     let status = || -> Result<Value> {
         let state = control.call(
             "inputQueue",
@@ -112,6 +135,14 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             && bar().is_none(),
         format!("{asking:?} bar {:?}", bar()),
     );
+    let (ok, why) = asking.as_ref().map_or((false, "no card".into()), |c| {
+        fits(c, &["input-request", "input-decline", "input-allow"])
+    });
+    check(
+        "the asking card draws its request row and both buttons inside a window as tall as its content",
+        ok,
+        why,
+    );
     if let Some(c) = &asking {
         let file = capture("inputqueue-ask", [c.x, c.y, c.width, c.height])?;
         println!("     card: {}", file.display());
@@ -138,6 +169,14 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
                 .is_some_and(|b| granted.as_ref().is_some_and(|c| !meets(b, c)) && b.width < 900.0)
             && edges() > 0,
         format!("card {granted:?} bar {shown:?} edges {}", edges()),
+    );
+    let (ok, why) = granted
+        .as_ref()
+        .map_or((false, "no card".into()), |c| fits(c, &["input-revoke"]));
+    check(
+        "the granted card draws Stop inside a window as tall as its content",
+        ok,
+        why,
     );
     if let Some(c) = &granted {
         let file = capture("inputqueue-granted", [c.x, c.y, c.width, c.height])?;
@@ -208,6 +247,15 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     show("input-bar-stop")?;
     sleep_ms(800);
     let request = status()?;
+    let asks = card();
+    let (ok, why) = asks.as_ref().map_or((false, "no card".into()), |c| {
+        fits(c, &["input-request", "input-allow"])
+    });
+    check(
+        "after Stop the card asks again at its full size, its request row and Allow inside it",
+        ok && asks.as_ref().is_some_and(|c| c.height > 200.0),
+        format!("{asks:?} {why}"),
+    );
     check(
         "the Input Bar's Stop ends the grant: the bar and edge go, and the card asks again",
         again.is_some()

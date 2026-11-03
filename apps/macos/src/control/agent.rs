@@ -1609,7 +1609,11 @@ async fn handle_one(
                 .into_iter()
                 .map(|(id, r)| (id.to_string(), json!(r)))
                 .collect();
-            Ok(json!({ "width": width, "buttons": buttons }))
+            Ok(json!({
+                "width": width,
+                "buttons": buttons,
+                "queueHeight": crate::ui::help_card::queue_height(),
+            }))
         }
         // Which picture the menu bar icon shows: idle, working, asking or setup.
         "debugIcon" if debug_methods() => {

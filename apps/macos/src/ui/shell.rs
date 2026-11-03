@@ -353,6 +353,9 @@ fn offset(r: NSRect, dy: f64) -> NSRect {
 /// The Input Bar's distance from the bottom of the screen's visible area.
 const BAR_MARGIN: f64 = 24.0;
 
+/// No queue card is shorter: a bad measurement can't shrink it away.
+const MIN_QUEUE_HEIGHT: f32 = 200.0;
+
 /// The tallest the queue card gets on a screen whose visible area is
 /// `visible`: it stays clear of the Input Bar at the bottom.
 fn queue_max_height(visible: NSRect) -> f32 {
@@ -1035,7 +1038,6 @@ impl Shell {
         let _ = card.update(cx, |card, _, cx| {
             card.display = Some(id);
             card.input_queue = input;
-            card.max_height = max_height;
             cx.notify();
         });
         self.streams.update(cx, |s, cx| {
@@ -1046,7 +1048,7 @@ impl Shell {
         let (w, h) = if input {
             (
                 f64::from(help_card::QUEUE_WIDTH),
-                f64::from(help_card::queue_height().min(max_height)),
+                f64::from(help_card::queue_height().clamp(MIN_QUEUE_HEIGHT, max_height)),
             )
         } else {
             (
@@ -1088,7 +1090,10 @@ impl Shell {
         if !self.card_input || self.card_shown.is_none() {
             return;
         }
-        let h = f64::from(help_card::queue_height());
+        let max = self
+            .host_screen()
+            .map_or(640.0, |(_, visible)| queue_max_height(visible));
+        let h = f64::from(help_card::queue_height().clamp(MIN_QUEUE_HEIGHT, max));
         if (h - placed.size.height).abs() < 0.5 {
             return;
         }
