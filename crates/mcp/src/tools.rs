@@ -177,6 +177,11 @@ pub fn definitions() -> Vec<Value> {
                 "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. To copy and paste, use",
                 "act_on_element's read_text and insert_text; set_value replaces a field's text. Shortcuts for app commands,",
                 "such as cmd+n or cmd+w, work.",
+                "When the app is also the user's front app with another of its windows focused, as a browser they work in,",
+                "nothing is posted to it, since keys would reach their window: a single left click presses the control or",
+                "picks the text field under it through accessibility, type puts text into the picked field, Return,",
+                "Escape, BackSpace and cmd+a act on what the click picked, and other keys fail and name the user's window.",
+                "The text before the screenshot says when an action went in this way.",
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
                 "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
@@ -1355,6 +1360,9 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         .map(String::from)
         .collect();
 
+    // What the app said about how an action went in, as beside the user's
+    // window in their front app (#110).
+    let mut note = None;
     match action.as_str() {
         "screenshot" => {}
         "left_click" | "right_click" | "middle_click" | "double_click" | "triple_click" => {
@@ -1369,12 +1377,14 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 "triple_click" => 3,
                 _ => 1,
             };
-            control
+            note = control
                 .call(
                     "click",
                     json!({ "displayId": display, "x": x, "y": y, "button": button, "count": count, "modifiers": modifiers }),
                 )
-                .await?;
+                .await?
+                .get("note")
+                .cloned();
         }
         "mouse_move" => {
             let (x, y) = require_coordinate(coordinate, &action)?;
@@ -1473,7 +1483,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 .await?;
         }
         "type" => {
-            control
+            note = control
                 .call(
                     "type",
                     json!({
@@ -1483,10 +1493,12 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                         "inputSource": input_source,
                     }),
                 )
-                .await?;
+                .await?
+                .get("note")
+                .cloned();
         }
         "key" => {
-            control
+            note = control
                 .call(
                     "key",
                     json!({
@@ -1496,7 +1508,9 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                         "inputSource": input_source,
                     }),
                 )
-                .await?;
+                .await?
+                .get("note")
+                .cloned();
         }
         _ => {
             // wait
@@ -1525,6 +1539,10 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         header.push_str(&format!(" Input route: {route}."));
     }
     header.push_str(&strayed_note(&shot));
+    if let Some(note) = note.as_ref().and_then(Value::as_str) {
+        header.push(' ');
+        header.push_str(note);
+    }
     Ok(vec![text(header), image(&get("data"), &get("mimeType"))])
 }
 

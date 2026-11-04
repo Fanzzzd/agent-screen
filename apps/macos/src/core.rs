@@ -301,6 +301,12 @@ impl Core {
         if crate::mac::ime::user_idle() < idle().as_secs_f64() {
             return;
         }
+        // A display change while an app starts makes Chrome lose the place
+        // it was told to open its window at, and open it on the user's
+        // screen (#123). The next tidy comes soon enough.
+        if !self.launching.is_empty() {
+            return;
+        }
         let mut released = false;
         for display in std::mem::take(&mut self.retiring) {
             crate::lifecycle::note("released", display.id, "ended, released while idle");
@@ -333,6 +339,11 @@ impl Core {
         if warm && self.spares.len() < READY && !self.warming && self.budget_allows().is_ok() {
             self.make_spare(cx);
         }
+    }
+
+    /// Whether a spare display is being made, which changes the displays.
+    pub fn making_spare(&self) -> bool {
+        self.warming
     }
 
     /// Make a spare of the size "+" makes, parked like any display.

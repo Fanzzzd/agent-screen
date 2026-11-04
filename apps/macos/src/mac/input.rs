@@ -11,6 +11,7 @@ use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, 
 use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
+use agent_screen_model::key_window::{AppWindow, KeyWindow, key_window};
 use futures::channel::oneshot;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -113,8 +114,21 @@ pub enum Sent {
     Typed(usize),
     /// All the text went out, but the field shows this, without some of it.
     Dropped(String),
+    /// The target's app came to the front partway through text, where its
+    /// focused window may be the user's: how many characters went in
+    /// before (#110).
+    Fronted(usize),
     /// No window to send it to.
     Nowhere,
+}
+
+/// Keys refused because the app's focused window, which every key posted
+/// to the app reaches, is off the Agent Displays (#120).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refused {
+    pub app: String,
+    /// The focused window's title, when Accessibility names the window.
+    pub window: Option<String>,
 }
 
 /// The text as typed: a Windows line ending, \r\n, is one Return.
@@ -411,6 +425,10 @@ impl Forwarder {
             let Some(target) = w.focused else {
                 return Sent::Nowhere;
             };
+            // The caller checked where keys go with the app in the
+            // background. Brought to the front since, it sends keys to its
+            // focused window, maybe the user's: stop before the next key.
+            let front_at_start = is_front(target.pid);
             let text = typed_text(&text);
             // A field that says what it holds is read back after, unless
             // Return or Tab moves on from it.
@@ -424,6 +442,9 @@ impl Forwarder {
             for (typed, character) in text.chars().enumerate() {
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
                     return Sent::Typed(typed);
+                }
+                if !front_at_start && is_front(target.pid) {
+                    return Sent::Fronted(typed);
                 }
                 let code = match character {
                     '\n' | '\r' => Some(36),
@@ -595,6 +616,12 @@ impl Forwarder {
         .await;
     }
 
+    /// Why the last keys found nowhere to go, if the app's focused window
+    /// was off the Agent Displays; cleared by reading it.
+    pub async fn take_refused(&self) -> Option<Refused> {
+        self.run(|w| w.refused.take()).await.flatten()
+    }
+
     /// The window keys would go to now, if any.
     pub async fn keys_target(&self, within: Rect) -> Option<WindowTarget> {
         self.run(move |w| {
@@ -607,33 +634,76 @@ impl Forwarder {
         .flatten()
     }
 
-    /// False when no window on the display can take the keys.
-    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> bool {
+    /// How many times the chord went out, or None when no window on the
+    /// display can take the keys. Fewer than `count` when the target's app
+    /// came to the front meanwhile, where its focused window may be the
+    /// user's (#110).
+    pub async fn press(&self, chord: KeyChord, count: i64, within: Rect) -> Option<i64> {
         self.run(move |w| {
-            let Some(_held) = w.focus_something(within) else {
-                return false;
-            };
-            for _ in 0..count.max(1) {
+            let _held = w.focus_something(within)?;
+            let pid = w.focused?.pid;
+            let front_at_start = is_front(pid);
+            for pressed in 0..count.max(1) {
+                if !front_at_start && is_front(pid) {
+                    return Some(pressed);
+                }
                 w.key(chord.code, true, flags(chord.modifiers), true);
                 thread::sleep(Duration::from_millis(20));
                 w.key(chord.code, false, flags(chord.modifiers), true);
             }
-            true
+            Some(count.max(1))
         })
         .await
-        .unwrap_or(false)
+        .flatten()
     }
 }
 
 /// Whether window `id` is on one of Agent Screen's displays: an agent's,
 /// never the user's to hand focus back to.
 fn on_agent_display(id: u32) -> bool {
-    super::windows::find(id).is_some_and(|w| {
-        super::cg::active_displays()
+    super::windows::find(id).is_some_and(|w| on_agent_display_at(w.bounds))
+}
+
+/// Whether a window with global `bounds` is on one of Agent Screen's
+/// displays.
+fn on_agent_display_at(bounds: Rect) -> bool {
+    super::cg::active_displays()
+        .into_iter()
+        .filter(|&d| super::cg::is_agent_screen(d))
+        .any(|d| super::cg::display_bounds(d).contains(bounds.mid()))
+}
+
+/// Where keys posted to `target`'s app go, asked up to `tries` times 40 ms
+/// apart until they stay on the Agent Displays, with the app's windows as
+/// last listed.
+fn key_window_now(target: WindowTarget, tries: usize) -> (KeyWindow, Vec<super::windows::Window>) {
+    let mut last = (KeyWindow::Elsewhere(None), Vec::new());
+    for attempt in 0..tries {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(40));
+        }
+        let focused = super::ax::focused_window_id(target.pid);
+        if focused == Some(target.window_id) {
+            return (KeyWindow::Target, Vec::new());
+        }
+        let windows: Vec<_> = super::windows::all()
             .into_iter()
-            .filter(|&d| super::cg::is_agent_screen(d))
-            .any(|d| super::cg::display_bounds(d).contains(w.bounds.mid()))
-    })
+            .filter(|w| w.target.pid == target.pid)
+            .collect();
+        let listed: Vec<_> = windows
+            .iter()
+            .map(|w| AppWindow {
+                id: w.target.window_id,
+                on_agent_display: on_agent_display_at(w.bounds),
+            })
+            .collect();
+        let reach = key_window(target.window_id, focused, &listed);
+        if reach.safe() {
+            return (reach, windows);
+        }
+        last = (reach, windows);
+    }
+    last
 }
 
 /// The bounds of the display window `id` is on.
@@ -750,6 +820,9 @@ struct Worker {
     known: Vec<u32>,
     /// File panels clicked since they opened: those take keys.
     pressed_panels: Vec<u32>,
+    /// Set when keys were refused, as their app's focused window was off
+    /// the Agent Displays.
+    refused: Option<Refused>,
 
     gesture: Option<Gesture>,
     /// The window the user holds by its title bar in the Viewer, and
@@ -791,6 +864,7 @@ impl Worker {
             restore: Vec::new(),
             known: Vec::new(),
             pressed_panels: Vec::new(),
+            refused: None,
 
             gesture: None,
             grab: None,
@@ -1233,6 +1307,7 @@ impl Worker {
     }
 
     fn focus_something_waking(&mut self, within: Rect, wake: bool) -> Option<AppKeys> {
+        self.refused = None;
         let Some(target) = self.pick_for_keys(within) else {
             // The window left the display, as when the user took it back:
             // keys must not follow it to the user's screen.
@@ -1249,7 +1324,45 @@ impl Worker {
             self.wake_panel(target);
         }
         self.focus_waking(target.target, wake);
+        // Without the wake, as for `keys_target`, nothing goes out yet.
+        if wake && !self.keys_reach(target.target) {
+            return None;
+        }
         Some(held)
+    }
+
+    /// Whether keys posted to `target`'s app now stay on the Agent
+    /// Displays. The app sends them to its focused window, which may be
+    /// the user's in an app they use too: the focus record alone doesn't
+    /// take key focus from another window of an app in the background, and
+    /// the wake click may not have found a spot (#120). AppKit may take a
+    /// moment to report the click's change. Notes why when they don't.
+    fn keys_reach(&mut self, target: WindowTarget) -> bool {
+        let (mut reach, mut windows) = key_window_now(target, 5);
+        // In the background the app makes a window its key window through
+        // accessibility, as for its own main window, without coming to the
+        // front; the window is on an Agent Display. Never in the user's
+        // front app, where it would take their keys.
+        if !reach.safe() && !is_front(target.pid) && super::ax::make_main(target) {
+            log::debug!("input: made {target:?} main through accessibility");
+            (reach, windows) = key_window_now(target, 3);
+        }
+        let KeyWindow::Elsewhere(focused) = reach else {
+            return true;
+        };
+        log::warn!(
+            "input: keys for {target:?} refused: its app's focused window {focused:?} is off the Agent Displays"
+        );
+        let window = focused.and_then(|id| windows.iter().find(|w| w.target.window_id == id));
+        self.refused = Some(Refused {
+            app: windows
+                .first()
+                .map(|w| w.app.clone())
+                .or_else(|| super::windows::find(target.window_id).map(|w| w.app))
+                .unwrap_or_else(|| "the app".into()),
+            window: window.map(|w| w.title.clone()),
+        });
+        false
     }
 
     /// The window on the display keys go to: the one last focused, or a

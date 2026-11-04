@@ -2,6 +2,7 @@
 //! relative to the display's top-left corner, the same space as screenshots.
 
 use super::server::{ControlError, Reply};
+use super::shared_app::{self, Beside};
 use crate::core::Core;
 use crate::keychord::KeyChord;
 use crate::mac::devtools::{self, Route};
@@ -16,6 +17,7 @@ use crate::model::{
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use agent_screen_model::input_queue::Action;
+use agent_screen_model::shared_app::Front;
 use base64::Engine;
 use futures::FutureExt;
 use gpui::{AsyncApp, Entity};
@@ -341,10 +343,28 @@ async fn handle_one(
                     ))
                 })?;
             let modifiers = modifiers(&p)?;
+            let count = p.int("count").unwrap_or(1);
+            // A window of the user's front app, beside the window they
+            // work in: a posted click would make it key and take their
+            // typing (#110).
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await
+                && let (Front::OtherFocused, Some(focused)) = shared_app::front(target, cx).await
+            {
+                // Keys go to this window from now on, as after a click.
+                // The app is in front, so this sends no focus record.
+                show_pointer(&core, id, point, true, cx).focus(target).await;
+                let beside = Beside { target, focused };
+                let plain = modifiers == Default::default();
+                let left = button == Button::Left;
+                return shared_app::click(id, point, beside, left, count, !plain, cx)
+                    .await
+                    .and_then(reply);
+            }
             let forwarder = show_pointer(&core, id, point, true, cx);
-            let hit = forwarder
-                .click(point, button, p.int("count").unwrap_or(1), modifiers)
-                .await;
+            let hit = forwarder.click(point, button, count, modifiers).await;
+            if let Some(window) = hit {
+                shared_app::note_click(id, window, point);
+            }
             match hit {
                 Some(window) => Ok(json!({ "windowId": window.window_id })),
                 None => Err(ControlError::not_found(format!(
@@ -647,24 +667,32 @@ async fn handle_one(
             let bounds = cg::display_bounds(id);
             let chars: Vec<char> = crate::mac::input::typed_text(&text).chars().collect();
             let total = chars.len();
+            let partial = |done: usize, e: ControlError| match done {
+                0 => e,
+                _ => ControlError::failed(format!(
+                    "typed {done} of {total} characters, then stopped: {} If you retry, type only the rest, or replace the whole field with set_value.",
+                    e.message
+                )),
+            };
             let typed = async {
                 let mut done = 0;
                 // In runs of 20, about 100 ms each, so the user switching to
-                // the app mid-way stops the rest.
-                for run in chars.chunks(20) {
-                    if let Err(e) = keys_allowed(&forwarder, bounds, cx).await {
-                        return Err(match done {
-                            0 => e,
-                            _ => ControlError::failed(format!(
-                                "typed {done} of {total} characters, then stopped: {} If you retry, type only the rest, or replace the whole field with set_value.",
-                                e.message
-                            )),
-                        });
+                // the app mid-way stops the rest; the app coming to the
+                // front stops a run at the next key.
+                while done < total {
+                    let gate = keys_gate(&forwarder, bounds, cx)
+                        .await
+                        .map_err(|e| partial(done, e))?;
+                    if let Gate::Beside(beside) = gate {
+                        let rest: String = chars[done..].iter().collect();
+                        return shared_app::type_text(id, beside, &rest, done, cx).await;
                     }
-                    match forwarder.type_text(run.iter().collect(), bounds).await {
-                        Sent::Nowhere => return Err(no_keyboard_target()),
+                    let run: String = chars[done..].iter().take(20).collect();
+                    let length = run.chars().count();
+                    match forwarder.type_text(run, bounds).await {
+                        Sent::Nowhere => return Err(partial(done, keys_refused(&forwarder, id).await)),
                         Sent::Dropped(shown) => {
-                            let typed = done + run.len();
+                            let typed = done + length;
                             let shown: String = shown.chars().take(300).collect();
                             return Err(ControlError::failed(format!(
                                 "sent {typed} of {total} characters, but the field holds {shown:?}, without some of them: the app dropped keys that came too fast, or changed the text. Typing stopped there. Select the field's text and type it again in shorter calls, a word or a few characters each, then check the field."
@@ -676,8 +704,13 @@ async fn handle_one(
                                 "the user took over display {id} after {typed} of {total} characters. Call wait_for_control, then take a screenshot before you type the rest."
                             )));
                         }
-                        _ => done += run.len(),
+                        Sent::Fronted(typed) => done += typed,
+                        _ => done += length,
                     }
+                }
+                // Return and Tab move on from what the last click picked.
+                if chars.iter().any(|c| matches!(c, '\n' | '\r' | '\t')) {
+                    shared_app::forget(id);
                 }
                 Ok(json!({}))
             }
@@ -699,21 +732,38 @@ async fn handle_one(
             let repeat = p.int("repeat").unwrap_or(1);
             let bounds = cg::display_bounds(id);
             let total = chords.len();
+            let names: Vec<&str> = keys.split_whitespace().collect();
+            let partial = |pressed: usize, e: ControlError| match pressed {
+                0 => e,
+                _ => ControlError::failed(format!(
+                    "pressed {pressed} of {total} keys, then stopped: {} If you retry, press only the rest.",
+                    e.message
+                )),
+            };
             let pressed = async {
+                let mut notes = Vec::new();
                 for (pressed, chord) in chords.into_iter().enumerate() {
                     if forwarder.agent_stopped() {
                         return Err(ControlError::takeover(format!(
                             "the user took over display {id} after {pressed} of {total} keys. Call wait_for_control, then take a screenshot before you press the rest."
                         )));
                     }
-                    if let Err(e) = keys_allowed(&forwarder, bounds, cx).await {
-                        return Err(match pressed {
-                            0 => e,
-                            _ => ControlError::failed(format!(
-                                "pressed {pressed} of {total} keys, then stopped: {} If you retry, press only the rest.",
-                                e.message
-                            )),
-                        });
+                    let gate = keys_gate(&forwarder, bounds, cx)
+                        .await
+                        .map_err(|e| partial(pressed, e))?;
+                    let name = names.get(pressed).copied().unwrap_or("key");
+                    if let Gate::Beside(beside) = gate {
+                        if repeat > 1 {
+                            return Err(partial(
+                                pressed,
+                                shared_app::refusal(beside, &format!("{name} with repeat")),
+                            ));
+                        }
+                        let note = shared_app::key(id, beside, chord, name, cx)
+                            .await
+                            .map_err(|e| partial(pressed, e))?;
+                        notes.push(note);
+                        continue;
                     }
                     // Select All needs a first responder, which an app in the
                     // background lacks; set the selection through accessibility.
@@ -726,11 +776,34 @@ async fn handle_one(
                     {
                         continue;
                     }
-                    if !forwarder.press(chord, repeat, bounds).await {
-                        return Err(no_keyboard_target());
+                    // A posted key may move focus on from what the last
+                    // click picked, as Tab does.
+                    shared_app::forget(id);
+                    match forwarder.press(chord, repeat, bounds).await {
+                        None => return Err(partial(pressed, keys_refused(&forwarder, id).await)),
+                        // The app came to the front partway through.
+                        Some(sent) if sent < repeat.max(1) => {
+                            let why = match keys_gate(&forwarder, bounds, cx).await {
+                                Ok(Gate::Beside(beside)) => {
+                                    shared_app::refusal(beside, "the rest").message
+                                }
+                                Err(e) => e.message,
+                                Ok(Gate::Post) => "its app came to the front.".into(),
+                            };
+                            return Err(partial(
+                                pressed,
+                                ControlError::failed(format!(
+                                    "{name} went out {sent} of {repeat} times, then stopped: {why}"
+                                )),
+                            ));
+                        }
+                        Some(_) => {}
                     }
                 }
-                Ok(json!({}))
+                Ok(match notes.is_empty() {
+                    true => json!({}),
+                    false => json!({ "route": "accessibility", "note": notes.join(" ") }),
+                })
             }
             .await;
             forwarder.keys_done().await;
@@ -751,8 +824,9 @@ async fn handle_one(
                 return Err(e);
             }
             let Some(pressed) = forwarder.chord(chord, true, within).await else {
+                let e = keys_refused(&forwarder, id).await;
                 forwarder.keys_done().await;
-                return Err(no_keyboard_target());
+                return Err(e);
             };
             // Let go at once if the user takes over: their keys would come
             // out with the agent's modifier held.
@@ -3373,7 +3447,29 @@ async fn launch_now(
     let mut spawned = None;
     let opening = if piped {
         let (path, first) = (path.clone(), first.clone());
-        let mut arguments = start.open_arguments();
+        // A browser opens its windows on the display, never on the user's
+        // screen first (#123).
+        let browser = off(cx, {
+            let path = path.clone();
+            move || app::handles_web(&path)
+        })
+        .await;
+        // Started while a spare display is being made, it would lose
+        // that place: let the spare come first, up to 2 s.
+        for _ in 0..100 {
+            if !browser || !core.read_with(cx, |c, _| c.making_spare()) {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+        let mut arguments = if browser {
+            agent_screen_model::launch::browser_window_switches(bounds)
+        } else {
+            Vec::new()
+        };
+        arguments.extend(start.open_arguments());
         arguments.extend(first);
         let environment = start.environment.clone();
         let started = off(cx, move || {
@@ -4374,43 +4470,44 @@ fn in_shot(mut window: Value, scale: f64) -> Value {
     window
 }
 
-/// Keys posted to the app the user is in reach its key window, which is
-/// the user's, not the agent's.
+/// Where an agent's keys go: posted to the app, or, when it is the user's
+/// front app with their window focused, beside that window (#110).
+enum Gate {
+    Post,
+    Beside(Beside),
+}
+
+async fn keys_gate(
+    forwarder: &crate::mac::input::Forwarder,
+    within: Rect,
+    cx: &mut AsyncApp,
+) -> Result<Gate, ControlError> {
+    let Some(target) = forwarder.keys_target(within).await else {
+        return Err(no_keyboard_target());
+    };
+    match shared_app::front(target, cx).await {
+        // In front with the agent's window focused, as when an app it
+        // started activates itself, keys go to that window: fine.
+        (Front::No | Front::TargetFocused, _) => Ok(Gate::Post),
+        (Front::OtherFocused, Some(focused)) => Ok(Gate::Beside(Beside { target, focused })),
+        _ => {
+            let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
+            Err(shared_app::unknown_focus(&name))
+        }
+    }
+}
+
+/// Keys that go out only as posted events, as a held key or the input
+/// method's: refused beside the user's window.
 async fn keys_allowed(
     forwarder: &crate::mac::input::Forwarder,
     within: Rect,
     cx: &mut AsyncApp,
 ) -> Result<(), ControlError> {
-    let Some(target) = forwarder.keys_target(within).await else {
-        return Err(no_keyboard_target());
-    };
-    // In front with the agent's window focused, as when an app it started
-    // activates itself, keys go to that window: fine.
-    let pid = target.pid;
-    if crate::mac::input::front() != Some(pid) {
-        return Ok(());
+    match keys_gate(forwarder, within, cx).await? {
+        Gate::Post => Ok(()),
+        Gate::Beside(beside) => Err(shared_app::refusal(beside, "the keys")),
     }
-    let focused = cx
-        .background_executor()
-        .spawn(async move { ax::focused_window_id(pid) })
-        .await;
-    if focused != Some(target.window_id) {
-        let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
-        return Err(key_route_error(&name, focused.is_some()));
-    }
-    Ok(())
-}
-
-/// Explain routing evidence without claiming to have observed user activity.
-fn key_route_error(app: &str, focused_known: bool) -> ControlError {
-    let reason = if focused_known {
-        "its focused window is different from the agent's keyboard target"
-    } else {
-        "Accessibility could not verify its focused window"
-    };
-    ControlError::failed(format!(
-        "{app} is the foreground app, but {reason}, so posted keys could reach the user's window. User idleness does not make this routing safe. The pending keys were refused. Use act_on_element set_value or a supported press action, or ask the user to switch their foreground app before retrying. Agent Screen will not switch it for them."
-    ))
 }
 
 fn forwarder_stopped(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
@@ -4462,6 +4559,32 @@ async fn through_input_method(
         ))),
         Err(reason) => Err(ControlError::failed(reason)),
     }
+}
+
+/// Why keys found nowhere to go: their app's focused window was off the
+/// Agent Displays, so they were refused (#120), or no window on the
+/// display takes keys.
+async fn keys_refused(forwarder: &crate::mac::input::Forwarder, id: DisplayId) -> ControlError {
+    match forwarder.take_refused().await {
+        Some(refused) => refused_error(&refused, id),
+        None => no_keyboard_target(),
+    }
+}
+
+fn refused_error(refused: &crate::mac::input::Refused, id: DisplayId) -> ControlError {
+    let app = &refused.app;
+    let focused = match &refused.window {
+        Some(title) if !title.is_empty() => {
+            format!("{app}'s focused window, {title:?}, is not on an Agent Display")
+        }
+        Some(_) => format!("{app}'s focused window is untitled and not on an Agent Display"),
+        None => format!(
+            "Accessibility could not say which window of {app} has focus, and {app} has a window that is not on an Agent Display"
+        ),
+    };
+    ControlError::failed(format!(
+        "{focused}, so keys posted to {app} could reach the user's window instead of yours on display {id}. Agent Screen refused the keys before sending any, and won't bring {app} to the front to fix that. Use act_on_element insert_text or set_value on the field, or click inside your window once and retry."
+    ))
 }
 
 fn no_keyboard_target() -> ControlError {
@@ -5259,16 +5382,31 @@ mod frame_request_tests {
 }
 
 #[cfg(test)]
-mod keyboard_refusal_tests {
+mod key_window_refusal_tests {
+    use crate::mac::input::Refused;
+
     #[test]
-    fn refusal_distinguishes_routing_evidence_from_user_activity() {
-        let different = super::key_route_error("Dia", true).message;
-        assert!(different.contains("focused window is different"));
-        assert!(different.contains("User idleness does not make this routing safe"));
-        assert!(different.contains("ask the user to switch"));
-        assert!(!different.contains("user is working"));
-        let unknown = super::key_route_error("Dia", false).message;
-        assert!(unknown.contains("Accessibility could not verify"));
-        assert!(!unknown.contains("focused window is different"));
+    fn a_refusal_names_the_focused_window_and_what_to_do_instead() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: Some("Notes".into()),
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(
+            message.contains(r#"TextEdit's focused window, "Notes", is not on an Agent Display"#)
+        );
+        assert!(message.contains("refused the keys before sending any"));
+        assert!(message.contains("insert_text or set_value"));
+        assert!(message.contains("display 7"));
+    }
+
+    #[test]
+    fn a_refusal_says_when_accessibility_named_no_window() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: None,
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(message.contains("Accessibility could not say which window of TextEdit has focus"));
     }
 }

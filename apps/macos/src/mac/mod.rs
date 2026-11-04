@@ -25,6 +25,7 @@ pub mod playback;
 pub mod real_input;
 pub mod recording;
 pub mod screenshot;
+pub mod shared_app;
 pub mod update;
 pub mod viewer_input;
 pub mod windows;

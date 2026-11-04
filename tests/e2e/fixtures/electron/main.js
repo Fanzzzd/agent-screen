@@ -45,8 +45,75 @@ if (menuLog) {
 const idle = process.env.HARNESS_IDLE === "1";
 if (idle) app.whenReady().then(() => app.dock && app.dock.hide());
 
+// HARNESS_PAIR=1 (#110): two windows of one app, as a browser the user
+// and an agent both use. The agent's opens on HARNESS_DISPLAY without
+// activating the app; the user's opens on the main screen. When the app
+// first comes to the front, the user's window is key, as the user working
+// in it; macOS lets an app started in the background ask for the front
+// but not take it, so the test brings it forward by the pid the log
+// names. HARNESS_KEY_LOG (a file) gets a line per event: each window's
+// focus and blur, as AppKit's key window changes, and what each page saw
+// (pair.html).
+const pair = process.env.HARNESS_PAIR === "1";
+if (pair) {
+  const fs = require("fs");
+  const keyLog = process.env.HARNESS_KEY_LOG;
+  const note = (line) => keyLog && fs.appendFileSync(keyLog, `${Date.now()} ${line}\n`);
+  app.whenReady().then(() => {
+    const on = screen.getAllDisplays().find((d) => d.id === Number(process.env.HARNESS_DISPLAY));
+    const area = screen.getPrimaryDisplay().workArea;
+    const open = (side, bounds, fixed) => {
+      // The user's window has no zoom or full-screen button, which makes
+      // AeroSpace float it rather than tile your windows around it.
+      const frame = fixed
+        ? { resizable: false, maximizable: false, minimizable: false, fullscreenable: false }
+        : {};
+      const win = new BrowserWindow({ ...bounds, ...frame, title: `pair ${side}`, show: false });
+      win.on("focus", () => note(`win ${side} focus`));
+      win.on("blur", () => note(`win ${side} blur`));
+      // Electron 35 and later pass one event with the message; earlier
+      // ones pass it third.
+      win.webContents.on("console-message", (...args) => {
+        const message = typeof args[2] === "string" ? args[2] : args[0] && args[0].message;
+        if (typeof message === "string" && message.startsWith("pair ")) note(message);
+      });
+      win.loadFile("pair.html", { query: { side } });
+      return win;
+    };
+    const user = open("user", {
+      x: area.x + area.width - 460,
+      y: area.y + area.height - 300,
+      width: 440,
+      height: 280,
+    }, true);
+    const agent = open("agent", {
+      ...(on ? { x: on.bounds.x + 40, y: on.bounds.y + 40 } : {}),
+      width: 640,
+      height: 480,
+    });
+    // Once: posted input and focus records make AppKit call a background
+    // app active too, and the agent's window must keep key status then.
+    app.on("did-become-active", () => note("app active"));
+    app.once("did-become-active", () => user.focus());
+    app.on("did-resign-active", () => note("app inactive"));
+    let shown = 0;
+    const ready = () => {
+      if (++shown < 2) return;
+      setTimeout(() => note(`ready ${process.pid}`), 500);
+    };
+    agent.once("ready-to-show", () => {
+      agent.showInactive();
+      ready();
+    });
+    user.once("ready-to-show", () => {
+      user.show();
+      ready();
+    });
+  });
+}
+
 app.whenReady().then(() => {
-  if (idle) return;
+  if (idle || pair) return;
   // HARNESS_SIZE ("1700x1100") makes a window larger than the display (#19).
   const [width, height] = (process.env.HARNESS_SIZE || "640x480").split("x").map(Number);
   // HARNESS_DISPLAY (a CG display id) opens the window on that display, as

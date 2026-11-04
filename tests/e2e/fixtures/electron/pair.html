@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <!-- One of the two windows of HARNESS_PAIR (#110): the user's on the
+         main screen, the agent's on the Agent Display. Every event a test
+         asks about goes to the console as "pair SIDE EVENT ...", which
+         main.js writes to HARNESS_KEY_LOG. -->
+    <style>
+      html, body { margin: 0; height: 100%; background: #ffffff; font: 16px -apple-system; }
+      form { margin: 60px 20px 20px; }
+      input { width: 300px; height: 32px; font-size: 16px; box-sizing: border-box; }
+      button { margin: 20px; width: 160px; height: 40px; font-size: 16px; }
+      #count { margin: 20px; }
+    </style>
+  </head>
+  <body>
+    <form id="form">
+      <input id="field" autocomplete="off" />
+    </form>
+    <button id="press">press</button>
+    <div id="count">0</div>
+    <script>
+      const side = new URLSearchParams(location.search).get("side") || "agent";
+      document.title = `pair ${side}`;
+      const field = document.getElementById("field");
+      field.setAttribute("aria-label", `${side} field`);
+      const press = document.getElementById("press");
+      press.setAttribute("aria-label", `${side} press`);
+      const log = (...parts) => console.log(["pair", side, ...parts].join(" "));
+      // JSON, so a space or an empty value reads back as typed.
+      const value = () => JSON.stringify(field.value);
+      field.addEventListener("keydown", (e) => log("keydown", JSON.stringify(e.key)));
+      field.addEventListener("input", () => log("input", value()));
+      field.addEventListener("focus", () => log("focus"));
+      field.addEventListener("blur", () => log("blur"));
+      document.getElementById("form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        log("submit", value());
+      });
+      field.addEventListener("keyup", (e) => {
+        if (e.key === "Escape") log("escape");
+      });
+      let clicks = 0;
+      press.addEventListener("click", () => {
+        clicks++;
+        document.getElementById("count").textContent = String(clicks);
+        log("click", clicks);
+      });
+      addEventListener("keydown", (e) => {
+        if (e.target !== field) log("keydown-page", JSON.stringify(e.key));
+      });
+      addEventListener("focus", () => log("page-focus", document.hasFocus()));
+      addEventListener("blur", () => log("page-blur", document.hasFocus()));
+      log("loaded", document.hasFocus());
+    </script>
+  </body>
+</html>

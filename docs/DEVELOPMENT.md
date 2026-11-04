@@ -217,6 +217,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the seri
 AGENTSCREEN_INSTANCE=e2e cargo e2e arrangement    # new displays park in a grid off the top-right corner of your screens, beside each other while the row fits; nothing already there moves; 2 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerpicture  # new displays get unit numbers of their own, and the Viewer shows each
 AGENTSCREEN_INSTANCE=e2e cargo e2e shared      # an app you and an agent both use: its keys reach only its window
+AGENTSCREEN_INSTANCE=e2e cargo e2e sharedbrowser # one Electron app, two windows (#110): its user window on your screen, key and in front, its agent window on the display; a click, type, Return, a button and Tab in the agent's window reach its page through accessibility or fail naming the user's window, which never loses key focus or sees an event; with your front app back, posted keys reach the agent's window as before; needs target/e2e/Electron.app; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e openpanel   # a file Open panel: keys, clicks, window state, picking a file by path
 AGENTSCREEN_INSTANCE=e2e cargo e2e browsers    # Safari: the first click, URLs in a running browser, a select menu
 AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e settings  # the Settings window opens, fits a 13-inch screen and closes with Done; shows on your screen
@@ -238,6 +239,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e displaychange  # a display comes and goes whi
 AGENTSCREEN_INSTANCE=e2e cargo e2e chrome      # Chrome on a throwaway profile while Firefox starts on another display: a click focuses a page's field, typing lands in it, a button runs the page's script
 AGENTSCREEN_INSTANCE=e2e cargo e2e menuclosed  # a select menu in Chrome on a throwaway profile: typing into the open menu chooses its item; once the menu has closed, as at your click or key anywhere, the next click or key fails and says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e typedrops   # typing into address fields in Chrome on a throwaway profile: a busy page and a controlled field get every character; a page that drops fast keys makes the type action fail and say what the field holds; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e coldflash   # Chrome started by launch_app RUNS times (20) on one display, each on a new throwaway profile: its first window never shows on your screen, which the run's screen watch checks at every frame (#123); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e firstclick  # a page opened in a running Chrome by launch_app runs its button's script on one click (#79); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e signupcontrols # a Google-style signup page in Chrome: a custom combobox's option chosen by press, click and arrow keys, and radios by press and click (#79); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e scrolljump  # 3, 60, 200 and 800 wheel clicks move a long virtualized list in Chrome 40 px each, not one page at most (#104); 1 display
