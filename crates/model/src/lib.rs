@@ -15,6 +15,7 @@ pub mod launch;
 pub mod model;
 pub mod numbers;
 pub mod recording_playback;
+pub mod shared_app;
 pub mod tree;
 pub mod typing;
 

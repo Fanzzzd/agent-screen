@@ -330,6 +330,7 @@ const HANDS_OFF: &[&str] = &[
     "secondwindow",
     "settings",
     "shared",
+    "sharedbrowser",
     "sound",
     "statusicon",
     "timing",

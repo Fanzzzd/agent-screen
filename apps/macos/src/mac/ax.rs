@@ -266,6 +266,14 @@ pub fn window_element(target: WindowTarget) -> Option<Element> {
 /// it and takes AXEnhancedUserInterface, as VoiceOver sets it. The page
 /// tree comes up to 2 s later: the first time per process, wait for it,
 /// at most 3 s, so the first read isn't the toolbar alone.
+/// Have a Chromium or Electron app publish its web pages' elements, once,
+/// so a hit test finds them.
+pub fn ensure_web_tree(target: WindowTarget) {
+    if let Some(window) = window_element(target) {
+        ask_for_web_tree(target.pid, &window);
+    }
+}
+
 fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
     static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
     {
@@ -451,6 +459,49 @@ fn sheet_element(target: WindowTarget) -> Option<Element> {
         }
     }
     None
+}
+
+/// The element at a global point of app `pid`, as a click there would hit
+/// it: the deepest one accessibility knows.
+pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(pid).copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let element = unsafe { CFRetained::from_raw(raw) };
+    (error == AXError::Success).then_some(element)
+}
+
+/// The actions an element takes, such as AXPress and AXConfirm.
+pub fn actions(element: &AXUIElement) -> Vec<String> {
+    let mut raw: *const CFArray = std::ptr::null();
+    let error = unsafe { element.copy_action_names(NonNull::from(&mut raw)) };
+    let Some(raw) = NonNull::new(raw as *mut CFArray) else {
+        return Vec::new();
+    };
+    let array = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return Vec::new();
+    }
+    let array: &CFArray<CFType> =
+        unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
+    array
+        .to_vec()
+        .into_iter()
+        .filter_map(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+        .collect()
+}
+
+/// The window an element is in.
+pub fn window_of(element: &AXUIElement) -> Option<u32> {
+    window_id(&*element_attribute(element, "AXWindow")?)
+}
+
+pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {
+    let range = objc2_core_foundation::CFRange::new(start as isize, length as isize);
+    ax_value(AXValueType::CFRange, &range)
+        .is_some_and(|value| set_attribute(element, "AXSelectedTextRange", &value))
 }
 
 /// Press the menu item at a global point of an open pop-up menu, as a
