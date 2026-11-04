@@ -153,4 +153,12 @@ mod tests {
         assert!(!on_display(Rect::new(3700.0, 24.0, 200.0, 300.0), display));
         assert!(!on_display(Rect::new(3240.0, 24.0, 0.0, 0.0), display));
     }
+
+    #[test]
+    fn a_closed_electron_submenu_is_not_open_on_the_display() {
+        // What a closed submenu of an Electron app reports: 10×10 at the
+        // main screen's bottom left (#39).
+        let display = Rect::new(8288.0, -700.0, 1100.0, 700.0);
+        assert!(!on_display(Rect::new(0.0, 1117.0, 10.0, 10.0), display));
+    }
 }
