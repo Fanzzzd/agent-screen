@@ -692,9 +692,9 @@ thread_local! {
 const EDGE: f64 = 2.0;
 
 /// A thin red edge around each of the user's screens while an Input Grant
-/// lets agents use the pointer, or none. It follows the screen's shape:
-/// rounded corners on a built-in display, and around its camera notch.
-/// Clicks pass through. Returns whether the indicator shows, as real input
+/// lets agents use the pointer, or none. It follows the screen's glass
+/// (`screen_edge`): a MacBook Pro's rounded top corners and its camera
+/// notch. Clicks pass through. Returns whether the indicator shows, as real input
 /// may run only while it does. The Input Bar says what the edge means.
 pub fn show_borders(on: bool) -> bool {
     use objc2_app_kit::{NSBackingStoreType, NSView, NSWindowStyleMask};
@@ -746,12 +746,19 @@ pub fn show_borders(on: bool) -> bool {
             let Some(layer) = view.layer() else {
                 continue;
             };
+            // The outline stroked twice as wide and clipped to itself: the
+            // inner half shows, EDGE wide along every curve, its outer side
+            // on the glass's edge.
+            let outline = edge_path(shape);
             let edge = CAShapeLayer::new();
-            edge.setPath(Some(&edge_path(shape)));
+            edge.setPath(Some(&outline));
             edge.setFillColor(None);
             edge.setStrokeColor(Some(&NSColor::systemRedColor().CGColor()));
-            edge.setLineWidth(EDGE);
-            edge.setLineJoin(unsafe { objc2_quartz_core::kCALineJoinRound });
+            edge.setLineWidth(2.0 * EDGE);
+            let glass = CAShapeLayer::new();
+            glass.setPath(Some(&outline));
+            // A fresh layer with no superlayer, as a mask must be.
+            unsafe { edge.setMask(Some(&glass)) };
             layer.addSublayer(&edge);
             window.setContentView(Some(&view));
             window.orderFrontRegardless();
@@ -761,10 +768,10 @@ pub fn show_borders(on: bool) -> bool {
     })
 }
 
-/// Each screen with its frame and shape: a built-in display has rounded
-/// corners, and its camera notch where NSScreen reports one.
+/// Each screen with its frame and shape: its camera notch where NSScreen
+/// reports one, and a built-in panel's measured rounding.
 fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)> {
-    use agent_screen_model::screen_edge::{BUILTIN_CORNER, Notch, Screen};
+    use agent_screen_model::screen_edge::{Bezel, Notch, Screen};
     let Some(mtm) = MainThreadMarker::new() else {
         return Vec::new();
     };
@@ -790,36 +797,62 @@ fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)
             );
             let depth = screen.safeAreaInsets().top;
             let notch = (builtin && depth > 0.0 && left.size.width > 0.0 && right.size.width > 0.0)
-                .then_some(Notch {
-                    left: left.origin.x + left.size.width - frame.origin.x,
-                    right: right.origin.x - frame.origin.x,
-                    depth,
+                .then(|| {
+                    Notch::from_areas(
+                        frame.size.width,
+                        left.origin.x + left.size.width - frame.origin.x,
+                        right.origin.x - frame.origin.x,
+                        depth,
+                    )
                 });
+            let panel = builtin
+                .then(|| super::display::native_pixels(id))
+                .flatten();
+            let bezel = panel.map_or(Bezel::SQUARE, |p| Bezel::of_builtin(p, notch.is_some()));
             let shape = Screen {
                 width: frame.size.width,
                 height: frame.size.height,
-                corner: if builtin { BUILTIN_CORNER } else { 0.0 },
+                scale: panel.map_or(screen.backingScaleFactor(), |(w, _)| {
+                    f64::from(w) / frame.size.width
+                }),
+                bezel,
                 notch,
             };
+            if builtin {
+                log::info!(
+                    "input grant edge: display {id}, panel {panel:?}, {}x{} pt, {bezel:?}, {notch:?}",
+                    frame.size.width,
+                    frame.size.height
+                );
+            }
             Some((id, frame, shape))
         })
         .collect()
 }
 
-/// The edge's outline in the view's coordinates, y up.
+/// The screen's glass outline in the view's coordinates, y up.
 fn edge_path(
     shape: agent_screen_model::screen_edge::Screen,
 ) -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGMutablePath> {
+    use agent_screen_model::screen_edge::{Segment, outline};
     use objc2_core_graphics::CGMutablePath;
     let path = CGMutablePath::new();
-    let points = agent_screen_model::screen_edge::outline(shape, EDGE);
-    for (n, (x, y)) in points.into_iter().enumerate() {
-        let y = shape.height - y;
-        unsafe {
-            if n == 0 {
-                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), x, y);
-            } else {
-                CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), x, y);
+    let up = |(x, y): (f64, f64)| (x, shape.height - y);
+    let o = outline(shape);
+    let none = std::ptr::null();
+    let (x, y) = up(o.start);
+    unsafe { CGMutablePath::move_to_point(Some(&path), none, x, y) };
+    for segment in o.segments {
+        match segment {
+            Segment::Line(p) => {
+                let (x, y) = up(p);
+                unsafe { CGMutablePath::add_line_to_point(Some(&path), none, x, y) };
+            }
+            Segment::Curve(a, b, p) => {
+                let ((ax, ay), (bx, by), (x, y)) = (up(a), up(b), up(p));
+                unsafe {
+                    CGMutablePath::add_curve_to_point(Some(&path), none, ax, ay, bx, by, x, y)
+                };
             }
         }
     }

@@ -1,21 +1,101 @@
-//! The Input Grant's red edge around a screen, as a closed outline that
-//! follows the screen's shape: square on an external display, rounded on a
-//! built-in one, and around the camera notch where there is one. Points
-//! are in points from the screen's top-left corner, y down. No OS calls.
+//! The Input Grant's red edge around a screen: the outline of the screen's
+//! visible glass, square on an external display and on built-in panels
+//! nobody has measured, and the measured shape on a notched MacBook Pro:
+//! rounded top corners, square bottom corners, and a path around the
+//! camera notch. Points are in points from the screen's top-left corner,
+//! y down. No OS calls.
+//!
+//! The app strokes the outline at twice the edge's width and clips the
+//! stroke to the outline, so the visible line lies wholly on the glass, its
+//! outer side on the glass's edge, and keeps its width through every curve.
+//! An inset path can't do that exactly: a curve offset by half a stroke is
+//! no longer a cubic Bézier.
+//!
+//! macOS has no API for the glass's shape: NSScreen answers no corner
+//! selector, and neither IORegistry nor SkyLight names one. The rounding
+//! comes from fitting Apple's MacBook Pro bezel art (Apple Design
+//! Resources), whose screen opening is the glass, pixel for pixel.
 
 pub type Point = (f64, f64);
 
-/// The corner radius of a built-in MacBook display, in points. macOS has
-/// no API for it (NSScreen answers no corner selector, and neither
-/// IORegistry nor SkyLight names one), so this is an estimate a little
-/// above the panel's rounding: an edge drawn tighter than the glass is cut
-/// off at the corners, one drawn a little wider stays whole.
-pub const BUILTIN_CORNER: f64 = 12.0;
+/// How far a continuous corner reaches along each of its edges, in radii.
+pub const CONTINUOUS_EXTENT: f64 = 1.528665;
 
-/// Where the edge bends from the top of the screen down into the notch.
-pub const NOTCH_FLARE: f64 = 4.0;
-/// The rounding of the notch's lower corners.
-pub const NOTCH_CORNER: f64 = 8.0;
+/// Apple's continuous ("squircle") corner, the curve of CALayer's
+/// `cornerCurve = .continuous` and SwiftUI's `RoundedRectangle(style:
+/// .continuous)`, as the three cubic Béziers SwiftUI's path is made of, in
+/// radii. A point is (u, v): u along the edge the corner comes from, v
+/// along the edge it goes to, both from the corner's vertex. It starts at
+/// (CONTINUOUS_EXTENT, 0) and ends at (0, CONTINUOUS_EXTENT).
+const CONTINUOUS: [[Point; 3]; 3] = [
+    [(1.088490, 0.0), (0.868407, 0.0), (0.631494, 0.074911)],
+    [
+        (0.372824, 0.169060),
+        (0.169060, 0.372824),
+        (0.074911, 0.631494),
+    ],
+    [(0.0, 0.868407), (0.0, 1.088490), (0.0, CONTINUOUS_EXTENT)],
+];
+
+/// A built-in panel's rounding, as continuous-corner radii in the panel's
+/// own pixels, so it holds in every display mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bezel {
+    /// The glass's top corners.
+    pub top: f64,
+    /// The glass's bottom corners.
+    pub bottom: f64,
+    /// The notch's lower corners.
+    pub notch_corner: f64,
+    /// Where the top edge turns down into the notch.
+    pub notch_fillet: f64,
+}
+
+impl Bezel {
+    /// No rounding: an external display, and the fallback for a built-in
+    /// panel without measured data. A guess larger than the real rounding
+    /// would draw the line off the glass's edge where the panel is square;
+    /// square corners on a rounded panel only lose the corner's tip under
+    /// the bezel.
+    pub const SQUARE: Bezel = Bezel {
+        top: 0.0,
+        bottom: 0.0,
+        notch_corner: 0.0,
+        notch_fillet: 0.0,
+    };
+
+    /// The 16-inch MacBook Pro (M1 Pro and later, 3456 × 2234 panel),
+    /// fitted to its bezel art.
+    pub const MACBOOK_PRO_16: Bezel = Bezel {
+        top: 39.75,
+        bottom: 0.0,
+        notch_corner: 20.5,
+        notch_fillet: 9.75,
+    };
+
+    /// The 14-inch MacBook Pro (M1 Pro and later, 3024 × 1964 panel),
+    /// fitted to its bezel art.
+    pub const MACBOOK_PRO_14: Bezel = Bezel {
+        top: 38.75,
+        bottom: 0.0,
+        notch_corner: 20.5,
+        notch_fillet: 9.25,
+    };
+
+    /// The rounding of a built-in panel with `pixels` native pixels, wide
+    /// and tall, on a screen that reports a notch or not. Keyed on the
+    /// panel, which is what has the shape, rather than on `hw.model`, which
+    /// changes every generation while the panels stay. A notched MacBook
+    /// Pro in a mode that ends below the notch reports none: the screen's
+    /// top then runs below the rounded corners, so it is square too.
+    pub fn of_builtin(pixels: (u32, u32), notch: bool) -> Bezel {
+        match (pixels, notch) {
+            ((3456, 2234), true) => Bezel::MACBOOK_PRO_16,
+            ((3024, 1964), true) => Bezel::MACBOOK_PRO_14,
+            _ => Bezel::SQUARE,
+        }
+    }
+}
 
 /// The camera housing, from the screen's top-left corner: its left and
 /// right sides and how far down it reaches.
@@ -26,85 +106,162 @@ pub struct Notch {
     pub depth: f64,
 }
 
+impl Notch {
+    /// The notch between the screen's top-left area, which ends at
+    /// `left`, and its top-right area, which starts at `right`, on a
+    /// screen `width` points wide. NSScreen reports the areas in whole
+    /// points, so a 185-point notch on a 1728-point screen ends the left
+    /// area at 771 and starts the right one at 956, half a point left of
+    /// the centre, while the bezel art of both MacBook Pros has the
+    /// housing centred on the panel to a hundredth of a pixel. A notch
+    /// within a point of the centre is the centred housing, as wide as
+    /// reported.
+    pub fn from_areas(width: f64, left: f64, right: f64, depth: f64) -> Notch {
+        let half = (right - left) / 2.0;
+        let centre = width / 2.0;
+        if ((left + right) / 2.0 - centre).abs() <= 1.0 {
+            Notch {
+                left: centre - half,
+                right: centre + half,
+                depth,
+            }
+        } else {
+            Notch { left, right, depth }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
     pub width: f64,
     pub height: f64,
-    /// 0 for square corners.
-    pub corner: f64,
+    /// Panel pixels per point: the panel's native pixel width over the
+    /// screen's width in points. 2 in a built-in display's default mode,
+    /// 1.92 at 1800 points on a 3456-pixel panel.
+    pub scale: f64,
+    pub bezel: Bezel,
     pub notch: Option<Notch>,
 }
 
-impl Screen {
-    /// A notch only counts when it lies within the top edge, clear of the
-    /// rounded corners.
-    fn notch(&self) -> Option<Notch> {
-        self.notch.filter(|n| {
-            n.depth > 0.0
-                && n.left > self.corner + NOTCH_FLARE
-                && n.right < self.width - self.corner - NOTCH_FLARE
-                && n.left < n.right
-                && n.depth < self.height / 2.0
-        })
+/// One piece of an outline, from where the last one ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Segment {
+    Line(Point),
+    /// A cubic Bézier: two control points, then its end.
+    Curve(Point, Point, Point),
+}
+
+/// A closed outline: `start`, then each segment in turn, the last ending
+/// at `start`. Clockwise on screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outline {
+    pub start: Point,
+    pub segments: Vec<Segment>,
+}
+
+impl Outline {
+    /// Every point that defines the outline: its start, and each segment's
+    /// control points and end. Each curve lies within the hull of its
+    /// points, so a region holding them all holds the outline.
+    pub fn points(&self) -> impl Iterator<Item = Point> + '_ {
+        std::iter::once(self.start).chain(self.segments.iter().flat_map(|s| match *s {
+            Segment::Line(p) => vec![p],
+            Segment::Curve(a, b, p) => vec![a, b, p],
+        }))
     }
 }
 
-/// Segments per quarter circle: about 1.5 pt each at the built-in radius.
-const STEPS: usize = 8;
-
-/// The centre line of a stroke `width` wide that lies wholly on the
-/// visible screen: inset from its edges and outset from its notch by half
-/// the stroke. Clockwise from the top-left corner's end; closed, the last
-/// point joining the first.
-pub fn outline(screen: Screen, width: f64) -> Vec<Point> {
-    let i = width / 2.0;
+/// The edge of `screen`'s visible glass. Stroke it at twice the edge's
+/// width, clipped to itself.
+pub fn outline(screen: Screen) -> Outline {
     let (w, h) = (screen.width, screen.height);
-    // Concentric with the glass's corner.
-    let r = (screen.corner - i).max(0.0);
-    let mut path = Vec::new();
-    path.push((i + r, i));
-    if let Some(n) = screen.notch() {
-        let (left, right, depth) = (n.left - i, n.right + i, n.depth + i);
-        let flare = NOTCH_FLARE;
-        let lower = NOTCH_CORNER
-            .min((right - left) / 2.0)
-            .min(depth - i - flare);
-        arc(&mut path, (left - flare, i + flare), flare, -90.0, 0.0);
-        arc(&mut path, (left + lower, depth - lower), lower, 180.0, 90.0);
-        arc(&mut path, (right - lower, depth - lower), lower, 90.0, 0.0);
-        arc(&mut path, (right + flare, i + flare), flare, 180.0, 270.0);
+    let reach = |px: f64| px / screen.scale * CONTINUOUS_EXTENT;
+    // A corner reaches at most half the shorter side.
+    let fit = |px: f64| reach(px).min(w.min(h) / 2.0) / CONTINUOUS_EXTENT;
+    let (top, bottom) = (fit(screen.bezel.top), fit(screen.bezel.bottom));
+    let top_reach = top * CONTINUOUS_EXTENT;
+    let mut path = Path::new((top_reach, 0.0));
+    if let Some((n, fillet, lower)) = notch(&screen, top_reach, &reach) {
+        path.corner((n.left, 0.0), (-1.0, 0.0), (0.0, 1.0), fillet);
+        path.corner((n.left, n.depth), (0.0, -1.0), (1.0, 0.0), lower);
+        path.corner((n.right, n.depth), (-1.0, 0.0), (0.0, -1.0), lower);
+        path.corner((n.right, 0.0), (0.0, 1.0), (1.0, 0.0), fillet);
     }
-    arc(&mut path, (w - i - r, i + r), r, -90.0, 0.0);
-    arc(&mut path, (w - i - r, h - i - r), r, 0.0, 90.0);
-    arc(&mut path, (i + r, h - i - r), r, 90.0, 180.0);
-    arc(&mut path, (i + r, i + r), r, 180.0, 270.0);
-    // The last corner ends where the outline began.
-    if path.len() > 1 && path.first() == path.last() {
-        path.pop();
-    }
-    path
+    path.corner((w, 0.0), (-1.0, 0.0), (0.0, 1.0), top);
+    path.corner((w, h), (0.0, -1.0), (-1.0, 0.0), bottom);
+    path.corner((0.0, h), (1.0, 0.0), (0.0, -1.0), bottom);
+    path.corner((0.0, 0.0), (0.0, 1.0), (1.0, 0.0), top);
+    path.outline
 }
 
-/// A circular arc from angle `from` to `to`, in degrees, y down: 0 points
-/// right, 90 down. A zero radius is the corner point alone.
-fn arc(path: &mut Vec<Point>, center: Point, radius: f64, from: f64, to: f64) {
-    let steps = if radius > 0.0 { STEPS } else { 0 };
-    for step in 0..=steps {
-        let t = if steps == 0 {
-            0.0
-        } else {
-            step as f64 / steps as f64
+/// The notch with its fillet and lower-corner radii in points, when it
+/// lies within the top edge, clear of the top corners. Radii that don't
+/// fit the housing shrink together.
+fn notch(screen: &Screen, top_reach: f64, reach: &dyn Fn(f64) -> f64) -> Option<(Notch, f64, f64)> {
+    let n = screen.notch?;
+    let (fillet, lower) = (
+        reach(screen.bezel.notch_fillet),
+        reach(screen.bezel.notch_corner),
+    );
+    let fits = n.depth > 0.0
+        && n.left < n.right
+        && n.left - fillet >= top_reach
+        && n.right + fillet <= screen.width - top_reach
+        && n.depth < screen.height / 2.0;
+    if !fits {
+        return None;
+    }
+    let shrink = (n.depth / (fillet + lower)).min(1.0);
+    let lower = (lower * shrink).min((n.right - n.left) / 2.0);
+    Some((
+        n,
+        fillet * shrink / CONTINUOUS_EXTENT,
+        lower / CONTINUOUS_EXTENT,
+    ))
+}
+
+struct Path {
+    outline: Outline,
+    at: Point,
+}
+
+impl Path {
+    fn new(start: Point) -> Path {
+        Path {
+            outline: Outline {
+                start,
+                segments: Vec::new(),
+            },
+            at: start,
+        }
+    }
+
+    fn line(&mut self, p: Point) {
+        if (p.0 - self.at.0).abs() > 1e-9 || (p.1 - self.at.1).abs() > 1e-9 {
+            self.outline.segments.push(Segment::Line(p));
+            self.at = p;
+        }
+    }
+
+    /// A continuous corner of `radius` at `vertex`, coming in along the
+    /// edge that runs from the vertex towards `from`, and leaving along the
+    /// one towards `to`, both unit vectors. A zero radius is the vertex.
+    fn corner(&mut self, vertex: Point, from: Point, to: Point, radius: f64) {
+        let at = |(u, v): Point| {
+            (
+                vertex.0 + radius * (u * from.0 + v * to.0),
+                vertex.1 + radius * (u * from.1 + v * to.1),
+            )
         };
-        let angle = (from + (to - from) * t).to_radians();
-        let p = (
-            center.0 + radius * angle.cos(),
-            center.1 + radius * angle.sin(),
-        );
-        if path
-            .last()
-            .is_none_or(|q| (q.0 - p.0).abs() > 1e-9 || (q.1 - p.1).abs() > 1e-9)
-        {
-            path.push(p);
+        if radius <= 0.0 {
+            self.line(vertex);
+            return;
+        }
+        self.line(at((CONTINUOUS_EXTENT, 0.0)));
+        for [a, b, p] in CONTINUOUS {
+            let p = at(p);
+            self.outline.segments.push(Segment::Curve(at(a), at(b), p));
+            self.at = p;
         }
     }
 }
@@ -113,12 +270,14 @@ fn arc(path: &mut Vec<Point>, center: Point, radius: f64, from: f64, to: f64) {
 mod tests {
     use super::*;
 
+    /// This Mac's built-in display at its default 1728 × 1117 points, as
+    /// NSScreen reports its auxiliary areas: the left one ends at 771, the
+    /// right one starts at 956, with a 32 pt safe-area top.
     const MACBOOK: Screen = Screen {
         width: 1728.0,
         height: 1117.0,
-        corner: BUILTIN_CORNER,
-        // This Mac's NSScreen: auxiliary areas end at 771 and start at
-        // 956, with a 32 pt safe-area top.
+        scale: 2.0,
+        bezel: Bezel::MACBOOK_PRO_16,
         notch: Some(Notch {
             left: 771.0,
             right: 956.0,
@@ -126,29 +285,66 @@ mod tests {
         }),
     };
 
-    fn near(a: f64, b: f64) -> bool {
-        (a - b).abs() < 1e-6
+    fn near(a: Point, b: Point) -> bool {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    }
+
+    fn ends(o: &Outline) -> Vec<Point> {
+        o.segments
+            .iter()
+            .map(|s| match *s {
+                Segment::Line(p) | Segment::Curve(_, _, p) => p,
+            })
+            .collect()
+    }
+
+    /// Points along the outline, a few per curve.
+    fn walk(o: &Outline) -> Vec<Point> {
+        let mut at = o.start;
+        let mut out = vec![at];
+        for s in &o.segments {
+            match *s {
+                Segment::Line(p) => out.push(p),
+                Segment::Curve(a, b, p) => {
+                    for i in 1..=16 {
+                        let t = i as f64 / 16.0;
+                        let m = 1.0 - t;
+                        let f = |q0: f64, q1: f64, q2: f64, q3: f64| {
+                            m * m * m * q0
+                                + 3.0 * m * m * t * q1
+                                + 3.0 * m * t * t * q2
+                                + t * t * t * q3
+                        };
+                        out.push((f(at.0, a.0, b.0, p.0), f(at.1, a.1, b.1, p.1)));
+                    }
+                }
+            }
+            at = ends(&Outline {
+                start: at,
+                segments: vec![*s],
+            })[0];
+        }
+        out
     }
 
     #[test]
-    fn an_external_display_gets_the_inset_rectangle() {
-        let path = outline(
-            Screen {
-                width: 2560.0,
-                height: 1440.0,
-                corner: 0.0,
-                notch: None,
-            },
-            2.0,
-        );
+    fn an_external_display_is_its_frame() {
+        let o = outline(Screen {
+            width: 2560.0,
+            height: 1440.0,
+            scale: 2.0,
+            bezel: Bezel::SQUARE,
+            notch: None,
+        });
+        assert_eq!(o.start, (0.0, 0.0));
         assert_eq!(
-            path,
-            vec![(1.0, 1.0), (2559.0, 1.0), (2559.0, 1439.0), (1.0, 1439.0)]
+            o.segments,
+            [(2560.0, 0.0), (2560.0, 1440.0), (0.0, 1440.0), (0.0, 0.0)].map(Segment::Line)
         );
     }
 
     #[test]
-    fn the_whole_stroke_stays_on_the_screen() {
+    fn the_outline_closes_where_it_starts() {
         for screen in [
             MACBOOK,
             Screen {
@@ -156,106 +352,220 @@ mod tests {
                 ..MACBOOK
             },
         ] {
-            for (x, y) in outline(screen, 2.0) {
-                assert!((1.0 - 1e-9..=screen.width - 1.0 + 1e-9).contains(&x), "{x}");
-                assert!(
-                    (1.0 - 1e-9..=screen.height - 1.0 + 1e-9).contains(&y),
-                    "{y}"
-                );
-            }
+            let o = outline(screen);
+            assert!(near(*ends(&o).last().unwrap(), o.start));
         }
     }
 
     #[test]
-    fn built_in_corners_are_rounded_concentric_with_the_glass() {
-        let path = outline(
+    fn top_corners_are_continuous_and_bottom_corners_square() {
+        let o = outline(Screen {
+            notch: None,
+            ..MACBOOK
+        });
+        let reach = 39.75 / 2.0 * CONTINUOUS_EXTENT;
+        let (w, h) = (MACBOOK.width, MACBOOK.height);
+        assert!(near(o.start, (reach, 0.0)));
+        let e = ends(&o);
+        // Along the top to the top-right corner, its curve down onto the
+        // right side, straight to the square bottom corners, and up the
+        // left side into the top-left corner's curve.
+        assert!(near(e[0], (w - reach, 0.0)));
+        assert!(near(e[3], (w, reach)));
+        assert!(near(e[4], (w, h)));
+        assert!(near(e[5], (0.0, h)));
+        assert!(near(e[6], (0.0, reach)));
+        assert!(near(e[9], (reach, 0.0)));
+        assert_eq!(e.len(), 10);
+        assert!(matches!(o.segments[4], Segment::Line(_)));
+        assert!(matches!(o.segments[5], Segment::Line(_)));
+    }
+
+    #[test]
+    fn a_continuous_corner_is_apples_curve() {
+        // The top-right corner: three cubics that leave the top edge along
+        // it, reach the side along it, and mirror about the corner's
+        // diagonal.
+        let o = outline(Screen {
+            notch: None,
+            ..MACBOOK
+        });
+        let r = 39.75 / 2.0;
+        let w = MACBOOK.width;
+        let mut at = ends(&o)[0];
+        let mut cubics = Vec::new();
+        for s in &o.segments[1..4] {
+            let Segment::Curve(a, b, p) = *s else {
+                panic!("{s:?}")
+            };
+            cubics.push([at, a, b, p]);
+            at = p;
+        }
+        assert!(cubics[0][1].1.abs() < 1e-9);
+        assert!((cubics[2][2].0 - w).abs() < 1e-9);
+        let flip = |q: Point| (w - q.1, w - q.0);
+        let [s, a, b, p] = cubics[1];
+        assert!(near(flip(s), p));
+        assert!(near(flip(a), b));
+        assert!(near(flip(cubics[0][0]), cubics[2][3]));
+        // Its middle sits 0.2915 radii in from both edges, where SwiftUI's
+        // continuous corner puts it; a circular one would be at 0.2929.
+        let mid = (
+            (s.0 + 3.0 * a.0 + 3.0 * b.0 + p.0) / 8.0,
+            (s.1 + 3.0 * a.1 + 3.0 * b.1 + p.1) / 8.0,
+        );
+        assert!(((w - mid.0) / r - 0.291507).abs() < 1e-6);
+        assert!((mid.1 / r - 0.291507).abs() < 1e-6);
+    }
+
+    #[test]
+    fn radii_scale_with_the_panel_not_the_backing_store() {
+        // 1800 points on the 3456-pixel panel: 1.92 panel pixels a point.
+        let o = outline(Screen {
+            width: 1800.0,
+            height: 1169.0,
+            scale: 3456.0 / 1800.0,
+            notch: None,
+            ..MACBOOK
+        });
+        let reach = 39.75 / 1.92 * CONTINUOUS_EXTENT;
+        assert!(near(o.start, (reach, 0.0)));
+    }
+
+    #[test]
+    fn the_notch_is_traced_down_its_sides_and_along_its_bottom() {
+        let n = Notch::from_areas(1728.0, 771.0, 956.0, 32.0);
+        let o = outline(Screen {
+            notch: Some(n),
+            ..MACBOOK
+        });
+        let fillet = 9.75 / 2.0 * CONTINUOUS_EXTENT;
+        let lower = 20.5 / 2.0 * CONTINUOUS_EXTENT;
+        let lines: Vec<(Point, Point)> = {
+            let mut at = o.start;
+            let mut v = Vec::new();
+            for s in &o.segments {
+                match *s {
+                    Segment::Line(p) => {
+                        v.push((at, p));
+                        at = p;
+                    }
+                    Segment::Curve(_, _, p) => at = p,
+                }
+            }
+            v
+        };
+        let has = |a: Point, b: Point| lines.iter().any(|&(p, q)| near(p, a) && near(q, b));
+        // The top edge runs to the fillet, which turns down the notch's
+        // side; the side runs straight to the lower corner, the bottom
+        // straight between the lower corners, and back up the other side.
+        let top_reach = 39.75 / 2.0 * CONTINUOUS_EXTENT;
+        assert!(has((top_reach, 0.0), (n.left - fillet, 0.0)));
+        assert!(has((n.left, fillet), (n.left, n.depth - lower)));
+        assert!(has((n.left + lower, n.depth), (n.right - lower, n.depth)));
+        assert!(has((n.right, n.depth - lower), (n.right, fillet)));
+        assert!(has(
+            (n.right + fillet, 0.0),
+            (MACBOOK.width - top_reach, 0.0)
+        ));
+    }
+
+    #[test]
+    fn a_notch_rounded_to_whole_points_is_centred() {
+        // This Mac's areas, half a point left of the centre.
+        let n = Notch::from_areas(1728.0, 771.0, 956.0, 32.0);
+        assert_eq!((n.left, n.right, n.depth), (771.5, 956.5, 32.0));
+        // Already centred, unchanged.
+        let n = Notch::from_areas(1512.0, 663.0, 849.0, 32.0);
+        assert_eq!((n.left, n.right), (663.0, 849.0));
+        // Far off centre: as reported.
+        let n = Notch::from_areas(1728.0, 700.0, 900.0, 32.0);
+        assert_eq!((n.left, n.right), (700.0, 900.0));
+    }
+
+    #[test]
+    fn the_outline_is_symmetric_about_the_centre() {
+        let screen = Screen {
+            notch: Some(Notch::from_areas(1728.0, 771.0, 956.0, 32.0)),
+            ..MACBOOK
+        };
+        // Every defining point has its mirror image among them.
+        let points: Vec<_> = outline(screen).points().collect();
+        for &(x, y) in &points {
+            let mirror = (screen.width - x, y);
+            assert!(points.iter().any(|&q| near(q, mirror)), "{mirror:?}");
+        }
+    }
+
+    #[test]
+    fn the_outline_stays_on_the_glass() {
+        let n = Notch::from_areas(1728.0, 771.0, 956.0, 32.0);
+        for screen in [
+            MACBOOK,
             Screen {
-                notch: None,
+                notch: Some(n),
                 ..MACBOOK
             },
-            2.0,
-        );
-        let r = BUILTIN_CORNER - 1.0;
-        // No point sits in a corner's square beyond the arc.
-        let corners = [
-            (1.0 + r, 1.0 + r),
-            (MACBOOK.width - 1.0 - r, 1.0 + r),
-            (MACBOOK.width - 1.0 - r, MACBOOK.height - 1.0 - r),
-            (1.0 + r, MACBOOK.height - 1.0 - r),
-        ];
-        for c in corners {
-            let on_arc: Vec<_> = path
-                .iter()
-                .filter(|p| (p.0 - c.0).abs() <= r + 1e-6 && (p.1 - c.1).abs() <= r + 1e-6)
-                .filter(|p| !near(p.0, c.0) || !near(p.1, c.1))
-                .collect();
-            assert!(on_arc.len() > STEPS / 2, "{c:?}");
-            for p in on_arc {
-                let d = ((p.0 - c.0).powi(2) + (p.1 - c.1).powi(2)).sqrt();
-                // On the arc, or on the straight edge leading into it.
-                assert!(near(d, r) || near(p.0, c.0) || near(p.1, c.1), "{p:?} {d}");
+            Screen {
+                bezel: Bezel::SQUARE,
+                ..MACBOOK
+            },
+        ] {
+            let o = outline(screen);
+            for (x, y) in o.points().chain(walk(&o)) {
+                assert!((-1e-9..=screen.width + 1e-9).contains(&x), "{x}");
+                assert!((-1e-9..=screen.height + 1e-9).contains(&y), "{y}");
+                // Off the housing: the glass reaches into the notch's
+                // rectangle only at its rounded lower corners.
+                let n = screen.notch.unwrap();
+                let lower = screen.bezel.notch_corner / screen.scale * CONTINUOUS_EXTENT;
+                let inside = |lo: f64, hi: f64, v: f64| v > lo + 1e-9 && v < hi - 1e-9;
+                let under = inside(n.left, n.right, x) && inside(0.0, n.depth - lower, y)
+                    || inside(n.left + lower, n.right - lower, x) && inside(0.0, n.depth, y);
+                assert!(!under, "({x}, {y}) is under the notch");
             }
         }
     }
 
     #[test]
-    fn the_edge_goes_around_the_notch_never_over_it() {
-        let path = outline(MACBOOK, 2.0);
-        let n = MACBOOK.notch.unwrap();
-        // Nothing inside the housing, with its rounded lower corners,
-        // grown by half the stroke.
-        let (left, right, depth) = (n.left - 1.0, n.right + 1.0, n.depth + 1.0);
-        let r = NOTCH_CORNER;
-        let under = |x: f64, y: f64| {
-            let e = 1e-6;
-            if !(x > left + e && x < right - e && y < depth - e) {
-                return false;
-            }
-            let corner = if x < left + r && y > depth - r {
-                Some((left + r, depth - r))
-            } else if x > right - r && y > depth - r {
-                Some((right - r, depth - r))
-            } else {
-                None
-            };
-            corner.is_none_or(|c| ((x - c.0).powi(2) + (y - c.1).powi(2)).sqrt() < r - e)
-        };
-        for &(x, y) in &path {
-            assert!(!under(x, y), "({x}, {y}) is under the notch");
-        }
-        // It runs down the notch's sides and along its bottom.
-        assert!(path.iter().any(|p| near(p.0, left) && p.1 > n.depth / 2.0));
-        assert!(path.iter().any(|p| near(p.0, right) && p.1 > n.depth / 2.0));
-        let bottom: Vec<_> = path.iter().filter(|p| near(p.1, n.depth + 1.0)).collect();
-        assert!(bottom.iter().any(|p| p.0 < n.left + NOTCH_CORNER + 1.0));
-        assert!(bottom.iter().any(|p| p.0 > n.right - NOTCH_CORNER - 1.0));
-        // And along the top edge on both sides of it.
-        assert!(
-            path.iter()
-                .any(|p| near(p.1, 1.0) && p.0 < n.left - NOTCH_FLARE)
-        );
-        assert!(
-            path.iter()
-                .any(|p| near(p.1, 1.0) && p.0 > n.right + NOTCH_FLARE)
-        );
+    fn only_measured_panels_are_rounded() {
+        assert_eq!(Bezel::of_builtin((3456, 2234), true), Bezel::MACBOOK_PRO_16);
+        assert_eq!(Bezel::of_builtin((3024, 1964), true), Bezel::MACBOOK_PRO_14);
+        // The same panels in a mode that ends below the notch.
+        assert_eq!(Bezel::of_builtin((3456, 2234), false), Bezel::SQUARE);
+        // A notched MacBook Air, and an older MacBook Pro without a notch.
+        assert_eq!(Bezel::of_builtin((2560, 1664), true), Bezel::SQUARE);
+        assert_eq!(Bezel::of_builtin((2880, 1800), false), Bezel::SQUARE);
     }
 
     #[test]
-    fn curves_take_short_steps_and_straight_runs_stay_straight() {
-        let path = outline(MACBOOK, 2.0);
-        for w in path.windows(2) {
-            let (dx, dy) = (w[1].0 - w[0].0, w[1].1 - w[0].1);
-            let straight = near(dx, 0.0) || near(dy, 0.0);
-            assert!(straight || (dx * dx + dy * dy).sqrt() < 2.5, "{w:?}");
-        }
+    fn an_unmeasured_notch_is_a_square_cut() {
+        let o = outline(Screen {
+            bezel: Bezel::SQUARE,
+            ..MACBOOK
+        });
+        assert_eq!(o.start, (0.0, 0.0));
+        assert_eq!(
+            ends(&o),
+            [
+                (771.0, 0.0),
+                (771.0, 32.0),
+                (956.0, 32.0),
+                (956.0, 0.0),
+                (1728.0, 0.0),
+                (1728.0, 1117.0),
+                (0.0, 1117.0),
+                (0.0, 0.0),
+            ]
+        );
     }
 
     #[test]
     fn a_notch_that_does_not_fit_is_left_out() {
         let screen = Screen {
             notch: Some(Notch {
-                left: 2.0,
-                right: 40.0,
+                left: 20.0,
+                right: 60.0,
                 depth: 32.0,
             }),
             ..MACBOOK
@@ -264,6 +574,6 @@ mod tests {
             notch: None,
             ..MACBOOK
         };
-        assert_eq!(outline(screen, 2.0), outline(plain, 2.0));
+        assert_eq!(outline(screen), outline(plain));
     }
 }

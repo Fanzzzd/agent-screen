@@ -17,6 +17,8 @@ unsafe extern "C" {
     fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
     fn CGDisplayModeGetHeight(mode: *const c_void) -> usize;
     fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+    fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize;
+    fn CGDisplayModeGetIOFlags(mode: *const c_void) -> u32;
     fn CGDisplayModeRelease(mode: *const c_void);
     fn CGConfigureDisplayWithDisplayMode(
         config: *mut c_void,
@@ -581,6 +583,43 @@ fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
         CFRelease(modes as *const c_void);
     }
     false
+}
+
+/// Display `id`'s panel size in its own pixels: the pixels of its native
+/// mode, whatever mode it runs in. A scaled mode's backing store is larger
+/// or smaller than the panel (4112 pixels wide for 2056 points on a
+/// 3456-pixel panel), so the current mode doesn't say. None when no mode
+/// is marked native.
+pub fn native_pixels(id: u32) -> Option<(u32, u32)> {
+    use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+    use core_foundation::base::{CFRelease, TCFType};
+    /// IOKit's kDisplayModeNativeFlag.
+    const NATIVE: u32 = 0x0200_0000;
+    unsafe {
+        let options = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
+            core_foundation::string::CFString::wrap_under_get_rule(
+                kCGDisplayShowDuplicateLowResolutionModes,
+            ),
+            core_foundation::boolean::CFBoolean::true_value(),
+        )]);
+        let modes = CGDisplayCopyAllDisplayModes(id, options.as_concrete_TypeRef() as *const c_void)
+            as CFArrayRef;
+        if modes.is_null() {
+            return None;
+        }
+        let native = (0..CFArrayGetCount(modes))
+            .map(|i| CFArrayGetValueAtIndex(modes, i))
+            .filter(|&mode| CGDisplayModeGetIOFlags(mode) & NATIVE != 0)
+            .map(|mode| {
+                (
+                    CGDisplayModeGetPixelWidth(mode) as u32,
+                    CGDisplayModeGetPixelHeight(mode) as u32,
+                )
+            })
+            .max();
+        CFRelease(modes as *const c_void);
+        native
+    }
 }
 
 fn class(name: &str) -> Option<&'static AnyClass> {
