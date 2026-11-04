@@ -1,5 +1,5 @@
 ---
-agent-screen: patch
+default: patch
 ---
 
 Unsupported web drags now create an approval request in a queue shared by agent sessions, without sending a mouse-down first. The card asks "Allow use of your mouse?", lists waiting sessions and reasons, spells out what approval covers, and fits its content. During approval it shows a live thumbnail and elapsed time, and lets you stop and take control. New requests share an active approval until 30 seconds of queue inactivity. Agents can inspect, wait for or withdraw their own requests with `input_queue`; disconnecting or ending a display clears its work. This build provides approval and scheduling only. It has no real-input executor, and approval never reports an unexecuted drag as completed.

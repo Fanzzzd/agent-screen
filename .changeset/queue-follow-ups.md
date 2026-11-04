@@ -1,5 +1,5 @@
 ---
-agent-screen: patch
+default: patch
 ---
 
 A Help Request's card now shows before the input queue's card, so a queue that cannot run no longer hides it. After you allow a batch and its approval lapses with nothing run, the card and notification don't ask about the same requests again; a new request or a revocation asks again.
