@@ -55,6 +55,8 @@ pub enum Native {
     },
     /// A menu item was chosen.
     Menu(MenuAction),
+    /// The user touched the mouse or keyboard during an Input Grant.
+    UserTookInput,
     /// The user typed in a launcher such as Raycast.
     LauncherTyped,
     /// A left click of the user's at a global point (top-left origin),
@@ -87,6 +89,7 @@ pub enum Native {
         take_over: bool,
     },
     /// What macOS says about notifying, after `notify::check`.
+    InputQueueOpened,
     NotificationAuth(super::notify::Auth),
     /// Screens were added, removed or rearranged.
     ScreensChanged,
@@ -612,6 +615,10 @@ pub fn watch_mouse() {
         | NSEventMask::LeftMouseDragged
         | NSEventMask::LeftMouseUp;
     let report = |event: &NSEvent| {
+        // The Input Queue's own drag is not the user's.
+        if super::real_input::is_ours(event) {
+            return;
+        }
         let at = NSEvent::mouseLocation();
         let (x, y) = (at.x, at.y);
         match event.r#type() {
@@ -633,6 +640,9 @@ pub fn watch_mouse() {
     // windows from an agent's. Events posted to a pid never reach these.
     let user = RcBlock::new(|event: NonNull<NSEvent>| {
         use super::catch::Towards;
+        if super::real_input::is_ours(unsafe { event.as_ref() }) {
+            return;
+        }
         let kind = unsafe { event.as_ref() }.r#type();
         let towards = if kind == NSEventType::KeyDown {
             super::catch::user_pressed_key();
@@ -670,6 +680,151 @@ pub fn watch_mouse() {
     {
         keep(monitor);
     }
+}
+
+// MARK: Input Grant indicator
+
+thread_local! {
+    static BORDERS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The width of the Input Grant's edge, in points.
+const EDGE: f64 = 2.0;
+
+/// A thin red edge around each of the user's screens while an Input Grant
+/// lets agents use the pointer, or none. It follows the screen's shape:
+/// rounded corners on a built-in display, and around its camera notch.
+/// Clicks pass through. Returns whether the indicator shows, as real input
+/// may run only while it does. The Input Bar says what the edge means.
+pub fn show_borders(on: bool) -> bool {
+    use objc2_app_kit::{NSBackingStoreType, NSView, NSWindowStyleMask};
+    use objc2_quartz_core::CAShapeLayer;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    BORDERS.with(|b| {
+        let mut borders = b.borrow_mut();
+        if !on {
+            for window in borders.drain(..) {
+                window.orderOut(None);
+            }
+            return false;
+        }
+        if !borders.is_empty() {
+            return true;
+        }
+        for (id, frame, shape) in screen_shapes() {
+            if super::cg::is_agent_screen(id) {
+                continue;
+            }
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    frame,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setIgnoresMouseEvents(true);
+            window.setHasShadow(false);
+            window.setLevel(1000);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            let view = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+            );
+            view.setWantsLayer(true);
+            let Some(layer) = view.layer() else {
+                continue;
+            };
+            let edge = CAShapeLayer::new();
+            edge.setPath(Some(&edge_path(shape)));
+            edge.setFillColor(None);
+            edge.setStrokeColor(Some(&NSColor::systemRedColor().CGColor()));
+            edge.setLineWidth(EDGE);
+            edge.setLineJoin(unsafe { objc2_quartz_core::kCALineJoinRound });
+            layer.addSublayer(&edge);
+            window.setContentView(Some(&view));
+            window.orderFrontRegardless();
+            borders.push(window);
+        }
+        !borders.is_empty()
+    })
+}
+
+/// Each screen with its frame and shape: a built-in display has rounded
+/// corners, and its camera notch where NSScreen reports one.
+fn screen_shapes() -> Vec<(u32, NSRect, agent_screen_model::screen_edge::Screen)> {
+    use agent_screen_model::screen_edge::{BUILTIN_CORNER, Notch, Screen};
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    objc2_app_kit::NSScreen::screens(mtm)
+        .iter()
+        .filter_map(|screen| {
+            let number = screen
+                .deviceDescription()
+                .objectForKey(&NSString::from_str("NSScreenNumber"))?;
+            let id = number
+                .downcast::<objc2_foundation::NSNumber>()
+                .ok()?
+                .unsignedIntValue();
+            if crate::mac::cg::is_closet(id) {
+                return None;
+            }
+            let frame = screen.frame();
+            let builtin = objc2_core_graphics::CGDisplayIsBuiltin(id);
+            // The areas either side of the notch, on a screen that has one.
+            let (left, right) = (
+                screen.auxiliaryTopLeftArea(),
+                screen.auxiliaryTopRightArea(),
+            );
+            let depth = screen.safeAreaInsets().top;
+            let notch = (builtin && depth > 0.0 && left.size.width > 0.0 && right.size.width > 0.0)
+                .then_some(Notch {
+                    left: left.origin.x + left.size.width - frame.origin.x,
+                    right: right.origin.x - frame.origin.x,
+                    depth,
+                });
+            let shape = Screen {
+                width: frame.size.width,
+                height: frame.size.height,
+                corner: if builtin { BUILTIN_CORNER } else { 0.0 },
+                notch,
+            };
+            Some((id, frame, shape))
+        })
+        .collect()
+}
+
+/// The edge's outline in the view's coordinates, y up.
+fn edge_path(
+    shape: agent_screen_model::screen_edge::Screen,
+) -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGMutablePath> {
+    use objc2_core_graphics::CGMutablePath;
+    let path = CGMutablePath::new();
+    let points = agent_screen_model::screen_edge::outline(shape, EDGE);
+    for (n, (x, y)) in points.into_iter().enumerate() {
+        let y = shape.height - y;
+        unsafe {
+            if n == 0 {
+                CGMutablePath::move_to_point(Some(&path), std::ptr::null(), x, y);
+            } else {
+                CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), x, y);
+            }
+        }
+    }
+    CGMutablePath::close_subpath(Some(&path));
+    path
 }
 
 // MARK: Windows that draw their own shadow

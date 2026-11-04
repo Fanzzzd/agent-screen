@@ -153,6 +153,10 @@ pub fn type_keys(
     source: Option<&str>,
     wake: impl FnOnce(),
 ) -> Result<Typed, String> {
+    let _session = super::real_input::SESSION_INPUT.try_lock().map_err(|_| {
+        "an operation is using the session's keyboard or pointer; try again after it ends"
+            .to_string()
+    })?;
     if PER_KEY * keys.len() as u32 > LONGEST {
         return Err(format!(
             "at most {} keys go through the input method in one call; split the text",
@@ -164,6 +168,9 @@ pub fn type_keys(
         return Err(
             "a password field on the user's screen has the keyboard (secure input is on), so keys can't go through the input method now".into(),
         );
+    }
+    if super::real_input::armed() {
+        return Err("an approved Input Queue drag may be using the user's pointer; try again when the approval ends".into());
     }
     let idle = user_idle();
     if idle < QUIET.as_secs_f64() {
