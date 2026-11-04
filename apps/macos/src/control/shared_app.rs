@@ -4,7 +4,8 @@
 //! window, and a posted click would make the agent's window key and take
 //! the user's typing. So nothing is posted there: text, Return, Escape,
 //! Backspace, cmd+a and plain left clicks go through accessibility, to the
-//! element the agent's last click picked, and everything else fails and
+//! element the agent's last click picked, Tab and shift+Tab set focus on
+//! the page's next or previous element, and everything else fails and
 //! names the window that holds focus. The rules are in
 //! `agent_screen_model::shared_app`.
 
@@ -71,7 +72,7 @@ fn names(b: Beside) -> Names {
     }
 }
 
-const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, and BackSpace and cmd+a edit the picked field. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";
+const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, BackSpace and cmd+a edit the picked field, and Tab and shift+Tab move focus to the next or previous element of your page and pick it. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";
 
 /// Keys that can't go in beside the user's window.
 pub fn refusal(b: Beside, what: &str) -> ControlError {
@@ -330,7 +331,7 @@ pub async fn type_text(
     };
     if text_route(Front::OtherFocused, text) == TextRoute::RefuseKeysInText {
         return Err(ControlError::failed(format!(
-            "{before}{app} is the user's front app with their window {user} focused, and Return and Tab in text are keys, which would reach {user}; nothing more was sent. Type the text without them, then press key Return on its own. {ROUTES}",
+            "{before}{app} is the user's front app with their window {user} focused, and Return and Tab in text are keys, which would reach {user}; nothing more was sent. Type the text without them, then press key Return or Tab on its own. {ROUTES}",
             app = n.app,
             user = n.user,
         )));
@@ -367,9 +368,9 @@ pub async fn type_text(
     }))
 }
 
-/// One key chord beside the user's window: Return, Escape, Backspace and
-/// cmd+a through accessibility, anything else refused. A note for the
-/// reply, when the key went in.
+/// One key chord beside the user's window: Return, Escape, Backspace,
+/// cmd+a, Tab and shift+Tab through accessibility, anything else refused.
+/// A note for the reply, when the key went in.
 pub async fn key(
     id: DisplayId,
     b: Beside,
@@ -389,6 +390,11 @@ pub async fn key(
             user = n.user,
         ))
     };
+    if let KeyRoute::FocusNext | KeyRoute::FocusPrevious = route {
+        return tab(id, b, route == KeyRoute::FocusNext, name, cx)
+            .await
+            .map_err(|e| e.unwrap_or_else(fail));
+    }
     let (element, last) = resolve(id, b, cx).await.map_err(&fail)?;
     let target = b.target;
     let (done, element) = off(cx, move || {
@@ -406,7 +412,9 @@ pub async fn key(
             KeyRoute::SelectAll => Ok(("selecting its text".into(), Some(beside::select_all(e)))),
             KeyRoute::DeleteBackward => beside::delete_backward(e, last.as_ref())
                 .map(|s| ("deleting through its value".into(), Some(s))),
-            KeyRoute::Post | KeyRoute::Refuse => Err("no route".into()),
+            KeyRoute::Post | KeyRoute::Refuse | KeyRoute::FocusNext | KeyRoute::FocusPrevious => {
+                Err("no route".into())
+            }
         };
         (done.map(|d| (d, beside::label(e))), element)
     })
@@ -420,6 +428,55 @@ pub async fn key(
         "{app} is the user's front app with their window {user} focused, so {name} was not posted: it went to \"{label}\" in your window through accessibility, by {how}.",
         app = n.app,
         user = n.user,
+    ))
+}
+
+/// Tab or shift+Tab beside the user's window: focus moves to the next or
+/// previous element of the agent's page through accessibility, and that
+/// element is picked for the keys and text after. Err(Ok) when focus went
+/// in but the app moved its focused window, Err(Err) a reason for the
+/// caller to word.
+async fn tab(
+    id: DisplayId,
+    b: Beside,
+    forward: bool,
+    name: &str,
+    cx: &AsyncApp,
+) -> Result<String, Result<ControlError, String>> {
+    // From what the last click or Tab picked; with nothing picked, from
+    // the page's focused element or its start.
+    let from = resolve(id, b, cx).await.ok().map(|(e, _)| e);
+    let target = b.target;
+    let moved = off(cx, move || {
+        beside::tab(target, from.as_ref().map(|e| e.get()), forward).map(|(element, label)| {
+            let point = ax::frame(&element)
+                .map(|f| (f.x + f.width / 2.0, f.y + f.height / 2.0))
+                .unwrap_or_default();
+            (ax::Sendable(element), label, point)
+        })
+    })
+    .await;
+    let (element, label, point) = moved.map_err(Err)?;
+    PICKED.with(|p| {
+        p.borrow_mut().insert(
+            id,
+            Picked {
+                window: target,
+                point,
+                element: Some(element.get().clone()),
+                selection: None,
+            },
+        )
+    });
+    check_focus(b, &format!("The key {name}"), cx)
+        .await
+        .map_err(Ok)?;
+    let n = names(b);
+    Ok(format!(
+        "{app} is the user's front app with their window {user} focused, so {name} was not posted: focus moved to \"{label}\", the {which} element of the page in your window that takes focus, through accessibility, and it is picked for the keys and text after. This order is an approximation of the page's tab order: elements in accessibility tree order whose focus can be set, so a page's tabindex order, and elements it keeps out of the order, can differ. The page saw no Tab key event.",
+        app = n.app,
+        user = n.user,
+        which = if forward { "next" } else { "previous" },
     ))
 }
 
