@@ -6,7 +6,8 @@
 //! mouse or key event is the user taking control back.
 
 use super::native::{self, Native};
-use crate::model::WindowTarget;
+use crate::model::{Rect, WindowTarget};
+use agent_screen_model::menu_press;
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CGPoint, kCFRunLoopCommonModes,
@@ -275,7 +276,7 @@ pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &
     let mut still = asked;
     loop {
         if !go() {
-            return Err("the approval ended before the drag began");
+            return Err("the approval ended before anything was pressed");
         }
         if aerospace && asked.elapsed() < TOUCHING {
             super::claims::touch();
@@ -441,8 +442,44 @@ impl Drop for Release {
             super::ime::note_posted();
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&self.event));
         }
+    }
+}
+
+/// While a loan works in an app: the guard that gives the front back to
+/// the user's app, and the one that keeps the cursor off Agent Displays,
+/// leave it alone until this drops.
+struct Holding;
+
+impl Holding {
+    fn new(pid: i32) -> Self {
+        HOLDING.store(pid, Ordering::Relaxed);
+        Holding
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
         HOLDING.store(0, Ordering::Relaxed);
     }
+}
+
+/// Input the user holds, or secure input: a loan may not start.
+fn inputs_busy() -> Option<&'static str> {
+    if unsafe { IsSecureEventInputEnabled() } {
+        return Some("secure input is on, as for a password field");
+    }
+    let held = USER_LEFT_DOWN.load(Ordering::SeqCst)
+        || (0..3).any(|button| unsafe {
+            CGEventSourceButtonState(CGEventSourceStateID::CombinedSessionState, button)
+        })
+        || unsafe { CGEventSourceFlagsState(CGEventSourceStateID::CombinedSessionState) }.0
+            & (CGEventFlags::MaskShift
+                | CGEventFlags::MaskControl
+                | CGEventFlags::MaskAlternate
+                | CGEventFlags::MaskCommand)
+                .0
+            != 0;
+    held.then_some("a mouse button or modifier is already held")
 }
 
 /// Drag from `from` to `to`, global points, with the user's pointer.
@@ -463,22 +500,8 @@ pub fn drag(
     let Ok(_process) = gate.try_write() else {
         return Outcome::Refused("background input into this process is still running");
     };
-    if unsafe { IsSecureEventInputEnabled() } {
-        return Outcome::Refused("secure input is on, as for a password field");
-    }
-    if USER_LEFT_DOWN.load(Ordering::SeqCst)
-        || (0..3).any(|button| unsafe {
-            CGEventSourceButtonState(CGEventSourceStateID::CombinedSessionState, button)
-        })
-        || unsafe { CGEventSourceFlagsState(CGEventSourceStateID::CombinedSessionState) }.0
-            & (CGEventFlags::MaskShift
-                | CGEventFlags::MaskControl
-                | CGEventFlags::MaskAlternate
-                | CGEventFlags::MaskCommand)
-                .0
-            != 0
-    {
-        return Outcome::Refused("a mouse button or modifier is already held");
+    if let Some(why) = inputs_busy() {
+        return Outcome::Refused(why);
     }
     let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         return Outcome::Refused("the input event source could not be created");
@@ -494,22 +517,18 @@ pub fn drag(
     // A click on an app in the background only brings it forward, and the
     // page never sees the press: the app comes to the front first. The
     // grant's end puts the user's app back.
-    HOLDING.store(target.pid, Ordering::Relaxed);
+    let _holding = Holding::new(target.pid);
     if let Err(why) = come_forward(target, || allowed(from)) {
-        HOLDING.store(0, Ordering::Relaxed);
         return Outcome::Refused(why);
     }
     if !poster.post(CGEventType::MouseMoved, from) {
-        HOLDING.store(0, Ordering::Relaxed);
         return Outcome::Refused("the mouse event could not be created");
     }
     thread::sleep(Duration::from_millis(60));
     if !allowed(from) || super::app::frontmost_pid() != Some(target.pid) {
-        HOLDING.store(0, Ordering::Relaxed);
         return Outcome::Refused("the approval ended before the drag began");
     }
     let Some(up) = poster.event(CGEventType::LeftMouseUp, from) else {
-        HOLDING.store(0, Ordering::Relaxed);
         return Outcome::Refused("the release event could not be created before pressing");
     };
     let mut release = Release {
@@ -518,7 +537,6 @@ pub fn drag(
         pressed: false,
     };
     if !poster.post(CGEventType::LeftMouseDown, from) {
-        HOLDING.store(0, Ordering::Relaxed);
         return Outcome::Refused("the press could not be created");
     }
     release.pressed = true;
@@ -567,6 +585,281 @@ pub fn drag(
         Some(why) => Outcome::Stopped(why),
         None => Outcome::Done,
     }
+}
+
+/// How long a menu gets to open, or a submenu to show, after the click or
+/// hover that opens it.
+const MENU_OPENS: Duration = Duration::from_millis(1000);
+
+/// The frame of an open menu. A closed one reports none, or no size.
+fn open_frame(menu: &super::ax::Element) -> Option<Rect> {
+    super::ax::frame(menu).filter(|f| f.width > 0.0 && f.height > 0.0)
+}
+
+/// Close whatever the loan opened, with accessibility: never a key.
+fn close_menu(title: &super::ax::Element) {
+    let Some(menu) = super::ax::submenu(title) else {
+        return;
+    };
+    if open_frame(&menu).is_none() {
+        return;
+    }
+    let cancel = objc2_core_foundation::CFString::from_static_str("AXCancel");
+    // The loan holds the process's input gate, so this skips it.
+    let error = unsafe { menu.perform_action(&cancel) };
+    log::info!("input queue: closed the menu with AXCancel ({error:?})");
+}
+
+/// Where the Agent Display's menu bar shows `title`, read from where
+/// accessibility places it on its own screen.
+fn title_on_display(title: &super::ax::Element, area: Rect) -> Option<(f64, f64)> {
+    let frame = super::ax::frame(title)?;
+    let screen = super::cg::active_displays()
+        .into_iter()
+        .map(super::cg::display_bounds)
+        .find(|b| b.contains(frame.mid()))?;
+    let at = menu_press::title_point(frame, screen, area);
+    log::info!(
+        "input queue: menu bar title at {frame:?} on screen {screen:?}; on the display at {at:?}"
+    );
+    at
+}
+
+/// Whether `pid`'s menu bar title `name` is what the screen shows at `at`.
+fn title_there(pid: i32, name: &str, at: (f64, f64)) -> bool {
+    let seen = super::ax::on_screen_at(at);
+    let ok = seen.as_ref().is_some_and(|(owner, element)| {
+        *owner == pid
+            && super::ax::string_attribute(element, "AXRole").as_deref() == Some("AXMenuBarItem")
+            && super::ax::string_attribute(element, "AXTitle").as_deref() == Some(name)
+    });
+    if !ok {
+        log::debug!(
+            "input queue: at {at:?} the screen shows {:?}",
+            seen.map(|(owner, e)| (
+                owner,
+                super::ax::string_attribute(&e, "AXRole"),
+                super::ax::string_attribute(&e, "AXTitle")
+            ))
+        );
+    }
+    ok
+}
+
+/// Choose an item of `target`'s app's menu bar with the user's pointer
+/// (ADR 0013, "Menu items of Electron apps"): a real click on the title on
+/// the Agent Display's own menu bar, then on the item in the menu that
+/// opens there. Electron then sees a mouse event, not a shortcut (#39).
+/// `path` runs from the menu bar title down to the item, as
+/// `ax::menu_bar_path` gives it. `go` is checked before every event, with
+/// the user's touch, the app still in front and the menu still open. No
+/// key is ever sent; a menu left open on any stop closes with AXCancel.
+pub fn pick_menu_item(
+    target: WindowTarget,
+    area: Rect,
+    path: &[(usize, String)],
+    go: impl Fn((f64, f64)) -> bool,
+) -> Outcome {
+    let Ok(_session) = SESSION_INPUT.try_lock() else {
+        return Outcome::Refused("another operation holds the session's keyboard or pointer");
+    };
+    let gate = process_gate(target.pid);
+    let Ok(_process) = gate.try_write() else {
+        return Outcome::Refused("background input into this process is still running");
+    };
+    if let Some(why) = inputs_busy() {
+        return Outcome::Refused(why);
+    }
+    if path.len() < 2 {
+        return Outcome::Refused("the item is not in a menu of the app's menu bar");
+    }
+    let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return Outcome::Refused("the input event source could not be created");
+    };
+    let poster = Poster {
+        source: Some(source),
+        flags: CGEventFlags(0),
+    };
+    let pid = target.pid;
+    let front = || super::app::frontmost_pid() == Some(pid);
+    let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    let why_not = |at| {
+        if touched() {
+            "the user moved the mouse or pressed a key"
+        } else if !front() {
+            "the foreground app changed"
+        } else if !allowed(at) {
+            "the approval or the display changed"
+        } else {
+            "the menu closed"
+        }
+    };
+    if !allowed(area.mid()) {
+        return Outcome::Refused("the approval ended before the click");
+    }
+    let _holding = Holding::new(pid);
+    if let Err(why) = come_forward(target, || allowed(area.mid())) {
+        return Outcome::Refused(why);
+    }
+    let Some(items) = super::ax::menu_bar_elements(pid, path) else {
+        return Outcome::Refused("the menu item is no longer where it was in the app's menu bar");
+    };
+    let title = &items[0];
+    let Some(at) = title_on_display(title, area) else {
+        return Outcome::Refused("the menu bar title has no place on the Agent Display's menu bar");
+    };
+    // The menu bar shows the app in front. It may also hide until the
+    // pointer reaches the top of the screen: wait for the title to show.
+    if !poster.post(CGEventType::MouseMoved, at) {
+        return Outcome::Refused("the mouse event could not be created");
+    }
+    let asked = std::time::Instant::now();
+    loop {
+        if !allowed(at) || !front() {
+            return Outcome::Refused(why_not(at));
+        }
+        if title_there(pid, &path[0].1, at) {
+            break;
+        }
+        if asked.elapsed() > MENU_OPENS {
+            return Outcome::Refused(
+                "the Agent Display's menu bar didn't show the app's menus, as when Displays have separate Spaces is off",
+            );
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    let mut pointer = at;
+    let stop = |why: &'static str| {
+        close_menu(title);
+        Outcome::Stopped(why)
+    };
+    if let Err(why) = click(&poster, at, &allowed, &front) {
+        return stop(why);
+    }
+    // Each level: the menu opens on the display, then the pointer goes to
+    // the next item. Into a submenu it moves across first, so it doesn't
+    // cross its menu's other items, which would close the submenu.
+    let mut menu_of = title.clone();
+    for (depth, item) in items.iter().enumerate().skip(1) {
+        let Some(menu) = super::ax::submenu(&menu_of) else {
+            return stop("the menu has no items");
+        };
+        let opened = std::time::Instant::now();
+        let frame = loop {
+            if !allowed(pointer) || !front() {
+                return stop(why_not(pointer));
+            }
+            if let Some(frame) = open_frame(&menu) {
+                break frame;
+            }
+            if opened.elapsed() > MENU_OPENS {
+                return stop("the menu didn't open");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        log::info!("input queue: menu {depth} open at {frame:?}, display {area:?}");
+        if !menu_press::on_display(frame, area) {
+            return stop("the menu opened outside the Agent Display");
+        }
+        let Some(spot) = super::ax::frame(item).filter(|f| menu_press::on_display(*f, area)) else {
+            return stop("the menu item is not on the Agent Display");
+        };
+        let to = spot.mid();
+        let corner = if depth == 1 {
+            (pointer.0, to.1)
+        } else {
+            (to.0, pointer.1)
+        };
+        for leg in [corner, to] {
+            if let Err(why) = glide(&poster, pointer, leg, |at| {
+                allowed(at) && front() && open_frame(&menu).is_some()
+            }) {
+                return stop(if why {
+                    why_not(pointer)
+                } else {
+                    "a mouse event could not be created"
+                });
+            }
+            pointer = leg;
+        }
+        if depth + 1 < items.len() {
+            menu_of = item.clone();
+            continue;
+        }
+        if open_frame(&menu).is_none() {
+            return stop("the menu closed");
+        }
+        if let Err(why) = click(&poster, to, &allowed, &front) {
+            return stop(why);
+        }
+    }
+    // The chosen item blinks before its menu goes away.
+    let clicked = std::time::Instant::now();
+    while super::ax::submenu(title).is_some_and(|m| open_frame(&m).is_some()) {
+        if clicked.elapsed() > MENU_OPENS {
+            return stop("the menu stayed open after the click, so the item didn't take it");
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    Outcome::Done
+}
+
+/// One click at `at`. The button goes up however this ends.
+fn click(
+    poster: &Poster,
+    at: (f64, f64),
+    allowed: &dyn Fn((f64, f64)) -> bool,
+    front: &dyn Fn() -> bool,
+) -> Result<(), &'static str> {
+    if !allowed(at) || !front() {
+        return Err(if touched() {
+            "the user moved the mouse or pressed a key"
+        } else {
+            "the approval, the display or the front app changed"
+        });
+    }
+    let Some(up) = poster.event(CGEventType::LeftMouseUp, at) else {
+        return Err("the release event could not be created before pressing");
+    };
+    let mut release = Release {
+        event: up,
+        at,
+        pressed: false,
+    };
+    if !poster.post(CGEventType::LeftMouseDown, at) {
+        return Err("the press could not be created");
+    }
+    release.pressed = true;
+    thread::sleep(Duration::from_millis(50));
+    drop(release);
+    thread::sleep(Duration::from_millis(30));
+    Ok(())
+}
+
+/// Move the pointer from `from` to `to` in small steps, checking `ok`
+/// before each. Err(true) when `ok` stopped it, Err(false) when an event
+/// could not be made.
+fn glide(
+    poster: &Poster,
+    from: (f64, f64),
+    to: (f64, f64),
+    ok: impl Fn((f64, f64)) -> bool,
+) -> Result<(), bool> {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let steps = ((dx.hypot(dy) / (STEP * 2.0)).ceil() as usize).clamp(1, 200);
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let at = (from.0 + dx * t, from.1 + dy * t);
+        if !ok(at) {
+            return Err(true);
+        }
+        if !poster.post(CGEventType::MouseMoved, at) {
+            return Err(false);
+        }
+        thread::sleep(Duration::from_millis(8));
+    }
+    thread::sleep(Duration::from_millis(60));
+    Ok(())
 }
 
 #[cfg(test)]

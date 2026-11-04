@@ -901,7 +901,9 @@ pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<
 
 /// The items of a menu bar title, numbered from `first`, or None when
 /// `item` is not a menu bar title. Reading items leaves the menu closed;
-/// AXPress on an item chooses it without opening anything.
+/// AXPress on an item chooses it without opening anything. Electron takes
+/// that press for the item's shortcut, so an item of its menu bar can go
+/// through the Input Queue as a real click instead (ADR 0013).
 pub fn menu_items(item: &AXUIElement, first: usize) -> Option<Snapshot> {
     if string_attribute(item, "AXRole")? != "AXMenuBarItem" {
         return None;
@@ -954,6 +956,143 @@ fn list_menu(
         lines.push(line);
         elements.push(element);
     }
+}
+
+/// Whether the element focused in `target` takes text: a field, a text
+/// area, a combo or search box, or anything with a settable value and a
+/// caret. An app in the background may name no focused element, as
+/// Chromium doesn't once it was in front and went back: then the window's
+/// own elements say which one has focus.
+pub fn editing(target: WindowTarget) -> bool {
+    let takes_text = |e: &AXUIElement| {
+        matches!(
+            string_attribute(e, "AXRole").as_deref(),
+            Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField")
+        ) || (settable(e, "AXValue") && attribute(e, "AXSelectedTextRange").is_some())
+    };
+    if let Some(focused) = element_attribute(&application(target.pid), "AXFocusedUIElement") {
+        return takes_text(&focused);
+    }
+    let Some(window) = window_element(target) else {
+        return false;
+    };
+    let is_focused = |e: &AXUIElement| {
+        attribute(e, "AXFocused")
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            .unwrap_or(false)
+    };
+    let mut stack = vec![(window, 0)];
+    let mut visits = 0;
+    while let Some((element, depth)) = stack.pop() {
+        visits += 1;
+        if visits > MAX_VISITS {
+            return false;
+        }
+        if depth > 0 && is_focused(&element) {
+            return takes_text(&element);
+        }
+        if depth < MAX_DEPTH {
+            stack.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|child| (child, depth + 1)),
+            );
+        }
+    }
+    false
+}
+
+fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
+    let (a, b): (&CFType, &CFType) = (a, b);
+    a == b
+}
+
+fn pid_of(element: &AXUIElement) -> Option<i32> {
+    let mut pid = 0;
+    (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
+}
+
+/// Where a menu item sits in its app's own menu bar: the app, and the
+/// index among its siblings and the title of each element from the menu
+/// bar title down to the item. None for an item of a context or pop-up
+/// menu, which hangs off no menu bar.
+pub fn menu_bar_path(item: &AXUIElement) -> Option<(i32, Vec<(usize, String)>)> {
+    let pid = pid_of(item)?;
+    let mut path = Vec::new();
+    let mut element: Element = unsafe { CFRetained::retain(NonNull::from(item)) };
+    for _ in 0..8 {
+        let role = string_attribute(&element, "AXRole")?;
+        let parent = element_attribute(&element, "AXParent")?;
+        let siblings = elements_attribute(&parent, "AXChildren");
+        let index = siblings.iter().position(|s| same(s, &element))?;
+        path.push((
+            index,
+            string_attribute(&element, "AXTitle").unwrap_or_default(),
+        ));
+        match role.as_str() {
+            "AXMenuBarItem" => {
+                let bar = element_attribute(&application(pid), "AXMenuBar")?;
+                if *bar != *parent {
+                    return None;
+                }
+                path.reverse();
+                return Some((pid, path));
+            }
+            "AXMenuItem" => {
+                // An item's parent is its menu, and the menu's the item
+                // or title that opens it.
+                if string_attribute(&parent, "AXRole").as_deref() != Some("AXMenu") {
+                    return None;
+                }
+                element = element_attribute(&parent, "AXParent")?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The elements along `path` in `pid`'s menu bar, from its title down to
+/// the item, each with the title it had when the path was taken. None
+/// once the app rebuilt its menu differently.
+pub fn menu_bar_elements(pid: i32, path: &[(usize, String)]) -> Option<Vec<Element>> {
+    let mut parent = element_attribute(&application(pid), "AXMenuBar")?;
+    let mut found: Vec<Element> = Vec::new();
+    for (depth, (index, title)) in path.iter().enumerate() {
+        if depth > 0 {
+            parent = submenu(found.last()?)?;
+        }
+        let element = elements_attribute(&parent, "AXChildren")
+            .into_iter()
+            .nth(*index)?;
+        if string_attribute(&element, "AXTitle").unwrap_or_default() != *title {
+            return None;
+        }
+        found.push(element);
+    }
+    Some(found)
+}
+
+/// The menu a menu bar title or an item opens.
+pub fn submenu(element: &AXUIElement) -> Option<Element> {
+    elements_attribute(element, "AXChildren")
+        .into_iter()
+        .find(|e| string_attribute(e, "AXRole").as_deref() == Some("AXMenu"))
+}
+
+/// Whatever is on screen at a global point, any app's or the system's.
+pub fn on_screen_at(at: (f64, f64)) -> Option<(i32, Element)> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let error = unsafe {
+        system.copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    Some((pid_of(&element)?, element))
 }
 
 /// The text field that has focus in `target`, when the app says what it

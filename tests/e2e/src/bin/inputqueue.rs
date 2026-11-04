@@ -6,8 +6,9 @@
 //! operation returns at once instead of waiting a minute for a card that
 //! won't come. The card fits its content, and during the grant the Input
 //! Bar sits at the bottom of the screen, clear of the card; its Stop ends
-//! the grant. Captures both cards and the bar under target/e2e. The card
-//! shows on your screen for about half a minute.
+//! the grant. A menu item an Electron app needs a real click for asks on
+//! the same card, which names it. Captures the cards and the bar under
+//! target/e2e. The card shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
 //!
@@ -287,5 +288,29 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             icon()
         ),
     );
+
+    // A menu item an Electron app needs a real click for: the card names
+    // it, beside the drag already waiting.
+    control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
+    )?;
+    show("input-queue-menu")?;
+    sleep_ms(800);
+    let menu = card();
+    let (ok, why) = menu.as_ref().map_or((false, "no card".into()), |c| {
+        fits(c, &["input-request", "input-allow"])
+    });
+    let painted = control.call("debugCard", json!({})).unwrap_or_default();
+    check(
+        "a menu item's request asks on the same card, its row and Allow inside it",
+        ok && status()?["state"] == "queued",
+        format!("{menu:?} {why} {painted}"),
+    );
+    if let Some(c) = &menu {
+        let file = capture("inputqueue-menu", [c.x, c.y, c.width, c.height])?;
+        println!("     card: {}", file.display());
+    }
+    show("input-queue-decline")?;
     Ok(())
 }

@@ -7,7 +7,7 @@ use agent_screen_model::model;
 #[path = "../../../apps/macos/src/input_queue.rs"]
 mod app_input_queue;
 
-use app_input_queue::{InputQueue, Plan};
+use app_input_queue::{Drag, InputQueue, MenuItem, Plan};
 use std::sync::atomic::Ordering;
 
 fn owner(connection: u64) -> model::Owner {
@@ -316,7 +316,7 @@ fn not_now_on_a_later_card_declines_a_lapsed_request_it_lists() {
 }
 
 fn plan(x: f64) -> Plan {
-    Plan {
+    Plan::Drag(Drag {
         target: model::WindowTarget {
             pid: 1,
             window_id: 7,
@@ -326,7 +326,7 @@ fn plan(x: f64) -> Plan {
         from: (x, 10.0),
         to: (x + 50.0, 10.0),
         flags: 0,
-    }
+    })
 }
 
 /// The executor gets each loan in turn, only during a grant and only while
@@ -464,4 +464,76 @@ fn a_takeover_or_an_ended_display_stops_the_running_loan() {
         input.queue.request(id).is_none(),
         "ended owners release their record after cleanup"
     );
+}
+
+/// A menu item chosen with a real click is a loan like a drag. Once its call
+/// has read the result, the result goes and the session is done: with
+/// nothing else waiting, the grant ends and puts the pointer and front app
+/// back. Another session's waiting drag keeps the grant open.
+#[test]
+fn a_menu_item_loan_ends_its_grant_when_nothing_else_waits() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    input.register(2, &owner(2));
+    let a = input.owner(1, 1).unwrap();
+    let b = input.owner(2, 2).unwrap();
+    let item = Plan::MenuItem(MenuItem {
+        target: model::WindowTarget {
+            pid: 1,
+            window_id: 7,
+        },
+        area: model::Rect::new(0.0, 0.0, 800.0, 600.0),
+        app: "Electron".into(),
+        path: vec![(3, "Go".into()), (0, "Previous view".into())],
+    });
+    if let Plan::MenuItem(menu) = &item {
+        assert_eq!(menu.titles(), ["Go", "Previous view"]);
+    }
+    let id = input
+        .submit(
+            a.clone(),
+            "menu".into(),
+            "Choose".into(),
+            Some(item.clone()),
+        )
+        .unwrap();
+    let drag = input
+        .submit(b.clone(), "drag".into(), "Drag".into(), Some(plan(1.0)))
+        .unwrap();
+    assert_eq!(input.plan(id), Some(&item));
+    assert!(input.approve(input.queue.approval()));
+    assert_eq!(input.start_loan(), Some((id, item.clone())));
+    input.finish_loan(id, None);
+    assert_eq!(state(&input, &a, id), "completed");
+    input.loan_done(&a, id);
+    assert!(
+        input.queue.request(id).is_none(),
+        "the same press made again is a new request"
+    );
+    assert!(
+        input.queue.grant().is_some(),
+        "the other session's drag still waits"
+    );
+    assert_eq!(input.start_loan().map(|l| l.0), Some(drag));
+    input.finish_loan(drag, None);
+
+    // Alone, the menu loan ends the grant as soon as its call is done.
+    let id = input
+        .submit(
+            a.clone(),
+            "menu".into(),
+            "Choose".into(),
+            Some(item.clone()),
+        )
+        .unwrap();
+    assert_eq!(input.start_loan().map(|l| l.0), Some(id));
+    input.finish_loan(id, None);
+    input.done(&b);
+    input.loan_done(&a, id);
+    let end = input.ending().expect("the grant ends with nothing waiting");
+    assert!(
+        end.restore,
+        "a normal end puts the pointer and front app back"
+    );
+    input.ended(end);
 }

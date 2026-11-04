@@ -13,6 +13,7 @@ use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
+use crate::input_queue::Plan;
 use crate::model::DisplayId;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -482,14 +483,17 @@ impl HelpCard {
         let approval = input.queue.approval();
         let mut rows = Vec::new();
         let mut can_approve = false;
+        let (mut menus, mut drags) = (false, false);
         for request in input.queue.waiting() {
             let Some(display) = core.displays.get(request.owner.display) else {
                 continue;
             };
             can_approve |= !display.takeover && !display.is_ended();
+            menus |= matches!(input.plan(request.id), Some(Plan::MenuItem(_)));
+            drags |= !matches!(input.plan(request.id), Some(Plan::MenuItem(_)));
             let row = request_row(
                 display.label(),
-                request.reason.clone(),
+                request_text(input, request),
                 display.takeover,
                 theme,
             );
@@ -504,10 +508,20 @@ impl HelpCard {
         let (title, sub) = if can_approve || count == 0 {
             (
                 t("Allow use of your mouse?", "允许使用你的鼠标？"),
-                t(
-                    "These drags cannot run in the background. They need your real pointer.",
-                    "这些拖拽无法在后台完成，需要暂时使用你的真实指针。",
-                ),
+                match (menus, drags) {
+                    (true, false) => t(
+                        "This app takes a menu item chosen in the background as its keyboard shortcut. A click with your real pointer chooses it.",
+                        "这个应用会把在后台选择的菜单项当作快捷键处理。用你的真实指针点一下，才能真正选中它。",
+                    ),
+                    (true, true) => t(
+                        "These actions cannot run in the background. They need your real pointer.",
+                        "这些操作无法在后台完成，需要暂时使用你的真实指针。",
+                    ),
+                    _ => t(
+                        "These drags cannot run in the background. They need your real pointer.",
+                        "这些拖拽无法在后台完成，需要暂时使用你的真实指针。",
+                    ),
+                },
             )
         } else {
             (
@@ -629,6 +643,22 @@ thread_local! {
 /// The height the queue card's window should have.
 pub fn queue_height() -> f32 {
     QUEUE_FIT.with(Cell::get)
+}
+
+/// What a request row says: the menu item a click will choose, in the
+/// user's language, or the agent's reason for a drag.
+pub fn request_text(
+    input: &crate::input_queue::InputQueue,
+    request: &agent_screen_model::input_queue::Request,
+) -> String {
+    match input.plan(request.id) {
+        Some(Plan::MenuItem(item)) => {
+            let label = agent_screen_model::menu_press::label(&item.titles());
+            let app = &item.app;
+            tf!("Choose \"{label}\" in {app}", "在 {app} 中选择\"{label}\"")
+        }
+        _ => request.reason.clone(),
+    }
 }
 
 /// What the card and the status bar show of a grant.

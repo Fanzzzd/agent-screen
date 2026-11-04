@@ -10,8 +10,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct Fixture(PathBuf);
 impl Fixture {
-    fn new() -> Self {
-        let path = PathBuf::from("/tmp").join(format!("as-queue-{}", std::process::id()));
+    fn new(name: &str) -> Self {
+        let path = PathBuf::from("/tmp").join(format!("as-{name}-{}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -52,7 +52,7 @@ impl Drop for Client {
 
 #[tokio::test]
 async fn queue_status_and_drag_failure_never_imply_execution() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("queue");
     let listener = fixture.listener();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -166,4 +166,85 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
     assert_eq!(calls[1]["params"]["requestId"], 42);
     assert_eq!(calls[4]["params"]["fromX"], 10.0);
     assert_eq!(calls[4]["params"]["realInput"], true);
+}
+
+/// A menu press that waits for a real click and comes back input_pending
+/// reports it and stops: no window state, no second press. real_input on
+/// any other action is refused before it reaches the app.
+#[tokio::test]
+async fn a_pending_menu_press_is_reported_without_a_fallback() {
+    let fixture = Fixture::new("menu");
+    let listener = fixture.listener();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut calls = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap().to_string();
+            if method != "agentReady" {
+                calls.push(request.clone());
+            }
+            let reply = if method == "elementAction" {
+                json!({"id":request["id"],"error":{"code":"input_pending","message":"Go > Previous view needs a real click. No click was sent, and the item was not pressed through accessibility either."}})
+            } else if method == "agentReady" {
+                json!({"id":request["id"],"result":{}})
+            } else {
+                json!({"id":request["id"],"error":{"code":"failed","message":"unexpected mock control call"}})
+            };
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        calls
+    });
+    let mut client = fixture.child();
+    tokio::task::spawn_blocking(move || {
+        let mut input = client.0.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(client.0.stdout.take().unwrap());
+        let mut exchange = |request: Value| -> Value {
+            writeln!(input, "{request}").unwrap();
+            if request.get("id").is_none() {
+                return Value::Null;
+            }
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+        exchange(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"menu-test","version":"1"}}}));
+        exchange(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let tools = exchange(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+        let act = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "act_on_element")
+            .unwrap();
+        assert_eq!(act["inputSchema"]["properties"]["real_input"]["type"], "boolean");
+        let call = |id, action, real| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"act_on_element","arguments":{"display_id":7,"window_id":8,"element":9,"action":action,"real_input":real}}});
+        let pending = exchange(call(3, "press", json!(true)));
+        assert_eq!(pending["result"]["isError"], true, "{pending}");
+        assert!(pending["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No click was sent"));
+        let refused = exchange(call(4, "focus", json!(true)));
+        assert_eq!(refused["result"]["isError"], true, "{refused}");
+        let wrong = exchange(call(5, "press", json!("yes")));
+        assert_eq!(wrong["result"]["isError"], true, "{wrong}");
+        drop(input);
+        assert!(client.0.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+    let calls = server.await.unwrap();
+    let methods: Vec<_> = calls
+        .iter()
+        .map(|r| r["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(methods, ["elementAction"]);
+    assert_eq!(calls[0]["params"]["action"], "press");
+    assert_eq!(calls[0]["params"]["realInput"], true);
 }
