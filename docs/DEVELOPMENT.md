@@ -175,6 +175,7 @@ cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, co
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
+cargo test -p agent-screen-model screen_edge # the Input Grant edge's outline: continuous corners, notch, panels with measured shapes
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup
@@ -449,6 +450,16 @@ pointer and are not captured. Do not use the user's working windows as fixtures.
 Complete queued drags have `executorAvailable: true`. A request moves through `queued`, `approved`, `running` and `completed`, or ends `declined` or `stopped`. Only `completed` means its events were sent and the loan released its input. Generic `input_queue request` calls only ask; they have `runnable: false`, even after approval. A split `mouseDown` also only asks: no press is held across calls. A whole drag without a background route waits up to 60 seconds for approval; once running, it waits through cleanup even if that deadline passes. A call that times out detaches its queued drag; `wait` or a same-token drag retry attaches it again. When a grant ends before a request ran, it reports `approval_lapsed` with a `next` hint instead of waiting for a card that will not return. A new request or a revocation asks again. Successful drags report `route`: `devtools`, `accessibility`, `placement`, `posted` or `real_input`. Background routes remain first; only `realInput: true` bypasses them to ask for a loan.
 
 `apps/macos/src/input_queue.rs` holds admission, scheduling and projection; `queue_adapter` compiles the same coordinator without GPUI. `Core` forwards owner lifetime, Takeover and disconnect changes. The shell shows a click-through red edge and the Input Bar (`ui/input_bar.rs`), runs one loan at a time, and acknowledges grant cleanup after restoration. `mac/real_input.rs` posts tagged HID events and observes untagged input through a listen-only HID tap; an unavailable or disabled tap stops execution. Each drag rechecks its saved window/display geometry and the window under each point; secure input or a foreground change stops it. Real input and Keyboard Borrow share a session mutex. Per-process gates serialize posted events, DevTools input and AX mutations with a real-input loan; unrelated processes remain independent. Real-keyboard operations are not routed through the queue. Native runtime checks are separate from the offline coordinator tests.
+
+The red edge is the outline of the screen's glass (`crates/model/src/screen_edge.rs`), stroked twice as wide and masked by itself so its outer side lies on the glass's edge. The rounding of the 14- and 16-inch MacBook Pro panels was fitted to Apple's bezel images from [Apple Design Resources](https://developer.apple.com/design/resources/), whose screen opening is the glass. `tests/e2e/tools/edgefit.swift` checks an outline against one: it reports the largest gap between the line and the glass's edge, any overhang past it, and the line's width, and writes an 8x overlay of the corners and the notch.
+
+```sh
+swiftc -O tests/e2e/tools/edgefit.swift -o target/e2e/edgefit
+cargo run -q -p agent-screen-model --example screen_edge -- 3456 2234 1 3456 2234 1542 1912 64 > target/e2e/edge16.txt
+target/e2e/edgefit "MacBook Pro 16.png" 402 303 target/e2e/edge16.txt 4 target/e2e/edgefit.png
+```
+
+The example's arguments are the screen's size, panel pixels per point, the panel's native size and the notch as NSScreen reports it; here the 16-inch panel at one point per pixel, whose bezel image has the screen opening at (402, 303).
 
 ### Debug control methods
 
