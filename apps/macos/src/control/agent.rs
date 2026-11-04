@@ -607,7 +607,16 @@ async fn handle_one(
                         });
                     }
                     match forwarder.type_text(run.iter().collect(), bounds).await {
-                        Sent::Nowhere => return Err(no_keyboard_target()),
+                        Sent::Nowhere => {
+                            let e = keys_refused(&forwarder, id).await;
+                            return Err(match done {
+                                0 => e,
+                                _ => ControlError::failed(format!(
+                                    "typed {done} of {total} characters, then stopped: {} If you retry, type only the rest.",
+                                    e.message
+                                )),
+                            });
+                        }
                         Sent::Dropped(shown) => {
                             let typed = done + run.len();
                             let shown: String = shown.chars().take(300).collect();
@@ -672,7 +681,14 @@ async fn handle_one(
                         continue;
                     }
                     if !forwarder.press(chord, repeat, bounds).await {
-                        return Err(no_keyboard_target());
+                        let e = keys_refused(&forwarder, id).await;
+                        return Err(match pressed {
+                            0 => e,
+                            _ => ControlError::failed(format!(
+                                "pressed {pressed} of {total} keys, then stopped: {} If you retry, press only the rest.",
+                                e.message
+                            )),
+                        });
                     }
                 }
                 Ok(json!({}))
@@ -696,8 +712,9 @@ async fn handle_one(
                 return Err(e);
             }
             let Some(pressed) = forwarder.chord(chord, true, within).await else {
+                let e = keys_refused(&forwarder, id).await;
                 forwarder.keys_done().await;
-                return Err(no_keyboard_target());
+                return Err(e);
             };
             // Let go at once if the user takes over: their keys would come
             // out with the agent's modifier held.
@@ -4365,6 +4382,32 @@ async fn through_input_method(
     }
 }
 
+/// Why keys found nowhere to go: their app's focused window was off the
+/// Agent Displays, so they were refused (#120), or no window on the
+/// display takes keys.
+async fn keys_refused(forwarder: &crate::mac::input::Forwarder, id: DisplayId) -> ControlError {
+    match forwarder.take_refused().await {
+        Some(refused) => refused_error(&refused, id),
+        None => no_keyboard_target(),
+    }
+}
+
+fn refused_error(refused: &crate::mac::input::Refused, id: DisplayId) -> ControlError {
+    let app = &refused.app;
+    let focused = match &refused.window {
+        Some(title) if !title.is_empty() => {
+            format!("{app}'s focused window, {title:?}, is not on an Agent Display")
+        }
+        Some(_) => format!("{app}'s focused window is untitled and not on an Agent Display"),
+        None => format!(
+            "Accessibility could not say which window of {app} has focus, and {app} has a window that is not on an Agent Display"
+        ),
+    };
+    ControlError::failed(format!(
+        "{focused}, so keys posted to {app} could reach the user's window instead of yours on display {id}. Agent Screen refused the keys before sending any, and won't bring {app} to the front to fix that. Use act_on_element insert_text or set_value on the field, or click inside your window once and retry."
+    ))
+}
+
 fn no_keyboard_target() -> ControlError {
     ControlError::not_found(
         "no window on the display can take keyboard input; launch an app or click a field first",
@@ -4964,5 +5007,35 @@ mod keyboard_refusal_tests {
         let unknown = super::key_route_error("Dia", false).message;
         assert!(unknown.contains("Accessibility could not verify"));
         assert!(!unknown.contains("focused window is different"));
+    }
+}
+
+#[cfg(test)]
+mod key_window_refusal_tests {
+    use crate::mac::input::Refused;
+
+    #[test]
+    fn a_refusal_names_the_focused_window_and_what_to_do_instead() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: Some("Notes".into()),
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(
+            message.contains(r#"TextEdit's focused window, "Notes", is not on an Agent Display"#)
+        );
+        assert!(message.contains("refused the keys before sending any"));
+        assert!(message.contains("insert_text or set_value"));
+        assert!(message.contains("display 7"));
+    }
+
+    #[test]
+    fn a_refusal_says_when_accessibility_named_no_window() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: None,
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(message.contains("Accessibility could not say which window of TextEdit has focus"));
     }
 }
