@@ -16,7 +16,9 @@ if (process.env.HARNESS_SINGLE === "1" && !app.requestSingleInstanceLock()) app.
 
 // HARNESS_MENU_LOG (a file) adds a Go menu whose Previous view item, with
 // no shortcut, writes how its click came: "previous accelerator=false"
-// for a click on the item, true for a shortcut (#39).
+// for a click on the item, true for a shortcut (#39). File > Open Recent
+// > notes.txt, one submenu down, writes "recent accelerator=…" the same
+// way.
 const menuLog = process.env.HARNESS_MENU_LOG;
 if (menuLog) {
   const fs = require("fs");
@@ -25,6 +27,22 @@ if (menuLog) {
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
         { role: "appMenu" },
+        {
+          label: "File",
+          submenu: [
+            { label: "New Window" },
+            {
+              label: "Open Recent",
+              submenu: [
+                {
+                  label: "notes.txt",
+                  click: (_item, _window, event) => note(`recent accelerator=${event.triggeredByAccelerator}`),
+                },
+                { label: "todo.txt" },
+              ],
+            },
+          ],
+        },
         { role: "editMenu" },
         {
           label: "Go",

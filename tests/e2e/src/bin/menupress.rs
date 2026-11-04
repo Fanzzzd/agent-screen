@@ -13,6 +13,8 @@
 //! item chooses it once, as a click. The field keeps its text and its
 //! focus, the page sees no click or key, no menu stays open, and the
 //! pointer and your front app come back. Declined, nothing is chosen.
+//! File > Open Recent > notes.txt, one submenu down, allowed, is chosen
+//! the same way: the loan crosses into the submenu and clicks the item.
 //! With real_input false, the press goes through accessibility again.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
@@ -196,20 +198,23 @@ fn cases(
             json!({ "sessionKey": KEY, "displayId": id, "action": "status" }),
         )
     };
-    // The item's number, read from the Go menu as an agent would.
-    let item = || -> Result<i64> {
-        let go = number(&state()?, r#"menubaritem "Go""#)?;
+    // An item's number, read from its menu bar title's list as an agent
+    // would; a submenu's items are in the same list, indented.
+    let item = |(title, name): (&str, &str)| -> Result<i64> {
+        let bar = number(&state()?, &format!(r#"menubaritem "{title}""#))?;
         let menu = control.call(
             "elementAction",
-            at(json!({ "element": go, "action": "press" })),
+            at(json!({ "element": bar, "action": "press" })),
         )?;
         number(
             menu["menu"].as_str().unwrap_or_default(),
-            r#"menuitem "Previous view""#,
+            &format!(r#"menuitem "{name}""#),
         )
     };
+    const PREVIOUS: (&str, &str) = ("Go", "Previous view");
+    const RECENT: (&str, &str) = ("File", "notes.txt");
     let press = |real_input: Option<bool>| -> Result<Result<Value>> {
-        let element = item()?;
+        let element = item(PREVIOUS)?;
         let mut params = at(json!({ "element": element, "action": "press" }));
         if let Some(real) = real_input {
             params["realInput"] = json!(real);
@@ -217,8 +222,8 @@ fn cases(
         Ok(control.call("elementAction", params))
     };
     // A press the user answers from the card while the call waits.
-    let answered = |surface: &str| -> Result<Result<Value>> {
-        let element = item()?;
+    let answered = |surface: &str, which: (&str, &str)| -> Result<Result<Value>> {
+        let element = item(which)?;
         let call = control.begin(
             "elementAction",
             at(json!({ "element": element, "action": "press" })),
@@ -274,7 +279,7 @@ fn cases(
 
     // (2) Focused: the press asks for the pointer; allowed, it runs.
     let before = lines(log).len();
-    let reply = answered("input-queue-allow")?;
+    let reply = answered("input-queue-allow", PREVIOUS)?;
     check(
         "with the field focused, the press waits for the user and, allowed, chooses the item with a real click",
         reply.as_ref().is_ok_and(|r| r["route"] == "real_input"),
@@ -288,51 +293,74 @@ fn cases(
         format!("{got:?}"),
     );
     // (5) The approval ends by itself, and puts everything back.
-    let mut queue = status()?;
-    for _ in 0..30 {
-        if queue["grantActive"] == false {
-            break;
+    let put_back = |what: &str| -> Result<()> {
+        let mut queue = status()?;
+        for _ in 0..30 {
+            if queue["grantActive"] == false {
+                break;
+            }
+            sleep_ms(100);
+            queue = status()?;
         }
-        sleep_ms(100);
-        queue = status()?;
-    }
-    sleep_ms(500);
-    let open = probe(&["openmenus", &app])?;
-    let front_after = probe(&["frontpid"])?;
-    let back = cursor();
+        sleep_ms(500);
+        let open = probe(&["openmenus", &app])?;
+        let front_after = probe(&["frontpid"])?;
+        let back = cursor();
+        check(
+            &format!(
+                "after {what}, no menu is open, the approval has ended, and your front app and pointer are back"
+            ),
+            open.trim().is_empty()
+                && queue["grantActive"] == false
+                && front_after == front
+                && (back.x - pointer.x).abs() < 1.5
+                && (back.y - pointer.y).abs() < 1.5,
+            format!(
+                "open menus {open:?}, {queue}, front {front:?} -> {front_after:?}, pointer {pointer:?} -> {back:?}"
+            ),
+        );
+        // (4) The field keeps its text and focus.
+        let tree = state()?;
+        check(
+            &format!("after {what}, the field kept what was typed, and its focus"),
+            tree.contains(r#"textfield value="abc" focused"#),
+            tree.lines()
+                .find(|l| l.contains("textfield"))
+                .unwrap_or_default(),
+        );
+        // (6) No click or key reached the page.
+        let now = title()?;
+        check(
+            &format!("after {what}, the page saw no click and no key from the menu choice"),
+            ["down", "up", "click", "keys", "typed"]
+                .iter()
+                .all(|k| seen(&now, k) == seen(&page, k)),
+            format!("{page:?} -> {now:?}"),
+        );
+        Ok(())
+    };
+    put_back("the click")?;
+
+    // (9) An item one submenu down: the loan opens File, crosses into
+    // Open Recent's submenu and clicks notes.txt there, once, as a click.
+    let before = lines(log).len();
+    let reply = answered("input-queue-allow", RECENT)?;
     check(
-        "afterwards no menu is open, the approval has ended, and your front app and pointer are back",
-        open.trim().is_empty()
-            && queue["grantActive"] == false
-            && front_after == front
-            && (back.x - pointer.x).abs() < 1.5
-            && (back.y - pointer.y).abs() < 1.5,
-        format!(
-            "open menus {open:?}, {queue}, front {front:?} -> {front_after:?}, pointer {pointer:?} -> {back:?}"
-        ),
+        "an item in a submenu, allowed, is chosen with a real click too",
+        reply.as_ref().is_ok_and(|r| r["route"] == "real_input"),
+        format!("{reply:?}"),
     );
-    // (4) The field keeps its text and focus.
-    let tree = state()?;
+    let got = new_lines(log, before, 1500);
     check(
-        "the field kept what was typed, and its focus",
-        tree.contains(r#"textfield value="abc" focused"#),
-        tree.lines()
-            .find(|l| l.contains("textfield"))
-            .unwrap_or_default(),
+        "the submenu's item runs once, as a click: Electron says it wasn't a shortcut",
+        got == ["recent accelerator=false"],
+        format!("{got:?}"),
     );
-    // (6) No click or key reached the page.
-    let now = title()?;
-    check(
-        "the page saw no click and no key from the menu choice",
-        ["down", "up", "click", "keys", "typed"]
-            .iter()
-            .all(|k| seen(&now, k) == seen(&page, k)),
-        format!("{page:?} -> {now:?}"),
-    );
+    put_back("the submenu click")?;
 
     // (7) Declined: nothing runs, not even the shortcut.
     let before = lines(log).len();
-    let reply = answered("input-queue-decline")?;
+    let reply = answered("input-queue-decline", PREVIOUS)?;
     let got = new_lines(log, before, 1500);
     check(
         "declined, the press reports input_pending and chooses nothing",

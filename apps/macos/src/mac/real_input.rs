@@ -596,6 +596,13 @@ fn open_frame(menu: &super::ax::Element) -> Option<Rect> {
     super::ax::frame(menu).filter(|f| f.width > 0.0 && f.height > 0.0)
 }
 
+/// The frame of a menu open on the Agent Display. A closed submenu of an
+/// Electron app reports a 10×10 frame at the main screen's bottom left,
+/// so a size alone doesn't say it opened (#39).
+fn open_on(menu: &super::ax::Element, area: Rect) -> Option<Rect> {
+    open_frame(menu).filter(|f| menu_press::on_display(*f, area))
+}
+
 /// Close whatever the loan opened, with accessibility: never a key.
 fn close_menu(title: &super::ax::Element) {
     let Some(menu) = super::ax::submenu(title) else {
@@ -749,18 +756,21 @@ pub fn pick_menu_item(
             if !allowed(pointer) || !front() {
                 return stop(why_not(pointer));
             }
-            if let Some(frame) = open_frame(&menu) {
+            if let Some(frame) = open_on(&menu, area) {
                 break frame;
             }
             if opened.elapsed() > MENU_OPENS {
-                return stop("the menu didn't open");
+                let seen = open_frame(&menu);
+                log::info!("input queue: menu {depth} not open on {area:?}; it reports {seen:?}");
+                return stop(if seen.is_some() {
+                    "the menu opened outside the Agent Display"
+                } else {
+                    "the menu didn't open"
+                });
             }
             thread::sleep(Duration::from_millis(20));
         };
         log::info!("input queue: menu {depth} open at {frame:?}, display {area:?}");
-        if !menu_press::on_display(frame, area) {
-            return stop("the menu opened outside the Agent Display");
-        }
         let Some(spot) = super::ax::frame(item).filter(|f| menu_press::on_display(*f, area)) else {
             return stop("the menu item is not on the Agent Display");
         };
@@ -772,7 +782,7 @@ pub fn pick_menu_item(
         };
         for leg in [corner, to] {
             if let Err(why) = glide(&poster, pointer, leg, |at| {
-                allowed(at) && front() && open_frame(&menu).is_some()
+                allowed(at) && front() && open_on(&menu, area).is_some()
             }) {
                 return stop(if why {
                     why_not(pointer)
@@ -786,7 +796,7 @@ pub fn pick_menu_item(
             menu_of = item.clone();
             continue;
         }
-        if open_frame(&menu).is_none() {
+        if open_on(&menu, area).is_none() {
             return stop("the menu closed");
         }
         if let Err(why) = click(&poster, to, &allowed, &front) {
