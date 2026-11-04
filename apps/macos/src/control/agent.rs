@@ -3252,7 +3252,29 @@ async fn launch_now(
     let mut spawned = None;
     let opening = if piped {
         let (path, first) = (path.clone(), first.clone());
-        let mut arguments = start.open_arguments();
+        // A browser opens its windows on the display, never on the user's
+        // screen first (#123).
+        let browser = off(cx, {
+            let path = path.clone();
+            move || app::handles_web(&path)
+        })
+        .await;
+        // Started while a spare display is being made, it would lose
+        // that place: let the spare come first, up to 2 s.
+        for _ in 0..100 {
+            if !browser || !core.read_with(cx, |c, _| c.making_spare()) {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+        let mut arguments = if browser {
+            agent_screen_model::launch::browser_window_switches(bounds)
+        } else {
+            Vec::new()
+        };
+        arguments.extend(start.open_arguments());
         arguments.extend(first);
         let environment = start.environment.clone();
         let started = off(cx, move || {

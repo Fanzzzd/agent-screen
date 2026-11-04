@@ -305,6 +305,7 @@ const HANDS_OFF: &[&str] = &[
     "appwhere",
     "browsers",
     "chrome",
+    "coldflash",
     "displaychange",
     "flash",
     "helpcard",
