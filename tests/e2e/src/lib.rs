@@ -315,6 +315,7 @@ const HANDS_OFF: &[&str] = &[
     "load",
     "loanfocus",
     "menuclosed",
+    "menupress",
     "realdrag",
     "oneclick",
     "openpanel",

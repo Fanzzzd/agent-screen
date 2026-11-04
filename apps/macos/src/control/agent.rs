@@ -1192,6 +1192,95 @@ async fn handle_one(
                     json!({ "text": value, "selected": selected.filter(|s| !s.is_empty()) }),
                 );
             }
+            // Electron takes a menu item pressed through accessibility for
+            // its shortcut: AppKit runs the press with no current event, and
+            // Electron reads only a mouse event as a click (#39). An item of
+            // its menu bar goes through the Input Queue as a real click
+            // while a text field has focus, where apps ignore shortcuts, or
+            // when the agent asks with real_input.
+            let real_input = match p.0.get("realInput") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(value)) => Some(*value),
+                Some(_) => return Err(ControlError::invalid("realInput must be true or false")),
+            };
+            if real_input.is_some() && action != "press" {
+                return Err(ControlError::invalid(
+                    "real_input applies to press on a menu item of an Electron app's menu bar",
+                ));
+            }
+            let menu_note = if action == "press" {
+                let (item, target) = (ax::Sendable(element.clone()), window.target);
+                let pid = target.pid;
+                let (press, path) = off(cx, move || {
+                    let e = item.get();
+                    if ax::string_attribute(e, "AXRole").as_deref() != Some("AXMenuItem") {
+                        return (None, None);
+                    }
+                    let electron = app::is_electron(pid);
+                    let path = electron
+                        .then(|| ax::menu_bar_path(e))
+                        .flatten()
+                        .filter(|(owner, _)| *owner == pid)
+                        .map(|(_, path)| path);
+                    let enabled = ax::attribute(e, "AXEnabled")
+                        .and_then(|v| {
+                            v.downcast_ref::<objc2_core_foundation::CFBoolean>()
+                                .map(|b| b.as_bool())
+                        })
+                        .unwrap_or(true);
+                    let press = agent_screen_model::menu_press::Press {
+                        in_menu_bar: path.is_some() && enabled,
+                        apple_menu: path
+                            .as_ref()
+                            .and_then(|p| p.first())
+                            .is_some_and(|(index, _)| *index == 0),
+                        electron,
+                        editing: electron && ax::editing(target),
+                        real_input,
+                    };
+                    (Some((press, app::is_vs_code_based(pid))), path)
+                })
+                .await;
+                if let (Some((press, _)), Some(path)) = (press, &path)
+                    && press.route() == agent_screen_model::menu_press::Route::RealClick
+                {
+                    let path = path.clone();
+                    return queued_menu_press(&core, connection, id, window.target, path, cx).await;
+                }
+                // While a real click on the item waits or runs, a press
+                // through accessibility would choose it a second time.
+                if let Some(path) = &path {
+                    let operation = menu_operation(window.target, path);
+                    let outstanding = core.read_with(cx, |c, _| {
+                        c.input_queue.owner(id, connection).is_ok_and(|owner| {
+                            c.input_queue.queue.requests().any(|r| {
+                                r.owner == owner && r.operation == operation && !r.status.terminal()
+                            })
+                        })
+                    });
+                    if outstanding {
+                        return Err(ControlError::invalid(
+                            "a real click on this menu item still waits for the user's approval or runs; use input_queue to withdraw it before pressing the item through accessibility",
+                        ));
+                    }
+                }
+                if real_input == Some(true) {
+                    return Err(ControlError::invalid(
+                        "real_input applies to press on an enabled menu item of an Electron app's own menu bar, not the Apple menu",
+                    ));
+                }
+                press
+                    .filter(|(press, _)| press.electron)
+                    .map(|(_, vs_code)| {
+                        if vs_code {
+                            VS_CODE_MENU_NOTE
+                        } else {
+                            ELECTRON_MENU_NOTE
+                        }
+                    })
+            } else {
+                None
+            };
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
                 core.update(cx, |c, _| c.forwarder(id))
                     .remember_user_window(window.target.pid)
@@ -1204,26 +1293,8 @@ async fn handle_one(
                 let forwarder = core.update(cx, |c, _| c.forwarder(id));
                 forwarder.focus(window.target).await;
             }
-            // Electron takes a menu item pressed through accessibility for
-            // its shortcut: AppKit runs the press with no current event,
-            // and Electron reads only a mouse event as a click (#39).
-            if action == "press" {
-                let (item, pid) = (ax::Sendable(element.clone()), window.target.pid);
-                let note = off(cx, move || {
-                    let menu =
-                        ax::string_attribute(item.get(), "AXRole").as_deref() == Some("AXMenuItem");
-                    if !menu || !app::is_electron(pid) {
-                        None
-                    } else if app::is_vs_code_based(pid) {
-                        Some(VS_CODE_MENU_NOTE)
-                    } else {
-                        Some(ELECTRON_MENU_NOTE)
-                    }
-                })
-                .await;
-                if let Some(note) = note {
-                    return reply(json!({ "note": note }));
-                }
+            if let Some(note) = menu_note {
+                return reply(json!({ "note": note }));
             }
             Ok(json!({}))
         }
@@ -1735,6 +1806,7 @@ async fn handle_one(
                 surface.as_str(),
                 "input-queue"
                     | "input-queue-approved"
+                    | "input-queue-menu"
                     | "input-queue-allow"
                     | "input-queue-decline"
                     | "input-bar-stop"
@@ -1745,6 +1817,37 @@ async fn handle_one(
                     ));
                 }
                 usable(&core, connection, id, "debugShow", cx)?;
+            }
+            // The card for a menu item an Electron app needs a real click
+            // for. Its call never waits, so the request never runs.
+            if surface == "input-queue-menu" {
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let item = crate::input_queue::MenuItem {
+                        target: WindowTarget {
+                            pid: 0,
+                            window_id: 0,
+                        },
+                        area: cg::display_bounds(id),
+                        app: p.string("app").unwrap_or_else(|| "Slack".into()),
+                        path: vec![(4, "Go".into()), (1, "Back".into())],
+                    };
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-menu:{id}"),
+                            "Preview a menu item that needs a real click".into(),
+                            Some(crate::input_queue::Plan::MenuItem(item)),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    cx.notify();
+                    Ok(())
+                })?;
             }
             // Allow Queue itself, through the shell, comes after this.
             if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
@@ -4439,7 +4542,7 @@ async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
 const VS_CODE_MENU_NOTE: &str = "This app is built on VS Code. It ran this menu item as the item's keyboard shortcut in whatever has focus, not as the menu's own command, because Electron reports a menu item pressed through accessibility as its shortcut. With the terminal, a panel or an input box focused, the result can differ: Edit > Find opened the terminal's find box. Check the window. To run the command itself, open the Command Palette with key cmd+shift+p, type the command's name and press Return.";
 
 /// What an agent hears after pressing an Electron app's menu item.
-const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, move focus out of the text field, with a click on an empty part of the window, then press the item again.";
+const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, press the item again with real_input: true: once the user allows it, Agent Screen chooses it with a real click on the display's menu bar. Or move focus out of the text field, with a click on an empty part of the window, then press it again.";
 
 thread_local! {
     /// When each display last settled after an action.
@@ -4746,7 +4849,7 @@ async fn queued_drag(
     };
     // A press held across calls would keep the user's button down while the
     // agent thinks, so only a whole drag runs; a press only asks.
-    let plan = to.map(|to| crate::input_queue::Plan {
+    let plan = to.map(|to| crate::input_queue::Drag {
         target,
         frame,
         area,
@@ -4764,7 +4867,12 @@ async fn queued_drag(
         .map_err(ControlError::invalid)?;
     let request = core
         .update(cx, |c, cx| {
-            let result = c.input_queue.submit(owner.clone(), operation, reason, plan);
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                plan.map(crate::input_queue::Plan::Drag),
+            );
             cx.notify();
             result
         })
@@ -4805,6 +4913,105 @@ async fn queued_drag(
             ),
         }),
     }
+}
+
+/// The Input Queue's token for a real click on a menu item: the same press
+/// made again finds its request.
+fn menu_operation(target: WindowTarget, path: &[(usize, String)]) -> String {
+    let path: Vec<String> = path
+        .iter()
+        .map(|(index, title)| format!("{index}={title}"))
+        .collect();
+    format!("menu:{}:{}", target.window_id, path.join("/"))
+}
+
+/// Choose an item of an Electron app's menu bar with a real click, once the
+/// user allows it (ADR 0013, "Menu items of Electron apps"). Nothing goes
+/// through accessibility while the request is outstanding: the item would
+/// run twice, once as a shortcut.
+async fn queued_menu_press(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    target: WindowTarget,
+    path: Vec<(usize, String)>,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let area = cg::display_bounds(id);
+    let app = off(cx, move || app::name(target.pid))
+        .await
+        .unwrap_or_else(|| "the app".into());
+    let item = crate::input_queue::MenuItem {
+        target,
+        area,
+        app: app.clone(),
+        path,
+    };
+    let label = agent_screen_model::menu_press::label(&item.titles());
+    let reason = format!("Choose {label} in {app} with a click on its menu");
+    let operation = menu_operation(target, &item.path);
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                Some(crate::input_queue::Plan::MenuItem(item)),
+            );
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    let ran = match r["state"].as_str() {
+        Some("completed") => true,
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => false,
+        state_now => {
+            let next = if state_now == Some("declined") {
+                "The user declined: pressing the same item again returns this answer. Press it with real_input: false to send it as the shortcut, or call request_help."
+            } else {
+                "The click runs with the user's pointer once they allow it and while your call waits: press the same item again to wait again, or use input_queue to inspect or withdraw it. To send it as the shortcut instead, withdraw the request and press the item with real_input: false."
+            };
+            return Err(ControlError {
+                code: "input_pending",
+                message: format!(
+                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {next}"
+                ),
+            });
+        }
+    };
+    // The session is done with the user's pointer unless it has more
+    // waiting: the approval ends and their pointer and app come back.
+    core.update(cx, |c, cx| {
+        c.input_queue.loan_done(&owner, request);
+        cx.notify();
+    });
+    if ran {
+        return reply(json!({
+            "route": "real_input",
+            "requestId": request,
+            "note": format!("Chose {label} with a real click on the display's menu bar, as the user allowed. Electron saw a click, not a shortcut."),
+        }));
+    }
+    Err(ControlError::failed(format!(
+        "Choosing {label} with the user's pointer stopped ({}{}). No key was sent and any menu it opened was closed. Take a screenshot before retrying. Input queue status: {state}",
+        r["stopReason"].as_str().unwrap_or("stopped"),
+        r["failure"]
+            .as_str()
+            .map(|f| format!(": {f}"))
+            .unwrap_or_default(),
+    )))
 }
 
 // MARK: Parameters

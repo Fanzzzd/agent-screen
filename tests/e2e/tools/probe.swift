@@ -10,6 +10,8 @@
 //   probe strip PNG ROWS      pixels in the top ROWS rows farther than 40 from the top-left one
 //   probe cancelmenu X Y      close the menu at global point X Y through accessibility
 //   probe front               the front app's name
+//   probe frontpid            the front app's pid
+//   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
 //   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
@@ -164,6 +166,27 @@ case "cancelmenu":
   }
 case "front":
   print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
+case "frontpid":
+  print(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+case "openmenus":
+  func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    AXUIElementCopyAttributeValue(e, name as CFString, &v)
+    return v
+  }
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  if let bar = value(app, "AXMenuBar") {
+    for title in (value(bar as! AXUIElement, "AXChildren") as? [AXUIElement]) ?? [] {
+      for menu in (value(title, "AXChildren") as? [AXUIElement]) ?? [] {
+        var origin = CGPoint.zero, size = CGSize.zero
+        if let p = value(menu, "AXPosition") { AXValueGetValue(p as! AXValue, .cgPoint, &origin) }
+        if let s = value(menu, "AXSize") { AXValueGetValue(s as! AXValue, .cgSize, &size) }
+        if size.width > 0 && size.height > 0 {
+          print((value(title, "AXTitle") as? String) ?? "", origin.x, origin.y, size.width, size.height)
+        }
+      }
+    }
+  }
 case "fronts":
   let say = { (app: NSRunningApplication?) in
     print(Int(Date().timeIntervalSince1970 * 1000), app?.processIdentifier ?? 0, app?.localizedName ?? "")

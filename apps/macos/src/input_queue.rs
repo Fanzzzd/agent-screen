@@ -32,9 +32,16 @@ pub struct InputQueue {
     pub loan_ok: Arc<AtomicBool>,
 }
 
+/// What one loan does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Plan {
+    Drag(Drag),
+    MenuItem(MenuItem),
+}
+
 /// One complete drag, in global points.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Plan {
+pub struct Drag {
     pub target: WindowTarget,
     pub frame: Rect,
     pub area: Rect,
@@ -42,6 +49,26 @@ pub struct Plan {
     pub to: (f64, f64),
     /// CGEventFlags bits.
     pub flags: u64,
+}
+
+/// An item of an Electron app's menu bar, chosen with a real click on the
+/// Agent Display's menu bar (ADR 0013, "Menu items of Electron apps").
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuItem {
+    /// The agent's window, which comes forward so its app's menus show.
+    pub target: WindowTarget,
+    pub area: Rect,
+    /// The app's name, for the card.
+    pub app: String,
+    /// Index among its siblings and title of each element from the menu
+    /// bar title down to the item.
+    pub path: Vec<(usize, String)>,
+}
+
+impl MenuItem {
+    pub fn titles(&self) -> Vec<String> {
+        self.path.iter().map(|(_, title)| title.clone()).collect()
+    }
 }
 
 impl Default for InputQueue {
@@ -118,6 +145,31 @@ impl InputQueue {
         Ok(id)
     }
 
+    /// What a request does, if it can run.
+    pub fn plan(&self, id: RequestId) -> Option<&Plan> {
+        self.plans.get(&id)
+    }
+
+    /// The loan `id` of `owner` ran, and its call read how it ended. The
+    /// result goes, so the same press made again is a new request, not
+    /// this one's answer. The session declares itself done unless it has
+    /// more waiting, so its grant ends and the pointer and front app go
+    /// back without the 30 seconds' wait.
+    pub fn loan_done(&mut self, owner: &Owner, id: RequestId) {
+        if self.queue.request(id).is_some_and(|r| {
+            &r.owner == owner && matches!(r.status, Status::Completed | Status::Stopped(_))
+        }) {
+            self.queue.forget(id);
+        }
+        if !self.queue.waiting().any(|r| &r.owner == owner)
+            && !self.queue.active().is_some_and(|r| &r.owner == owner)
+        {
+            let now = self.now();
+            self.queue.done(owner, now);
+        }
+        self.tick();
+    }
+
     /// The agent's call waits for `id` again, if it can run.
     pub fn attach(&mut self, id: RequestId) {
         if self.plans.contains_key(&id) {
@@ -141,7 +193,7 @@ impl InputQueue {
         }
         let now = self.now();
         let id = self.queue.start(now)?;
-        let plan = self.plans.get(&id).copied();
+        let plan = self.plans.get(&id).cloned();
         if plan.is_none() {
             // Not reachable: a request without a plan is never attached.
             self.queue.fail(id);

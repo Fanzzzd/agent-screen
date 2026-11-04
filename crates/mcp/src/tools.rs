@@ -479,8 +479,10 @@ pub fn definitions() -> Vec<Value> {
                 "set_value, increment, decrement and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
                 "double_click and right_click send a real click at the element's center. press falls back to a click when",
                 "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
-                "Electron apps take a pressed menu item for its keyboard shortcut, which some ignore while a text field has",
-                "focus: click outside the field first.",
+                "Electron apps take a menu item pressed through accessibility for its keyboard shortcut, which some ignore",
+                "while a text field has focus. So pressing an item of an Electron app's menu bar while a text field has focus,",
+                "or with real_input true, asks the user to allow a real click on the display's menu bar and waits up to 60",
+                "seconds; input_pending means nothing was sent, not even the shortcut. real_input false sends the shortcut.",
                 "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
                 "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
                 "Both work in background apps, where Command-C and Command-V do nothing.",
@@ -500,6 +502,10 @@ pub fn definitions() -> Vec<Value> {
                         "read_text", "scroll_into_view", "increment", "decrement"
                     ] },
                     "value": { "type": "string", "description": "Text for set_value and insert_text." },
+                    "real_input": {
+                        "type": "boolean",
+                        "description": "For press on an item of an Electron app's menu bar only. true: choose it with a real click once the user allows it. false: press it through accessibility, which Electron takes as the item's shortcut. Default: a real click only while a text field has focus."
+                    },
                     "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
                     "max_depth": max_depth()
                 }),
@@ -934,6 +940,16 @@ pub async fn run(
                     ],
                 )?
                 .ok_or_else(|| ControlError::invalid("action is required"))?;
+            let real_input = match a.0.get("real_input") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(value)) => Some(*value),
+                _ => return Err(ControlError::invalid("real_input must be true or false")),
+            };
+            if real_input.is_some() && action != "press" {
+                return Err(ControlError::invalid(
+                    "real_input applies to press on a menu item of an Electron app's menu bar",
+                ));
+            }
             let reply = control
                 .call(
                     "elementAction",
@@ -942,7 +958,8 @@ pub async fn run(
                         "windowId": window,
                         "element": a.require_int("element")?,
                         "action": action,
-                        "value": a.string("value")?
+                        "value": a.string("value")?,
+                        "realInput": real_input
                     }),
                 )
                 .await?;

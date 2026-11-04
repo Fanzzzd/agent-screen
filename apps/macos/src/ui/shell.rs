@@ -867,7 +867,10 @@ impl Shell {
                     display.id,
                     display.agent_name(),
                     task,
-                    Some(Note::Input(input.reason.clone())),
+                    Some(Note::Input(help_card::request_text(
+                        &core.input_queue,
+                        input,
+                    ))),
                 );
             } else {
                 notify::withdraw_input(display.id);
@@ -1270,7 +1273,8 @@ impl Shell {
         let loan = self.core.update(cx, |core, cx| {
             let loan = core.input_queue.start_loan();
             let display = loan
-                .and_then(|(id, _)| core.input_queue.queue.request(id).map(|r| r.owner.display));
+                .as_ref()
+                .and_then(|(id, _)| core.input_queue.queue.request(*id).map(|r| r.owner.display));
             cx.notify();
             loan.zip(display)
         });
@@ -1287,6 +1291,40 @@ impl Shell {
                 .spawn(async move {
                     use std::sync::atomic::Ordering;
                     let area = cg::display_bounds(display);
+                    let plan = match plan {
+                        crate::input_queue::Plan::Drag(drag) => drag,
+                        crate::input_queue::Plan::MenuItem(item) => {
+                            if area != item.area
+                                || !crate::mac::windows::on_display(display)
+                                    .iter()
+                                    .any(|w| w.target == item.target)
+                            {
+                                return Outcome::Refused(
+                                    "the window is no longer on its Agent Display",
+                                );
+                            }
+                            return real_input::pick_menu_item(
+                                item.target,
+                                area,
+                                &item.path,
+                                |at| {
+                                    let why = if !ok.load(Ordering::SeqCst) {
+                                        Some("the loan was cancelled")
+                                    } else if cg::display_bounds(display) != area
+                                        || !area.contains(at)
+                                    {
+                                        Some("the display geometry changed")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(why) = why {
+                                        log::debug!("input queue containment: {why}");
+                                    }
+                                    why.is_none()
+                                },
+                            );
+                        }
+                    };
                     let Some(window) = crate::mac::windows::on_display(display)
                         .into_iter()
                         .find(|w| w.target == plan.target)
@@ -2273,7 +2311,7 @@ impl Shell {
                 let effect = self.peek_intent.pin();
                 self.apply_peek_effect(effect, cx);
             }
-            "input-queue" => {
+            "input-queue" | "input-queue-menu" => {
                 self.hide_peek(cx);
                 self.sync_card(cx);
             }

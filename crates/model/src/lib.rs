@@ -14,6 +14,7 @@ pub mod input_queue;
 pub mod key_window;
 pub mod keychord;
 pub mod launch;
+pub mod menu_press;
 pub mod model;
 pub mod numbers;
 pub mod recording_playback;
