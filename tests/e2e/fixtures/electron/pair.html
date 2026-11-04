@@ -11,6 +11,9 @@
       input { width: 300px; height: 32px; font-size: 16px; box-sizing: border-box; }
       button { margin: 20px; width: 160px; height: 40px; font-size: 16px; }
       #count { margin: 20px; }
+      #login { margin: 20px; }
+      #login input { width: 180px; }
+      #login button { margin: 0 0 0 10px; width: 100px; height: 32px; }
     </style>
   </head>
   <body>
@@ -19,6 +22,12 @@
     </form>
     <button id="press">press</button>
     <div id="count">0</div>
+    <!-- Two fields and a submit button, for Tab and Return (#110). -->
+    <form id="login">
+      <input id="first" autocomplete="off" />
+      <input id="second" autocomplete="off" />
+      <button id="submit">submit</button>
+    </form>
     <script>
       const side = new URLSearchParams(location.search).get("side") || "agent";
       document.title = `pair ${side}`;
@@ -40,6 +49,28 @@
       field.addEventListener("keyup", (e) => {
         if (e.key === "Escape") log("escape");
       });
+      const login = document.getElementById("login");
+      for (const id of ["first", "second", "submit"]) {
+        const el = document.getElementById(id);
+        el.setAttribute("aria-label", `${side} ${id}`);
+        el.addEventListener("focus", () => log("focus", id));
+        el.addEventListener("keydown", (e) => log("keydown", id, JSON.stringify(e.key)));
+      }
+      login.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const values = ["first", "second"].map((id) => document.getElementById(id).value);
+        log("login-submit", JSON.stringify(values));
+      });
+      // Focus events wait for the page to have focus, which a window that
+      // isn't key may not; the focused element shows here either way.
+      let active = document.activeElement && document.activeElement.id;
+      setInterval(() => {
+        const now = document.activeElement && document.activeElement.id;
+        if (now !== active) {
+          active = now;
+          log("active", now || "none");
+        }
+      }, 50);
       let clicks = 0;
       press.addEventListener("click", () => {
         clicks++;

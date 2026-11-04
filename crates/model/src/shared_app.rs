@@ -6,7 +6,8 @@
 //!
 //! In that state Agent Screen posts nothing. Text goes into the field the
 //! agent last clicked through accessibility, read back after; Return and
-//! Escape become that element's confirm, press and cancel actions; a left
+//! Escape become that element's confirm, press and cancel actions; Tab and
+//! shift+Tab set focus on the next or previous element of the page; a left
 //! click becomes a press or picks a field. Everything else fails and names
 //! the window that holds focus.
 
@@ -78,6 +79,10 @@ pub enum KeyRoute {
     SelectAll,
     /// Backspace: delete in the remembered field.
     DeleteBackward,
+    /// Tab: focus the page's next element that takes focus.
+    FocusNext,
+    /// shift+Tab: focus the previous one.
+    FocusPrevious,
     Refuse,
 }
 
@@ -85,6 +90,7 @@ const RETURN: u16 = 36;
 const KEYPAD_ENTER: u16 = 76;
 const ESCAPE: u16 = 53;
 const BACKSPACE: u16 = 51;
+const TAB: u16 = 48;
 const A: u16 = 0;
 
 pub fn key_route(front: Front, chord: KeyChord) -> KeyRoute {
@@ -96,11 +102,14 @@ pub fn key_route(front: Front, chord: KeyChord) -> KeyRoute {
     let m = chord.modifiers;
     let plain = !(m.control || m.alt || m.command || m.function || m.shift);
     let only_command = m.command && !(m.control || m.alt || m.function || m.shift);
+    let only_shift = m.shift && !(m.control || m.alt || m.command || m.function);
     match chord.code {
         RETURN | KEYPAD_ENTER if plain => KeyRoute::Confirm,
         ESCAPE if plain => KeyRoute::Cancel,
         BACKSPACE if plain => KeyRoute::DeleteBackward,
         A if only_command => KeyRoute::SelectAll,
+        TAB if plain => KeyRoute::FocusNext,
+        TAB if only_shift => KeyRoute::FocusPrevious,
         _ => KeyRoute::Refuse,
     }
 }
@@ -147,6 +156,36 @@ pub fn element_use(role: &str, actions: &[String]) -> ElementUse {
         return ElementUse::Press;
     }
     ElementUse::Nothing
+}
+
+/// Whether Tab stops at an element: one that is enabled and lets a client
+/// set its focus. The page itself and the scroll area around it take
+/// focus too, but Tab moves among what is in them. An element a page
+/// keeps out of its tab order with tabindex="-1" still takes focus, so
+/// this order is only close to a browser's.
+pub fn tab_stop(role: &str, focus_settable: bool, enabled: bool) -> bool {
+    focus_settable && enabled && !matches!(role, "AXWebArea" | "AXScrollArea")
+}
+
+/// Where Tab (`forward`) or shift+Tab goes among `count` stops in tree
+/// order, from the stop at `from`, or from none. None past either end,
+/// where a browser moves into its own controls.
+pub fn next_stop(count: usize, from: Option<usize>, forward: bool) -> Option<usize> {
+    match (from, forward) {
+        _ if count == 0 => None,
+        (None, true) => Some(0),
+        (None, false) => Some(count - 1),
+        (Some(i), true) => (i + 1 < count).then_some(i + 1),
+        (Some(i), false) => i.checked_sub(1).filter(|&p| p < count),
+    }
+}
+
+/// Whether an element is a web form as Chromium shows it: a group whose
+/// subrole is AXLandmarkForm when the form has a name, else whose role
+/// description is "form". Chromium translates role descriptions, so in
+/// another language an unnamed form isn't recognised.
+pub fn is_form(role: &str, subrole: &str, role_description: &str) -> bool {
+    role == "AXGroup" && (subrole == "AXLandmarkForm" || role_description == "form")
 }
 
 /// Whether text can go into an element through accessibility: a field
@@ -237,8 +276,12 @@ mod tests {
         assert_eq!(key_route(f, chord("Escape")), KeyRoute::Cancel);
         assert_eq!(key_route(f, chord("BackSpace")), KeyRoute::DeleteBackward);
         assert_eq!(key_route(f, chord("cmd+a")), KeyRoute::SelectAll);
+        assert_eq!(key_route(f, chord("Tab")), KeyRoute::FocusNext);
+        assert_eq!(key_route(f, chord("shift+Tab")), KeyRoute::FocusPrevious);
         for refused in [
-            "Tab",
+            "ctrl+Tab",
+            "cmd+shift+Tab",
+            "alt+Tab",
             "shift+Return",
             "cmd+Return",
             "a",
@@ -292,6 +335,47 @@ mod tests {
         assert!(!takes_text("AXTextField", false, true), "a password field");
         assert!(!takes_text("AXTextField", true, false));
         assert!(!takes_text("AXButton", true, true));
+    }
+
+    #[test]
+    fn tab_stops_at_enabled_elements_that_take_focus_inside_the_page() {
+        assert!(tab_stop("AXTextField", true, true));
+        assert!(tab_stop("AXButton", true, true));
+        assert!(tab_stop("AXLink", true, true));
+        assert!(
+            tab_stop("AXGroup", true, true),
+            "an element with tabindex=0"
+        );
+        assert!(!tab_stop("AXButton", true, false), "a disabled button");
+        assert!(!tab_stop("AXStaticText", false, true));
+        assert!(!tab_stop("AXGroup", false, true), "a form");
+        assert!(!tab_stop("AXWebArea", true, true));
+        assert!(!tab_stop("AXScrollArea", true, true));
+    }
+
+    #[test]
+    fn tab_goes_to_the_next_stop_and_shift_tab_to_the_previous() {
+        assert_eq!(next_stop(3, Some(0), true), Some(1));
+        assert_eq!(next_stop(3, Some(1), false), Some(0));
+        // From no stop: the first or the last, as from the page's start.
+        assert_eq!(next_stop(3, None, true), Some(0));
+        assert_eq!(next_stop(3, None, false), Some(2));
+        // Past either end a browser moves into its own controls.
+        assert_eq!(next_stop(3, Some(2), true), None);
+        assert_eq!(next_stop(3, Some(0), false), None);
+        assert_eq!(next_stop(0, None, true), None);
+        assert_eq!(next_stop(0, None, false), None);
+        assert_eq!(next_stop(2, Some(5), false), None, "a stale index");
+    }
+
+    #[test]
+    fn a_form_is_a_group_chromium_calls_one() {
+        assert!(is_form("AXGroup", "", "form"));
+        assert!(is_form("AXGroup", "AXLandmarkForm", "form"));
+        assert!(is_form("AXGroup", "AXLandmarkForm", "formulaire"));
+        assert!(!is_form("AXGroup", "", "group"));
+        assert!(!is_form("AXGroup", "AXLandmarkSearch", "search"));
+        assert!(!is_form("AXTextField", "", "form"));
     }
 
     #[test]

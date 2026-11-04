@@ -322,7 +322,7 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
 }
 
 /// The window's first web area, breadth first.
-fn web_area(window: &AXUIElement) -> Option<Element> {
+pub fn web_area(window: &AXUIElement) -> Option<Element> {
     let window = unsafe { CFRetained::retain(NonNull::from(window)) };
     let mut queue = std::collections::VecDeque::from([(window, 0)]);
     let mut visited = 0;

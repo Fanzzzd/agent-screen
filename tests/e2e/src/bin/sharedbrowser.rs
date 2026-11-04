@@ -112,6 +112,8 @@ fn user_touched(lines: &[String]) -> Vec<String> {
                     "submit",
                     "click",
                     "blur",
+                    "focus",
+                    "active",
                     "page-blur",
                     "escape",
                 ]
@@ -184,6 +186,167 @@ fn names_users_window(reply: &Result<Value>) -> bool {
         .is_err_and(|e| e.to_string().contains("\"pair user\""))
 }
 
+/// The title of the window an app's accessibility calls focused: the one
+/// its keys go to.
+fn focused_window(pid: &str) -> String {
+    let script = format!(
+        "tell application \"System Events\"
+            tell (first process whose unix id is {pid})
+                try
+                    set w to value of attribute \"AXFocusedWindow\"
+                    if w is missing value then return \"no focused window\"
+                    return name of w
+                on error e
+                    return \"error: \" & e
+                end try
+            end tell
+        end tell"
+    );
+    sh_lenient("/usr/bin/osascript", &["-e", &script])
+        .trim()
+        .to_string()
+}
+
+fn key(control: &Control, id: &Value, keys: &str) -> Result<Value> {
+    let reply = control.call(
+        "key",
+        json!({ "sessionKey": KEY, "displayId": id, "keys": keys }),
+    );
+    sleep_ms(500);
+    reply
+}
+
+/// Whether the agent's page moved its focus to `field` since `from`: a
+/// focus event, or the focused element as the page polls it, since a page
+/// whose window isn't key may get no focus event.
+fn focus_moved(log: &std::path::Path, from: usize, field: &str) -> bool {
+    let seen = lines(log, from);
+    has(&seen, &format!("pair agent focus {field}"))
+        || has(&seen, &format!("pair agent active {field}"))
+}
+
+/// The login form beside the user's window (#110): a click picks its
+/// first field, Tab and shift+Tab move focus through accessibility, text
+/// goes into the field Tab reached, and Return submits the form once, or
+/// fails naming the button that submits it, which a click then presses.
+/// The user's window keeps its focus throughout.
+fn form(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let tree1 = tree(control, id, window_id)?;
+    let (_, first) = element(&tree1, "agent first")?;
+    let (_, submit) = element(&tree1, "agent submit")?;
+    let user_focus = focused_window(pid);
+    let from = lines(log, 0).len();
+    let picked = control.call("click", at(first));
+    sleep_ms(300);
+
+    let mark = lines(log, 0).len();
+    let tabbed = key(control, id, "Tab");
+    let (second, _) = element(&tree(control, id, window_id)?, "agent second")?;
+    check(
+        "Tab moves focus from the first field to the second in the agent's window",
+        picked.is_ok()
+            && tabbed.is_ok()
+            && focus_moved(log, mark, "second")
+            && second.contains("focused"),
+        format!(
+            "{} | {second} | log {:?}",
+            cut(&said(&tabbed), 400),
+            lines(log, mark)
+        ),
+    );
+    check(
+        "the reply says Tab order is an approximation",
+        tabbed
+            .as_ref()
+            .is_ok_and(|v| v.to_string().contains("approximation")),
+        cut(&said(&tabbed), 400),
+    );
+    let mark = lines(log, 0).len();
+    let back = key(control, id, "shift+Tab");
+    let (first_line, _) = element(&tree(control, id, window_id)?, "agent first")?;
+    check(
+        "shift+Tab moves it back to the first field",
+        back.is_ok() && focus_moved(log, mark, "first") && first_line.contains("focused"),
+        format!(
+            "{} | {first_line} | log {:?}",
+            cut(&said(&back), 400),
+            lines(log, mark)
+        ),
+    );
+    let mark = lines(log, 0).len();
+    let again = key(control, id, "Tab");
+    check(
+        "Tab again reaches the second field",
+        again.is_ok() && focus_moved(log, mark, "second"),
+        format!("{} | log {:?}", cut(&said(&again), 400), lines(log, mark)),
+    );
+    let now = focused_window(pid);
+    let seen = lines(log, from);
+    check(
+        "the user's window stays focused and logs no blur",
+        now == user_focus && now == "pair user" && !has(&seen, "win user blur"),
+        format!("focused window {user_focus:?} → {now:?} | log {seen:?}"),
+    );
+
+    let typed = control.call(
+        "type",
+        json!({ "sessionKey": KEY, "displayId": id, "text": "pw" }),
+    );
+    sleep_ms(500);
+    let (second, _) = element(&tree(control, id, window_id)?, "agent second")?;
+    check(
+        "type goes into the field Tab reached",
+        typed.is_ok() && second.contains("value=\"pw\""),
+        format!("{} | {second}", cut(&said(&typed), 400)),
+    );
+
+    let submits = |log: &std::path::Path| {
+        lines(log, from)
+            .iter()
+            .filter(|l| l.starts_with("pair agent login-submit"))
+            .count()
+    };
+    let returned = key(control, id, "Return");
+    let after_return = submits(log);
+    // Without a route, the error must name the form's submit button, and
+    // the agent's click on it submits.
+    let named = returned
+        .as_ref()
+        .is_err_and(|e| e.to_string().contains("\"agent submit\""));
+    let clicked = if returned.is_err() && named && after_return == 0 {
+        let clicked = control.call("click", at(submit));
+        sleep_ms(500);
+        Some(said(&clicked))
+    } else {
+        None
+    };
+    let seen = lines(log, from);
+    check(
+        "Return in the second field submits the form once, or names its submit button, which a click submits once",
+        submits(log) == 1
+            && has(&seen, "pair agent login-submit [\"\",\"pw\"]")
+            && (returned.is_ok() || clicked.is_some()),
+        format!(
+            "{} | click {clicked:?} | log {seen:?}",
+            cut(&said(&returned), 600)
+        ),
+    );
+    let now = focused_window(pid);
+    check(
+        "the user's window is still the focused one",
+        now == "pair user",
+        now,
+    );
+    Ok(())
+}
+
 fn test(
     control: &Control,
     id: &Value,
@@ -240,6 +403,7 @@ fn test(
         .iter()
         .find_map(|l| l.strip_prefix("ready ").map(str::to_string))
         .context("the harness's log names no pid")?;
+    let pid = pid.as_str();
     sh_lenient(
         "/usr/bin/osascript",
         &[
@@ -341,16 +505,7 @@ fn test(
         format!("{} | log {seen:?}", cut(&said(&pressed), 400)),
     );
 
-    let tabbed = control.call(
-        "key",
-        json!({ "sessionKey": KEY, "displayId": id, "keys": "Tab" }),
-    );
-    sleep_ms(300);
-    check(
-        "Tab fails and names the user's window",
-        names_users_window(&tabbed),
-        cut(&said(&tabbed), 400),
-    );
+    form(control, id, window_id, log, pid)?;
 
     let seen = lines(log, from);
     let touched = user_touched(&seen);

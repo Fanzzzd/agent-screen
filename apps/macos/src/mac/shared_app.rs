@@ -7,7 +7,8 @@ use super::ax::{self, Element};
 use crate::model::WindowTarget;
 use agent_screen_model::shared_app::{self as rules, ElementUse};
 use agent_screen_model::typing::landed;
-use objc2_core_foundation::CFString;
+use objc2_application_services::AXUIElement;
+use objc2_core_foundation::{CFBoolean, CFString};
 use std::time::{Duration, Instant};
 
 /// What a field holds after the agent's last edit there, and its
@@ -41,6 +42,54 @@ pub fn label(element: &ax::Element) -> String {
 
 fn role(element: &ax::Element) -> String {
     ax::string_attribute(element, "AXRole").unwrap_or_default()
+}
+
+fn flag(element: &AXUIElement, name: &str) -> Option<bool> {
+    ax::attribute(element, name).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+}
+
+/// The elements up from `element` to its window, nearest first.
+fn ancestors(element: &ax::Element) -> Vec<ax::Element> {
+    let mut out = Vec::new();
+    let mut at = element.clone();
+    while out.len() < 64 {
+        let Some(parent) = ax::element_attribute(&at, "AXParent") else {
+            break;
+        };
+        if role(&parent) == "AXWindow" {
+            break;
+        }
+        out.push(parent.clone());
+        at = parent;
+    }
+    out
+}
+
+/// The elements under `scope` in tree order, as far as `MAX` visits go,
+/// that `keep` takes.
+fn descendants(scope: &ax::Element, keep: impl Fn(&ax::Element) -> bool) -> Vec<ax::Element> {
+    const MAX: usize = 5000;
+    let mut out = Vec::new();
+    let mut stack: Vec<ax::Element> = ax::elements_attribute(scope, "AXChildren")
+        .into_iter()
+        .rev()
+        .collect();
+    let mut visits = 0;
+    while let Some(element) = stack.pop() {
+        visits += 1;
+        if visits > MAX {
+            break;
+        }
+        if keep(&element) {
+            out.push(element.clone());
+        }
+        stack.extend(
+            ax::elements_attribute(&element, "AXChildren")
+                .into_iter()
+                .rev(),
+        );
+    }
+    out
 }
 
 /// The element at `at` in `target`'s window: a field, or the nearest
@@ -168,15 +217,110 @@ pub fn confirm(element: &ax::Element) -> Result<&'static str, String> {
     if !field && actions.iter().any(|a| a == "AXPress") && ax::try_action(element, "AXPress") {
         return Ok("AXPress");
     }
+    if field {
+        return Err(no_submit(element));
+    }
     Err(format!(
-        "\"{}\" has no confirm action, so Return can't reach it without a key event{}",
-        label(element),
-        if field {
-            "; a web form submits through its button, so click that"
-        } else {
-            ""
-        }
+        "\"{}\" has no confirm action, so Return can't reach it without a key event",
+        label(element)
     ))
+}
+
+/// Why Return can't submit a web field's form. Chromium gives a field no
+/// confirm action, and nothing it publishes tells the button that
+/// submits, which Return's implicit submission clicks, from one that
+/// doesn't: both are AXButton with the same attributes. So Agent Screen
+/// doesn't guess, and names the form's buttons for the agent to click.
+fn no_submit(field: &ax::Element) -> String {
+    let name = label(field);
+    let form = ancestors(field).into_iter().find(|e| {
+        rules::is_form(
+            &role(e),
+            &ax::string_attribute(e, "AXSubrole").unwrap_or_default(),
+            &ax::string_attribute(e, "AXRoleDescription").unwrap_or_default(),
+        )
+    });
+    let Some(form) = form else {
+        return format!(
+            "\"{name}\" has no confirm action and is in no form accessibility shows, so Return can't reach it without a key event. If the page has a button that acts on the field, click it"
+        );
+    };
+    let buttons: Vec<String> = descendants(&form, |e| role(e) == "AXButton")
+        .iter()
+        .take(8)
+        .map(|b| format!("\"{}\"", label(b)))
+        .collect();
+    if buttons.is_empty() {
+        return format!(
+            "\"{name}\" is a web text field with no confirm action, in a form without a button, which only a Return key event submits"
+        );
+    }
+    format!(
+        "\"{name}\" is a web text field with no confirm action, and accessibility doesn't say which of its form's buttons ({}) submits it, so Return can't submit the form without a key event, and Agent Screen doesn't guess. Click the button that submits it: the click presses it through accessibility, as Return would",
+        buttons.join(", ")
+    )
+}
+
+/// Where Tab moves: the outermost page around `element`, so it goes on
+/// past a frame's end.
+fn page_of(element: &ax::Element) -> Option<ax::Element> {
+    std::iter::once(element.clone())
+        .chain(ancestors(element))
+        .filter(|e| role(e) == "AXWebArea")
+        .last()
+}
+
+/// Tab (`forward`) or shift+Tab in `target`'s page: focus the next or
+/// previous element that takes focus, from `from`, the element the agent
+/// last picked, or else the page's focused element. The element focused,
+/// and its label.
+pub fn tab(
+    target: WindowTarget,
+    from: Option<&ax::Element>,
+    forward: bool,
+) -> Result<(ax::Element, String), String> {
+    ax::ensure_web_tree(target);
+    let page = from
+        .filter(|e| ax::window_of(e) == Some(target.window_id))
+        .and_then(page_of)
+        .or_else(|| ax::window_element(target).and_then(|w| ax::web_area(&w)))
+        .ok_or("your window shows no web page accessibility can reach, and Tab moves focus only within one")?;
+    let stops = descendants(&page, |e| {
+        rules::tab_stop(
+            &role(e),
+            ax::settable(e, "AXFocused"),
+            flag(e, "AXEnabled").unwrap_or(true),
+        )
+    });
+    let picked = from.and_then(|f| stops.iter().position(|s| **s == **f));
+    let focused = || {
+        stops
+            .iter()
+            .position(|s| flag(s, "AXFocused") == Some(true))
+    };
+    let at = picked.or_else(focused);
+    let Some(next) = rules::next_stop(stops.len(), at, forward) else {
+        return Err(match stops.is_empty() {
+            true => "the page in your window has no element that takes focus".into(),
+            false => format!(
+                "focus is on the page's {} element that takes focus, and past it a browser moves into its own controls, which have no route here",
+                if forward { "last" } else { "first" }
+            ),
+        });
+    };
+    let element = stops[next].clone();
+    let name = label(&element);
+    if !ax::set_attribute(&element, "AXFocused", CFBoolean::new(true)) {
+        return Err(format!("\"{name}\" refused focus through accessibility"));
+    }
+    let started = Instant::now();
+    while flag(&element, "AXFocused") != Some(true) {
+        if started.elapsed() > Duration::from_millis(1000) {
+            return Err(format!("\"{name}\" took no focus through accessibility"));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Ok((element, name))
 }
 
 /// Escape: the element's cancel action.
