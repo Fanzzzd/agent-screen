@@ -17,6 +17,9 @@
 // - over: the most of any pixel the line covers beyond the glass;
 // - width: the line's width across it, measured along the edge's normal.
 //
+// Gap and overhang are also given for each top corner, the notch and the
+// rest of the outline.
+//
 // OVERLAY.png gets 8x crops of the top-left and top-right corners, the
 // notch, and a bottom corner: the bezel black, the glass grey, the line red.
 
@@ -167,6 +170,18 @@ let glassGrid = Grid(glassEdge)
 var worstGap = 0.0, worstGapAt = (0.0, 0.0)
 var worstOver = 0.0, worstOverAt = (0.0, 0.0)
 var unmatched = 0
+// The same by part of the outline: the top 100 px at each corner, the top
+// edge between them with the notch, and the rest. One part's worst can
+// hide another's.
+let parts = ["top-left corner", "notch", "top-right corner", "elsewhere"]
+func part(_ p: (Double, Double)) -> Int {
+  if p.1 > 100 { return 3 }
+  if p.0 < 100 { return 0 }
+  if p.0 > Double(pw) - 100 { return 2 }
+  return 1
+}
+var partGap = [Double](repeating: 0, count: 4), partOver = [Double](repeating: 0, count: 4)
+var partGapAt = [(Double, Double)](repeating: (0, 0), count: 4), partOverAt = partGapAt
 for p in glassEdge {
   guard let (q, d) = outer.nearest(p) else {
     unmatched += 1
@@ -177,6 +192,9 @@ for p in glassEdge {
   let signed = inside ? d : -d
   if signed > worstGap { (worstGap, worstGapAt) = (signed, p) }
   if -signed > worstOver { (worstOver, worstOverAt) = (-signed, p) }
+  let k = part(p)
+  if signed > partGap[k] { (partGap[k], partGapAt[k]) = (signed, p) }
+  if -signed > partOver[k] { (partOver[k], partOverAt[k]) = (-signed, p) }
 }
 for p in outerEdge where glassGrid.nearest(p) == nil { unmatched += 1 }
 
@@ -216,6 +234,9 @@ print("glass edge points \(glassEdge.count), line edge points \(outerEdge.count)
 print("max gap, line inside the glass's edge: \(f(worstGap)) px at \(pt(worstGapAt))")
 print("max overhang, line outside the glass: \(f(worstOver)) px at \(pt(worstOverAt))")
 print("most of one pixel covered past the glass: \(f(over)) at (\(overAt.0), \(overAt.1))")
+for (i, name) in parts.enumerated() {
+  print("  \(name): gap \(f(partGap[i])) px at \(pt(partGapAt[i])), overhang \(f(partOver[i])) px at \(pt(partOverAt[i]))")
+}
 print("line width across it: \(f(minWidth)) at \(pt(minWidthAt)) to \(f(maxWidth)) at \(pt(maxWidthAt)) px")
 
 // The overlay: crops at 8x.
