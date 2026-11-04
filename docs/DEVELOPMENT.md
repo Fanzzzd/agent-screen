@@ -175,7 +175,7 @@ cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, co
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
-cargo test -p agent-screen-model screen_edge # the Input Grant edge's outline: continuous corners, notch, panels with measured shapes
+cargo test -p agent-screen-model screen_edge # the Input Grant edge's outline: smoothed corners, notch, panels with measured shapes, and the outline against points of Apple's bezel art (crates/model/testdata)
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup
@@ -451,7 +451,7 @@ Complete queued drags have `executorAvailable: true`. A request moves through `q
 
 `apps/macos/src/input_queue.rs` holds admission, scheduling and projection; `queue_adapter` compiles the same coordinator without GPUI. `Core` forwards owner lifetime, Takeover and disconnect changes. The shell shows a click-through red edge and the Input Bar (`ui/input_bar.rs`), runs one loan at a time, and acknowledges grant cleanup after restoration. `mac/real_input.rs` posts tagged HID events and observes untagged input through a listen-only HID tap; an unavailable or disabled tap stops execution. Each drag rechecks its saved window/display geometry and the window under each point; secure input or a foreground change stops it. Real input and Keyboard Borrow share a session mutex. Per-process gates serialize posted events, DevTools input and AX mutations with a real-input loan; unrelated processes remain independent. Real-keyboard operations are not routed through the queue. Native runtime checks are separate from the offline coordinator tests.
 
-The red edge is the outline of the screen's glass (`crates/model/src/screen_edge.rs`), stroked twice as wide and masked by itself so its outer side lies on the glass's edge. The rounding of the 14- and 16-inch MacBook Pro panels was fitted to Apple's bezel images from [Apple Design Resources](https://developer.apple.com/design/resources/), whose screen opening is the glass. `tests/e2e/tools/edgefit.swift` checks an outline against one: it reports the largest gap between the line and the glass's edge, any overhang past it, and the line's width, and writes an 8x overlay of the corners and the notch.
+The red edge is the outline of the screen's glass (`crates/model/src/screen_edge.rs`), stroked twice as wide and masked by itself so its outer side lies on the glass's edge. The rounding of the 14- and 16-inch MacBook Pro panels was fitted to Apple's bezel images from [Apple Design Resources](https://developer.apple.com/design/resources/), whose screen opening is the glass. `tests/e2e/tools/edgefit.swift` checks an outline against one: it reports the largest gap between the line and the glass's edge and any overhang past it, overall and for each top corner and the notch, and the line's width, and writes an 8x overlay of the corners and the notch.
 
 ```sh
 swiftc -O tests/e2e/tools/edgefit.swift -o target/e2e/edgefit

@@ -15,40 +15,108 @@
 //! selector, and neither IORegistry nor SkyLight names one. The rounding
 //! comes from fitting Apple's MacBook Pro bezel art (Apple Design
 //! Resources), whose screen opening is the glass, pixel for pixel.
+//!
+//! Every corner is a smoothed corner, the construction Figma calls corner
+//! smoothing: a circular arc of the corner's radius, shortened at both
+//! ends, with a cubic Bézier from each end onto its edge. More smoothing
+//! starts the curve farther along the edge and eases it in. Apple's
+//! continuous corner, SwiftUI's `RoundedRectangle(style: .continuous)`, is
+//! close to 0.6. The bezel art's corners are not that curve: at the radius
+//! that fits a top corner's middle, Apple's curve reaches the side sooner
+//! than the glass does and runs 0.5 px past the glass's edge there.
 
 pub type Point = (f64, f64);
 
-/// How far a continuous corner reaches along each of its edges, in radii.
-pub const CONTINUOUS_EXTENT: f64 = 1.528665;
+/// One corner's rounding, in the panel's own pixels, so it holds in every
+/// display mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Corner {
+    /// The radius of the corner's circular arc.
+    pub radius: f64,
+    /// 0 is a circular corner; 1 has no arc left, only the two easing
+    /// curves. The curve reaches `(1 + smoothing) × radius` along each
+    /// edge.
+    pub smoothing: f64,
+}
 
-/// Apple's continuous ("squircle") corner, the curve of CALayer's
-/// `cornerCurve = .continuous` and SwiftUI's `RoundedRectangle(style:
-/// .continuous)`, as the three cubic Béziers SwiftUI's path is made of, in
-/// radii. A point is (u, v): u along the edge the corner comes from, v
-/// along the edge it goes to, both from the corner's vertex. It starts at
-/// (CONTINUOUS_EXTENT, 0) and ends at (0, CONTINUOUS_EXTENT).
-const CONTINUOUS: [[Point; 3]; 3] = [
-    [(1.088490, 0.0), (0.868407, 0.0), (0.631494, 0.074911)],
-    [
-        (0.372824, 0.169060),
-        (0.169060, 0.372824),
-        (0.074911, 0.631494),
-    ],
-    [(0.0, 0.868407), (0.0, 1.088490), (0.0, CONTINUOUS_EXTENT)],
-];
+impl Corner {
+    pub const SQUARE: Corner = Corner {
+        radius: 0.0,
+        smoothing: 0.0,
+    };
 
-/// A built-in panel's rounding, as continuous-corner radii in the panel's
-/// own pixels, so it holds in every display mode.
+    const fn new(radius: f64, smoothing: f64) -> Corner {
+        Corner { radius, smoothing }
+    }
+
+    /// How far the curve reaches along each edge, per unit of radius.
+    fn extent(self) -> f64 {
+        1.0 + self.smoothing.clamp(0.0, 1.0)
+    }
+
+    /// The corner's cubic Béziers for a radius `radius`, as points (u, v):
+    /// u along the edge the corner comes from, v along the edge it goes
+    /// to, both from the corner's vertex. They start at (extent × radius,
+    /// 0) and end at (0, extent × radius), mirror images about the
+    /// diagonal.
+    fn cubics(self, radius: f64) -> Vec<[Point; 3]> {
+        let s = self.smoothing.clamp(0.0, 1.0);
+        let r = radius;
+        let p = (1.0 + s) * r;
+        // The arc's sweep, and its chord along each axis.
+        let arc = std::f64::consts::FRAC_PI_2 * (1.0 - s);
+        let chord = (arc / 2.0).sin() * r * std::f64::consts::SQRT_2;
+        // The easing curve's last leg, which meets the arc on its tangent.
+        let alpha = (std::f64::consts::FRAC_PI_2 - arc) / 2.0;
+        let beta = std::f64::consts::FRAC_PI_4 * s;
+        let c = r * (alpha / 2.0).tan() * beta.cos();
+        let d = c * beta.tan();
+        let b = (p - chord - c - d) / 3.0;
+        let a = 2.0 * b;
+        // Built along the incoming edge, x from where the curve leaves it
+        // and y towards the outgoing edge, then turned into (u, v).
+        let uv = |(x, y): Point| (p - x, y);
+        let arc_start = (a + b + c, d);
+        let arc_end = (arc_start.0 + chord, arc_start.1 + chord);
+        let mut out = Vec::new();
+        if a + b + c > 1e-12 {
+            out.push([(a, 0.0), (a + b, 0.0), arc_start].map(uv));
+        }
+        if arc > 1e-12 {
+            // One cubic per arc of at most 90°: its tangents' lengths are
+            // 4/3 × tan(sweep / 4) radii.
+            let centre = (p - r, r);
+            let tangent = |(x, y): Point| (-(y - centre.1) / r, (x - centre.0) / r);
+            let k = 4.0 / 3.0 * (arc / 4.0).tan() * r;
+            let (t0, t1) = (tangent(arc_start), tangent(arc_end));
+            out.push(
+                [
+                    (arc_start.0 + k * t0.0, arc_start.1 + k * t0.1),
+                    (arc_end.0 - k * t1.0, arc_end.1 - k * t1.1),
+                    arc_end,
+                ]
+                .map(uv),
+            );
+        }
+        if a + b + c > 1e-12 {
+            let (x, y) = arc_end;
+            out.push([(x + d, y + c), (x + d, y + b + c), (x + d, y + a + b + c)].map(uv));
+        }
+        out
+    }
+}
+
+/// A built-in panel's rounding.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bezel {
     /// The glass's top corners.
-    pub top: f64,
+    pub top: Corner,
     /// The glass's bottom corners.
-    pub bottom: f64,
+    pub bottom: Corner,
     /// The notch's lower corners.
-    pub notch_corner: f64,
+    pub notch_corner: Corner,
     /// Where the top edge turns down into the notch.
-    pub notch_fillet: f64,
+    pub notch_fillet: Corner,
 }
 
 impl Bezel {
@@ -58,28 +126,28 @@ impl Bezel {
     /// square corners on a rounded panel only lose the corner's tip under
     /// the bezel.
     pub const SQUARE: Bezel = Bezel {
-        top: 0.0,
-        bottom: 0.0,
-        notch_corner: 0.0,
-        notch_fillet: 0.0,
+        top: Corner::SQUARE,
+        bottom: Corner::SQUARE,
+        notch_corner: Corner::SQUARE,
+        notch_fillet: Corner::SQUARE,
     };
 
     /// The 16-inch MacBook Pro (M1 Pro and later, 3456 × 2234 panel),
-    /// fitted to its bezel art.
+    /// fitted to its bezel art so the outline stays on the glass.
     pub const MACBOOK_PRO_16: Bezel = Bezel {
-        top: 39.75,
-        bottom: 0.0,
-        notch_corner: 20.5,
-        notch_fillet: 9.75,
+        top: Corner::new(39.2, 0.92),
+        bottom: Corner::SQUARE,
+        notch_corner: Corner::new(20.5, 0.5),
+        notch_fillet: Corner::new(10.25, 0.6),
     };
 
     /// The 14-inch MacBook Pro (M1 Pro and later, 3024 × 1964 panel),
-    /// fitted to its bezel art.
+    /// fitted to its bezel art so the outline stays on the glass.
     pub const MACBOOK_PRO_14: Bezel = Bezel {
-        top: 38.75,
-        bottom: 0.0,
-        notch_corner: 20.5,
-        notch_fillet: 9.25,
+        top: Corner::new(39.2, 0.78),
+        bottom: Corner::SQUARE,
+        notch_corner: Corner::new(21.0, 0.6),
+        notch_fillet: Corner::new(9.25, 0.6),
     };
 
     /// The rounding of a built-in panel with `pixels` native pixels, wide
@@ -175,13 +243,14 @@ impl Outline {
 /// width, clipped to itself.
 pub fn outline(screen: Screen) -> Outline {
     let (w, h) = (screen.width, screen.height);
-    let reach = |px: f64| px / screen.scale * CONTINUOUS_EXTENT;
-    // A corner reaches at most half the shorter side.
-    let fit = |px: f64| reach(px).min(w.min(h) / 2.0) / CONTINUOUS_EXTENT;
+    // Radii in points; a corner reaches at most half the shorter side.
+    let fit = |c: Corner| Sized {
+        shape: c,
+        radius: (c.radius.max(0.0) / screen.scale).min(w.min(h) / 2.0 / c.extent()),
+    };
     let (top, bottom) = (fit(screen.bezel.top), fit(screen.bezel.bottom));
-    let top_reach = top * CONTINUOUS_EXTENT;
-    let mut path = Path::new((top_reach, 0.0));
-    if let Some((n, fillet, lower)) = notch(&screen, top_reach, &reach) {
+    let mut path = Path::new((top.reach(), 0.0));
+    if let Some((n, fillet, lower)) = notch(&screen, top.reach()) {
         path.corner((n.left, 0.0), (-1.0, 0.0), (0.0, 1.0), fillet);
         path.corner((n.left, n.depth), (0.0, -1.0), (1.0, 0.0), lower);
         path.corner((n.right, n.depth), (-1.0, 0.0), (0.0, -1.0), lower);
@@ -194,29 +263,52 @@ pub fn outline(screen: Screen) -> Outline {
     path.outline
 }
 
-/// The notch with its fillet and lower-corner radii in points, when it
-/// lies within the top edge, clear of the top corners. Radii that don't
-/// fit the housing shrink together.
-fn notch(screen: &Screen, top_reach: f64, reach: &dyn Fn(f64) -> f64) -> Option<(Notch, f64, f64)> {
+/// A corner's shape with its radius in points.
+#[derive(Clone, Copy)]
+struct Sized {
+    shape: Corner,
+    radius: f64,
+}
+
+impl Sized {
+    fn reach(self) -> f64 {
+        self.radius * self.shape.extent()
+    }
+}
+
+/// The notch with its fillets and lower corners in points, when it lies
+/// within the top edge, clear of the top corners. Corners that don't fit
+/// the housing shrink together.
+fn notch(screen: &Screen, top_reach: f64) -> Option<(Notch, Sized, Sized)> {
     let n = screen.notch?;
+    let sized = |c: Corner| Sized {
+        shape: c,
+        radius: c.radius.max(0.0) / screen.scale,
+    };
     let (fillet, lower) = (
-        reach(screen.bezel.notch_fillet),
-        reach(screen.bezel.notch_corner),
+        sized(screen.bezel.notch_fillet),
+        sized(screen.bezel.notch_corner),
     );
     let fits = n.depth > 0.0
         && n.left < n.right
-        && n.left - fillet >= top_reach
-        && n.right + fillet <= screen.width - top_reach
+        && n.left - fillet.reach() >= top_reach
+        && n.right + fillet.reach() <= screen.width - top_reach
         && n.depth < screen.height / 2.0;
     if !fits {
         return None;
     }
-    let shrink = (n.depth / (fillet + lower)).min(1.0);
-    let lower = (lower * shrink).min((n.right - n.left) / 2.0);
+    let shrink = (n.depth / (fillet.reach() + lower.reach())).min(1.0);
+    let lower_reach = (lower.reach() * shrink).min((n.right - n.left) / 2.0);
     Some((
         n,
-        fillet * shrink / CONTINUOUS_EXTENT,
-        lower / CONTINUOUS_EXTENT,
+        Sized {
+            radius: fillet.radius * shrink,
+            ..fillet
+        },
+        Sized {
+            radius: lower_reach / lower.shape.extent(),
+            ..lower
+        },
     ))
 }
 
@@ -243,22 +335,22 @@ impl Path {
         }
     }
 
-    /// A continuous corner of `radius` at `vertex`, coming in along the
-    /// edge that runs from the vertex towards `from`, and leaving along the
-    /// one towards `to`, both unit vectors. A zero radius is the vertex.
-    fn corner(&mut self, vertex: Point, from: Point, to: Point, radius: f64) {
+    /// A smoothed corner at `vertex`, coming in along the edge that runs
+    /// from the vertex towards `from`, and leaving along the one towards
+    /// `to`, both unit vectors. A zero radius is the vertex.
+    fn corner(&mut self, vertex: Point, from: Point, to: Point, corner: Sized) {
         let at = |(u, v): Point| {
             (
-                vertex.0 + radius * (u * from.0 + v * to.0),
-                vertex.1 + radius * (u * from.1 + v * to.1),
+                vertex.0 + u * from.0 + v * to.0,
+                vertex.1 + u * from.1 + v * to.1,
             )
         };
-        if radius <= 0.0 {
+        if corner.radius <= 0.0 {
             self.line(vertex);
             return;
         }
-        self.line(at((CONTINUOUS_EXTENT, 0.0)));
-        for [a, b, p] in CONTINUOUS {
+        self.line(at((corner.reach(), 0.0)));
+        for [a, b, p] in corner.shape.cubics(corner.radius) {
             let p = at(p);
             self.outline.segments.push(Segment::Curve(at(a), at(b), p));
             self.at = p;
@@ -284,6 +376,11 @@ mod tests {
             depth: 32.0,
         }),
     };
+
+    /// How far a corner reaches along its edges, in points.
+    fn reach_of(c: Corner, scale: f64) -> f64 {
+        c.radius / scale * c.extent()
+    }
 
     fn near(a: Point, b: Point) -> bool {
         (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
@@ -358,12 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn top_corners_are_continuous_and_bottom_corners_square() {
+    fn top_corners_are_rounded_and_bottom_corners_square() {
         let o = outline(Screen {
             notch: None,
             ..MACBOOK
         });
-        let reach = 39.75 / 2.0 * CONTINUOUS_EXTENT;
+        let reach = reach_of(Bezel::MACBOOK_PRO_16.top, 2.0);
         let (w, h) = (MACBOOK.width, MACBOOK.height);
         assert!(near(o.start, (reach, 0.0)));
         let e = ends(&o);
@@ -382,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_continuous_corner_is_apples_curve() {
+    fn a_top_corner_leaves_and_meets_its_edges_along_them() {
         // The top-right corner: three cubics that leave the top edge along
         // it, reach the side along it, and mirror about the corner's
         // diagonal.
@@ -390,7 +487,6 @@ mod tests {
             notch: None,
             ..MACBOOK
         });
-        let r = 39.75 / 2.0;
         let w = MACBOOK.width;
         let mut at = ends(&o)[0];
         let mut cubics = Vec::new();
@@ -408,14 +504,64 @@ mod tests {
         assert!(near(flip(s), p));
         assert!(near(flip(a), b));
         assert!(near(flip(cubics[0][0]), cubics[2][3]));
-        // Its middle sits 0.2915 radii in from both edges, where SwiftUI's
-        // continuous corner puts it; a circular one would be at 0.2929.
+    }
+
+    /// Each smoothing's cubics, from the start of the curve to its end.
+    fn corner_cubics(smoothing: f64) -> Vec<[Point; 4]> {
+        let c = Corner::new(10.0, smoothing);
+        let mut at = (c.extent() * 10.0, 0.0);
+        c.cubics(10.0)
+            .into_iter()
+            .map(|[a, b, p]| {
+                let cubic = [at, a, b, p];
+                at = p;
+                cubic
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_smoothing_is_a_circular_corner() {
+        let cubics = corner_cubics(0.0);
+        assert_eq!(cubics.len(), 1);
+        let [s, a, b, p] = cubics[0];
+        assert!(near(s, (10.0, 0.0)) && near(p, (0.0, 10.0)));
+        // Its middle is on the circle about (10, 10), to the 0.03% one
+        // cubic per quarter circle allows.
         let mid = (
             (s.0 + 3.0 * a.0 + 3.0 * b.0 + p.0) / 8.0,
             (s.1 + 3.0 * a.1 + 3.0 * b.1 + p.1) / 8.0,
         );
-        assert!(((w - mid.0) / r - 0.291507).abs() < 1e-6);
-        assert!((mid.1 / r - 0.291507).abs() < 1e-6);
+        assert!(((mid.0 - 10.0).hypot(mid.1 - 10.0) - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_smoothed_corner_is_an_arc_eased_onto_both_edges() {
+        for smoothing in [0.5, 0.6, 0.78, 0.92] {
+            let cubics = corner_cubics(smoothing);
+            assert_eq!(cubics.len(), 3);
+            let reach = 10.0 * (1.0 + smoothing);
+            assert!(near(cubics[0][0], (reach, 0.0)));
+            assert!(near(cubics[2][3], (0.0, reach)));
+            // The arc's ends are on the corner's circle.
+            for q in [cubics[1][0], cubics[1][3]] {
+                assert!(
+                    ((q.0 - 10.0).hypot(q.1 - 10.0) - 10.0).abs() < 1e-9,
+                    "{q:?}"
+                );
+            }
+            // No kink where one cubic meets the next.
+            for pair in cubics.windows(2) {
+                let (into, out) = (pair[0], pair[1]);
+                let d0 = (into[3].0 - into[2].0, into[3].1 - into[2].1);
+                let d1 = (out[1].0 - out[0].0, out[1].1 - out[0].1);
+                let cross = d0.0 * d1.1 - d0.1 * d1.0;
+                assert!(cross.abs() < 1e-9 * d0.0.hypot(d0.1) * d1.0.hypot(d1.1));
+                assert!(d0.0 * d1.0 + d0.1 * d1.1 > 0.0);
+            }
+        }
+        // All smoothing: the two easing curves meet with no arc between.
+        assert_eq!(corner_cubics(1.0).len(), 2);
     }
 
     #[test]
@@ -428,7 +574,7 @@ mod tests {
             notch: None,
             ..MACBOOK
         });
-        let reach = 39.75 / 1.92 * CONTINUOUS_EXTENT;
+        let reach = reach_of(Bezel::MACBOOK_PRO_16.top, 1.92);
         assert!(near(o.start, (reach, 0.0)));
     }
 
@@ -439,8 +585,8 @@ mod tests {
             notch: Some(n),
             ..MACBOOK
         });
-        let fillet = 9.75 / 2.0 * CONTINUOUS_EXTENT;
-        let lower = 20.5 / 2.0 * CONTINUOUS_EXTENT;
+        let fillet = reach_of(Bezel::MACBOOK_PRO_16.notch_fillet, 2.0);
+        let lower = reach_of(Bezel::MACBOOK_PRO_16.notch_corner, 2.0);
         let lines: Vec<(Point, Point)> = {
             let mut at = o.start;
             let mut v = Vec::new();
@@ -459,7 +605,7 @@ mod tests {
         // The top edge runs to the fillet, which turns down the notch's
         // side; the side runs straight to the lower corner, the bottom
         // straight between the lower corners, and back up the other side.
-        let top_reach = 39.75 / 2.0 * CONTINUOUS_EXTENT;
+        let top_reach = reach_of(Bezel::MACBOOK_PRO_16.top, 2.0);
         assert!(has((top_reach, 0.0), (n.left - fillet, 0.0)));
         assert!(has((n.left, fillet), (n.left, n.depth - lower)));
         assert!(has((n.left + lower, n.depth), (n.right - lower, n.depth)));
@@ -518,7 +664,7 @@ mod tests {
                 // Off the housing: the glass reaches into the notch's
                 // rectangle only at its rounded lower corners.
                 let n = screen.notch.unwrap();
-                let lower = screen.bezel.notch_corner / screen.scale * CONTINUOUS_EXTENT;
+                let lower = reach_of(screen.bezel.notch_corner, screen.scale);
                 let inside = |lo: f64, hi: f64, v: f64| v > lo + 1e-9 && v < hi - 1e-9;
                 let under = inside(n.left, n.right, x) && inside(0.0, n.depth - lower, y)
                     || inside(n.left + lower, n.right - lower, x) && inside(0.0, n.depth, y);
@@ -575,5 +721,140 @@ mod tests {
             ..MACBOOK
         };
         assert_eq!(outline(screen), outline(plain));
+    }
+
+    /// The outline as a polygon, 64 chords a curve.
+    fn polygon(o: &Outline) -> Vec<Point> {
+        let mut at = o.start;
+        let mut out = vec![at];
+        for s in &o.segments {
+            match *s {
+                Segment::Line(p) => at = p,
+                Segment::Curve(a, b, p) => {
+                    for i in 1..64 {
+                        let t = i as f64 / 64.0;
+                        let m = 1.0 - t;
+                        let f = |q0: f64, q1: f64, q2: f64, q3: f64| {
+                            m * m * m * q0
+                                + 3.0 * m * m * t * q1
+                                + 3.0 * m * t * t * q2
+                                + t * t * t * q3
+                        };
+                        out.push((f(at.0, a.0, b.0, p.0), f(at.1, a.1, b.1, p.1)));
+                    }
+                    at = p;
+                }
+            }
+            out.push(at);
+        }
+        out
+    }
+
+    /// How far the outline runs past the glass at a point on the glass's
+    /// edge: positive when the point is inside the outline, so the outline
+    /// lies beyond it, over the bezel; negative for a gap.
+    fn past(p: Point, polygon: &[Point]) -> f64 {
+        let mut distance = f64::INFINITY;
+        let mut inside = false;
+        for pair in polygon.windows(2) {
+            let ((ax, ay), (bx, by)) = (pair[0], pair[1]);
+            let (dx, dy) = (bx - ax, by - ay);
+            let length = dx * dx + dy * dy;
+            let t = if length > 0.0 {
+                (((p.0 - ax) * dx + (p.1 - ay) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            distance = distance.min((p.0 - ax - t * dx).hypot(p.1 - ay - t * dy));
+            if (ay > p.1) != (by > p.1) && p.0 < ax + (p.1 - ay) / dy * dx {
+                inside = !inside;
+            }
+        }
+        if inside { distance } else { -distance }
+    }
+
+    #[test]
+    fn the_outline_stays_on_the_bezel_arts_glass() {
+        // Points on the glass's edge in Apple's bezel art, near the top
+        // corners and the notch, against the outline at one point per
+        // panel pixel, with the notch NSScreen reports. The outline may
+        // cross the glass's edge by no more than 0.1 px, and leave no more
+        // than 0.5 px of it bare: 0.7 px on the 14-inch panel, whose notch
+        // in the art is 0.36 px shallower than NSScreen's 32 points.
+        let panels = [
+            (
+                include_str!("../testdata/bezel-16.txt"),
+                (3456.0, 2234.0),
+                (1542.0, 1912.0),
+                0.5,
+            ),
+            (
+                include_str!("../testdata/bezel-14.txt"),
+                (3024.0, 1964.0),
+                (1326.0, 1696.0),
+                0.7,
+            ),
+        ];
+        for (art, (width, height), (left, right), most_gap) in panels {
+            let screen = Screen {
+                width,
+                height,
+                scale: 1.0,
+                bezel: Bezel::of_builtin((width as u32, height as u32), true),
+                notch: Some(Notch::from_areas(width, left, right, 64.0)),
+            };
+            let polygon = polygon(&outline(screen));
+            let edge: Vec<Point> = art
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(|l| {
+                    let mut xy = l.split(' ').map(|v| v.parse::<f64>().unwrap());
+                    (xy.next().unwrap(), xy.next().unwrap())
+                })
+                .collect();
+            assert!(edge.len() > 150);
+            let (mut over, mut gap) = ((0.0, (0.0, 0.0)), (0.0, (0.0, 0.0)));
+            for p in edge {
+                let d = past(p, &polygon);
+                if d > over.0 {
+                    over = (d, p);
+                }
+                if -d > gap.0 {
+                    gap = (-d, p);
+                }
+            }
+            assert!(over.0 <= 0.1, "{width}: {over:?} past the glass");
+            assert!(gap.0 <= most_gap, "{width}: {gap:?} of glass bare");
+        }
+    }
+
+    #[test]
+    fn a_less_smoothed_top_corner_runs_past_the_glass() {
+        // Smoothing 0.6, close to Apple's continuous corner, which the edge
+        // used before, at the 39.75 px that fits the 16-inch top corner's
+        // middle: the art's glass reaches the side later, so the outline
+        // crosses its edge there.
+        let screen = Screen {
+            width: 3456.0,
+            height: 2234.0,
+            scale: 1.0,
+            bezel: Bezel {
+                top: Corner::new(39.75, 0.6),
+                ..Bezel::SQUARE
+            },
+            notch: None,
+        };
+        let polygon = polygon(&outline(screen));
+        let over = include_str!("../testdata/bezel-16.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                let mut xy = l.split(' ').map(|v| v.parse::<f64>().unwrap());
+                (xy.next().unwrap(), xy.next().unwrap())
+            })
+            .filter(|p| p.0 < 100.0)
+            .map(|p| past(p, &polygon))
+            .fold(0.0, f64::max);
+        assert!(over > 0.3, "{over}");
     }
 }
