@@ -3290,8 +3290,9 @@ struct Launched {
     pid: Option<i32>,
 }
 
-/// How long a launch watches for a window that comes after it gave up.
-const LATE_WINDOW_WAIT: Duration = Duration::from_secs(30);
+/// How long a cold start's windows count as the agent's, and the launch
+/// watches for them (ADR 0007).
+const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;
 
 /// How long a running app may take to make the window Agent Screen asked
 /// for. A window it makes later may be the user's.
@@ -3683,12 +3684,18 @@ async fn launch_now(
     // Two sessions launching an app at once both see it start; it's the
     // first one's.
     if !was_running {
-        core.update(cx, |c, _| {
+        let ours = core.update(cx, |c, _| {
             let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
-            if !claimed && let Some(d) = c.displays.get_mut(id) {
-                d.started.insert(pid);
-            }
+            !claimed
+                && c.displays
+                    .get_mut(id)
+                    .is_some_and(|d| d.started.insert(pid))
         });
+        // Its windows are the agent's for 30 s from now unless the user
+        // acts on it, whenever launch_app answers.
+        if ours {
+            crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
+        }
     }
     // A starting app takes accessibility observers only once it has set
     // up; until then, try again, and move any window that beats it.
@@ -3986,6 +3993,13 @@ async fn launch_now(
                 wait_for_page(placed.target, cx).await;
             }
             keep_catch(core, id, catch, cx);
+            // A starting app's later windows, such as a main window after a
+            // loading one, may come while it is too busy for the catch.
+            if !was_running {
+                let mut seen = before.clone();
+                seen.insert(placed.target.window_id);
+                watch_cold_start(core, id, pid, seen, screen.clone(), cx);
+            }
             log::debug!(
                 "launch: {name} answered at {} ms",
                 started.elapsed().as_millis()
@@ -4062,57 +4076,10 @@ async fn launch_now(
         .detach();
     } else if !was_running {
         // The kept catch takes the first window the moment it opens, unless
-        // the user is clicking or typing then; the poll is for an app that
+        // the user is clicking or typing then; the watch is for an app that
         // won't take observers yet.
         crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            let mut seen = before;
-            for _ in 0..200 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                // An app that finished starting after the unhide above, as
-                // an Electron development build does, is still hidden, and
-                // its windows are listed nowhere: move them in, then show.
-                let hidden = off(cx, move || {
-                    app::is_hidden(pid) && {
-                        if ax::move_all_into(pid, bounds) > 0 {
-                            app::unhide(pid);
-                        }
-                        true
-                    }
-                })
-                .await;
-                if hidden {
-                    continue;
-                }
-                let listed = seen.clone();
-                let late: Vec<_> = off(cx, move || {
-                    windows::all()
-                        .into_iter()
-                        .filter(|w| {
-                            w.target.pid == pid
-                                && w.layer == 0
-                                && !listed.contains(&w.target.window_id)
-                        })
-                        .collect()
-                })
-                .await;
-                for window in late {
-                    seen.insert(window.target.window_id);
-                    // Unless the user took the app back or made it.
-                    if still_agents(&core, id, window.target, cx) {
-                        let _ = settle(&core, window.target, id, cx).await;
-                        return;
-                    }
-                }
-                // Ended or removed meanwhile: the window stays where it opened.
-                if !takes_windows(&core, id, cx) {
-                    return;
-                }
-            }
-        })
-        .detach();
+        watch_cold_start(&core, id, pid, before, screen.clone(), cx);
     }
     // The URL waits for the new window, which never came: opening it now
     // would add a tab to whatever window the user has in front.
@@ -4694,6 +4661,133 @@ fn no_keyboard_target() -> ControlError {
     ControlError::not_found(
         "no window on the display can take keyboard input; launch an app or click a field first",
     )
+}
+
+/// For 30 s after a cold start, decide each new window of the app that the
+/// catch didn't, by ADR 0007's rule (`new_window::watch`): one the app made
+/// before it took observers, or while too busy to answer Accessibility, as
+/// WeCom's main window, 3.4 s after its loading window, was. Without a kept
+/// catch yet, it tries for one again.
+fn watch_cold_start(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    mut seen: std::collections::HashSet<u32>,
+    screen: Option<String>,
+    cx: &mut AsyncApp,
+) {
+    use agent_screen_model::new_window::{On, Watch, watch};
+    let core = core.clone();
+    let bounds = cg::display_bounds(id);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for tick in 0..200 {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            // Ended or removed meanwhile: windows stay where they opened.
+            if !takes_windows(&core, id, cx) {
+                return;
+            }
+            // An app that finished starting after the unhide, as an
+            // Electron development build does, is still hidden, and its
+            // windows are listed nowhere: move them in, then show.
+            let hidden = off(cx, move || {
+                app::is_hidden(pid) && {
+                    if ax::move_all_into(pid, bounds) > 0 {
+                        app::unhide(pid);
+                    }
+                    true
+                }
+            })
+            .await;
+            if hidden {
+                continue;
+            }
+            // No catch yet, as for an app that took no observers while it
+            // started: about once a second, try for one.
+            let caught = |c: &Core| c.kept_catches.iter().any(|(_, k)| k.pid() == pid);
+            if tick % 7 == 0 && !core.read_with(cx, |c, _| caught(c)) {
+                let catch = crate::mac::catch::Catch::start(pid, id, screen.clone(), None);
+                keep_catch(&core, id, catch.await, cx);
+            }
+            let others: Vec<Rect> = core.read_with(cx, |c, _| {
+                c.displays
+                    .list
+                    .iter()
+                    .filter(|d| d.id != id)
+                    .map(|d| cg::display_bounds(d.id))
+                    .collect()
+            });
+            let listed = seen.clone();
+            let late: Vec<(windows::Window, On)> = off(cx, move || {
+                windows::all()
+                    .into_iter()
+                    .filter(|w| {
+                        w.target.pid == pid
+                            && w.layer == 0
+                            && !listed.contains(&w.target.window_id)
+                    })
+                    .map(|w| {
+                        let mid = w.bounds.mid();
+                        let on = if bounds.contains(mid) {
+                            On::ThisDisplay
+                        } else if others.iter().any(|d| d.contains(mid)) {
+                            On::OtherDisplay
+                        } else {
+                            On::Elsewhere
+                        };
+                        (w, on)
+                    })
+                    .collect()
+            })
+            .await;
+            for (window, on) in late {
+                let target = window.target;
+                seen.insert(target.window_id);
+                // The catch's verdict stands, and a taken-back app is the
+                // user's.
+                let decided = !still_agents(&core, id, target, cx);
+                let facts = off(cx, move || {
+                    crate::mac::catch::seen(id, pid, bounds, Some(target.window_id))
+                })
+                .await;
+                match watch(on, decided, facts) {
+                    Watch::Leave => {}
+                    // As the catch left it: placed and recorded the way
+                    // launch_app places its window.
+                    Watch::Record => {
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Place => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch; the agent's ({facts:?})",
+                            target.window_id
+                        );
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Theirs => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch while the user acted on it; theirs",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| {
+                            if let Some(d) = c.displays.get_mut(id) {
+                                d.user_made.insert(target.window_id);
+                            }
+                        });
+                    }
+                    Watch::Undecided => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch ({facts:?}); left where it is",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| c.left_alone.push((id, target.window_id)));
+                    }
+                }
+            }
+        }
+    })
+    .detach();
 }
 
 /// The display still exists and has not ended, so windows may go onto it.
