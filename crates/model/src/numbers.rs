@@ -40,6 +40,18 @@ impl<E: Hash + Eq + Clone> Numbers<E> {
             .collect()
     }
 
+    /// Only a complete whole-window read can retire missing numbers.
+    /// Subtree, shallow and budget-limited reads leave other numbers in
+    /// place. The platform validates a retained element is still in this
+    /// window before using it as a root or taking an action on it.
+    pub fn refresh(&mut self, snapshot: Vec<E>, complete: bool) -> Vec<usize> {
+        if complete {
+            self.renumber(snapshot)
+        } else {
+            self.extend(snapshot)
+        }
+    }
+
     /// Number elements listed on top of the snapshot, such as a menu's
     /// items, keeping every number the window has.
     pub fn extend(&mut self, more: Vec<E>) -> Vec<usize> {
@@ -116,6 +128,28 @@ mod tests {
         assert!(!numbers.issued(3));
         // It comes back as a new element with a new number.
         assert_eq!(numbers.renumber(vec!["ok", "cancel"]), [0, 3]);
+    }
+
+    #[test]
+    fn partial_reads_preserve_numbers_outside_the_subtree() {
+        let mut numbers = Numbers::default();
+        assert_eq!(
+            numbers.refresh(vec!["window", "sidebar", "messages"], true),
+            [0, 1, 2]
+        );
+        assert_eq!(numbers.refresh(vec!["messages", "card"], false), [2, 3]);
+        assert_eq!(numbers.get(1), Some(&"sidebar"));
+        // A later shallow read must not discard the card it didn't visit.
+        assert_eq!(
+            numbers.refresh(vec!["window", "sidebar", "messages"], false),
+            [0, 1, 2]
+        );
+        assert_eq!(numbers.get(3), Some(&"card"));
+        // Only a complete window read can establish that an element is gone.
+        numbers.refresh(vec!["window", "sidebar", "messages"], true);
+        assert_eq!(numbers.get(3), None);
+        assert!(numbers.issued(3));
+        assert_eq!(numbers.refresh(vec!["messages", "new card"], false), [2, 4]);
     }
 
     #[test]

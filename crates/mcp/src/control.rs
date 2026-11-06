@@ -69,9 +69,9 @@ pub struct Control {
     /// Displays this session made, by id: the connection each was made on,
     /// and the apps launch_app started there.
     made: std::sync::Mutex<HashMap<u64, Made>>,
-    /// The last element tree each window sent, by display and window, for
+    /// The last element tree each window sent, by display, window and read scope, for
     /// act_on_element's changes.
-    trees: std::sync::Mutex<HashMap<(i64, i64), String>>,
+    trees: std::sync::Mutex<HashMap<(i64, i64, agent_screen_model::tree::Scope), String>>,
 }
 
 #[derive(Default)]
@@ -84,8 +84,17 @@ struct Made {
 
 impl Control {
     /// Keep a window's latest tree; the one before it, if any.
-    pub fn swap_tree(&self, display: i64, window: i64, tree: String) -> Option<String> {
-        self.trees.lock().unwrap().insert((display, window), tree)
+    pub fn swap_tree(
+        &self,
+        display: i64,
+        window: i64,
+        scope: agent_screen_model::tree::Scope,
+        tree: String,
+    ) -> Option<String> {
+        self.trees
+            .lock()
+            .unwrap()
+            .insert((display, window, scope), tree)
     }
 
     /// Note a display this session made on the current connection.
@@ -345,6 +354,31 @@ mod tests {
     /// connection.
     fn reconnect(control: &Control) {
         control.connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn change_baselines_are_separate_for_roots_and_traversal_depths() {
+        let control = Control::default();
+        let full = agent_screen_model::tree::Scope::default();
+        let shallow = agent_screen_model::tree::Scope {
+            root: None,
+            max_depth: Some(1),
+        };
+        let pane = agent_screen_model::tree::Scope {
+            root: Some(2),
+            max_depth: Some(1),
+        };
+        assert_eq!(control.swap_tree(7, 8, full, "full".into()), None);
+        assert_eq!(control.swap_tree(7, 8, shallow, "shallow".into()), None);
+        assert_eq!(control.swap_tree(7, 8, pane, "pane".into()), None);
+        assert_eq!(
+            control.swap_tree(7, 8, pane, "new pane".into()),
+            Some("pane".into())
+        );
+        assert_eq!(
+            control.swap_tree(7, 8, full, "new full".into()),
+            Some("full".into())
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The Accessibility API: other apps' windows and their element trees.
 
 use crate::model::{Rect, WindowTarget};
+use agent_screen_model::tree::{MAX_DEPTH, MAX_VISITS};
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
@@ -637,6 +638,29 @@ pub fn window_of(element: &AXUIElement) -> Option<u32> {
     window_id(&*element_attribute(element, "AXWindow")?)
 }
 
+/// Validate a retained number before a scoped read or action. Partial
+/// snapshots cannot infer that an unvisited element disappeared.
+pub fn in_window(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> bool {
+    let mut pid = 0;
+    if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success || pid != target.pid {
+        return false;
+    }
+    let Some(role) = string_attribute(element, "AXRole") else {
+        return false;
+    };
+    if allow_menu && matches!(role.as_str(), "AXMenuBarItem" | "AXMenuItem" | "AXMenu") {
+        return true;
+    }
+    let Some(window) = window_or_sheet(target) else {
+        return false;
+    };
+    let element = unsafe { CFRetained::retain(NonNull::from(element)) };
+    // AXWindow is a direct association in many apps; some web elements
+    // expose only AXParent. Both must name this live window.
+    element_attribute(&element, "AXWindow").is_some_and(|owner| owner == window)
+        || agent_screen_model::tree::within(element, &window, |e| element_attribute(e, "AXParent"))
+}
+
 pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {
     let range = objc2_core_foundation::CFRange::new(start as isize, length as isize);
     ax_value(AXValueType::CFRange, &range)
@@ -850,6 +874,7 @@ pub struct Snapshot {
     pub tree: String,
     pub elements: Vec<Element>,
     pub truncated: bool,
+    pub depth_limited: bool,
 }
 // See Sendable.
 unsafe impl Send for Snapshot {}
@@ -859,23 +884,46 @@ unsafe impl Send for Snapshot {}
 /// tool clicks in.
 /// `origin` is the display's top-left corner; `scale` turns its points
 /// into screenshot pixels.
-pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<Snapshot> {
-    let window = window_or_sheet(target)?;
+pub enum SnapshotError {
+    WindowUnavailable,
+    RootUnavailable,
+}
+
+pub fn snapshot(
+    target: WindowTarget,
+    origin: (f64, f64),
+    scale: f64,
+    root: Option<Element>,
+    max_depth: Option<usize>,
+) -> Result<Snapshot, SnapshotError> {
+    let window = window_or_sheet(target).ok_or(SnapshotError::WindowUnavailable)?;
+    if root
+        .as_ref()
+        .is_some_and(|element| !in_window(element, target, false))
+    {
+        return Err(SnapshotError::RootUnavailable);
+    }
     ask_for_web_tree(target.pid, &window);
     let mut walker = TreeWalker {
         origin,
         scale,
         lines: Vec::new(),
         elements: Vec::new(),
-        truncated: false,
-        visited: 0,
     };
-    walker.visit(&window, 0);
+    let scoped = root.is_some();
+    let read =
+        agent_screen_model::tree::walk(root.unwrap_or(window), max_depth, |element, depth| {
+            walker.read(element, depth)
+        });
     // The menu bar the agent's display shows belongs to the user's front
     // app, so list this app's menu titles here; pressing one lists its items.
-    let titles = element_attribute(&application(target.pid), "AXMenuBar")
-        .map(|bar| elements_attribute(&bar, "AXChildren"))
-        .unwrap_or_default();
+    let titles = if scoped {
+        Vec::new()
+    } else {
+        element_attribute(&application(target.pid), "AXMenuBar")
+            .map(|bar| elements_attribute(&bar, "AXChildren"))
+            .unwrap_or_default()
+    };
     // The first title is the Apple menu.
     for (n, item) in titles.into_iter().skip(1).enumerate() {
         let Some(title) = string_attribute(&item, "AXTitle").filter(|t| !t.is_empty()) else {
@@ -892,10 +940,11 @@ pub fn snapshot(target: WindowTarget, origin: (f64, f64), scale: f64) -> Option<
         ));
         walker.elements.push(item);
     }
-    Some(Snapshot {
+    Ok(Snapshot {
         tree: walker.lines.join("\n"),
         elements: walker.elements,
-        truncated: walker.truncated,
+        truncated: read.truncated,
+        depth_limited: read.depth_limited,
     })
 }
 
@@ -913,6 +962,7 @@ pub fn menu_items(item: &AXUIElement, first: usize) -> Option<Snapshot> {
         tree: String::new(),
         elements: Vec::new(),
         truncated: false,
+        depth_limited: false,
     };
     let mut lines = Vec::new();
     list_menu(&menu, 0, first, &mut lines, &mut snapshot.elements);
@@ -1429,13 +1479,8 @@ struct TreeWalker {
     scale: f64,
     lines: Vec<String>,
     elements: Vec<Element>,
-    truncated: bool,
-    visited: usize,
 }
 
-const MAX_ELEMENTS: usize = 400;
-const MAX_VISITS: usize = 3000;
-const MAX_DEPTH: usize = 40;
 const NAMES: [&str; 10] = [
     "AXRole",
     "AXSubrole",
@@ -1459,20 +1504,12 @@ const CONTAINERS: [&str; 7] = [
 ];
 
 impl TreeWalker {
-    fn visit(&mut self, element: &AXUIElement, depth: usize) {
-        if depth > MAX_DEPTH {
-            return;
-        }
-        // Unlabelled containers are not numbered but still cost a round
-        // trip each; a web page has thousands.
-        self.visited += 1;
-        if self.elements.len() >= MAX_ELEMENTS || self.visited > MAX_VISITS {
-            self.truncated = true;
-            return;
-        }
-        let Some(values) = multiple_values(element) else {
-            return;
-        };
+    fn read(
+        &mut self,
+        element: &AXUIElement,
+        depth: usize,
+    ) -> Option<agent_screen_model::tree::Branch<Element>> {
+        let values = multiple_values(element)?;
         let string = |i: usize| {
             let text = values[i].downcast_ref::<CFString>()?.to_string();
             // Apps wrap numbers and names in invisible direction marks.
@@ -1484,7 +1521,7 @@ impl TreeWalker {
         let role = string(0).unwrap_or_else(|| "AXUnknown".into());
         // A ruler's tick marks: dozens of elements nobody acts on.
         if role == "AXRulerMarker" {
-            return;
+            return None;
         }
         let label = string(2).or_else(|| string(3));
         let value = values[4]
@@ -1501,8 +1538,8 @@ impl TreeWalker {
             .or_else(|| string(4));
         let children = elements(&values[9]);
 
-        let mut indent = depth;
-        if !CONTAINERS.contains(&role.as_str()) || label.is_some() {
+        let named = !CONTAINERS.contains(&role.as_str()) || label.is_some();
+        if named {
             let mut line = format!("[{}] {}", self.elements.len(), short(&role));
             if let Some(subrole) = string(1) {
                 line += &format!("({})", short(&subrole));
@@ -1533,11 +1570,8 @@ impl TreeWalker {
             self.lines.push(format!("{}{line}", "  ".repeat(depth)));
             self.elements
                 .push(unsafe { CFRetained::retain(NonNull::from(element)) });
-            indent = depth + 1;
         }
-        for child in children {
-            self.visit(&child, indent);
-        }
+        Some(agent_screen_model::tree::Branch { named, children })
     }
 }
 
