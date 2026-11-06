@@ -831,6 +831,18 @@ impl Shell {
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // A grant that just ended, as after a loan that left its session
+        // done, puts the pointer and front app back now, not at the next
+        // once-a-second tick.
+        if !self.loan_running
+            && !self.restoring
+            && self.core.read(cx).input_queue.ending().is_some()
+        {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |shell, cx| shell.drive_queue(cx));
+            })
+            .detach();
+        }
         let helper = self.core.read(cx).colorsync_helper();
         if helper.is_some() && helper != self.colorsync {
             self.colorsync = helper;
@@ -1293,6 +1305,54 @@ impl Shell {
                     let area = cg::display_bounds(display);
                     let plan = match plan {
                         crate::input_queue::Plan::Drag(drag) => drag,
+                        crate::input_queue::Plan::Click(click) => {
+                            let Some(window) = crate::mac::windows::on_display(display)
+                                .into_iter()
+                                .find(|w| w.target == click.target)
+                            else {
+                                return Outcome::Refused("the window is no longer on the display");
+                            };
+                            let frame = window.bounds.offset(area.x, area.y);
+                            if area != click.area
+                                || frame != click.frame
+                                || !agent_screen_model::real_click::contained(click.at, area, frame)
+                            {
+                                return Outcome::Refused(
+                                    "the click is outside its authorized window or display",
+                                );
+                            }
+                            return real_input::click_at(
+                                click.target,
+                                click.at,
+                                click.click,
+                                objc2_core_graphics::CGEventFlags(click.flags),
+                                |at| {
+                                    // As for a drag: a moved or covered
+                                    // window must not get the click.
+                                    let why = if !ok.load(Ordering::SeqCst) {
+                                        Some("the loan was cancelled")
+                                    } else if cg::display_bounds(display) != area
+                                        || !area.contains(at)
+                                    {
+                                        Some("the display geometry changed")
+                                    } else if cg::window_bounds(click.target.window_id)
+                                        != Some(frame)
+                                    {
+                                        Some("the window geometry changed")
+                                    } else if !crate::mac::input::window_at(at)
+                                        .is_some_and(|(target, _)| target == click.target)
+                                    {
+                                        Some("the window was covered or left the screen")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(why) = why {
+                                        log::debug!("input queue containment: {why}");
+                                    }
+                                    why.is_none()
+                                },
+                            );
+                        }
                         crate::input_queue::Plan::MenuItem(item) => {
                             if area != item.area
                                 || !crate::mac::windows::on_display(display)

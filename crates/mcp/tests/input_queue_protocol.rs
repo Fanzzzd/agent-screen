@@ -86,6 +86,14 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
                     continue;
                 }
                 "drag" => json!({"route":"accessibility"}),
+                "click" if request["params"]["realInput"] == true => {
+                    let reply = json!({"id":request["id"],"error":{"code":"input_pending","message":"The click at (10, 20) waits for the user to allow their pointer. No click was sent, not on the background route either."}});
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
                 "screenshot" => json!({"width":800,"height":600,"data":"","mimeType":"image/png"}),
                 _ => {
                     // Keep the isolated listener alive even for a regression,
@@ -141,7 +149,12 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
         let changed=exchange(tool(9,"computer",drag(false)));
         assert_ne!(changed["result"]["isError"],true,"{changed}");
         assert!(changed["result"]["content"][0]["text"].as_str().unwrap().contains("Input route: accessibility"));
-        let invalid=exchange(tool(10,"computer",json!({"display_id":7,"action":"left_click","coordinate":[10,20],"real_input":true})));
+        // A click asks for the user's pointer and, while it waits, sends
+        // nothing: no background click, no screenshot.
+        let click=exchange(tool(10,"computer",json!({"display_id":7,"action":"double_click","coordinate":[10,20],"real_input":true})));
+        assert_eq!(click["result"]["isError"],true,"{click}");
+        assert!(click["result"]["content"][0]["text"].as_str().unwrap().contains("No click was sent"));
+        let invalid=exchange(tool(12,"computer",json!({"display_id":7,"action":"scroll","coordinate":[10,20],"real_input":true})));
         assert_eq!(invalid["result"]["isError"],true);
         drop(input); assert!(client.0.wait().unwrap().success());
     }).await.unwrap();
@@ -159,13 +172,17 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
             "inputQueue",
             "drag",
             "drag",
-            "screenshot"
+            "screenshot",
+            "click"
         ]
     );
     assert_eq!(calls[0]["params"]["operation"], "drag-1");
     assert_eq!(calls[1]["params"]["requestId"], 42);
     assert_eq!(calls[4]["params"]["fromX"], 10.0);
     assert_eq!(calls[4]["params"]["realInput"], true);
+    assert_eq!(calls[7]["params"]["realInput"], true);
+    assert_eq!(calls[7]["params"]["button"], "left");
+    assert_eq!(calls[7]["params"]["count"], 2);
 }
 
 /// A menu press that waits for a real click and comes back input_pending

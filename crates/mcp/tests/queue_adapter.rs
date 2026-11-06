@@ -7,7 +7,7 @@ use agent_screen_model::model;
 #[path = "../../../apps/macos/src/input_queue.rs"]
 mod app_input_queue;
 
-use app_input_queue::{Drag, InputQueue, MenuItem, Plan};
+use app_input_queue::{Click, Drag, InputQueue, MenuItem, Plan};
 use std::sync::atomic::Ordering;
 
 fn owner(connection: u64) -> model::Owner {
@@ -535,5 +535,69 @@ fn a_menu_item_loan_ends_its_grant_when_nothing_else_waits() {
         end.restore,
         "a normal end puts the pointer and front app back"
     );
+    input.ended(end);
+}
+
+/// A click with the user's pointer (ADR 0013, "Clicks"): declined, the
+/// same click asked again finds the declined request and nothing runs;
+/// allowed, it runs once, and when its call has read the result the
+/// grant ends at once and puts the pointer and front app back.
+#[test]
+fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
+    use agent_screen_model::real_click;
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let click = Plan::Click(Click {
+        target: model::WindowTarget {
+            pid: 1,
+            window_id: 7,
+        },
+        frame: model::Rect::new(100.0, 100.0, 400.0, 300.0),
+        area: model::Rect::new(0.0, 0.0, 800.0, 600.0),
+        at: (300.0, 250.0),
+        click: real_click::Click::of_action("double_click").unwrap(),
+        flags: 0,
+        app: "WeCom".into(),
+        title: None,
+    });
+    let token = || {
+        real_click::operation(
+            7,
+            (300.0, 250.0),
+            real_click::Click::of_action("double_click").unwrap(),
+            0,
+        )
+    };
+    let declined = input
+        .submit(a.clone(), token(), "Click".into(), Some(click.clone()))
+        .unwrap();
+    input.decline(input.queue.approval());
+    let again = input
+        .submit(a.clone(), token(), "Click".into(), Some(click.clone()))
+        .unwrap();
+    assert_eq!(again, declined, "the same click finds its declined request");
+    assert_eq!(state(&input, &a, again), "declined");
+    assert_eq!(input.start_loan(), None, "nothing runs once declined");
+
+    let other = real_click::operation(
+        7,
+        (310.0, 250.0),
+        real_click::Click::of_action("left_click").unwrap(),
+        0,
+    );
+    let id = input
+        .submit(a.clone(), other, "Click".into(), Some(click.clone()))
+        .unwrap();
+    assert_ne!(id, declined);
+    assert_eq!(input.start_loan(), None, "nothing runs before approval");
+    assert!(input.approve(input.queue.approval()));
+    assert_eq!(input.start_loan(), Some((id, click.clone())));
+    input.finish_loan(id, None);
+    assert_eq!(state(&input, &a, id), "completed");
+    input.loan_done(&a, id);
+    assert!(input.queue.request(id).is_none());
+    let end = input.ending().expect("the grant ends with nothing waiting");
+    assert!(end.restore);
     input.ended(end);
 }
