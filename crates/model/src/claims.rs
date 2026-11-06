@@ -1,7 +1,13 @@
 //! What Agent Screen tells a window manager is its own: the displays it made
 //! and the windows on them that are the agents'. AeroSpace leaves both alone
 //! while the claim is live (the fork's AGENT-SCREEN.md, Claims).
+//!
+//! A window is claimed before it moves onto a claimed display and keeps its
+//! claim until it is off all of them. AeroSpace leaves an unclaimed window
+//! where its app put it once it has taken it back before, so a window
+//! released while still on an Agent Display can stay there, out of sight.
 
+use crate::model::Rect;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -45,6 +51,33 @@ impl Claims {
         self.displays.contains(&display) && self.windows.insert(window, display) != Some(display)
     }
 
+    /// The claimed display whose bounds are `target`, among the `online`
+    /// displays and their bounds.
+    pub fn display_at(&self, target: Rect, online: &[(u32, Rect)]) -> Option<u32> {
+        online
+            .iter()
+            .find(|&&(display, bounds)| self.displays.contains(&display) && bounds == target)
+            .map(|&(display, _)| display)
+    }
+
+    /// The bounds of the claimed displays among the `online` ones.
+    pub fn claimed_bounds(&self, online: &[(u32, Rect)]) -> Vec<Rect> {
+        online
+            .iter()
+            .filter(|(display, _)| self.displays.contains(display))
+            .map(|&(_, bounds)| bounds)
+            .collect()
+    }
+
+    /// A window about to move into `target`. Going onto a claimed display,
+    /// it is claimed for that display first, and a claim for another one
+    /// follows it there. Going anywhere else, it keeps the claim it has
+    /// until [`after_leaving`] says it is off. True when the claims changed.
+    pub fn moving_into(&mut self, window: u32, target: Rect, online: &[(u32, Rect)]) -> bool {
+        self.display_at(target, online)
+            .is_some_and(|display| self.claim(window, display))
+    }
+
     pub fn release(&mut self, window: u32) -> bool {
         self.windows.remove(&window).is_some()
     }
@@ -64,6 +97,30 @@ impl Claims {
             list(&mut self.displays.iter().copied()),
             list(&mut self.windows.keys().copied())
         )
+    }
+}
+
+/// What becomes of a window's claim after a move meant to take it off the
+/// claimed displays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterLeaving {
+    /// Its frame is off every claimed display: the claim goes.
+    Release,
+    /// The move failed, the window is still on a claimed display, or where
+    /// it is can't be read: the claim stays, so AeroSpace leaves the window
+    /// alone instead of stranding it on a display the user can't see.
+    Keep,
+}
+
+/// Whether a window that was to leave the claimed displays, with `frame`
+/// now, is off them: its middle is on none of `claimed`, the way AeroSpace
+/// places a window on a monitor.
+pub fn after_leaving(moved: bool, frame: Option<Rect>, claimed: &[Rect]) -> AfterLeaving {
+    match frame {
+        Some(frame) if moved && !claimed.iter().any(|b| b.contains(frame.mid())) => {
+            AfterLeaving::Release
+        }
+        _ => AfterLeaving::Keep,
     }
 }
 
@@ -213,6 +270,90 @@ mod tests {
             claims.to_json(),
             r#"{"version":1,"displays":[3],"windows":[7]}"#
         );
+    }
+
+    const AGENT: Rect = Rect::new(5000.0, 0.0, 1280.0, 800.0);
+    const OTHER_AGENT: Rect = Rect::new(7000.0, 0.0, 1280.0, 800.0);
+    const USER: Rect = Rect::new(0.0, 0.0, 1728.0, 1117.0);
+    const ONLINE: [(u32, Rect); 3] = [(1, USER), (3, AGENT), (4, OTHER_AGENT)];
+
+    fn claimed_on_3() -> Claims {
+        let mut claims = Claims::default();
+        claims.add_display(3);
+        claims.add_display(4);
+        claims.claim(7, 3);
+        claims
+    }
+
+    #[test]
+    fn a_window_leaving_for_the_users_screen_keeps_its_claim_on_the_way() {
+        let mut claims = claimed_on_3();
+        assert!(!claims.moving_into(7, USER, &ONLINE));
+        assert_eq!(claims.display_of(7), Some(3));
+    }
+
+    #[test]
+    fn a_window_moving_between_agent_displays_takes_its_claim_along() {
+        let mut claims = claimed_on_3();
+        assert!(claims.moving_into(7, OTHER_AGENT, &ONLINE));
+        assert_eq!(claims.display_of(7), Some(4));
+        // A window not claimed yet is claimed before it goes onto one.
+        assert!(claims.moving_into(8, AGENT, &ONLINE));
+        assert_eq!(claims.display_of(8), Some(3));
+    }
+
+    #[test]
+    fn a_window_that_made_it_off_every_agent_display_is_released() {
+        let claims = claimed_on_3();
+        let claimed = claims.claimed_bounds(&ONLINE);
+        assert_eq!(claimed, vec![AGENT, OTHER_AGENT]);
+        let home = Rect::new(100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(true, Some(home), &claimed),
+            AfterLeaving::Release
+        );
+    }
+
+    #[test]
+    fn a_failed_move_keeps_the_claim() {
+        let claimed = claimed_on_3().claimed_bounds(&ONLINE);
+        let still = Rect::new(5100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(false, Some(still), &claimed),
+            AfterLeaving::Keep
+        );
+        // Even when the window ended up off by some other means: the move
+        // didn't say so.
+        let home = Rect::new(100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(false, Some(home), &claimed),
+            AfterLeaving::Keep
+        );
+    }
+
+    #[test]
+    fn a_window_moved_but_still_on_an_agent_display_keeps_its_claim() {
+        let claimed = claimed_on_3().claimed_bounds(&ONLINE);
+        // The app put it back where it was.
+        let back = Rect::new(5100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(true, Some(back), &claimed),
+            AfterLeaving::Keep
+        );
+        // Or it landed on the other Agent Display.
+        let other = Rect::new(7100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(true, Some(other), &claimed),
+            AfterLeaving::Keep
+        );
+        // Hanging over the user's screen with its middle still on the display.
+        let straddling = Rect::new(4500.0, 100.0, 1200.0, 600.0);
+        assert_eq!(
+            after_leaving(true, Some(straddling), &claimed),
+            AfterLeaving::Keep
+        );
+        // Its frame can't be read: nothing says it is off.
+        assert_eq!(after_leaving(true, None, &claimed), AfterLeaving::Keep);
     }
 
     #[test]
