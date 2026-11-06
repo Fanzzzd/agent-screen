@@ -265,6 +265,12 @@ pub fn login_app() -> Result<PathBuf> {
     swift_app("login", "Login")
 }
 
+/// tools/hidclick.swift as an app: a button that takes only a click the
+/// HID system reads as held, as a real click is.
+pub fn hidclick_app() -> Result<PathBuf> {
+    swift_app("hidclick", "HIDClick")
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));

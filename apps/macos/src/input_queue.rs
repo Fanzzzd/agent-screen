@@ -37,6 +37,7 @@ pub struct InputQueue {
 pub enum Plan {
     Drag(Drag),
     MenuItem(MenuItem),
+    Click(Click),
 }
 
 /// One complete drag, in global points.
@@ -63,6 +64,22 @@ pub struct MenuItem {
     /// Index among its siblings and title of each element from the menu
     /// bar title down to the item.
     pub path: Vec<(usize, String)>,
+}
+
+/// One complete click with the user's pointer, in global points (ADR 0013,
+/// "Clicks").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Click {
+    pub target: WindowTarget,
+    pub frame: Rect,
+    pub area: Rect,
+    pub at: (f64, f64),
+    pub click: agent_screen_model::real_click::Click,
+    /// CGEventFlags bits.
+    pub flags: u64,
+    /// The app's name and the window's title, for the card.
+    pub app: String,
+    pub title: Option<String>,
 }
 
 impl MenuItem {
@@ -463,7 +480,7 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag with real_input while the approval lasts.",
+            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts.",
         })
     }
 }
