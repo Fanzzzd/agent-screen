@@ -5,6 +5,7 @@
 
 use crate::control::{Control, ControlError, Object};
 use crate::session::Session;
+use agent_screen_model::tree::Scope;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -48,7 +49,11 @@ fn window_id() -> Value {
 }
 
 fn max_depth() -> Value {
-    json!({ "type": "integer", "description": "Leave out elements nested deeper than this many levels; 0 keeps only the window's direct children. Default: all." })
+    json!({ "type": "integer", "minimum": 0, "description": "Limit traversal depth relative to root. 0 reads root-level elements only; unnamed containers do not add a level. Deeper elements are not visited, leaving the budget for sibling branches. Default: all." })
+}
+
+fn tree_root() -> Value {
+    json!({ "type": "integer", "minimum": 0, "description": "A bracketed element number from this window to use as the returned tree's root. Omit for the whole window. If a long list hides the branch you need, first read without root and with a small max_depth, then use that branch's number. A stale root fails instead of reading another window." })
 }
 
 fn user_instruction(purpose: &str) -> Value {
@@ -462,11 +467,12 @@ pub fn definitions() -> Vec<Value> {
                 "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
                 "brackets that act_on_element takes, and its center in screenshot pixels. An element keeps its number",
                 "while it stays in the window; a number whose element went away fails instead of hitting another one.",
-                "A large window's tree runs to thousands of tokens: max_depth leaves out deeper elements and says how many,",
-                "and their numbers still work.",
+                "root reads only that element's subtree. max_depth stops traversal below that depth, relative to the root,",
+                "so a long list in an earlier branch cannot consume the budget for later branches. Discover branch numbers",
+                "with a small max_depth before reading one with root. Numbers outside a partial read stay available, but stale elements fail.",
             ],
             object(
-                json!({ "display_id": display_id(), "window_id": window_id(), "max_depth": max_depth() }),
+                json!({ "display_id": display_id(), "window_id": window_id(), "root": tree_root(), "max_depth": max_depth() }),
                 &["display_id", "window_id"],
             ),
             READ_ONLY,
@@ -490,7 +496,8 @@ pub fn definitions() -> Vec<Value> {
                 "They never fall back to a click. If an action is not confirmed, inspect the current value before retrying.",
                 "result picks what comes back: state, the default, is the whole window state; changes lists only the",
                 "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
-                "none says only that it is done. Fails with a takeover error while the user operates the display.",
+                "none says only that it is done. root and max_depth scope the returned state, not the action's target.",
+                "changes compares only reads with the same root and max_depth. Fails with a takeover error while the user operates the display.",
             ],
             object(
                 json!({
@@ -507,6 +514,7 @@ pub fn definitions() -> Vec<Value> {
                         "description": "For press on an item of an Electron app's menu bar only. true: choose it with a real click once the user allows it. false: press it through accessibility, which Electron takes as the item's shortcut. Default: a real click only while a text field has focus."
                     },
                     "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
+                    "root": tree_root(),
                     "max_depth": max_depth()
                 }),
                 &["display_id", "window_id", "element", "action"],
@@ -868,11 +876,13 @@ pub async fn run(
             Ok(Output::Object(launch_output(&Value::Object(reply))))
         }
         "get_window_state" => {
-            let depth = max_depth_arg(&a)?;
+            let scope = scope_arg(&a)?;
+            let depth = scope.max_depth;
             let state = window_state(
                 control,
                 a.require_int("display_id")?,
                 a.require_int("window_id")?,
+                scope,
             )
             .await?;
             Ok(Output::Content(state.content(depth)))
@@ -920,7 +930,8 @@ pub async fn run(
             let result = a
                 .one_of("result", &["state", "changes", "none"])?
                 .unwrap_or_else(|| "state".into());
-            let depth = max_depth_arg(&a)?;
+            let scope = scope_arg(&a)?;
+            let depth = scope.max_depth;
             let action = a
                 .one_of(
                     "action",
@@ -950,6 +961,11 @@ pub async fn run(
                     "real_input applies to press on a menu item of an Electron app's menu bar",
                 ));
             }
+            // A legacy app ignores unknown parameters. Confirm support and
+            // the root before even an action with an early text/menu reply.
+            if scope.root.is_some() {
+                window_state_reply(control, display, window, scope).await?;
+            }
             let reply = control
                 .call(
                     "elementAction",
@@ -959,7 +975,9 @@ pub async fn run(
                         "element": a.require_int("element")?,
                         "action": action,
                         "value": a.string("value")?,
-                        "realInput": real_input
+                        "realInput": real_input,
+                        "root": scope.root,
+                        "maxDepth": scope.max_depth
                     }),
                 )
                 .await?;
@@ -993,7 +1011,16 @@ pub async fn run(
             control
                 .call("settle", json!({ "displayId": display }))
                 .await?;
-            noted(match window_state(control, display, window).await {
+            if result == "none" && scope.root.is_some() {
+                return noted(Ok(Output::Content(vec![text("Done.")])));
+            }
+            noted(match window_state(control, display, window, scope).await {
+                Err(error) if scope.root.is_some() && error.code == "invalid" => {
+                    Ok(Output::Content(vec![text(format!(
+                        "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
+                        error.message
+                    ))]))
+                }
                 // OK, Save or Close took its own window away: that is the
                 // action working, so show what is on the display now.
                 Err(error) if error.code == "not_found" => {
@@ -1247,9 +1274,27 @@ fn max_depth_arg(a: &Args<'_>) -> Result<Option<usize>, ControlError> {
     }
 }
 
+fn scope_arg(a: &Args<'_>) -> Result<Scope, ControlError> {
+    let root = match a.0.get("root") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| ControlError::invalid("root must be a non-negative integer"))?,
+        ),
+    };
+    Ok(Scope {
+        root,
+        max_depth: max_depth_arg(a)?,
+    })
+}
+
 /// One window's state from the app, and the tree it had before.
 struct WindowState {
     window: i64,
+    root: Option<usize>,
+    depth_limited: bool,
     /// The window and its element count.
     header: String,
     strayed: String,
@@ -1264,6 +1309,9 @@ impl WindowState {
         let full = self.tree.as_str();
         let cut = depth.map(|d| agent_screen_model::tree::cut_depth(full, d));
         let note = match (&cut, depth) {
+            (_, Some(d)) if self.depth_limited => format!(
+                " Deeper elements were not read; use a larger max_depth than {d}, or omit it, to read them."
+            ),
             (Some(cut), Some(d)) if cut != full => format!(
                 " Elements deeper than {d} levels are left out; call get_window_state with a larger max_depth, or none, to see them."
             ),
@@ -1286,13 +1334,17 @@ impl WindowState {
             return self.content(depth);
         };
         let window = self.window;
+        let scope = self
+            .root
+            .map(|root| format!(", subtree [{root}]"))
+            .unwrap_or_default();
         let body = match agent_screen_model::tree::changes(before, &self.tree) {
             Some(changes) => format!(
-                "Done. Changes in window {window} since its last tree (+ new, ~ changed, - gone):{}\n\n{changes}",
+                "Done. Changes in window {window}{scope} since its last tree in the same scope (+ new, ~ changed, - gone):{}\n\n{changes}",
                 self.strayed
             ),
             None => format!(
-                "Done. Window {window}'s elements didn't change.{}",
+                "Done. Window {window}{scope}'s elements didn't change.{}",
                 self.strayed
             ),
         };
@@ -1300,17 +1352,34 @@ impl WindowState {
     }
 }
 
+async fn window_state_reply(
+    control: &Control,
+    display: i64,
+    window: i64,
+    scope: Scope,
+) -> Result<Object, ControlError> {
+    let state = control
+        .call(
+            "windowState",
+            json!({ "displayId": display, "windowId": window, "root": scope.root, "maxDepth": scope.max_depth }),
+        )
+        .await?;
+    if scope.root.is_some() && state.get("root") != Some(&json!(scope.root)) {
+        return Err(ControlError::new(
+            "failed",
+            "the app did not confirm the requested subtree root; update Agent Screen before using root",
+        ));
+    }
+    Ok(state)
+}
+
 async fn window_state(
     control: &Control,
     display: i64,
     window: i64,
+    scope: Scope,
 ) -> Result<WindowState, ControlError> {
-    let state = control
-        .call(
-            "windowState",
-            json!({ "displayId": display, "windowId": window }),
-        )
-        .await?;
+    let state = window_state_reply(control, display, window, scope).await?;
     let get = |key: &str| state.get(key).cloned().unwrap_or(Value::Null);
     let truncated = if get("truncated") == Value::Bool(true) {
         " (truncated)"
@@ -1322,15 +1391,21 @@ async fn window_state(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let root_note = scope
+        .root
+        .map(|root| format!(" Subtree root [{root}]."))
+        .unwrap_or_default();
     Ok(WindowState {
         window,
+        root: scope.root,
+        depth_limited: get("depthLimited") == Value::Bool(true),
         header: format!(
-            "Window {window}: {} {} elements{truncated}.",
+            "Window {window}: {} {} elements{truncated}.{root_note}",
             get("window"),
             get("elements")
         ),
         strayed: strayed_note(&state),
-        before: control.swap_tree(display, window, tree.clone()),
+        before: control.swap_tree(display, window, scope, tree.clone()),
         tree,
         image: image(&get("data"), &get("mimeType")),
     })
@@ -1628,6 +1703,8 @@ mod tests {
     fn state(before: Option<&str>, tree: &str) -> WindowState {
         WindowState {
             window: 7,
+            root: None,
+            depth_limited: false,
             header: "Window 7: {} 3 elements.".into(),
             strayed: String::new(),
             tree: tree.into(),

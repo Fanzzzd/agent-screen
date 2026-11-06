@@ -171,11 +171,13 @@ The frame-placement regression injects the actual AX writer callback to check re
 ```sh
 cargo test                    # unit and isolated integration tests
 cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated endpoint; no app, display or input
-cargo test -p agent-screen-mcp --test element_steps # increment/decrement schema, forwarding and errors over a mock socket; no app or input
+cargo test -p agent-screen-mcp --test element_steps # step actions and subtree schema, socket forwarding, validation and scoped changes; no app or input
 cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, compiled without GPUI; no app or input
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
+cargo test -p agent-screen-model tree # production traversal: shallow discovery beyond a long list, subtree budgets and ancestry guards
+cargo test -p agent-screen-model numbers # full versus partial reads preserve stable element numbers
 cargo test -p agent-screen-model screen_edge # the Input Grant edge's outline: smoothed corners, notch, panels with measured shapes, and the outline against points of Apple's bezel art (crates/model/testdata)
 cargo e2e control             # Takeover and Help Request, needs a debug build running
 cargo e2e smoke [app]         # end to end with Calculator
@@ -199,6 +201,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e windowaccess # Window Authorization on a real
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
 AGENTSCREEN_INSTANCE=e2e cargo e2e placeheld  # Field moves to a user stand-in stage; place_window takes it as a stray, or fails when it keeps moving back; 2 displays, nothing on your screen
 AGENTSCREEN_INSTANCE=e2e cargo e2e compactstate # get_window_state with max_depth and act_on_element with result changes or none send a fraction of the tree (skips while Calculator runs, quits it after)
+AGENTSCREEN_INSTANCE=e2e cargo e2e subtreestate # native Electron AX: an 800-row earlier branch truncates the default read; shallow reads discover the later pane, root reads reach its card, scoped actions report changes and partial reads preserve unrelated IDs; one display, no private apps or real input
 AGENTSCREEN_INSTANCE=e2e cargo e2e claims     # the claim file lists the displays and the windows placed on them, drops a window taken back, and is gone after quit; with AeroSpace running, the display gets none of your workspaces or windows (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; its sign shows each of the three steps (needs Electron.app and Field.app)
