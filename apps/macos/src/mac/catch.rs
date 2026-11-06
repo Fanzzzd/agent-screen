@@ -6,6 +6,7 @@
 use super::ax;
 use super::windows;
 use crate::model::{DisplayId, Rect, WindowTarget};
+use agent_screen_model::new_window::{ACTION_WINDOW, Owner, Seen};
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
@@ -71,9 +72,6 @@ pub enum Towards {
     Window(u32, Option<i32>),
     Unknown,
 }
-
-/// How long after an action a new window counts as its result.
-const ACTION_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Note that the display was just driven.
 pub fn agent_acted(display: DisplayId) {
@@ -211,25 +209,18 @@ pub fn user_acted_recently(pid: i32) -> bool {
     })
 }
 
-/// Whose a new window in an app the agent started is.
-#[derive(Debug, PartialEq)]
-enum Owner {
-    Agent,
-    User,
-    /// Both acted, or neither: leave the window where it is, for the agent
-    /// to place if it's its own.
-    Unknown,
-}
-
-/// `only_here`: none of the app's other windows is off the display, so
-/// the user isn't using it: a window it makes on its own while nobody
-/// acted, as a VM viewer does when its guest reboots, is the agent's (#46).
-fn owner(agent: bool, user: bool, only_here: bool) -> Owner {
-    match (agent, user) {
-        (true, false) => Owner::Agent,
-        (false, true) => Owner::User,
-        (false, false) if only_here => Owner::Agent,
-        _ => Owner::Unknown,
+/// What is known as `pid` makes the window `new` while its catch targets
+/// `display` at `bounds`: whose it is follows (ADR 0007).
+pub fn seen(display: DisplayId, pid: i32, bounds: Rect, new: Option<u32>) -> Seen {
+    // Another session with a window of this app, driving its display just
+    // now, may have made it: then it's nobody's for sure.
+    let agent = acted_recently(display, pid) && !others_acted_recently(display, pid);
+    let user = user_acted_recently(pid);
+    let only_here = !agent && !user && only_on(pid, bounds, new);
+    Seen {
+        agent,
+        user,
+        only_here,
     }
 }
 
@@ -541,7 +532,19 @@ extern "C" fn created(
     }
     // Panels and sheets stay where the app puts them; Agent Screen places
     // those through the usual path.
-    if ax::string_attribute(window, "AXRole").as_deref() != Some("AXWindow") {
+    let role = ax::string_attribute(window, "AXRole");
+    if role.as_deref() != Some("AXWindow") {
+        // An app whose main thread is busy, as a large one building its
+        // main window is, doesn't answer within the messaging timeout.
+        // The launch's watch decides such a window of an app the display
+        // started cold, once it shows.
+        if role.is_none() {
+            log::info!(
+                "catch: pid {} made a window it doesn't describe yet, {:?}; left to the launch's watch",
+                target.pid,
+                ax::window_id(window)
+            );
+        }
         return;
     }
     // The user's app: send back what opens on the agent's display by itself.
@@ -559,14 +562,14 @@ extern "C" fn created(
     // A kept catch takes a window only right after its display was driven,
     // and records one the user made so nothing moves it later.
     if target.kept.load(Ordering::Relaxed) {
-        // Another session with a window of this app, driving its display
-        // just now, may have made it: then it's nobody's for sure.
-        let agent = acted_recently(target.display, target.pid)
-            && !others_acted_recently(target.display, target.pid);
-        let user = user_acted_recently(target.pid);
-        let only_here =
-            !agent && !user && only_on(target.pid, target.bounds, ax::window_id(window));
-        match owner(agent, user, only_here) {
+        let seen = seen(
+            target.display,
+            target.pid,
+            target.bounds,
+            ax::window_id(window),
+        );
+        let Seen { agent, user, .. } = seen;
+        match seen.owner() {
             Owner::Agent => {}
             Owner::User => {
                 log::info!(
@@ -668,29 +671,7 @@ pub fn follow_aerospace(target: WindowTarget, display: DisplayId, screen: String
 
 #[cfg(test)]
 mod tests {
-    use super::{Owner, owner, take};
-
-    #[test]
-    fn a_window_is_the_agents_only_when_the_user_did_nothing() {
-        assert_eq!(owner(true, false, false), Owner::Agent);
-        assert_eq!(owner(false, true, false), Owner::User);
-        assert_eq!(owner(false, true, true), Owner::User);
-        assert_eq!(
-            owner(true, true, true),
-            Owner::Unknown,
-            "the user's own click may have made it"
-        );
-        assert_eq!(
-            owner(false, false, false),
-            Owner::Unknown,
-            "a slow window, with others of the app on the user's screen, stays placeable"
-        );
-        assert_eq!(
-            owner(false, false, true),
-            Owner::Agent,
-            "an app on the display alone makes a window by itself"
-        );
-    }
+    use super::take;
 
     #[test]
     fn takes_only_as_many_windows_as_asked() {
