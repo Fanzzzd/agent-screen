@@ -417,8 +417,8 @@ impl Core {
         (serial, name)
     }
 
-    /// Take on a display made off the main thread, as macOS takes about
-    /// half a second, and park it out of the cursor's way.
+    /// Take on a display only after its position is verified. New displays
+    /// arrive parked; a reused or resized spare must still be safe.
     pub fn adopt(
         &mut self,
         handle: VirtualDisplay,
@@ -426,8 +426,15 @@ impl Core {
         size: (f64, f64),
         owner: Option<Owner>,
         cx: &mut Context<Self>,
-    ) -> DisplayId {
+    ) -> Option<DisplayId> {
         let id = handle.id;
+        let mut virtual_ids = self.virtual_ids();
+        virtual_ids.push(id);
+        if !display::is_tucked(id, &virtual_ids) {
+            log::warn!("display {id}: refusing to adopt an unverified position");
+            crate::lifecycle::note("released", id, "unsafe at adoption");
+            return None;
+        }
         if let Some((serial, slot)) = handle.serial() {
             colorsync::remember(serial, slot, id);
         }
@@ -439,58 +446,9 @@ impl Core {
         // Its record is new and has all 39 names.
         self.reclaim_soon(cx);
         label_soon(id, cx);
-        // A reused display is already in place: moving it again would be
-        // another reconfiguration.
-        let virtual_ids = self.virtual_ids();
-        if display::is_tucked(id, &virtual_ids) {
-            self.tucked.insert(id);
-            cx.notify();
-            return id;
-        }
-        // WindowServer usually takes the position at once; a display it has
-        // only just added needs a moment first, so try until it does. On
-        // the display thread: each try waits on WindowServer.
-        cx.spawn(async move |this, cx| {
-            let started = std::time::Instant::now();
-            let mut tries = 0;
-            let mut parked = false;
-            for attempt in 0..75 {
-                // At once, then every 20 ms: each try that WindowServer takes
-                // ends the wait for create_display.
-                if attempt > 0 {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(20))
-                        .await;
-                }
-                tries += 1;
-                let Ok(virtual_ids) = this.read_with(cx, |core, _| core.virtual_ids()) else {
-                    return;
-                };
-                let placed = display::configure(move || {
-                    park_fillers(&virtual_ids);
-                    display::tuck_away(id, &virtual_ids)
-                })
-                .await;
-                if placed {
-                    parked = true;
-                    break;
-                }
-            }
-            if parked {
-                log::debug!(
-                    "display {id} parked after {tries} tries, {} ms",
-                    started.elapsed().as_millis()
-                );
-            } else {
-                // create_display answers anyway: the display works where it
-                // is, but the user's pointer may wander onto it.
-                log::warn!("display {id} could not be parked after {tries} tries");
-            }
-            let _ = this.update(cx, |core, _| core.tucked.insert(id));
-        })
-        .detach();
+        self.tucked.insert(id);
         cx.notify();
-        id
+        Some(id)
     }
 
     /// The displays changed. Park again any display of ours that is no

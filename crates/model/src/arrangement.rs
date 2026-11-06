@@ -80,6 +80,19 @@ pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
     placed
 }
 
+/// A parking attempt succeeds only when the target appears in the current
+/// arrangement at its planned origin. An absent display or user screen is
+/// unverified, not success.
+pub fn at_planned_origin(id: u32, screens: &[Screen]) -> bool {
+    let Some(target) = screens.iter().find(|s| s.id == id) else {
+        return false;
+    };
+    plan(screens)
+        .into_iter()
+        .find(|&(d, _)| d == id)
+        .is_some_and(|(_, origin)| (target.rect.x, target.rect.y) == origin)
+}
+
 /// Whether `rect` is out of the cursor's way: wholly above and right of
 /// the user's displays. One the user dragged elsewhere is not.
 pub fn out_of_the_way(rect: &Rect, user: &Rect) -> bool {
@@ -200,6 +213,32 @@ mod tests {
     #[test]
     fn nothing_moves_without_a_user_display_to_arrange_around() {
         assert!(plan(&[ours(10, 1, 1280., 800.)]).is_empty());
+    }
+
+    #[test]
+    fn parking_requires_the_target_and_user_to_be_enumerated() {
+        assert!(!at_planned_origin(10, &desk()));
+        assert!(!at_planned_origin(10, &[ours(10, 1, 1280., 800.)]));
+        assert!(!at_planned_origin(1, &desk()));
+    }
+
+    #[test]
+    fn parking_verifies_the_actual_origin_on_the_reported_two_monitor_desk() {
+        let mut s = vec![
+            user(1, 0., 0., 2560., 1440.),
+            user(2, 2560., 190., 1728., 1117.),
+            Screen {
+                id: 10,
+                rect: Rect::new(-1280., 0., 1280., 1600.),
+                role: Role::Ours { order: 1 },
+            },
+        ];
+        assert!(!at_planned_origin(10, &s));
+        let (_, (x, y)) = plan(&s)[0];
+        s[2].rect.x = x;
+        s[2].rect.y = y;
+        assert!(at_planned_origin(10, &s));
+        assert!(out_of_the_way(&s[2].rect, &user_bounds(&s).unwrap()));
     }
 
     #[test]
