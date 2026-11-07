@@ -33,6 +33,12 @@ pub struct InputQueue {
     /// Whether the active loan may send its next event. The executor's
     /// thread reads it before every event.
     pub loan_ok: Arc<AtomicBool>,
+    /// The loans the current grant started, in order, with their display
+    /// and what each did, so the card can number the steps and draw the
+    /// finished ones after their requests are gone.
+    ran: Vec<(RequestId, DisplayId, Plan)>,
+    /// The grant `ran` belongs to.
+    ran_grant: Option<u64>,
 }
 
 /// What one loan does.
@@ -109,6 +115,8 @@ impl Default for InputQueue {
             failures: BTreeMap::new(),
             changed: BTreeMap::new(),
             loan_ok: Arc::default(),
+            ran: Vec::new(),
+            ran_grant: None,
         }
     }
 }
@@ -243,6 +251,10 @@ impl InputQueue {
         let now = self.now();
         let id = self.queue.start(now)?;
         let plan = self.plans.get(&id).cloned();
+        self.follow_grant();
+        if let (Some(plan), Some(request)) = (&plan, self.queue.request(id)) {
+            self.ran.push((id, request.owner.display, plan.clone()));
+        }
         if plan.is_none() {
             // Not reachable: a request without a plan is never attached.
             self.queue.fail(id);
@@ -392,7 +404,23 @@ impl InputQueue {
             .active()
             .is_some_and(|r| self.queue.may_send(r.id, &r.owner));
         self.loan_ok.store(ok, Ordering::Relaxed);
+        self.follow_grant();
         was.is_some() || self.queue.grant().is_some()
+    }
+
+    /// A new grant, or none, starts with no loans run.
+    fn follow_grant(&mut self) {
+        let grant = self.queue.grant().map(|grant| grant.id);
+        if grant != self.ran_grant {
+            self.ran.clear();
+            self.ran_grant = grant;
+        }
+    }
+
+    /// The loans this grant started, oldest first: the last one may still
+    /// be running.
+    pub fn ran(&self) -> &[(RequestId, DisplayId, Plan)] {
+        &self.ran
     }
 
     /// A waiting request the user has not allowed yet. Status stays queued
@@ -428,14 +456,21 @@ impl InputQueue {
     }
 
     /// The display the queue's card shows, while it needs one: the first
-    /// request still to ask about, or during a grant the first waiting
-    /// request's display or any live display.
+    /// request still to ask about, or during a grant the running loan's
+    /// display, the first waiting request's, the last loan's while it is
+    /// live, or any live display.
     pub fn card_display<H>(&self, displays: &Displays<H>) -> Option<DisplayId> {
         let id = if self.queue.grant().is_some() {
             self.queue
-                .waiting()
-                .next()
+                .active()
+                .or_else(|| self.queue.waiting().next())
                 .map(|r| r.owner.display)
+                .or_else(|| {
+                    self.ran
+                        .last()
+                        .map(|(_, display, _)| *display)
+                        .filter(|id| displays.get(*id).is_some_and(|d| d.is_live()))
+                })
                 .or_else(|| displays.list.iter().find(|d| d.is_live()).map(|d| d.id))
         } else {
             self.queue
@@ -617,6 +652,55 @@ mod tests {
             .unwrap();
         input.end_display(1);
         assert_eq!(input.queue.requests().count(), 0);
+    }
+
+    fn drag(x: f64) -> Plan {
+        let target = WindowTarget {
+            pid: 1,
+            window_id: 1,
+        };
+        let area = Rect::new(0.0, 0.0, 1280.0, 800.0);
+        Plan::Drag(Drag {
+            target,
+            frame: area,
+            area,
+            from: (x, 100.0),
+            to: (x + 50.0, 200.0),
+            flags: 0,
+        })
+    }
+
+    #[test]
+    fn a_grant_keeps_the_loans_it_ran_in_order_until_it_ends() {
+        let mut input = InputQueue::default();
+        input.register(1, &display_owner(1));
+        input.register(2, &display_owner(2));
+        let first = input.owner(1, 1).unwrap();
+        let second = input.owner(2, 2).unwrap();
+        let a = input
+            .submit(first.clone(), "a".into(), "Drag".into(), Some(drag(10.0)))
+            .unwrap();
+        let b = input
+            .submit(second, "b".into(), "Drag".into(), Some(drag(20.0)))
+            .unwrap();
+        assert!(input.ran().is_empty());
+        assert!(input.approve(input.queue.approval()));
+        assert_eq!(input.start_loan().map(|(id, _)| id), Some(a));
+        input.finish_loan(a, None);
+        // The agent read its result: the request goes, its step stays.
+        input.loan_done(&first, a);
+        assert!(input.queue.request(a).is_none());
+        assert_eq!(input.start_loan().map(|(id, _)| id), Some(b));
+        let ran: Vec<_> = input
+            .ran()
+            .iter()
+            .map(|(id, d, p)| (*id, *d, p.clone()))
+            .collect();
+        assert_eq!(ran, vec![(a, 1, drag(10.0)), (b, 2, drag(20.0))]);
+        input.finish_loan(b, None);
+        input.revoke();
+        assert!(input.queue.grant().is_none());
+        assert!(input.ran().is_empty());
     }
 
     #[test]

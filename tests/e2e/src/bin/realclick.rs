@@ -4,7 +4,7 @@
 //! mouse button down, as some apps check. A click sent in the background
 //! reaches it but stays red. The same click with realInput asks for your
 //! pointer on the approval card, which names the click and the app;
-//! allowed, as the card's Allow Queue does, the window comes forward, your
+//! allowed, as the card's Allow does, the window comes forward, your
 //! pointer clicks the button, it turns green, and the call reports route
 //! real_input. The approval then ends at once and your pointer and front
 //! app come back. A double click allowed the same way arrives as one

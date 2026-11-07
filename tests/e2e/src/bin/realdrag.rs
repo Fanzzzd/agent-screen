@@ -2,7 +2,7 @@
 //! Electron harness, started with `open` and so without a DevTools pipe,
 //! has a splitter that follows pointermove only while the session's left
 //! button reads held, which no background route can make it do. A drag
-//! there waits for approval; Allow Queue, as the card's button, lets it run
+//! there waits for approval; Allow, as the card's button, lets it run
 //! with the pointer: the splitter follows it, a red edge shows on your
 //! screens meanwhile, and the drag reports route real_input. A move of the
 //! pointer the executor didn't make takes the approval back at once; the
@@ -143,7 +143,7 @@ fn borders(pid: u32) -> usize {
 }
 
 /// Drag the splitter `by` points while the test allows it, as the user's
-/// Allow Queue does. Returns the drag's reply.
+/// Allow does. Returns the drag's reply.
 fn approved_drag(
     control: &Control,
     key: &str,
