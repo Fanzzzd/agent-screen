@@ -3,12 +3,14 @@
 // session's button state do (#134): a click posted to the process leaves it
 // red, a real click turns it green. The title counts presses (down), real
 // clicks (real), the highest click count of a real click (clicks) and real
-// right clicks (right). HIDCLICK_DISPLAY names the Agent Display to open on.
+// right clicks (right). SIGUSR1 paints it white, as a list that reordered
+// under the point. HIDCLICK_DISPLAY names the Agent Display to open on.
 import AppKit
 
 final class Target: NSView {
   var down = 0, real = 0, clicks = 0, right = 0
   var pending = false
+  var moved = false
 
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
   override func mouseDown(with event: NSEvent) { press(.left) }
@@ -38,13 +40,14 @@ final class Target: NSView {
   }
 
   override func draw(_ dirtyRect: NSRect) {
-    (real > 0 ? NSColor.systemGreen : NSColor.systemRed).setFill()
+    (moved ? NSColor.white : real > 0 ? NSColor.systemGreen : NSColor.systemRed).setFill()
     bounds.fill()
   }
 }
 
 final class Delegate: NSObject, NSApplicationDelegate {
   var window: NSWindow!
+  var moved: DispatchSourceSignal?
 
   func applicationDidFinishLaunching(_ note: Notification) {
     window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 400, height: 300),
@@ -52,6 +55,13 @@ final class Delegate: NSObject, NSApplicationDelegate {
     let target = Target(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
     window.contentView = target
     target.show()
+    signal(SIGUSR1, SIG_IGN)
+    moved = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    moved?.setEventHandler {
+      target.moved = true
+      target.show()
+    }
+    moved?.resume()
     // Never fall back to the user's screen.
     guard let value = ProcessInfo.processInfo.environment["HIDCLICK_DISPLAY"],
           let id = UInt32(value), CGDisplayVendorNumber(id) == 0x5353,

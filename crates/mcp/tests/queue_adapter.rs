@@ -560,6 +560,8 @@ fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
         flags: 0,
         app: "WeCom".into(),
         title: None,
+        look: vec![0; 16],
+        asked_ms: 0,
     });
     let token = || {
         real_click::operation(

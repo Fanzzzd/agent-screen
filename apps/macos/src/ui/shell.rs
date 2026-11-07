@@ -1301,6 +1301,7 @@ impl Shell {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
+                    use agent_screen_model::real_click;
                     use std::sync::atomic::Ordering;
                     let area = cg::display_bounds(display);
                     let plan = match plan {
@@ -1315,11 +1316,25 @@ impl Shell {
                             let frame = window.bounds.offset(area.x, area.y);
                             if area != click.area
                                 || frame != click.frame
-                                || !agent_screen_model::real_click::contained(click.at, area, frame)
+                                || !real_click::contained(click.at, area, frame)
                             {
                                 return Outcome::Refused(
                                     "the click is outside its authorized window or display",
                                 );
+                            }
+                            // Before the window comes forward, which can
+                            // redraw it: the point must still show what the
+                            // agent aimed at.
+                            let region = real_click::look_region(click.at, area);
+                            match crate::mac::screenshot::luma(display, region) {
+                                Ok(now) if real_click::looks_same(&click.look, &now) => {}
+                                Ok(_) => return Outcome::Refused(real_click::CONTENT_CHANGED),
+                                Err(why) => {
+                                    log::info!("input queue: no picture before the click: {why}");
+                                    return Outcome::Refused(
+                                        "what is under the point could not be captured before the click",
+                                    );
+                                }
                             }
                             return real_input::click_at(
                                 click.target,

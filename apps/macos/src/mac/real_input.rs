@@ -210,21 +210,30 @@ pub fn watch() {
     WATCHING.store(true, Ordering::SeqCst);
 }
 
-/// The pointer and front app at grant start, to put back when it ends
-/// normally.
+/// The pointer, front app and its focused window at grant start, to put
+/// back when it ends normally.
 #[derive(Clone, Copy, Debug)]
 pub struct Saved {
     pub pointer: (f64, f64),
     pub front: Option<i32>,
+    /// The front app's focused window. A loan in the same app, as the
+    /// agent's Chrome window beside the user's, makes its own window main,
+    /// and the user's typing would go there.
+    pub window: Option<u32>,
 }
 
 pub fn save() -> Saved {
     let pointer = CGEvent::new(None)
         .map(|e| CGEvent::location(Some(&e)))
         .map_or((0.0, 0.0), |p| (p.x, p.y));
+    let front = super::app::frontmost_pid();
+    let window = front
+        .filter(|&p| p != std::process::id() as i32)
+        .and_then(super::ax::focused_window_id);
     Saved {
         pointer,
-        front: super::app::frontmost_pid(),
+        front,
+        window,
     }
 }
 
@@ -246,6 +255,16 @@ pub fn restore(saved: Saved) {
     if !touched()
         && let Some(front) = saved.front.filter(|&p| p != std::process::id() as i32)
     {
+        // Their window first, so the app comes forward with it main and
+        // their keys go back to it.
+        if let Some(window_id) = saved.window
+            && !super::ax::make_main(WindowTarget {
+                pid: front,
+                window_id,
+            })
+        {
+            log::info!("input queue: window {window_id} could not be made main again");
+        }
         // Do not wait and activate again: the user may act during a wait.
         super::ax::set_attribute(
             &super::ax::application(front),

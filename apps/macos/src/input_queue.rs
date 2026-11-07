@@ -80,6 +80,11 @@ pub struct Click {
     /// The app's name and the window's title, for the card.
     pub app: String,
     pub title: Option<String>,
+    /// Luma of `real_click::look_region` around the point when the agent
+    /// asked. The loan clicks only if it still looks the same.
+    pub look: Vec<u8>,
+    /// When the agent first asked, by the queue's clock.
+    pub asked_ms: u64,
 }
 
 impl MenuItem {

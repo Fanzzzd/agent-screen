@@ -8,8 +8,12 @@
 //! pointer clicks the button, it turns green, and the call reports route
 //! real_input. The approval then ends at once and your pointer and front
 //! app come back. A double click allowed the same way arrives as one
-//! double click. A right click declined reports input_pending and sends
-//! nothing, not even the background click.
+//! double click. A right click with realInput is refused at once, as the
+//! menu it opened would close when the user's app came back. A click
+//! declined reports input_pending and sends nothing, not even the
+//! background click. A click whose target changes while the user decides,
+//! the fixture turning white, clicks nothing once allowed and tells the
+//! agent to take a new screenshot.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e realclick
 //!
@@ -182,7 +186,9 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
     let now = title()?;
     check(
         "allowed, the click runs with the user's pointer: the button turns green and the call says real_input",
-        reply.as_ref().is_ok_and(|r| r["route"] == "real_input")
+        reply
+            .as_ref()
+            .is_ok_and(|r| r["route"] == "real_input" && r["waitedSeconds"].as_f64().is_some())
             && seen(&now, "real") == 1
             && seen(&now, "clicks") == 1
             && seen(&now, "down") == seen(&after, "down") + 1,
@@ -232,9 +238,32 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
     );
     put_back("the double click")?;
 
-    // A right click, declined: nothing is sent at all.
+    // A right click with the user's pointer is refused at once: the menu it
+    // opened would close when the user's front app came back.
     let before = title()?;
-    let (_, reply) = answered("input-queue-decline", (middle.0 - 20, middle.1), "right", 1)?;
+    let right = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": middle.0 - 20, "y": middle.1,
+                "button": "right", "realInput": true }),
+    );
+    let queue = status()?;
+    sleep_ms(300);
+    let now = title()?;
+    check(
+        "a right click with realInput is refused at once, says why and what to use, and sends and queues nothing",
+        right.as_ref().is_err_and(|e| {
+            let e = e.to_string();
+            e.contains("left clicks only") && e.contains("show_menu")
+        }) && seen(&now, "down") == seen(&before, "down")
+            && queue["requests"]
+                .as_array()
+                .is_none_or(|r| r.iter().all(|r| r["state"] != "queued")),
+        format!("{before:?} -> {now:?} {right:?} {queue}"),
+    );
+
+    // A click, declined: nothing is sent at all.
+    let before = title()?;
+    let (_, reply) = answered("input-queue-decline", (middle.0 - 20, middle.1), "left", 1)?;
     sleep_ms(500);
     let now = title()?;
     check(
@@ -245,5 +274,38 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
             && seen(&now, "down") == seen(&before, "down"),
         format!("{before:?} -> {now:?} {reply:?}"),
     );
+
+    // A click whose target changed while the user decided: the fixture
+    // turns white, as a list that reordered under the point. Allowed, the
+    // loan clicks nothing and tells the agent to look again.
+    let before = title()?;
+    let at = (middle.0 - 40, middle.1);
+    let call = control.begin(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": at.0, "y": at.1,
+                "button": "left", "realInput": true }),
+    )?;
+    sleep_ms(800);
+    let fixture = pid.context("the fixture's pid")?;
+    std::process::Command::new("/bin/kill")
+        .args(["-USR1", &fixture.to_string()])
+        .status()?;
+    sleep_ms(500);
+    control.call(
+        "debugShow",
+        json!({ "sessionKey": KEY, "surface": "input-queue-allow", "displayId": id }),
+    )?;
+    let reply = call.wait();
+    sleep_ms(300);
+    let now = title()?;
+    check(
+        "allowed after what was under the point changed, nothing is clicked and the agent is told to take a new screenshot",
+        reply
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("Take a new screenshot"))
+            && seen(&now, "down") == seen(&before, "down"),
+        format!("{before:?} -> {now:?} {reply:?}"),
+    );
+    put_back("the click that changed")?;
     Ok(())
 }

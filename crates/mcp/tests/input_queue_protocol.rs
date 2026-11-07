@@ -156,6 +156,11 @@ async fn queue_status_and_drag_failure_never_imply_execution() {
         assert!(click["result"]["content"][0]["text"].as_str().unwrap().contains("No click was sent"));
         let invalid=exchange(tool(12,"computer",json!({"display_id":7,"action":"scroll","coordinate":[10,20],"real_input":true})));
         assert_eq!(invalid["result"]["isError"],true);
+        // A real right click's menu would close when the user's app comes
+        // back: refused before anything reaches the app.
+        let right=exchange(tool(13,"computer",json!({"display_id":7,"action":"right_click","coordinate":[10,20],"real_input":true})));
+        assert_eq!(right["result"]["isError"],true,"{right}");
+        assert!(right["result"]["content"][0]["text"].as_str().unwrap().contains("show_menu"),"{right}");
         drop(input); assert!(client.0.wait().unwrap().success());
     }).await.unwrap();
     let calls = server.await.unwrap();

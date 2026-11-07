@@ -24,9 +24,74 @@ pub const GAP_MS: u64 = 40;
 const _: () = assert!(HOLD_MS + GAP_MS < 150);
 
 /// The `computer` actions that accept `real_input`: a complete drag, a
-/// split press, which only asks, and a complete click.
+/// split press, which only asks, and a complete left click. A right or
+/// middle click is refused with `NO_MENU_CLICK`.
 pub fn takes_real_input(action: &str) -> bool {
-    matches!(action, "left_click_drag" | "left_mouse_down") || CLICK_ACTIONS.contains(&action)
+    matches!(action, "left_click_drag" | "left_mouse_down")
+        || Click::of_action(action).is_some_and(|c| c.button == Button::Left)
+}
+
+/// Why a right or middle click can't use the user's pointer. The menu or
+/// popover it opens belongs to the app the loan brings to the front, and
+/// closes as soon as the user's front app comes back at the grant's end.
+/// The agent would never see it, and might ask the user again.
+pub const NO_MENU_CLICK: &str = "real_input takes left clicks only: left_click, double_click and triple_click. A menu or popover that a real right or middle click opens closes as soon as the user's front app comes back, so you would never see it. Nothing was sent. For a context menu, use act_on_element's show_menu on the element; for a menu bar item, act_on_element's press, which asks for the user's pointer by itself when an Electron app needs it.";
+
+/// The side of the square around a click's point, in points, that must
+/// look the same just before the loan clicks as when the agent asked.
+/// Small enough that a blinking caret or a spinner elsewhere doesn't
+/// matter; big enough to hold a sidebar row's avatar and name.
+pub const LOOK_SIDE: f64 = 64.0;
+/// A sample of the square changed when its luma moved by more than this,
+/// out of 255.
+pub const LOOK_LEVELS: u8 = 32;
+/// The square looks different when more than this percentage of its
+/// samples changed: a caret is about 1 %, another chat's avatar and name
+/// far more.
+pub const LOOK_PERCENT: usize = 5;
+
+/// The agent's failure when the square changed: the reply tells it to look
+/// again.
+pub const CONTENT_CHANGED: &str =
+    "what was under the point changed while the request waited for the user";
+
+/// The square around `at`, global points, that the loan compares: in the
+/// display's own points from its top-left corner, whole points, inside the
+/// display.
+pub fn look_region(at: (f64, f64), display: Rect) -> Rect {
+    let side = |length: f64| LOOK_SIDE.min(length.floor()).max(0.0);
+    let (w, h) = (side(display.width), side(display.height));
+    let start = |p: f64, origin: f64, length: f64, side: f64| {
+        (p - origin - side / 2.0)
+            .round()
+            .clamp(0.0, (length.floor() - side).max(0.0))
+    };
+    Rect::new(
+        start(at.0, display.x, display.width, w),
+        start(at.1, display.y, display.height, h),
+        w,
+        h,
+    )
+}
+
+/// Whether the square's luma samples `now` show what `before` showed,
+/// within `LOOK_LEVELS` and `LOOK_PERCENT`. Samples of another size, or
+/// none, never match.
+pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
+    if before.is_empty() || before.len() != now.len() {
+        return false;
+    }
+    let changed = before
+        .iter()
+        .zip(now)
+        .filter(|(a, b)| a.abs_diff(**b) > LOOK_LEVELS)
+        .count();
+    changed * 100 <= before.len() * LOOK_PERCENT
+}
+
+/// What the success reply says of the wait, in tenths of a second.
+pub fn waited_seconds(asked_ms: u64, now_ms: u64) -> f64 {
+    (now_ms.saturating_sub(asked_ms) / 100) as f64 / 10.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -173,11 +238,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_click_action_takes_real_input_and_others_do_not() {
+    fn left_clicks_take_real_input_and_others_do_not() {
         for action in CLICK_ACTIONS {
-            assert!(takes_real_input(action), "{action}");
             assert!(Click::of_action(action).is_some(), "{action}");
         }
+        for action in ["left_click", "double_click", "triple_click"] {
+            assert!(takes_real_input(action), "{action}");
+        }
+        // The menu they open would close when the user's app comes back.
+        assert!(!takes_real_input("right_click"));
+        assert!(!takes_real_input("middle_click"));
         assert!(takes_real_input("left_click_drag"));
         assert!(takes_real_input("left_mouse_down"));
         for action in ["scroll", "type", "key", "mouse_move", "left_mouse_up"] {
@@ -281,5 +351,70 @@ mod tests {
             Some("A very lo…".into())
         );
         assert_eq!(short_title("企业微信", 10), Some("企业微信".into()));
+    }
+
+    #[test]
+    fn the_compared_square_surrounds_the_point_inside_the_display() {
+        let display = Rect::new(3000.0, -200.0, 1280.0, 800.0);
+        assert_eq!(
+            look_region((3400.4, 100.0), display),
+            Rect::new(368.0, 268.0, 64.0, 64.0)
+        );
+        // Near a corner it slides inside rather than shrinking.
+        assert_eq!(
+            look_region((3005.0, 595.0), display),
+            Rect::new(0.0, 736.0, 64.0, 64.0)
+        );
+        let tiny = Rect::new(0.0, 0.0, 40.0, 30.0);
+        assert_eq!(
+            look_region((20.0, 15.0), tiny),
+            Rect::new(0.0, 0.0, 40.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn a_caret_blink_looks_the_same_and_another_row_does_not() {
+        let side = LOOK_SIDE as usize;
+        let before = vec![240_u8; side * side];
+        assert!(looks_same(&before, &before));
+        // A 2 by 16 point caret appears.
+        let mut caret = before.clone();
+        for y in 20..36 {
+            caret[y * side + 30] = 20;
+            caret[y * side + 31] = 20;
+        }
+        assert!(looks_same(&before, &caret));
+        // A slightly different shade everywhere, as a hover tint.
+        let tint: Vec<u8> = before.iter().map(|v| v - 20).collect();
+        assert!(looks_same(&before, &tint));
+        // Another chat's 40 by 40 avatar where this one's was.
+        let mut other = before.clone();
+        for y in 10..50 {
+            for x in 4..44 {
+                other[y * side + x] = 60;
+            }
+        }
+        assert!(!looks_same(&before, &other));
+        // Just past the limit.
+        let mut edge = before.clone();
+        let limit = before.len() * LOOK_PERCENT / 100;
+        for v in edge.iter_mut().take(limit + 1) {
+            *v = 0;
+        }
+        assert!(!looks_same(&before, &edge));
+        edge[limit] = 240;
+        assert!(looks_same(&before, &edge));
+    }
+
+    #[test]
+    fn missing_or_mismatched_samples_never_match() {
+        assert!(!looks_same(&[], &[]));
+        assert!(!looks_same(&[1, 2, 3], &[1, 2]));
+    }
+
+    #[test]
+    fn the_wait_is_reported_in_tenths_of_a_second() {
+        assert_eq!(waited_seconds(1_000, 13_470), 12.4);
+        assert_eq!(waited_seconds(5_000, 4_000), 0.0);
     }
 }
