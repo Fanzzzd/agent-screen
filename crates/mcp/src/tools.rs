@@ -1013,12 +1013,14 @@ pub async fn run(
                 .call("settle", json!({ "displayId": display }))
                 .await?;
             noted(match window_state(control, display, window, scope).await {
+                // The action ran: a stale or busy root afterward must not
+                // read as a failure the agent would retry.
                 Err(error)
-                    if scope.root.is_some() && error.code == "invalid" && result == "none" =>
+                    if scope.root.is_some() && error.code != "not_found" && result == "none" =>
                 {
                     Ok(Output::Content(vec![text("Done.")]))
                 }
-                Err(error) if scope.root.is_some() && error.code == "invalid" => {
+                Err(error) if scope.root.is_some() && error.code != "not_found" => {
                     Ok(Output::Content(vec![text(format!(
                         "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
                         error.message
@@ -1298,6 +1300,9 @@ struct WindowState {
     window: i64,
     root: Option<usize>,
     depth_limited: bool,
+    /// The app applied max_depth itself and marked its cuts; an older app
+    /// read past it, so the MCP cuts the tree.
+    app_cut: bool,
     /// The window and its element count.
     header: String,
     strayed: String,
@@ -1310,7 +1315,9 @@ impl WindowState {
     /// The tree as text, cut at `depth`, then the window image.
     fn content(&self, depth: Option<usize>) -> Vec<Value> {
         let full = self.tree.as_str();
-        let cut = depth.map(|d| agent_screen_model::tree::cut_depth(full, d));
+        let cut = depth
+            .filter(|_| !self.app_cut)
+            .map(|d| agent_screen_model::tree::cut_depth(full, d));
         let note = match (&cut, depth) {
             (_, Some(d)) if self.depth_limited => format!(
                 " Deeper elements were not read; use a larger max_depth than {d}, or omit it, to read them."
@@ -1409,6 +1416,7 @@ async fn window_state(
         window,
         root: scope.root,
         depth_limited: get("depthLimited") == Value::Bool(true),
+        app_cut: state.contains_key("depthLimited"),
         header: format!(
             "Window {window}: {} {} elements{truncated}.{root_note}{old_app}",
             get("window"),
@@ -1715,6 +1723,7 @@ mod tests {
             window: 7,
             root: None,
             depth_limited: false,
+            app_cut: false,
             header: "Window 7: {} 3 elements.".into(),
             strayed: String::new(),
             tree: tree.into(),
@@ -1740,6 +1749,17 @@ mod tests {
         assert_eq!(cut[1]["type"], "image");
         // Deep enough for the whole tree: no note.
         assert!(!first_text(&state(None, tree).content(Some(3))).contains("left out"));
+    }
+
+    #[test]
+    fn a_tree_the_app_cut_keeps_its_marks() {
+        let tree = "[0] group \"List\"\n  … more inside: 800 children not read\n[1] group \"Pane\"\n  … more inside: 1 child not read";
+        let mut cut = state(None, tree);
+        cut.app_cut = true;
+        cut.depth_limited = true;
+        let text = first_text(&cut.content(Some(0))).to_string();
+        assert!(text.ends_with(tree), "{text}");
+        assert!(text.contains("Deeper elements were not read"), "{text}");
     }
 
     #[test]
