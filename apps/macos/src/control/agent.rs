@@ -3279,8 +3279,9 @@ struct Launched {
     pid: Option<i32>,
 }
 
-/// How long a launch watches for a window that comes after it gave up.
-const LATE_WINDOW_WAIT: Duration = Duration::from_secs(30);
+/// How long a cold start's windows count as the agent's, and the launch
+/// watches for them (ADR 0007).
+const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;
 
 /// How long a running app may take to make the window Agent Screen asked
 /// for. A window it makes later may be the user's.
@@ -3670,14 +3671,21 @@ async fn launch_now(
         return already_running(core, id, name, &instances_before, cx).await;
     }
     // Two sessions launching an app at once both see it start; it's the
-    // first one's.
+    // first one's. Its cold start counts from here.
+    let launched_at = Instant::now();
     if !was_running {
-        core.update(cx, |c, _| {
+        let ours = core.update(cx, |c, _| {
             let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
-            if !claimed && let Some(d) = c.displays.get_mut(id) {
-                d.started.insert(pid);
-            }
+            !claimed
+                && c.displays
+                    .get_mut(id)
+                    .is_some_and(|d| d.started.insert(pid))
         });
+        // Its windows are the agent's for 30 s from now unless the user
+        // acts on it, whenever launch_app answers.
+        if ours {
+            crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
+        }
     }
     // A starting app takes accessibility observers only once it has set
     // up; until then, try again, and move any window that beats it.
@@ -3975,6 +3983,13 @@ async fn launch_now(
                 wait_for_page(placed.target, cx).await;
             }
             keep_catch(core, id, catch, cx);
+            // A starting app's later windows, such as a main window after a
+            // loading one, may come while it is too busy for the catch.
+            if !was_running {
+                let mut seen = before.clone();
+                seen.insert(placed.target.window_id);
+                watch_cold_start(core, id, pid, seen, true, launched_at, screen.clone(), cx);
+            }
             log::debug!(
                 "launch: {name} answered at {} ms",
                 started.elapsed().as_millis()
@@ -4051,57 +4066,18 @@ async fn launch_now(
         .detach();
     } else if !was_running {
         // The kept catch takes the first window the moment it opens, unless
-        // the user is clicking or typing then; the poll is for an app that
-        // won't take observers yet.
-        crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
-        cx.spawn(async move |cx: &mut AsyncApp| {
-            let mut seen = before;
-            for _ in 0..200 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                // An app that finished starting after the unhide above, as
-                // an Electron development build does, is still hidden, and
-                // its windows are listed nowhere: move them in, then show.
-                let hidden = off(cx, move || {
-                    app::is_hidden(pid) && {
-                        if ax::move_all_into(pid, bounds) > 0 {
-                            app::unhide(pid);
-                        }
-                        true
-                    }
-                })
-                .await;
-                if hidden {
-                    continue;
-                }
-                let listed = seen.clone();
-                let late: Vec<_> = off(cx, move || {
-                    windows::all()
-                        .into_iter()
-                        .filter(|w| {
-                            w.target.pid == pid
-                                && w.layer == 0
-                                && !listed.contains(&w.target.window_id)
-                        })
-                        .collect()
-                })
-                .await;
-                for window in late {
-                    seen.insert(window.target.window_id);
-                    // Unless the user took the app back or made it.
-                    if still_agents(&core, id, window.target, cx) {
-                        let _ = settle(&core, window.target, id, cx).await;
-                        return;
-                    }
-                }
-                // Ended or removed meanwhile: the window stays where it opened.
-                if !takes_windows(&core, id, cx) {
-                    return;
-                }
-            }
-        })
-        .detach();
+        // the user is clicking or typing then; the watch is for an app that
+        // won't take observers yet. The cold start counts from the launch.
+        watch_cold_start(
+            &core,
+            id,
+            pid,
+            before,
+            false,
+            launched_at,
+            screen.clone(),
+            cx,
+        );
     }
     // The URL waits for the new window, which never came: opening it now
     // would add a tab to whatever window the user has in front.
@@ -4683,6 +4659,227 @@ fn no_keyboard_target() -> ControlError {
     ControlError::not_found(
         "no window on the display can take keyboard input; launch an app or click a field first",
     )
+}
+
+/// For 30 s after a cold start, decide each new window of the app that the
+/// catch didn't, by ADR 0007's rule (`new_window::watch`): one the app made
+/// before it took observers, or while too busy to answer Accessibility, as
+/// WeCom's main window, 3.4 s after its loading window, was. Without a kept
+/// catch yet, it tries for one again. A window the app can't describe yet
+/// waits, up to 60 s from the launch. `shown`: launch_app answered with a
+/// window of the app. `launched_at`: when the cold start began.
+#[allow(clippy::too_many_arguments)]
+fn watch_cold_start(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    mut seen: std::collections::HashSet<u32>,
+    mut shown: bool,
+    launched_at: Instant,
+    screen: Option<String>,
+    cx: &mut AsyncApp,
+) {
+    use agent_screen_model::new_window::{
+        On, Role, Seen, Step, Tick, Watch, retries_catch, step, watch,
+    };
+    let core = core.clone();
+    let bounds = cg::display_bounds(id);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        // Each window the app didn't describe yet: what was known as it
+        // first showed, and when, so the user's input since counts.
+        let mut first_seen: std::collections::HashMap<u32, (Seen, Instant)> = Default::default();
+        for tick in 0u32.. {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let started = takes_windows(&core, id, cx)
+                && core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+                });
+            let hidden = off(cx, move || app::is_hidden(pid)).await;
+            // Only asked when it would move the hidden app's windows.
+            let theirs = hidden && !shown && {
+                let users = core.update(cx, |c, _| users_windows(c, id));
+                off(cx, move || {
+                    ax::elements_attribute(&ax::application(pid), "AXWindows")
+                        .iter()
+                        .any(|w| ax::window_id(w).is_some_and(|w| users.contains(&w)))
+                })
+                .await
+            };
+            let now = step(Tick {
+                elapsed: launched_at.elapsed(),
+                started,
+                hidden,
+                shown,
+                theirs,
+                waiting: !first_seen.is_empty(),
+            });
+            match now {
+                Step::Stop => return,
+                Step::GiveUp => {
+                    for window in first_seen.keys() {
+                        log::info!(
+                            "launch: pid {pid} never said what window {window} is; left where it is"
+                        );
+                    }
+                    core.update(cx, |c, _| {
+                        c.left_alone
+                            .extend(first_seen.keys().map(|window| (id, *window)))
+                    });
+                    return;
+                }
+                // Its windows are listed nowhere: move them in, then show.
+                Step::ShowHidden => {
+                    off(cx, move || {
+                        if ax::move_all_into(pid, bounds) > 0 {
+                            app::unhide(pid);
+                        }
+                    })
+                    .await;
+                    continue;
+                }
+                Step::Skip => continue,
+                Step::Look | Step::Resolve => {}
+            }
+            // No catch yet, as for an app that took no observers while it
+            // started: try for one again now and then.
+            let caught = |c: &Core| c.kept_catches.iter().any(|(_, k)| k.pid() == pid);
+            if now == Step::Look && retries_catch(tick) && !core.read_with(cx, |c, _| caught(c)) {
+                let catch = crate::mac::catch::Catch::start(pid, id, screen.clone(), None);
+                keep_catch(&core, id, catch.await, cx);
+            }
+            let others: Vec<Rect> = core.read_with(cx, |c, _| {
+                c.displays
+                    .list
+                    .iter()
+                    .filter(|d| d.id != id)
+                    .map(|d| cg::display_bounds(d.id))
+                    .collect()
+            });
+            let listed = seen.clone();
+            let known = first_seen.clone();
+            // Past the cold start, only the windows seen in it.
+            let only_waiting = now == Step::Resolve;
+            // Every window's facts first, then what each is: asking a busy
+            // app takes up to 1 s a window.
+            let late: Vec<(windows::Window, On, Seen, Instant, Role)> = off(cx, move || {
+                let found: Vec<(windows::Window, On, Seen, Instant)> = windows::all()
+                    .into_iter()
+                    .filter(|w| {
+                        let window = w.target.window_id;
+                        w.target.pid == pid
+                            && w.layer == 0
+                            && !listed.contains(&window)
+                            && (!only_waiting || known.contains_key(&window))
+                    })
+                    .map(|w| {
+                        let mid = w.bounds.mid();
+                        let on = if bounds.contains(mid) {
+                            On::ThisDisplay
+                        } else if others.iter().any(|d| d.contains(mid)) {
+                            On::OtherDisplay
+                        } else {
+                            On::Elsewhere
+                        };
+                        let window = w.target.window_id;
+                        let (facts, sighted) = known.get(&window).copied().unwrap_or_else(|| {
+                            (
+                                crate::mac::catch::seen(id, pid, bounds, Some(window)),
+                                Instant::now(),
+                            )
+                        });
+                        (w, on, facts, sighted)
+                    })
+                    .collect();
+                found
+                    .into_iter()
+                    .map(|(w, on, facts, sighted)| {
+                        let role = crate::mac::catch::role(w.target);
+                        (w, on, facts, sighted, role)
+                    })
+                    .collect()
+            })
+            .await;
+            shown |= !late.is_empty();
+            for (window, on, facts, sighted, role) in late {
+                let target = window.target;
+                // Read right before deciding, as reading roles and settling
+                // other windows take seconds: a window the user clicked
+                // into since it showed isn't the agent's, and a taken-back
+                // app is the user's.
+                let user_since =
+                    off(cx, move || crate::mac::catch::user_acted_since(pid, sighted)).await;
+                let facts = facts.with_user_now(user_since);
+                let decided = !still_agents(&core, id, target, cx);
+                let verdict = watch(on, decided, role, facts);
+                if verdict == Watch::Later {
+                    first_seen.insert(target.window_id, (facts, sighted));
+                    continue;
+                }
+                seen.insert(target.window_id);
+                first_seen.remove(&target.window_id);
+                if !decided && facts.ends_cold_start() {
+                    crate::mac::catch::end_cold_start(id, pid);
+                }
+                match verdict {
+                    Watch::Leave | Watch::Later => {}
+                    // As the catch left it: placed and recorded the way
+                    // launch_app places its window.
+                    Watch::Record => {
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Place => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch; the agent's ({facts:?})",
+                            target.window_id
+                        );
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Theirs => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch while the user acted on it; theirs",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| {
+                            if let Some(d) = c.displays.get_mut(id) {
+                                d.user_made.insert(target.window_id);
+                            }
+                        });
+                    }
+                    Watch::Undecided => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch ({facts:?}, {role:?}); left where it is",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| c.left_alone.push((id, target.window_id)));
+                    }
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// The windows of the display's apps that are the user's: made by them,
+/// taken back, or left with them undecided.
+fn users_windows(c: &mut Core, id: DisplayId) -> std::collections::HashSet<u32> {
+    sync_user_made(c, id);
+    let undecided = c
+        .kept_catches
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .flat_map(|(_, k)| k.undecided());
+    let left = c
+        .left_alone
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .map(|(_, w)| *w);
+    let mut theirs: std::collections::HashSet<u32> = undecided.chain(left).collect();
+    if let Some(d) = c.displays.get(id) {
+        theirs.extend(d.user_made.iter().chain(&d.returned).copied());
+    }
+    theirs
 }
 
 /// The display still exists and has not ended, so windows may go onto it.

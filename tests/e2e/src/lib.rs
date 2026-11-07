@@ -265,6 +265,12 @@ pub fn login_app() -> Result<PathBuf> {
     swift_app("login", "Login")
 }
 
+/// tools/latewindow.swift as an app: a loading window, then a main window
+/// on the main screen seconds later.
+pub fn late_window_app() -> Result<PathBuf> {
+    swift_app("latewindow", "LateWindow")
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));
@@ -311,6 +317,7 @@ const HANDS_OFF: &[&str] = &[
     "helpcard",
     "ime",
     "keys",
+    "latewindow",
     "launchhere",
     "load",
     "loanfocus",
