@@ -160,7 +160,8 @@ app.whenReady().then(() => {
       }, 1500),
     );
   }
-  win.loadFile("index.html");
+  // HARNESS_SUBTREE exercises a long earlier AX branch and a later pane (#134).
+  win.loadFile(process.env.HARNESS_SUBTREE === "1" ? "subtree.html" : "index.html");
   if (tone) {
     win.webContents.once("did-finish-load", () => {
       win.webContents.executeJavaScript(
