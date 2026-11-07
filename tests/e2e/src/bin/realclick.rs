@@ -253,12 +253,28 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
         "a right click with realInput is refused at once, says why and what to use, and sends and queues nothing",
         right.as_ref().is_err_and(|e| {
             let e = e.to_string();
-            e.contains("left clicks only") && e.contains("show_menu")
+            e.contains("left clicks without Control only") && e.contains("show_menu")
         }) && seen(&now, "down") == seen(&before, "down")
             && queue["requests"]
                 .as_array()
                 .is_none_or(|r| r.iter().all(|r| r["state"] != "queued")),
         format!("{before:?} -> {now:?} {right:?} {queue}"),
+    );
+
+    // So is a Control-held left click, which opens the same menu.
+    let control_click = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": middle.0 - 20, "y": middle.1,
+                "modifiers": ["ctrl"], "realInput": true }),
+    );
+    let now = title()?;
+    check(
+        "a Control-held left click with realInput is refused the same way and sends nothing",
+        control_click
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("show_menu"))
+            && seen(&now, "down") == seen(&before, "down"),
+        format!("{before:?} -> {now:?} {control_click:?}"),
     );
 
     // A click, declined: nothing is sent at all.

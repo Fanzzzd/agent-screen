@@ -351,7 +351,10 @@ async fn handle_one(
             if p.0.get("realInput") == Some(&Value::Bool(true)) {
                 // The menu a real right click opens would close when the
                 // user's front app comes back.
-                if button != Button::Left {
+                // So would a Control-held left click's.
+                let pressed = real_click::Button::parse(button_name(button))
+                    .unwrap_or(real_click::Button::Left);
+                if real_click::opens_menu(pressed, modifiers.control) {
                     return Err(ControlError::invalid(real_click::NO_MENU_CLICK));
                 }
                 let click = real_click::Button::parse(button_name(button))
@@ -4977,14 +4980,19 @@ async fn queued_click(
     }
     // What the agent aimed at, to compare just before the loan clicks: a
     // list can reorder while the user decides.
-    let region = real_click::look_region(at, area);
-    let look = off(cx, move || crate::mac::screenshot::luma(id, region))
-        .await
-        .map_err(|why| {
-            ControlError::failed(format!(
-                "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
-            ))
-        })?;
+    let region = real_click::look_region(at, area, frame);
+    let (look, element) = off(cx, move || {
+        (
+            crate::mac::screenshot::samples(id, region),
+            crate::mac::ax::identity_at(target.pid, at),
+        )
+    })
+    .await;
+    let look = look.map_err(|why| {
+        ControlError::failed(format!(
+            "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
+        ))
+    })?;
     let app = if app.is_empty() {
         off(cx, move || app::name(target.pid))
             .await
@@ -5010,9 +5018,11 @@ async fn queued_click(
         app,
         title: real_click::short_title(&title, 40),
         look,
+        element,
         asked_ms: 0,
     };
     let operation = real_click::operation(target.window_id, at, click, modifier_bits(modifiers));
+    let token = operation.clone();
     let owner = core
         .read_with(cx, |c, _| c.input_queue.owner(id, connection))
         .map_err(ControlError::invalid)?;
@@ -5061,15 +5071,19 @@ async fn queued_click(
     };
     // The session is done with the user's pointer unless it has more
     // waiting: the approval ends and their pointer and app come back.
-    let waited = core.update(cx, |c, cx| {
+    let changed = r["failure"].as_str() == Some(real_click::CONTENT_CHANGED);
+    let (waited, refusals) = core.update(cx, |c, cx| {
         let asked = match c.input_queue.plan(request) {
             Some(crate::input_queue::Plan::Click(click)) => click.asked_ms,
             _ => c.input_queue.now(),
         };
         let waited = real_click::waited_seconds(asked, c.input_queue.now());
+        let refusals = c
+            .input_queue
+            .content_changed(&owner, changed.then_some(token.as_str()));
         c.input_queue.loan_done(&owner, request);
         cx.notify();
-        waited
+        (waited, refusals)
     });
     if ran {
         show_pointer(core, id, at, true, cx);
@@ -5080,7 +5094,12 @@ async fn queued_click(
             "waitedSeconds": waited,
         }));
     }
-    if r["failure"].as_str() == Some(real_click::CONTENT_CHANGED) {
+    if changed && refusals >= 2 {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) changed again while the request waited, {waited} s this time, so that area keeps changing, as a video or an animation does. Asking again would likely end the same way, and asks the user again. Use act_on_element on the element there instead, or call request_help."
+        )));
+    }
+    if changed {
         return Err(ControlError::failed(format!(
             "Nothing was clicked: what is under ({x}, {y}) looks different from when you asked, {waited} s ago, so the click could land on something else, such as another row of a list that reordered. Take a new screenshot, find the target again, and ask again with real_input."
         )));
