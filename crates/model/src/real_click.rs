@@ -151,22 +151,56 @@ pub fn element_identity(parts: Identity) -> Option<Identity> {
     parts.iter().any(Option::is_some).then_some(parts)
 }
 
-/// A row's name, from its texts in depth-first pre-order: the first with a
-/// letter and no digit that isn't a day word, as "Yesterday" or 昨天. A
-/// time stamp ("10:30 AM", 下午3:05, "2m"), an unread count or a day would
-/// change while the request waits, and a name can sit deeper in the tree
-/// than they do. Only when no text qualifies, the first with a letter.
+/// A row's name, from its texts in depth-first pre-order: the first that
+/// can name a row (`names_row`). The name usually comes first; a time
+/// stamp, an unread count or a day before it is skipped, as it would
+/// change while the request waits.
 pub fn item_name(texts: &[String]) -> Option<&str> {
-    let texts = || texts.iter().map(|t| t.trim());
-    let letter = |t: &str| t.chars().any(char::is_alphabetic);
-    texts()
-        .find(|t| letter(t) && !t.chars().any(|c| c.is_ascii_digit()) && !day_word(t))
-        .or_else(|| texts().find(|t| letter(t)))
+    texts.iter().map(|t| t.trim()).find(|t| names_row(t))
 }
 
-/// A word a list shows for a day instead of a date.
+/// Whether a text can be a row's name: it has a letter, and isn't a time,
+/// date, count or day. "项目组2024" and "张三2" can; "10:30 AM",
+/// 下午3:05, "2m", 3分钟前, 2024/11/08, 11月8日 and 昨天 can't.
+pub fn names_row(text: &str) -> bool {
+    let text = text.trim();
+    if !text.chars().any(char::is_alphabetic) || day_word(text) {
+        return false;
+    }
+    if !text.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // What's left of a time or date once its numbers, separators and
+    // units go is nothing, a unit letter or a day.
+    let mut rest = text.to_lowercase();
+    for unit in [
+        "分钟前",
+        "小时前",
+        "天前",
+        "上午",
+        "下午",
+        "凌晨",
+        "中午",
+        "晚上",
+        "早上",
+        "min",
+        "hr",
+        "am",
+        "pm",
+    ] {
+        rest = rest.replace(unit, " ");
+    }
+    let rest: String = rest
+        .chars()
+        .filter(|c| !c.is_ascii_digit() && !c.is_whitespace() && !":/.-年月日号".contains(*c))
+        .collect();
+    !(rest.chars().all(|c| "mhd".contains(c)) || day_word(&rest))
+}
+
+/// A word a list shows for a day instead of a date: the whole text, so
+/// 周天明 stays a name.
 fn day_word(text: &str) -> bool {
-    const WORDS: [&str; 20] = [
+    const WORDS: [&str; 27] = [
         "now",
         "just now",
         "today",
@@ -179,6 +213,13 @@ fn day_word(text: &str) -> bool {
         "friday",
         "saturday",
         "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
         "刚刚",
         "今天",
         "昨天",
@@ -188,12 +229,12 @@ fn day_word(text: &str) -> bool {
         "下午",
         "晚上",
     ];
-    let lower = text.to_lowercase();
+    let lower = text.trim().to_lowercase();
     if WORDS.contains(&lower.as_str()) {
         return true;
     }
     // 星期一, 周三, 礼拜天.
-    let chars: Vec<char> = text.chars().collect();
+    let chars: Vec<char> = lower.chars().collect();
     let weekday = |c: char| "一二三四五六日天".contains(c);
     match chars.as_slice() {
         ['周', d] => weekday(*d),
@@ -667,10 +708,17 @@ mod tests {
     #[test]
     fn a_row_s_name_skips_times_days_and_counts() {
         let texts = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // In pre-order the time and the preview come before a name nested
-        // deeper: the time is skipped, and the preview, with a digit, too.
+        // A name with a digit, before a preview without one.
         assert_eq!(
-            item_name(&texts(&["10:30 AM", "3", "see you at 5", "Alice"])),
+            item_name(&texts(&["项目组2024", "收到"])),
+            Some("项目组2024")
+        );
+        assert_eq!(item_name(&texts(&["张三2", "李四: 好的"])), Some("张三2"));
+        // A preview with a digit doesn't displace the name.
+        assert_eq!(item_name(&texts(&["张三丰", "改到3点"])), Some("张三丰"));
+        // Times, days and counts before a name nested deeper.
+        assert_eq!(
+            item_name(&texts(&["10:30 AM", "3", "Alice", "see you at 5"])),
             Some("Alice")
         );
         assert_eq!(
@@ -684,13 +732,48 @@ mod tests {
             ])),
             Some("张三丰")
         );
-        assert_eq!(item_name(&texts(&["2m", "Yesterday", "Bob"])), Some("Bob"));
-        // A surname is not a weekday.
-        assert_eq!(item_name(&texts(&["周杰"])), Some("周杰"));
-        // Nothing qualifies: the first text with a letter.
-        assert_eq!(item_name(&texts(&["12:01", "Room 101"])), Some("Room 101"));
+        assert_eq!(
+            item_name(&texts(&["2m", "Yesterday", "Mon", "Bob"])),
+            Some("Bob")
+        );
         assert_eq!(item_name(&texts(&["12:01", "3"])), None);
         assert_eq!(item_name(&[]), None);
+    }
+
+    #[test]
+    fn times_dates_and_counts_never_name_a_row() {
+        for time in [
+            "10:30",
+            "10:30 AM",
+            "下午3:05",
+            "2m",
+            "3h",
+            "5 min",
+            "3分钟前",
+            "2小时前",
+            "2024/11/08",
+            "2024-11-08",
+            "11月8日",
+            "8号",
+            "昨天 10:30",
+            "周五 9:00",
+            "Mon",
+            "星期三",
+            "凌晨1:20",
+        ] {
+            assert!(!names_row(time), "{time}");
+        }
+        for name in [
+            "项目组2024",
+            "张三2",
+            "Room 101",
+            "周天明",
+            "周杰",
+            "改到3点",
+            "Alice",
+        ] {
+            assert!(names_row(name), "{name}");
+        }
     }
 
     #[test]

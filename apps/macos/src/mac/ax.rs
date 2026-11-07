@@ -639,17 +639,20 @@ fn element_at_in(app: &AXUIElement, at: (f64, f64)) -> Option<Element> {
 /// "Clicks"): the hit element's role, subrole, title and description and
 /// the name of its row, cell or link, each None when the app didn't
 /// answer for it, and the frame of that row, cell or link, or else of the
-/// element, in global points. Every read together takes at most `budget`:
-/// an app that stalls past it leaves both unknown, and the pixels decide.
+/// element, in global points, when `framed` asks for it. Every read
+/// together takes at most `budget`: an app that stalls past it leaves both
+/// unknown, and the pixels decide.
 pub fn target_at(
     pid: i32,
     at: (f64, f64),
     budget: std::time::Duration,
+    framed: bool,
 ) -> (
     Option<agent_screen_model::real_click::Identity>,
     Option<Rect>,
 ) {
-    let budget = Budget(std::time::Instant::now() + budget);
+    let started = std::time::Instant::now();
+    let budget = Budget(started + budget);
     let app = unsafe { AXUIElement::new_application(pid) };
     let Some(element) = budget.arm(&app).then(|| element_at_in(&app, at)).flatten() else {
         return (None, None);
@@ -681,15 +684,22 @@ pub fn target_at(
         read(&element, "AXDescription"),
         name,
     ]);
-    let framed = item
-        .as_deref()
-        .filter(|i| budget.arm(i))
-        .and_then(frame)
-        .or_else(|| budget.arm(&element).then(|| frame(&element)).flatten());
+    let framed = framed
+        .then(|| {
+            item.as_deref()
+                .filter(|i| budget.arm(i))
+                .and_then(frame)
+                .or_else(|| budget.arm(&element).then(|| frame(&element)).flatten())
+        })
+        .flatten();
+    let took = started.elapsed().as_millis();
     if budget.over() {
-        log::info!("input queue: accessibility at the click took too long; the pixels decide");
+        log::info!(
+            "input queue: accessibility at the click took {took} ms, past its budget; the pixels decide"
+        );
         return (None, None);
     }
+    log::info!("input queue: accessibility at the click read in {took} ms: {identity:?}");
     (identity, framed)
 }
 
@@ -713,9 +723,9 @@ impl Budget {
     }
 }
 
-/// A row's name, from its static texts in depth-first pre-order within
-/// three levels and 40 elements (`real_click::item_name` picks), or else
-/// its own title or description.
+/// A row's name: its first static text in depth-first pre-order, within
+/// three levels and 40 elements, that `real_click::names_row` takes, or
+/// else its own title or description. The walk stops at that text.
 fn item_name(item: &AXUIElement, budget: &Budget) -> Option<String> {
     fn walk(
         e: &AXUIElement,
@@ -724,7 +734,10 @@ fn item_name(item: &AXUIElement, budget: &Budget) -> Option<String> {
         texts: &mut Vec<String>,
         budget: &Budget,
     ) {
-        if depth > 3 || *seen >= 40 || !budget.arm(e) {
+        let found = texts
+            .last()
+            .is_some_and(|t| agent_screen_model::real_click::names_row(t));
+        if depth > 3 || *seen >= 40 || found || !budget.arm(e) {
             return;
         }
         *seen += 1;

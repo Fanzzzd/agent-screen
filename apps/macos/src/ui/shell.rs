@@ -1335,6 +1335,7 @@ impl Shell {
                                     click.target.pid,
                                     click.at,
                                     std::time::Duration::from_millis(300),
+                                    false,
                                 );
                                 let same = real_click::same_element(
                                     click.element.as_deref(),
