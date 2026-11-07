@@ -1325,18 +1325,30 @@ impl Shell {
                             // Before the window comes forward, which can
                             // redraw it: the point must still show what the
                             // agent aimed at.
-                            let region = real_click::look_region(click.at, area, frame);
-                            let element = crate::mac::ax::identity_at(click.target.pid, click.at);
-                            if !real_click::same_element(click.element.as_deref(), element.as_deref()) {
+                            let (element, _) = crate::mac::ax::target_at(click.target.pid, click.at);
+                            if !real_click::same_element(click.element.as_ref(), element.as_ref()) {
                                 log::info!(
                                     "input queue: the element at the click changed: {:?} -> {element:?}",
                                     click.element
                                 );
                                 return Outcome::Refused(real_click::CONTENT_CHANGED);
                             }
-                            match crate::mac::screenshot::samples(display, region) {
+                            match crate::mac::screenshot::samples(display, click.region) {
                                 Ok(now) if real_click::looks_same(&click.look, &now) => {}
-                                Ok(_) => return Outcome::Refused(real_click::CONTENT_CHANGED),
+                                Ok(now) => {
+                                    // Diagnostics tell a false refusal from a
+                                    // real change by how much changed.
+                                    let (changed, all) =
+                                        real_click::changed_samples(&click.look, &now)
+                                            .unwrap_or((0, 0));
+                                    log::info!(
+                                        "input queue: the region {:?} at the click changed: {changed} of {all} samples ({:.1}%, the limit is {}%)",
+                                        click.region,
+                                        changed as f64 * 100.0 / all.max(1) as f64,
+                                        real_click::LOOK_PERCENT
+                                    );
+                                    return Outcome::Refused(real_click::CONTENT_CHANGED);
+                                }
                                 Err(why) => {
                                     log::info!("input queue: no picture before the click: {why}");
                                     return Outcome::Refused(

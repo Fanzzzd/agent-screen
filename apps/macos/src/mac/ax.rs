@@ -630,24 +630,44 @@ pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
     (error == AXError::Success).then_some(element)
 }
 
-/// What accessibility says is at a global point of app `pid`: the
-/// element's role, subrole, title and description, for a real click to
-/// check that it still aims at the same thing (ADR 0013, "Clicks").
-pub fn identity_at(pid: i32, at: (f64, f64)) -> Option<String> {
-    let element = element_at(pid, at)?;
+/// What accessibility says is at a global point of app `pid`, for a real
+/// click to check that it still aims at the same thing (ADR 0013,
+/// "Clicks"): the element's role, subrole, title and description, each
+/// None when the app didn't answer for it, and the frame of its row or
+/// cell, or else its own, in global points.
+pub fn target_at(
+    pid: i32,
+    at: (f64, f64),
+) -> (
+    Option<agent_screen_model::real_click::Identity>,
+    Option<Rect>,
+) {
+    let Some(element) = element_at(pid, at) else {
+        return (None, None);
+    };
     let get = |name| string_attribute(&element, name);
-    let (role, subrole, title, description) = (
+    let identity = agent_screen_model::real_click::element_identity([
         get("AXRole"),
         get("AXSubrole"),
         get("AXTitle"),
         get("AXDescription"),
-    );
-    agent_screen_model::real_click::element_identity([
-        role.as_deref(),
-        subrole.as_deref(),
-        title.as_deref(),
-        description.as_deref(),
-    ])
+    ]);
+    // A list's row or a table's cell frames what a reorder would change.
+    let mut row = None;
+    let mut next = Some(element.clone());
+    for _ in 0..6 {
+        let Some(e) = next else { break };
+        if matches!(
+            string_attribute(&e, "AXRole").as_deref(),
+            Some("AXRow" | "AXCell")
+        ) {
+            row = Some(e);
+            break;
+        }
+        next = element_attribute(&e, "AXParent");
+    }
+    let framed = row.as_deref().and_then(frame).or_else(|| frame(&element));
+    (identity, framed)
 }
 
 /// The actions an element takes, such as AXPress and AXConfirm.

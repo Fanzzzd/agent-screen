@@ -560,6 +560,7 @@ fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
         flags: 0,
         app: "WeCom".into(),
         title: None,
+        region: model::Rect::new(0.0, 0.0, 4.0, 4.0),
         look: vec![0; 48],
         element: None,
         asked_ms: 0,

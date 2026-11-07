@@ -83,11 +83,12 @@ pub struct Click {
     /// The app's name and the window's title, for the card.
     pub app: String,
     pub title: Option<String>,
-    /// Samples of `real_click::look_region` around the point when the
-    /// agent asked, and what accessibility named there. The loan clicks
-    /// only if both are still the same.
+    /// The display-local region `real_click::look_region` chose, its
+    /// samples when the agent asked, and what accessibility named at the
+    /// point. The loan clicks only if both still look the same.
+    pub region: Rect,
     pub look: Vec<u8>,
-    pub element: Option<String>,
+    pub element: Option<agent_screen_model::real_click::Identity>,
     /// When the agent first asked, by the queue's clock.
     pub asked_ms: u64,
 }
