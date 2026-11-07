@@ -17,6 +17,7 @@ pub mod launch;
 pub mod menu_press;
 pub mod model;
 pub mod numbers;
+pub mod real_click;
 pub mod recording_playback;
 pub mod screen_edge;
 pub mod shared_app;

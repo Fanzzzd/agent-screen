@@ -17,6 +17,7 @@ use crate::model::{
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use agent_screen_model::input_queue::Action;
+use agent_screen_model::real_click;
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
 use futures::FutureExt;
@@ -344,6 +345,27 @@ async fn handle_one(
                 })?;
             let modifiers = modifiers(&p)?;
             let count = p.int("count").unwrap_or(1);
+            // The agent saw a background click have no effect and asks for
+            // the user's pointer (ADR 0013, "Clicks"). Nothing goes out on
+            // the background route meanwhile.
+            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                // The menu a real right click opens would close when the
+                // user's front app comes back.
+                // So would a Control-held left click's.
+                let pressed = real_click::Button::parse(button_name(button))
+                    .unwrap_or(real_click::Button::Left);
+                if real_click::opens_menu(pressed, modifiers.control) {
+                    return Err(ControlError::invalid(real_click::NO_MENU_CLICK));
+                }
+                let click = real_click::Button::parse(button_name(button))
+                    .and_then(|b| real_click::Click::new(b, count))
+                    .ok_or_else(|| {
+                        ControlError::invalid(
+                            "a click with the user's pointer presses its button one to three times",
+                        )
+                    })?;
+                return queued_click(&core, connection, id, point, click, modifiers, cx).await;
+            }
             // A window of the user's front app, beside the window they
             // work in: a posted click would make it key and take their
             // typing (#110).
@@ -4902,6 +4924,186 @@ async fn queued_drag(
             ),
         }),
     }
+}
+
+fn button_name(button: Button) -> &'static str {
+    match button {
+        Button::Left => "left",
+        Button::Right => "right",
+        Button::Middle => "middle",
+    }
+}
+
+/// A click with the user's real pointer, once they allow it (ADR 0013,
+/// "Clicks"). The agent asks after a background click visibly had no
+/// effect; nothing goes out on the background route while the request is
+/// outstanding, so the click never runs twice.
+async fn queued_click(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    at: (f64, f64),
+    click: real_click::Click,
+    modifiers: crate::keychord::Modifiers,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let area = cg::display_bounds(id);
+    let (x, y) = real_click::display_point(at, area);
+    let hit = off(cx, move || {
+        let (target, frame) = crate::mac::input::window_at(at)?;
+        let window = windows::on_display(id)
+            .into_iter()
+            .find(|w| w.target == target)?;
+        Some((target, frame, window.app, window.title))
+    })
+    .await;
+    let Some((target, frame, app, title)) = hit else {
+        return Err(ControlError::not_found(format!(
+            "no window of yours at ({x}, {y}) on display {id}, so no click was asked for"
+        )));
+    };
+    if !real_click::contained(at, area, frame) {
+        return Err(ControlError::invalid(
+            "the window under that point reaches past your Agent Display, so its click can't use the user's pointer",
+        ));
+    }
+    // What the agent aimed at, to compare just before the loan clicks: a
+    // list can reorder while the user decides.
+    let (region, look, element) = off(cx, move || {
+        // Chromium and Electron publish their pages' elements only once
+        // asked.
+        crate::mac::ax::ensure_web_tree(target);
+        let (element, framed) = crate::mac::ax::target_at(target.pid, at);
+        let region = real_click::look_region(at, area, frame, framed);
+        (region, crate::mac::screenshot::samples(id, region), element)
+    })
+    .await;
+    let look = look.map_err(|why| {
+        ControlError::failed(format!(
+            "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
+        ))
+    })?;
+    let app = if app.is_empty() {
+        off(cx, move || app::name(target.pid))
+            .await
+            .unwrap_or_else(|| "the app".into())
+    } else {
+        app
+    };
+    let verb = match click.verb() {
+        real_click::Verb::Click => "Click",
+        real_click::Verb::DoubleClick => "Double-click",
+        real_click::Verb::TripleClick => "Triple-click",
+        real_click::Verb::RightClick => "Right-click",
+        real_click::Verb::MiddleClick => "Middle-click",
+    };
+    let reason = format!("{verb} at ({x}, {y}) in {app} with the user's pointer");
+    let plan = crate::input_queue::Click {
+        target,
+        frame,
+        area,
+        at,
+        click,
+        flags: crate::mac::input::flags(modifiers).0,
+        app,
+        title: real_click::short_title(&title, 40),
+        region,
+        look,
+        element,
+        asked_ms: 0,
+    };
+    let operation = real_click::operation(target.window_id, at, click, modifier_bits(modifiers));
+    let token = operation.clone();
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let plan = crate::input_queue::Click {
+                asked_ms: c.input_queue.now(),
+                ..plan
+            };
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                Some(crate::input_queue::Plan::Click(plan)),
+            );
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    let ran = match r["state"].as_str() {
+        Some("completed") => true,
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => false,
+        state_now => {
+            let next = if state_now == Some("declined") {
+                "The user declined: the same click again returns this answer. Use another way, such as act_on_element, or call request_help."
+            } else {
+                "The click runs with the user's pointer once they allow it and while your call waits: make the same click with real_input again to wait again, or use input_queue to inspect or withdraw it."
+            };
+            return Err(ControlError {
+                code: "input_pending",
+                message: format!(
+                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {next}",
+                    verb.to_lowercase()
+                ),
+            });
+        }
+    };
+    // The session is done with the user's pointer unless it has more
+    // waiting: the approval ends and their pointer and app come back.
+    let changed = r["failure"].as_str() == Some(real_click::CONTENT_CHANGED);
+    let (waited, refusals) = core.update(cx, |c, cx| {
+        let asked = match c.input_queue.plan(request) {
+            Some(crate::input_queue::Plan::Click(click)) => click.asked_ms,
+            _ => c.input_queue.now(),
+        };
+        let waited = real_click::waited_seconds(asked, c.input_queue.now());
+        let refusals = c
+            .input_queue
+            .content_changed(&owner, changed.then_some(token.as_str()));
+        c.input_queue.loan_done(&owner, request);
+        cx.notify();
+        (waited, refusals)
+    });
+    if ran {
+        show_pointer(core, id, at, true, cx);
+        return reply(json!({
+            "windowId": target.window_id,
+            "route": "real_input",
+            "requestId": request,
+            "waitedSeconds": waited,
+        }));
+    }
+    if changed && refusals >= 2 {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) changed again while the request waited, {waited} s this time, so that area keeps changing, as a video or an animation does. Asking again would likely end the same way, and asks the user again. Use act_on_element on the element there instead, or call request_help."
+        )));
+    }
+    if changed {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) looks different from when you asked, {waited} s ago, so the click could land on something else, such as another row of a list that reordered. Take a new screenshot, find the target again, and ask again with real_input."
+        )));
+    }
+    Err(ControlError::failed(format!(
+        "The {} with the user's pointer stopped ({}{}); every button it pressed was let go. Take a screenshot before retrying. Input queue status: {state}",
+        verb.to_lowercase(),
+        r["stopReason"].as_str().unwrap_or("stopped"),
+        r["failure"]
+            .as_str()
+            .map(|f| format!(": {f}"))
+            .unwrap_or_default(),
+    )))
 }
 
 /// The Input Queue's token for a real click on a menu item: the same press

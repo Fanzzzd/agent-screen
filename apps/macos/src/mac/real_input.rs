@@ -1,13 +1,14 @@
-//! The Input Queue's executor (ADR 0013): one complete drag with the
-//! user's own pointer, during an Input Grant the user allowed. Events go to
-//! the HID system, so the pointer really moves and the session's left
-//! button really reads down, as Chromium needs. Each event carries `TAG`,
-//! which tells it from the user's own input: while armed, any untagged
-//! mouse or key event is the user taking control back.
+//! The Input Queue's executor (ADR 0013): one complete drag, click or
+//! menu item with the user's own pointer, during an Input Grant the user
+//! allowed. Events go to the HID system, so the pointer really moves and
+//! the session's button really reads down, as Chromium needs. Each event
+//! carries `TAG`, which tells it from the user's own input: while armed,
+//! any untagged mouse or key event is the user taking control back.
 
 use super::native::{self, Native};
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::menu_press;
+use agent_screen_model::real_click::{self, Event};
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CGPoint, kCFRunLoopCommonModes,
@@ -17,7 +18,7 @@ use objc2_core_graphics::{
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGMouseButton,
 };
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -52,8 +53,16 @@ static TOUCHED: AtomicBool = AtomicBool::new(false);
 /// A missing or disabled observer prevents real input.
 static WATCHING: AtomicBool = AtomicBool::new(false);
 /// A physical press of the user's takes precedence over releasing our
-/// synthetic button. Never synthesize an up over a physical down.
-static USER_LEFT_DOWN: AtomicBool = AtomicBool::new(false);
+/// synthetic button. Never synthesize an up over a physical down. One bit
+/// per button: left, right, other.
+static USER_DOWN: AtomicU8 = AtomicU8::new(0);
+const LEFT: u8 = 1;
+const RIGHT: u8 = 2;
+const OTHER: u8 = 4;
+
+fn user_holds(bits: u8) -> bool {
+    USER_DOWN.load(Ordering::SeqCst) & bits != 0
+}
 /// The app a loan is pressing in, 0 for none. The guard that gives the
 /// front back to the user's app and the reminder leave it alone.
 static HOLDING: AtomicI32 = AtomicI32::new(0);
@@ -134,10 +143,23 @@ pub fn watch() {
             CGEventField::EventSourceUserData,
         ) == TAG;
         if !ours {
-            if kind == CGEventType::LeftMouseDown {
-                USER_LEFT_DOWN.store(true, Ordering::SeqCst);
-            } else if kind == CGEventType::LeftMouseUp {
-                USER_LEFT_DOWN.store(false, Ordering::SeqCst);
+            let (down, bit) = match kind {
+                CGEventType::LeftMouseDown => (Some(true), LEFT),
+                CGEventType::LeftMouseUp => (Some(false), LEFT),
+                CGEventType::RightMouseDown => (Some(true), RIGHT),
+                CGEventType::RightMouseUp => (Some(false), RIGHT),
+                CGEventType::OtherMouseDown => (Some(true), OTHER),
+                CGEventType::OtherMouseUp => (Some(false), OTHER),
+                _ => (None, 0),
+            };
+            match down {
+                Some(true) => {
+                    USER_DOWN.fetch_or(bit, Ordering::SeqCst);
+                }
+                Some(false) => {
+                    USER_DOWN.fetch_and(!bit, Ordering::SeqCst);
+                }
+                None => {}
             }
             if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
                 native::send(Native::UserTookInput);
@@ -188,28 +210,49 @@ pub fn watch() {
     WATCHING.store(true, Ordering::SeqCst);
 }
 
-/// The pointer and front app at grant start, to put back when it ends
-/// normally.
+/// The pointer, front app and its focused window at grant start, to put
+/// back when it ends normally.
 #[derive(Clone, Copy, Debug)]
 pub struct Saved {
     pub pointer: (f64, f64),
     pub front: Option<i32>,
+    /// The front app's focused window. A loan in the same app, as the
+    /// agent's Chrome window beside the user's, makes its own window main,
+    /// and the user's typing would go there.
+    pub window: Option<u32>,
+    /// Its main window, which differs when a panel has focus: a panel
+    /// can't become main, and the document window it serves must.
+    pub main: Option<u32>,
 }
 
 pub fn save() -> Saved {
     let pointer = CGEvent::new(None)
         .map(|e| CGEvent::location(Some(&e)))
         .map_or((0.0, 0.0), |p| (p.x, p.y));
+    let front = super::app::frontmost_pid();
+    let theirs = front.filter(|&p| p != std::process::id() as i32);
+    let window = theirs.and_then(super::ax::focused_window_id);
+    let main = theirs.and_then(|pid| {
+        let app = super::ax::application(pid);
+        unsafe { app.set_messaging_timeout(0.1) };
+        super::ax::window_id(&*super::ax::element_attribute(&app, "AXMainWindow")?)
+    });
     Saved {
         pointer,
-        front: super::app::frontmost_pid(),
+        front,
+        window,
+        main,
     }
 }
 
 /// Put the pointer and front app back. Not after the user took control:
 /// that would undo what they just did.
 pub fn restore(saved: Saved) {
-    log::info!("input queue: restoring the pointer and front app");
+    let now = CGEvent::new(None).map(|e| CGEvent::location(Some(&e)));
+    log::info!(
+        "input queue: restoring the pointer and front app; pointer at {:?}",
+        now.map(|p| (p.x, p.y))
+    );
     if touched() {
         return;
     }
@@ -220,6 +263,35 @@ pub fn restore(saved: Saved) {
     if !touched()
         && let Some(front) = saved.front.filter(|&p| p != std::process::id() as i32)
     {
+        // Their windows first, so the app comes forward with them main
+        // and focused, and their keys go back there. The main window, then
+        // a focused panel apart from it, which can't become main but can
+        // take focus.
+        let target = |window_id| WindowTarget {
+            pid: front,
+            window_id,
+        };
+        if let Some(main) = saved.main
+            && !super::ax::make_main(target(main))
+        {
+            log::info!("input queue: window {main} could not be made main again");
+        }
+        if let Some(focused) = saved.window.filter(|&w| Some(w) != saved.main) {
+            let focused_again = super::ax::window_element(target(focused)).is_some_and(|w| {
+                super::ax::set_attribute(
+                    &w,
+                    "AXFocused",
+                    objc2_core_foundation::CFBoolean::new(true),
+                ) || super::ax::set_attribute(
+                    &w,
+                    "AXMain",
+                    objc2_core_foundation::CFBoolean::new(true),
+                )
+            });
+            if !focused_again {
+                log::info!("input queue: window {focused} could not be focused again");
+            }
+        }
         // Do not wait and activate again: the user may act during a wait.
         super::ax::set_attribute(
             &super::ax::application(front),
@@ -396,22 +468,50 @@ struct Poster {
 
 impl Poster {
     fn event(&self, kind: CGEventType, at: (f64, f64)) -> Option<CFRetained<CGEvent>> {
+        self.mouse(kind, at, CGMouseButton::Left, 1)
+    }
+
+    /// A mouse event of `button`; a press or release carries click state
+    /// `state`, 2 for the second press of a double click.
+    fn mouse(
+        &self,
+        kind: CGEventType,
+        at: (f64, f64),
+        button: CGMouseButton,
+        state: i64,
+    ) -> Option<CFRetained<CGEvent>> {
         let event = CGEvent::new_mouse_event(
             self.source.as_deref(),
             kind,
             CGPoint::new(at.0, at.1),
-            CGMouseButton::Left,
+            button,
         )?;
         CGEvent::set_flags(Some(&event), self.flags);
         CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, TAG);
-        if matches!(kind, CGEventType::LeftMouseDown | CGEventType::LeftMouseUp) {
-            CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, 1);
+        if matches!(
+            kind,
+            CGEventType::LeftMouseDown
+                | CGEventType::LeftMouseUp
+                | CGEventType::RightMouseDown
+                | CGEventType::RightMouseUp
+                | CGEventType::OtherMouseDown
+                | CGEventType::OtherMouseUp
+        ) {
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::MouseEventClickState,
+                state,
+            );
         }
         Some(event)
     }
 
     fn post(&self, kind: CGEventType, at: (f64, f64)) -> bool {
-        let Some(event) = self.event(kind, at) else {
+        self.send(self.event(kind, at))
+    }
+
+    fn send(&self, event: Option<CFRetained<CGEvent>>) -> bool {
+        let Some(event) = event else {
             return false;
         };
         super::ime::note_posted();
@@ -426,11 +526,13 @@ struct Release {
     event: CFRetained<CGEvent>,
     at: (f64, f64),
     pressed: bool,
+    /// The button's bit in USER_DOWN.
+    button: u8,
 }
 
 impl Drop for Release {
     fn drop(&mut self) {
-        if self.pressed && !USER_LEFT_DOWN.load(Ordering::SeqCst) {
+        if self.pressed && !user_holds(self.button) {
             let at = if touched() {
                 CGEvent::new(None)
                     .map(|e| CGEvent::location(Some(&e)))
@@ -468,7 +570,7 @@ fn inputs_busy() -> Option<&'static str> {
     if unsafe { IsSecureEventInputEnabled() } {
         return Some("secure input is on, as for a password field");
     }
-    let held = USER_LEFT_DOWN.load(Ordering::SeqCst)
+    let held = user_holds(LEFT | RIGHT | OTHER)
         || (0..3).any(|button| unsafe {
             CGEventSourceButtonState(CGEventSourceStateID::CombinedSessionState, button)
         })
@@ -535,6 +637,7 @@ pub fn drag(
         event: up,
         at: from,
         pressed: false,
+        button: LEFT,
     };
     if !poster.post(CGEventType::LeftMouseDown, from) {
         return Outcome::Refused("the press could not be created");
@@ -585,6 +688,129 @@ pub fn drag(
         Some(why) => Outcome::Stopped(why),
         None => Outcome::Done,
     }
+}
+
+/// One complete click at `at`, global points, with the user's pointer
+/// (ADR 0013, "Clicks"): the window comes forward as for a drag, the
+/// pointer goes to the point, and each press is released before the next.
+/// `go` is checked before every event, with the user's touch, secure input
+/// and the app still in front. Every button pressed goes up before this
+/// returns, however it ends.
+pub fn click_at(
+    target: WindowTarget,
+    at: (f64, f64),
+    click: real_click::Click,
+    flags: CGEventFlags,
+    go: impl Fn((f64, f64)) -> bool,
+) -> Outcome {
+    let Ok(_session) = SESSION_INPUT.try_lock() else {
+        return Outcome::Refused("another operation holds the session's keyboard or pointer");
+    };
+    let gate = process_gate(target.pid);
+    let Ok(_process) = gate.try_write() else {
+        return Outcome::Refused("background input into this process is still running");
+    };
+    if let Some(why) = inputs_busy() {
+        return Outcome::Refused(why);
+    }
+    let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return Outcome::Refused("the input event source could not be created");
+    };
+    let poster = Poster {
+        source: Some(source),
+        flags,
+    };
+    let (button, bit, down, up) = match click.button {
+        real_click::Button::Left => (
+            CGMouseButton::Left,
+            LEFT,
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+        ),
+        real_click::Button::Right => (
+            CGMouseButton::Right,
+            RIGHT,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+        ),
+        real_click::Button::Middle => (
+            CGMouseButton::Center,
+            OTHER,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+        ),
+    };
+    let pid = target.pid;
+    let front = || super::app::frontmost_pid() == Some(pid);
+    let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    if !allowed(at) {
+        return Outcome::Refused("the approval ended before the click");
+    }
+    // An app in the background takes a click as a click on its window to
+    // bring it forward: the app comes to the front first. The grant's end
+    // puts the user's app back.
+    let _holding = Holding::new(pid);
+    if let Err(why) = come_forward(target, || allowed(at)) {
+        return Outcome::Refused(why);
+    }
+    let mut release: Option<Release> = None;
+    let mut pressed = false;
+    for event in click.events() {
+        if !allowed(at) || !front() {
+            let why = if touched() {
+                "the user moved the mouse or pressed a key"
+            } else if !front() {
+                "the foreground app changed"
+            } else {
+                "the approval or target geometry changed"
+            };
+            drop(release.take());
+            return if pressed {
+                Outcome::Stopped(why)
+            } else {
+                Outcome::Refused(why)
+            };
+        }
+        match event {
+            Event::Move => {
+                if !poster.post(CGEventType::MouseMoved, at) {
+                    return Outcome::Refused("the mouse event could not be created");
+                }
+                thread::sleep(Duration::from_millis(60));
+            }
+            Event::Down(state) => {
+                let Some(event) = poster.mouse(up, at, button, state) else {
+                    let why = "the release event could not be created before pressing";
+                    return if pressed {
+                        Outcome::Stopped(why)
+                    } else {
+                        Outcome::Refused(why)
+                    };
+                };
+                let held = release.insert(Release {
+                    event,
+                    at,
+                    pressed: false,
+                    button: bit,
+                });
+                if !poster.send(poster.mouse(down, at, button, state)) {
+                    return if pressed {
+                        Outcome::Stopped("the press could not be created")
+                    } else {
+                        Outcome::Refused("the press could not be created")
+                    };
+                }
+                held.pressed = true;
+                pressed = true;
+                thread::sleep(Duration::from_millis(real_click::HOLD_MS));
+            }
+            Event::Up(_) => {
+                drop(release.take());
+                thread::sleep(Duration::from_millis(real_click::GAP_MS));
+            }
+        }
+    }
+    Outcome::Done
 }
 
 /// How long a menu gets to open, or a submenu to show, after the click or
@@ -835,6 +1061,7 @@ fn click(
         event: up,
         at,
         pressed: false,
+        button: LEFT,
     };
     if !poster.post(CGEventType::LeftMouseDown, at) {
         return Err("the press could not be created");

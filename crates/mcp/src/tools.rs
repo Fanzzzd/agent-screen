@@ -189,6 +189,14 @@ pub fn definitions() -> Vec<Value> {
                 "Sliders with enough accessibility information can instead change their value without moving your pointer.",
                 "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
                 "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
+                "Click with the normal background route first. Some apps take a background click only partway, for example",
+                "selecting a row without opening it. If a screenshot or get_window_state shows the click had no effect, retry",
+                "the same left, double or triple click with real_input true: it asks the user to allow a click with their real",
+                "pointer and waits up to 60 seconds. Input route: real_input means it ran. input_pending means nothing was sent,",
+                "not even the background click; retry the same click to wait again. If what is under the point changed while",
+                "the user decided, nothing is clicked: take a new screenshot and ask again. Don't use real_input on the first",
+                "try. A menu or popover a real click opens closes when the user's front app comes back, so right, middle and",
+                "Control clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
                 "cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
@@ -218,7 +226,7 @@ pub fn definitions() -> Vec<Value> {
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For left_click_drag or left_mouse_down only: ask to use the user's pointer after observing a background failure. Complete drags run only during user approval; a split press only asks and sends nothing."
+                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click, middle_click or a click with ctrl held: the menu they open would close when the user's front app comes back."
                     },
                     "via_input_method": {
                         "type": "boolean",
@@ -237,13 +245,13 @@ pub fn definitions() -> Vec<Value> {
             "input_queue",
             "Inspect or withdraw an input request",
             &[
-                "A background drag that cannot run enters the shared Input Queue and reports its request_id.",
-                "Use wait to wait up to 60 seconds for approval and then for a started drag to release its inputs, status to inspect your requests, withdraw to cancel one,",
+                "A drag or click that needs the user's pointer enters the shared Input Queue and reports its request_id.",
+                "Use wait to wait up to 60 seconds for approval and then for a started drag or click to release its inputs, status to inspect your requests, withdraw to cancel one,",
                 "or done when your session no longer needs input. done withdraws your pending requests, not another session's, clears your results and takes no request_id.",
                 "request adds an approval intent with a reason and a stable operation token; repeating the token returns its newest request, a declined one included.",
                 "A token whose request you replaced or withdrew starts a fresh request. A session holds at most 64 requests across its displays, finished ones included; done releases the requests of the display you name.",
                 "Queue approval includes new requests while it lasts, and ends after 30 idle seconds or when all participants are done.",
-                "approved means allowed, not completed. A complete drag waits for its turn and runs with the user's pointer. Only completed means it ran. request here asks for approval but contains no executable action; once approved, submit a complete drag with real_input.",
+                "approved means allowed, not completed. A complete drag or click waits for its turn and runs with the user's pointer. Only completed means it ran. request here asks for approval but contains no executable action; once approved, submit the complete drag or click with real_input.",
                 "approval_lapsed means the user allowed it, the approval ended with nothing run, and they will not be asked again; wait and retry return at once.",
                 "Do not continue a split drag or assume success after input_pending. You can use a background alternative or request_help.",
                 "The tool returns only your session's requests. It does not end a Takeover or grant access to other windows.",
@@ -1359,11 +1367,17 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         Some(Value::Bool(value)) => *value,
         _ => return Err(ControlError::invalid("real_input must be true or false")),
     };
-    if real_input && !matches!(action.as_str(), "left_click_drag" | "left_mouse_down") {
+    if real_input && matches!(action.as_str(), "right_click" | "middle_click") {
         return Err(ControlError::invalid(
-            "real_input currently queues drag or press requests only",
+            agent_screen_model::real_click::NO_MENU_CLICK,
         ));
     }
+    if real_input && !agent_screen_model::real_click::takes_real_input(&action) {
+        return Err(ControlError::invalid(
+            "real_input applies to left_click, double_click, triple_click, left_click_drag and left_mouse_down only",
+        ));
+    }
+    let mut waited = None;
     let mut route = None;
     let coordinate = a.coordinate("coordinate")?;
     let text_arg = a.string("text")?;
@@ -1394,14 +1408,18 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 "triple_click" => 3,
                 _ => 1,
             };
-            note = control
+            let result = control
                 .call(
                     "click",
-                    json!({ "displayId": display, "x": x, "y": y, "button": button, "count": count, "modifiers": modifiers }),
+                    json!({ "displayId": display, "x": x, "y": y, "button": button, "count": count, "modifiers": modifiers, "realInput": real_input }),
                 )
-                .await?
-                .get("note")
-                .cloned();
+                .await?;
+            note = result.get("note").cloned();
+            route = result
+                .get("route")
+                .and_then(Value::as_str)
+                .map(String::from);
+            waited = result.get("waitedSeconds").and_then(Value::as_f64);
         }
         "mouse_move" => {
             let (x, y) = require_coordinate(coordinate, &action)?;
@@ -1554,6 +1572,11 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
     );
     if let Some(route) = route {
         header.push_str(&format!(" Input route: {route}."));
+    }
+    if let Some(waited) = waited {
+        header.push_str(&format!(
+            " The request waited {waited} s for the user's answer."
+        ));
     }
     header.push_str(&strayed_note(&shot));
     if let Some(note) = note.as_ref().and_then(Value::as_str) {

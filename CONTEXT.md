@@ -53,7 +53,7 @@ One `type` or `key` call that goes through the user's input method. For the call
 _Avoid_: focus steal, IME mode
 
 **Input Request** (申请指针和键盘):
-An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, or choosing an Electron app's menu item while a text field has focus. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now.
+An Agent Session asking to use the user's own pointer and keyboard on its Agent Display, for an action that background input can't do, such as a drag in a web page of the user's browser, choosing an Electron app's menu item while a text field has focus, or a click an app took only partway in the background. It waits in the Input Queue until the user allows it, and is declined when the user answers Not Now.
 _Avoid_: borrow, lease, takeover
 
 **Input Queue**:

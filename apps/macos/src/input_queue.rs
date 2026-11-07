@@ -27,6 +27,9 @@ pub struct InputQueue {
     plans: BTreeMap<RequestId, Plan>,
     /// Why the executor could not carry a loan out.
     failures: BTreeMap<RequestId, String>,
+    /// Per session's display, the last click refused because what was
+    /// under its point changed, and how many times in a row.
+    changed: BTreeMap<Owner, (String, u32)>,
     /// Whether the active loan may send its next event. The executor's
     /// thread reads it before every event.
     pub loan_ok: Arc<AtomicBool>,
@@ -37,6 +40,7 @@ pub struct InputQueue {
 pub enum Plan {
     Drag(Drag),
     MenuItem(MenuItem),
+    Click(Click),
 }
 
 /// One complete drag, in global points.
@@ -65,6 +69,30 @@ pub struct MenuItem {
     pub path: Vec<(usize, String)>,
 }
 
+/// One complete click with the user's pointer, in global points (ADR 0013,
+/// "Clicks").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Click {
+    pub target: WindowTarget,
+    pub frame: Rect,
+    pub area: Rect,
+    pub at: (f64, f64),
+    pub click: agent_screen_model::real_click::Click,
+    /// CGEventFlags bits.
+    pub flags: u64,
+    /// The app's name and the window's title, for the card.
+    pub app: String,
+    pub title: Option<String>,
+    /// The display-local region `real_click::look_region` chose, its
+    /// samples when the agent asked, and what accessibility named at the
+    /// point. The loan clicks only if both still look the same.
+    pub region: Rect,
+    pub look: Vec<u8>,
+    pub element: Option<agent_screen_model::real_click::Identity>,
+    /// When the agent first asked, by the queue's clock.
+    pub asked_ms: u64,
+}
+
 impl MenuItem {
     pub fn titles(&self) -> Vec<String> {
         self.path.iter().map(|(_, title)| title.clone()).collect()
@@ -79,6 +107,7 @@ impl Default for InputQueue {
             approved: BTreeSet::new(),
             plans: BTreeMap::new(),
             failures: BTreeMap::new(),
+            changed: BTreeMap::new(),
             loan_ok: Arc::default(),
         }
     }
@@ -143,6 +172,26 @@ impl InputQueue {
         }
         self.tick();
         Ok(id)
+    }
+
+    /// A real click `operation` of `owner` was refused because what was
+    /// under its point changed: how many times in a row that click has
+    /// been. Another click starts over; `None`, for a click that ended any
+    /// other way, forgets it.
+    pub fn content_changed(&mut self, owner: &Owner, operation: Option<&str>) -> u32 {
+        let Some(operation) = operation else {
+            self.changed.remove(owner);
+            return 0;
+        };
+        let entry = self
+            .changed
+            .entry(owner.clone())
+            .or_insert_with(|| (operation.to_string(), 0));
+        if entry.0 != operation {
+            *entry = (operation.to_string(), 0);
+        }
+        entry.1 += 1;
+        entry.1
     }
 
     /// What a request does, if it can run.
@@ -336,6 +385,8 @@ impl InputQueue {
         self.plans.retain(|id, _| requests.request(*id).is_some());
         self.failures
             .retain(|id, _| requests.request(*id).is_some());
+        self.changed
+            .retain(|owner, _| requests.owner(owner.display) == Some(owner));
         let ok = self
             .queue
             .active()
@@ -463,7 +514,7 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag with real_input while the approval lasts.",
+            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts.",
         })
     }
 }
