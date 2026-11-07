@@ -31,6 +31,33 @@ pub struct Walk {
     /// A safety budget stopped the read, not the caller's depth limit.
     pub truncated: bool,
     pub depth_limited: bool,
+    /// Elements whose children the depth limit left unread, in reading
+    /// order, so the tree can mark which branches have more inside.
+    pub cuts: Vec<Cut>,
+}
+
+/// A named element whose children were not read.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Cut {
+    /// The element's place among the named elements read, from 0.
+    pub after: usize,
+    /// The depth its children would have had.
+    pub depth: usize,
+    pub children: usize,
+}
+
+/// The line that marks a branch the depth limit left unread.
+pub fn cut_line(cut: &Cut) -> String {
+    format!(
+        "{}… more inside: {} {} not read",
+        "  ".repeat(cut.depth),
+        cut.children,
+        if cut.children == 1 {
+            "child"
+        } else {
+            "children"
+        }
+    )
 }
 
 /// Bounded depth-first traversal used by accessibility snapshots. The
@@ -59,7 +86,16 @@ pub fn walk<E>(
         result.named += usize::from(branch.named);
         let next_depth = depth + usize::from(branch.named);
         if max_depth.is_some_and(|limit| next_depth > limit) {
-            result.depth_limited |= !branch.children.is_empty();
+            if !branch.children.is_empty() {
+                result.depth_limited = true;
+                // Only a named element reaches past the limit: an unnamed
+                // one keeps its children at its own depth.
+                result.cuts.push(Cut {
+                    after: result.named - 1,
+                    depth: next_depth,
+                    children: branch.children.len(),
+                });
+            }
         } else {
             pending.extend(
                 branch
@@ -245,6 +281,27 @@ Menu bar (press a title to list its items):
         });
         assert_eq!(seen, [(0, 0), (1, 1), (2, 1)]);
         assert!(read.depth_limited);
+        // Both branches are marked, so the agent can tell the long list
+        // from the pane before choosing a root.
+        assert_eq!(
+            read.cuts,
+            [
+                Cut {
+                    after: 1,
+                    depth: 2,
+                    children: 800
+                },
+                Cut {
+                    after: 2,
+                    depth: 2,
+                    children: 1
+                },
+            ]
+        );
+        assert_eq!(
+            cut_line(&read.cuts[1]),
+            "    … more inside: 1 child not read"
+        );
         assert!(!read.truncated);
         // A rooted read starts at depth zero with a fresh element budget.
         let mut pane = Vec::new();

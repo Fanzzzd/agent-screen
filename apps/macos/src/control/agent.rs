@@ -1172,10 +1172,18 @@ async fn handle_one(
             };
             let current = ax::Sendable(element.clone());
             let target = window.target;
-            if !off(cx, move || ax::in_window(current.get(), target, true)).await {
-                return Err(ControlError::not_found(format!(
-                    "element {index} is no longer in this window; call get_window_state again"
-                )));
+            match off(cx, move || ax::belongs(current.get(), target, true)).await {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(ControlError::not_found(format!(
+                        "element {index} is no longer in this window; call get_window_state again"
+                    )));
+                }
+                None => {
+                    return Err(ControlError::failed(
+                        "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+                    ));
+                }
             }
             let action = p.string("action").unwrap_or_else(|| "press".into());
             // A menu bar title lists its items rather than opening a menu
