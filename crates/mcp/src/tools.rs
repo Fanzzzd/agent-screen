@@ -53,7 +53,7 @@ fn max_depth() -> Value {
 }
 
 fn tree_root() -> Value {
-    json!({ "type": "integer", "minimum": 0, "description": "A bracketed element number from this window to use as the returned tree's root. Omit for the whole window. If a long list hides the branch you need, first read without root and with a small max_depth, then use that branch's number. A stale root fails instead of reading another window." })
+    json!({ "type": "integer", "minimum": 0, "description": "A bracketed element number from this window to use as the returned tree's root. Omit for the whole window. If a long list hides the branch you need, first read without root and with a small max_depth, then use the number of a branch marked \"more inside\". A stale root fails instead of reading another window." })
 }
 
 fn user_instruction(purpose: &str) -> Value {
@@ -469,7 +469,8 @@ pub fn definitions() -> Vec<Value> {
                 "while it stays in the window; a number whose element went away fails instead of hitting another one.",
                 "root reads only that element's subtree. max_depth stops traversal below that depth, relative to the root,",
                 "so a long list in an earlier branch cannot consume the budget for later branches. Discover branch numbers",
-                "with a small max_depth before reading one with root. Numbers outside a partial read stay available, but stale elements fail.",
+                "with a small max_depth (a branch with unread children is marked \"more inside\") before reading one with root.",
+                "Numbers outside a partial read stay available, but stale elements fail.",
             ],
             object(
                 json!({ "display_id": display_id(), "window_id": window_id(), "root": tree_root(), "max_depth": max_depth() }),
@@ -1011,10 +1012,12 @@ pub async fn run(
             control
                 .call("settle", json!({ "displayId": display }))
                 .await?;
-            if result == "none" && scope.root.is_some() {
-                return noted(Ok(Output::Content(vec![text("Done.")])));
-            }
             noted(match window_state(control, display, window, scope).await {
+                Err(error)
+                    if scope.root.is_some() && error.code == "invalid" && result == "none" =>
+                {
+                    Ok(Output::Content(vec![text("Done.")]))
+                }
                 Err(error) if scope.root.is_some() && error.code == "invalid" => {
                     Ok(Output::Content(vec![text(format!(
                         "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
@@ -1395,12 +1398,19 @@ async fn window_state(
         .root
         .map(|root| format!(" Subtree root [{root}]."))
         .unwrap_or_default();
+    // An app older than root and max_depth ignores both and reads the
+    // whole budget; only the MCP's cut hides the deeper lines.
+    let old_app = if scope.max_depth.is_some() && state.get("depthLimited").is_none() {
+        " This Agent Screen app predates max_depth's traversal limit, so a long list can still use up the read; update Agent Screen."
+    } else {
+        ""
+    };
     Ok(WindowState {
         window,
         root: scope.root,
         depth_limited: get("depthLimited") == Value::Bool(true),
         header: format!(
-            "Window {window}: {} {} elements{truncated}.{root_note}",
+            "Window {window}: {} {} elements{truncated}.{root_note}{old_app}",
             get("window"),
             get("elements")
         ),

@@ -641,24 +641,44 @@ pub fn window_of(element: &AXUIElement) -> Option<u32> {
 /// Validate a retained number before a scoped read or action. Partial
 /// snapshots cannot infer that an unvisited element disappeared.
 pub fn in_window(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> bool {
+    belongs(element, target, allow_menu) == Some(true)
+}
+
+/// Whether `element` is in the window, or None when the app didn't answer
+/// within the messaging timeout, as a busy app doesn't.
+pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> Option<bool> {
     let mut pid = 0;
     if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success || pid != target.pid {
-        return false;
+        return Some(false);
     }
-    let Some(role) = string_attribute(element, "AXRole") else {
-        return false;
+    let name = CFString::from_static_str("AXRole");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error == AXError::CannotComplete {
+        return None;
+    }
+    if error != AXError::Success || value.is_null() {
+        return Some(false);
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    let Some(role) = value.downcast_ref::<CFString>().map(|r| r.to_string()) else {
+        return Some(false);
     };
     if allow_menu && matches!(role.as_str(), "AXMenuBarItem" | "AXMenuItem" | "AXMenu") {
-        return true;
+        return Some(true);
     }
     let Some(window) = window_or_sheet(target) else {
-        return false;
+        return Some(false);
     };
     let element = unsafe { CFRetained::retain(NonNull::from(element)) };
     // AXWindow is a direct association in many apps; some web elements
     // expose only AXParent. Both must name this live window.
-    element_attribute(&element, "AXWindow").is_some_and(|owner| owner == window)
-        || agent_screen_model::tree::within(element, &window, |e| element_attribute(e, "AXParent"))
+    Some(
+        element_attribute(&element, "AXWindow").is_some_and(|owner| owner == window)
+            || agent_screen_model::tree::within(element, &window, |e| {
+                element_attribute(e, "AXParent")
+            }),
+    )
 }
 
 pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {
@@ -932,6 +952,13 @@ pub fn snapshot(
         agent_screen_model::tree::walk(root.unwrap_or(window), max_depth, |element, depth| {
             walker.read(element, depth)
         });
+    // One line per named element so far: mark each cut branch under its
+    // element, from the last so earlier places stay put.
+    for cut in read.cuts.iter().rev() {
+        walker
+            .lines
+            .insert(cut.after + 1, agent_screen_model::tree::cut_line(cut));
+    }
     // The menu bar the agent's display shows belongs to the user's front
     // app, so list this app's menu titles here; pressing one lists its items.
     let titles = if scoped {

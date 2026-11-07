@@ -202,7 +202,9 @@ async fn subtree_reads_forward_scope_and_keep_change_baselines_separate() {
                 .await
                 .unwrap();
         }
-        assert_eq!(reads, 7);
+        // result "none" reads the scoped state too, for its strayed-window
+        // note and its change baseline.
+        assert_eq!(reads, 8);
     });
     let mut client = fixture.child();
     tokio::task::spawn_blocking(move || {
