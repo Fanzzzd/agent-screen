@@ -89,6 +89,13 @@ pub fn display_of(window: u32) -> Option<u32> {
 /// looks again for up to 0.5 s, as an app or AeroSpace may take a moment to
 /// put the window where it was asked. Blocking.
 pub fn is_off(window: u32, moved: bool) -> bool {
+    is_off_or_filed(window, moved, || false)
+}
+
+/// [`is_off`], for a window sent to an AeroSpace workspace: `filed` asks
+/// AeroSpace whether the window is in that workspace, and it counts as off
+/// once it is, though its frame hasn't followed yet. Blocking.
+pub fn is_off_or_filed(window: u32, moved: bool, mut filed: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(500);
     loop {
         let online = online();
@@ -97,7 +104,13 @@ pub fn is_off(window: u32, moved: bool) -> bool {
             claims.desired().claimed_bounds(&online)
         };
         let frame = super::cg::window_bounds(window);
-        match after_leaving(moved, frame, &claimed) {
+        let decision = match after_leaving(moved, frame, &claimed, false) {
+            // Asked only while the frame says it is still on: each answer
+            // costs AeroSpace a refresh.
+            AfterLeaving::Keep if moved => after_leaving(moved, frame, &claimed, filed()),
+            decision => decision,
+        };
+        match decision {
             AfterLeaving::Release => return true,
             AfterLeaving::Keep if !moved || Instant::now() >= deadline => return false,
             AfterLeaving::Keep => std::thread::sleep(Duration::from_millis(50)),

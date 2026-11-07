@@ -114,13 +114,21 @@ pub enum AfterLeaving {
 
 /// Whether a window that was to leave the claimed displays, with `frame`
 /// now, is off them: its middle is on none of `claimed`, the way AeroSpace
-/// places a window on a monitor.
-pub fn after_leaving(moved: bool, frame: Option<Rect>, claimed: &[Rect]) -> AfterLeaving {
-    match frame {
-        Some(frame) if moved && !claimed.iter().any(|b| b.contains(frame.mid())) => {
-            AfterLeaving::Release
-        }
-        _ => AfterLeaving::Keep,
+/// places a window on a monitor. A window sent to an AeroSpace workspace
+/// counts as off once AeroSpace files it there (`filed`), before its frame
+/// follows: AeroSpace lays it out on that workspace's monitor, and a claim
+/// back would pull it out of the workspace again.
+pub fn after_leaving(
+    moved: bool,
+    frame: Option<Rect>,
+    claimed: &[Rect],
+    filed: bool,
+) -> AfterLeaving {
+    let off = frame.is_some_and(|frame| !claimed.iter().any(|b| b.contains(frame.mid())));
+    if moved && (off || filed) {
+        AfterLeaving::Release
+    } else {
+        AfterLeaving::Keep
     }
 }
 
@@ -309,7 +317,7 @@ mod tests {
         assert_eq!(claimed, vec![AGENT, OTHER_AGENT]);
         let home = Rect::new(100.0, 100.0, 800.0, 600.0);
         assert_eq!(
-            after_leaving(true, Some(home), &claimed),
+            after_leaving(true, Some(home), &claimed, false),
             AfterLeaving::Release
         );
     }
@@ -319,14 +327,14 @@ mod tests {
         let claimed = claimed_on_3().claimed_bounds(&ONLINE);
         let still = Rect::new(5100.0, 100.0, 800.0, 600.0);
         assert_eq!(
-            after_leaving(false, Some(still), &claimed),
+            after_leaving(false, Some(still), &claimed, false),
             AfterLeaving::Keep
         );
         // Even when the window ended up off by some other means: the move
         // didn't say so.
         let home = Rect::new(100.0, 100.0, 800.0, 600.0);
         assert_eq!(
-            after_leaving(false, Some(home), &claimed),
+            after_leaving(false, Some(home), &claimed, false),
             AfterLeaving::Keep
         );
     }
@@ -337,23 +345,41 @@ mod tests {
         // The app put it back where it was.
         let back = Rect::new(5100.0, 100.0, 800.0, 600.0);
         assert_eq!(
-            after_leaving(true, Some(back), &claimed),
+            after_leaving(true, Some(back), &claimed, false),
             AfterLeaving::Keep
         );
         // Or it landed on the other Agent Display.
         let other = Rect::new(7100.0, 100.0, 800.0, 600.0);
         assert_eq!(
-            after_leaving(true, Some(other), &claimed),
+            after_leaving(true, Some(other), &claimed, false),
             AfterLeaving::Keep
         );
         // Hanging over the user's screen with its middle still on the display.
         let straddling = Rect::new(4500.0, 100.0, 1200.0, 600.0);
         assert_eq!(
-            after_leaving(true, Some(straddling), &claimed),
+            after_leaving(true, Some(straddling), &claimed, false),
             AfterLeaving::Keep
         );
         // Its frame can't be read: nothing says it is off.
-        assert_eq!(after_leaving(true, None, &claimed), AfterLeaving::Keep);
+        assert_eq!(
+            after_leaving(true, None, &claimed, false),
+            AfterLeaving::Keep
+        );
+    }
+
+    #[test]
+    fn a_window_aerospace_filed_in_its_workspace_is_off_before_its_frame_moves() {
+        let claimed = claimed_on_3().claimed_bounds(&ONLINE);
+        let still = Rect::new(5100.0, 100.0, 800.0, 600.0);
+        assert_eq!(
+            after_leaving(true, Some(still), &claimed, true),
+            AfterLeaving::Release
+        );
+        // The command failed: whatever AeroSpace says, the move didn't go.
+        assert_eq!(
+            after_leaving(false, Some(still), &claimed, true),
+            AfterLeaving::Keep
+        );
     }
 
     #[test]

@@ -139,8 +139,9 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
 }
 
 /// A window returns to where it came from when we know that, otherwise to
-/// the main display. Blocking.
-pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) {
+/// the main display. True once it is off every Agent Display; a window that
+/// isn't stays claimed where it is. Blocking.
+pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) -> bool {
     if let Some((stage, home)) = user_stage_home(home) {
         // Debug builds: the claim stays the whole way, and a window that
         // can't go home claimed stays where it is rather than going
@@ -150,15 +151,16 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
                 "window {} not returned: its claim for the user stand-in stage wasn't published",
                 target.window_id
             );
-            return;
+            return false;
         }
         if let Err(error) = ax::set_frame(target, home.frame) {
             log::warn!(
                 "could not return window {} to the user stand-in stage: {error:?}",
                 target.window_id
             );
+            return false;
         }
-        return;
+        return true;
     }
     // The window stays claimed until it is off every Agent Display.
     // AeroSpace leaves an unclaimed window its app keeps on one where it is,
@@ -170,12 +172,16 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
         {
             // AeroSpace files a claimed window back with the claimed ones at
             // its next refresh, so the claim goes for this move and comes
-            // back if the window didn't leave.
+            // back if the window didn't leave. Filed in the workspace, it is
+            // AeroSpace's to lay out there, even before its frame follows.
             let claimed = claims::display_of(window);
             claims::release(window);
             let moved = aerospace.move_window(window, workspace).is_ok();
-            if claims::is_off(window, moved) {
-                return;
+            let filed = || {
+                aerospace.workspace_of(window).ok().flatten().as_deref() == Some(workspace.as_str())
+            };
+            if claims::is_off_or_filed(window, moved, filed) {
+                return true;
             }
             if let Some(display) = claimed {
                 claims::claim(window, display);
@@ -191,15 +197,19 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
         if screen_there
             && claims::release_once_off(window, ax::set_frame(target, home.frame).is_ok())
         {
-            return;
+            return true;
         }
     }
     match windows::place(target, cg::main_display(), main_name) {
-        Ok(()) if claims::release_once_off(window, true) => {}
+        Ok(()) if claims::release_once_off(window, true) => true,
         Ok(()) => {
-            log::warn!("could not return window {window}: it isn't seen off the Agent Displays")
+            log::warn!("could not return window {window}: it isn't seen off the Agent Displays");
+            false
         }
-        Err(error) => log::warn!("could not return window {window}: {error}"),
+        Err(error) => {
+            log::warn!("could not return window {window}: {error}");
+            false
+        }
     }
 }
 

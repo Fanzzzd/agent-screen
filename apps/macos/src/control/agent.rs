@@ -1608,14 +1608,14 @@ async fn handle_one(
                 .ok_or_else(|| ControlError::not_found("no window with that id"))?
                 .target;
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            shell
+            let left = shell
                 .update(cx, |shell, cx| shell.take_back(target, id, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?
                 .await;
             cx.background_executor()
                 .timer(Duration::from_millis(500))
                 .await;
-            Ok(json!({}))
+            Ok(json!({ "left": left }))
         }
         // Test hook: the session that holds the user stand-in stage gives
         // up a window it launched there, so the window counts as the user's
@@ -2843,11 +2843,12 @@ async fn window_access(
             };
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             let mut returned = Vec::new();
+            let mut stuck = Vec::new();
             // One at a time, each after the input queued before it.
             for window in wanted {
-                let record = core.update(cx, |c, cx| {
-                    let record = c.displays.return_handover(id, window);
-                    if record.is_ok() {
+                let given = core.update(cx, |c, cx| {
+                    let given = c.displays.return_handover(id, window);
+                    if given.is_ok() {
                         if let Some(d) = c.displays.get_mut(id) {
                             d.access.last = Some(Instruction {
                                 action: ChatAction::Return,
@@ -2856,25 +2857,36 @@ async fn window_access(
                         }
                         cx.notify();
                     }
-                    record
+                    given
                 });
-                let record = match record {
-                    Ok(record) => record,
+                let given = match given {
+                    Ok(given) => given,
                     Err(e) if !all => return Err(ControlError::not_found(e)),
                     Err(_) => continue,
                 };
                 let task = shell
                     .update(cx, |shell, cx| {
-                        shell.send_home(record.target, id, record.home.clone(), cx)
+                        shell.send_home(given.target, id, Some(given), cx)
                     })
                     .map_err(|e| ControlError::failed(e.to_string()))?;
-                task.await;
+                if !task.await {
+                    if !all {
+                        return Err(ControlError::failed(format!(
+                            "window {window} didn't leave your display, so it is still a Handover there. Tell the user; return can try again."
+                        )));
+                    }
+                    stuck.push(window);
+                    continue;
+                }
                 log::info!(
                     "display {id}: window {window} returned on the user's words as the agent relayed them: {words:?}"
                 );
                 returned.push(window);
             }
             extra.insert("returned".into(), json!(returned));
+            if !stuck.is_empty() {
+                extra.insert("stuck".into(), json!(stuck));
+            }
         }
         other => {
             return Err(ControlError::invalid(format!(

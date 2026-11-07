@@ -18,7 +18,7 @@ use crate::mac::native::{self, MenuAction, Native, StatusIcon};
 use crate::mac::notify::Note;
 use crate::mac::permissions::{self, Permission};
 use crate::mac::{app, assist, ax, cg, menubar, notify, update, viewer_input, windows};
-use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, Rect, WindowTarget};
+use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, GivenBack, Rect, WindowTarget};
 use agent_screen_model::access::Authority;
 use agent_screen_model::card;
 use agent_screen_model::peek as peek_intent;
@@ -2732,16 +2732,14 @@ impl Shell {
                 display,
                 pid,
                 window,
-            } => self
-                .take_back(
-                    WindowTarget {
-                        pid,
-                        window_id: window,
-                    },
-                    display,
-                    cx,
-                )
-                .detach(),
+            } => self.take_back_for_user(
+                WindowTarget {
+                    pid,
+                    window_id: window,
+                },
+                display,
+                cx,
+            ),
             MenuAction::PressProxy { index } => {
                 let Some(element) = menubar::chosen(index) else {
                     return;
@@ -2908,35 +2906,58 @@ impl Shell {
 
     /// Return one window to the user: its old place for a Handover, the
     /// main display otherwise. No Window Access covers it again until the
-    /// user says so for it.
+    /// user says so for it. False when the window couldn't leave the
+    /// display: it shows there again, for another try.
     pub fn take_back(
         &mut self,
         target: WindowTarget,
         id: DisplayId,
         cx: &mut Context<Self>,
-    ) -> Task<()> {
-        let home = self.core.update(cx, |core, _| {
-            let display = core.displays.get_mut(id)?;
-            let home = display
-                .records
-                .get(&target.window_id)
-                .and_then(|r| r.home.clone());
-            display.give_back(target);
-            home
+    ) -> Task<bool> {
+        let given = self.core.update(cx, |core, _| {
+            core.displays.get_mut(id).map(|d| d.give_back(target))
         });
-        self.send_home(target, id, home, cx)
+        self.send_home(target, id, given, cx)
+    }
+
+    /// Take Back from the user's own click: a window that couldn't leave
+    /// the display gets an alert saying so.
+    fn take_back_for_user(&mut self, target: WindowTarget, id: DisplayId, cx: &mut Context<Self>) {
+        let task = self.take_back(target, id, cx);
+        cx.spawn(async move |_, _| {
+            if task.await {
+                return;
+            }
+            let name = windows::find(target.window_id)
+                .map(|w| name(&w.app, &w.title))
+                .unwrap_or_else(|| t("The window", "这个窗口").to_string());
+            native::alert(
+                &tf!(
+                    "{name} didn't come back to your screen",
+                    "{name} 没能回到你的屏幕"
+                ),
+                t(
+                    "It is still on the agent's display. Take Back can try again.",
+                    "它还在 agent 的显示器上，可以再点“取回”试一次。",
+                ),
+            );
+        })
+        .detach();
     }
 
     /// Move a window the model already gave back to its home. Input the
     /// agent queued before goes first, and a move for the agent decided
-    /// before can't follow it. Done when the window is home.
+    /// before can't follow it. Done when the window is home, or when it
+    /// couldn't leave the display: then false, and `given`, what the
+    /// give-back changed, is put back so the window shows there again.
     pub fn send_home(
         &mut self,
         target: WindowTarget,
         id: DisplayId,
-        home: Option<crate::model::Home>,
+        given: Option<GivenBack>,
         cx: &mut Context<Self>,
-    ) -> Task<()> {
+    ) -> Task<bool> {
+        let home = given.as_ref().and_then(GivenBack::home);
         self.core.update(cx, |core, _| {
             // Taking a window back says the app is the user's now: its
             // later windows stay on the user's screen, even one it opens
@@ -2960,18 +2981,36 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             // After the agent's input already queued for the display.
             forwarder.forget_target(target).await;
-            cx.background_executor()
+            let left = cx
+                .background_executor()
                 .spawn(async move {
                     windows::return_home(target.window_id, || {
                         dismissal::give_back(target, home.as_ref(), main_name.as_deref())
                     })
                 })
                 .await;
-            // Armed once the window is back, on the catch thread:
-            // registering asks the app, which may be slow.
+            if !left {
+                log::warn!(
+                    "display {id}: window {} didn't leave the display; it shows there again",
+                    target.window_id
+                );
+                let _ = this.update(cx, |shell, cx| {
+                    shell.core.update(cx, |core, cx| {
+                        if let Some(given) = given
+                            && let Some(d) = core.displays.get_mut(id)
+                        {
+                            d.give_back_failed(given);
+                        }
+                        cx.notify();
+                    })
+                });
+            }
+            // The app is the user's either way. Armed once the window is
+            // back, on the catch thread: registering asks the app, which
+            // may be slow.
             let Some(catch) = crate::mac::catch::Catch::returning(target.pid, id, screen).await
             else {
-                return;
+                return left;
             };
             let _ = this.update(cx, |shell, cx| {
                 shell.core.update(cx, |core, _| {
@@ -2988,6 +3027,7 @@ impl Shell {
                 });
                 shell.refresh_counts(cx)
             });
+            left
         })
     }
 
@@ -3823,7 +3863,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         for target in targets {
-            self.take_back(target, id, cx).detach();
+            self.take_back_for_user(target, id, cx);
         }
         self.hide_peek(cx);
     }

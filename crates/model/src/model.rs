@@ -204,6 +204,22 @@ pub struct Home {
     pub workspace: Option<String>,
 }
 
+/// What a take-back changed on a display, for [`Display::give_back_failed`]
+/// when the window couldn't leave it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct GivenBack {
+    pub target: WindowTarget,
+    /// The window's record before, with its home.
+    pub record: Option<Record>,
+    was_returned: bool,
+}
+
+impl GivenBack {
+    pub fn home(&self) -> Option<Home> {
+        self.record.as_ref().and_then(|r| r.home.clone())
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Record {
     pub target: WindowTarget,
@@ -386,13 +402,40 @@ impl<H> Display<H> {
     /// Taking one window back makes its app the user's: none of its
     /// windows is the agent's to place any more, and no Window Access
     /// covers the window again until the user says so for it.
-    pub fn give_back(&mut self, target: WindowTarget) {
+    pub fn give_back(&mut self, target: WindowTarget) -> GivenBack {
+        let record = self.records.get(&target.window_id).cloned();
         self.forget(target.window_id);
-        self.returned.insert(target.window_id);
+        let was_returned = !self.returned.insert(target.window_id);
         self.access.excluded.insert(target.window_id);
         if self.started.remove(&target.pid) {
             self.released.insert(target.pid);
         }
+        GivenBack {
+            target,
+            record,
+            was_returned,
+        }
+    }
+
+    /// The window of a give-back is still on this display: its app kept it,
+    /// or nothing could move it. It shows and works as before, with its
+    /// record and home, so the user or the agent can try again. The user's
+    /// word still stands for the rest: no Window Access covers the window,
+    /// and its app stays theirs. Nothing changes when the window was placed
+    /// here again meanwhile, or was the user's already before. True when
+    /// the window is no longer marked returned.
+    pub fn give_back_failed(&mut self, given: GivenBack) -> bool {
+        let window = given.target.window_id;
+        if given.was_returned
+            || self.records.contains_key(&window)
+            || !self.returned.remove(&window)
+        {
+            return false;
+        }
+        if let Some(record) = given.record {
+            self.records.insert(window, record);
+        }
+        true
     }
 
     /// Whether a window off every display is the agent's to place: one of
@@ -993,8 +1036,12 @@ impl<H> Displays<H> {
 
     /// Give a Handover back to the user on their word, as Take Back does.
     /// Only a window the user handed over: never one the agent opened or
-    /// placed. Returns its record, with its home.
-    pub fn return_handover(&mut self, id: DisplayId, window: WindowId) -> Result<Record, String> {
+    /// placed. Returns what the give-back changed, with the record's home.
+    pub fn return_handover(
+        &mut self,
+        id: DisplayId,
+        window: WindowId,
+    ) -> Result<GivenBack, String> {
         let d = self
             .get_mut(id)
             .ok_or_else(|| "the display has ended".to_string())?;
@@ -1008,8 +1055,7 @@ impl<H> Displays<H> {
                     "window {window} isn't a Handover on this display; only windows the user handed over go back this way"
                 )
             })?;
-        d.give_back(record.target);
-        Ok(record)
+        Ok(d.give_back(record.target))
     }
 
     /// The agent no longer needs the display back. The Takeover goes on.
@@ -1676,12 +1722,67 @@ mod tests {
         assert!(d.return_handover(7, 2).is_err(), "the agent's own window");
         assert!(d.return_handover(7, 3).is_err(), "a placed window");
         assert!(d.get(7).unwrap().records.contains_key(&2));
-        let record = d.return_handover(7, 1).unwrap();
-        assert_eq!(record.home, Some(home));
+        let given = d.return_handover(7, 1).unwrap();
+        assert_eq!(given.home(), Some(home));
         let display = d.get(7).unwrap();
         assert!(display.handovers().is_empty());
         assert!(display.access.excluded.contains(&1), "as after Take Back");
         assert!(d.return_handover(7, 1).is_err(), "already back");
+    }
+
+    #[test]
+    fn a_window_that_couldnt_leave_shows_again_for_another_try() {
+        let mut d = displays();
+        let home = Home {
+            frame: Rect::new(10.0, 20.0, 300.0, 200.0),
+            workspace: Some("2".into()),
+        };
+        assert!(
+            d.hand_over(7, users(1), &Authority::Once, Some(home.clone()))
+                .is_ok()
+        );
+        let given = d.return_handover(7, 1).unwrap();
+        let display = d.get_mut(7).unwrap();
+        assert!(display.give_back_failed(given));
+        assert_eq!(display.handovers(), vec![users(1)]);
+        assert_eq!(display.records[&1].home, Some(home.clone()));
+        assert!(!display.returned.contains(&1));
+        // The user's word stands: no grant covers the window again.
+        assert!(display.access.excluded.contains(&1));
+        // The second try goes home the same way.
+        assert_eq!(d.return_handover(7, 1).unwrap().home(), Some(home));
+
+        // An app the agent started stays the user's.
+        let launched = WindowTarget {
+            pid: 5,
+            window_id: 2,
+        };
+        let display = d.get_mut(7).unwrap();
+        display.started.insert(5);
+        display.claim(launched, Origin::Launched, None);
+        let given = display.give_back(launched);
+        assert!(display.give_back_failed(given));
+        assert_eq!(display.records[&2].origin, Origin::Launched);
+        assert!(display.released.contains(&5) && !display.started.contains(&5));
+    }
+
+    #[test]
+    fn a_failed_give_back_leaves_later_choices_alone() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        display.claim(users(1), Origin::Placed, None);
+        let given = display.give_back(users(1));
+        // Placed again before the failure came in.
+        display.claim(users(1), Origin::HandedOver, None);
+        assert!(!display.give_back_failed(given));
+        assert_eq!(display.records[&1].origin, Origin::HandedOver);
+
+        // A window the user had taken back already stays theirs.
+        let display = d.get_mut(7).unwrap();
+        display.give_back(users(3));
+        let given = display.give_back(users(3));
+        assert!(!display.give_back_failed(given));
+        assert!(display.returned.contains(&3) && !display.records.contains_key(&3));
     }
 
     #[test]
