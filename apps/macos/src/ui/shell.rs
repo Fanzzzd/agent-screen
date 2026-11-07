@@ -1326,7 +1326,7 @@ impl Shell {
                             // redraw it: the point must still show what the
                             // agent aimed at.
                             let (element, _) = crate::mac::ax::target_at(click.target.pid, click.at);
-                            if !real_click::same_element(click.element.as_ref(), element.as_ref()) {
+                            if !real_click::same_element(click.element.as_deref(), element.as_ref()) {
                                 log::info!(
                                     "input queue: the element at the click changed: {:?} -> {element:?}",
                                     click.element
@@ -1385,6 +1385,21 @@ impl Shell {
                                         log::debug!("input queue containment: {why}");
                                     }
                                     why.is_none()
+                                },
+                                || {
+                                    let (element, _) =
+                                        crate::mac::ax::target_at(click.target.pid, click.at);
+                                    let same = real_click::same_element(
+                                        click.element.as_deref(),
+                                        element.as_ref(),
+                                    );
+                                    if !same {
+                                        log::info!(
+                                            "input queue: the element at the click changed as its window came forward: {:?} -> {element:?}",
+                                            click.element
+                                        );
+                                    }
+                                    same
                                 },
                             );
                         }

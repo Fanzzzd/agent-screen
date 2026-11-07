@@ -694,14 +694,16 @@ pub fn drag(
 /// (ADR 0013, "Clicks"): the window comes forward as for a drag, the
 /// pointer goes to the point, and each press is released before the next.
 /// `go` is checked before every event, with the user's touch, secure input
-/// and the app still in front. Every button pressed goes up before this
-/// returns, however it ends.
+/// and the app still in front; `still`, that the element at the point is
+/// the one the agent aimed at, once the window is forward. Every button
+/// pressed goes up before this returns, however it ends.
 pub fn click_at(
     target: WindowTarget,
     at: (f64, f64),
     click: real_click::Click,
     flags: CGEventFlags,
     go: impl Fn((f64, f64)) -> bool,
+    still: impl Fn() -> bool,
 ) -> Outcome {
     let Ok(_session) = SESSION_INPUT.try_lock() else {
         return Outcome::Refused("another operation holds the session's keyboard or pointer");
@@ -752,6 +754,11 @@ pub fn click_at(
     let _holding = Holding::new(pid);
     if let Err(why) = come_forward(target, || allowed(at)) {
         return Outcome::Refused(why);
+    }
+    // Under AeroSpace the window takes a second to settle: a list could
+    // reorder meanwhile. The element at the point is checked once more.
+    if !still() {
+        return Outcome::Refused(real_click::CONTENT_CHANGED);
     }
     let mut release: Option<Release> = None;
     let mut pressed = false;

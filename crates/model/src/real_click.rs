@@ -135,14 +135,30 @@ pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
     changed_samples(before, now).is_some_and(|(changed, all)| changed * 100 <= all * LOOK_PERCENT)
 }
 
-/// What accessibility says is at the point: role, subrole, title and
-/// description, each None when the app didn't answer for it. Two rows of
-/// a list with the same avatar and a shared name prefix still differ here.
-pub type Identity = [Option<String>; 4];
+/// What accessibility says is at the point: the hit element's role,
+/// subrole, title and description, then the name of the list row, table
+/// cell or link it sits in. Each is None when the app didn't answer for
+/// it. In a native list the hit element is usually a static text or an
+/// image whose text lives in its value, which isn't read: a preview label
+/// changes with each new message. The row's name tells two rows with the
+/// same avatar apart.
+pub type Identity = [Option<String>; 5];
+/// Where the row's name sits in an `Identity`.
+pub const ITEM_NAME: usize = 4;
 
 /// The identity, or None when the app answered for no attribute.
 pub fn element_identity(parts: Identity) -> Option<Identity> {
     parts.iter().any(Option::is_some).then_some(parts)
+}
+
+/// A row's name: the first of its texts, in the tree's order, with a
+/// letter in it. A time stamp or an unread count has none, and would
+/// change while the request waits.
+pub fn item_name(texts: &[String]) -> Option<&str> {
+    texts
+        .iter()
+        .map(|t| t.trim())
+        .find(|t| t.chars().any(char::is_alphabetic))
 }
 
 /// Whether the element at the point may still be the one the agent aimed
@@ -150,14 +166,23 @@ pub fn element_identity(parts: Identity) -> Option<Identity> {
 /// an app that times out says nothing: an unknown element on either side,
 /// or an attribute only one read returned, leaves the pixels to decide.
 /// Only an attribute both reads returned, with different values, refuses.
+/// When both name the row, the hit element's title and description are
+/// left out: a link spanning a web row has the whole row's text there,
+/// unread count and time included.
 pub fn same_element(before: Option<&Identity>, now: Option<&Identity>) -> bool {
     let (Some(before), Some(now)) = (before, now) else {
         return true;
     };
-    before.iter().zip(now).all(|pair| match pair {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    })
+    let named = before[ITEM_NAME].is_some() && now[ITEM_NAME].is_some();
+    before
+        .iter()
+        .zip(now)
+        .enumerate()
+        .filter(|&(i, _)| !(named && (i == 2 || i == 3)))
+        .all(|(_, pair)| match pair {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        })
 }
 
 /// What the success reply says of the wait, in tenths of a second.
@@ -541,22 +566,73 @@ mod tests {
         assert!(!looks_same(&[1, 2, 3, 4], &[1, 2, 3, 4]));
     }
 
+    /// A native list's hit element: a static text under a row, whose own
+    /// text isn't read, and the row's name.
+    fn text_in_row(name: &str) -> Option<Identity> {
+        element_identity([
+            Some("AXStaticText".into()),
+            None,
+            None,
+            None,
+            Some(name.into()),
+        ])
+    }
+
     #[test]
-    fn another_element_at_the_point_is_refused_but_an_unknown_one_is_not() {
-        let row =
-            |title: &str| element_identity([Some("AXRow".into()), None, Some(title.into()), None]);
-        let a = row("张三丰");
-        assert!(same_element(a.as_ref(), row("张三丰").as_ref()));
-        assert!(!same_element(a.as_ref(), row("张三").as_ref()));
+    fn another_row_under_the_point_is_refused_but_an_unknown_one_is_not() {
+        let a = text_in_row("张三丰");
+        assert!(same_element(a.as_ref(), text_in_row("张三丰").as_ref()));
+        // Same placeholder avatar, a shared name prefix: the row's name
+        // still differs.
+        assert!(!same_element(a.as_ref(), text_in_row("张三").as_ref()));
         // A hit test that timed out, on either side: the pixels decide.
         assert!(same_element(a.as_ref(), None));
         assert!(same_element(None, a.as_ref()));
-        // A title that timed out on one read compares the role alone.
-        let untitled = element_identity([Some("AXRow".into()), None, None, None]);
-        assert!(same_element(a.as_ref(), untitled.as_ref()));
-        let cell = element_identity([Some("AXCell".into()), None, None, None]);
-        assert!(!same_element(a.as_ref(), cell.as_ref()));
-        assert_eq!(element_identity([None, None, None, None]), None);
+        // A row name that timed out on one read compares the role alone.
+        let unnamed = element_identity([Some("AXStaticText".into()), None, None, None, None]);
+        assert!(same_element(a.as_ref(), unnamed.as_ref()));
+        let image = element_identity([Some("AXImage".into()), None, None, None, None]);
+        assert!(!same_element(a.as_ref(), image.as_ref()));
+        assert_eq!(element_identity([None, None, None, None, None]), None);
+    }
+
+    #[test]
+    fn a_web_row_s_link_compares_its_name_not_its_badge() {
+        let link = |title: &str, name: &str| {
+            element_identity([
+                Some("AXLink".into()),
+                None,
+                Some(title.into()),
+                None,
+                Some(name.into()),
+            ])
+        };
+        let a = link("张三丰 3 unread 12:01", "张三丰");
+        assert!(same_element(
+            a.as_ref(),
+            link("张三丰 4 unread 12:02", "张三丰").as_ref()
+        ));
+        assert!(!same_element(
+            a.as_ref(),
+            link("张三 1 unread", "张三").as_ref()
+        ));
+        // Without the row's name on both sides the title counts.
+        let bare = |title: &str| {
+            element_identity([Some("AXLink".into()), None, Some(title.into()), None, None])
+        };
+        assert!(!same_element(bare("a 3").as_ref(), bare("a 4").as_ref()));
+    }
+
+    #[test]
+    fn a_row_s_name_is_its_first_text_with_a_letter() {
+        let texts = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            item_name(&texts(&["12:01", "3", " 张三丰 ", "你好"])),
+            Some("张三丰")
+        );
+        assert_eq!(item_name(&texts(&["Alice", "see you"])), Some("Alice"));
+        assert_eq!(item_name(&texts(&["12:01", "3"])), None);
+        assert_eq!(item_name(&[]), None);
     }
 
     #[test]

@@ -5222,6 +5222,9 @@ async fn queued_click(
         (region, crate::mac::screenshot::samples(id, region), element)
     })
     .await;
+    log::info!(
+        "input queue: a real click at ({x}, {y}) will compare element {element:?} and region {region:?}"
+    );
     let look = look.map_err(|why| {
         ControlError::failed(format!(
             "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
@@ -5253,7 +5256,7 @@ async fn queued_click(
         title: real_click::short_title(&title, 40),
         region,
         look,
-        element,
+        element: element.map(Box::new),
         asked_ms: 0,
     };
     let operation = real_click::operation(target.window_id, at, click, modifier_bits(modifiers));

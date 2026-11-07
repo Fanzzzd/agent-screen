@@ -632,9 +632,10 @@ pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
 
 /// What accessibility says is at a global point of app `pid`, for a real
 /// click to check that it still aims at the same thing (ADR 0013,
-/// "Clicks"): the element's role, subrole, title and description, each
-/// None when the app didn't answer for it, and the frame of its row or
-/// cell, or else its own, in global points.
+/// "Clicks"): the hit element's role, subrole, title and description and
+/// the name of its row, cell or link, each None when the app didn't
+/// answer for it, and the frame of that row, cell or link, or else of the
+/// element, in global points.
 pub fn target_at(
     pid: i32,
     at: (f64, f64),
@@ -646,28 +647,69 @@ pub fn target_at(
         return (None, None);
     };
     let get = |name| string_attribute(&element, name);
-    let identity = agent_screen_model::real_click::element_identity([
-        get("AXRole"),
-        get("AXSubrole"),
-        get("AXTitle"),
-        get("AXDescription"),
-    ]);
-    // A list's row or a table's cell frames what a reorder would change.
-    let mut row = None;
+    // A list's row, a table's cell or a web row's link frames and names
+    // what a reorder would change.
+    let mut item = None;
     let mut next = Some(element.clone());
     for _ in 0..6 {
         let Some(e) = next else { break };
         if matches!(
             string_attribute(&e, "AXRole").as_deref(),
-            Some("AXRow" | "AXCell")
+            Some("AXRow" | "AXCell" | "AXLink")
         ) {
-            row = Some(e);
+            item = Some(e);
             break;
         }
         next = element_attribute(&e, "AXParent");
     }
-    let framed = row.as_deref().and_then(frame).or_else(|| frame(&element));
+    let name = item.as_deref().and_then(item_name);
+    let identity = agent_screen_model::real_click::element_identity([
+        get("AXRole"),
+        get("AXSubrole"),
+        get("AXTitle"),
+        get("AXDescription"),
+        name,
+    ]);
+    let framed = item.as_deref().and_then(frame).or_else(|| frame(&element));
     (identity, framed)
+}
+
+/// A row's name: its first static text with a letter in it, within three
+/// levels and 40 elements, or else its own title or description.
+fn item_name(item: &AXUIElement) -> Option<String> {
+    let mut texts = Vec::new();
+    let mut level = elements_attribute(item, "AXChildren");
+    let mut seen = 0;
+    for _ in 0..3 {
+        let mut below = Vec::new();
+        for e in level {
+            seen += 1;
+            if seen > 40 {
+                break;
+            }
+            if string_attribute(&e, "AXRole").as_deref() == Some("AXStaticText") {
+                if let Some(text) = string_attribute(&e, "AXValue")
+                    .filter(|t| !t.trim().is_empty())
+                    .or_else(|| string_attribute(&e, "AXTitle"))
+                {
+                    texts.push(text);
+                }
+            } else {
+                below.extend(elements_attribute(&e, "AXChildren"));
+            }
+        }
+        if let Some(name) = agent_screen_model::real_click::item_name(&texts) {
+            return Some(name.to_string());
+        }
+        if seen > 40 || below.is_empty() {
+            break;
+        }
+        level = below;
+    }
+    ["AXTitle", "AXDescription"]
+        .into_iter()
+        .filter_map(|a| string_attribute(item, a))
+        .find(|t| !t.trim().is_empty())
 }
 
 /// The actions an element takes, such as AXPress and AXConfirm.

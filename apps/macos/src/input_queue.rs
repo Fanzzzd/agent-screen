@@ -88,7 +88,7 @@ pub struct Click {
     /// point. The loan clicks only if both still look the same.
     pub region: Rect,
     pub look: Vec<u8>,
-    pub element: Option<agent_screen_model::real_click::Identity>,
+    pub element: Option<Box<agent_screen_model::real_click::Identity>>,
     /// When the agent first asked, by the queue's clock.
     pub asked_ms: u64,
 }
