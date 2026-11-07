@@ -195,17 +195,20 @@ fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
 /// launcher such as Spotlight, which open files and apps. Typing in
 /// another app doesn't count.
 pub fn user_acted_recently(pid: i32) -> bool {
-    user_acted_where(pid, |at| at.elapsed() < ACTION_WINDOW)
+    user_acted_where(pid, |at| at.elapsed() < ACTION_WINDOW, true)
 }
 
-/// Whether the user pressed something that could make `pid` open a window,
-/// as `user_acted_recently` counts it, at `since` or later, up to
-/// `RESOLVE_BY` ago.
+/// Whether the user pressed something in `pid` itself, a key to it or a
+/// click on one of its windows, at `since` or later, up to `RESOLVE_BY`
+/// ago. Finder, the Dock and launchers don't count here: they can make an
+/// app open a window, but a press after the window showed didn't.
 pub fn user_acted_since(pid: i32, since: std::time::Instant) -> bool {
-    user_acted_where(pid, |at| at >= since)
+    user_acted_where(pid, |at| at >= since, false)
 }
 
-fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool) -> bool {
+/// `openers`: input to Finder, the Dock, a launcher, or to nothing known,
+/// counts too.
+fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers: bool) -> bool {
     let input: Vec<Towards> = USER_INPUT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -227,7 +230,10 @@ fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool) -> bool
                 .or(front),
             Towards::Unknown => None,
         };
-        to.is_none_or(|p| p == pid || super::app::opens_things(p))
+        match to {
+            Some(p) => p == pid || (openers && super::app::opens_things(p)),
+            None => openers,
+        }
     })
 }
 
