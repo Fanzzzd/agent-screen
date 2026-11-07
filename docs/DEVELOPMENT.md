@@ -41,6 +41,7 @@ Development switches for the Rust app:
 
 - `AGENTSCREEN_DEBUG=1` enables the debug control methods in a release build, for measuring.
 - `AGENTSCREEN_APPEARANCE=light` or `dark` forces the app's appearance in debug builds, for screenshots.
+- `AGENTSCREEN_TEST_PARK_REFUSED=1`, only in a debug build with `AGENTSCREEN_INSTANCE=e2e`, refuses parking verification after applying the real configuration. `parksafe` uses it to test failed creation without deliberately leaving a display beside the user's. Release builds ignore it.
 
 For build identities, stale MCP clients and evidence to attach to a bug, follow [Reporting bugs](REPORTING_BUGS.md). The build embeds a full source revision when git is available, dirty state, Cargo profile and target. Cargo watches the worktree gitfile, git HEAD/index/refs, tracked files and source directories. Source archives have unknown git metadata. A dirty build never counts as a verified metadata match.
 ## Viewer click diagnostics
@@ -216,6 +217,8 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back 
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the serial a released one freed
 AGENTSCREEN_INSTANCE=e2e cargo e2e arrangement    # new displays park in a grid off the top-right corner of your screens, beside each other while the row fits; nothing already there moves; 2 displays
+AGENTSCREEN_INSTANCE=e2e cargo e2e parksafe       # refused parking verification fails create_display and releases the unassigned display; existing display frames stay unchanged; one empty display, no app launches or pointer input; requires a stopped e2e instance
+AGENTSCREEN_INSTANCE=e2e cargo e2e sparesize      # a 1280x800 spare grows to 1280x1600, parks again and is reused by the next session; one empty display, no app launches or pointer input; requires a stopped test instance
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerpicture  # new displays get unit numbers of their own, and the Viewer shows each
 AGENTSCREEN_INSTANCE=e2e cargo e2e shared      # an app you and an agent both use: its keys reach only its window
 AGENTSCREEN_INSTANCE=e2e cargo e2e sharedbrowser # one Electron app, two windows (#110): its user window on your screen, key and in front, its agent window on the display; a click, type, Return and a button in the agent's window reach its page through accessibility or fail naming the user's window; in a login form, Tab and shift+Tab move focus between its fields, type goes into the field Tab reached, and Return names the form's submit button, whose click submits it once; the user's window never loses key focus or sees an event; with your front app back, posted keys reach the agent's window as before; needs target/e2e/Electron.app; 1 display

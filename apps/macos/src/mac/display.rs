@@ -375,17 +375,88 @@ pub async fn create_parked(
     serial: Serial,
     others: Vec<u32>,
 ) -> Option<VirtualDisplay> {
-    let before = origins();
-    let made = VirtualDisplay::create(&name, width, height, serial)?;
-    let id = made.id;
-    let mut ids = others;
-    ids.push(id);
+    // Creation and parking share the display worker. Otherwise two new
+    // displays can choose positions from an incomplete set of origins.
     configure(move || {
-        crate::core::park_fillers(&ids);
-        tuck_away_restoring(id, &ids, &before)
+        let before = origins();
+        let previous_fillers = filler_ids();
+        let made = VirtualDisplay::create(&name, width, height, serial)?;
+        let parked = park_owned(made, others, &before);
+        if parked.is_none() {
+            // A unit-twin retry can retain fillers before it returns its
+            // usable target. Failed creation owns those handles too.
+            let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
+            let (kept, released): (Vec<_>, Vec<_>) = std::mem::take(&mut *fillers)
+                .into_iter()
+                .partition(|d| previous_fillers.contains(&d.id));
+            *fillers = kept;
+            drop(fillers);
+            for filler in released {
+                crate::lifecycle::note("released", filler.id, "filler from failed creation");
+            }
+        }
+        parked
     })
-    .await;
-    Some(made)
+    .await
+}
+
+/// Reuse a spare without publishing it while a larger mode overlaps the
+/// user's screens. Its old origin is not necessarily safe at its new size.
+pub async fn reuse_parked(
+    mut handle: VirtualDisplay,
+    width: u32,
+    height: u32,
+    resize: bool,
+    others: Vec<u32>,
+) -> Option<VirtualDisplay> {
+    configure(move || {
+        let before = origins();
+        if resize && !handle.resize(width, height) {
+            crate::lifecycle::note("released", handle.id, "spare could not resize");
+            return None;
+        }
+        let mut ids = others;
+        ids.push(handle.id);
+        if is_tucked(handle.id, &ids) {
+            return Some(handle);
+        }
+        park_owned(handle, ids, &before)
+    })
+    .await
+}
+
+/// Runs only on the display worker, for a new handle or a resized spare.
+fn park_owned(
+    made: VirtualDisplay,
+    mut ids: Vec<u32>,
+    before: &[(u32, (f64, f64))],
+) -> Option<VirtualDisplay> {
+    let id = made.id;
+    ids.push(id);
+    // Include fillers retained during this creation, not just the ones
+    // known when the UI queued the job.
+    let fillers = filler_ids();
+    ids.extend(fillers.iter().copied());
+    ids.sort_unstable();
+    ids.dedup();
+    for attempt in 0..75 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        crate::core::park_fillers(&ids);
+        if tuck_away_restoring(id, &ids, before)
+            && is_tucked(id, &ids)
+            && fillers
+                .iter()
+                .all(|&f| !cg::is_online(f) || is_tucked(f, &ids))
+        {
+            crate::lifecycle::note("parked", id, &format!("tries={}", attempt + 1));
+            return Some(made);
+        }
+    }
+    log::warn!("display {id}: macOS did not verify a safe position; releasing it");
+    crate::lifecycle::note("released", id, "parking failed");
+    None
 }
 
 /// Park Agent Screen's displays where `arrangement::plan` puts them: a
@@ -456,11 +527,22 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
             }
         }
     }
-    let planned = arrangement::plan(&self::screens(&cg::active_displays(), virtual_ids, &[]))
-        .into_iter()
-        .find(|&(d, _)| d == id);
-    let now = cg::display_bounds(id);
-    planned.is_none_or(|(_, (x, y))| (now.x, now.y) == (x, y))
+    let after = cg::active_displays();
+    let restored = restore.iter().all(|&(d, (x, y))| {
+        let now = cg::display_bounds(d);
+        !after.contains(&d) || (now.x, now.y) == (x, y)
+    });
+    !parking_refused()
+        && restored
+        && arrangement::at_planned_origin(id, &self::screens(&after, virtual_ids, &[]))
+}
+
+/// Exercise an unverified parking result without leaving a test display
+/// beside the user's screen. The real configuration and restoration still
+/// run; only their verification is refused, in an isolated debug instance.
+fn parking_refused() -> bool {
+    knob("AGENTSCREEN_TEST_PARK_REFUSED").is_some()
+        && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e")
 }
 
 /// The displays `online`, as the arrangement sees them, with the user's at
@@ -495,9 +577,19 @@ fn screens(
 /// of the user's displays. The user may have dragged it elsewhere in System
 /// Settings.
 pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
-    let online = cg::active_displays();
-    let Some(user) = arrangement::user_bounds(&screens(&online, virtual_ids, &[])) else {
+    if parking_refused() {
+        return false;
+    }
+    // Only the existing debug-only cost comparison may skip parking.
+    if knob("AGENTSCREEN_NO_PARK").is_some() {
         return true;
+    }
+    let online = cg::active_displays();
+    if !online.contains(&id) || !virtual_ids.contains(&id) {
+        return false;
+    }
+    let Some(user) = arrangement::user_bounds(&screens(&online, virtual_ids, &[])) else {
+        return false;
     };
     arrangement::out_of_the_way(&cg::display_bounds(id), &user)
 }

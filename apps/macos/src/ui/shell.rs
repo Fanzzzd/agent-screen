@@ -1984,18 +1984,16 @@ impl Shell {
         // moment: start it once the waiting tile has grown in.
         let grown = peek::RESIZE + Duration::from_millis(40);
         let (made, name) = match spare {
-            Some((handle, name, false)) => (gpui::Task::ready(Some(handle)), name),
-            // A spare of another size, resized on the display thread.
-            Some((mut handle, name, true)) => (
+            Some((handle, name, resize)) => (
                 cx.background_spawn({
                     let executor = cx.background_executor().clone();
+                    let others = self.core.read(cx).virtual_ids();
                     async move {
-                        executor.timer(grown).await;
+                        if resize {
+                            executor.timer(grown).await;
+                        }
                         let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
-                        crate::mac::display::configure(move || {
-                            handle.resize(w, h).then_some(handle)
-                        })
-                        .await
+                        crate::mac::display::reuse_parked(handle, w, h, resize, others).await
                     }
                 }),
                 name,
@@ -2032,9 +2030,15 @@ impl Shell {
                     }
                     return;
                 };
-                let id = shell.core.update(cx, |core, cx| {
+                let Some(id) = shell.core.update(cx, |core, cx| {
                     core.adopt(handle, name, DEFAULT_SIZE, None, cx)
-                });
+                }) else {
+                    beep();
+                    if shell.peek_shown {
+                        shell.show_peek(cx);
+                    }
+                    return;
+                };
                 // Its tile takes the waiting one's place.
                 if let Some((peek, _)) = &shell.peek {
                     let creating = shell.creating;

@@ -2098,21 +2098,12 @@ async fn create_display(
     // A spare of another size takes this one: a mode change, where a new
     // display would add one more for every later display change to cost.
     let spare = match core.update(cx, |c, _| c.take_spare((width, height))) {
-        Some((mut handle, name, true)) => {
-            let (w, h) = (width as u32, height as u32);
-            let (handle, resized) = crate::mac::display::configure(move || {
-                let resized = handle.resize(w, h);
-                (handle, resized)
-            })
-            .await;
-            if resized {
-                Some((handle, name))
-            } else {
-                crate::lifecycle::note("released", handle.id, "spare could not resize");
-                None
-            }
+        Some((handle, name, resize)) => {
+            let others = core.read_with(cx, |c, _| c.virtual_ids());
+            crate::mac::display::reuse_parked(handle, width as u32, height as u32, resize, others)
+                .await
+                .map(|handle| (handle, name))
         }
-        Some((handle, name, false)) => Some((handle, name)),
         None => None,
     };
     let (made, name) = match spare {
@@ -2162,7 +2153,7 @@ async fn create_display(
     let adopted = adopt.clone();
     let reply = core
         .update(cx, |c, cx| {
-            let id = c.adopt(made?, name, (width, height), Some(owner), cx);
+            let id = c.adopt(made?, name, (width, height), Some(owner), cx)?;
             // Apps the session's displays started before this app quit:
             // their windows, which macOS moved to the user's screen, are
             // strays of this display. A pid another display holds, or one
@@ -2187,7 +2178,11 @@ async fn create_display(
                 reply
             })
         })
-        .ok_or_else(|| ControlError::failed("macOS refused to create a virtual display"))?;
+        .ok_or_else(|| {
+            ControlError::failed(
+                "macOS could not create a virtual display at a verified safe position. No Agent Display was assigned; retry create_display later.",
+            )
+        })?;
     // Answer once the display is where it stays, so a first screenshot
     // shows only the display.
     let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
@@ -2210,14 +2205,8 @@ async fn create_display(
         })
         .await;
     }
-    for _ in 0..100 {
-        if core.read_with(cx, |c, _| c.tucked.contains(&id)) {
-            break;
-        }
-        cx.background_executor()
-            .timer(Duration::from_millis(20))
-            .await;
-    }
+    // Adoption already verified the position; there is no timeout that
+    // can turn a failed parking attempt into a successful reply.
     // Stock AeroSpace may show one of the user's workspaces on the new
     // display until the shell's guard moves it back; their windows must
     // not reach the agent.
