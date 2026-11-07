@@ -5470,10 +5470,18 @@ async fn read_root(
         "root element {number} is unavailable in this window; call get_window_state without root and with a small max_depth to find it"
     )))?;
     let retained = ax::Sendable(element.clone());
-    if !off(cx, move || ax::in_window(retained.get(), target, false)).await {
-        return Err(ControlError::invalid(format!(
-            "root element {number} no longer belongs to this window; call get_window_state without root to find it again"
-        )));
+    match off(cx, move || ax::belongs(retained.get(), target, false)).await {
+        Some(true) => {}
+        Some(false) => {
+            return Err(ControlError::invalid(format!(
+                "root element {number} no longer belongs to this window; call get_window_state without root to find it again"
+            )));
+        }
+        None => {
+            return Err(ControlError::failed(
+                "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+            ));
+        }
     }
     Ok(Some(ax::Sendable(element)))
 }
