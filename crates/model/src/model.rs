@@ -212,6 +212,7 @@ pub struct GivenBack {
     /// The window's record before, with its home.
     pub record: Option<Record>,
     was_returned: bool,
+    serial: u64,
 }
 
 impl GivenBack {
@@ -332,6 +333,10 @@ pub struct Display<H> {
     /// windows on their word. Ends with the display.
     pub access: Access,
     handover_serial: u64,
+    /// The latest give-back of each window, by serial: only that one's
+    /// failure may put the window's record back.
+    given_back: BTreeMap<WindowId, u64>,
+    give_back_serial: u64,
     handing_over: BTreeMap<WindowId, u64>,
     waiters: Vec<oneshot::Sender<ControlWait>>,
     /// The platform display. Only held: dropping it removes the display.
@@ -410,10 +415,14 @@ impl<H> Display<H> {
         if self.started.remove(&target.pid) {
             self.released.insert(target.pid);
         }
+        self.give_back_serial += 1;
+        self.given_back
+            .insert(target.window_id, self.give_back_serial);
         GivenBack {
             target,
             record,
             was_returned,
+            serial: self.give_back_serial,
         }
     }
 
@@ -422,11 +431,12 @@ impl<H> Display<H> {
     /// record and home, so the user or the agent can try again. The user's
     /// word still stands for the rest: no Window Access covers the window,
     /// and its app stays theirs. Nothing changes when the window was placed
-    /// here again meanwhile, or was the user's already before. True when
-    /// the window is no longer marked returned.
+    /// here again or given back again meanwhile, or was the user's already
+    /// before. True when the window is no longer marked returned.
     pub fn give_back_failed(&mut self, given: GivenBack) -> bool {
         let window = given.target.window_id;
         if given.was_returned
+            || self.given_back.get(&window) != Some(&given.serial)
             || self.records.contains_key(&window)
             || !self.returned.remove(&window)
         {
@@ -690,6 +700,8 @@ impl<H> Displays<H> {
             pointer: None,
             access: Access::default(),
             handover_serial: 0,
+            given_back: BTreeMap::new(),
+            give_back_serial: 0,
             handing_over: BTreeMap::new(),
             waiters: Vec::new(),
             handle,
@@ -1783,6 +1795,23 @@ mod tests {
         let given = display.give_back(users(3));
         assert!(!display.give_back_failed(given));
         assert!(display.returned.contains(&3) && !display.records.contains_key(&3));
+    }
+
+    #[test]
+    fn only_the_latest_give_back_can_put_a_record_back() {
+        let mut d = displays();
+        let display = d.get_mut(7).unwrap();
+        display.claim(users(1), Origin::Placed, None);
+        let first = display.give_back(users(1));
+        // Handed over again and taken back again before the first move
+        // home came to an end.
+        display.claim(users(1), Origin::HandedOver, None);
+        let second = display.give_back(users(1));
+        assert!(!display.give_back_failed(first), "an outdated record");
+        assert!(display.returned.contains(&1) && !display.records.contains_key(&1));
+        // The second move home is the one that counts.
+        assert!(display.give_back_failed(second));
+        assert_eq!(display.records[&1].origin, Origin::HandedOver);
     }
 
     #[test]

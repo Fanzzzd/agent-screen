@@ -2733,10 +2733,10 @@ impl Shell {
                 pid,
                 window,
             } => self.take_back_for_user(
-                WindowTarget {
+                vec![WindowTarget {
                     pid,
                     window_id: window,
-                },
+                }],
                 display,
                 cx,
             ),
@@ -2920,27 +2920,69 @@ impl Shell {
         self.send_home(target, id, given, cx)
     }
 
-    /// Take Back from the user's own click: a window that couldn't leave
-    /// the display gets an alert saying so.
-    fn take_back_for_user(&mut self, target: WindowTarget, id: DisplayId, cx: &mut Context<Self>) {
-        let task = self.take_back(target, id, cx);
+    /// Take Back from the user's own click, of one window or several. Once
+    /// every one has gone or failed, one alert names those still on the
+    /// display.
+    fn take_back_for_user(
+        &mut self,
+        targets: Vec<WindowTarget>,
+        id: DisplayId,
+        cx: &mut Context<Self>,
+    ) {
+        let tasks: Vec<_> = targets
+            .into_iter()
+            .map(|target| (target, self.take_back(target, id, cx)))
+            .collect();
         cx.spawn(async move |_, _| {
-            if task.await {
+            let mut stuck = Vec::new();
+            for (target, task) in tasks {
+                if !task.await {
+                    stuck.push(target);
+                }
+            }
+            if stuck.is_empty() {
                 return;
             }
-            let name = windows::find(target.window_id)
+            let names: Vec<String> = stuck
+                .iter()
+                .filter_map(|t| windows::find(t.window_id))
                 .map(|w| name(&w.app, &w.title))
-                .unwrap_or_else(|| t("The window", "这个窗口").to_string());
-            native::alert(
-                &tf!(
-                    "{name} didn't come back to your screen",
-                    "{name} 没能回到你的屏幕"
-                ),
-                t(
-                    "It is still on the agent's display. Take Back can try again.",
-                    "它还在 agent 的显示器上，可以再点“取回”试一次。",
-                ),
-            );
+                .collect();
+            let names = if names.is_empty() {
+                t("The window", "这个窗口").to_string()
+            } else {
+                names.join(", ")
+            };
+            let (title, text) = if stuck.len() == 1 {
+                (
+                    tf!(
+                        "{names} didn't come back to your screen",
+                        "{names} 没能回到你的屏幕"
+                    ),
+                    t(
+                        "It is still on the agent's display. Take Back can try again.",
+                        "它还在 agent 的显示器上，可以再点“取回”试一次。",
+                    ),
+                )
+            } else {
+                (
+                    tf!(
+                        "{} windows didn't come back to your screen",
+                        "{} 个窗口没能回到你的屏幕",
+                        stuck.len()
+                    ),
+                    t(
+                        "They are still on the agent's display. Take Back can try again.",
+                        "它们还在 agent 的显示器上，可以再点“取回”试一次。",
+                    ),
+                )
+            };
+            let text = if stuck.len() == 1 {
+                text.to_string()
+            } else {
+                format!("{names}\n\n{text}")
+            };
+            native::alert(&title, &text);
         })
         .detach();
     }
@@ -2984,9 +3026,12 @@ impl Shell {
             let left = cx
                 .background_executor()
                 .spawn(async move {
-                    windows::return_home(target.window_id, || {
+                    let left = windows::return_home(target.window_id, || {
                         dismissal::give_back(target, home.as_ref(), main_name.as_deref())
-                    })
+                    });
+                    // A window that closed meanwhile has left too: nothing
+                    // to show again.
+                    left || windows::find(target.window_id).is_none()
                 })
                 .await;
             if !left {
@@ -3862,9 +3907,7 @@ impl Shell {
         targets: Vec<WindowTarget>,
         cx: &mut Context<Self>,
     ) {
-        for target in targets {
-            self.take_back_for_user(target, id, cx);
-        }
+        self.take_back_for_user(targets, id, cx);
         self.hide_peek(cx);
     }
 

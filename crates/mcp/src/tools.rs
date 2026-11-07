@@ -1182,6 +1182,10 @@ fn access_output(action: &str, reply: Object) -> Value {
     if let Some(note) = note {
         out["note"] = json!(note);
     }
+    // The app's warning for an older MCP says what the note says.
+    if stuck && let Some(out) = out.as_object_mut() {
+        out.remove("warning");
+    }
     out
 }
 
@@ -1907,9 +1911,11 @@ mod tests {
         let mut stuck = status;
         stuck.insert("returned".into(), json!([]));
         stuck.insert("stuck".into(), json!([4]));
+        stuck.insert("warning".into(), json!("For an older MCP."));
         let out = access_output("return", stuck);
         assert_eq!(out["stuck"], json!([4]));
         assert!(out["note"].as_str().unwrap().contains("didn't leave"));
+        assert!(out.get("warning").is_none(), "said once, in the note");
     }
 
     #[test]

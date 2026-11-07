@@ -2886,6 +2886,12 @@ async fn window_access(
             extra.insert("returned".into(), json!(returned));
             if !stuck.is_empty() {
                 extra.insert("stuck".into(), json!(stuck));
+                // An older MCP passes this through beside its own note,
+                // which says every window went back.
+                extra.insert(
+                    "warning".into(),
+                    json!("The windows in stuck didn't leave your display and are still Handovers there. Tell the user; return can try again."),
+                );
             }
         }
         other => {
