@@ -3064,13 +3064,13 @@ impl Shell {
                     // Still wanted: no Handover or later Take Back of the
                     // app, and the display still there. Otherwise the catch
                     // drops here, and a slow one can't stand in for the
-                    // latest Take Back's.
-                    let wanted = core.pending_returns.complete(ticket)
-                        && !core
-                            .returning
-                            .iter()
-                            .any(|(d, k)| *d == id && k.pid() == target.pid);
-                    if let Some(catch) = catch.filter(|_| wanted) {
+                    // latest Take Back's. The latest replaces the app's
+                    // earlier catch, so its screen wins whatever the
+                    // order; if it failed to register, the earlier stays.
+                    let latest = core.pending_returns.complete(ticket);
+                    if let Some(catch) = catch.filter(|_| latest) {
+                        core.returning
+                            .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
                         core.returning.push((id, catch));
                     }
                 });
