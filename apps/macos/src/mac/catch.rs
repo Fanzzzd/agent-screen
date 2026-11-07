@@ -6,8 +6,8 @@
 use super::ax;
 use super::windows;
 use crate::model::{DisplayId, Rect, WindowTarget};
-use agent_screen_model::new_window::{self, ACTION_WINDOW, Owner, Role, Seen};
-use objc2_application_services::AXUIElement;
+use agent_screen_model::new_window::{self, ACTION_WINDOW, Listing, Owner, Role, Seen};
+use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -111,7 +111,9 @@ fn drive(display: DisplayId, pid: Option<i32>, span: std::time::Duration) {
 pub fn user_acted(towards: Towards) {
     let now = std::time::Instant::now();
     let mut input = USER_INPUT.lock().unwrap_or_else(|e| e.into_inner());
-    input.retain(|(at, _)| now.duration_since(*at) < ACTION_WINDOW);
+    // Kept as long as the launch's watch may ask what came after a
+    // window showed.
+    input.retain(|(at, _)| now.duration_since(*at) < new_window::RESOLVE_BY);
     // Typing fast fills this with the same app; one entry per place will do.
     if !matches!(input.last(), Some((_, Towards::App(p))) if matches!(towards, Towards::App(q) if q == *p))
     {
@@ -193,11 +195,22 @@ fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
 /// launcher such as Spotlight, which open files and apps. Typing in
 /// another app doesn't count.
 pub fn user_acted_recently(pid: i32) -> bool {
+    user_acted_where(pid, |at| at.elapsed() < ACTION_WINDOW)
+}
+
+/// Whether the user pressed something that could make `pid` open a window,
+/// as `user_acted_recently` counts it, at `since` or later, up to
+/// `RESOLVE_BY` ago.
+pub fn user_acted_since(pid: i32, since: std::time::Instant) -> bool {
+    user_acted_where(pid, |at| at >= since)
+}
+
+fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool) -> bool {
     let input: Vec<Towards> = USER_INPUT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .filter(|(at, _)| at.elapsed() < ACTION_WINDOW)
+        .filter(|(at, _)| when(*at))
         .map(|(_, towards)| *towards)
         .collect();
     if input.is_empty() {
@@ -236,14 +249,16 @@ pub fn seen(display: DisplayId, pid: i32, bounds: Rect, new: Option<u32>) -> See
 /// What Accessibility says the window is, as the catch reads it. Blocking:
 /// a busy app takes up to the messaging timeout to not answer.
 pub fn role(target: WindowTarget) -> Role {
-    let Ok(listed) = ax::try_elements_attribute(&ax::application(target.pid), "AXWindows") else {
-        return new_window::role(None);
+    let listed = match ax::try_elements_attribute(&ax::application(target.pid), "AXWindows") {
+        Ok(listed) => listed,
+        Err(e) if e == AXError::CannotComplete => return new_window::role(Listing::TimedOut),
+        Err(_) => return new_window::role(Listing::Failed),
     };
     let window = listed
         .iter()
         .find(|w| ax::window_id(w) == Some(target.window_id));
     let role = window.map(|w| ax::string_attribute(w, "AXRole"));
-    new_window::role(Some(role.as_ref().map(|r| r.as_deref())))
+    new_window::role(Listing::Answered(role.as_ref().map(|r| r.as_deref())))
 }
 
 /// Whether every window of `pid` but `new` is on the display.

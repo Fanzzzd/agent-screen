@@ -5,8 +5,11 @@
 //! three times: once with the app idle, once with its main thread busy for
 //! 1.5 s as it opens the main window, as a large app building it is, which
 //! outlasts Accessibility's 1 s timeout for the catch's first look, and once
-//! with the window on screen before the app goes busy for 2.5 s, so the
-//! launch's watch finds a window the app can't describe yet.
+//! with the window on screen before the app goes busy for 1.5 s, so the
+//! launch's watch finds a window the app can't describe yet. Its first ask
+//! times out about 1.1 s in, and the app answers the next one about 1.5 s
+//! in: a watch that took that answer as "no such window" left the window
+//! on your screen.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e latewindow
 //!
@@ -26,7 +29,7 @@ use anyhow::{Context, Result};
 
 /// How long the app's main thread is busy as it opens its main window, ms,
 /// and whether the window is on screen before that.
-const CASES: [(u64, bool); 3] = [(0, false), (1500, false), (2500, true)];
+const CASES: [(u64, bool); 3] = [(0, false), (1500, false), (1500, true)];
 
 fn main() -> ExitCode {
     if instance().is_none() {
