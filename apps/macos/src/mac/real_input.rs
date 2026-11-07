@@ -220,6 +220,9 @@ pub struct Saved {
     /// agent's Chrome window beside the user's, makes its own window main,
     /// and the user's typing would go there.
     pub window: Option<u32>,
+    /// Its main window, which differs when a panel has focus: a panel
+    /// can't become main, and the document window it serves must.
+    pub main: Option<u32>,
 }
 
 pub fn save() -> Saved {
@@ -227,13 +230,18 @@ pub fn save() -> Saved {
         .map(|e| CGEvent::location(Some(&e)))
         .map_or((0.0, 0.0), |p| (p.x, p.y));
     let front = super::app::frontmost_pid();
-    let window = front
-        .filter(|&p| p != std::process::id() as i32)
-        .and_then(super::ax::focused_window_id);
+    let theirs = front.filter(|&p| p != std::process::id() as i32);
+    let window = theirs.and_then(super::ax::focused_window_id);
+    let main = theirs.and_then(|pid| {
+        let app = super::ax::application(pid);
+        unsafe { app.set_messaging_timeout(0.1) };
+        super::ax::window_id(&*super::ax::element_attribute(&app, "AXMainWindow")?)
+    });
     Saved {
         pointer,
         front,
         window,
+        main,
     }
 }
 
@@ -255,15 +263,34 @@ pub fn restore(saved: Saved) {
     if !touched()
         && let Some(front) = saved.front.filter(|&p| p != std::process::id() as i32)
     {
-        // Their window first, so the app comes forward with it main and
-        // their keys go back to it.
-        if let Some(window_id) = saved.window
-            && !super::ax::make_main(WindowTarget {
-                pid: front,
-                window_id,
-            })
+        // Their windows first, so the app comes forward with them main
+        // and focused, and their keys go back there. The main window, then
+        // a focused panel apart from it, which can't become main but can
+        // take focus.
+        let target = |window_id| WindowTarget {
+            pid: front,
+            window_id,
+        };
+        if let Some(main) = saved.main
+            && !super::ax::make_main(target(main))
         {
-            log::info!("input queue: window {window_id} could not be made main again");
+            log::info!("input queue: window {main} could not be made main again");
+        }
+        if let Some(focused) = saved.window.filter(|&w| Some(w) != saved.main) {
+            let focused_again = super::ax::window_element(target(focused)).is_some_and(|w| {
+                super::ax::set_attribute(
+                    &w,
+                    "AXFocused",
+                    objc2_core_foundation::CFBoolean::new(true),
+                ) || super::ax::set_attribute(
+                    &w,
+                    "AXMain",
+                    objc2_core_foundation::CFBoolean::new(true),
+                )
+            });
+            if !focused_again {
+                log::info!("input queue: window {focused} could not be focused again");
+            }
         }
         // Do not wait and activate again: the user may act during a wait.
         super::ax::set_attribute(

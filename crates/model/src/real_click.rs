@@ -31,62 +31,88 @@ pub fn takes_real_input(action: &str) -> bool {
         || Click::of_action(action).is_some_and(|c| c.button == Button::Left)
 }
 
-/// Why a right or middle click can't use the user's pointer. The menu or
-/// popover it opens belongs to the app the loan brings to the front, and
-/// closes as soon as the user's front app comes back at the grant's end.
-/// The agent would never see it, and might ask the user again.
-pub const NO_MENU_CLICK: &str = "real_input takes left clicks only: left_click, double_click and triple_click. A menu or popover that a real right or middle click opens closes as soon as the user's front app comes back, so you would never see it. Nothing was sent. For a context menu, use act_on_element's show_menu on the element; for a menu bar item, act_on_element's press, which asks for the user's pointer by itself when an Electron app needs it.";
+/// Why a right, middle or Control click can't use the user's pointer.
+/// The menu or popover it opens belongs to the app the loan brings to the
+/// front, and closes as soon as the user's front app comes back at the
+/// grant's end. The agent would never see it, and might ask the user
+/// again.
+pub const NO_MENU_CLICK: &str = "real_input takes left clicks without Control only: left_click, double_click and triple_click. A menu or popover that a real right, middle or Control click opens closes as soon as the user's front app comes back, so you would never see it. Nothing was sent. For a context menu, use act_on_element's show_menu on the element; for a menu bar item, act_on_element's press, which asks for the user's pointer by itself when an Electron app needs it.";
 
-/// The side of the square around a click's point, in points, that must
-/// look the same just before the loan clicks as when the agent asked.
-/// Small enough that a blinking caret or a spinner elsewhere doesn't
-/// matter; big enough to hold a sidebar row's avatar and name.
+/// Whether a click with these held modifiers would open a context menu:
+/// macOS takes a Control-held left click for a right click.
+pub fn opens_menu(button: Button, control: bool) -> bool {
+    button != Button::Left || control
+}
+
+/// The height, in points, of the band across the window around a click's
+/// point that must look the same just before the loan clicks as when the
+/// agent asked. The band spans the window's width, so a list row is
+/// compared whole: avatar, name, preview and time.
 pub const LOOK_SIDE: f64 = 64.0;
-/// A sample of the square changed when its luma moved by more than this,
-/// out of 255.
+/// A sample of the band changed when one of its red, green and blue
+/// channels moved by more than this, out of 255. Channels, not luma:
+/// system red and green differ by only 26 luma levels.
 pub const LOOK_LEVELS: u8 = 32;
-/// The square looks different when more than this percentage of its
-/// samples changed: a caret is about 1 %, another chat's avatar and name
-/// far more.
-pub const LOOK_PERCENT: usize = 5;
+/// The band looks different when more than this percentage of its
+/// samples changed. A blinking caret is well under 1 %.
+pub const LOOK_PERCENT: usize = 2;
 
-/// The agent's failure when the square changed: the reply tells it to look
+/// The agent's failure when the band changed: the reply tells it to look
 /// again.
 pub const CONTENT_CHANGED: &str =
     "what was under the point changed while the request waited for the user";
 
-/// The square around `at`, global points, that the loan compares: in the
-/// display's own points from its top-left corner, whole points, inside the
-/// display.
-pub fn look_region(at: (f64, f64), display: Rect) -> Rect {
-    let side = |length: f64| LOOK_SIDE.min(length.floor()).max(0.0);
-    let (w, h) = (side(display.width), side(display.height));
-    let start = |p: f64, origin: f64, length: f64, side: f64| {
-        (p - origin - side / 2.0)
-            .round()
-            .clamp(0.0, (length.floor() - side).max(0.0))
-    };
-    Rect::new(
-        start(at.0, display.x, display.width, w),
-        start(at.1, display.y, display.height, h),
-        w,
-        h,
-    )
+/// The band around `at`, global points, that the loan compares: across
+/// `window` and at least `LOOK_SIDE` high where the window and display
+/// allow, centred on the point's row. In the display's own whole points
+/// from its top-left corner, inside both the window and the display.
+pub fn look_region(at: (f64, f64), display: Rect, window: Rect) -> Rect {
+    let left = window.x.max(display.x);
+    let right = window.max_x().min(display.max_x());
+    let top = window.y.max(display.y);
+    let bottom = window.max_y().min(display.max_y());
+    let (x0, x1) = ((left - display.x).ceil(), (right - display.x).floor());
+    let (y0, y1) = ((top - display.y).ceil(), (bottom - display.y).floor());
+    let width = (x1 - x0).max(0.0);
+    let height = LOOK_SIDE.min(y1 - y0).max(0.0);
+    let y = (at.1 - display.y - height / 2.0)
+        .round()
+        .clamp(y0, (y1 - height).max(y0));
+    Rect::new(x0, y, width, height)
 }
 
-/// Whether the square's luma samples `now` show what `before` showed,
-/// within `LOOK_LEVELS` and `LOOK_PERCENT`. Samples of another size, or
-/// none, never match.
+/// Whether the band's samples `now`, three bytes of red, green and blue
+/// each, show what `before` showed, within `LOOK_LEVELS` and
+/// `LOOK_PERCENT`. Samples of another size, or none, never match.
 pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
-    if before.is_empty() || before.len() != now.len() {
+    if before.len() < 3 || before.len() != now.len() || !before.len().is_multiple_of(3) {
         return false;
     }
+    let (before, _) = before.as_chunks::<3>();
+    let (now, _) = now.as_chunks::<3>();
     let changed = before
         .iter()
         .zip(now)
-        .filter(|(a, b)| a.abs_diff(**b) > LOOK_LEVELS)
+        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > LOOK_LEVELS))
         .count();
     changed * 100 <= before.len() * LOOK_PERCENT
+}
+
+/// What accessibility says is at the point, as one string: role, subrole,
+/// title and description. Two rows of a list with the same avatar and a
+/// shared name prefix still differ here.
+pub fn element_identity(parts: [Option<&str>; 4]) -> Option<String> {
+    if parts.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(parts.map(|p| p.unwrap_or_default()).join("\u{1f}"))
+}
+
+/// Whether the element at the point is still the one the agent aimed at.
+/// An app that named none when the agent asked leaves the pixels to
+/// decide; one that named one must name the same one again.
+pub fn same_element(before: Option<&str>, now: Option<&str>) -> bool {
+    before.is_none() || before == now
 }
 
 /// What the success reply says of the wait, in tenths of a second.
@@ -354,62 +380,105 @@ mod tests {
     }
 
     #[test]
-    fn the_compared_square_surrounds_the_point_inside_the_display() {
+    fn the_band_spans_the_window_around_the_point_s_row() {
         let display = Rect::new(3000.0, -200.0, 1280.0, 800.0);
+        let window = Rect::new(3100.0, -100.0, 400.0, 300.0);
         assert_eq!(
-            look_region((3400.4, 100.0), display),
-            Rect::new(368.0, 268.0, 64.0, 64.0)
+            look_region((3200.0, 0.0), display, window),
+            Rect::new(100.0, 168.0, 400.0, 64.0)
         );
-        // Near a corner it slides inside rather than shrinking.
+        // Near the window's bottom it slides up inside the window.
         assert_eq!(
-            look_region((3005.0, 595.0), display),
-            Rect::new(0.0, 736.0, 64.0, 64.0)
+            look_region((3200.0, 195.0), display, window),
+            Rect::new(100.0, 336.0, 400.0, 64.0)
         );
-        let tiny = Rect::new(0.0, 0.0, 40.0, 30.0);
+        // A window past the display's edge is cut at it.
+        let spilling = Rect::new(2900.0, -250.0, 400.0, 100.0);
         assert_eq!(
-            look_region((20.0, 15.0), tiny),
-            Rect::new(0.0, 0.0, 40.0, 30.0)
+            look_region((3050.0, -190.0), display, spilling),
+            Rect::new(0.0, 0.0, 300.0, 50.0)
         );
+    }
+
+    fn band(width: usize, rgb: [u8; 3]) -> Vec<u8> {
+        rgb.repeat(width * LOOK_SIDE as usize)
+    }
+
+    fn paint(
+        samples: &mut [u8],
+        width: usize,
+        xs: std::ops::Range<usize>,
+        ys: std::ops::Range<usize>,
+        rgb: [u8; 3],
+    ) {
+        for y in ys {
+            for x in xs.clone() {
+                let i = (y * width + x) * 3;
+                samples[i..i + 3].copy_from_slice(&rgb);
+            }
+        }
     }
 
     #[test]
     fn a_caret_blink_looks_the_same_and_another_row_does_not() {
-        let side = LOOK_SIDE as usize;
-        let before = vec![240_u8; side * side];
+        let width = 400;
+        let before = band(width, [240, 240, 240]);
         assert!(looks_same(&before, &before));
         // A 2 by 16 point caret appears.
         let mut caret = before.clone();
-        for y in 20..36 {
-            caret[y * side + 30] = 20;
-            caret[y * side + 31] = 20;
-        }
+        paint(&mut caret, width, 30..32, 20..36, [20, 20, 20]);
         assert!(looks_same(&before, &caret));
         // A slightly different shade everywhere, as a hover tint.
         let tint: Vec<u8> = before.iter().map(|v| v - 20).collect();
         assert!(looks_same(&before, &tint));
         // Another chat's 40 by 40 avatar where this one's was.
         let mut other = before.clone();
-        for y in 10..50 {
-            for x in 4..44 {
-                other[y * side + x] = 60;
-            }
-        }
+        paint(&mut other, width, 4..44, 10..50, [60, 60, 60]);
         assert!(!looks_same(&before, &other));
-        // Just past the limit.
+        // Just past the limit, and at it.
+        let limit = width * LOOK_SIDE as usize * LOOK_PERCENT / 100;
         let mut edge = before.clone();
-        let limit = before.len() * LOOK_PERCENT / 100;
-        for v in edge.iter_mut().take(limit + 1) {
+        for v in edge.iter_mut().take((limit + 1) * 3) {
             *v = 0;
         }
         assert!(!looks_same(&before, &edge));
-        edge[limit] = 240;
+        edge[limit * 3..limit * 3 + 3].copy_from_slice(&[240, 240, 240]);
         assert!(looks_same(&before, &edge));
+    }
+
+    #[test]
+    fn red_and_green_of_the_same_luma_differ() {
+        // System red and green: 26 luma levels apart, far apart in red.
+        let red = band(64, [255, 59, 48]);
+        let green = band(64, [52, 199, 89]);
+        assert!(!looks_same(&red, &green));
     }
 
     #[test]
     fn missing_or_mismatched_samples_never_match() {
         assert!(!looks_same(&[], &[]));
         assert!(!looks_same(&[1, 2, 3], &[1, 2]));
+        assert!(!looks_same(&[1, 2, 3, 4], &[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn another_element_at_the_point_is_refused() {
+        let row = |title| element_identity([Some("AXRow"), None, Some(title), None]);
+        let a = row("张三丰");
+        assert!(same_element(a.as_deref(), row("张三丰").as_deref()));
+        assert!(!same_element(a.as_deref(), row("张三").as_deref()));
+        assert!(!same_element(a.as_deref(), None));
+        // Nothing named when the agent asked: the pixels decide.
+        assert!(same_element(None, a.as_deref()));
+        assert_eq!(element_identity([None; 4]), None);
+    }
+
+    #[test]
+    fn control_and_other_buttons_open_menus() {
+        assert!(!opens_menu(Button::Left, false));
+        assert!(opens_menu(Button::Left, true));
+        assert!(opens_menu(Button::Right, false));
+        assert!(opens_menu(Button::Middle, false));
     }
 
     #[test]

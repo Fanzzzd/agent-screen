@@ -560,7 +560,8 @@ fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
         flags: 0,
         app: "WeCom".into(),
         title: None,
-        look: vec![0; 16],
+        look: vec![0; 48],
+        element: None,
         asked_ms: 0,
     });
     let token = || {
@@ -602,4 +603,18 @@ fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
     let end = input.ending().expect("the grant ends with nothing waiting");
     assert!(end.restore);
     input.ended(end);
+}
+
+/// A click refused twice in a row because what was under its point
+/// changed is counted, so the agent hears that the area keeps changing.
+#[test]
+fn a_click_refused_for_changing_content_counts_its_repeats() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    assert_eq!(input.content_changed(&a, Some("click:7:1,2:left:1:0")), 1);
+    assert_eq!(input.content_changed(&a, Some("click:7:1,2:left:1:0")), 2);
+    assert_eq!(input.content_changed(&a, Some("click:7:9,9:left:1:0")), 1);
+    assert_eq!(input.content_changed(&a, None), 0);
+    assert_eq!(input.content_changed(&a, Some("click:7:9,9:left:1:0")), 1);
 }

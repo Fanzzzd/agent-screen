@@ -630,6 +630,26 @@ pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
     (error == AXError::Success).then_some(element)
 }
 
+/// What accessibility says is at a global point of app `pid`: the
+/// element's role, subrole, title and description, for a real click to
+/// check that it still aims at the same thing (ADR 0013, "Clicks").
+pub fn identity_at(pid: i32, at: (f64, f64)) -> Option<String> {
+    let element = element_at(pid, at)?;
+    let get = |name| string_attribute(&element, name);
+    let (role, subrole, title, description) = (
+        get("AXRole"),
+        get("AXSubrole"),
+        get("AXTitle"),
+        get("AXDescription"),
+    );
+    agent_screen_model::real_click::element_identity([
+        role.as_deref(),
+        subrole.as_deref(),
+        title.as_deref(),
+        description.as_deref(),
+    ])
+}
+
 /// The actions an element takes, such as AXPress and AXConfirm.
 pub fn actions(element: &AXUIElement) -> Vec<String> {
     let mut raw: *const CFArray = std::ptr::null();

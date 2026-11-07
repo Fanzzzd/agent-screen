@@ -200,8 +200,8 @@ pub fn definitions() -> Vec<Value> {
                 "pointer and waits up to 60 seconds. Input route: real_input means it ran. input_pending means nothing was sent,",
                 "not even the background click; retry the same click to wait again. If what is under the point changed while",
                 "the user decided, nothing is clicked: take a new screenshot and ask again. Don't use real_input on the first",
-                "try. A menu or popover a real click opens closes when the user's front app comes back, so right and middle",
-                "clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
+                "try. A menu or popover a real click opens closes when the user's front app comes back, so right, middle and",
+                "Control clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
                 "cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
@@ -231,7 +231,7 @@ pub fn definitions() -> Vec<Value> {
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click or middle_click: the menu they open would close when the user's front app comes back."
+                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click, middle_click or a click with ctrl held: the menu they open would close when the user's front app comes back."
                     },
                     "via_input_method": {
                         "type": "boolean",

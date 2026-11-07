@@ -261,11 +261,12 @@ pub fn display(
     }
 }
 
-/// Luma of `source`, a display-local rect in points, one sample per point,
-/// rows top to bottom. What lies there, as an agent's screenshot shows it:
+/// Red, green and blue of `source`, a display-local rect in points, one
+/// three-byte sample per point, rows top to bottom. What lies there, as an
+/// agent's screenshot shows it:
 /// a real click compares it before and after the user's answer (ADR 0013,
 /// "Clicks"). Blocking: call off the main thread.
-pub fn luma(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String> {
+pub fn samples(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String> {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo,
@@ -305,15 +306,15 @@ pub fn luma(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String
     }
     let image = result?;
     unsafe {
-        let space = CGColorSpace::new_device_gray().ok_or("no color space")?;
+        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
         let context = CGBitmapContextCreate(
             std::ptr::null_mut(),
             width,
             height,
             8,
-            width,
+            width * 4,
             Some(&space),
-            CGImageAlphaInfo::None.0,
+            CGImageAlphaInfo::NoneSkipLast.0,
         )
         .ok_or("could not draw the region")?;
         let all = CGRect::new(
@@ -339,7 +340,7 @@ pub fn luma(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String
             }
             // Nothing but the desktop: the plain background.
             None => {
-                CGContext::set_gray_fill_color(Some(&context), 0.13, 1.0);
+                CGContext::set_rgb_fill_color(Some(&context), 0.13, 0.13, 0.14, 1.0);
                 CGContext::fill_rect(Some(&context), all);
             }
         }
@@ -347,7 +348,8 @@ pub fn luma(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String
         if data.is_null() {
             return Err("could not read the region".into());
         }
-        Ok(std::slice::from_raw_parts(data, width * height).to_vec())
+        let (pixels, _) = std::slice::from_raw_parts(data, width * height * 4).as_chunks::<4>();
+        Ok(pixels.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
     }
 }
 

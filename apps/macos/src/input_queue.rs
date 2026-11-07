@@ -27,6 +27,9 @@ pub struct InputQueue {
     plans: BTreeMap<RequestId, Plan>,
     /// Why the executor could not carry a loan out.
     failures: BTreeMap<RequestId, String>,
+    /// Per session's display, the last click refused because what was
+    /// under its point changed, and how many times in a row.
+    changed: BTreeMap<Owner, (String, u32)>,
     /// Whether the active loan may send its next event. The executor's
     /// thread reads it before every event.
     pub loan_ok: Arc<AtomicBool>,
@@ -80,9 +83,11 @@ pub struct Click {
     /// The app's name and the window's title, for the card.
     pub app: String,
     pub title: Option<String>,
-    /// Luma of `real_click::look_region` around the point when the agent
-    /// asked. The loan clicks only if it still looks the same.
+    /// Samples of `real_click::look_region` around the point when the
+    /// agent asked, and what accessibility named there. The loan clicks
+    /// only if both are still the same.
     pub look: Vec<u8>,
+    pub element: Option<String>,
     /// When the agent first asked, by the queue's clock.
     pub asked_ms: u64,
 }
@@ -101,6 +106,7 @@ impl Default for InputQueue {
             approved: BTreeSet::new(),
             plans: BTreeMap::new(),
             failures: BTreeMap::new(),
+            changed: BTreeMap::new(),
             loan_ok: Arc::default(),
         }
     }
@@ -165,6 +171,26 @@ impl InputQueue {
         }
         self.tick();
         Ok(id)
+    }
+
+    /// A real click `operation` of `owner` was refused because what was
+    /// under its point changed: how many times in a row that click has
+    /// been. Another click starts over; `None`, for a click that ended any
+    /// other way, forgets it.
+    pub fn content_changed(&mut self, owner: &Owner, operation: Option<&str>) -> u32 {
+        let Some(operation) = operation else {
+            self.changed.remove(owner);
+            return 0;
+        };
+        let entry = self
+            .changed
+            .entry(owner.clone())
+            .or_insert_with(|| (operation.to_string(), 0));
+        if entry.0 != operation {
+            *entry = (operation.to_string(), 0);
+        }
+        entry.1 += 1;
+        entry.1
     }
 
     /// What a request does, if it can run.
@@ -358,6 +384,8 @@ impl InputQueue {
         self.plans.retain(|id, _| requests.request(*id).is_some());
         self.failures
             .retain(|id, _| requests.request(*id).is_some());
+        self.changed
+            .retain(|owner, _| requests.owner(owner.display) == Some(owner));
         let ok = self
             .queue
             .active()
