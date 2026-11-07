@@ -1083,9 +1083,11 @@ async fn handle_one(
                 .map(Value::Object)
         }
         "windowState" => {
+            let scope = read_scope(&p)?;
             let id = display(&core, &p, false, cx)?;
             let window = window_on(id, &p, cx).await?;
             let target = window.target;
+            let root = read_root(&core, id, target, scope.root, cx).await?;
             let area = cg::display_bounds(id);
             let origin = (area.x, area.y);
             let scale = display_scale(&core, id, cx);
@@ -1093,20 +1095,27 @@ async fn handle_one(
             let started = Instant::now();
             let snapshot = cx
                 .background_executor()
-                .spawn(async move { ax::snapshot(target, origin, scale) })
+                .spawn(async move { ax::snapshot(target, origin, scale, root.map(|r| r.0), scope.max_depth) })
                 .await
                 // The window is there, so this isn't `not_found`, which
                 // reads as closed: the app is busy, or AX is off.
-                .ok_or_else(|| {
-                    ControlError::failed(
+                .map_err(|error| match error {
+                    ax::SnapshotError::WindowUnavailable => ControlError::failed(
                         "the app didn't answer accessibility in time, or Accessibility isn't granted; call get_window_state again",
-                    )
+                    ),
+                    ax::SnapshotError::RootUnavailable => ControlError::invalid(
+                        "the root element no longer belongs to this window; call get_window_state without root to find it again",
+                    ),
                 })?;
             let count = snapshot.elements.len();
             let walked = started.elapsed();
+            let complete = scope.root.is_none() && !snapshot.truncated && !snapshot.depth_limited;
             let tree = core.update(cx, |c, _| {
                 let numbers = c.elements.entry((id, window.target.window_id)).or_default();
-                numbers::relabel(&snapshot.tree, &numbers.renumber(snapshot.elements))
+                numbers::relabel(
+                    &snapshot.tree,
+                    &numbers.refresh(snapshot.elements, complete),
+                )
             });
             let size = (window.bounds.width, window.bounds.height);
             let shot = cx
@@ -1125,12 +1134,17 @@ async fn handle_one(
             result["tree"] = json!(tree);
             result["elements"] = json!(count);
             result["truncated"] = json!(snapshot.truncated);
+            result["depthLimited"] = json!(snapshot.depth_limited);
+            result["root"] = json!(scope.root);
             add_strayed(&core, id, &mut result, cx);
             Ok(result)
         }
         "elementAction" => {
+            let scope = read_scope(&p)?;
             let id = input_display(&core, &p, cx).await?;
             let window = window_on(id, &p, cx).await?;
+            // Validate the requested result root before any action occurs.
+            read_root(&core, id, window.target, scope.root, cx).await?;
             let index = p
                 .int("element")
                 .ok_or_else(|| ControlError::invalid("element is required"))?;
@@ -1156,6 +1170,21 @@ async fn handle_one(
                 }
                 Some((Some(element), _)) => element,
             };
+            let current = ax::Sendable(element.clone());
+            let target = window.target;
+            match off(cx, move || ax::belongs(current.get(), target, true)).await {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(ControlError::not_found(format!(
+                        "element {index} is no longer in this window; call get_window_state again"
+                    )));
+                }
+                None => {
+                    return Err(ControlError::failed(
+                        "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+                    ));
+                }
+            }
             let action = p.string("action").unwrap_or_else(|| "press".into());
             // A menu bar title lists its items rather than opening a menu
             // on the user's own menu bar.
@@ -5416,6 +5445,54 @@ fn modifiers(p: &Args) -> Result<crate::keychord::Modifiers, ControlError> {
     KeyChord::parse_modifiers(&names).map_err(|e| ControlError::invalid(e.to_string()))
 }
 
+/// Optional traversal scope is strict even on the raw control socket.
+fn read_scope(p: &Args<'_>) -> Result<agent_screen_model::tree::Scope, ControlError> {
+    let number = |key: &str| match p.0.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| ControlError::invalid(format!("{key} must be a non-negative integer"))),
+    };
+    Ok(agent_screen_model::tree::Scope {
+        root: number("root")?,
+        max_depth: number("maxDepth")?,
+    })
+}
+
+/// A number retained from this window, checked against its live AX parent
+/// chain. Failure is an invalid root, never a claim that the window closed.
+async fn read_root(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    root: Option<usize>,
+    cx: &mut AsyncApp,
+) -> Result<Option<ax::Sendable>, ControlError> {
+    let Some(number) = root else { return Ok(None) };
+    let element = core.read_with(cx, |c, _| {
+        c.elements.get(&(id, target.window_id)).and_then(|numbers| numbers.get(number)).cloned()
+    }).ok_or_else(|| ControlError::invalid(format!(
+        "root element {number} is unavailable in this window; call get_window_state without root and with a small max_depth to find it"
+    )))?;
+    let retained = ax::Sendable(element.clone());
+    match off(cx, move || ax::belongs(retained.get(), target, false)).await {
+        Some(true) => {}
+        Some(false) => {
+            return Err(ControlError::invalid(format!(
+                "root element {number} no longer belongs to this window; call get_window_state without root to find it again"
+            )));
+        }
+        None => {
+            return Err(ControlError::failed(
+                "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+            ));
+        }
+    }
+    Ok(Some(ax::Sendable(element)))
+}
+
 /// Loosely typed request parameters from JSON.
 struct Args<'a>(&'a Params);
 
@@ -5448,6 +5525,28 @@ mod launch_tests {
 
     fn ago(ms: u64) -> Instant {
         Instant::now() - Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn subtree_socket_scope_rejects_invalid_numbers() {
+        for value in [json!(-1), json!(1.5), json!("2"), json!(true)] {
+            for key in ["root", "maxDepth"] {
+                let mut p = Params::new();
+                p.insert(key.into(), value.clone());
+                assert!(read_scope(&Args(&p)).is_err());
+            }
+        }
+        let p = json!({"root": 0, "maxDepth": 2})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            read_scope(&Args(&p)).unwrap(),
+            agent_screen_model::tree::Scope {
+                root: Some(0),
+                max_depth: Some(2)
+            }
+        );
     }
 
     #[test]
