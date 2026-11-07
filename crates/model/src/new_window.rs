@@ -16,6 +16,11 @@ pub const ACTION_WINDOW: Duration = Duration::from_secs(3);
 /// its main window seconds after.
 pub const COLD_START: Duration = Duration::from_secs(30);
 
+/// How long after the launch the watch keeps waiting for a busy app to
+/// say what a window it saw in the cold start is. A window still
+/// unanswered then is left where it is, and the agent is told.
+pub const RESOLVE_BY: Duration = Duration::from_secs(60);
+
 /// What is known as a new window of the app appears.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seen {
@@ -116,22 +121,35 @@ pub enum Role {
     /// A sheet, a panel the app doesn't list, or anything else the catch
     /// leaves where the app puts it.
     Other,
-    /// The app didn't answer, as one too busy building the window doesn't.
+    /// The app didn't answer in time, as one too busy building the window
+    /// doesn't: ask again.
     Unanswered,
+    /// The app answered with an error, and asking again won't help.
+    Unreadable,
 }
 
-/// What the window is, from the app's answer for its AXWindows: `None`
-/// when it gave none, as a busy app doesn't within the timeout; else
-/// whether the window is listed, with the role the app gave it, `None`
-/// when it didn't answer for that.
-pub fn role(listed: Option<Option<Option<&str>>>) -> Role {
-    match listed {
-        None | Some(Some(None)) => Role::Unanswered,
+/// The app's answer for its AXWindows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listing<'a> {
+    /// No answer within the messaging timeout (kAXErrorCannotComplete).
+    TimedOut,
+    /// Another error, such as an app that doesn't implement Accessibility.
+    Failed,
+    /// The window's role if the list holds it, `None` for the role when
+    /// the app didn't answer for that.
+    Answered(Option<Option<&'a str>>),
+}
+
+/// What the window is, from the app's answer for its AXWindows.
+pub fn role(listing: Listing) -> Role {
+    match listing {
+        Listing::TimedOut | Listing::Answered(Some(None)) => Role::Unanswered,
+        Listing::Failed => Role::Unreadable,
         // An app that answers and doesn't list it: a sheet, or a window it
         // keeps out of its list.
-        Some(None) => Role::Other,
-        Some(Some(Some("AXWindow"))) => Role::Window,
-        Some(Some(Some(_))) => Role::Other,
+        Listing::Answered(None) => Role::Other,
+        Listing::Answered(Some(Some("AXWindow"))) => Role::Window,
+        Listing::Answered(Some(Some(_))) => Role::Other,
     }
 }
 
@@ -139,7 +157,12 @@ pub fn role(listed: Option<Option<Option<&str>>>) -> Role {
 /// or the user took the app back.
 pub fn watch(on: On, decided: bool, role: Role, seen: Seen) -> Watch {
     match (on, decided, role) {
-        (_, true, _) | (On::OtherDisplay, ..) | (_, _, Role::Other) => Watch::Leave,
+        (_, true, _)
+        | (On::OtherDisplay, ..)
+        | (_, _, Role::Other)
+        | (On::ThisDisplay, _, Role::Unreadable) => Watch::Leave,
+        // It can't be moved, and may be anything: the agent is told.
+        (On::Elsewhere, false, Role::Unreadable) => Watch::Undecided,
         (_, false, Role::Unanswered) => Watch::Later,
         (On::ThisDisplay, false, Role::Window) => Watch::Record,
         (On::Elsewhere, false, Role::Window) => match seen.owner() {
@@ -155,28 +178,64 @@ pub fn watch(on: On, decided: bool, role: Role, seen: Seen) -> Watch {
 pub enum Step {
     /// The display ended, or the app is no longer one it started, as once
     /// the user takes a window of it back: every window of the app is the
-    /// user's, and the watch ends.
+    /// user's, and the watch ends. Or the cold start is over, with no
+    /// window waiting.
     Stop,
     /// The app finished starting hidden, as an Electron development build
     /// does after the launch showed it, so its windows are listed nowhere:
     /// move them onto the display and show it.
     ShowHidden,
-    /// Hidden after it showed a window, as by the user's Command-H: that
-    /// window may be theirs, so nothing moves.
+    /// Hidden after it showed a window, as by the user's Command-H, or
+    /// with a window the user made: that window may be theirs, so nothing
+    /// moves.
     Skip,
-    /// Look for new windows.
+    /// Look for new windows, and at those waiting.
     Look,
+    /// Past the cold start: look only at the windows still waiting for
+    /// the app to say what they are.
+    Resolve,
+    /// Past `RESOLVE_BY`: leave the windows still waiting where they are,
+    /// and tell the agent.
+    GiveUp,
 }
 
-/// `started`: the cold start's 30 s since the launch haven't passed, and
-/// the display takes windows and still counts the app as one it started. `shown`: `launch_app` answered with a window of the app, or
-/// the watch has seen one.
-pub fn step(started: bool, hidden: bool, shown: bool) -> Step {
-    match (started, hidden, shown) {
-        (false, ..) => Step::Stop,
-        (true, true, false) => Step::ShowHidden,
-        (true, true, true) => Step::Skip,
-        (true, false, _) => Step::Look,
+/// What is known at the start of a watch tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tick {
+    /// Since the launch.
+    pub elapsed: Duration,
+    /// The display takes windows and still counts the app as one it
+    /// started.
+    pub started: bool,
+    pub hidden: bool,
+    /// `launch_app` answered with a window of the app, or the watch has
+    /// seen one.
+    pub shown: bool,
+    /// A window of the hidden app is the user's: they made it, took it
+    /// back, or it was left with them undecided.
+    pub theirs: bool,
+    /// Windows wait for the app to say what they are.
+    pub waiting: bool,
+}
+
+pub fn step(t: Tick) -> Step {
+    let past = t.elapsed >= COLD_START;
+    if !t.started {
+        Step::Stop
+    } else if t.elapsed >= RESOLVE_BY {
+        if t.waiting { Step::GiveUp } else { Step::Stop }
+    } else if past && !t.waiting {
+        Step::Stop
+    } else if t.hidden {
+        if t.shown || t.theirs || past {
+            Step::Skip
+        } else {
+            Step::ShowHidden
+        }
+    } else if past {
+        Step::Resolve
+    } else {
+        Step::Look
     }
 }
 
@@ -314,38 +373,106 @@ mod tests {
         assert!(!seen(false, false, true).ends_cold_start());
     }
 
+    fn tick(elapsed: u64, hidden: bool, shown: bool) -> Tick {
+        Tick {
+            elapsed: Duration::from_secs(elapsed),
+            started: true,
+            hidden,
+            shown,
+            ..Tick::default()
+        }
+    }
+
     #[test]
     fn the_watch_moves_a_hidden_app_only_before_it_shows_a_window() {
-        assert_eq!(step(true, true, false), Step::ShowHidden);
+        assert_eq!(step(tick(5, true, false)), Step::ShowHidden);
         assert_eq!(
-            step(true, true, true),
+            step(tick(5, true, true)),
             Step::Skip,
             "hidden by the user after a window showed, which may be theirs"
         );
-        assert_eq!(step(true, false, false), Step::Look);
-        assert_eq!(step(true, false, true), Step::Look);
+        assert_eq!(
+            step(Tick {
+                theirs: true,
+                ..tick(5, true, false)
+            }),
+            Step::Skip,
+            "a window the user made, which the watch hadn't seen yet"
+        );
+        assert_eq!(step(tick(5, false, false)), Step::Look);
+        assert_eq!(step(tick(5, false, true)), Step::Look);
         for hidden in [false, true] {
             for shown in [false, true] {
-                assert_eq!(
-                    step(false, hidden, shown),
-                    Step::Stop,
-                    "taken back, or the display ended: all its windows are the user's"
-                );
+                for elapsed in [5, 40, 70] {
+                    assert_eq!(
+                        step(Tick {
+                            started: false,
+                            waiting: true,
+                            ..tick(elapsed, hidden, shown)
+                        }),
+                        Step::Stop,
+                        "taken back, or the display ended: all its windows are the user's"
+                    );
+                }
             }
         }
     }
 
     #[test]
+    fn a_window_still_waiting_is_resolved_or_reported() {
+        let waiting = |elapsed| Tick {
+            waiting: true,
+            ..tick(elapsed, false, true)
+        };
+        assert_eq!(step(tick(31, false, true)), Step::Stop);
+        assert_eq!(
+            step(waiting(31)),
+            Step::Resolve,
+            "past the cold start, a window seen in it is still decided"
+        );
+        assert_eq!(
+            step(Tick {
+                hidden: true,
+                ..waiting(31)
+            }),
+            Step::Skip
+        );
+        assert_eq!(
+            step(waiting(60)),
+            Step::GiveUp,
+            "left where it is, and named to the agent"
+        );
+        assert_eq!(step(tick(60, false, true)), Step::Stop);
+    }
+
+    #[test]
     fn a_window_the_app_doesnt_answer_for_is_unanswered() {
         assert_eq!(
-            role(None),
+            role(Listing::TimedOut),
             Role::Unanswered,
             "AXWindows timed out: not a sheet, a busy app's window"
         );
-        assert_eq!(role(Some(Some(None))), Role::Unanswered);
-        assert_eq!(role(Some(None)), Role::Other);
-        assert_eq!(role(Some(Some(Some("AXWindow")))), Role::Window);
-        assert_eq!(role(Some(Some(Some("AXSheet")))), Role::Other);
+        assert_eq!(role(Listing::Answered(Some(None))), Role::Unanswered);
+        assert_eq!(role(Listing::Failed), Role::Unreadable);
+        assert_eq!(role(Listing::Answered(None)), Role::Other);
+        assert_eq!(
+            role(Listing::Answered(Some(Some("AXWindow")))),
+            Role::Window
+        );
+        assert_eq!(role(Listing::Answered(Some(Some("AXSheet")))), Role::Other);
+    }
+
+    #[test]
+    fn an_unreadable_window_is_reported_not_moved() {
+        let agents = seen(true, false, true);
+        assert_eq!(
+            watch(On::Elsewhere, false, Role::Unreadable, agents),
+            Watch::Undecided
+        );
+        assert_eq!(
+            watch(On::ThisDisplay, false, Role::Unreadable, agents),
+            Watch::Leave
+        );
     }
 
     #[test]
