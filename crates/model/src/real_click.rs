@@ -44,49 +44,80 @@ pub fn opens_menu(button: Button, control: bool) -> bool {
     button != Button::Left || control
 }
 
-/// The height, in points, of the band across the window around a click's
-/// point that must look the same just before the loan clicks as when the
-/// agent asked. The band spans the window's width, so a list row is
-/// compared whole: avatar, name, preview and time.
+/// The region a real click compares, just before the loan clicks, with
+/// what it showed when the agent asked: the element at the point, or its
+/// row or cell, as accessibility frames it. Without a usable frame, a band
+/// `LOOK_WIDTH` by `LOOK_SIDE` points around the point. Never the whole
+/// window: a sidebar that reorders must not refuse a click in the message
+/// pane beside it.
+pub const LOOK_WIDTH: f64 = 300.0;
 pub const LOOK_SIDE: f64 = 64.0;
-/// A sample of the band changed when one of its red, green and blue
-/// channels moved by more than this, out of 255. Channels, not luma:
-/// system red and green differ by only 26 luma levels.
+/// An element taller than this, such as a whole pane, frames too much: the
+/// band is compared instead.
+pub const LOOK_MAX_HEIGHT: f64 = 200.0;
+/// An element smaller than this either way frames too little to compare.
+pub const LOOK_MIN_SIDE: f64 = 8.0;
+/// A sample changed when one of its red, green and blue channels moved by
+/// more than this, out of 255. Channels, not luma: system red and green
+/// differ by only 26 luma levels.
 pub const LOOK_LEVELS: u8 = 32;
-/// The band looks different when more than this percentage of its
-/// samples changed. A blinking caret is well under 1 %.
-pub const LOOK_PERCENT: usize = 2;
+/// The region looks different when more than this percentage of its
+/// samples changed. The pixels only back up the accessibility check, and
+/// a click the user allowed should not be refused for a new time stamp or
+/// badge in the row: a blinking caret is well under 1 %, another chat's
+/// avatar, name and preview well over.
+pub const LOOK_PERCENT: usize = 10;
 
-/// The agent's failure when the band changed: the reply tells it to look
+/// The agent's failure when the region changed: the reply tells it to look
 /// again.
 pub const CONTENT_CHANGED: &str =
     "what was under the point changed while the request waited for the user";
 
-/// The band around `at`, global points, that the loan compares: across
-/// `window` and at least `LOOK_SIDE` high where the window and display
-/// allow, centred on the point's row. In the display's own whole points
-/// from its top-left corner, inside both the window and the display.
-pub fn look_region(at: (f64, f64), display: Rect, window: Rect) -> Rect {
+/// The region around `at`, global points, that the loan compares: the
+/// accessibility frame `element` of what is at the point, when it holds the
+/// point and isn't a whole pane, else the band, either cut to the window and
+/// display. In the display's own whole points from its top-left corner.
+pub fn look_region(at: (f64, f64), display: Rect, window: Rect, element: Option<Rect>) -> Rect {
     let left = window.x.max(display.x);
     let right = window.max_x().min(display.max_x());
     let top = window.y.max(display.y);
     let bottom = window.max_y().min(display.max_y());
-    let (x0, x1) = ((left - display.x).ceil(), (right - display.x).floor());
-    let (y0, y1) = ((top - display.y).ceil(), (bottom - display.y).floor());
-    let width = (x1 - x0).max(0.0);
-    let height = LOOK_SIDE.min(y1 - y0).max(0.0);
-    let y = (at.1 - display.y - height / 2.0)
-        .round()
-        .clamp(y0, (y1 - height).max(y0));
-    Rect::new(x0, y, width, height)
+    let cut = |r: Rect| {
+        let (x0, x1) = (r.x.max(left), r.max_x().min(right));
+        let (y0, y1) = (r.y.max(top), r.max_y().min(bottom));
+        Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+    };
+    let framed = element
+        .filter(|e| e.contains(at) && e.height <= LOOK_MAX_HEIGHT)
+        .map(cut)
+        .filter(|r| r.width >= LOOK_MIN_SIDE && r.height >= LOOK_MIN_SIDE);
+    let global = framed.unwrap_or_else(|| {
+        // The band slides to stay inside the window rather than shrink.
+        let slide = |center: f64, size: f64, lo: f64, hi: f64| {
+            let size = size.min(hi - lo).max(0.0);
+            ((center - size / 2.0).clamp(lo, (hi - size).max(lo)), size)
+        };
+        let (x, w) = slide(at.0, LOOK_WIDTH, left, right);
+        let (y, h) = slide(at.1, LOOK_SIDE, top, bottom);
+        Rect::new(x, y, w, h)
+    });
+    let (x0, x1) = (
+        (global.x - display.x).ceil(),
+        (global.max_x() - display.x).floor(),
+    );
+    let (y0, y1) = (
+        (global.y - display.y).ceil(),
+        (global.max_y() - display.y).floor(),
+    );
+    Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
-/// Whether the band's samples `now`, three bytes of red, green and blue
-/// each, show what `before` showed, within `LOOK_LEVELS` and
-/// `LOOK_PERCENT`. Samples of another size, or none, never match.
-pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
+/// How many of the region's samples, three bytes of red, green and blue
+/// each, changed between `before` and `now`, and how many there are.
+/// None for samples of another size, or none.
+pub fn changed_samples(before: &[u8], now: &[u8]) -> Option<(usize, usize)> {
     if before.len() < 3 || before.len() != now.len() || !before.len().is_multiple_of(3) {
-        return false;
+        return None;
     }
     let (before, _) = before.as_chunks::<3>();
     let (now, _) = now.as_chunks::<3>();
@@ -95,24 +126,38 @@ pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
         .zip(now)
         .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > LOOK_LEVELS))
         .count();
-    changed * 100 <= before.len() * LOOK_PERCENT
+    Some((changed, before.len()))
 }
 
-/// What accessibility says is at the point, as one string: role, subrole,
-/// title and description. Two rows of a list with the same avatar and a
-/// shared name prefix still differ here.
-pub fn element_identity(parts: [Option<&str>; 4]) -> Option<String> {
-    if parts.iter().all(Option::is_none) {
-        return None;
-    }
-    Some(parts.map(|p| p.unwrap_or_default()).join("\u{1f}"))
+/// Whether `now` shows what `before` showed, within `LOOK_LEVELS` and
+/// `LOOK_PERCENT`. Samples of another size, or none, never match.
+pub fn looks_same(before: &[u8], now: &[u8]) -> bool {
+    changed_samples(before, now).is_some_and(|(changed, all)| changed * 100 <= all * LOOK_PERCENT)
 }
 
-/// Whether the element at the point is still the one the agent aimed at.
-/// An app that named none when the agent asked leaves the pixels to
-/// decide; one that named one must name the same one again.
-pub fn same_element(before: Option<&str>, now: Option<&str>) -> bool {
-    before.is_none() || before == now
+/// What accessibility says is at the point: role, subrole, title and
+/// description, each None when the app didn't answer for it. Two rows of
+/// a list with the same avatar and a shared name prefix still differ here.
+pub type Identity = [Option<String>; 4];
+
+/// The identity, or None when the app answered for no attribute.
+pub fn element_identity(parts: Identity) -> Option<Identity> {
+    parts.iter().any(Option::is_some).then_some(parts)
+}
+
+/// Whether the element at the point may still be the one the agent aimed
+/// at. Accessibility is the main guard against a list that reordered, but
+/// an app that times out says nothing: an unknown element on either side,
+/// or an attribute only one read returned, leaves the pixels to decide.
+/// Only an attribute both reads returned, with different values, refuses.
+pub fn same_element(before: Option<&Identity>, now: Option<&Identity>) -> bool {
+    let (Some(before), Some(now)) = (before, now) else {
+        return true;
+    };
+    before.iter().zip(now).all(|pair| match pair {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    })
 }
 
 /// What the success reply says of the wait, in tenths of a second.
@@ -380,23 +425,47 @@ mod tests {
     }
 
     #[test]
-    fn the_band_spans_the_window_around_the_point_s_row() {
+    fn the_region_is_the_element_s_frame_inside_the_window() {
         let display = Rect::new(3000.0, -200.0, 1280.0, 800.0);
-        let window = Rect::new(3100.0, -100.0, 400.0, 300.0);
+        let window = Rect::new(3100.0, -100.0, 900.0, 600.0);
+        // A sidebar row.
+        let row = Rect::new(3100.0, 0.0, 250.0, 64.0);
         assert_eq!(
-            look_region((3200.0, 0.0), display, window),
-            Rect::new(100.0, 168.0, 400.0, 64.0)
+            look_region((3200.0, 30.0), display, window, Some(row)),
+            Rect::new(100.0, 200.0, 250.0, 64.0)
         );
-        // Near the window's bottom it slides up inside the window.
+        // A row reaching past the window is cut at its edge.
+        let wide = Rect::new(3000.0, 0.0, 400.0, 64.0);
         assert_eq!(
-            look_region((3200.0, 195.0), display, window),
-            Rect::new(100.0, 336.0, 400.0, 64.0)
+            look_region((3200.0, 30.0), display, window, Some(wide)),
+            Rect::new(100.0, 200.0, 300.0, 64.0)
         );
-        // A window past the display's edge is cut at it.
-        let spilling = Rect::new(2900.0, -250.0, 400.0, 100.0);
+    }
+
+    #[test]
+    fn without_a_usable_frame_a_band_surrounds_the_point() {
+        let display = Rect::new(3000.0, -200.0, 1280.0, 800.0);
+        let window = Rect::new(3100.0, -100.0, 900.0, 600.0);
+        let band = Rect::new(450.0, 268.0, 300.0, 64.0);
+        let at = (3600.0, 100.0);
+        assert_eq!(look_region(at, display, window, None), band);
+        // A whole pane, a frame elsewhere, a speck: the band.
+        let pane = Rect::new(3400.0, -100.0, 600.0, 600.0);
+        assert_eq!(look_region(at, display, window, Some(pane)), band);
+        let elsewhere = Rect::new(3100.0, 0.0, 250.0, 64.0);
+        assert_eq!(look_region(at, display, window, Some(elsewhere)), band);
+        let speck = Rect::new(3598.0, 98.0, 4.0, 4.0);
+        assert_eq!(look_region(at, display, window, Some(speck)), band);
+        // Near the window's corner it slides inside rather than shrinking.
         assert_eq!(
-            look_region((3050.0, -190.0), display, spilling),
-            Rect::new(0.0, 0.0, 300.0, 50.0)
+            look_region((3105.0, 495.0), display, window, None),
+            Rect::new(100.0, 636.0, 300.0, 64.0)
+        );
+        // A small window holds a smaller band.
+        let small = Rect::new(3100.0, -100.0, 200.0, 40.0);
+        assert_eq!(
+            look_region((3200.0, -80.0), display, small, None),
+            Rect::new(100.0, 100.0, 200.0, 40.0)
         );
     }
 
@@ -421,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_caret_blink_looks_the_same_and_another_row_does_not() {
-        let width = 400;
+        let width = 250;
         let before = band(width, [240, 240, 240]);
         assert!(looks_same(&before, &before));
         // A 2 by 16 point caret appears.
@@ -431,10 +500,21 @@ mod tests {
         // A slightly different shade everywhere, as a hover tint.
         let tint: Vec<u8> = before.iter().map(|v| v - 20).collect();
         assert!(looks_same(&before, &tint));
-        // Another chat's 40 by 40 avatar where this one's was.
+        // A new time stamp and badge in the same row.
+        let mut badge = before.clone();
+        paint(&mut badge, width, 200..240, 8..20, [90, 90, 90]);
+        paint(&mut badge, width, 220..240, 36..52, [250, 60, 50]);
+        assert!(looks_same(&before, &badge));
+        // Another chat: its avatar, name and preview where this one's were.
         let mut other = before.clone();
         paint(&mut other, width, 4..44, 10..50, [60, 60, 60]);
+        paint(&mut other, width, 56..160, 12..24, [30, 30, 30]);
+        paint(&mut other, width, 56..200, 36..46, [120, 120, 120]);
         assert!(!looks_same(&before, &other));
+        assert_eq!(
+            changed_samples(&before, &other).map(|c| c.1),
+            Some(width * 64)
+        );
         // Just past the limit, and at it.
         let limit = width * LOOK_SIDE as usize * LOOK_PERCENT / 100;
         let mut edge = before.clone();
@@ -462,15 +542,21 @@ mod tests {
     }
 
     #[test]
-    fn another_element_at_the_point_is_refused() {
-        let row = |title| element_identity([Some("AXRow"), None, Some(title), None]);
+    fn another_element_at_the_point_is_refused_but_an_unknown_one_is_not() {
+        let row =
+            |title: &str| element_identity([Some("AXRow".into()), None, Some(title.into()), None]);
         let a = row("张三丰");
-        assert!(same_element(a.as_deref(), row("张三丰").as_deref()));
-        assert!(!same_element(a.as_deref(), row("张三").as_deref()));
-        assert!(!same_element(a.as_deref(), None));
-        // Nothing named when the agent asked: the pixels decide.
-        assert!(same_element(None, a.as_deref()));
-        assert_eq!(element_identity([None; 4]), None);
+        assert!(same_element(a.as_ref(), row("张三丰").as_ref()));
+        assert!(!same_element(a.as_ref(), row("张三").as_ref()));
+        // A hit test that timed out, on either side: the pixels decide.
+        assert!(same_element(a.as_ref(), None));
+        assert!(same_element(None, a.as_ref()));
+        // A title that timed out on one read compares the role alone.
+        let untitled = element_identity([Some("AXRow".into()), None, None, None]);
+        assert!(same_element(a.as_ref(), untitled.as_ref()));
+        let cell = element_identity([Some("AXCell".into()), None, None, None]);
+        assert!(!same_element(a.as_ref(), cell.as_ref()));
+        assert_eq!(element_identity([None, None, None, None]), None);
     }
 
     #[test]

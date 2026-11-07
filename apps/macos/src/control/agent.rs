@@ -4980,12 +4980,13 @@ async fn queued_click(
     }
     // What the agent aimed at, to compare just before the loan clicks: a
     // list can reorder while the user decides.
-    let region = real_click::look_region(at, area, frame);
-    let (look, element) = off(cx, move || {
-        (
-            crate::mac::screenshot::samples(id, region),
-            crate::mac::ax::identity_at(target.pid, at),
-        )
+    let (region, look, element) = off(cx, move || {
+        // Chromium and Electron publish their pages' elements only once
+        // asked.
+        crate::mac::ax::ensure_web_tree(target);
+        let (element, framed) = crate::mac::ax::target_at(target.pid, at);
+        let region = real_click::look_region(at, area, frame, framed);
+        (region, crate::mac::screenshot::samples(id, region), element)
     })
     .await;
     let look = look.map_err(|why| {
@@ -5017,6 +5018,7 @@ async fn queued_click(
         flags: crate::mac::input::flags(modifiers).0,
         app,
         title: real_click::short_title(&title, 40),
+        region,
         look,
         element,
         asked_ms: 0,
