@@ -5217,7 +5217,8 @@ async fn queued_click(
         // Chromium and Electron publish their pages' elements only once
         // asked.
         crate::mac::ax::ensure_web_tree(target);
-        let (element, framed) = crate::mac::ax::target_at(target.pid, at);
+        let (element, framed) =
+            crate::mac::ax::target_at(target.pid, at, std::time::Duration::from_secs(1));
         let region = real_click::look_region(at, area, frame, framed);
         (region, crate::mac::screenshot::samples(id, region), element)
     })

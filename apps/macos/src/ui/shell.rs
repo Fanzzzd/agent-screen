@@ -1325,12 +1325,30 @@ impl Shell {
                             // Before the window comes forward, which can
                             // redraw it: the point must still show what the
                             // agent aimed at.
-                            let (element, _) = crate::mac::ax::target_at(click.target.pid, click.at);
-                            if !real_click::same_element(click.element.as_deref(), element.as_ref()) {
-                                log::info!(
-                                    "input queue: the element at the click changed: {:?} -> {element:?}",
-                                    click.element
+                            // Read only when the request named an element,
+                            // and within 300 ms: the user's pointer waits.
+                            let element_kept = |when: &str| {
+                                if click.element.is_none() {
+                                    return true;
+                                }
+                                let (element, _) = crate::mac::ax::target_at(
+                                    click.target.pid,
+                                    click.at,
+                                    std::time::Duration::from_millis(300),
                                 );
+                                let same = real_click::same_element(
+                                    click.element.as_deref(),
+                                    element.as_ref(),
+                                );
+                                if !same {
+                                    log::info!(
+                                        "input queue: the element at the click changed {when}: {:?} -> {element:?}",
+                                        click.element
+                                    );
+                                }
+                                same
+                            };
+                            if !element_kept("while the request waited") {
                                 return Outcome::Refused(real_click::CONTENT_CHANGED);
                             }
                             match crate::mac::screenshot::samples(display, click.region) {
@@ -1386,21 +1404,7 @@ impl Shell {
                                     }
                                     why.is_none()
                                 },
-                                || {
-                                    let (element, _) =
-                                        crate::mac::ax::target_at(click.target.pid, click.at);
-                                    let same = real_click::same_element(
-                                        click.element.as_deref(),
-                                        element.as_ref(),
-                                    );
-                                    if !same {
-                                        log::info!(
-                                            "input queue: the element at the click changed as its window came forward: {:?} -> {element:?}",
-                                            click.element
-                                        );
-                                    }
-                                    same
-                                },
+                                || element_kept("as its window came forward"),
                             );
                         }
                         crate::input_queue::Plan::MenuItem(item) => {

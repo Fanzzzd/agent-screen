@@ -621,10 +621,14 @@ fn sheet_element(target: WindowTarget) -> Option<Element> {
 /// The element at a global point of app `pid`, as a click there would hit
 /// it: the deepest one accessibility knows.
 pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
+    element_at_in(&application(pid), at)
+}
+
+/// The element at a global point of `app`, an application element.
+fn element_at_in(app: &AXUIElement, at: (f64, f64)) -> Option<Element> {
     let mut raw: *const AXUIElement = std::ptr::null();
-    let error = unsafe {
-        application(pid).copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
-    };
+    let error =
+        unsafe { app.copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw)) };
     let raw = NonNull::new(raw as *mut AXUIElement)?;
     let element = unsafe { CFRetained::from_raw(raw) };
     (error == AXError::Success).then_some(element)
@@ -635,18 +639,22 @@ pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
 /// "Clicks"): the hit element's role, subrole, title and description and
 /// the name of its row, cell or link, each None when the app didn't
 /// answer for it, and the frame of that row, cell or link, or else of the
-/// element, in global points.
+/// element, in global points. Every read together takes at most `budget`:
+/// an app that stalls past it leaves both unknown, and the pixels decide.
 pub fn target_at(
     pid: i32,
     at: (f64, f64),
+    budget: std::time::Duration,
 ) -> (
     Option<agent_screen_model::real_click::Identity>,
     Option<Rect>,
 ) {
-    let Some(element) = element_at(pid, at) else {
+    let budget = Budget(std::time::Instant::now() + budget);
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let Some(element) = budget.arm(&app).then(|| element_at_in(&app, at)).flatten() else {
         return (None, None);
     };
-    let get = |name| string_attribute(&element, name);
+    let read = |e: &AXUIElement, name| budget.arm(e).then(|| string_attribute(e, name)).flatten();
     // A list's row, a table's cell or a web row's link frames and names
     // what a reorder would change.
     let mut item = None;
@@ -654,61 +662,107 @@ pub fn target_at(
     for _ in 0..6 {
         let Some(e) = next else { break };
         if matches!(
-            string_attribute(&e, "AXRole").as_deref(),
+            read(&e, "AXRole").as_deref(),
             Some("AXRow" | "AXCell" | "AXLink")
         ) {
             item = Some(e);
             break;
         }
-        next = element_attribute(&e, "AXParent");
+        next = budget
+            .arm(&e)
+            .then(|| element_attribute(&e, "AXParent"))
+            .flatten();
     }
-    let name = item.as_deref().and_then(item_name);
+    let name = item.as_deref().and_then(|i| item_name(i, &budget));
     let identity = agent_screen_model::real_click::element_identity([
-        get("AXRole"),
-        get("AXSubrole"),
-        get("AXTitle"),
-        get("AXDescription"),
+        read(&element, "AXRole"),
+        read(&element, "AXSubrole"),
+        read(&element, "AXTitle"),
+        read(&element, "AXDescription"),
         name,
     ]);
-    let framed = item.as_deref().and_then(frame).or_else(|| frame(&element));
+    let framed = item
+        .as_deref()
+        .filter(|i| budget.arm(i))
+        .and_then(frame)
+        .or_else(|| budget.arm(&element).then(|| frame(&element)).flatten());
+    if budget.over() {
+        log::info!("input queue: accessibility at the click took too long; the pixels decide");
+        return (None, None);
+    }
     (identity, framed)
 }
 
-/// A row's name: its first static text with a letter in it, within three
-/// levels and 40 elements, or else its own title or description.
-fn item_name(item: &AXUIElement) -> Option<String> {
+/// When a run of accessibility reads must end.
+struct Budget(std::time::Instant);
+
+impl Budget {
+    /// Let `element`'s next read wait only what is left; false once
+    /// nothing is.
+    fn arm(&self, element: &AXUIElement) -> bool {
+        let left = self.0.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        unsafe { element.set_messaging_timeout(left.as_secs_f32().max(0.01)) };
+        true
+    }
+
+    fn over(&self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
+/// A row's name, from its static texts in depth-first pre-order within
+/// three levels and 40 elements (`real_click::item_name` picks), or else
+/// its own title or description.
+fn item_name(item: &AXUIElement, budget: &Budget) -> Option<String> {
+    fn walk(
+        e: &AXUIElement,
+        depth: usize,
+        seen: &mut usize,
+        texts: &mut Vec<String>,
+        budget: &Budget,
+    ) {
+        if depth > 3 || *seen >= 40 || !budget.arm(e) {
+            return;
+        }
+        *seen += 1;
+        if depth > 0 && string_attribute(e, "AXRole").as_deref() == Some("AXStaticText") {
+            let text = budget
+                .arm(e)
+                .then(|| string_attribute(e, "AXValue"))
+                .flatten()
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| {
+                    budget
+                        .arm(e)
+                        .then(|| string_attribute(e, "AXTitle"))
+                        .flatten()
+                });
+            texts.extend(text);
+            return;
+        }
+        if !budget.arm(e) {
+            return;
+        }
+        for child in elements_attribute(e, "AXChildren") {
+            walk(&child, depth + 1, seen, texts, budget);
+        }
+    }
     let mut texts = Vec::new();
-    let mut level = elements_attribute(item, "AXChildren");
-    let mut seen = 0;
-    for _ in 0..3 {
-        let mut below = Vec::new();
-        for e in level {
-            seen += 1;
-            if seen > 40 {
-                break;
-            }
-            if string_attribute(&e, "AXRole").as_deref() == Some("AXStaticText") {
-                if let Some(text) = string_attribute(&e, "AXValue")
-                    .filter(|t| !t.trim().is_empty())
-                    .or_else(|| string_attribute(&e, "AXTitle"))
-                {
-                    texts.push(text);
-                }
-            } else {
-                below.extend(elements_attribute(&e, "AXChildren"));
-            }
-        }
-        if let Some(name) = agent_screen_model::real_click::item_name(&texts) {
-            return Some(name.to_string());
-        }
-        if seen > 40 || below.is_empty() {
-            break;
-        }
-        level = below;
+    walk(item, 0, &mut 0, &mut texts, budget);
+    if let Some(name) = agent_screen_model::real_click::item_name(&texts) {
+        return Some(name.to_string());
     }
     ["AXTitle", "AXDescription"]
         .into_iter()
-        .filter_map(|a| string_attribute(item, a))
+        .filter_map(|a| {
+            budget
+                .arm(item)
+                .then(|| string_attribute(item, a))
+                .flatten()
+        })
         .find(|t| !t.trim().is_empty())
 }
 

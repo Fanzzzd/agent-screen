@@ -151,14 +151,55 @@ pub fn element_identity(parts: Identity) -> Option<Identity> {
     parts.iter().any(Option::is_some).then_some(parts)
 }
 
-/// A row's name: the first of its texts, in the tree's order, with a
-/// letter in it. A time stamp or an unread count has none, and would
-/// change while the request waits.
+/// A row's name, from its texts in depth-first pre-order: the first with a
+/// letter and no digit that isn't a day word, as "Yesterday" or 昨天. A
+/// time stamp ("10:30 AM", 下午3:05, "2m"), an unread count or a day would
+/// change while the request waits, and a name can sit deeper in the tree
+/// than they do. Only when no text qualifies, the first with a letter.
 pub fn item_name(texts: &[String]) -> Option<&str> {
-    texts
-        .iter()
-        .map(|t| t.trim())
-        .find(|t| t.chars().any(char::is_alphabetic))
+    let texts = || texts.iter().map(|t| t.trim());
+    let letter = |t: &str| t.chars().any(char::is_alphabetic);
+    texts()
+        .find(|t| letter(t) && !t.chars().any(|c| c.is_ascii_digit()) && !day_word(t))
+        .or_else(|| texts().find(|t| letter(t)))
+}
+
+/// A word a list shows for a day instead of a date.
+fn day_word(text: &str) -> bool {
+    const WORDS: [&str; 20] = [
+        "now",
+        "just now",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "刚刚",
+        "今天",
+        "昨天",
+        "前天",
+        "明天",
+        "上午",
+        "下午",
+        "晚上",
+    ];
+    let lower = text.to_lowercase();
+    if WORDS.contains(&lower.as_str()) {
+        return true;
+    }
+    // 星期一, 周三, 礼拜天.
+    let chars: Vec<char> = text.chars().collect();
+    let weekday = |c: char| "一二三四五六日天".contains(c);
+    match chars.as_slice() {
+        ['周', d] => weekday(*d),
+        ['星', '期', d] | ['礼', '拜', d] => weekday(*d),
+        _ => false,
+    }
 }
 
 /// Whether the element at the point may still be the one the agent aimed
@@ -624,13 +665,30 @@ mod tests {
     }
 
     #[test]
-    fn a_row_s_name_is_its_first_text_with_a_letter() {
+    fn a_row_s_name_skips_times_days_and_counts() {
         let texts = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // In pre-order the time and the preview come before a name nested
+        // deeper: the time is skipped, and the preview, with a digit, too.
         assert_eq!(
-            item_name(&texts(&["12:01", "3", " 张三丰 ", "你好"])),
+            item_name(&texts(&["10:30 AM", "3", "see you at 5", "Alice"])),
+            Some("Alice")
+        );
+        assert_eq!(
+            item_name(&texts(&[
+                "下午3:05",
+                "昨天",
+                "星期三",
+                "周五",
+                " 张三丰 ",
+                "你好"
+            ])),
             Some("张三丰")
         );
-        assert_eq!(item_name(&texts(&["Alice", "see you"])), Some("Alice"));
+        assert_eq!(item_name(&texts(&["2m", "Yesterday", "Bob"])), Some("Bob"));
+        // A surname is not a weekday.
+        assert_eq!(item_name(&texts(&["周杰"])), Some("周杰"));
+        // Nothing qualifies: the first text with a letter.
+        assert_eq!(item_name(&texts(&["12:01", "Room 101"])), Some("Room 101"));
         assert_eq!(item_name(&texts(&["12:01", "3"])), None);
         assert_eq!(item_name(&[]), None);
     }
