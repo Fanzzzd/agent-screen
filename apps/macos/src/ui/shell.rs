@@ -3011,6 +3011,8 @@ impl Shell {
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
             core.pending_returns.take_back(id, target.pid)
         });
+        // Nor does the agent's cold start of it count any more.
+        crate::mac::catch::end_cold_start(id, target.pid);
         // Keys typed in the Viewer must not follow the window home.
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
         let main_name = main_screen_name();

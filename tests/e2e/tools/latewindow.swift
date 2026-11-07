@@ -4,7 +4,8 @@
 // main screen, where an app restores a saved frame. LATE_BUSY_MS (0 by
 // default) then keeps its main thread busy that long, as a large app
 // building its main window is: Accessibility gets no answer from it
-// meanwhile. It never activates itself.
+// meanwhile. SIGUSR1 hides it, as Command-H does. It never activates
+// itself.
 import AppKit
 
 final class Delegate: NSObject, NSApplicationDelegate {
@@ -43,5 +44,9 @@ final class Delegate: NSObject, NSApplicationDelegate {
 let app = NSApplication.shared
 let delegate = Delegate()
 app.delegate = delegate
+signal(SIGUSR1, SIG_IGN)
+let hide = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+hide.setEventHandler { NSApp.hide(nil) }
+hide.resume()
 app.setActivationPolicy(.regular)
 app.run()

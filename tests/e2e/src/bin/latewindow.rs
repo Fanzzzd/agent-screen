@@ -8,7 +8,10 @@
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e latewindow
 //!
-//! Makes 1 display and takes about 30 s. Before the fix, the busy app's
+//! Then the app is hidden, as by Command-H, after its window showed: the
+//! launch's watch leaves it hidden, as the window may be the user's.
+//!
+//! Makes 1 display and takes about 35 s. Before the fix, the busy app's
 //! main window stayed on your screen, and AeroSpace tiled it there.
 
 use std::process::ExitCode;
@@ -77,6 +80,10 @@ fn test(app: &str) -> Result<()> {
         kill_ours(our_binary("LateWindow"));
         sleep_ms(500);
     }
+    println!("hidden after its window showed");
+    hidden_app_stays_hidden(&client, id, app)?;
+    kill_ours(our_binary("LateWindow"));
+    sleep_ms(500);
     client.call("end_display", json!({ "display_id": id }))?;
     client.close();
     Ok(())
@@ -138,6 +145,40 @@ fn main_window_lands(client: &McpClient, id: u64, app: &str, busy: u64) -> Resul
         "the main window is claimed, so AeroSpace leaves it alone",
         window.is_some_and(|w| claimed().contains(&w)),
         format!("window {window:?}, claimed {:?}", claimed()),
+    );
+    Ok(())
+}
+
+/// Within the cold start's 30 s, an app hidden after its window showed
+/// stays hidden: the window may be the user's, and they hid it.
+fn hidden_app_stays_hidden(client: &McpClient, id: u64, app: &str) -> Result<()> {
+    let launched = client.call(
+        "launch_app",
+        json!({ "display_id": id, "app": app, "environment": { "LATE_MAIN_MS": "60000" } }),
+    )?;
+    let first = launched.window().context("the loading window")?;
+    check(
+        "launch_app answers with the loading window",
+        first.title == "Loading",
+        launched.text(),
+    );
+    sleep_ms(500);
+    let _ = std::process::Command::new("/usr/bin/pkill")
+        .args(["-USR1", "-f"])
+        .arg(our_binary("LateWindow"))
+        .status();
+    // The watch looks every 150 ms.
+    sleep_ms(2000);
+    let listed = client.call("list_windows", json!({ "display_id": id }))?;
+    let shown = listed
+        .windows()
+        .unwrap_or_default()
+        .into_iter()
+        .any(|w| w.window_id == first.window_id);
+    check(
+        "the hidden app's window isn't shown again on the display",
+        !shown,
+        listed.text(),
     );
     Ok(())
 }
