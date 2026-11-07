@@ -3682,7 +3682,8 @@ async fn launch_now(
         return already_running(core, id, name, &instances_before, cx).await;
     }
     // Two sessions launching an app at once both see it start; it's the
-    // first one's.
+    // first one's. Its cold start counts from here.
+    let launched_at = Instant::now();
     if !was_running {
         let ours = core.update(cx, |c, _| {
             let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
@@ -3998,7 +3999,7 @@ async fn launch_now(
             if !was_running {
                 let mut seen = before.clone();
                 seen.insert(placed.target.window_id);
-                watch_cold_start(core, id, pid, seen, true, screen.clone(), cx);
+                watch_cold_start(core, id, pid, seen, true, launched_at, screen.clone(), cx);
             }
             log::debug!(
                 "launch: {name} answered at {} ms",
@@ -4077,9 +4078,17 @@ async fn launch_now(
     } else if !was_running {
         // The kept catch takes the first window the moment it opens, unless
         // the user is clicking or typing then; the watch is for an app that
-        // won't take observers yet.
-        crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
-        watch_cold_start(&core, id, pid, before, false, screen.clone(), cx);
+        // won't take observers yet. The cold start counts from the launch.
+        watch_cold_start(
+            &core,
+            id,
+            pid,
+            before,
+            false,
+            launched_at,
+            screen.clone(),
+            cx,
+        );
     }
     // The URL waits for the new window, which never came: opening it now
     // would add a tab to whatever window the user has in front.
@@ -4668,28 +4677,35 @@ fn no_keyboard_target() -> ControlError {
 /// before it took observers, or while too busy to answer Accessibility, as
 /// WeCom's main window, 3.4 s after its loading window, was. Without a kept
 /// catch yet, it tries for one again. `shown`: launch_app answered with a
-/// window of the app.
+/// window of the app. `launched_at`: when the cold start began.
+#[allow(clippy::too_many_arguments)]
 fn watch_cold_start(
     core: &Entity<Core>,
     id: DisplayId,
     pid: i32,
     mut seen: std::collections::HashSet<u32>,
     mut shown: bool,
+    launched_at: Instant,
     screen: Option<String>,
     cx: &mut AsyncApp,
 ) {
-    use agent_screen_model::new_window::{On, Role, Seen, Step, Watch, retries_catch, step, watch};
+    use agent_screen_model::new_window::{
+        COLD_START, On, Role, Seen, Step, Watch, retries_catch, step, watch,
+    };
     let core = core.clone();
     let bounds = cg::display_bounds(id);
     cx.spawn(async move |cx: &mut AsyncApp| {
         // What was known as each window the app didn't describe yet first
         // showed: the user's input then counts, not 3 s later.
         let mut first_seen: std::collections::HashMap<u32, Seen> = Default::default();
-        for tick in 0..200u32 {
+        for tick in 0u32.. {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let started = takes_windows(&core, id, cx)
+            // A busy app makes a tick take seconds: the span is 30 s from
+            // the launch, not 200 ticks.
+            let started = launched_at.elapsed() < COLD_START
+                && takes_windows(&core, id, cx)
                 && core.read_with(cx, |c, _| {
                     c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
                 });
@@ -4746,9 +4762,14 @@ fn watch_cold_start(
                             On::Elsewhere
                         };
                         let window = w.target.window_id;
-                        let facts = known.get(&window).copied().unwrap_or_else(|| {
-                            crate::mac::catch::seen(id, pid, bounds, Some(window))
-                        });
+                        // Kept from first sight, with the user's input
+                        // since: a window they clicked into isn't the
+                        // agent's.
+                        let facts = match known.get(&window) {
+                            Some(first) => first
+                                .with_user_now(crate::mac::catch::user_acted_recently(pid)),
+                            None => crate::mac::catch::seen(id, pid, bounds, Some(window)),
+                        };
                         (w, on, facts)
                     })
                     .collect();
@@ -4772,13 +4793,20 @@ fn watch_cold_start(
                 let target = window.target;
                 let verdict = watch(on, decided, role, facts);
                 if verdict == Watch::Later {
-                    first_seen.entry(target.window_id).or_insert(facts);
+                    first_seen.insert(target.window_id, facts);
                     continue;
                 }
                 seen.insert(target.window_id);
                 first_seen.remove(&target.window_id);
                 if !decided && facts.ends_cold_start() {
                     crate::mac::catch::end_cold_start(id, pid);
+                }
+                // Settling an earlier window took time: the user may have
+                // taken the app back meanwhile.
+                if matches!(verdict, Watch::Record | Watch::Place)
+                    && !still_agents(&core, id, target, cx)
+                {
+                    continue;
                 }
                 match verdict {
                     Watch::Leave | Watch::Later => {}

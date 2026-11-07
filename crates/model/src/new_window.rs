@@ -56,12 +56,23 @@ impl Seen {
     }
 
     /// Whether this window ends the cold start's 30 s for its app: the
-    /// user acted on the app as it opened, so they use it too. Its later
-    /// windows count as the agent's only right after the agent acts, as
-    /// any app's do, or the link they click in Mail would open on the
-    /// Agent Display.
+    /// user acted as it opened, in the app or in Finder, the Dock or a
+    /// launcher, which open apps' windows (`user`), so they may use it too.
+    /// Its later windows count as the agent's only right after the agent
+    /// acts, as any app's do, or the link they click in Mail would open on
+    /// the Agent Display.
     pub fn ends_cold_start(self) -> bool {
         self.user
+    }
+
+    /// The facts from when a window first showed, with whether the user
+    /// has acted since: a window they clicked into while the app was too
+    /// busy to describe it isn't the agent's.
+    pub fn with_user_now(self, user: bool) -> Seen {
+        Seen {
+            user: self.user || user,
+            ..self
+        }
     }
 }
 
@@ -109,6 +120,21 @@ pub enum Role {
     Unanswered,
 }
 
+/// What the window is, from the app's answer for its AXWindows: `None`
+/// when it gave none, as a busy app doesn't within the timeout; else
+/// whether the window is listed, with the role the app gave it, `None`
+/// when it didn't answer for that.
+pub fn role(listed: Option<Option<Option<&str>>>) -> Role {
+    match listed {
+        None | Some(Some(None)) => Role::Unanswered,
+        // An app that answers and doesn't list it: a sheet, or a window it
+        // keeps out of its list.
+        Some(None) => Role::Other,
+        Some(Some(Some("AXWindow"))) => Role::Window,
+        Some(Some(Some(_))) => Role::Other,
+    }
+}
+
 /// `decided`: the catch left the window to the user or left it undecided,
 /// or the user took the app back.
 pub fn watch(on: On, decided: bool, role: Role, seen: Seen) -> Watch {
@@ -142,8 +168,8 @@ pub enum Step {
     Look,
 }
 
-/// `started`: the display takes windows and still counts the app as one
-/// it started. `shown`: `launch_app` answered with a window of the app, or
+/// `started`: the cold start's 30 s since the launch haven't passed, and
+/// the display takes windows and still counts the app as one it started. `shown`: `launch_app` answered with a window of the app, or
 /// the watch has seen one.
 pub fn step(started: bool, hidden: bool, shown: bool) -> Step {
     match (started, hidden, shown) {
@@ -307,6 +333,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_window_the_app_doesnt_answer_for_is_unanswered() {
+        assert_eq!(
+            role(None),
+            Role::Unanswered,
+            "AXWindows timed out: not a sheet, a busy app's window"
+        );
+        assert_eq!(role(Some(Some(None))), Role::Unanswered);
+        assert_eq!(role(Some(None)), Role::Other);
+        assert_eq!(role(Some(Some(Some("AXWindow")))), Role::Window);
+        assert_eq!(role(Some(Some(Some("AXSheet")))), Role::Other);
+    }
+
+    #[test]
+    fn the_users_input_while_a_window_waits_counts() {
+        let first = seen(true, false, true);
+        assert_eq!(
+            watch(
+                On::Elsewhere,
+                false,
+                Role::Window,
+                first.with_user_now(true)
+            ),
+            Watch::Undecided,
+            "clicked into while the app was busy: not moved from under the pointer"
+        );
+        assert_eq!(first.with_user_now(false), first);
+        let users = seen(false, true, false);
+        assert_eq!(users.with_user_now(false), users);
     }
 
     #[test]
