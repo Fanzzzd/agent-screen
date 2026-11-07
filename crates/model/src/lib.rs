@@ -18,6 +18,7 @@ pub mod menu_press;
 pub mod model;
 pub mod new_window;
 pub mod numbers;
+pub mod real_click;
 pub mod recording_playback;
 pub mod returns;
 pub mod screen_edge;

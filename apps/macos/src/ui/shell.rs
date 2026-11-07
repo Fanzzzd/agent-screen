@@ -831,6 +831,18 @@ impl Shell {
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // A grant that just ended, as after a loan that left its session
+        // done, puts the pointer and front app back now, not at the next
+        // once-a-second tick.
+        if !self.loan_running
+            && !self.restoring
+            && self.core.read(cx).input_queue.ending().is_some()
+        {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update(cx, |shell, cx| shell.drive_queue(cx));
+            })
+            .detach();
+        }
         let helper = self.core.read(cx).colorsync_helper();
         if helper.is_some() && helper != self.colorsync {
             self.colorsync = helper;
@@ -1289,10 +1301,113 @@ impl Shell {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
+                    use agent_screen_model::real_click;
                     use std::sync::atomic::Ordering;
                     let area = cg::display_bounds(display);
                     let plan = match plan {
                         crate::input_queue::Plan::Drag(drag) => drag,
+                        crate::input_queue::Plan::Click(click) => {
+                            let Some(window) = crate::mac::windows::on_display(display)
+                                .into_iter()
+                                .find(|w| w.target == click.target)
+                            else {
+                                return Outcome::Refused("the window is no longer on the display");
+                            };
+                            let frame = window.bounds.offset(area.x, area.y);
+                            if area != click.area
+                                || frame != click.frame
+                                || !real_click::contained(click.at, area, frame)
+                            {
+                                return Outcome::Refused(
+                                    "the click is outside its authorized window or display",
+                                );
+                            }
+                            // Before the window comes forward, which can
+                            // redraw it: the point must still show what the
+                            // agent aimed at.
+                            // Read only when the request named an element,
+                            // and within 300 ms: the user's pointer waits.
+                            let element_kept = |when: &str| {
+                                if click.element.is_none() {
+                                    return true;
+                                }
+                                let (element, _) = crate::mac::ax::target_at(
+                                    click.target.pid,
+                                    click.at,
+                                    std::time::Duration::from_millis(300),
+                                    false,
+                                );
+                                let same = real_click::same_element(
+                                    click.element.as_deref(),
+                                    element.as_ref(),
+                                );
+                                if !same {
+                                    log::info!(
+                                        "input queue: the element at the click changed {when}: {:?} -> {element:?}",
+                                        click.element
+                                    );
+                                }
+                                same
+                            };
+                            if !element_kept("while the request waited") {
+                                return Outcome::Refused(real_click::CONTENT_CHANGED);
+                            }
+                            match crate::mac::screenshot::samples(display, click.region) {
+                                Ok(now) if real_click::looks_same(&click.look, &now) => {}
+                                Ok(now) => {
+                                    // Diagnostics tell a false refusal from a
+                                    // real change by how much changed.
+                                    let (changed, all) =
+                                        real_click::changed_samples(&click.look, &now)
+                                            .unwrap_or((0, 0));
+                                    log::info!(
+                                        "input queue: the region {:?} at the click changed: {changed} of {all} samples ({:.1}%, the limit is {}%)",
+                                        click.region,
+                                        changed as f64 * 100.0 / all.max(1) as f64,
+                                        real_click::LOOK_PERCENT
+                                    );
+                                    return Outcome::Refused(real_click::CONTENT_CHANGED);
+                                }
+                                Err(why) => {
+                                    log::info!("input queue: no picture before the click: {why}");
+                                    return Outcome::Refused(
+                                        "what is under the point could not be captured before the click",
+                                    );
+                                }
+                            }
+                            return real_input::click_at(
+                                click.target,
+                                click.at,
+                                click.click,
+                                objc2_core_graphics::CGEventFlags(click.flags),
+                                |at| {
+                                    // As for a drag: a moved or covered
+                                    // window must not get the click.
+                                    let why = if !ok.load(Ordering::SeqCst) {
+                                        Some("the loan was cancelled")
+                                    } else if cg::display_bounds(display) != area
+                                        || !area.contains(at)
+                                    {
+                                        Some("the display geometry changed")
+                                    } else if cg::window_bounds(click.target.window_id)
+                                        != Some(frame)
+                                    {
+                                        Some("the window geometry changed")
+                                    } else if !crate::mac::input::window_at(at)
+                                        .is_some_and(|(target, _)| target == click.target)
+                                    {
+                                        Some("the window was covered or left the screen")
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(why) = why {
+                                        log::debug!("input queue containment: {why}");
+                                    }
+                                    why.is_none()
+                                },
+                                || element_kept("as its window came forward"),
+                            );
+                        }
                         crate::input_queue::Plan::MenuItem(item) => {
                             if area != item.area
                                 || !crate::mac::windows::on_display(display)

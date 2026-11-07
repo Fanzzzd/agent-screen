@@ -483,14 +483,17 @@ impl HelpCard {
         let approval = input.queue.approval();
         let mut rows = Vec::new();
         let mut can_approve = false;
-        let (mut menus, mut drags) = (false, false);
+        let (mut menus, mut clicks, mut drags) = (false, false, false);
         for request in input.queue.waiting() {
             let Some(display) = core.displays.get(request.owner.display) else {
                 continue;
             };
             can_approve |= !display.takeover && !display.is_ended();
-            menus |= matches!(input.plan(request.id), Some(Plan::MenuItem(_)));
-            drags |= !matches!(input.plan(request.id), Some(Plan::MenuItem(_)));
+            match input.plan(request.id) {
+                Some(Plan::MenuItem(_)) => menus = true,
+                Some(Plan::Click(_)) => clicks = true,
+                _ => drags = true,
+            }
             let row = request_row(
                 display.label(),
                 request_text(input, request),
@@ -508,18 +511,22 @@ impl HelpCard {
         let (title, sub) = if can_approve || count == 0 {
             (
                 t("Allow use of your mouse?", "允许使用你的鼠标？"),
-                match (menus, drags) {
-                    (true, false) => t(
+                match (menus, clicks, drags) {
+                    (true, false, false) => t(
                         "This app takes a menu item chosen in the background as its keyboard shortcut. A click with your real pointer chooses it.",
                         "这个应用会把在后台选择的菜单项当作快捷键处理。用你的真实指针点一下，才能真正选中它。",
                     ),
-                    (true, true) => t(
-                        "These actions cannot run in the background. They need your real pointer.",
-                        "这些操作无法在后台完成，需要暂时使用你的真实指针。",
+                    (false, true, false) => t(
+                        "A click sent in the background had no effect in this app. It needs your real pointer.",
+                        "后台发送的点击在这个应用里没有生效，需要暂时使用你的真实指针。",
                     ),
-                    _ => t(
+                    (false, false, _) => t(
                         "These drags cannot run in the background. They need your real pointer.",
                         "这些拖拽无法在后台完成，需要暂时使用你的真实指针。",
+                    ),
+                    _ => t(
+                        "These actions cannot run in the background. They need your real pointer.",
+                        "这些操作无法在后台完成，需要暂时使用你的真实指针。",
                     ),
                 },
             )
@@ -657,7 +664,33 @@ pub fn request_text(
             let app = &item.app;
             tf!("Choose \"{label}\" in {app}", "在 {app} 中选择\"{label}\"")
         }
+        Some(Plan::Click(click)) => click_text(click),
         _ => request.reason.clone(),
+    }
+}
+
+/// A click the user is asked to allow: what it does, where, and in which
+/// app and window.
+fn click_text(click: &crate::input_queue::Click) -> String {
+    use agent_screen_model::real_click::{self, Verb};
+    let (x, y) = real_click::display_point(click.at, click.area);
+    let app = &click.app;
+    let verb = match click.click.verb() {
+        Verb::Click => t("Click", "点击"),
+        Verb::DoubleClick => t("Double-click", "双击"),
+        Verb::TripleClick => t("Triple-click", "三击"),
+        Verb::RightClick => t("Right-click", "右键点击"),
+        Verb::MiddleClick => t("Middle-click", "中键点击"),
+    };
+    match &click.title {
+        Some(title) if title != app => tf!(
+            "{verb} at ({x}, {y}) in {app}, \"{title}\"",
+            "在 {app}「{title}」中{verb} ({x}, {y})"
+        ),
+        _ => tf!(
+            "{verb} at ({x}, {y}) in {app}",
+            "在 {app} 中{verb} ({x}, {y})"
+        ),
     }
 }
 
