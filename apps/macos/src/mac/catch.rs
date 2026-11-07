@@ -6,7 +6,7 @@
 use super::ax;
 use super::windows;
 use crate::model::{DisplayId, Rect, WindowTarget};
-use agent_screen_model::new_window::{ACTION_WINDOW, Owner, Role, Seen};
+use agent_screen_model::new_window::{self, ACTION_WINDOW, Owner, Role, Seen};
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
@@ -236,20 +236,14 @@ pub fn seen(display: DisplayId, pid: i32, bounds: Rect, new: Option<u32>) -> See
 /// What Accessibility says the window is, as the catch reads it. Blocking:
 /// a busy app takes up to the messaging timeout to not answer.
 pub fn role(target: WindowTarget) -> Role {
-    let app = ax::application(target.pid);
-    let listed = ax::elements_attribute(&app, "AXWindows");
-    match listed
+    let Ok(listed) = ax::try_elements_attribute(&ax::application(target.pid), "AXWindows") else {
+        return new_window::role(None);
+    };
+    let window = listed
         .iter()
-        .find(|w| ax::window_id(w) == Some(target.window_id))
-    {
-        Some(w) if ax::string_attribute(w, "AXRole").as_deref() == Some("AXWindow") => Role::Window,
-        Some(w) if ax::string_attribute(w, "AXRole").is_none() => Role::Unanswered,
-        Some(_) => Role::Other,
-        // Not listed by an app that answers: a sheet or a window it keeps
-        // out of its list.
-        None if !listed.is_empty() || ax::string_attribute(&app, "AXRole").is_some() => Role::Other,
-        None => Role::Unanswered,
-    }
+        .find(|w| ax::window_id(w) == Some(target.window_id));
+    let role = window.map(|w| ax::string_attribute(w, "AXRole"));
+    new_window::role(Some(role.as_ref().map(|r| r.as_deref())))
 }
 
 /// Whether every window of `pid` but `new` is on the display.

@@ -4,7 +4,9 @@
 // main screen, where an app restores a saved frame. LATE_BUSY_MS (0 by
 // default) then keeps its main thread busy that long, as a large app
 // building its main window is: Accessibility gets no answer from it
-// meanwhile. SIGUSR1 hides it, as Command-H does. It never activates
+// meanwhile. LATE_FLUSH=1 puts the main window on screen before the main
+// thread goes busy, so it shows while the app can't describe it. SIGUSR1
+// hides it, as Command-H does. It never activates
 // itself.
 import AppKit
 
@@ -34,6 +36,10 @@ final class Delegate: NSObject, NSApplicationDelegate {
       window.makeKeyAndOrderFront(nil)
       self.main = window
       let busy = Double(ProcessInfo.processInfo.environment["LATE_BUSY_MS"] ?? "") ?? 0
+      if ProcessInfo.processInfo.environment["LATE_FLUSH"] == "1" {
+        window.display()
+        CATransaction.flush()
+      }
       if busy > 0 {
         Thread.sleep(forTimeInterval: busy / 1000)
       }
