@@ -3004,12 +3004,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let home = given.as_ref().and_then(GivenBack::home);
-        self.core.update(cx, |core, _| {
+        let ticket = self.core.update(cx, |core, _| {
             // Taking a window back says the app is the user's now: its
             // later windows stay on the user's screen, even one it opens
             // beside a window of its own still on the display.
             core.kept_catches.retain(|(_, k)| k.pid() != target.pid);
-            core.pending_returns.insert((id, target.pid));
+            core.pending_returns.take_back(id, target.pid)
         });
         // Keys typed in the Viewer must not follow the window home.
         let forwarder = self.core.update(cx, |core, _| core.forwarder(id));
@@ -3057,21 +3057,20 @@ impl Shell {
             }
             // The app is the user's either way. Armed once the window is
             // back, on the catch thread: registering asks the app, which
-            // may be slow.
-            let Some(catch) = crate::mac::catch::Catch::returning(target.pid, id, screen).await
-            else {
-                return left;
-            };
+            // may be slow. A failed registration still completes its ticket.
+            let catch = crate::mac::catch::Catch::returning(target.pid, id, screen).await;
             let _ = this.update(cx, |shell, cx| {
                 shell.core.update(cx, |core, _| {
-                    // Still wanted: no Handover of the app and the display
-                    // still there. Otherwise the catch drops here.
-                    let wanted = core.pending_returns.remove(&(id, target.pid))
+                    // Still wanted: no Handover or later Take Back of the
+                    // app, and the display still there. Otherwise the catch
+                    // drops here, and a slow one can't stand in for the
+                    // latest Take Back's.
+                    let wanted = core.pending_returns.complete(ticket)
                         && !core
                             .returning
                             .iter()
                             .any(|(d, k)| *d == id && k.pid() == target.pid);
-                    if wanted {
+                    if let Some(catch) = catch.filter(|_| wanted) {
                         core.returning.push((id, catch));
                     }
                 });
@@ -4136,7 +4135,7 @@ impl Shell {
                         // agent's to have, not to send back.
                         core.returning
                             .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
-                        core.pending_returns.remove(&(id, target.pid));
+                        core.pending_returns.hand_over(id, target.pid);
                     }
                     landed
                 });
