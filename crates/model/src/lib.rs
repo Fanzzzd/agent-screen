@@ -18,6 +18,7 @@ pub mod menu_press;
 pub mod model;
 pub mod numbers;
 pub mod recording_playback;
+pub mod returns;
 pub mod screen_edge;
 pub mod shared_app;
 pub mod substitute;

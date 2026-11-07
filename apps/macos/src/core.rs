@@ -77,9 +77,9 @@ pub struct Core {
     /// the display by themselves.
     pub returning: Vec<(DisplayId, crate::mac::catch::Catch)>,
     /// Take-backs whose returning catch is still to be armed, once the
-    /// window is back. A Handover or the display's removal meanwhile
-    /// cancels it.
-    pub pending_returns: std::collections::HashSet<(DisplayId, i32)>,
+    /// window is back. A Handover, a later Take Back or the display's
+    /// removal meanwhile cancels it.
+    pub pending_returns: agent_screen_model::returns::Returns,
     /// Files a running app is still opening, by pid, each watched once.
     pub watching: HashSet<(i32, std::path::PathBuf)>,
     /// Undecided windows of the kept catches already reported to an agent.
@@ -641,7 +641,7 @@ impl Core {
             self.remodes.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
             self.returning.retain(|(display, _)| *display != id);
-            self.pending_returns.retain(|(display, _)| *display != id);
+            self.pending_returns.remove_display(id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
             cx.notify();

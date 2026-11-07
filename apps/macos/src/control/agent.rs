@@ -2601,7 +2601,7 @@ async fn hand_over(
             // back, as after the user's own Hand Over.
             c.returning
                 .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
-            c.pending_returns.remove(&(id, target.pid));
+            c.pending_returns.hand_over(id, target.pid);
         }
         cx.notify();
         landed
