@@ -177,14 +177,21 @@ pub fn names_row(text: &str) -> bool {
         "分钟前",
         "小时前",
         "天前",
+        "秒前",
+        "秒",
         "上午",
         "下午",
         "凌晨",
         "中午",
         "晚上",
         "早上",
+        "ago",
+        "mins",
         "min",
+        "hrs",
         "hr",
+        "secs",
+        "sec",
         "am",
         "pm",
     ] {
@@ -194,7 +201,7 @@ pub fn names_row(text: &str) -> bool {
         .chars()
         .filter(|c| !c.is_ascii_digit() && !c.is_whitespace() && !":/.-年月日号".contains(*c))
         .collect();
-    !(rest.chars().all(|c| "mhd".contains(c)) || day_word(&rest))
+    !(rest.chars().all(|c| "smhd".contains(c)) || day_word(&rest))
 }
 
 /// A word a list shows for a day instead of a date: the whole text, so
@@ -760,6 +767,13 @@ mod tests {
             "Mon",
             "星期三",
             "凌晨1:20",
+            "2 mins",
+            "1 hr",
+            "2 hrs",
+            "5 mins ago",
+            "30s",
+            "30 secs",
+            "30秒前",
         ] {
             assert!(!names_row(time), "{time}");
         }
