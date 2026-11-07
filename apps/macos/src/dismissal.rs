@@ -9,7 +9,7 @@
 use crate::i18n::t;
 use crate::mac::aerospace::AeroSpace;
 use crate::mac::display::VirtualDisplay;
-use crate::mac::{ax, cg, windows};
+use crate::mac::{ax, cg, claims, windows};
 use crate::model::{Display, Disposition, Fate, Home, Origin, Rect, WindowTarget, default_fate};
 use std::collections::HashSet;
 
@@ -139,45 +139,77 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
 }
 
 /// A window returns to where it came from when we know that, otherwise to
-/// the main display. Blocking.
-pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) {
+/// the main display. True once it is off every Agent Display; a window that
+/// isn't stays claimed where it is. Blocking.
+pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&str>) -> bool {
     if let Some((stage, home)) = user_stage_home(home) {
         // Debug builds: the claim stays the whole way, and a window that
         // can't go home claimed stays where it is rather than going
         // anywhere AeroSpace or the user's screen could have it.
-        if !crate::mac::claims::claim_confirmed(target.window_id, stage) {
+        if !claims::claim_confirmed(target.window_id, stage) {
             log::warn!(
                 "window {} not returned: its claim for the user stand-in stage wasn't published",
                 target.window_id
             );
-            return;
+            return false;
         }
         if let Err(error) = ax::set_frame(target, home.frame) {
             log::warn!(
                 "could not return window {} to the user stand-in stage: {error:?}",
                 target.window_id
             );
+            return false;
         }
-        return;
+        return true;
     }
-    crate::mac::claims::release(target.window_id);
+    // The window stays claimed until it is off every Agent Display.
+    // AeroSpace leaves an unclaimed window its app keeps on one where it is,
+    // and the user would never see it again.
+    let window = target.window_id;
     if let Some(home) = home {
         if let Some(workspace) = &home.workspace
             && let Some(aerospace) = AeroSpace::current()
-            && aerospace.move_window(target.window_id, workspace).is_ok()
         {
-            return;
+            // AeroSpace files a claimed window back with the claimed ones at
+            // its next refresh, so the claim goes for this move and comes
+            // back if the window didn't leave. Filed in the workspace, it is
+            // AeroSpace's to lay out there, even before its frame follows.
+            let claimed = claims::display_of(window);
+            claims::release(window);
+            let moved = aerospace.move_window(window, workspace).is_ok();
+            let filed = || {
+                aerospace.workspace_of(window).ok().flatten().as_deref() == Some(workspace.as_str())
+            };
+            if claims::is_off_or_filed(window, moved, filed) {
+                return true;
+            }
+            if let Some(display) = claimed {
+                claims::claim(window, display);
+            }
+            log::info!(
+                "window {window} didn't leave its Agent Display for workspace {workspace} (moved: {moved}); moving it directly"
+            );
         }
         // Its screen may have gone since, as when a monitor is unplugged.
         let screen_there = cg::active_displays()
             .into_iter()
             .any(|d| cg::display_bounds(d).contains(home.frame.mid()));
-        if screen_there && ax::set_frame(target, home.frame).is_ok() {
-            return;
+        if screen_there
+            && claims::release_once_off(window, ax::set_frame(target, home.frame).is_ok())
+        {
+            return true;
         }
     }
-    if let Err(error) = windows::place(target, cg::main_display(), main_name) {
-        log::warn!("could not return window {}: {error}", target.window_id);
+    match windows::place(target, cg::main_display(), main_name) {
+        Ok(()) if claims::release_once_off(window, true) => true,
+        Ok(()) => {
+            log::warn!("could not return window {window}: it isn't seen off the Agent Displays");
+            false
+        }
+        Err(error) => {
+            log::warn!("could not return window {window}: {error}");
+            false
+        }
     }
 }
 

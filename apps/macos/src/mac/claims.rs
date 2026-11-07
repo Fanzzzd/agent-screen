@@ -1,11 +1,15 @@
 //! The claim file: tells AeroSpace which displays Agent Screen made and which
 //! windows on them are the agents', so it leaves them alone (the fork's
 //! AGENT-SCREEN.md, Claims). A window is claimed before it moves onto a display
-//! and released before it moves off, so AeroSpace never lays it out between.
-//! Without the file, AeroSpace guesses from where windows are.
+//! and released once it is off every claimed display, so AeroSpace never lays
+//! it out between. A window that doesn't make it off keeps its claim:
+//! AeroSpace leaves an unclaimed window its app keeps on an Agent Display
+//! where it is, out of the user's sight. Without the file, AeroSpace guesses
+//! from where windows are.
 
-use agent_screen_model::claims::{Claims, Publication};
+use agent_screen_model::claims::{AfterLeaving, Claims, Publication, after_leaving};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 static CLAIMS: Mutex<Publication> = Mutex::new(Publication::new());
 
@@ -54,18 +58,80 @@ pub fn remove_display(display: u32) {
     change(|c| c.remove_display(display));
 }
 
-/// A window about to move into `bounds`: claimed when they are one of the
-/// claimed displays, released otherwise.
-pub fn moving_into(window: u32, bounds: crate::model::Rect) {
+fn online() -> Vec<(u32, crate::model::Rect)> {
+    super::cg::online()
+        .into_iter()
+        .map(|d| (d, super::cg::display_bounds(d)))
+        .collect()
+}
+
+/// A window about to move into `bounds`: claimed for them when they are one
+/// of the claimed displays, and true then. Going anywhere else, it keeps its
+/// claim until [`release_once_off`] sees it off.
+pub fn moving_into(window: u32, bounds: crate::model::Rect) -> bool {
+    let online = online();
+    let mut onto = false;
     change(|c| {
-        let display = super::cg::online()
-            .into_iter()
-            .find(|&d| c.has_display(d) && super::cg::display_bounds(d) == bounds);
-        match display {
-            Some(display) => c.claim(window, display),
-            None => c.release(window),
-        }
+        onto = c.display_at(bounds, &online).is_some();
+        c.moving_into(window, bounds, &online)
     });
+    onto
+}
+
+/// The display a window is claimed for, if it is claimed.
+pub fn display_of(window: u32) -> Option<u32> {
+    let claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+    claims.desired().display_of(window)
+}
+
+/// Whether a window that was to leave the claimed displays is off all of
+/// them, by its frame in the window list. After a move that went through, it
+/// looks again for up to 0.5 s, as an app or AeroSpace may take a moment to
+/// put the window where it was asked. Blocking.
+pub fn is_off(window: u32, moved: bool) -> bool {
+    is_off_or_filed(window, moved, || false)
+}
+
+/// [`is_off`], for a window sent to an AeroSpace workspace: `filed` asks
+/// AeroSpace whether the window is in that workspace, and it counts as off
+/// once it is, though its frame hasn't followed yet. Blocking.
+pub fn is_off_or_filed(window: u32, moved: bool, mut filed: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let online = online();
+        let claimed = {
+            let claims = CLAIMS.lock().unwrap_or_else(|e| e.into_inner());
+            claims.desired().claimed_bounds(&online)
+        };
+        let frame = super::cg::window_bounds(window);
+        let decision = match after_leaving(moved, frame, &claimed, false) {
+            // Asked only while the frame says it is still on: each answer
+            // costs AeroSpace a refresh.
+            AfterLeaving::Keep if moved => after_leaving(moved, frame, &claimed, filed()),
+            decision => decision,
+        };
+        match decision {
+            AfterLeaving::Release => return true,
+            AfterLeaving::Keep if !moved || Instant::now() >= deadline => return false,
+            AfterLeaving::Keep => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// After a move meant to take a window off the claimed displays: release it
+/// once it is off all of them, and say whether it is. A failed move, or a
+/// window still on one, keeps its claim. Blocking.
+pub fn release_once_off(window: u32, moved: bool) -> bool {
+    if !is_off(window, moved) {
+        if display_of(window).is_some() {
+            log::warn!(
+                "claims: window {window} isn't seen off the Agent Displays; it stays claimed"
+            );
+        }
+        return false;
+    }
+    change(|c| c.release(window));
+    true
 }
 
 /// A window that stays where it is on one of the claimed displays.
@@ -85,7 +151,9 @@ pub fn claim_confirmed(window: u32, display: u32) -> bool {
     claims.published().display_of(window) == Some(display)
 }
 
-/// A window about to leave for the user's screen.
+/// A window about to leave for the user's screen through AeroSpace, which
+/// only moves a window that isn't claimed. Confirm it left with [`is_off`],
+/// and claim it again if it didn't.
 pub fn release(window: u32) {
     change(|c| c.release(window));
 }

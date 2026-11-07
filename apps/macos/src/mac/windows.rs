@@ -362,15 +362,21 @@ impl Lanes {
         })
     }
 
-    /// Mark the window as the user's, then send it home with `home`.
-    pub fn home(&self, window: u32, home: impl FnOnce()) {
+    /// Mark the window as the user's, then send it home with `home`. A
+    /// window `home` couldn't move off the display is the agent's to move
+    /// again.
+    pub fn home(&self, window: u32, home: impl FnOnce() -> bool) -> bool {
         self.in_lane(window, || {
-            {
+            let was_returned = {
                 let mut state = self.state();
-                state.returned.insert(window);
                 *state.count.entry(window).or_default() += 1;
+                !state.returned.insert(window)
+            };
+            let left = home();
+            if !left && !was_returned {
+                self.state().returned.remove(&window);
             }
-            home()
+            left
         })
     }
 
@@ -410,8 +416,9 @@ pub fn place_for_agent(
 }
 
 /// Mark a window as the user's, after any move for the agent in flight,
-/// then send it home with `home`, before any later one. Blocking.
-pub fn return_home(window: u32, home: impl FnOnce()) {
+/// then send it home with `home`, before any later one. `home` says whether
+/// the window left the display, and so does this. Blocking.
+pub fn return_home(window: u32, home: impl FnOnce() -> bool) -> bool {
     LANES.home(window, home)
 }
 
@@ -495,6 +502,7 @@ mod tests {
                     let _ = entered.send(());
                     // An app that doesn't answer Accessibility.
                     let _ = held.recv_timeout(Duration::from_secs(5));
+                    true
                 })
             }
         });
@@ -507,7 +515,9 @@ mod tests {
         });
         let other_home = finishes({
             let lanes = lanes.clone();
-            move || lanes.home(2, || {})
+            move || {
+                lanes.home(2, || true);
+            }
         });
         let other_move = finishes({
             let lanes = lanes.clone();
@@ -539,7 +549,7 @@ mod tests {
     fn a_move_decided_before_a_take_back_stays_home() {
         let lanes = Lanes::default();
         let seen = lanes.times_returned(5);
-        lanes.home(5, || {});
+        lanes.home(5, || true);
         let mut moved = false;
         assert!(
             lanes
@@ -559,7 +569,7 @@ mod tests {
     #[test]
     fn a_failed_handover_keeps_the_window_returned() {
         let lanes = Lanes::default();
-        lanes.home(6, || {});
+        lanes.home(6, || true);
         let seen = lanes.times_returned(6);
         assert!(
             lanes
@@ -572,9 +582,22 @@ mod tests {
     }
 
     #[test]
+    fn a_window_that_couldnt_go_home_is_the_agents_to_move_again() {
+        let lanes = Lanes::default();
+        assert!(!lanes.home(7, || false));
+        assert!(lanes.agent_move(7, || Ok(())).is_ok());
+        // Still, a move decided before the try doesn't follow it.
+        assert!(lanes.unless_returned_since(7, 0, false, || Ok(())).is_err());
+        // One the user had taken back before stays theirs.
+        assert!(lanes.home(8, || true));
+        assert!(!lanes.home(8, || false));
+        assert!(lanes.agent_move(8, || Ok(())).is_err());
+    }
+
+    #[test]
     fn a_frame_write_after_the_window_went_home_doesnt_run() {
         let seen = times_returned(900_003);
-        return_home(900_003, || {});
+        return_home(900_003, || true);
         let mut wrote = false;
         let result = write_frame_unless_returned(900_003, seen, || {
             wrote = true;

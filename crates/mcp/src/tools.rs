@@ -1162,7 +1162,11 @@ fn window_access_params(a: &Args<'_>) -> Result<Value, ControlError> {
 fn access_output(action: &str, reply: Object) -> Value {
     let mut out = Value::Object(reply);
     let changed = out.get("changed") != Some(&Value::Bool(false));
+    let stuck = out.get("stuck").is_some();
     let note = match action {
+        "return" if stuck => Some(
+            "The windows in returned are back where they came from. Those in stuck didn't leave your display and are still Handovers there: tell the user, and call return again if they ask. Window access no longer covers any of them until the user tells you to take them again.",
+        ),
         "grant" => Some(
             "Granted on the user's words as you relayed them; Agent Screen didn't check them against the chat. place_window takes covered windows of theirs without a card while you have control.",
         ),
@@ -1177,6 +1181,10 @@ fn access_output(action: &str, reply: Object) -> Value {
     };
     if let Some(note) = note {
         out["note"] = json!(note);
+    }
+    // The app's warning for an older MCP says what the note says.
+    if stuck && let Some(out) = out.as_object_mut() {
+        out.remove("warning");
     }
     out
 }
@@ -1895,7 +1903,19 @@ mod tests {
         let mut none = status.clone();
         none.insert("changed".into(), json!(false));
         assert_eq!(access_output("revoke", none)["note"], "Nothing to revoke.");
-        assert!(access_output("status", status).get("note").is_none());
+        assert!(
+            access_output("status", status.clone())
+                .get("note")
+                .is_none()
+        );
+        let mut stuck = status;
+        stuck.insert("returned".into(), json!([]));
+        stuck.insert("stuck".into(), json!([4]));
+        stuck.insert("warning".into(), json!("For an older MCP."));
+        let out = access_output("return", stuck);
+        assert_eq!(out["stuck"], json!([4]));
+        assert!(out["note"].as_str().unwrap().contains("didn't leave"));
+        assert!(out.get("warning").is_none(), "said once, in the note");
     }
 
     #[test]

@@ -707,6 +707,9 @@ pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool 
 pub enum MoveError {
     NoWindow,
     Rejected,
+    /// Sent off the Agent Displays, the window is still on one. It stays
+    /// claimed there.
+    StillOnAgentDisplay,
 }
 
 impl std::fmt::Display for MoveError {
@@ -714,6 +717,7 @@ impl std::fmt::Display for MoveError {
         f.write_str(match self {
             MoveError::NoWindow => "no such window",
             MoveError::Rejected => "the app rejected the change",
+            MoveError::StillOnAgentDisplay => "the window is still on an Agent Display",
         })
     }
 }
@@ -743,15 +747,28 @@ pub fn move_all_into(pid: i32, bounds: Rect) -> usize {
         .count()
 }
 
-/// Center a window element inside `bounds`, shrunk to fit.
+/// Center a window element inside `bounds`, shrunk to fit. A window going
+/// onto a claimed display is claimed first. A claimed window going anywhere
+/// else keeps its claim until it is off every claimed display, and keeps it
+/// when it doesn't get off. Blocking.
 pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
     if bounds.width <= 80.0 || bounds.height <= 80.0 {
         return Err(MoveError::Rejected);
     }
-    if let Some(id) = window_id(window) {
-        super::claims::moving_into(id, bounds);
+    let id = window_id(window);
+    let onto_claimed = id.is_some_and(|id| super::claims::moving_into(id, bounds));
+    let moved = with_moves_direct(window, || fit_into(window, bounds));
+    match id {
+        Some(id) if !onto_claimed && super::claims::display_of(id).is_some() => {
+            let off = super::claims::release_once_off(id, moved.is_ok());
+            moved.and(if off {
+                Ok(())
+            } else {
+                Err(MoveError::StillOnAgentDisplay)
+            })
+        }
+        _ => moved,
     }
-    with_moves_direct(window, || fit_into(window, bounds))
 }
 
 fn fit_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
