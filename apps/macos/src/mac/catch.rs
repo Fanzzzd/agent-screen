@@ -6,7 +6,7 @@
 use super::ax;
 use super::windows;
 use crate::model::{DisplayId, Rect, WindowTarget};
-use agent_screen_model::new_window::{ACTION_WINDOW, Owner, Seen};
+use agent_screen_model::new_window::{ACTION_WINDOW, Owner, Role, Seen};
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFString;
 use std::ffi::c_void;
@@ -82,6 +82,15 @@ pub fn agent_acted(display: DisplayId) {
 /// while an app it launched is still starting.
 pub fn agent_acted_for(display: DisplayId, pid: i32, span: std::time::Duration) {
     drive(display, Some(pid), span);
+}
+
+/// End the cold start's span for `pid` on the display, once the user uses
+/// the app too (`Seen::ends_cold_start`) or takes it back.
+pub fn end_cold_start(display: DisplayId, pid: i32) {
+    ACTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(d, p, _)| !(*d == display && *p == Some(pid)));
 }
 
 fn drive(display: DisplayId, pid: Option<i32>, span: std::time::Duration) {
@@ -221,6 +230,25 @@ pub fn seen(display: DisplayId, pid: i32, bounds: Rect, new: Option<u32>) -> See
         agent,
         user,
         only_here,
+    }
+}
+
+/// What Accessibility says the window is, as the catch reads it. Blocking:
+/// a busy app takes up to the messaging timeout to not answer.
+pub fn role(target: WindowTarget) -> Role {
+    let app = ax::application(target.pid);
+    let listed = ax::elements_attribute(&app, "AXWindows");
+    match listed
+        .iter()
+        .find(|w| ax::window_id(w) == Some(target.window_id))
+    {
+        Some(w) if ax::string_attribute(w, "AXRole").as_deref() == Some("AXWindow") => Role::Window,
+        Some(w) if ax::string_attribute(w, "AXRole").is_none() => Role::Unanswered,
+        Some(_) => Role::Other,
+        // Not listed by an app that answers: a sheet or a window it keeps
+        // out of its list.
+        None if !listed.is_empty() || ax::string_attribute(&app, "AXRole").is_some() => Role::Other,
+        None => Role::Unanswered,
     }
 }
 
@@ -569,6 +597,9 @@ extern "C" fn created(
             ax::window_id(window),
         );
         let Seen { agent, user, .. } = seen;
+        if seen.ends_cold_start() {
+            end_cold_start(target.display, target.pid);
+        }
         match seen.owner() {
             Owner::Agent => {}
             Owner::User => {

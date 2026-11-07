@@ -54,6 +54,15 @@ impl Seen {
             _ => Owner::Unknown,
         }
     }
+
+    /// Whether this window ends the cold start's 30 s for its app: the
+    /// user acted on the app as it opened, so they use it too. Its later
+    /// windows count as the agent's only right after the agent acts, as
+    /// any app's do, or the link they click in Mail would open on the
+    /// Agent Display.
+    pub fn ends_cold_start(self) -> bool {
+        self.user
+    }
 }
 
 /// Where a new window is when the launch's watch finds it.
@@ -83,20 +92,74 @@ pub enum Watch {
     Theirs,
     /// Nobody's for sure: it stays, and the agent's next screenshot names it.
     Undecided,
+    /// The app doesn't answer what the window is yet: look again on the
+    /// next tick, with the facts from when it first showed.
+    Later,
+}
+
+/// What Accessibility says a new window is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// An AXWindow, as the catch takes.
+    Window,
+    /// A sheet, a panel the app doesn't list, or anything else the catch
+    /// leaves where the app puts it.
+    Other,
+    /// The app didn't answer, as one too busy building the window doesn't.
+    Unanswered,
 }
 
 /// `decided`: the catch left the window to the user or left it undecided,
 /// or the user took the app back.
-pub fn watch(on: On, decided: bool, seen: Seen) -> Watch {
-    match (on, decided) {
-        (_, true) | (On::OtherDisplay, _) => Watch::Leave,
-        (On::ThisDisplay, false) => Watch::Record,
-        (On::Elsewhere, false) => match seen.owner() {
+pub fn watch(on: On, decided: bool, role: Role, seen: Seen) -> Watch {
+    match (on, decided, role) {
+        (_, true, _) | (On::OtherDisplay, ..) | (_, _, Role::Other) => Watch::Leave,
+        (_, false, Role::Unanswered) => Watch::Later,
+        (On::ThisDisplay, false, Role::Window) => Watch::Record,
+        (On::Elsewhere, false, Role::Window) => match seen.owner() {
             Owner::Agent => Watch::Place,
             Owner::User => Watch::Theirs,
             Owner::Unknown => Watch::Undecided,
         },
     }
+}
+
+/// What the launch's watch does at the start of a tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The display ended, or the app is no longer one it started, as once
+    /// the user takes a window of it back: every window of the app is the
+    /// user's, and the watch ends.
+    Stop,
+    /// The app finished starting hidden, as an Electron development build
+    /// does after the launch showed it, so its windows are listed nowhere:
+    /// move them onto the display and show it.
+    ShowHidden,
+    /// Hidden after it showed a window, as by the user's Command-H: that
+    /// window may be theirs, so nothing moves.
+    Skip,
+    /// Look for new windows.
+    Look,
+}
+
+/// `started`: the display takes windows and still counts the app as one
+/// it started. `shown`: `launch_app` answered with a window of the app, or
+/// the watch has seen one.
+pub fn step(started: bool, hidden: bool, shown: bool) -> Step {
+    match (started, hidden, shown) {
+        (false, ..) => Step::Stop,
+        (true, true, false) => Step::ShowHidden,
+        (true, true, true) => Step::Skip,
+        (true, false, _) => Step::Look,
+    }
+}
+
+/// Whether the watch's tick `tick`, one per 150 ms, tries again for a
+/// catch on an app that has none. Asking a busy app can hold the catch
+/// thread, which every display's catches share, for 1 s, so the tries
+/// thin out: about 1, 2, 4, 8 and 17 s in.
+pub fn retries_catch(tick: u32) -> bool {
+    tick == 0 || tick.is_multiple_of(7) && (tick / 7).is_power_of_two()
 }
 
 #[cfg(test)]
@@ -138,12 +201,12 @@ mod tests {
         // WeCom's main window, 3.4 s after its loading window, which
         // launch_app had answered with, while it had no window elsewhere.
         assert_eq!(
-            watch(On::Elsewhere, false, seen(true, false, true)),
+            watch(On::Elsewhere, false, Role::Window, seen(true, false, true)),
             Watch::Place
         );
         // The same with a window of it on the user's screen.
         assert_eq!(
-            watch(On::Elsewhere, false, seen(true, false, false)),
+            watch(On::Elsewhere, false, Role::Window, seen(true, false, false)),
             Watch::Place
         );
     }
@@ -151,17 +214,22 @@ mod tests {
     #[test]
     fn the_watch_leaves_the_users_windows_to_them() {
         assert_eq!(
-            watch(On::Elsewhere, false, seen(false, true, true)),
+            watch(On::Elsewhere, false, Role::Window, seen(false, true, true)),
             Watch::Theirs,
             "a window the user opened in the app is theirs"
         );
         assert_eq!(
-            watch(On::Elsewhere, false, seen(true, true, true)),
+            watch(On::Elsewhere, false, Role::Window, seen(true, true, true)),
             Watch::Undecided,
             "a window that opens while both act is moved by no one"
         );
         assert_eq!(
-            watch(On::Elsewhere, false, seen(false, false, false)),
+            watch(
+                On::Elsewhere,
+                false,
+                Role::Window,
+                seen(false, false, false)
+            ),
             Watch::Undecided
         );
     }
@@ -170,17 +238,80 @@ mod tests {
     fn the_watch_leaves_what_is_placed_or_decided() {
         let agents = seen(true, false, true);
         assert_eq!(
-            watch(On::ThisDisplay, false, agents),
+            watch(On::ThisDisplay, false, Role::Window, agents),
             Watch::Record,
             "caught already, recorded as launched"
         );
-        assert_eq!(watch(On::OtherDisplay, false, agents), Watch::Leave);
+        assert_eq!(
+            watch(On::OtherDisplay, false, Role::Window, agents),
+            Watch::Leave
+        );
         for on in [On::ThisDisplay, On::Elsewhere] {
             assert_eq!(
-                watch(on, true, agents),
+                watch(on, true, Role::Window, agents),
                 Watch::Leave,
                 "the catch decided it, or the user took the app back"
             );
         }
+    }
+
+    #[test]
+    fn the_watch_settles_only_what_the_catch_would_take() {
+        let agents = seen(true, false, true);
+        for on in [On::ThisDisplay, On::Elsewhere] {
+            assert_eq!(
+                watch(on, false, Role::Other, agents),
+                Watch::Leave,
+                "a sheet or panel stays where the app puts it"
+            );
+            assert_eq!(
+                watch(on, false, Role::Unanswered, agents),
+                Watch::Later,
+                "a busy app's window is decided once it answers"
+            );
+            assert_eq!(watch(on, true, Role::Unanswered, agents), Watch::Leave);
+        }
+        assert_eq!(
+            watch(On::OtherDisplay, false, Role::Unanswered, agents),
+            Watch::Leave
+        );
+    }
+
+    #[test]
+    fn the_user_acting_on_the_app_ends_its_cold_start() {
+        assert!(
+            seen(true, true, false).ends_cold_start(),
+            "a window they opened from the Dock as the app started"
+        );
+        assert!(seen(false, true, true).ends_cold_start());
+        assert!(!seen(true, false, true).ends_cold_start());
+        assert!(!seen(false, false, true).ends_cold_start());
+    }
+
+    #[test]
+    fn the_watch_moves_a_hidden_app_only_before_it_shows_a_window() {
+        assert_eq!(step(true, true, false), Step::ShowHidden);
+        assert_eq!(
+            step(true, true, true),
+            Step::Skip,
+            "hidden by the user after a window showed, which may be theirs"
+        );
+        assert_eq!(step(true, false, false), Step::Look);
+        assert_eq!(step(true, false, true), Step::Look);
+        for hidden in [false, true] {
+            for shown in [false, true] {
+                assert_eq!(
+                    step(false, hidden, shown),
+                    Step::Stop,
+                    "taken back, or the display ended: all its windows are the user's"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retries_for_a_catch_thin_out() {
+        let tries: Vec<u32> = (0..200).filter(|&t| retries_catch(t)).collect();
+        assert_eq!(tries, [0, 7, 14, 28, 56, 112]);
     }
 }
