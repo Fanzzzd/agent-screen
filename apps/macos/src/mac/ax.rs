@@ -90,6 +90,23 @@ pub fn elements_attribute(element: &AXUIElement, name: &str) -> Vec<Element> {
         .unwrap_or_default()
 }
 
+/// The elements, or the error when the app gave no answer, as a busy one
+/// doesn't within the messaging timeout. An attribute without a value is
+/// an empty list.
+pub fn try_elements_attribute(element: &AXUIElement, name: &str) -> Result<Vec<Element>, AXError> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error == AXError::NoValue || error == AXError::Success && value.is_null() {
+        return Ok(Vec::new());
+    }
+    if error != AXError::Success {
+        return Err(error);
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    Ok(elements(&value))
+}
+
 fn elements(value: &CFType) -> Vec<Element> {
     let Some(array) = value.downcast_ref::<CFArray>() else {
         return Vec::new();

@@ -16,6 +16,7 @@ pub mod keychord;
 pub mod launch;
 pub mod menu_press;
 pub mod model;
+pub mod new_window;
 pub mod numbers;
 pub mod recording_playback;
 pub mod returns;
