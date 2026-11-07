@@ -2929,29 +2929,29 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) {
+        // Named now: once it fails, a window may be off the on-screen list.
         let tasks: Vec<_> = targets
             .into_iter()
-            .map(|target| (target, self.take_back(target, id, cx)))
+            .map(|target| {
+                let named = windows::find(target.window_id).map(|w| name(&w.app, &w.title));
+                (named, self.take_back(target, id, cx))
+            })
             .collect();
         cx.spawn(async move |_, _| {
             let mut stuck = Vec::new();
-            for (target, task) in tasks {
+            for (named, task) in tasks {
                 if !task.await {
-                    stuck.push(target);
+                    stuck.push(named);
                 }
             }
             if stuck.is_empty() {
                 return;
             }
-            let names: Vec<String> = stuck
-                .iter()
-                .filter_map(|t| windows::find(t.window_id))
-                .map(|w| name(&w.app, &w.title))
-                .collect();
-            let names = if names.is_empty() {
+            let listed: Vec<String> = stuck.iter().flatten().cloned().collect();
+            let names = if listed.is_empty() {
                 t("The window", "这个窗口").to_string()
             } else {
-                names.join(", ")
+                listed.join(", ")
             };
             let (title, text) = if stuck.len() == 1 {
                 (
@@ -2977,7 +2977,7 @@ impl Shell {
                     ),
                 )
             };
-            let text = if stuck.len() == 1 {
+            let text = if stuck.len() == 1 || listed.is_empty() {
                 text.to_string()
             } else {
                 format!("{names}\n\n{text}")
@@ -3030,8 +3030,9 @@ impl Shell {
                         dismissal::give_back(target, home.as_ref(), main_name.as_deref())
                     });
                     // A window that closed meanwhile has left too: nothing
-                    // to show again.
-                    left || windows::find(target.window_id).is_none()
+                    // to show again. Minimized and hidden windows are off
+                    // the on-screen list, so ask for this one by id.
+                    left || crate::mac::cg::window_bounds(target.window_id).is_none()
                 })
                 .await;
             if !left {
