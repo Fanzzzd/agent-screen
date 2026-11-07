@@ -349,6 +349,11 @@ async fn handle_one(
             // the user's pointer (ADR 0013, "Clicks"). Nothing goes out on
             // the background route meanwhile.
             if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                // The menu a real right click opens would close when the
+                // user's front app comes back.
+                if button != Button::Left {
+                    return Err(ControlError::invalid(real_click::NO_MENU_CLICK));
+                }
                 let click = real_click::Button::parse(button_name(button))
                     .and_then(|b| real_click::Click::new(b, count))
                     .ok_or_else(|| {
@@ -4970,6 +4975,16 @@ async fn queued_click(
             "the window under that point reaches past your Agent Display, so its click can't use the user's pointer",
         ));
     }
+    // What the agent aimed at, to compare just before the loan clicks: a
+    // list can reorder while the user decides.
+    let region = real_click::look_region(at, area);
+    let look = off(cx, move || crate::mac::screenshot::luma(id, region))
+        .await
+        .map_err(|why| {
+            ControlError::failed(format!(
+                "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
+            ))
+        })?;
     let app = if app.is_empty() {
         off(cx, move || app::name(target.pid))
             .await
@@ -4994,6 +5009,8 @@ async fn queued_click(
         flags: crate::mac::input::flags(modifiers).0,
         app,
         title: real_click::short_title(&title, 40),
+        look,
+        asked_ms: 0,
     };
     let operation = real_click::operation(target.window_id, at, click, modifier_bits(modifiers));
     let owner = core
@@ -5001,6 +5018,10 @@ async fn queued_click(
         .map_err(ControlError::invalid)?;
     let request = core
         .update(cx, |c, cx| {
+            let plan = crate::input_queue::Click {
+                asked_ms: c.input_queue.now(),
+                ..plan
+            };
             let result = c.input_queue.submit(
                 owner.clone(),
                 operation,
@@ -5040,9 +5061,15 @@ async fn queued_click(
     };
     // The session is done with the user's pointer unless it has more
     // waiting: the approval ends and their pointer and app come back.
-    core.update(cx, |c, cx| {
+    let waited = core.update(cx, |c, cx| {
+        let asked = match c.input_queue.plan(request) {
+            Some(crate::input_queue::Plan::Click(click)) => click.asked_ms,
+            _ => c.input_queue.now(),
+        };
+        let waited = real_click::waited_seconds(asked, c.input_queue.now());
         c.input_queue.loan_done(&owner, request);
         cx.notify();
+        waited
     });
     if ran {
         show_pointer(core, id, at, true, cx);
@@ -5050,7 +5077,13 @@ async fn queued_click(
             "windowId": target.window_id,
             "route": "real_input",
             "requestId": request,
+            "waitedSeconds": waited,
         }));
+    }
+    if r["failure"].as_str() == Some(real_click::CONTENT_CHANGED) {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) looks different from when you asked, {waited} s ago, so the click could land on something else, such as another row of a list that reordered. Take a new screenshot, find the target again, and ask again with real_input."
+        )));
     }
     Err(ControlError::failed(format!(
         "The {} with the user's pointer stopped ({}{}); every button it pressed was let go. Take a screenshot before retrying. Input queue status: {state}",

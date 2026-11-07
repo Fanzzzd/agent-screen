@@ -191,9 +191,12 @@ pub fn definitions() -> Vec<Value> {
                 "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
                 "Click with the normal background route first. Some apps take a background click only partway, for example",
                 "selecting a row without opening it. If a screenshot or get_window_state shows the click had no effect, retry",
-                "the same click with real_input true: it asks the user to allow a click with their real pointer and waits up to",
-                "60 seconds. Input route: real_input means it ran. input_pending means nothing was sent, not even the",
-                "background click; retry the same click to wait again. Don't use real_input on the first try.",
+                "the same left, double or triple click with real_input true: it asks the user to allow a click with their real",
+                "pointer and waits up to 60 seconds. Input route: real_input means it ran. input_pending means nothing was sent,",
+                "not even the background click; retry the same click to wait again. If what is under the point changed while",
+                "the user decided, nothing is clicked: take a new screenshot and ask again. Don't use real_input on the first",
+                "try. A menu or popover a real click opens closes when the user's front app comes back, so right and middle",
+                "clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
                 "cursor_position returns the pointer without a screenshot. zoom",
                 "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
                 "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
@@ -223,7 +226,7 @@ pub fn definitions() -> Vec<Value> {
                     "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
                     "real_input": {
                         "type": "boolean",
-                        "description": "For clicks, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing."
+                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click or middle_click: the menu they open would close when the user's front app comes back."
                     },
                     "via_input_method": {
                         "type": "boolean",
@@ -1364,11 +1367,17 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
         Some(Value::Bool(value)) => *value,
         _ => return Err(ControlError::invalid("real_input must be true or false")),
     };
-    if real_input && !agent_screen_model::real_click::takes_real_input(&action) {
+    if real_input && matches!(action.as_str(), "right_click" | "middle_click") {
         return Err(ControlError::invalid(
-            "real_input applies to clicks, left_click_drag and left_mouse_down only",
+            agent_screen_model::real_click::NO_MENU_CLICK,
         ));
     }
+    if real_input && !agent_screen_model::real_click::takes_real_input(&action) {
+        return Err(ControlError::invalid(
+            "real_input applies to left_click, double_click, triple_click, left_click_drag and left_mouse_down only",
+        ));
+    }
+    let mut waited = None;
     let mut route = None;
     let coordinate = a.coordinate("coordinate")?;
     let text_arg = a.string("text")?;
@@ -1410,6 +1419,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
                 .get("route")
                 .and_then(Value::as_str)
                 .map(String::from);
+            waited = result.get("waitedSeconds").and_then(Value::as_f64);
         }
         "mouse_move" => {
             let (x, y) = require_coordinate(coordinate, &action)?;
@@ -1562,6 +1572,11 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
     );
     if let Some(route) = route {
         header.push_str(&format!(" Input route: {route}."));
+    }
+    if let Some(waited) = waited {
+        header.push_str(&format!(
+            " The request waited {waited} s for the user's answer."
+        ));
     }
     header.push_str(&strayed_note(&shot));
     if let Some(note) = note.as_ref().and_then(Value::as_str) {

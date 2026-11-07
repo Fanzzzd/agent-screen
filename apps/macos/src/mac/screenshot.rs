@@ -261,6 +261,96 @@ pub fn display(
     }
 }
 
+/// Luma of `source`, a display-local rect in points, one sample per point,
+/// rows top to bottom. What lies there, as an agent's screenshot shows it:
+/// a real click compares it before and after the user's answer (ADR 0013,
+/// "Clicks"). Blocking: call off the main thread.
+pub fn luma(id: DisplayId, source: crate::model::Rect) -> Result<Vec<u8>, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGContext, CGImageAlphaInfo,
+    };
+    let (width, height) = (source.width as usize, source.height as usize);
+    if width == 0 || height == 0 {
+        return Err("nothing to capture".into());
+    }
+    let capture = || -> Result<Option<CGImage>, String> {
+        let (filter, left) = filter_counting(id, true, true)?;
+        if left == 0 {
+            return Ok(None);
+        }
+        let mut config = SCStreamConfiguration::new()
+            .with_width(width as u32)
+            .with_height(height as u32)
+            .with_shows_cursor(false);
+        config.set_background_color(0.13, 0.13, 0.14);
+        config.set_source_rect(screencapturekit::cg::CGRect::new(
+            source.x,
+            source.y,
+            source.width,
+            source.height,
+        ));
+        SCScreenshotManager::capture_image(&filter, &config)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    };
+    let mut result = capture();
+    for wait in [100, 300] {
+        if result.is_ok() {
+            break;
+        }
+        forget();
+        std::thread::sleep(Duration::from_millis(wait));
+        result = capture();
+    }
+    let image = result?;
+    unsafe {
+        let space = CGColorSpace::new_device_gray().ok_or("no color space")?;
+        let context = CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            width,
+            Some(&space),
+            CGImageAlphaInfo::None.0,
+        )
+        .ok_or("could not draw the region")?;
+        let all = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(width as f64, height as f64),
+        );
+        match &image {
+            Some(image) => {
+                unsafe extern "C" {
+                    fn CGContextDrawImage(
+                        context: *const c_void,
+                        rect: CGRect,
+                        image: *const c_void,
+                    );
+                }
+                CGContextDrawImage(
+                    objc2_core_foundation::CFRetained::as_ptr(&context)
+                        .as_ptr()
+                        .cast(),
+                    all,
+                    image.as_ptr().cast(),
+                );
+            }
+            // Nothing but the desktop: the plain background.
+            None => {
+                CGContext::set_gray_fill_color(Some(&context), 0.13, 1.0);
+                CGContext::fill_rect(Some(&context), all);
+            }
+        }
+        let data = CGBitmapContextGetData(Some(&context)) as *const u8;
+        if data.is_null() {
+            return Err("could not read the region".into());
+        }
+        Ok(std::slice::from_raw_parts(data, width * height).to_vec())
+    }
+}
+
 /// `rect` of an image, in its pixels, drawn at `size` and encoded.
 fn crop(
     image: &CGImage,
