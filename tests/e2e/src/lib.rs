@@ -1153,6 +1153,12 @@ pub fn start_test_app(env: &[(&str, &str)]) -> Result<()> {
         bail!("set AGENTSCREEN_INSTANCE to run beside the user's app");
     }
     bundle_debug()?;
+    // An instance another checkout left, or this checkout's from before the
+    // build, would answer for code the script doesn't test. Scripts run one
+    // at a time under the shared lock, so none is using it.
+    if listening() && !current_instance() {
+        stop_test_app();
+    }
     if listening() {
         return Ok(());
     }
@@ -1161,6 +1167,33 @@ pub fn start_test_app(env: &[(&str, &str)]) -> Result<()> {
         bail!("the test app didn't start");
     }
     Ok(())
+}
+
+/// Whether the running debug app is this checkout's, started after its
+/// binary was last built.
+fn current_instance() -> bool {
+    let Some(pid) = debug_pid() else {
+        return false;
+    };
+    let built = modified(Path::new(&binary_of(&debug_app())))
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    match (started_at(pid), built) {
+        (Some(started), Some(built)) => started >= built,
+        _ => false,
+    }
+}
+
+/// When process `pid` started, in seconds since 1970.
+fn started_at(pid: u32) -> Option<u64> {
+    let start = sh_lenient("/bin/ps", &["-o", "lstart=", "-p", &pid.to_string()]);
+    sh_lenient(
+        "/bin/date",
+        &["-j", "-f", "%a %b %d %T %Y", start.trim(), "+%s"],
+    )
+    .trim()
+    .parse()
+    .ok()
 }
 
 /// With AGENTSCREEN_INSTANCE, run `body` in the test app beside the user's,
