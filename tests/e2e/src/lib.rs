@@ -317,11 +317,13 @@ const HANDS_OFF: &[&str] = &[
     "appwhere",
     "browsers",
     "chrome",
+    "claims",
     "coldflash",
     "displaychange",
     "flash",
     "helpcard",
     "ime",
+    "inputqueue",
     "keys",
     "latewindow",
     "launchhere",
@@ -330,6 +332,7 @@ const HANDS_OFF: &[&str] = &[
     "menuclosed",
     "menupress",
     "realdrag",
+    "realclick",
     "oneclick",
     "openpanel",
     "peekanim",
@@ -354,6 +357,10 @@ const HANDS_OFF: &[&str] = &[
     "typedrops",
     "webdrag",
 ];
+
+/// Scripts that never start the debug app, so `run` builds nothing for
+/// them.
+const NO_APP: &[&str] = &["control", "selfupdate", "smoke", "stop"];
 
 /// The sign `run` shows on the main screen (`tools/overlay.swift`): a count
 /// from 3 in the middle with the script's name, then a badge in the
@@ -706,7 +713,14 @@ pub fn skip(reason: &str) -> ! {
 /// turns green whatever the result, a panic too.
 pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
     start_sighting();
-    start_sign(&script_name());
+    let name = script_name();
+    // The build comes before the countdown, so the user keeps the Mac
+    // while it runs. A failed build fails the script when it starts the app.
+    if !NO_APP.contains(&name.as_str()) {
+        open_sign();
+        let _ = bundle_debug();
+    }
+    start_sign(&name);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -1077,9 +1091,21 @@ fn wait_listening_at(socket: &Path) -> bool {
     false
 }
 
+/// Build the debug bundle, once per script: `run` builds it before the
+/// countdown, and starting the app later reuses that build.
 fn bundle_debug() -> Result<()> {
-    sign_step("building the test app / 正在编译测试 app");
-    sh(root().join("apps/macos/scripts/bundle.sh"), &["debug"]).map(|_| ())
+    static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            sign_step(
+                "building the test app, you can keep working / 正在编译测试 app，可以继续操作",
+            );
+            sh(root().join("apps/macos/scripts/bundle.sh"), &["debug"])
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
+        })
+        .clone()
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Start the debug app's binary. Started from here, it borrows this
