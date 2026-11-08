@@ -73,7 +73,7 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
             "no window's app is {app:?}, compared with each window's owner name, its app's name and its bundle id, ignoring case, and no app by that name or bundle id is running or installed. Check the name, or pass a window_id"
         ),
         AppSighting::NotRunning { name } => format!(
-            "{name} isn't running. Start it with launch_app, and its window opens on your display"
+            "{name} isn't running. Start it with launch_app, which opens its window on the display"
         ),
         AppSighting::NoWindow { name } => format!(
             "{name} is running, but none of its windows is on the user's screen: they are closed, minimized, hidden or on another macOS Space. Ask the user to open or bring up its window, then call place_window again"
