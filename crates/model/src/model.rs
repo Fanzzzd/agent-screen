@@ -28,11 +28,9 @@ impl DisplayRole {
         }
     }
 
-    /// A user's window can be offered in a Window Request, on their screen
-    /// or in another AeroSpace workspace, which AeroSpace keeps on its
-    /// closet (#133). A window on an Agent Display is an agent's.
+    /// Only a user's window can be offered in a Window Request.
     pub fn accepts_window_request(self) -> bool {
-        self != Self::Agent
+        self == Self::User
     }
 }
 
@@ -2075,10 +2073,7 @@ mod tests {
             );
         }
         let closet = DisplayRole::from_hardware(0x4145, 1, true);
-        assert!(
-            closet.accepts_window_request(),
-            "a window in another AeroSpace workspace is the user's"
-        );
+        assert!(!closet.accepts_window_request());
         assert!(!display.is_stray_from(window, false, closet, true));
     }
 

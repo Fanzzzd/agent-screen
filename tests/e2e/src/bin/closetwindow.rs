@@ -1,6 +1,6 @@
 //! place_window offers a window of the user's in another AeroSpace
 //! workspace, where AeroSpace keeps it on its closet display, and finds an
-//! app by its bundle id as well as by name (#133). An agent asked for the
+//! app by its bundle id or .app path as well as by name (#133). An agent asked for the
 //! user's WeCom window and got `not_found`: it had named the app by its
 //! localized name and its bundle id, while windows went only by their CG
 //! owner name. Field stands in for the user's window: it opens on your
@@ -19,7 +19,7 @@ use std::process::{Command, ExitCode};
 
 use agent_screen_tests::{
     Control, McpClient, allow_on_your_screen, check, field_app, instance, json, kill_ours,
-    our_binary, run, sh_lenient, sign_step, sleep_ms, start_test_app, stop_test_app, tool,
+    our_binary, out, run, sh_lenient, sign_step, sleep_ms, start_test_app, stop_test_app, tool,
 };
 use anyhow::{Context, Result, bail};
 
@@ -174,6 +174,20 @@ fn test() -> Result<()> {
         "the app's bundle id finds its window in another workspace, and the user is asked",
         refused.is_error && refused.text().contains("declined"),
         refused.text(),
+    );
+    // By .app path, which resolves to the bundle id once.
+    let answer = answer_soon(id, false);
+    let path = out().join("Field.app");
+    let by_path = client.tool(
+        "place_window",
+        json!({ "display_id": id, "app": path.to_string_lossy() }),
+    )?;
+    let answered = answer.join().expect("answer thread");
+    println!("     answer: {answered:?}");
+    check(
+        "the app's .app path finds its window too",
+        by_path.is_error && by_path.text().contains("declined"),
+        by_path.text(),
     );
     check(
         "the declined window stays in its workspace",
