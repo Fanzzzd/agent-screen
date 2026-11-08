@@ -17,6 +17,7 @@ use crate::model::{
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use agent_screen_model::input_queue::Action;
+use agent_screen_model::placement::{self, AppSighting, WindowSighting};
 use agent_screen_model::real_click;
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
@@ -960,13 +961,11 @@ async fn handle_one(
                     return frame_window(&core, id, window.target, asked, cx).await;
                 }
             }
-            let matches = |w: &windows::Window| match (wanted, &app) {
-                (Some(wanted), _) => w.target.window_id as i64 == wanted,
-                (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
-                (None, None) => false,
-            };
             // A window of an app the agent started is its own to place.
-            let stray = strays(&core, id, cx).await.into_iter().find(|w| matches(w));
+            let stray = strays(&core, id, cx)
+                .await
+                .into_iter()
+                .find(|w| is_named(w, wanted, app.as_deref()));
             let Some(window) = stray else {
                 // Any other window is the user's until they hand it over.
                 // The user's windows that match, front to back, with their
@@ -978,11 +977,7 @@ async fn handle_one(
                             .into_iter()
                             .filter(|w| {
                                 w.layer == 0
-                                    && match (wanted, &app) {
-                                        (Some(wanted), _) => w.target.window_id as i64 == wanted,
-                                        (None, Some(app)) => w.app.eq_ignore_ascii_case(app),
-                                        (None, None) => false,
-                                    }
+                                    && is_named(w, wanted, app.as_deref())
                                     && windows::display_role(w).accepts_window_request()
                             })
                             .map(|w| {
@@ -994,10 +989,10 @@ async fn handle_one(
                 })
                 .await;
                 if candidates.is_empty() {
-                    return Err(ControlError::not_found(match &app {
-                        Some(app) => format!("no {app} window on the user's screen"),
-                        None => "no window with that id on the user's screen".into(),
-                    }));
+                    let app = app.clone();
+                    return Err(ControlError::not_found(
+                        off(cx, move || not_placeable(wanted, app.as_deref())).await,
+                    ));
                 }
                 let words = p
                     .string("userInstruction")
@@ -2606,6 +2601,70 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
             .map(|(w, _, _)| w)
             .collect()
     })
+}
+
+/// Whether `w` is the window an agent named for place_window: by id, or
+/// by its app's owner name, name or bundle id (#133).
+fn is_named(w: &windows::Window, wanted: Option<i64>, app: Option<&str>) -> bool {
+    match (wanted, app) {
+        (Some(wanted), _) => w.target.window_id as i64 == wanted,
+        (None, Some(named)) => {
+            placement::names_app(named, &w.app, None, None)
+                || placement::names_app(
+                    named,
+                    &w.app,
+                    app::name(w.target.pid).as_deref(),
+                    app::bundle_id(w.target.pid).as_deref(),
+                )
+        }
+        (None, None) => false,
+    }
+}
+
+/// place_window's `not_found` when no stray and no window of the user's
+/// matched: where the window is, or what was searched. Blocking.
+fn not_placeable(wanted: Option<i64>, named: Option<&str>) -> String {
+    if let Some(id) = wanted {
+        let on_screen = windows::all()
+            .into_iter()
+            .find(|w| w.target.window_id as i64 == id);
+        let sighting = match on_screen {
+            Some(w) if w.layer != 0 => WindowSighting::NotDocument { app: w.app },
+            Some(w) if !windows::display_role(&w).accepts_window_request() => {
+                WindowSighting::OnAgentDisplay { app: w.app }
+            }
+            _ if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
+                WindowSighting::OffScreen {
+                    app: cg::all_windows()
+                        .into_iter()
+                        .find(|w| w.target.window_id as i64 == id)
+                        .map(|w| w.owner_name),
+                }
+            }
+            _ => WindowSighting::Gone,
+        };
+        return placement::no_window(id, &sighting);
+    }
+    let named = named.unwrap_or_default();
+    let found = app::identify(named);
+    // A window anywhere, hidden or on another Space, names its app by its
+    // owner name, which the app's own name may not be.
+    let running = found
+        .as_ref()
+        .filter(|f| app::is_running(&f.bundle_id))
+        .map(|f| f.name.clone())
+        .or_else(|| {
+            cg::all_windows()
+                .into_iter()
+                .find(|w| placement::names_app(named, &w.owner_name, None, None))
+                .map(|w| w.owner_name)
+        });
+    let sighting = match (running, found) {
+        (Some(name), _) => AppSighting::NoWindow { name },
+        (None, Some(found)) => AppSighting::NotRunning { name: found.name },
+        (None, None) => AppSighting::Unknown,
+    };
+    placement::no_app_window(named, &sighting)
 }
 
 /// Ask the user for one of their windows with a Window Request, and wait

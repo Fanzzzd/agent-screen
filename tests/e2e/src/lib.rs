@@ -318,6 +318,7 @@ const HANDS_OFF: &[&str] = &[
     "browsers",
     "chrome",
     "claims",
+    "closetwindow",
     "coldflash",
     "displaychange",
     "flash",
