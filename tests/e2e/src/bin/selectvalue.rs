@@ -4,7 +4,10 @@
 //! change event, with no option passed on the way and no menu opened.
 //! Titles with a space, a repeated key and CJK are chosen; the title the
 //! select shows already sends nothing; a title no option has fails and says
-//! so. The page writes what it holds and its event counts into its title:
+//! so. A select in a frame from another site gets type-ahead, which never
+//! sends a space: "United States" goes in as "United", and "New York",
+//! which shares its start with "Newark", and "11" are refused before any
+//! key. The page writes what it holds and its event counts into its title:
 //! tests/e2e/fixtures/web/selects.html.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e selectvalue
@@ -154,8 +157,9 @@ fn test(browser: &str) -> Result<()> {
                 && menus() == 0,
             format!("{missing:?}; {shown}"),
         );
-        // The framed select gets type-ahead: a space mid-title must not
-        // open its menu, and a repeated key is refused before any key.
+        // The select in the other site's frame gets type-ahead, which never
+        // sends a space: a spaced title goes in as the part before its
+        // space only when that alone reaches it.
         let town = || -> Result<i64> {
             let tree = call("windowState", json!({}))?["tree"]
                 .as_str()
@@ -168,37 +172,44 @@ fn test(browser: &str) -> Result<()> {
         };
         let typed = call(
             "elementAction",
-            json!({ "element": town()?, "action": "set_value", "value": "New York" }),
+            json!({ "element": town()?, "action": "set_value", "value": "United States" }),
         );
         let mut shown = String::new();
         for _ in 0..20 {
             shown = title()?;
-            if shown.contains("town=New York ") {
+            if shown.contains("town=United States ") {
                 break;
             }
             sleep_ms(100);
         }
         let open = menus();
         check(
-            "type-ahead with a space mid-title chooses the framed option with no menu",
-            typed.is_ok() && shown.contains("town=New York ") && open == 0,
+            "\"United States\" is typed as \"United\", which reaches it alone, with no menu",
+            typed.is_ok() && shown.contains("town=United States ") && open == 0,
             format!("{typed:?}; {shown}; menus open {open}"),
         );
-        let repeated = call(
-            "elementAction",
-            json!({ "element": town()?, "action": "set_value", "value": "11" }),
-        );
-        let after = title()?;
-        check(
-            "a repeated key is refused for a typed web select, and nothing changes",
-            repeated
-                .as_ref()
-                .err()
-                .is_some_and(|e| format!("{e:#}").contains("can't reach \"11\""))
-                && after.contains("town=New York ")
-                && menus() == 0,
-            format!("{repeated:?}; {after}"),
-        );
+        for (value, says) in [
+            ("New York", "would reach \"Newark\""),
+            ("11", "repeated key"),
+        ] {
+            let before = title()?;
+            let refused = call(
+                "elementAction",
+                json!({ "element": town()?, "action": "set_value", "value": value }),
+            );
+            sleep_ms(300);
+            let after = title()?;
+            let open = menus();
+            check(
+                &format!("{value:?} is refused for the typed select before any key"),
+                refused.as_ref().err().is_some_and(|e| {
+                    let e = format!("{e:#}");
+                    e.contains(says) && e.contains("Nothing was sent")
+                }) && after == before
+                    && open == 0,
+                format!("{refused:?}; {before} -> {after}; menus open {open}"),
+            );
+        }
         Ok(())
     })();
     // Close the browser before its display ends.

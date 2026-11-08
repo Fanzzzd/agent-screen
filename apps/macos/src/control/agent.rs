@@ -3504,16 +3504,22 @@ impl super::values::ValueAccess for AxValues<'_> {
         self.forwarder.agent_stopped()
     }
 
-    async fn in_web_page(&mut self) -> bool {
+    async fn popup_facts(&mut self) -> super::values::PopupFacts {
         let item = ax::Sendable(self.element.clone());
-        off(self.cx, move || ax::in_web_area(item.get())).await
+        off(self.cx, move || super::values::PopupFacts {
+            in_web_page: ax::in_web_area(item.get()),
+            engine: ax::pid_of(item.get()).and_then(devtools::engine),
+            items: ax::closed_menu_items(item.get()),
+        })
+        .await
     }
 
-    async fn choose_in_page(&mut self, title: &str) -> super::values::PageChoice {
+    async fn choose_in_page(&mut self, title: &str, shown: &str) -> super::values::PageChoice {
         use super::values::PageChoice;
         use devtools::SelectChoice;
         let item = ax::Sendable(self.element.clone());
         let title = title.to_owned();
+        let shown = shown.to_owned();
         let forwarder = self.forwarder.clone();
         let within = self.bounds;
         off(self.cx, move || {
@@ -3529,9 +3535,11 @@ impl super::values::ValueAccess for AxValues<'_> {
             if !within.contains(at) {
                 return PageChoice::Unpiped;
             }
-            match devtools::choose_option(target, bounds, at, &title, || forwarder.agent_stopped())
-            {
+            match devtools::choose_option(target, bounds, at, &title, &shown, || {
+                forwarder.agent_stopped()
+            }) {
                 SelectChoice::Unpiped => PageChoice::Unpiped,
+                SelectChoice::Elsewhere => PageChoice::Elsewhere,
                 SelectChoice::Chosen => PageChoice::Chosen,
                 SelectChoice::Already => PageChoice::Already,
                 SelectChoice::Missing { shown, near } => PageChoice::Missing { shown, near },
@@ -3543,7 +3551,7 @@ impl super::values::ValueAccess for AxValues<'_> {
         .await
     }
 
-    async fn type_popup(&mut self, title: &str) -> super::values::Typed {
+    async fn type_popup(&mut self, keys: &str) -> super::values::Typed {
         use super::values::Typed;
         use crate::mac::input::PopupTyped;
         let id = self.id;
@@ -3558,7 +3566,7 @@ impl super::values::ValueAccess for AxValues<'_> {
             .choose_closed_popup(
                 target,
                 ax::Sendable(self.element.clone()),
-                title.to_owned(),
+                keys.to_owned(),
                 self.bounds,
             )
             .await;
@@ -3571,7 +3579,10 @@ impl super::values::ValueAccess for AxValues<'_> {
                 "the pop-up button's window is no longer on display {id}, so nothing was typed. Call list_windows"
             ))),
             PopupTyped::Unfocused => Typed::NotSent(ControlError::failed(
-                "the pop-up button took no focus, so nothing was typed and no menu was opened. Refresh get_window_state and retry, or call request_help",
+                "the pop-up button didn't become its app's focused element, so keys could have gone to another control. Nothing was typed and no menu was opened. Refresh get_window_state and retry, or call request_help",
+            )),
+            PopupTyped::Spaced => Typed::NotSent(ControlError::invalid(
+                "Agent Screen never types a space into a closed pop-up. Nothing was sent",
             )),
             PopupTyped::Refused => {
                 let app = self

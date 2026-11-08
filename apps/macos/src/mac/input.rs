@@ -148,8 +148,10 @@ pub enum PopupTyped {
     /// Its app's key window is off the Agent Displays, maybe the user's:
     /// nothing typed. `take_refused` says which.
     Refused,
-    /// The button took no focus: nothing typed.
+    /// The button didn't become its app's focused element: nothing typed.
     Unfocused,
+    /// The keys held a space, which is never typed: nothing typed.
+    Spaced,
     /// Another window of the app took key focus, or the button's window
     /// left the display, after this many characters.
     Interrupted(usize),
@@ -160,10 +162,10 @@ pub enum PopupTyped {
 }
 
 /// The longest gap between two keys of a title. AppKit and Chromium end a
-/// type-ahead search about a second after its last key; a key after that
-/// starts a new search, and a space then opens the menu, which would take
-/// the user's keyboard. Posted keys carry the time they are sent, which
-/// the app's search goes by, however late it reads them.
+/// type-ahead search about a second after its last key, and a key after
+/// that starts a new search. No space is ever typed, so a late key can't
+/// open the menu, but it could choose another item: the gap is measured
+/// as the key goes out, after the process's real-input gate.
 const KEY_GAP: Duration = Duration::from_millis(300);
 
 /// Wait out a type-ahead search an earlier title may have started, or
@@ -546,13 +548,14 @@ impl Forwarder {
         .unwrap_or(Sent::Nowhere)
     }
 
-    /// Choose a closed pop-up button's item by typing its title, as
-    /// type-ahead, with keys posted to the button's process only. No menu
-    /// opens, so nothing takes the user's keyboard (ADR 0001), and no click
-    /// wakes the window. Each key goes out only while the button's window
-    /// is on this display and is its app's key window, the app hasn't come
-    /// to the front, no Takeover started, and the last key went out less
-    /// than `KEY_GAP` before.
+    /// Type `keys` into a closed pop-up button, as type-ahead, with keys
+    /// posted to the button's process only. No menu opens, so nothing takes
+    /// the user's keyboard (ADR 0001): the keys never hold a space, and no
+    /// click wakes the window. The first key goes out only once the button
+    /// is its app's focused element. Each key goes out only while the
+    /// button's window is on this display and is its app's key window, the
+    /// app hasn't come to the front, no Takeover started, and the last key
+    /// went out less than `KEY_GAP` before.
     ///
     /// A user who clicks their own window of the same app between the check
     /// and the key could still get that one key: the check is an AX call,
@@ -561,9 +564,12 @@ impl Forwarder {
         &self,
         target: WindowTarget,
         element: super::ax::Sendable,
-        title: String,
+        keys: String,
         within: Rect,
     ) -> PopupTyped {
+        if keys.contains(char::is_whitespace) || keys.is_empty() {
+            return PopupTyped::Spaced;
+        }
         let stopped = self.stopped.clone();
         self.run(move |w| {
             let is_stopped = || stopped.load(std::sync::atomic::Ordering::Relaxed);
@@ -573,7 +579,7 @@ impl Forwarder {
                 return PopupTyped::Gone;
             }
             let _held = AppKeys::hold(target.pid);
-            // A title typed while an earlier search goes on adds to it.
+            // Keys typed while an earlier search goes on add to it.
             if !wait_typeahead(&stopped) {
                 return PopupTyped::Stopped(0);
             }
@@ -591,16 +597,19 @@ impl Forwarder {
             if is_stopped() {
                 return PopupTyped::Stopped(0);
             }
+            // The keys go to the app's focused element, which must be the
+            // button: read it back.
             if !super::ax::set_attribute(
                 element.get(),
                 "AXFocused",
                 objc2_core_foundation::CFBoolean::new(true),
-            ) {
+            ) || !super::ax::is_focused_element(target.pid, element.get())
+            {
                 return PopupTyped::Unfocused;
             }
             let front_at_start = is_front(target.pid);
             let mut last: Option<Instant> = None;
-            for (typed, character) in title.chars().enumerate() {
+            for (typed, character) in keys.chars().enumerate() {
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
                 }
@@ -613,30 +622,38 @@ impl Forwarder {
                 {
                     return PopupTyped::Interrupted(typed);
                 }
+                let mut units = [0u16; 2];
+                let units = character.encode_utf16(&mut units);
+                let events: Vec<_> = [true, false]
+                    .into_iter()
+                    .filter_map(|down| {
+                        let event = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)?;
+                        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                        unsafe {
+                            CGEvent::keyboard_set_unicode_string(
+                                Some(&event),
+                                units.len() as _,
+                                units.as_ptr(),
+                            )
+                        };
+                        Some(event)
+                    })
+                    .collect();
+                // A real-input loan holds the gate: measure the gap once
+                // it is ours, just before the key goes out.
+                let gate = super::real_input::process_gate(target.pid);
+                let input = gate.read().unwrap_or_else(|e| e.into_inner());
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
                 }
                 if last.is_some_and(|at| at.elapsed() >= KEY_GAP) {
                     return PopupTyped::Slow(typed);
                 }
-                let mut units = [0u16; 2];
-                let units = character.encode_utf16(&mut units);
-                for down in [true, false] {
-                    let Some(event) = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)
-                    else {
-                        continue;
-                    };
-                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
-                    unsafe {
-                        CGEvent::keyboard_set_unicode_string(
-                            Some(&event),
-                            units.len() as _,
-                            units.as_ptr(),
-                        )
-                    };
-                    deliver(&event, target.pid, true);
+                for event in &events {
+                    post_now(event, target.pid, true);
                 }
                 last = Some(Instant::now());
+                drop(input);
                 thread::sleep(Duration::from_millis(4));
             }
             PopupTyped::Typed
@@ -1675,6 +1692,11 @@ fn stamp_routing_using(
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
     let gate = super::real_input::process_gate(pid);
     let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+    post_now(event, pid, authenticate);
+}
+
+/// `deliver` with the process's real-input gate already held.
+fn post_now(event: &CGEvent, pid: i32, authenticate: bool) {
     super::ime::note_posted();
     stamp_time(event);
     if !unsafe { SSPostEventToPid(pid, event, authenticate) } {

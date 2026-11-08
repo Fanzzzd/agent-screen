@@ -731,8 +731,12 @@ impl Drag {
 /// What became of choosing a web page's `<select>` option through the pipe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectChoice {
-    /// No pipe, or no select of the page's at the point: choose another way.
+    /// No pipe, or no select of the page's own at the point, as one in a
+    /// frame from another site: choose another way.
     Unpiped,
+    /// The select at the point shows something other than accessibility
+    /// said of the element: it may be another one. Nothing changed.
+    Elsewhere,
     /// The option is chosen, with one input and one change event.
     Chosen,
     /// The select already shows the option: nothing was sent.
@@ -740,7 +744,8 @@ pub enum SelectChoice {
     /// No option has the title; the select shows `shown`. `near` is an
     /// option whose title differs only in case.
     Missing { shown: String, near: Option<String> },
-    /// The select or the option is disabled: nothing changed.
+    /// The select, its fieldset, the option or its optgroup is disabled:
+    /// nothing changed.
     Disabled,
     /// The page didn't answer, so the choice may or may not have run.
     Unknown(String),
@@ -748,23 +753,39 @@ pub enum SelectChoice {
     Stopped,
 }
 
-/// Finds the select under the point and chooses the option titled as the
-/// agent asked, or says why not. One script run: no option in between is
-/// chosen, and the page gets one input event and one change event, as from
-/// the user's choice in the open menu.
-const CHOOSE: &str = r#"((x, y, title) => {
-  const hit = document.elementFromPoint(x, y);
+/// Finds the select under the point, in the page or a frame of the same
+/// site, and chooses the option titled as the agent asked, or says why
+/// not. One script run: no option in between is chosen, and the page gets
+/// one input event and one change event, as from the user's choice in the
+/// open menu. A page script sees them as untrusted (`isTrusted` false), as
+/// for any script's events.
+const CHOOSE: &str = r#"((x, y, title, expected) => {
+  let doc = document, hit = null;
+  for (let depth = 0; depth < 8; depth++) {
+    hit = doc.elementFromPoint(x, y);
+    if (!hit || !(hit instanceof doc.defaultView.HTMLIFrameElement)) break;
+    let inner = null;
+    try { inner = hit.contentDocument; } catch (e) { inner = null; }
+    if (!inner) return JSON.stringify({ kind: 'none' });
+    const box = hit.getBoundingClientRect();
+    x -= box.left + hit.clientLeft;
+    y -= box.top + hit.clientTop;
+    doc = inner;
+  }
   const select = hit && hit.closest ? hit.closest('select') : null;
   if (!select || select.multiple) return JSON.stringify({ kind: 'none' });
   const options = Array.from(select.options);
   const shown = () => select.selectedIndex >= 0 ? options[select.selectedIndex].text : '';
+  if (shown() !== expected) return JSON.stringify({ kind: 'elsewhere' });
   const i = options.findIndex(o => o.text === title || o.label === title);
   if (i < 0) {
     const near = options.find(o => o.text.toLowerCase() === title.toLowerCase());
     return JSON.stringify({ kind: 'missing', shown: shown(), near: near ? near.text : null });
   }
   if (select.selectedIndex === i) return JSON.stringify({ kind: 'already' });
-  if (select.disabled || options[i].disabled) return JSON.stringify({ kind: 'disabled' });
+  if (select.matches(':disabled') || options[i].matches(':disabled')) {
+    return JSON.stringify({ kind: 'disabled' });
+  }
   select.selectedIndex = i;
   select.dispatchEvent(new Event('input', { bubbles: true }));
   select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -773,7 +794,9 @@ const CHOOSE: &str = r#"((x, y, title) => {
 
 /// Choose the option titled `title` of the select at the global point `at`
 /// of `window`, whose frame is `bounds`, through the app's pipe: nothing
-/// reaches WindowServer, and no menu opens. `stopped` is asked just
+/// reaches WindowServer, and no menu opens. `shown` is what accessibility
+/// says the element shows: a select at the point that shows something
+/// else may be another one, and is left alone. `stopped` is asked just
 /// before the page's script runs. Blocks on the app; call it off the main
 /// thread.
 pub fn choose_option(
@@ -781,6 +804,7 @@ pub fn choose_option(
     bounds: Rect,
     at: (f64, f64),
     title: &str,
+    shown: &str,
     stopped: impl Fn() -> bool,
 ) -> SelectChoice {
     let Some(area) = super::ax::web_area_at(window, at) else {
@@ -793,7 +817,7 @@ pub fn choose_option(
         return SelectChoice::Unpiped;
     };
     let (x, y) = page.viewport.to_page(at);
-    let expression = format!("{CHOOSE}({x}, {y}, {})", json!(title));
+    let expression = format!("{CHOOSE}({x}, {y}, {}, {})", json!(title), json!(shown));
     if stopped() {
         return SelectChoice::Stopped;
     }
@@ -815,6 +839,7 @@ pub fn choose_option(
         Some("chosen") => SelectChoice::Chosen,
         Some("already") => SelectChoice::Already,
         Some("disabled") => SelectChoice::Disabled,
+        Some("elsewhere") => SelectChoice::Elsewhere,
         Some("missing") => SelectChoice::Missing {
             shown: string("shown").unwrap_or_default(),
             near: string("near"),

@@ -9,9 +9,9 @@
 <select id="city" aria-label="City">
   <option>Apple</option><option>Newark</option><option>New York</option><option>1</option><option>10</option><option>11</option><option>東京</option>
 </select></p>
-<!-- A select in a frame: the pipe's script finds only the page's own
-     selects, so set_value types into this one. -->
-<iframe id="frame" width="320" height="80" srcdoc="<label for=town>Town</label> <select id=town aria-label=Town><option>Apple</option><option>Newark</option><option>New York</option><option>10</option><option>11</option></select><script>const t = document.getElementById('town'); let n = 0; const say = () => parent.postMessage({ town: t.value, changes: n }, '*'); t.addEventListener('change', () => { n++; say(); }); say();</script>"></iframe>
+<!-- A select in a frame from another site, out of the pipe's script's
+     reach: set_value types into this one. -->
+<iframe id="frame" width="360" height="80" src="data:text/html;charset=utf-8,%3Clabel for=town%3ETown%3C/label%3E %3Cselect id=town aria-label=Town%3E%3Coption%3EApple%3C/option%3E%3Coption%3ENewark%3C/option%3E%3Coption%3ENew York%3C/option%3E%3Coption%3EUnited States%3C/option%3E%3Coption%3EUruguay%3C/option%3E%3Coption%3E10%3C/option%3E%3Coption%3E11%3C/option%3E%3C/select%3E%3Cscript%3Econst t = document.getElementById('town'); let n = 0; const say = () => parent.postMessage({ town: t.value, changes: n }, '*'); t.addEventListener('change', () => { n++; say(); }); say();%3C/script%3E"></iframe>
 <script>
   // The title says what the select shows and how many input and change
   // events it fired, so a script sees an item passed on the way.

@@ -3,8 +3,12 @@
 //! title as type-ahead, sent to the fixture's process only; the combo box
 //! takes AXValue and AXConfirm. The fixture writes what it holds and how
 //! often a menu opened into its title: tests/e2e/tools/menuchoice.swift.
-//! A wrong-case title, a rejected combo commit and unsafe titles fail and
-//! say so; a Takeover during either choice stops it.
+//! A title with a space is refused before any key, as a space can open the
+//! menu and an AppKit pop-up lists no items to tell whether the part before
+//! it is enough. So are a pop-up that takes no focus and a WebKit page's
+//! select. A wrong-case title, an earlier item that starts with the title,
+//! a rejected combo commit and unsafe titles fail and say so; a Takeover
+//! during either choice stops it.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e menuchoice
 //!
@@ -108,19 +112,25 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             );
         }
 
-        // A space mid-title, a repeated key, CJK, and a title an earlier
-        // item starts with. `Ok(())` means chosen; `Err(text)`, a failure
-        // whose message has the text and leaves the pop-up as it was.
+        // A title with a space, which is never typed, a repeated key, CJK,
+        // and a title an earlier item starts with.
+        enum Outcome {
+            Chosen,
+            /// Refused before any key: the pop-up is as it was.
+            Refused(&'static str),
+            /// Typed, then the check failed and said so.
+            Failed(&'static str),
+        }
         let fruit = element("popupbutton", "Fruit")?;
         for (value, outcome) in [
-            ("Dragon fruit", Ok(())),
-            ("10", Ok(())),
-            ("11", Ok(())),
-            ("1", Ok(())),
-            ("1", Ok(())),
-            ("中文", Ok(())),
-            ("Dragon", Err("can't reach")),
-            ("Banana", Ok(())),
+            ("Dragon fruit", Outcome::Refused("never types one")),
+            ("10", Outcome::Chosen),
+            ("11", Outcome::Chosen),
+            ("1", Outcome::Chosen),
+            ("1", Outcome::Chosen),
+            ("中文", Outcome::Chosen),
+            ("Dragon", Outcome::Failed("can't reach")),
+            ("Banana", Outcome::Chosen),
         ] {
             let before = title()?;
             let result = set(fruit, value);
@@ -132,25 +142,52 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 }
                 sleep_ms(50);
             }
-            let ok = match outcome {
-                Ok(()) => result.is_ok() && shown.contains(&format!("fruit={value} ")),
-                Err(text) => result
+            let says = |text: &str| {
+                result
                     .as_ref()
                     .err()
-                    .is_some_and(|e| format!("{e:#}").contains(text)),
+                    .is_some_and(|e| format!("{e:#}").contains(text))
+            };
+            let (label, ok) = match outcome {
+                Outcome::Chosen => (
+                    "is chosen".to_string(),
+                    result.is_ok() && shown.contains(&format!("fruit={value} ")),
+                ),
+                Outcome::Refused(text) => (
+                    format!("is refused before any key, saying {text:?}"),
+                    says(text) && says("Nothing was sent") && shown == before,
+                ),
+                Outcome::Failed(text) => (format!("fails saying {text:?}"), says(text)),
             };
             check(
-                &format!(
-                    "{value:?} {}, with no menu opened",
-                    match outcome {
-                        Ok(()) => "is chosen".to_string(),
-                        Err(text) => format!("fails saying {text:?}"),
-                    }
-                ),
+                &format!("{value:?} {label}, with no menu opened"),
                 ok && shown.contains("opens=0"),
                 format!("{result:?}; {before} -> {shown}"),
             );
         }
+
+        // Keys go out only once the pop-up is the app's focused element.
+        let locked = set(element("popupbutton", "Locked")?, "Kiwi");
+        let shown = title()?;
+        check(
+            "a pop-up that takes no focus gets no key",
+            locked
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("focused element"))
+                && shown.contains("locked=Apple ")
+                && shown.contains("opens=0"),
+            format!("{locked:?}; {shown}"),
+        );
+        // A WebKit page's select may open its menu on a key: none is sent.
+        let web = set(element("popupbutton", "Web fruit")?, "Kiwi");
+        check(
+            "a WebKit page's select is refused before any key",
+            web.as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("is neither")),
+            format!("{web:?}"),
+        );
 
         let color = element("combobox", "Color")?;
         let wrong_case = set(fruit, "banana");
