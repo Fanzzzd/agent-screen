@@ -1,0 +1,208 @@
+//! How `place_window` finds the window an agent names, and what it says
+//! when it finds none (#133). An agent named WeCom by its process name,
+//! 企业微信, and by its bundle id, while place_window compared only the
+//! window list's owner name, "WeCom", and every answer was the same
+//! `not_found`.
+
+/// An app as an agent named it for place_window, with the bundle id that
+/// name resolved to once, by a running app's name or bundle id, an
+/// installed app's name, or an .app path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedApp {
+    text: String,
+    bundle_id: Option<String>,
+}
+
+impl NamedApp {
+    pub fn new(text: &str, resolved_bundle_id: Option<String>) -> Self {
+        Self {
+            text: text.trim().to_lowercase(),
+            bundle_id: resolved_bundle_id.map(|b| b.to_lowercase()),
+        }
+    }
+
+    /// Whether the window list's owner name alone names the app, so the
+    /// app's own name and bundle id needn't be looked up.
+    pub fn is_owner(&self, owner: &str) -> bool {
+        !self.text.is_empty() && owner.trim().to_lowercase() == self.text
+    }
+
+    /// Whether a window with this owner name, of an app with this name and
+    /// bundle id, is the app's: any of the three is the name the agent
+    /// gave, ignoring case and surrounding spaces, or the bundle id is the
+    /// one that name resolved to.
+    pub fn is_app(&self, owner: &str, name: Option<&str>, bundle_id: Option<&str>) -> bool {
+        let same = |n: &str| n.trim().to_lowercase() == self.text;
+        self.is_owner(owner)
+            || (!self.text.is_empty() && name.is_some_and(same))
+            || bundle_id.is_some_and(|b| {
+                let b = b.to_lowercase();
+                (!self.text.is_empty() && b == self.text) || self.bundle_id.as_ref() == Some(&b)
+            })
+    }
+}
+
+/// What became of a window an agent asked for by id that isn't one of its
+/// strays or a window of the user's on screen. Only a window on the user's
+/// screen is named: the agent may have guessed the id of a hidden window
+/// or of another agent's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowSighting {
+    /// No window has that id.
+    Gone,
+    /// It exists, but not on screen: minimized, hidden, closed to the
+    /// Dock, or on another macOS Space.
+    OffScreen,
+    /// On the user's screen, but a panel, dialog or menu rather than a
+    /// document window.
+    NotDocument { app: String },
+    /// On another Agent Display.
+    OnAgentDisplay,
+}
+
+/// The `not_found` message for window `id`.
+pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
+    match sighting {
+        WindowSighting::Gone => format!(
+            "no window has id {id}: it closed, or the id is from another list. Call list_windows with strays: true, or place_window with the app's name"
+        ),
+        WindowSighting::OffScreen => format!(
+            "window {id} isn't on screen: it is minimized, hidden or on another macOS Space. Ask the user to bring it up, then call place_window again"
+        ),
+        WindowSighting::NotDocument { app } => format!(
+            "window {id} ({app}) is a panel or dialog; place_window moves document windows. Place the {app} window it belongs to"
+        ),
+        WindowSighting::OnAgentDisplay => {
+            format!("window {id} is on another Agent Display, which another agent session holds")
+        }
+    }
+}
+
+/// What place_window knows of an app no window it could offer matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppSighting {
+    /// Nothing checked has that name or bundle id.
+    Unknown,
+    /// Installed, not running.
+    NotRunning { name: String },
+    /// Running, with no window on screen.
+    NoWindow { name: String },
+    /// Its only windows on screen are panels and dialogs.
+    OnlyPanels { name: String },
+    /// Its document window is on this display already.
+    OnThisDisplay { window_id: u32 },
+    /// Its document windows on screen are on other Agent Displays.
+    OnAgentDisplay,
+}
+
+/// The `not_found` message for an app the agent named. It says what was
+/// compared, so an agent can tell a name that matched nothing from an app
+/// with no window to offer.
+pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
+    match sighting {
+        AppSighting::Unknown => format!(
+            "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no app named {app:?}.app in the Applications folders, and no installed app with that bundle id. Check the name, or pass a window_id"
+        ),
+        AppSighting::NotRunning { name } => format!(
+            "{name} isn't running. Start it with launch_app, which opens its window on the display"
+        ),
+        AppSighting::NoWindow { name } => format!(
+            "{name} is running, but none of its windows is on screen: they are closed, minimized, hidden or on another macOS Space. Ask the user to open or bring up its window, then call place_window again"
+        ),
+        AppSighting::OnlyPanels { name } => format!(
+            "{name}'s only windows on the user's screen are panels or dialogs; place_window moves document windows. Ask the user to open its main window"
+        ),
+        AppSighting::OnThisDisplay { window_id } => format!(
+            "its window {window_id} is on your display already; pass that window_id to set its frame"
+        ),
+        AppSighting::OnAgentDisplay => {
+            "its windows on screen are on other Agent Displays, which other agent sessions hold"
+                .into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_app_is_named_by_its_owner_its_name_or_its_bundle_id() {
+        let wecom = |wanted| {
+            NamedApp::new(wanted, None).is_app(
+                "WeCom",
+                Some("企业微信"),
+                Some("com.tencent.WeWorkMac"),
+            )
+        };
+        for wanted in [
+            "WeCom",
+            "wecom",
+            "企业微信",
+            "com.tencent.weworkmac",
+            " WeCom ",
+        ] {
+            assert!(wecom(wanted), "{wanted}");
+        }
+        for wanted in ["WeWork", "", "  ", "com.tencent"] {
+            assert!(!wecom(wanted), "{wanted}");
+        }
+        assert!(NamedApp::new("Field", None).is_owner("Field"));
+        assert!(!NamedApp::new("企业微信", None).is_owner("WeCom"));
+    }
+
+    #[test]
+    fn a_path_or_installed_name_matches_by_the_bundle_id_it_resolved_to() {
+        let by_path = NamedApp::new(
+            "/tmp/e2e/Field.app",
+            Some("app.agentscreen.e2e.field".into()),
+        );
+        assert!(by_path.is_app("Field", Some("Field"), Some("app.agentscreen.e2e.Field")));
+        assert!(!by_path.is_app("Other", Some("Other"), Some("com.example.other")));
+        assert!(
+            !by_path.is_app("Field", Some("Field"), None),
+            "no bundle id to compare"
+        );
+    }
+
+    #[test]
+    fn each_not_found_says_what_was_searched_or_where_the_window_is() {
+        let unknown = no_app_window("WeWork", &AppSighting::Unknown);
+        assert!(unknown.contains("\"WeWork\"") && unknown.contains("bundle id"));
+        assert!(
+            !unknown.contains("is running"),
+            "claims only what it checked"
+        );
+        let name = || "企业微信".to_string();
+        assert!(
+            no_app_window("企业微信", &AppSighting::NoWindow { name: name() })
+                .starts_with("企业微信 is running")
+        );
+        let panels = no_app_window("企业微信", &AppSighting::OnlyPanels { name: name() });
+        assert!(panels.contains("panels or dialogs") && !panels.contains("none of its windows"));
+        assert!(
+            no_app_window("Field", &AppSighting::OnThisDisplay { window_id: 9 })
+                .contains("window_id")
+        );
+        assert!(
+            no_app_window("UTM", &AppSighting::NotRunning { name: "UTM".into() })
+                .contains("launch_app")
+        );
+        assert!(no_window(7, &WindowSighting::Gone).starts_with("no window has id 7"));
+        assert_eq!(
+            no_window(7, &WindowSighting::OffScreen),
+            "window 7 isn't on screen: it is minimized, hidden or on another macOS Space. Ask the user to bring it up, then call place_window again"
+        );
+        let other = no_window(7, &WindowSighting::OnAgentDisplay);
+        assert!(other.starts_with("window 7 is on another Agent Display"));
+        assert!(
+            no_window(
+                7,
+                &WindowSighting::NotDocument {
+                    app: "WeCom".into()
+                }
+            )
+            .starts_with("window 7 (WeCom) is a panel")
+        );
+    }
+}

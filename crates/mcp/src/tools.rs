@@ -391,7 +391,7 @@ pub fn definitions() -> Vec<Value> {
             "place_window",
             "Place a window on the display",
             &[
-                "Move a window onto the display, by window_id or by app name. A window of an app launch_app started for you",
+                "Move a window onto the display, by window_id or by app name or bundle id. A window of an app launch_app started for you",
                 "moves at once: get ids from list_windows with strays: true. Any other window is the user's, such as one an app",
                 "opened that you started with a shell command like open -a: Agent Screen asks the user, and the call waits for",
                 "their answer, up to timeout_seconds. Handed over, the window is on the display as a Handover; turned down, it stays",
@@ -411,7 +411,7 @@ pub fn definitions() -> Vec<Value> {
                 json!({
                     "display_id": display_id(),
                     "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, or one already on the display." },
-                    "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name, e.g. \"UTM\"." },
+                    "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name or bundle id, e.g. \"UTM\" or \"com.utmapp.UTM\". A window in another AeroSpace workspace counts as the user's." },
                     "x": { "type": "number", "description": "Left edge in screenshot pixels from the display's left edge." },
                     "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
                     "width": { "type": "number", "description": "Width in screenshot pixels." },

@@ -2,11 +2,21 @@
 //
 //     onscreen main          the user's main display
 //     onscreen <displayId>   any display
+//     onscreen closet        AeroSpace's closet (vendor 0x4145, model 1); none without one
 import CoreGraphics
 import Foundation
 
 let arg = CommandLine.arguments.dropFirst().first ?? "main"
-let id = arg == "main" ? CGMainDisplayID() : CGDirectDisplayID(UInt32(arg)!)
+func closet() -> CGDirectDisplayID {
+  var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+  var count: UInt32 = 0
+  CGGetActiveDisplayList(32, &ids, &count)
+  guard let id = ids[..<Int(count)].first(where: {
+    CGDisplayVendorNumber($0) == 0x4145 && CGDisplayModelNumber($0) == 1
+  }) else { exit(0) }
+  return id
+}
+let id = arg == "main" ? CGMainDisplayID() : arg == "closet" ? closet() : CGDirectDisplayID(UInt32(arg)!)
 let area = CGDisplayBounds(id)
 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
 for w in list {
