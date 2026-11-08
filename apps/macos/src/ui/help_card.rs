@@ -1121,7 +1121,7 @@ fn list_row(i: usize, item: &Item, several: bool, zh: bool, theme: &Theme) -> gp
                             .truncate()
                             .text_size(px(11.))
                             .text_color(theme.secondary)
-                            .child(t("You are using this display", "你正在操作此显示器")),
+                            .child(t("You are using this display", "你正在操作这个显示器")),
                     )
                 }),
         )
