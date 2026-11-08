@@ -157,6 +157,46 @@ pub fn bundle_of(pid: i32) -> Option<PathBuf> {
     Some(PathBuf::from(app.bundleURL()?.path()?.to_string()))
 }
 
+/// Whether the app draws its controls with AppKit, so its pop-up buttons
+/// are NSPopUpButtons: no Qt, Java, Flutter or Chromium runtime in its
+/// bundle. None when its bundle can't be found. An app without any of
+/// those markers counts as AppKit: every other Mac toolkit we know of
+/// ships one of them.
+pub fn is_cocoa(pid: i32) -> Option<bool> {
+    let bundle = bundle_of(pid)?;
+    Some(!foreign_toolkit(&bundle))
+}
+
+/// Whether a bundle carries a toolkit of its own, whose pop-ups may take
+/// keys differently from AppKit's.
+fn foreign_toolkit(bundle: &std::path::Path) -> bool {
+    let contents = bundle.join("Contents");
+    let names = |dir: &str| -> Vec<String> {
+        std::fs::read_dir(contents.join(dir))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let frameworks = names("Frameworks");
+    let plugins = names("PlugIns");
+    let has = |list: &[String], f: &dyn Fn(&str) -> bool| list.iter().any(|n| f(n));
+    // Qt
+    has(&frameworks, &|n| n.starts_with("Qt") && n.ends_with(".framework"))
+        || contents.join("PlugIns/platforms/libqcocoa.dylib").exists()
+        // Java: a bundled runtime or the launcher's library
+        || has(&plugins, &|n| n.ends_with(".jre") || n.ends_with(".jdk"))
+        || contents.join("runtime").exists()
+        || contents.join("Home/lib/libjli.dylib").exists()
+        || has(&frameworks, &|n| n == "JavaVM.framework" || n.ends_with("libjli.dylib"))
+        // Flutter
+        || has(&frameworks, &|n| n == "FlutterMacOS.framework")
+        // Chromium and Electron, whose own controls aren't AppKit's
+        || super::devtools::is_chromium(bundle)
+}
+
 /// Whether the app is built on Electron, which ships its framework inside.
 pub fn is_electron(pid: i32) -> bool {
     bundle_of(pid).is_some_and(|b| {

@@ -1352,14 +1352,14 @@ async fn handle_one(
                     .remember_user_window(window.target.pid)
                     .await;
             }
-            act(&core, id, &action, &element, p.string("value"), cx).await?;
+            let action_note = act(&core, id, &action, &element, p.string("value"), cx).await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
                 let forwarder = core.update(cx, |c, _| c.forwarder(id));
                 forwarder.focus(window.target).await;
             }
-            if let Some(note) = menu_note {
+            if let Some(note) = menu_note.map(String::from).or(action_note) {
                 return reply(json!({ "note": note }));
             }
             Ok(json!({}))
@@ -3353,7 +3353,8 @@ async fn act(
     element: &ax::Element,
     value: Option<String>,
     cx: &mut AsyncApp,
-) -> Result<(), ControlError> {
+) -> Result<Option<String>, ControlError> {
+    let mut note = None;
     let bounds = cg::display_bounds(id);
     // Each AX call blocks until the app answers, up to the 1 s timeout,
     // and an action that opens a modal holds it all that time.
@@ -3422,7 +3423,7 @@ async fn act(
                 id,
                 cx,
             };
-            super::values::set_value(&mut access, id, &value).await?;
+            note = super::values::set_value(&mut access, id, &value).await?;
         }
         "insert_text" => {
             let value =
@@ -3472,7 +3473,7 @@ async fn act(
         }
         other => return Err(ControlError::invalid(format!("unknown action {other}"))),
     }
-    Ok(())
+    Ok(note)
 }
 
 /// The window an element is in, and its process.
@@ -3509,6 +3510,7 @@ impl super::values::ValueAccess for AxValues<'_> {
         off(self.cx, move || super::values::PopupFacts {
             in_web_page: ax::in_web_area(item.get()),
             engine: ax::pid_of(item.get()).and_then(devtools::engine),
+            cocoa: ax::pid_of(item.get()).and_then(app::is_cocoa),
             items: ax::closed_menu_items(item.get()),
         })
         .await

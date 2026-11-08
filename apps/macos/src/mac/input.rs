@@ -623,9 +623,20 @@ impl Forwarder {
                 element.get(),
                 "AXFocused",
                 objc2_core_foundation::CFBoolean::new(true),
-            ) || !super::ax::is_focused_element(target.pid, element.get())
-            {
+            ) {
                 return PopupTyped::Unfocused;
+            }
+            // Chromium moves focus a moment after it answers: look for up
+            // to 300 ms, and send nothing if it never arrives.
+            let asked = Instant::now();
+            while !super::ax::is_focused_element(target.pid, element.get()) {
+                if is_stopped() {
+                    return PopupTyped::Stopped(0);
+                }
+                if asked.elapsed() >= Duration::from_millis(300) {
+                    return PopupTyped::Unfocused;
+                }
+                thread::sleep(Duration::from_millis(20));
             }
             let front_at_start = is_front(target.pid);
             let mut last: Option<Instant> = None;

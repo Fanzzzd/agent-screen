@@ -11,7 +11,7 @@
 use super::server::ControlError;
 use agent_screen_model::devtools::Engine;
 use agent_screen_model::selection::{
-    PopupKind, PopupMiss, Refusal, ValueRoute, keys_for, popup_kind, popup_miss,
+    PopupKind, PopupMiss, Refusal, ValueRoute, keys_for, passed, popup_kind, popup_miss,
     popup_title_is_safe, value_route,
 };
 use std::time::{Duration, Instant};
@@ -85,6 +85,8 @@ pub(super) struct PopupFacts {
     /// None when accessibility couldn't tell: then no key goes out.
     pub in_web_page: Option<bool>,
     pub engine: Option<Engine>,
+    /// Whether the app draws with AppKit; None when that can't be told.
+    pub cocoa: Option<bool>,
     /// Its items, when accessibility lists them while it is closed, as a
     /// Chromium `<select>` does and an AppKit pop-up button doesn't.
     pub items: Option<Vec<String>>,
@@ -135,11 +137,12 @@ fn same(shown: &str, value: &str) -> bool {
     shown.replace('\r', "\n") == value.replace('\r', "\n")
 }
 
+/// Set the value; on success, a note for the agent, if any.
 pub(super) async fn set_value(
     access: &mut impl ValueAccess,
     display: u32,
     value: &str,
-) -> Result<(), ControlError> {
+) -> Result<Option<String>, ControlError> {
     check(access, display)?;
     let role = access.role().await;
     check(access, display)?;
@@ -147,9 +150,9 @@ pub(super) async fn set_value(
         ValueRoute::PopupTypeAhead => popup(access, display, value).await,
         ValueRoute::ComboConfirm => {
             attribute(access, display, value, true).await?;
-            combo(access, display, value).await
+            combo(access, display, value).await.map(|_| None)
         }
-        ValueRoute::Attribute => attribute(access, display, value, false).await,
+        ValueRoute::Attribute => attribute(access, display, value, false).await.map(|_| None),
     }
 }
 
@@ -183,11 +186,37 @@ fn refusal_message(refusal: &Refusal, title: &str, shown: &str) -> String {
     format!("{why}. Nothing was sent and no menu was opened. {INSTEAD}")
 }
 
+/// What type-ahead with `keys` may have chosen on the way, for the
+/// agent: an app acts on each item a pop-up shows, a web page with a
+/// change event, a native app with the pop-up's action. Named when the
+/// items are known; empty when a single key goes straight to the item.
+fn passed_note(kind: PopupKind, keys: &str, current: &str, items: Option<&[String]>) -> String {
+    match (kind, items) {
+        (PopupKind::ChromiumSelect, Some(items)) => {
+            let on_the_way = passed(kind, keys, current, items);
+            if on_the_way.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " On the way it showed {}, and the page may have taken a change event for each.",
+                    on_the_way
+                        .iter()
+                        .map(|i| format!("{i:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        _ if keys.chars().count() > 1 => " Type-ahead may have shown other items on the way, and the app may have acted on each, as a pop-up runs its action or a page fires a change event for every item it shows.".to_string(),
+        _ => String::new(),
+    }
+}
+
 async fn popup(
     access: &mut impl ValueAccess,
     display: u32,
     title: &str,
-) -> Result<(), ControlError> {
+) -> Result<Option<String>, ControlError> {
     if !popup_title_is_safe(title) {
         return Err(ControlError::invalid(
             "a pop-up button takes the exact full title of one of its items, nonempty, without leading whitespace, control characters or function-key characters. Nothing was sent",
@@ -199,7 +228,7 @@ async fn popup(
     // Typing the title it shows could move it on: a web page's select goes
     // to the next item that starts with a repeated key.
     if shown.as_deref() == Some(title) {
-        return Ok(());
+        return Ok(None);
     }
     let before = shown.clone().unwrap_or_default();
     let facts = access.popup_facts().await;
@@ -215,8 +244,12 @@ async fn popup(
                     "the page has no select at this element, so it is a button that opens a menu or a custom control, and typing into it could open the menu. Nothing was sent and no menu was opened. {INSTEAD}"
                 )));
             }
-            PageChoice::Already => return Ok(()),
-            PageChoice::Chosen => return settle(access, display, title, &before, None).await,
+            PageChoice::Already => return Ok(None),
+            PageChoice::Chosen => {
+                return settle(access, display, title, &before, None)
+                    .await
+                    .map(|_| None);
+            }
             PageChoice::Elsewhere => {
                 return Err(ControlError::failed(
                     "the select at the element's point shows something else than accessibility reported for the element, so nothing was chosen. Refresh get_window_state and retry",
@@ -256,19 +289,18 @@ async fn popup(
             "accessibility didn't say what the pop-up button shows, so Agent Screen can't tell where type-ahead would go. Nothing was sent and no menu was opened. Refresh get_window_state and retry, or call request_help",
         ));
     }
-    let kind = popup_kind(facts.in_web_page, facts.engine, select);
+    let kind = popup_kind(facts.in_web_page, facts.engine, facts.cocoa, select);
     let keys = keys_for(title, kind, &before, facts.items.as_deref())
         .map_err(|refusal| ControlError::failed(refusal_message(&refusal, title, &before)))?;
-    let web = kind == PopupKind::ChromiumSelect;
+    let passed = passed_note(kind, &keys, &before, facts.items.as_deref());
     let typed = access.type_popup(&keys).await;
     let total = keys.chars().count();
-    let passed = if web {
-        " A web page may have taken a change event for each item passed on the way."
-    } else {
-        ""
-    };
     let (done, why) = match typed {
-        Typed::All => return settle(access, display, title, &before, Some(web)).await,
+        Typed::All => {
+            settle(access, display, title, &before, Some(&passed)).await?;
+            let note = passed.trim();
+            return Ok((!note.is_empty()).then(|| note.to_string()));
+        }
         Typed::NotSent(error) => return Err(error),
         Typed::Stopped(done) => (done, None),
         Typed::Interrupted(done) => (
@@ -284,6 +316,8 @@ async fn popup(
     };
     let shown = if done > 0 {
         let shown = access.read().await;
+        let sent: String = keys.chars().take(done).collect();
+        let passed = passed_note(kind, &sent, &before, facts.items.as_deref());
         format!(" It now shows {}.{passed}", shown_text(&shown))
     } else {
         String::new()
@@ -299,14 +333,14 @@ async fn popup(
 }
 
 /// Wait for the pop-up to show `title`, which the page chose (`typed`
-/// None) or was typed into it (`typed` says whether in a web page); if it
-/// doesn't, say why. A hung app gets `SETTLE` in all.
+/// None) or was typed into it (`typed` is what may have been chosen on
+/// the way); if it doesn't, say why. A hung app gets `SETTLE` in all.
 async fn settle(
     access: &mut impl ValueAccess,
     display: u32,
     title: &str,
     before: &str,
-    typed: Option<bool>,
+    typed: Option<&str>,
 ) -> Result<(), ControlError> {
     let deadline = Instant::now() + SETTLE;
     let mut shown = String::new();
@@ -323,15 +357,10 @@ async fn settle(
         access.pause(Duration::from_millis(25)).await;
     }
     check(access, display)?;
-    let Some(typed_in_page) = typed else {
+    let Some(passed) = typed else {
         return Err(ControlError::failed(format!(
             "the page chose the option {title:?}, but accessibility shows {shown:?}. Inspect the select before retrying"
         )));
-    };
-    let passed = if typed_in_page {
-        " A web page may have taken a change event for each item passed on the way."
-    } else {
-        ""
     };
     let why = match popup_miss(title, before, &shown) {
         PopupMiss::Case => format!(
@@ -465,6 +494,7 @@ mod tests {
                 facts: PopupFacts {
                     in_web_page: Some(false),
                     engine: Some(Engine::WebKit),
+                    cocoa: Some(true),
                     items: None,
                 },
                 page: PageChoice::Unpiped,
@@ -530,7 +560,7 @@ mod tests {
         }
     }
 
-    fn run(fake: &mut Fake, value: &str) -> Result<(), ControlError> {
+    fn run(fake: &mut Fake, value: &str) -> Result<Option<String>, ControlError> {
         futures::executor::block_on(set_value(fake, 1, value))
     }
 
@@ -547,6 +577,7 @@ mod tests {
         fake.facts = PopupFacts {
             in_web_page: Some(true),
             engine: Some(Engine::Chromium),
+            cocoa: Some(false),
             items: Some(items.iter().map(|s| s.to_string()).collect()),
         };
         fake
@@ -557,6 +588,42 @@ mod tests {
         let mut fake = popup("Cherry");
         run(&mut fake, "Cherry").unwrap();
         assert_eq!(fake.trace, ["role", "read", "facts", "type", "read"]);
+    }
+
+    #[test]
+    fn a_native_choice_says_the_app_may_have_acted_on_items_on_the_way() {
+        let mut fake = popup("Cherry");
+        let note = run(&mut fake, "Cherry").unwrap().unwrap_or_default();
+        assert!(note.contains("may have acted on each"), "{note}");
+        let mut fake = popup("Banana");
+        let error = run(&mut fake, "Cherry").unwrap_err();
+        assert!(
+            error.message.contains("may have acted on each"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_typed_web_choice_names_the_items_on_the_way() {
+        let mut fake = select("Blueberry", &["Apple", "Banana", "Blueberry"]);
+        let note = run(&mut fake, "Blueberry").unwrap().unwrap_or_default();
+        assert!(note.contains("showed \"Banana\""), "{note}");
+    }
+
+    #[test]
+    fn a_pop_up_of_another_toolkit_gets_no_key() {
+        for cocoa in [Some(false), None] {
+            let mut fake = popup("Cherry");
+            fake.facts.cocoa = cocoa;
+            assert!(
+                run(&mut fake, "Cherry")
+                    .unwrap_err()
+                    .message
+                    .contains("is neither")
+            );
+            assert!(!fake.trace.contains(&"type"));
+        }
     }
 
     #[test]
@@ -624,11 +691,13 @@ mod tests {
             PopupFacts {
                 in_web_page: Some(true),
                 engine: Some(Engine::WebKit),
+                cocoa: Some(true),
                 items: Some(vec!["Apple".into(), "Cherry".into()]),
             },
             PopupFacts {
                 in_web_page: Some(true),
                 engine: Some(Engine::Chromium),
+                cocoa: Some(false),
                 items: None,
             },
         ] {
@@ -735,10 +804,9 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_web_select_warns_of_change_events() {
-        let mut fake = select("Banana", &["Apple", "Banana", "Cherry"]);
-        fake.reads = VecDeque::from([Some("Apple"), Some("Banana")]);
-        let error = run(&mut fake, "Cherry").unwrap_err();
+    fn a_typed_web_select_that_misses_names_what_it_passed() {
+        let mut fake = select("Banana", &["Apple", "Banana", "Blueberry"]);
+        let error = run(&mut fake, "Blueberry").unwrap_err();
         assert!(error.message.contains("change event"), "{}", error.message);
     }
 

@@ -51,16 +51,42 @@ pub enum PopupKind {
 }
 
 /// The kind of a pop-up button: in a web page or not, the engine of the
-/// app's pages, and whether it is known to be a `<select>`, as when its
-/// options show to accessibility. Any of them unknown, as when an AX call
-/// failed, makes it `Other`: no key goes to a control that may be in a
-/// WebKit page.
-pub fn popup_kind(in_web_page: Option<bool>, engine: Option<Engine>, select: bool) -> PopupKind {
+/// app's pages, whether the app draws with AppKit (no Qt, Java, Flutter or
+/// Chromium runtime in its bundle), and whether it is known to be a
+/// `<select>`, as when its options show to accessibility. Any of them
+/// unknown, as when an AX call failed, makes it `Other`: no key goes to a
+/// control that may open its menu on one.
+pub fn popup_kind(
+    in_web_page: Option<bool>,
+    engine: Option<Engine>,
+    cocoa: Option<bool>,
+    select: bool,
+) -> PopupKind {
     match (in_web_page, engine) {
-        (Some(false), Some(Engine::WebKit)) => PopupKind::AppKit,
+        (Some(false), Some(Engine::WebKit)) if cocoa == Some(true) => PopupKind::AppKit,
         (Some(true), Some(Engine::Chromium)) if select => PopupKind::ChromiumSelect,
         _ => PopupKind::Other,
     }
+}
+
+/// The items type-ahead with `keys` shows on the way to the one it ends
+/// on, each a choice the app may act on, when the items are known: for a
+/// Chromium select, one per key that moves it.
+pub fn passed(kind: PopupKind, keys: &str, current: &str, items: &[String]) -> Vec<String> {
+    let mut shown = current.to_string();
+    let mut passed = Vec::new();
+    let mut typed = String::new();
+    for c in keys.chars() {
+        typed.push(c);
+        if let Some(now) = reached(kind, &typed, current, items)
+            && now != shown
+        {
+            passed.push(now.to_string());
+            shown = now.to_string();
+        }
+    }
+    passed.pop();
+    passed
 }
 
 /// Why no key goes to a closed pop-up.
@@ -285,33 +311,57 @@ mod tests {
     fn only_appkit_popups_and_chromium_selects_take_keys() {
         use Engine::*;
         assert_eq!(
-            popup_kind(Some(false), Some(WebKit), false),
+            popup_kind(Some(false), Some(WebKit), Some(true), false),
             PopupKind::AppKit
         );
         assert_eq!(
-            popup_kind(Some(true), Some(Chromium), true),
+            popup_kind(Some(true), Some(Chromium), Some(true), true),
             PopupKind::ChromiumSelect
         );
         // An ARIA button with a pop-up, Safari's select, Chromium's own UI,
         // Firefox, an app with no bundle.
         assert_eq!(
-            popup_kind(Some(true), Some(Chromium), false),
+            popup_kind(Some(true), Some(Chromium), Some(true), false),
             PopupKind::Other
         );
-        assert_eq!(popup_kind(Some(true), Some(WebKit), true), PopupKind::Other);
         assert_eq!(
-            popup_kind(Some(false), Some(Chromium), true),
+            popup_kind(Some(true), Some(WebKit), Some(true), true),
             PopupKind::Other
         );
-        assert_eq!(popup_kind(Some(true), Some(Gecko), true), PopupKind::Other);
         assert_eq!(
-            popup_kind(Some(false), Some(Gecko), false),
+            popup_kind(Some(false), Some(Chromium), Some(true), true),
             PopupKind::Other
         );
-        assert_eq!(popup_kind(Some(false), None, false), PopupKind::Other);
+        assert_eq!(
+            popup_kind(Some(true), Some(Gecko), Some(true), true),
+            PopupKind::Other
+        );
+        assert_eq!(
+            popup_kind(Some(false), Some(Gecko), Some(true), false),
+            PopupKind::Other
+        );
+        assert_eq!(
+            popup_kind(Some(false), None, Some(true), false),
+            PopupKind::Other
+        );
+        // Qt, Java or Flutter, or a bundle that can't be found.
+        assert_eq!(
+            popup_kind(Some(false), Some(WebKit), Some(false), false),
+            PopupKind::Other
+        );
+        assert_eq!(
+            popup_kind(Some(false), Some(WebKit), None, false),
+            PopupKind::Other
+        );
         // Accessibility couldn't say whether it is in a web page.
-        assert_eq!(popup_kind(None, Some(WebKit), false), PopupKind::Other);
-        assert_eq!(popup_kind(None, Some(Chromium), true), PopupKind::Other);
+        assert_eq!(
+            popup_kind(None, Some(WebKit), Some(true), false),
+            PopupKind::Other
+        );
+        assert_eq!(
+            popup_kind(None, Some(Chromium), Some(true), true),
+            PopupKind::Other
+        );
         assert_eq!(
             keys_for("Apple", PopupKind::Other, "", None),
             Err(Refusal::Kind)
@@ -412,5 +462,14 @@ mod tests {
             reached(PopupKind::AppKit, "bl", "Cherry", &list),
             Some("Blue")
         );
+    }
+
+    #[test]
+    fn the_items_passed_on_the_way_are_named() {
+        let list = items(&["Apple", "Banana", "Blueberry", "Cherry"]);
+        let web = PopupKind::ChromiumSelect;
+        assert_eq!(passed(web, "Blueberry", "Apple", &list), ["Banana"]);
+        assert!(passed(web, "Cherry", "Apple", &list).is_empty());
+        assert_eq!(passed(PopupKind::AppKit, "Blu", "Apple", &list), ["Banana"]);
     }
 }

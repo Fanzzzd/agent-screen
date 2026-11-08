@@ -75,12 +75,22 @@ fn test(browser: &str) -> Result<()> {
             control.call(method, params)
         };
         // A browser's open menus are windows at the pop-up menu level.
+        // Counting one also closes it at once through accessibility, as
+        // the user's click would: an open menu holds the user's keyboard,
+        // and a regression must not leave it so while the script fails.
         let menus = || {
-            probe(&["windows", &pid.to_string()])
+            let open: Vec<Value> = probe(&["windows", &pid.to_string()])
                 .unwrap_or_default()
                 .lines()
-                .filter(|l| l.contains(r#""layer":101"#))
-                .count()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|w| w["layer"] == 101)
+                .collect();
+            for w in &open {
+                let n = |k: &str| w[k].as_f64().unwrap_or_default();
+                let (x, y) = (n("x") + n("width") / 2.0, n("y") + n("height") / 2.0);
+                let _ = probe(&["cancelmenu", &x.to_string(), &y.to_string()]);
+            }
+            open.len()
         };
         let select = || -> Result<i64> {
             let tree = call("windowState", json!({}))?["tree"]
