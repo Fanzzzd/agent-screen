@@ -184,8 +184,11 @@ fn test(browser: &str) -> Result<()> {
         }
         let open = menus();
         check(
-            "\"United States\" is typed as \"United\", which reaches it alone, with no menu",
-            typed.is_ok() && shown.contains("town=United States ") && open == 0,
+            "\"United States\" is typed as \"United\", which reaches it alone, with one change event and no menu",
+            typed.is_ok()
+                && shown.contains("town=United States ")
+                && shown.contains("tchanges=1 ")
+                && open == 0,
             format!("{typed:?}; {shown}; menus open {open}"),
         );
         for (value, says) in [
@@ -210,6 +213,36 @@ fn test(browser: &str) -> Result<()> {
                 format!("{refused:?}; {before} -> {after}; menus open {open}"),
             );
         }
+        // The country's change handler focuses the zip field after the
+        // first key: the rest must not land there, and the call must not
+        // succeed.
+        let country = || -> Result<i64> {
+            let tree = call("windowState", json!({}))?["tree"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let found = Regex::new(r#"\[(\d+)\] popupbutton "Country""#)?
+                .captures(&tree)
+                .with_context(|| format!("no country select in\n{tree}"))?;
+            Ok(found[1].parse()?)
+        };
+        let moved = call(
+            "elementAction",
+            json!({ "element": country()?, "action": "set_value", "value": "Blueberry" }),
+        );
+        sleep_ms(300);
+        let shown = title()?;
+        let open = menus();
+        check(
+            "a select whose change handler moves focus stops typing, and the zip field gets no key",
+            moved
+                .as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("took key focus"))
+                && shown.contains("zip= ")
+                && open == 0,
+            format!("{moved:?}; {shown}; menus open {open}"),
+        );
         Ok(())
     })();
     // Close the browser before its display ends.

@@ -731,9 +731,12 @@ impl Drag {
 /// What became of choosing a web page's `<select>` option through the pipe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectChoice {
-    /// No pipe, or no select of the page's own at the point, as one in a
-    /// frame from another site: choose another way.
+    /// No pipe, or the point is in a frame from another site, which the
+    /// page's script can't look into: choose another way.
     Unpiped,
+    /// The script reached the page or frame at the point and found no
+    /// select there, as for a button that opens a menu.
+    NotSelect,
     /// The select at the point shows something other than accessibility
     /// said of the element: it may be another one. Nothing changed.
     Elsewhere,
@@ -766,7 +769,8 @@ const CHOOSE: &str = r#"((x, y, title, expected) => {
     if (!hit || !(hit instanceof doc.defaultView.HTMLIFrameElement)) break;
     let inner = null;
     try { inner = hit.contentDocument; } catch (e) { inner = null; }
-    if (!inner) return JSON.stringify({ kind: 'none' });
+    // A frame from another site: only accessibility can tell its select.
+    if (!inner) return JSON.stringify({ kind: 'unreachable' });
     const box = hit.getBoundingClientRect();
     x -= box.left + hit.clientLeft;
     y -= box.top + hit.clientTop;
@@ -840,6 +844,7 @@ pub fn choose_option(
         Some("already") => SelectChoice::Already,
         Some("disabled") => SelectChoice::Disabled,
         Some("elsewhere") => SelectChoice::Elsewhere,
+        Some("none") => SelectChoice::NotSelect,
         Some("missing") => SelectChoice::Missing {
             shown: string("shown").unwrap_or_default(),
             near: string("near"),

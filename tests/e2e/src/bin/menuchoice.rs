@@ -159,9 +159,10 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 ),
                 Outcome::Failed(text) => (format!("fails saying {text:?}"), says(text)),
             };
+            // The combo box beside it keeps its value.
             check(
                 &format!("{value:?} {label}, with no menu opened"),
-                ok && shown.contains("opens=0"),
+                ok && shown.contains("opens=0") && shown.contains("color=Blue "),
                 format!("{result:?}; {before} -> {shown}"),
             );
         }
@@ -178,6 +179,20 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 && shown.contains("locked=Apple ")
                 && shown.contains("opens=0"),
             format!("{locked:?}; {shown}"),
+        );
+        // The pop-up's action focuses the note field after the first key:
+        // the rest must not land there, and the call must not succeed.
+        let jump = set(element("popupbutton", "Jump")?, "Blueberry");
+        sleep_ms(300);
+        let shown = title()?;
+        check(
+            "a pop-up whose choice moves focus stops typing, and the next field gets no key",
+            jump.as_ref()
+                .err()
+                .is_some_and(|e| format!("{e:#}").contains("took key focus"))
+                && shown.contains("note= ")
+                && shown.contains("opens=0"),
+            format!("{jump:?}; {shown}"),
         );
         // A WebKit page's select may open its menu on a key: none is sent.
         let web = set(element("popupbutton", "Web fruit")?, "Kiwi");

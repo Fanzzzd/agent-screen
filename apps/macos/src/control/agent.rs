@@ -3539,6 +3539,7 @@ impl super::values::ValueAccess for AxValues<'_> {
                 forwarder.agent_stopped()
             }) {
                 SelectChoice::Unpiped => PageChoice::Unpiped,
+                SelectChoice::NotSelect => PageChoice::NotSelect,
                 SelectChoice::Elsewhere => PageChoice::Elsewhere,
                 SelectChoice::Chosen => PageChoice::Chosen,
                 SelectChoice::Already => PageChoice::Already,

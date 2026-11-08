@@ -38,19 +38,6 @@ pub fn popup_title_is_safe(title: &str) -> bool {
             .any(|c| c.is_control() || ('\u{f700}'..='\u{f747}').contains(&c))
 }
 
-/// Whether `title` is one character typed more than once, as "11". A web
-/// page's select takes a repeated key as "the next item that starts with
-/// it", not as the title: type-ahead can't reach such an item there.
-pub fn repeats_one_character(title: &str) -> bool {
-    let mut chars = title.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    let lower = |c: char| c.to_lowercase().collect::<String>();
-    let mut rest = chars.peekable();
-    rest.peek().is_some() && rest.all(|c| lower(c) == lower(first))
-}
-
 /// Which closed pop-ups Agent Screen types into. Only those where a typed
 /// letter can't open the menu: an AppKit pop-up button, and a Chromium
 /// page's `<select>`. Anything else, a WebKit page's select or an ARIA
@@ -64,12 +51,14 @@ pub enum PopupKind {
 }
 
 /// The kind of a pop-up button: in a web page or not, the engine of the
-/// app's pages, and whether it is known to be a `<select>`, as when the
-/// page's DevTools pipe or its accessibility items say so.
-pub fn popup_kind(in_web_page: bool, engine: Option<Engine>, select: bool) -> PopupKind {
+/// app's pages, and whether it is known to be a `<select>`, as when its
+/// options show to accessibility. Any of them unknown, as when an AX call
+/// failed, makes it `Other`: no key goes to a control that may be in a
+/// WebKit page.
+pub fn popup_kind(in_web_page: Option<bool>, engine: Option<Engine>, select: bool) -> PopupKind {
     match (in_web_page, engine) {
-        (false, Some(Engine::WebKit)) => PopupKind::AppKit,
-        (true, Some(Engine::Chromium)) if select => PopupKind::ChromiumSelect,
+        (Some(false), Some(Engine::WebKit)) => PopupKind::AppKit,
+        (Some(true), Some(Engine::Chromium)) if select => PopupKind::ChromiumSelect,
         _ => PopupKind::Other,
     }
 }
@@ -90,8 +79,8 @@ pub enum Refusal {
     NotAnItem,
     /// Typing the title would reach another item first.
     Reaches(String),
-    /// A web page's select takes a repeated key as the next item that
-    /// starts with it.
+    /// A web page's select takes a key typed twice at the start as the
+    /// next item that starts with it, not as the title's start.
     RepeatedKey,
     /// A web page's select searches one key from the item after the one it
     /// shows, which starts with that key too.
@@ -103,34 +92,60 @@ fn lower(s: &str) -> String {
 }
 
 /// The item type-ahead reaches with `keys`, where it shows `current`. An
-/// AppKit pop-up takes the first item that starts with the keys; a
-/// Chromium select searches from the item it shows, or from the next one
-/// for a single key, and wraps around.
+/// AppKit pop-up takes the first item that starts with the keys. A
+/// Chromium select goes key by key as Blink's type-ahead does: while every
+/// key so far is the same one, each moves to the next item after the shown
+/// one that starts with it ("cycle" mode); otherwise it takes the first
+/// item, from the shown one on, that starts with all the keys so far. Both
+/// wrap around.
 pub fn reached<'a>(
     kind: PopupKind,
     keys: &str,
     current: &str,
     items: &'a [String],
 ) -> Option<&'a str> {
-    let keys = lower(keys);
-    let starts = |i: &String| lower(i).starts_with(&keys);
     match kind {
-        PopupKind::AppKit => items.iter().find(|i| starts(i)).map(String::as_str),
+        PopupKind::AppKit => {
+            let keys = lower(keys);
+            items
+                .iter()
+                .find(|i| lower(i).starts_with(&keys))
+                .map(String::as_str)
+        }
         PopupKind::ChromiumSelect => {
             let n = items.len();
-            let at = items.iter().position(|i| i == current);
-            let start = match at {
-                Some(at) if keys.chars().count() == 1 => at + 1,
-                Some(at) => at,
-                None => 0,
-            };
-            (0..n)
-                .map(|k| &items[(start + k) % n])
-                .find(|i| starts(i))
-                .map(String::as_str)
+            let mut at = items.iter().position(|i| i == current);
+            let mut typed = String::new();
+            let mut repeating = None;
+            for c in keys.chars().flat_map(char::to_lowercase) {
+                typed.push(c);
+                repeating = match repeating {
+                    _ if typed.chars().count() == 1 => Some(c),
+                    Some(r) if r == c => Some(c),
+                    _ => None,
+                };
+                let (prefix, start) = match repeating {
+                    Some(c) => (c.to_string(), at.map_or(0, |a| a + 1)),
+                    None => (typed.clone(), at.unwrap_or(0)),
+                };
+                if let Some(found) = (0..n)
+                    .map(|k| (start + k) % n)
+                    .find(|&i| lower(&items[i]).starts_with(&prefix))
+                {
+                    at = Some(found);
+                }
+            }
+            at.map(|i| items[i].as_str())
         }
         PopupKind::Other => None,
     }
+}
+
+/// Whether Blink would take `keys` in cycle mode for their first two
+/// keys: the same key twice, as in "11" or "1100".
+fn cycles(keys: &str) -> bool {
+    let mut chars = keys.chars().flat_map(char::to_lowercase);
+    matches!((chars.next(), chars.next()), (Some(a), Some(b)) if a == b)
 }
 
 /// The keys to type into a closed pop-up of `kind` that shows `current`
@@ -149,7 +164,7 @@ pub fn keys_for(
     }
     let keys: String = title.chars().take_while(|c| !c.is_whitespace()).collect();
     if kind == PopupKind::ChromiumSelect {
-        if repeats_one_character(&keys) {
+        if cycles(&keys) {
             return Err(Refusal::RepeatedKey);
         }
         if keys.chars().count() == 1 && lower(current).starts_with(&lower(&keys)) {
@@ -252,16 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_key_is_not_a_title_to_a_web_select() {
-        for title in ["11", "aa", "aA", "222"] {
-            assert!(repeats_one_character(title), "{title:?}");
-        }
-        for title in ["1", "10", "Anna", "", "中文"] {
-            assert!(!repeats_one_character(title), "{title:?}");
-        }
-    }
-
-    #[test]
     fn a_miss_says_why_the_title_was_not_reached() {
         assert_eq!(popup_miss("banana", "Banana", "Banana"), PopupMiss::Case);
         assert_eq!(popup_miss("Kiwi", "Apple", "Apple"), PopupMiss::Unchanged);
@@ -279,19 +284,34 @@ mod tests {
     #[test]
     fn only_appkit_popups_and_chromium_selects_take_keys() {
         use Engine::*;
-        assert_eq!(popup_kind(false, Some(WebKit), false), PopupKind::AppKit);
         assert_eq!(
-            popup_kind(true, Some(Chromium), true),
+            popup_kind(Some(false), Some(WebKit), false),
+            PopupKind::AppKit
+        );
+        assert_eq!(
+            popup_kind(Some(true), Some(Chromium), true),
             PopupKind::ChromiumSelect
         );
         // An ARIA button with a pop-up, Safari's select, Chromium's own UI,
         // Firefox, an app with no bundle.
-        assert_eq!(popup_kind(true, Some(Chromium), false), PopupKind::Other);
-        assert_eq!(popup_kind(true, Some(WebKit), true), PopupKind::Other);
-        assert_eq!(popup_kind(false, Some(Chromium), true), PopupKind::Other);
-        assert_eq!(popup_kind(true, Some(Gecko), true), PopupKind::Other);
-        assert_eq!(popup_kind(false, Some(Gecko), false), PopupKind::Other);
-        assert_eq!(popup_kind(false, None, false), PopupKind::Other);
+        assert_eq!(
+            popup_kind(Some(true), Some(Chromium), false),
+            PopupKind::Other
+        );
+        assert_eq!(popup_kind(Some(true), Some(WebKit), true), PopupKind::Other);
+        assert_eq!(
+            popup_kind(Some(false), Some(Chromium), true),
+            PopupKind::Other
+        );
+        assert_eq!(popup_kind(Some(true), Some(Gecko), true), PopupKind::Other);
+        assert_eq!(
+            popup_kind(Some(false), Some(Gecko), false),
+            PopupKind::Other
+        );
+        assert_eq!(popup_kind(Some(false), None, false), PopupKind::Other);
+        // Accessibility couldn't say whether it is in a web page.
+        assert_eq!(popup_kind(None, Some(WebKit), false), PopupKind::Other);
+        assert_eq!(popup_kind(None, Some(Chromium), true), PopupKind::Other);
         assert_eq!(
             keys_for("Apple", PopupKind::Other, "", None),
             Err(Refusal::Kind)
@@ -384,6 +404,10 @@ mod tests {
         let web = PopupKind::ChromiumSelect;
         assert_eq!(reached(web, "b", "Blue", &list), Some("Black"));
         assert_eq!(reached(web, "bl", "Cherry", &list), Some("Black"));
+        // "b" moves to Blue after Banana, then "bl" stays there.
+        assert_eq!(reached(web, "bl", "Banana", &list), Some("Blue"));
+        // Cycle mode: each "b" moves on to the next item with a b.
+        assert_eq!(reached(web, "bb", "Banana", &list), Some("Black"));
         assert_eq!(
             reached(PopupKind::AppKit, "bl", "Cherry", &list),
             Some("Blue")

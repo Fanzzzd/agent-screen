@@ -1267,23 +1267,21 @@ fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     a == b
 }
 
-/// Whether an element is in a web page: it has an AXWebArea above it.
-pub fn in_web_area(element: &AXUIElement) -> bool {
-    let Some(mut above) = element_attribute(element, "AXParent") else {
-        return false;
-    };
+/// Whether an element is in a web page: it has an AXWebArea above it,
+/// below its window. None when that can't be told, as when a role or
+/// parent read fails or times out before the window: callers that act on
+/// a "no" must treat None as "maybe".
+pub fn in_web_area(element: &AXUIElement) -> Option<bool> {
+    let mut above = element_attribute(element, "AXParent")?;
     for _ in 0..200 {
-        match string_attribute(&above, "AXRole").as_deref() {
-            Some("AXWebArea") => return true,
-            Some("AXWindow" | "AXSheet" | "AXApplication") => return false,
+        match string_attribute(&above, "AXRole")?.as_str() {
+            "AXWebArea" => return Some(true),
+            "AXWindow" | "AXSheet" | "AXApplication" => return Some(false),
             _ => {}
         }
-        match element_attribute(&above, "AXParent") {
-            Some(parent) => above = parent,
-            None => return false,
-        }
+        above = element_attribute(&above, "AXParent")?;
     }
-    false
+    None
 }
 
 /// A closed pop-up button's item titles, when accessibility lists them

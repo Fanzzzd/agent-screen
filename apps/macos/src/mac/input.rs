@@ -168,6 +168,26 @@ pub enum PopupTyped {
 /// as the key goes out, after the process's real-input gate.
 const KEY_GAP: Duration = Duration::from_millis(300);
 
+/// After a key, give the app a moment to take it and to run what a new
+/// choice triggers, such as a change handler that focuses another field,
+/// so the focus check before the next key sees it: until the pop-up shows
+/// another item, then a little longer, or at most `KEY_SETTLE` in all.
+/// Well under `KEY_GAP`, which the next key must still meet.
+/// `before` is what the pop-up showed just before the key.
+fn settle_key(element: &super::ax::Sendable, before: &Option<String>) {
+    let start = Instant::now();
+    while start.elapsed() < KEY_SETTLE {
+        thread::sleep(Duration::from_millis(15));
+        if super::ax::string_attribute(element.get(), "AXValue") != *before {
+            thread::sleep(Duration::from_millis(80));
+            return;
+        }
+    }
+}
+
+/// How long `settle_key` waits for the pop-up to show a new item.
+const KEY_SETTLE: Duration = Duration::from_millis(90);
+
 /// Wait out a type-ahead search an earlier title may have started, or
 /// until the user takes over. False on a Takeover.
 fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
@@ -609,19 +629,27 @@ impl Forwarder {
             }
             let front_at_start = is_front(target.pid);
             let mut last: Option<Instant> = None;
+            let mut shown = None;
             for (typed, character) in keys.chars().enumerate() {
+                if typed > 0 {
+                    settle_key(&element, &shown);
+                }
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
                 }
-                // The app sends every key to its key window: another one
-                // now, as one the user clicked, would get the rest. A Take
-                // Back moves the window off the display.
+                // The app sends every key to its key window and focused
+                // element: another one now would get the rest, as a window
+                // the user clicked, or a field the page's change handler or
+                // the pop-up's action focused. A Take Back moves the window
+                // off the display.
                 if (!front_at_start && is_front(target.pid))
                     || !placed()
                     || super::ax::focused_window_id(target.pid) != Some(target.window_id)
+                    || !super::ax::is_focused_element(target.pid, element.get())
                 {
                     return PopupTyped::Interrupted(typed);
                 }
+                shown = super::ax::string_attribute(element.get(), "AXValue");
                 let mut units = [0u16; 2];
                 let units = character.encode_utf16(&mut units);
                 let events: Vec<_> = [true, false]

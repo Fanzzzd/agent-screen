@@ -58,9 +58,12 @@ pub(super) enum Typed {
 /// What became of choosing a web page's select option through the pipe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PageChoice {
-    /// No pipe, or no select of the page's own at the point, as one in a
-    /// frame from another site.
+    /// No pipe, or the point is in a frame from another site, which the
+    /// pipe's script can't reach.
     Unpiped,
+    /// The pipe reached the page or frame at the point and found no
+    /// select there, as for a button that opens a menu.
+    NotSelect,
     /// The select at the point shows something other than accessibility
     /// said: nothing was chosen.
     Elsewhere,
@@ -79,7 +82,8 @@ pub(super) enum PageChoice {
 /// What a closed pop-up is, read without opening it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct PopupFacts {
-    pub in_web_page: bool,
+    /// None when accessibility couldn't tell: then no key goes out.
+    pub in_web_page: Option<bool>,
     pub engine: Option<Engine>,
     /// Its items, when accessibility lists them while it is closed, as a
     /// Chromium `<select>` does and an AppKit pop-up button doesn't.
@@ -190,19 +194,27 @@ async fn popup(
         ));
     }
     check(access, display)?;
-    let before = access.read().await.unwrap_or_default();
+    let shown = access.read().await;
     check(access, display)?;
     // Typing the title it shows could move it on: a web page's select goes
     // to the next item that starts with a repeated key.
-    if before == title {
+    if shown.as_deref() == Some(title) {
         return Ok(());
     }
+    let before = shown.clone().unwrap_or_default();
     let facts = access.popup_facts().await;
     check(access, display)?;
     let mut select = facts.items.is_some();
-    if facts.in_web_page && facts.engine == Some(Engine::Chromium) {
+    if facts.in_web_page == Some(true) && facts.engine == Some(Engine::Chromium) {
         match access.choose_in_page(title, &before).await {
+            // A frame from another site: only accessibility's list of
+            // options can tell a select there.
             PageChoice::Unpiped => {}
+            PageChoice::NotSelect => {
+                return Err(ControlError::failed(format!(
+                    "the page has no select at this element, so it is a button that opens a menu or a custom control, and typing into it could open the menu. Nothing was sent and no menu was opened. {INSTEAD}"
+                )));
+            }
             PageChoice::Already => return Ok(()),
             PageChoice::Chosen => return settle(access, display, title, &before, None).await,
             PageChoice::Elsewhere => {
@@ -239,6 +251,11 @@ async fn popup(
         select = facts.items.is_some();
     }
     check(access, display)?;
+    if shown.is_none() {
+        return Err(ControlError::failed(
+            "accessibility didn't say what the pop-up button shows, so Agent Screen can't tell where type-ahead would go. Nothing was sent and no menu was opened. Refresh get_window_state and retry, or call request_help",
+        ));
+    }
     let kind = popup_kind(facts.in_web_page, facts.engine, select);
     let keys = keys_for(title, kind, &before, facts.items.as_deref())
         .map_err(|refusal| ControlError::failed(refusal_message(&refusal, title, &before)))?;
@@ -256,7 +273,9 @@ async fn popup(
         Typed::Stopped(done) => (done, None),
         Typed::Interrupted(done) => (
             done,
-            Some("another window of its app took key focus, or its window left the display"),
+            Some(
+                "another window or control of its app took key focus, as a change handler that focuses the next field does, or its window left the display; the rest of the keys were not sent",
+            ),
         ),
         Typed::Slow(done) => (
             done,
@@ -444,7 +463,7 @@ mod tests {
                 stop_at: None,
                 stopped: false,
                 facts: PopupFacts {
-                    in_web_page: false,
+                    in_web_page: Some(false),
                     engine: Some(Engine::WebKit),
                     items: None,
                 },
@@ -526,7 +545,7 @@ mod tests {
     fn select(after: &'static str, items: &[&str]) -> Fake {
         let mut fake = popup(after);
         fake.facts = PopupFacts {
-            in_web_page: true,
+            in_web_page: Some(true),
             engine: Some(Engine::Chromium),
             items: Some(items.iter().map(|s| s.to_string()).collect()),
         };
@@ -603,12 +622,12 @@ mod tests {
     fn webkit_selects_and_aria_buttons_get_no_key() {
         for facts in [
             PopupFacts {
-                in_web_page: true,
+                in_web_page: Some(true),
                 engine: Some(Engine::WebKit),
                 items: Some(vec!["Apple".into(), "Cherry".into()]),
             },
             PopupFacts {
-                in_web_page: true,
+                in_web_page: Some(true),
                 engine: Some(Engine::Chromium),
                 items: None,
             },
@@ -619,6 +638,37 @@ mod tests {
             assert!(error.message.contains("is neither"), "{}", error.message);
             assert!(!fake.trace.contains(&"type"));
         }
+    }
+
+    #[test]
+    fn an_unknown_page_or_shown_value_gets_no_key() {
+        let mut fake = popup("Cherry");
+        fake.facts.in_web_page = None;
+        assert!(
+            run(&mut fake, "Cherry")
+                .unwrap_err()
+                .message
+                .contains("is neither")
+        );
+        assert!(!fake.trace.contains(&"type"));
+        let mut fake = popup("Cherry");
+        fake.reads = VecDeque::from([None, Some("Cherry")]);
+        let error = run(&mut fake, "Cherry").unwrap_err();
+        assert!(
+            error.message.contains("didn't say what"),
+            "{}",
+            error.message
+        );
+        assert!(!fake.trace.contains(&"type"));
+    }
+
+    #[test]
+    fn a_reachable_page_without_a_select_there_gets_no_key() {
+        let mut fake = select("Cherry", &["Apple", "Cherry"]);
+        fake.page = PageChoice::NotSelect;
+        let error = run(&mut fake, "Cherry").unwrap_err();
+        assert!(error.message.contains("no select"), "{}", error.message);
+        assert!(!fake.trace.contains(&"type"));
     }
 
     #[test]
