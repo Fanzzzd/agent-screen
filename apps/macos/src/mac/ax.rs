@@ -1267,6 +1267,25 @@ fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     a == b
 }
 
+/// Whether an element is in a web page: it has an AXWebArea above it.
+pub fn in_web_area(element: &AXUIElement) -> bool {
+    let Some(mut above) = element_attribute(element, "AXParent") else {
+        return false;
+    };
+    for _ in 0..200 {
+        match string_attribute(&above, "AXRole").as_deref() {
+            Some("AXWebArea") => return true,
+            Some("AXWindow" | "AXSheet" | "AXApplication") => return false,
+            _ => {}
+        }
+        match element_attribute(&above, "AXParent") {
+            Some(parent) => above = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// The process that owns an accessibility element.
 pub fn pid_of(element: &AXUIElement) -> Option<i32> {
     let mut pid = 0;

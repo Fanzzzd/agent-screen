@@ -3475,6 +3475,15 @@ async fn act(
     Ok(())
 }
 
+/// The window an element is in, and its process.
+fn popup_window(element: &ax::Element) -> Option<WindowTarget> {
+    let window = ax::element_attribute(element, "AXWindow")?;
+    Some(WindowTarget {
+        pid: ax::pid_of(element)?,
+        window_id: ax::window_id(&window)?,
+    })
+}
+
 /// set_value's AX and input calls on one element, each off the main
 /// thread, as an app may take up to the 1 s timeout to answer.
 struct AxValues<'a> {
@@ -3495,23 +3504,55 @@ impl super::values::ValueAccess for AxValues<'_> {
         self.forwarder.agent_stopped()
     }
 
-    async fn type_popup(&mut self, title: &str) -> Result<(), ControlError> {
+    async fn in_web_page(&mut self) -> bool {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::in_web_area(item.get())).await
+    }
+
+    async fn choose_in_page(&mut self, title: &str) -> super::values::PageChoice {
+        use super::values::PageChoice;
+        use devtools::SelectChoice;
+        let item = ax::Sendable(self.element.clone());
+        let title = title.to_owned();
+        let forwarder = self.forwarder.clone();
+        let within = self.bounds;
+        off(self.cx, move || {
+            let Some(target) = popup_window(item.get()) else {
+                return PageChoice::Unpiped;
+            };
+            let (Some(bounds), Some(frame)) =
+                (cg::window_bounds(target.window_id), ax::frame(item.get()))
+            else {
+                return PageChoice::Unpiped;
+            };
+            let at = frame.mid();
+            if !within.contains(at) {
+                return PageChoice::Unpiped;
+            }
+            match devtools::choose_option(target, bounds, at, &title, || forwarder.agent_stopped())
+            {
+                SelectChoice::Unpiped => PageChoice::Unpiped,
+                SelectChoice::Chosen => PageChoice::Chosen,
+                SelectChoice::Already => PageChoice::Already,
+                SelectChoice::Missing { shown, near } => PageChoice::Missing { shown, near },
+                SelectChoice::Disabled => PageChoice::Disabled,
+                SelectChoice::Unknown(why) => PageChoice::Unknown(why),
+                SelectChoice::Stopped => PageChoice::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn type_popup(&mut self, title: &str) -> super::values::Typed {
+        use super::values::Typed;
         use crate::mac::input::PopupTyped;
         let id = self.id;
         let item = ax::Sendable(self.element.clone());
-        let target = off(self.cx, move || {
-            let window = ax::element_attribute(item.get(), "AXWindow")?;
-            Some(WindowTarget {
-                pid: ax::pid_of(item.get())?,
-                window_id: ax::window_id(&window)?,
-            })
-        })
-        .await
-        .ok_or_else(|| {
-            ControlError::failed(
+        let Some(target) = off(self.cx, move || popup_window(item.get())).await else {
+            return Typed::NotSent(ControlError::failed(
                 "Accessibility names no window for the pop-up button, so nothing was typed. Refresh get_window_state and retry",
-            )
-        })?;
+            ));
+        };
         let typed = self
             .forwarder
             .choose_closed_popup(
@@ -3521,21 +3562,15 @@ impl super::values::ValueAccess for AxValues<'_> {
                 self.bounds,
             )
             .await;
-        let total = title.chars().count();
         match typed {
-            PopupTyped::Typed => Ok(()),
-            PopupTyped::Stopped(done) => Err(ControlError::takeover(format!(
-                "the user took over display {id} after {done} of {total} characters of the pop-up button's title, and nothing more was sent{}. Call wait_for_control to wait until they hand it back.",
-                if done > 0 {
-                    "; it may show another item now"
-                } else {
-                    ""
-                }
-            ))),
-            PopupTyped::Gone => Err(ControlError::failed(format!(
+            PopupTyped::Typed => Typed::All,
+            PopupTyped::Stopped(done) => Typed::Stopped(done),
+            PopupTyped::Interrupted(done) => Typed::Interrupted(done),
+            PopupTyped::Slow(done) => Typed::Slow(done),
+            PopupTyped::Gone => Typed::NotSent(ControlError::failed(format!(
                 "the pop-up button's window is no longer on display {id}, so nothing was typed. Call list_windows"
             ))),
-            PopupTyped::Unfocused => Err(ControlError::failed(
+            PopupTyped::Unfocused => Typed::NotSent(ControlError::failed(
                 "the pop-up button took no focus, so nothing was typed and no menu was opened. Refresh get_window_state and retry, or call request_help",
             )),
             PopupTyped::Refused => {
@@ -3545,13 +3580,10 @@ impl super::values::ValueAccess for AxValues<'_> {
                     .await
                     .map(|r| r.app)
                     .unwrap_or_else(|| "the app".into());
-                Err(ControlError::failed(format!(
+                Typed::NotSent(ControlError::failed(format!(
                     "{app}'s focused window is not on an Agent Display, so keys for the pop-up button could reach the user's window instead of yours on display {id}. Nothing was typed and no menu was opened. Click inside your window once and retry"
                 )))
             }
-            PopupTyped::Interrupted(done) => Err(ControlError::failed(format!(
-                "typed {done} of {total} characters of {title:?} into the closed pop-up button, then stopped: another window of its app took key focus. It may show another item now; inspect it before retrying. No menu was opened"
-            ))),
         }
     }
 

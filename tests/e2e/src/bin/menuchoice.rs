@@ -108,7 +108,50 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             );
         }
 
+        // A space mid-title, a repeated key, CJK, and a title an earlier
+        // item starts with. `Ok(())` means chosen; `Err(text)`, a failure
+        // whose message has the text and leaves the pop-up as it was.
         let fruit = element("popupbutton", "Fruit")?;
+        for (value, outcome) in [
+            ("Dragon fruit", Ok(())),
+            ("10", Ok(())),
+            ("11", Ok(())),
+            ("1", Ok(())),
+            ("1", Ok(())),
+            ("中文", Ok(())),
+            ("Dragon", Err("can't reach")),
+            ("Banana", Ok(())),
+        ] {
+            let before = title()?;
+            let result = set(fruit, value);
+            let mut shown = String::new();
+            for _ in 0..20 {
+                shown = title()?;
+                if shown.contains(&format!("fruit={value} ")) {
+                    break;
+                }
+                sleep_ms(50);
+            }
+            let ok = match outcome {
+                Ok(()) => result.is_ok() && shown.contains(&format!("fruit={value} ")),
+                Err(text) => result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| format!("{e:#}").contains(text)),
+            };
+            check(
+                &format!(
+                    "{value:?} {}, with no menu opened",
+                    match outcome {
+                        Ok(()) => "is chosen".to_string(),
+                        Err(text) => format!("fails saying {text:?}"),
+                    }
+                ),
+                ok && shown.contains("opens=0"),
+                format!("{result:?}; {before} -> {shown}"),
+            );
+        }
+
         let color = element("combobox", "Color")?;
         let wrong_case = set(fruit, "banana");
         check(

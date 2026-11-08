@@ -150,9 +150,21 @@ pub enum PopupTyped {
     Refused,
     /// The button took no focus: nothing typed.
     Unfocused,
-    /// Another window of the app took key focus after this many characters.
+    /// Another window of the app took key focus, or the button's window
+    /// left the display, after this many characters.
     Interrupted(usize),
+    /// The next key would have come so long after the last that the app's
+    /// search might have ended, and a space then presses the button and
+    /// opens its menu: stopped after this many characters.
+    Slow(usize),
 }
+
+/// The longest gap between two keys of a title. AppKit and Chromium end a
+/// type-ahead search about a second after its last key; a key after that
+/// starts a new search, and a space then opens the menu, which would take
+/// the user's keyboard. Posted keys carry the time they are sent, which
+/// the app's search goes by, however late it reads them.
+const KEY_GAP: Duration = Duration::from_millis(300);
 
 /// Wait out a type-ahead search an earlier title may have started, or
 /// until the user takes over. False on a Takeover.
@@ -537,8 +549,14 @@ impl Forwarder {
     /// Choose a closed pop-up button's item by typing its title, as
     /// type-ahead, with keys posted to the button's process only. No menu
     /// opens, so nothing takes the user's keyboard (ADR 0001), and no click
-    /// wakes the window. Keys go out only while the button's window is on
-    /// this display and is its app's key window, and stop at a Takeover.
+    /// wakes the window. Each key goes out only while the button's window
+    /// is on this display and is its app's key window, the app hasn't come
+    /// to the front, no Takeover started, and the last key went out less
+    /// than `KEY_GAP` before.
+    ///
+    /// A user who clicks their own window of the same app between the check
+    /// and the key could still get that one key: the check is an AX call,
+    /// the key a post, and nothing makes them one step.
     pub async fn choose_closed_popup(
         &self,
         target: WindowTarget,
@@ -549,18 +567,13 @@ impl Forwarder {
         let stopped = self.stopped.clone();
         self.run(move |w| {
             let is_stopped = || stopped.load(std::sync::atomic::Ordering::Relaxed);
-            let placed = || {
-                hits()
-                    .iter()
-                    .any(|h| h.host == target && within.contains(h.bounds.mid()))
-            };
+            let placed =
+                || cg::window_bounds(target.window_id).is_some_and(|b| within.contains(b.mid()));
             if !placed() {
                 return PopupTyped::Gone;
             }
             let _held = AppKeys::hold(target.pid);
-            // AppKit and Chromium keep a type-ahead search going for about
-            // a second after its last key, and a title typed meanwhile adds
-            // to it. Wait it out, then look again.
+            // A title typed while an earlier search goes on adds to it.
             if !wait_typeahead(&stopped) {
                 return PopupTyped::Stopped(0);
             }
@@ -585,14 +598,26 @@ impl Forwarder {
             ) {
                 return PopupTyped::Unfocused;
             }
+            let front_at_start = is_front(target.pid);
+            let mut last: Option<Instant> = None;
             for (typed, character) in title.chars().enumerate() {
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
                 }
                 // The app sends every key to its key window: another one
-                // now, as one the user clicked, would get the rest.
-                if super::ax::focused_window_id(target.pid) != Some(target.window_id) {
+                // now, as one the user clicked, would get the rest. A Take
+                // Back moves the window off the display.
+                if (!front_at_start && is_front(target.pid))
+                    || !placed()
+                    || super::ax::focused_window_id(target.pid) != Some(target.window_id)
+                {
                     return PopupTyped::Interrupted(typed);
+                }
+                if is_stopped() {
+                    return PopupTyped::Stopped(typed);
+                }
+                if last.is_some_and(|at| at.elapsed() >= KEY_GAP) {
+                    return PopupTyped::Slow(typed);
                 }
                 let mut units = [0u16; 2];
                 let units = character.encode_utf16(&mut units);
@@ -611,6 +636,7 @@ impl Forwarder {
                     };
                     deliver(&event, target.pid, true);
                 }
+                last = Some(Instant::now());
                 thread::sleep(Duration::from_millis(4));
             }
             PopupTyped::Typed

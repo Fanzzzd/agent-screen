@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>selects</title>
+</head>
+<body>
+<p><label for="city">City</label><br>
+<select id="city" aria-label="City">
+  <option>Apple</option><option>Newark</option><option>New York</option><option>1</option><option>10</option><option>11</option><option>東京</option>
+</select></p>
+<!-- A select in a frame: the pipe's script finds only the page's own
+     selects, so set_value types into this one. -->
+<iframe id="frame" width="320" height="80" srcdoc="<label for=town>Town</label> <select id=town aria-label=Town><option>Apple</option><option>Newark</option><option>New York</option><option>10</option><option>11</option></select><script>const t = document.getElementById('town'); let n = 0; const say = () => parent.postMessage({ town: t.value, changes: n }, '*'); t.addEventListener('change', () => { n++; say(); }); say();</script>"></iframe>
+<script>
+  // The title says what the select shows and how many input and change
+  // events it fired, so a script sees an item passed on the way.
+  const city = document.getElementById('city');
+  let inputs = 0, changes = 0, town = '', townChanges = 0;
+  const state = () => {
+    document.title = `city=${city.value} inputs=${inputs} changes=${changes} town=${town} tchanges=${townChanges} `;
+  };
+  window.addEventListener('message', (e) => { town = e.data.town; townChanges = e.data.changes; state(); });
+  city.addEventListener('input', () => { inputs++; state(); });
+  city.addEventListener('change', () => { changes++; state(); });
+  state();
+</script>
+</body>
+</html>

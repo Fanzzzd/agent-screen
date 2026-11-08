@@ -20,7 +20,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     window = NSWindow(contentRect: NSRect(x: 50, y: 100, width: 360, height: 260), styleMask: [.titled], backing: .buffered, defer: true, screen: screen)
     window.setFrameOrigin(NSPoint(x: screen.frame.minX + 50, y: screen.frame.minY + 100))
     guard screen.frame.contains(window.frame) else { exit(4) }
-    pop.addItems(withTitles: ["Apple", "Banana", "Cherry"])
+    pop.addItems(withTitles: ["Apple", "Banana", "Cherry", "Dragon fruit", "Dragon", "1", "10", "11", "中文"])
     pop.setAccessibilityLabel("Fruit")
     pop.target = self; pop.action = #selector(changed); pop.menu?.delegate = self
     combo.addItems(withObjectValues: ["Red", "Blue", "Green", "Reject", "Slow"])
