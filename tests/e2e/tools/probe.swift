@@ -52,7 +52,15 @@ case "bounds":
   let b = CGDisplayBounds(CGDirectDisplayID(UInt32(args[2])!))
   print("\(b.origin.x) \(b.origin.y) \(b.size.width) \(b.size.height)")
 case "idle":
-  print(Int(CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)))
+  // Seconds since the user last used the mouse, scroll or keys. Not any
+  // event: a trackpad sends gesture events about once a second while a
+  // finger or palm only rests on it, and the user then never reads idle.
+  let used: [CGEventType] = [
+    .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .mouseMoved,
+    .leftMouseDragged, .rightMouseDragged, .otherMouseDown, .otherMouseUp,
+    .otherMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged,
+  ]
+  print(Int(used.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min()!))
 case "locked":
   let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
   print((session["CGSSessionScreenIsLocked"] as? Bool ?? false) ? 1 : 0)
