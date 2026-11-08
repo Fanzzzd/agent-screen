@@ -136,6 +136,39 @@ pub fn typed_text(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
+/// How far typing a closed pop-up button's item title went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupTyped {
+    /// Every character went out.
+    Typed,
+    /// The user took over after this many characters.
+    Stopped(usize),
+    /// The button's window is no longer on the display: nothing typed.
+    Gone,
+    /// Its app's key window is off the Agent Displays, maybe the user's:
+    /// nothing typed. `take_refused` says which.
+    Refused,
+    /// The button took no focus: nothing typed.
+    Unfocused,
+    /// Another window of the app took key focus after this many characters.
+    Interrupted(usize),
+}
+
+/// Wait out a type-ahead search an earlier title may have started, or
+/// until the user takes over. False on a Takeover.
+fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < until {
+        if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(
+            Duration::from_millis(10).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    !stopped.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// One display's input queue. Cheap to clone.
 #[derive(Clone)]
 pub struct Forwarder {
@@ -499,6 +532,91 @@ impl Forwarder {
         })
         .await
         .unwrap_or(Sent::Nowhere)
+    }
+
+    /// Choose a closed pop-up button's item by typing its title, as
+    /// type-ahead, with keys posted to the button's process only. No menu
+    /// opens, so nothing takes the user's keyboard (ADR 0001), and no click
+    /// wakes the window. Keys go out only while the button's window is on
+    /// this display and is its app's key window, and stop at a Takeover.
+    pub async fn choose_closed_popup(
+        &self,
+        target: WindowTarget,
+        element: super::ax::Sendable,
+        title: String,
+        within: Rect,
+    ) -> PopupTyped {
+        let stopped = self.stopped.clone();
+        self.run(move |w| {
+            let is_stopped = || stopped.load(std::sync::atomic::Ordering::Relaxed);
+            let placed = || {
+                hits()
+                    .iter()
+                    .any(|h| h.host == target && within.contains(h.bounds.mid()))
+            };
+            if !placed() {
+                return PopupTyped::Gone;
+            }
+            let _held = AppKeys::hold(target.pid);
+            // AppKit and Chromium keep a type-ahead search going for about
+            // a second after its last key, and a title typed meanwhile adds
+            // to it. Wait it out, then look again.
+            if !wait_typeahead(&stopped) {
+                return PopupTyped::Stopped(0);
+            }
+            if !placed() {
+                return PopupTyped::Gone;
+            }
+            w.refused = None;
+            w.focus_waking(target, false);
+            if is_stopped() {
+                return PopupTyped::Stopped(0);
+            }
+            if !w.keys_reach(target) {
+                return PopupTyped::Refused;
+            }
+            if is_stopped() {
+                return PopupTyped::Stopped(0);
+            }
+            if !super::ax::set_attribute(
+                element.get(),
+                "AXFocused",
+                objc2_core_foundation::CFBoolean::new(true),
+            ) {
+                return PopupTyped::Unfocused;
+            }
+            for (typed, character) in title.chars().enumerate() {
+                if is_stopped() {
+                    return PopupTyped::Stopped(typed);
+                }
+                // The app sends every key to its key window: another one
+                // now, as one the user clicked, would get the rest.
+                if super::ax::focused_window_id(target.pid) != Some(target.window_id) {
+                    return PopupTyped::Interrupted(typed);
+                }
+                let mut units = [0u16; 2];
+                let units = character.encode_utf16(&mut units);
+                for down in [true, false] {
+                    let Some(event) = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)
+                    else {
+                        continue;
+                    };
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    unsafe {
+                        CGEvent::keyboard_set_unicode_string(
+                            Some(&event),
+                            units.len() as _,
+                            units.as_ptr(),
+                        )
+                    };
+                    deliver(&event, target.pid, true);
+                }
+                thread::sleep(Duration::from_millis(4));
+            }
+            PopupTyped::Typed
+        })
+        .await
+        .unwrap_or(PopupTyped::Gone)
     }
 
     /// Focus the display's window of app `pid` for a menu command: the one
@@ -2075,5 +2193,35 @@ mod scroll_tests {
             assert_eq!(read(CGEventField::ScrollWheelEventDeltaAxis2), 0);
             assert_eq!(read(CGEventField::ScrollWheelEventIsContinuous), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn a_takeover_ends_the_typeahead_wait_at_once() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let takeover = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        assert!(!wait_typeahead(&stopped));
+        takeover.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn the_typeahead_wait_outlasts_a_search() {
+        let start = Instant::now();
+        assert!(wait_typeahead(&AtomicBool::new(false)));
+        assert!(start.elapsed() >= Duration::from_millis(1200));
     }
 }

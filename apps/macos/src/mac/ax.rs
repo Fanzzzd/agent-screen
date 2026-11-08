@@ -1267,7 +1267,8 @@ fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     a == b
 }
 
-fn pid_of(element: &AXUIElement) -> Option<i32> {
+/// The process that owns an accessibility element.
+pub fn pid_of(element: &AXUIElement) -> Option<i32> {
     let mut pid = 0;
     (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
 }
