@@ -92,7 +92,7 @@ pub enum AppSighting {
     /// Its document window is on this display already.
     OnThisDisplay { window_id: u32 },
     /// Its document windows on screen are on other Agent Displays.
-    OnAgentDisplay { name: String },
+    OnAgentDisplay,
 }
 
 /// The `not_found` message for an app the agent named. It says what was
@@ -101,7 +101,7 @@ pub enum AppSighting {
 pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
     match sighting {
         AppSighting::Unknown => format!(
-            "nothing matched {app:?}, ignoring case: no app window's owner name, no running app's name or bundle id, and no installed app's name or bundle id. Check the name, or pass a window_id"
+            "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no app named {app:?}.app in the Applications folders, and no installed app with that bundle id. Check the name, or pass a window_id"
         ),
         AppSighting::NotRunning { name } => format!(
             "{name} isn't running. Start it with launch_app, which opens its window on the display"
@@ -115,9 +115,10 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
         AppSighting::OnThisDisplay { window_id } => format!(
             "its window {window_id} is on your display already; pass that window_id to set its frame"
         ),
-        AppSighting::OnAgentDisplay { name } => format!(
-            "{name}'s windows on screen are on other Agent Displays, which other agent sessions hold"
-        ),
+        AppSighting::OnAgentDisplay => {
+            "its windows on screen are on other Agent Displays, which other agent sessions hold"
+                .into()
+        }
     }
 }
 

@@ -2669,10 +2669,34 @@ fn no_such_window(id: i64) -> String {
         Some(w) if !windows::display_role(&w).accepts_window_request() => {
             WindowSighting::OnAgentDisplay
         }
-        _ if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
-            WindowSighting::OffScreen
-        }
-        _ => WindowSighting::Gone,
+        // It left the list between the two reads.
+        Some(_) => WindowSighting::OffScreen,
+        None => match cg::on_screen_windows()
+            .into_iter()
+            .find(|w| w.target.window_id as i64 == id)
+        {
+            // On screen, but a window place_window never offers: a menu,
+            // a floating window above the panel levels, a small one, or
+            // Agent Screen's own.
+            Some(w) => {
+                let window = windows::Window {
+                    target: w.target,
+                    app: w.owner_name,
+                    title: w.title,
+                    bounds: w.bounds,
+                    layer: w.layer,
+                };
+                if windows::display_role(&window).accepts_window_request() {
+                    WindowSighting::NotDocument { app: window.app }
+                } else {
+                    WindowSighting::OnAgentDisplay
+                }
+            }
+            None if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
+                WindowSighting::OffScreen
+            }
+            None => WindowSighting::Gone,
+        },
     };
     placement::no_window(id, &sighting)
 }
@@ -2702,14 +2726,15 @@ fn no_app_window(
         AppSighting::OnThisDisplay {
             window_id: here.target.window_id,
         }
-    } else if let Some(w) = documents.first() {
-        AppSighting::OnAgentDisplay {
-            name: w.app.clone(),
-        }
-    } else if let Some(w) = mine.first() {
+    } else if let Some(w) = mine
+        .iter()
+        .find(|w| windows::display_role(w).accepts_window_request())
+    {
         AppSighting::OnlyPanels {
             name: w.app.clone(),
         }
+    } else if !mine.is_empty() {
+        AppSighting::OnAgentDisplay
     } else {
         // A window anywhere, hidden or on another Space, names its app by
         // its owner name, which the app's own name may not be.
