@@ -759,6 +759,7 @@ pub fn show_borders(on: bool) -> bool {
             glass.setPath(Some(&outline));
             // A fresh layer with no superlayer, as a mask must be.
             unsafe { edge.setMask(Some(&glass)) };
+            layer.addSublayer(&glow(&outline));
             layer.addSublayer(&edge);
             window.setContentView(Some(&view));
             window.orderFrontRegardless();
@@ -767,6 +768,33 @@ pub fn show_borders(on: bool) -> bool {
         !borders.is_empty()
     })
 }
+
+/// A soft red glow just inside the outline: the outline's stroke casts a
+/// blurred shadow, and a container masked by the glass keeps only its
+/// inner half. Drawn once: the window never changes while it shows.
+fn glow(outline: &objc2_core_graphics::CGMutablePath) -> Retained<objc2_quartz_core::CALayer> {
+    use objc2_quartz_core::{CALayer, CAShapeLayer};
+    let red = NSColor::systemRedColor().CGColor();
+    let stroke = CAShapeLayer::new();
+    stroke.setPath(Some(outline));
+    stroke.setFillColor(None);
+    stroke.setStrokeColor(Some(&red));
+    stroke.setLineWidth(2.0 * EDGE);
+    stroke.setShadowColor(Some(&red));
+    stroke.setShadowOpacity(GLOW_OPACITY);
+    stroke.setShadowRadius(GLOW_RADIUS);
+    stroke.setShadowOffset(objc2_core_foundation::CGSize::new(0.0, 0.0));
+    let glass = CAShapeLayer::new();
+    glass.setPath(Some(outline));
+    let inside = CALayer::new();
+    unsafe { inside.setMask(Some(&glass)) };
+    inside.addSublayer(&stroke);
+    inside
+}
+
+/// The glow's blur, in points, and how strong it is.
+const GLOW_RADIUS: f64 = 7.0;
+const GLOW_OPACITY: f32 = 0.45;
 
 /// Each screen with its frame and shape: its camera notch where NSScreen
 /// reports one, and a built-in panel's measured rounding.

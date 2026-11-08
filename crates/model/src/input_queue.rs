@@ -528,7 +528,7 @@ impl Queue {
 
     /// The call that asked for it is waiting, and its display is not in
     /// a Takeover.
-    fn runnable(&self, r: &Request) -> bool {
+    pub fn runnable(&self, r: &Request) -> bool {
         r.status == Status::Queued && r.attached && !self.takeovers.contains(&r.owner.display)
     }
 

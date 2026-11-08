@@ -7,7 +7,9 @@
 //! won't come. The card fits its content, and during the grant the Input
 //! Bar sits at the bottom of the screen, clear of the card; its Stop ends
 //! the grant. A menu item an Electron app needs a real click for asks on
-//! the same card, which names it. Captures the cards and the bar under
+//! the same card, which names it, and so does a double click. Three
+//! preview drags ask on one card, and allowed, with the second shown
+//! running, the card shows Stop. Captures the cards and the bar under
 //! target/e2e. The card shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
@@ -55,18 +57,18 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
             json!({ "sessionKey": key, "surface": surface, "displayId": id }),
         )
     };
-    // The queue card is the card's 360-pt-wide window.
+    // The queue card is the Help Card's 320-pt-wide window.
     let card = || -> Option<Frame> {
         windows_of(pid)
             .into_iter()
-            .find(|w| w.width == 360.0 && w.layer > 0)
+            .find(|w| w.width == 320.0 && w.layer > 0)
     };
     // The Input Bar: a short window of the app's own, below the edge's
     // level 1000.
     let bar = || -> Option<Frame> {
         windows_of(pid)
             .into_iter()
-            .find(|w| w.layer > 0 && w.layer < 1000 && w.width != 360.0 && w.height < 120.0)
+            .find(|w| w.layer > 0 && w.layer < 1000 && w.width != 320.0 && w.height < 120.0)
     };
     let edges = || windows_of(pid).iter().filter(|w| w.layer == 1000).count();
     let meets = |a: &Frame, b: &Frame| {
@@ -155,7 +157,7 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
     let granted = card();
     let request = status()?;
     check(
-        "Allow Queue keeps the card up for the grant, and the agent sees approved, not done",
+        "Allow keeps the card up for the grant, and the agent sees approved, not done",
         granted.is_some() && request["state"] == "approved",
         format!("{granted:?} {request}"),
     );
@@ -312,5 +314,97 @@ fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
         println!("     card: {}", file.display());
     }
     show("input-queue-decline")?;
+
+    // A double click asks on the same card, its point on the picture.
+    control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
+    )?;
+    control.call(
+        "debugShow",
+        json!({ "sessionKey": key, "surface": "input-queue-click", "displayId": id, "presses": 2 }),
+    )?;
+    sleep_ms(800);
+    let click = card();
+    let (ok, why) = click.as_ref().map_or((false, "no card".into()), |c| {
+        fits(c, &["input-request", "input-decline", "input-allow"])
+    });
+    check(
+        "a double click's request asks on the same card, its reason and both buttons inside it",
+        ok && status()?["state"] == "queued",
+        format!("{click:?} {why}"),
+    );
+    if let Some(c) = &click {
+        let file = capture("inputqueue-click", [c.x, c.y, c.width, c.height])?;
+        println!("     card: {}", file.display());
+    }
+    show("input-queue-decline")?;
+
+    // Three drags at once: the card numbers them on the picture and lists
+    // them; then allowed, with the second shown running, it shows its
+    // step and Stop. None runs: their calls never wait.
+    control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
+    )?;
+    show("input-queue-drags")?;
+    sleep_ms(800);
+    let many = card();
+    let (ok, why) = many.as_ref().map_or((false, "no card".into()), |c| {
+        fits(
+            c,
+            &[
+                "input-request",
+                "input-request-last",
+                "input-decline",
+                "input-allow",
+            ],
+        )
+    });
+    // The list's first and last rows, three rows apart: the last row's
+    // top is at least two rows below the first's.
+    let painted = control.call("debugCard", json!({})).unwrap_or_default();
+    let row = |id: &str| -> Option<(f64, f64)> {
+        let b = &painted["buttons"][id];
+        Some((b[1].as_f64()?, b[3].as_f64()?))
+    };
+    let listed = match (row("input-request"), row("input-request-last")) {
+        (Some((top, height)), Some((last, _))) => height > 10.0 && last >= top + 2.0 * height - 1.0,
+        _ => false,
+    };
+    check(
+        "three drags ask on one card that lists all three, the list and both buttons inside a window as tall as its content",
+        ok && listed && many.as_ref().is_some_and(|c| c.height > 300.0),
+        format!(
+            "{why}, rows {:?} {:?}",
+            row("input-request"),
+            row("input-request-last")
+        ),
+    );
+    if let Some(c) = &many {
+        let file = capture("inputqueue-many", [c.x, c.y, c.width, c.height])?;
+        println!("     card: {}", file.display());
+    }
+    show("input-queue-decline")?;
+    control.call(
+        "inputQueue",
+        json!({ "sessionKey": key, "displayId": id, "action": "done" }),
+    )?;
+    show("input-queue-running")?;
+    sleep_ms(800);
+    let running = card();
+    let (ok, why) = running
+        .as_ref()
+        .map_or((false, "no card".into()), |c| fits(c, &["input-revoke"]));
+    check(
+        "the running step's card draws Stop inside a window as tall as its content, the bar shows",
+        ok && bar().is_some(),
+        format!("{why} bar {:?}", bar()),
+    );
+    if let Some(c) = &running {
+        let file = capture("inputqueue-running", [c.x, c.y, c.width, c.height])?;
+        println!("     card: {}", file.display());
+    }
+    show("input-bar-stop")?;
     Ok(())
 }

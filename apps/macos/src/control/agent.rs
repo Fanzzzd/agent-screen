@@ -1857,6 +1857,9 @@ async fn handle_one(
                 surface.as_str(),
                 "input-queue"
                     | "input-queue-approved"
+                    | "input-queue-drags"
+                    | "input-queue-running"
+                    | "input-queue-click"
                     | "input-queue-menu"
                     | "input-queue-allow"
                     | "input-queue-decline"
@@ -1868,6 +1871,13 @@ async fn handle_one(
                     ));
                 }
                 usable(&core, connection, id, "debugShow", cx)?;
+                // A new preview's steps replace an earlier preview's.
+                if !matches!(
+                    surface.as_str(),
+                    "input-queue-allow" | "input-queue-decline" | "input-bar-stop"
+                ) {
+                    crate::ui::help_card::preview_steps(Vec::new());
+                }
             }
             // The card for a menu item an Electron app needs a real click
             // for. Its call never waits, so the request never runs.
@@ -1900,7 +1910,101 @@ async fn handle_one(
                     Ok(())
                 })?;
             }
-            // Allow Queue itself, through the shell, comes after this.
+            // Drags across a board on the display, `count` of them (1 to
+            // 3, default 3): one request, whose call never waits, so it
+            // never runs, even allowed, and the rest shown after it, then
+            // a click with `presses` when given. `input-queue-running`
+            // allows it and shows the second as running.
+            if matches!(
+                surface.as_str(),
+                "input-queue-drags" | "input-queue-running"
+            ) {
+                let count = p.int("count").unwrap_or(3).clamp(1, 3) as usize;
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let area = cg::display_bounds(id);
+                    // The design's paths, on a 1280 by 800 board.
+                    let paths = [
+                        ((450.0, 179.0), (1094.0, 320.0)),
+                        ((450.0, 269.0), (772.0, 232.0)),
+                        ((260.0, 500.0), (340.0, 500.0)),
+                    ];
+                    let at = |(x, y): (f64, f64)| {
+                        (
+                            area.x + x / 1280.0 * area.width,
+                            area.y + y / 800.0 * area.height,
+                        )
+                    };
+                    let drags = paths.into_iter().take(count).map(|(from, to)| {
+                        crate::input_queue::Plan::Drag(crate::input_queue::Drag {
+                            target: WindowTarget {
+                                pid: 0,
+                                window_id: 0,
+                            },
+                            frame: area,
+                            area,
+                            from: at(from),
+                            to: at(to),
+                            flags: 0,
+                        })
+                    });
+                    let click = p.int("presses").map(|presses| {
+                        crate::input_queue::Plan::Click(preview_click(
+                            area,
+                            presses,
+                            &p,
+                            c.input_queue.now(),
+                        ))
+                    });
+                    let mut plans = drags.chain(click);
+                    // A session waits on one request at a time, so the
+                    // first is a real request and the rest only show.
+                    let first = plans.next().expect("one preview drag");
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-drag:{id}"),
+                            "Preview a drag that needs the real pointer".into(),
+                            Some(first),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    crate::ui::help_card::preview_steps(plans.map(|plan| (id, plan)).collect());
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // A click with `presses` (1 to 3, default 1) in `app`'s window
+            // `title` (default WeCom, Chats), on a chat list's row. Its
+            // call never waits, so it never runs, even allowed.
+            if surface == "input-queue-click" {
+                let presses = p.int("presses").unwrap_or(1);
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let plan =
+                        preview_click(cg::display_bounds(id), presses, &p, c.input_queue.now());
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-click:{id}"),
+                            "Preview a click that needs the real pointer".into(),
+                            Some(crate::input_queue::Plan::Click(plan)),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // Allow itself, through the shell, comes after this.
             if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
                 core.update(cx, |c, cx| -> Result<(), ControlError> {
                     let owner = c
@@ -5913,6 +6017,42 @@ impl Args<'_> {
     fn require(&self, key: &str) -> Result<f64, ControlError> {
         self.number(key)
             .ok_or_else(|| ControlError::invalid(format!("{key} is required")))
+    }
+}
+
+/// A preview click with `presses` (1 to 3) in `app`'s window `title`
+/// (default WeCom, Chats), on a chat list's row of a display at `area`.
+fn preview_click(
+    area: crate::model::Rect,
+    presses: i64,
+    p: &Args,
+    now: u64,
+) -> crate::input_queue::Click {
+    let click = agent_screen_model::real_click::Click::new(
+        agent_screen_model::real_click::Button::Left,
+        presses.clamp(1, 3),
+    )
+    .expect("one to three presses");
+    crate::input_queue::Click {
+        target: WindowTarget {
+            pid: 0,
+            window_id: 0,
+        },
+        frame: area,
+        area,
+        // A row of a sidebar, on a 1280 by 800 board.
+        at: (
+            area.x + 180.0 / 1280.0 * area.width,
+            area.y + 236.0 / 800.0 * area.height,
+        ),
+        click,
+        flags: 0,
+        app: p.string("app").unwrap_or_else(|| "WeCom".into()),
+        title: Some(p.string("title").unwrap_or_else(|| "Chats".into())),
+        region: area,
+        look: Vec::new(),
+        element: None,
+        asked_ms: now,
     }
 }
 

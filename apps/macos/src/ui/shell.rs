@@ -1062,7 +1062,7 @@ impl Shell {
         // change after the next paint refits it (`fit_card`).
         let (w, h) = if input {
             (
-                f64::from(help_card::QUEUE_WIDTH),
+                f64::from(help_card::WIDTH),
                 f64::from(help_card::queue_height().clamp(MIN_QUEUE_HEIGHT, max_height)),
             )
         } else {
@@ -1155,6 +1155,8 @@ impl Shell {
     }
 
     /// The bar painted at a new size: its window follows, still centred.
+    /// An animation, as the one showing the bar may still run toward the
+    /// size it had before, and would otherwise end there.
     pub fn fit_bar(&mut self, _cx: &mut Context<Self>) {
         if !self.bar_shown {
             return;
@@ -1162,7 +1164,10 @@ impl Shell {
         let (Some((_, window)), Some(frame)) = (&self.bar, self.bar_frame()) else {
             return;
         };
-        native::set_frame_later(window, frame);
+        let window = window.clone();
+        native::later(move || {
+            native::animate_frame(&window, frame, 0.12, native::Curve::Settle);
+        });
     }
 
     fn bar_frame(&self) -> Option<NSRect> {
@@ -1273,7 +1278,7 @@ impl Shell {
             self.user_took_input(cx);
             return;
         }
-        // The user's hand may still be on the mouse that clicked Allow Queue:
+        // The user's hand may still be on the mouse that clicked Allow:
         // the first loan waits until they leave it alone for a moment, and
         // from then on their touch takes control back.
         if !real_input::armed() {
@@ -2430,11 +2435,21 @@ impl Shell {
                 let effect = self.peek_intent.pin();
                 self.apply_peek_effect(effect, cx);
             }
-            "input-queue" | "input-queue-menu" => {
+            "input-queue" | "input-queue-menu" | "input-queue-drags" | "input-queue-click" => {
                 self.hide_peek(cx);
                 self.sync_card(cx);
             }
-            // As the card's Allow Queue.
+            // Allow for the preview drags waiting, which never run, and
+            // show the second as running.
+            "input-queue-running" => {
+                self.hide_peek(cx);
+                let approval = self.core.read(cx).input_queue.queue.approval();
+                self.answer_input(approval, true, cx);
+                help_card::preview_running();
+                self.core.update(cx, |_, cx| cx.notify());
+                self.sync_card(cx);
+            }
+            // As the card's Allow.
             "input-queue-approved" | "input-queue-allow" => {
                 self.hide_peek(cx);
                 let approval = self.core.read(cx).input_queue.queue.approval();

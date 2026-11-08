@@ -12,6 +12,8 @@ pub struct Theme {
     /// The card behind the Viewer and Peek.
     pub card: Hsla,
     pub card_border: Hsla,
+    /// Between the rows of a list on a card.
+    pub hairline: Hsla,
     pub label: Hsla,
     pub secondary: Hsla,
     /// Resting fill of a plain button.
@@ -37,6 +39,7 @@ pub fn palette(dark: bool) -> Theme {
         Theme {
             card: rgb(0x1e1e20).into(),
             card_border: rgba(0xffffff26).into(),
+            hairline: rgba(0xffffff14).into(),
             label: rgb(0xf5f5f7).into(),
             secondary: rgb(0x98989d).into(),
             control: rgba(0xffffff1f).into(),
@@ -54,6 +57,7 @@ pub fn palette(dark: bool) -> Theme {
         Theme {
             card: rgb(0xf6f6f8).into(),
             card_border: rgba(0x0000001f).into(),
+            hairline: rgba(0x00000012).into(),
             label: rgb(0x1d1d1f).into(),
             secondary: rgb(0x6e6e73).into(),
             control: rgba(0x0000000f).into(),
