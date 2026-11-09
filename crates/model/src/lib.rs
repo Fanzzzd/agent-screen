@@ -28,6 +28,7 @@ pub mod shared_app;
 pub mod substitute;
 pub mod tree;
 pub mod typing;
+pub mod viewer_keys;
 
 pub mod diagnostics;
 pub mod peek;

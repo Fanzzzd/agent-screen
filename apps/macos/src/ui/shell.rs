@@ -2571,6 +2571,15 @@ impl Shell {
             }
             "focus" => self.take_keyboard(),
             "viewer" => self.open_viewer(id, cx),
+            // The input method's marked text over the display image, as
+            // while the user composes; `debugViewerInput` mark and commit
+            // drive the real input method calls.
+            "marked" => {
+                self.open_viewer(id, cx);
+                if let Some((viewer, _)) = self.viewer.clone() {
+                    let _ = viewer.update(cx, |viewer, _, cx| viewer.show_marked("nǐ hǎo", cx));
+                }
+            }
             "stage" => {
                 #[cfg(debug_assertions)]
                 if let Some(old) = self.stage {

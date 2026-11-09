@@ -37,6 +37,8 @@ unsafe extern "C" {
         key: *const std::ffi::c_void,
     ) -> *const std::ffi::c_void;
     static kTISPropertyInputSourceID: *const std::ffi::c_void;
+    static kTISPropertyInputSourceType: *const std::ffi::c_void;
+    static kTISTypeKeyboardLayout: *const std::ffi::c_void;
     fn CFArrayGetCount(array: &CFArray) -> isize;
     fn CFArrayGetValueAtIndex(array: &CFArray, index: isize) -> *const std::ffi::c_void;
     fn CFRelease(object: *const std::ffi::c_void);
@@ -102,6 +104,29 @@ fn on_main<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     let slot = &mut out;
     dispatch2::DispatchQueue::main().exec_sync(move || *slot = Some(work()));
     out.expect("the main queue ran it")
+}
+
+/// Whether the user's current input source is a keyboard layout or an
+/// input method, for keys typed in the Viewer. Main thread only, as the
+/// Viewer's event monitor runs there.
+pub fn current_kind() -> agent_screen_model::viewer_keys::Source {
+    use agent_screen_model::viewer_keys::Source as Kind;
+    let source = unsafe { TISCopyCurrentKeyboardInputSource() };
+    if source.is_null() {
+        return Kind::Layout;
+    }
+    let source = Source(source);
+    let kind = unsafe { TISGetInputSourceProperty(source.0, kTISPropertyInputSourceType) };
+    if kind.is_null() {
+        return Kind::Layout;
+    }
+    let kind = unsafe { &*(kind as *const CFString) };
+    let layout = unsafe { &*(kTISTypeKeyboardLayout as *const CFString) };
+    if kind == layout {
+        Kind::Layout
+    } else {
+        Kind::InputMethod
+    }
 }
 
 fn current_source() -> Source {

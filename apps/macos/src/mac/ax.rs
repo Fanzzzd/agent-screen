@@ -864,6 +864,65 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     )
 }
 
+/// The caret of `target`'s focused text element, in global top-left
+/// points: the bounds of its selection, or of the character before an
+/// empty one. None when the element is in another window or doesn't say.
+pub fn caret(target: WindowTarget) -> Option<Rect> {
+    use objc2_core_foundation::CFRange;
+    let element = element_attribute(&application(target.pid), "AXFocusedUIElement")?;
+    let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
+    if window != Some(target.window_id) {
+        return None;
+    }
+    let selected = attribute(&element, "AXSelectedTextRange")?;
+    let selected = selected.downcast_ref::<AXValue>()?;
+    let mut range = CFRange::new(0, 0);
+    unsafe {
+        selected.value(
+            AXValueType::CFRange,
+            NonNull::from(&mut range).cast::<c_void>(),
+        )
+    }
+    .then_some(())?;
+    let bounds = |range: CFRange| -> Option<Rect> {
+        let parameter = ax_value(AXValueType::CFRange, &range)?;
+        let name = CFString::from_static_str("AXBoundsForRange");
+        let mut value: *const CFType = std::ptr::null();
+        let error = unsafe {
+            element.copy_parameterized_attribute_value(&name, &parameter, NonNull::from(&mut value))
+        };
+        if error != AXError::Success || value.is_null() {
+            return None;
+        }
+        let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+        let value = value.downcast_ref::<AXValue>()?;
+        let mut rect = objc2_core_foundation::CGRect::default();
+        unsafe {
+            value.value(
+                AXValueType::CGRect,
+                NonNull::from(&mut rect).cast::<c_void>(),
+            )
+        }
+        .then_some(())?;
+        (rect.size.height > 0.0).then(|| {
+            Rect::new(
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+            )
+        })
+    };
+    bounds(range).or_else(|| {
+        // An empty range has no bounds in many apps: the character before
+        // it ends where the caret is.
+        (range.length == 0 && range.location > 0)
+            .then(|| bounds(CFRange::new(range.location - 1, 1)))
+            .flatten()
+            .map(|r| Rect::new(r.x + r.width, r.y, 0.0, r.height))
+    })
+}
+
 pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {
     let range = objc2_core_foundation::CFRange::new(start as isize, length as isize);
     ax_value(AXValueType::CFRange, &range)

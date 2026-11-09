@@ -6,14 +6,22 @@
 //! Control-click into a right click, and keep only five modifier flags.
 //! Events outside the image, and every event while the Dismissal sheet is
 //! up, go on to GPUI.
+//!
+//! Keys follow `viewer_keys::route` (ADR 0008). With a keyboard layout
+//! they go to the target as keys. With an input method they go on to GPUI,
+//! whose view hands them to the input method; it composes in the Viewer,
+//! which sends the target the finished text through `commit`.
 
 use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, Phase};
 use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
+use agent_screen_model::viewer_keys::{self, Press, Route, Source};
 use block2::RcBlock;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSEvent, NSEventMask, NSEventPhase, NSEventType, NSWindow};
+use objc2_app_kit::{
+    NSEvent, NSEventMask, NSEventModifierFlags, NSEventPhase, NSEventType, NSWindow,
+};
 use objc2_core_graphics::CGEventFlags;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -34,6 +42,8 @@ struct State {
     frame_pixels: Option<[usize; 2]>,
     /// Keys sent with Command, whose release AppKit may never report.
     sent_up: HashSet<u16>,
+    /// Keys that went to the input method: their release goes there too.
+    composed: HashSet<u16>,
 }
 
 thread_local! {
@@ -42,6 +52,80 @@ thread_local! {
     static INJECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Except this one, which takes it as the user's click does.
     static TAKE_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The text the input method has marked in the Viewer, while it
+    /// composes. The Viewer sets it.
+    static MARKED: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Tests: the input source a key made by `inject_key` is typed with.
+    static SOURCE: std::cell::Cell<Option<Source>> = const { std::cell::Cell::new(None) };
+    /// Where the last key down went.
+    static ROUTED: std::cell::Cell<Option<Route>> = const { std::cell::Cell::new(None) };
+}
+
+/// The input method's marked text in the Viewer, None once it commits or
+/// cancels.
+pub fn set_marked(text: Option<&str>) {
+    MARKED.with(|m| *m.borrow_mut() = text.map(str::to_string));
+}
+
+pub fn marked() -> Option<String> {
+    MARKED.with(|m| m.borrow().clone())
+}
+
+/// Text the user's input method finished in the Viewer, for the target on
+/// the display it shows. It goes where the user's keys go, through the
+/// same checks, as Unicode text that no keyboard layout changes.
+pub fn commit(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let shown = STATE.with(|s| match s.try_borrow() {
+        Ok(s) if !s.blocked => Ok(s.display.clone()),
+        Ok(_) => Ok(None),
+        Err(_) => Err(()),
+    });
+    match shown {
+        Ok(Some((display, forwarder))) => {
+            native::send(Native::ScreenTouched { display });
+            super::catch::agent_acted(display);
+            forwarder.text(text.to_string(), cg::display_bounds(display));
+        }
+        Ok(None) => log::debug!("viewer: composed text dropped, no display to send it to"),
+        // Inside the event handler, which holds the state: after it.
+        Err(()) => {
+            let text = text.to_string();
+            native::main_async(move || commit(&text));
+        }
+    }
+}
+
+/// The target's caret in the Viewer's window, in points from its top-left
+/// corner, as x, y, width, height: where the input method shows its
+/// candidates. The point last clicked when the target doesn't say.
+pub fn caret_in_window() -> Option<[f64; 4]> {
+    STATE.with(|s| {
+        let s = s.try_borrow().ok()?;
+        let (display, forwarder) = s.display.as_ref()?;
+        let content = s.content?;
+        let caret = forwarder.caret()?;
+        Some(caret_on_image(caret, cg::display_bounds(*display), content))
+    })
+}
+
+/// A rect on the display, in global points, on the display image at
+/// `content` in the window.
+fn caret_on_image(
+    caret: crate::model::Rect,
+    display: crate::model::Rect,
+    content: [f64; 4],
+) -> [f64; 4] {
+    let [cx, cy, cw, ch] = content;
+    let (sx, sy) = (cw / display.width, ch / display.height);
+    [
+        cx + (caret.x - display.x) * sx,
+        cy + (caret.y - display.y) * sy,
+        caret.width * sx,
+        caret.height * sy,
+    ]
 }
 
 /// Tests: a click at a point of the display image, given as fractions of
@@ -93,8 +177,15 @@ pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
 }
 
 /// Tests: press and release a key on the Viewer, as if the user typed it,
-/// with Shift and Command held as asked.
-pub fn inject_key(code: u16, shift: bool, command: bool) -> Result<(), String> {
+/// with Shift and Command held as asked, and `source`, when given, as the
+/// input source selected. Where the key went. A key for the input method
+/// stops there: the user's real input method would take it.
+pub fn inject_key(
+    code: u16,
+    shift: bool,
+    command: bool,
+    source: Option<Source>,
+) -> Result<Route, String> {
     let window = STATE.with(|s| s.borrow().window);
     if window == 0 {
         return Err("no Viewer".into());
@@ -108,6 +199,7 @@ pub fn inject_key(code: u16, shift: bool, command: bool) -> Result<(), String> {
         flags |= objc2_app_kit::NSEventModifierFlags::Command;
     }
     let empty = objc2_foundation::NSString::new();
+    let mut route = Route::Raw;
     for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             kind,
@@ -122,7 +214,55 @@ pub fn inject_key(code: u16, shift: bool, command: bool) -> Result<(), String> {
             code,
         )
         .ok_or("no event")?;
-        inject(&event)?;
+        SOURCE.with(|s| s.set(source));
+        ROUTED.with(|r| r.set(None));
+        let injected = inject(&event);
+        SOURCE.with(|s| s.set(None));
+        if kind == NSEventType::KeyDown {
+            route = ROUTED.with(|r| r.get()).unwrap_or(Route::Raw);
+        }
+        if route == Route::Raw {
+            injected?;
+        }
+    }
+    Ok(route)
+}
+
+/// Tests: an input method's call on the Viewer's view, as the user's makes
+/// it while they compose. With `commit`, insertText: the composition ends
+/// with `text`. Otherwise setMarkedText: `text` is marked, the caret at its
+/// end. Calls AppKit's NSTextInputClient methods on the view, so GPUI's own
+/// routing runs. Never from inside a GPUI update: the view calls back into
+/// it.
+pub fn inject_text_input(text: &str, commit: bool) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2_foundation::{NSNotFound, NSString};
+    /// NSRange as GPUI's view declares it, `{NSRange=QQ}`, which
+    /// objc2's checked sends tell apart from AppKit's `{_NSRange=QQ}`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSRange(usize, usize);
+    unsafe impl objc2::Encode for NSRange {
+        const ENCODING: objc2::Encoding =
+            objc2::Encoding::Struct("NSRange", &[usize::ENCODING, usize::ENCODING]);
+    }
+    let window = STATE.with(|s| s.borrow().window);
+    if window == 0 {
+        return Err("no Viewer".into());
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let view = window
+        .firstResponder()
+        .ok_or("the Viewer has no first responder")?;
+    let string = NSString::from_str(text);
+    let none = NSRange(NSNotFound as usize, 0);
+    if commit {
+        let _: () = unsafe { msg_send![&*view, insertText: &*string, replacementRange: none] };
+    } else {
+        let caret = NSRange(string.length(), 0);
+        let _: () = unsafe {
+            msg_send![&*view, setMarkedText: &*string, selectedRange: caret, replacementRange: none]
+        };
     }
     Ok(())
 }
@@ -148,7 +288,10 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.display = display;
         s.pressed = None;
         s.click = None;
+        s.composed.clear();
     });
+    // A composition belongs to the display it started on.
+    set_marked(None);
 }
 
 /// Where the image is, and whether the sheet covers it. The Viewer reports
@@ -437,6 +580,28 @@ fn handle_in(
                 let code = event.keyCode();
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
+                let held = event.modifierFlags();
+                let press = Press {
+                    code,
+                    command: held.contains(NSEventModifierFlags::Command),
+                    control: held.contains(NSEventModifierFlags::Control),
+                };
+                let source = SOURCE
+                    .with(|s| s.get())
+                    .unwrap_or_else(super::ime::current_kind);
+                let composing = MARKED.with(|m| m.borrow().is_some());
+                let route = viewer_keys::route(source, composing, press);
+                ROUTED.with(|r| r.set(Some(route)));
+                if route == Route::InputMethod {
+                    // On to GPUI's view and the input method. A new
+                    // composition looks up the target's caret first.
+                    if !composing {
+                        forwarder.find_caret();
+                    }
+                    s.sent_up.remove(&code);
+                    s.composed.insert(code);
+                    return false;
+                }
                 forwarder.key(code, true, flags(event), cg::display_bounds(display));
                 // Command shortcuts often never report their release, so
                 // send it now and skip the real one if it comes.
@@ -451,6 +616,9 @@ fn handle_in(
             }
             NSEventType::KeyUp => {
                 let code = event.keyCode();
+                if s.composed.remove(&code) {
+                    return false;
+                }
                 if !s.sent_up.remove(&code) {
                     forwarder.key(code, false, flags(event), cg::display_bounds(display));
                 }
@@ -458,11 +626,31 @@ fn handle_in(
             }
             NSEventType::FlagsChanged => {
                 forwarder.flags_changed(event.keyCode(), flags(event));
+                // An input method switches modes on Shift alone: it sees
+                // the modifiers too.
+                if !INJECTING.with(|i| i.get()) && super::ime::current_kind() == Source::InputMethod
+                {
+                    input_method_sees(&window, event);
+                }
                 true
             }
             _ => false,
         }
     })
+}
+
+/// Hand `event` to the input context of the Viewer's view, as AppKit's
+/// own text views do with modifier changes.
+fn input_method_sees(window: &NSWindow, event: &NSEvent) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let Some(view) = window.firstResponder() else {
+        return;
+    };
+    let context: *mut AnyObject = unsafe { msg_send![&*view, inputContext] };
+    if let Some(context) = unsafe { context.as_ref() } {
+        let _: bool = unsafe { msg_send![context, handleEvent: event] };
+    }
 }
 
 pub fn install() {
@@ -514,6 +702,18 @@ mod click_diagnostics_tests {
             display_bounds: bounds,
             global,
         }
+    }
+
+    #[test]
+    fn a_caret_on_the_display_lands_on_its_image() {
+        // A 1280x900 display shown at half size, 20 pt in and 60 pt down.
+        let display = Rect::new(4288.0, -2340.0, 1280.0, 900.0);
+        let image = [20.0, 60.0, 640.0, 450.0];
+        let caret = Rect::new(4288.0 + 100.0, -2340.0 + 200.0, 2.0, 20.0);
+        assert_eq!(
+            caret_on_image(caret, display, image),
+            [70.0, 160.0, 1.0, 10.0]
+        );
     }
 
     #[test]

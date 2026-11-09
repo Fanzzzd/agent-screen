@@ -188,6 +188,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e robust      # what agents get back, and nothi
 AGENTSCREEN_INSTANCE=e2e cargo e2e takeover    # Takeover through the Viewer
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag  # a title-bar drag in the Viewer stays on the display
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerkey  # a click that makes the Viewer key again, and a paste after it in a Takeover, keep the app running
+AGENTSCREEN_INSTANCE=e2e cargo e2e viewerime  # in a Takeover, the input method composes in the Viewer at Field's caret and Field gets only the finished 你好; keys with a plain layout, keys with no text and Command shortcuts still go to Field as keys; your input source is untouched; 2 displays (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
@@ -296,7 +297,7 @@ With AeroSpace running, a window counts as placed only once AeroSpace files it u
 for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 ```
 
-`AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. A click with `key` 1 takes the keyboard as the user's click does. A key takes `shift` 1 and `command` 1 for those modifiers. `E2E_LOG=FILE` keeps the debug app's log.
+`AGENTSCREEN_INSTANCE=e2e` runs the debug app as a second instance with its own socket (`control-e2e.sock`) and display serials, so your Agent Screen and its displays keep running. Those tests send input to app processes, never to your pointer or keyboard. `takeover` also keeps the Viewer off your screen: `debugShow` with the surface `stage` makes one of the test's displays stand in for your screen, and `debugViewerInput` makes clicks, key presses and drags (`kind` click, key or drag) inside the app, through the Viewer's own handler. A click with `key` 1 takes the keyboard as the user's click does. A key takes `shift` 1 and `command` 1 for those modifiers, and `source` `layout` or `inputMethod` to stand in for the user's input source; its reply's `route` says whether it went to the target as a key (`raw`) or to the input method (`inputMethod`), where it stops. `kind` mark and commit, with `text`, make the input method's setMarkedText and insertText calls on the Viewer's view. `debugViewer` returns the marked text and the target's caret in the Viewer. `E2E_LOG=FILE` keeps the debug app's log.
 
 `cargo e2e run` posts real pointer events, so it borrows your cursor. It starts 3 s after you stop using the mouse and keyboard, with no Agent Display open (`E2E_IDLE_SECS` changes the 3 s, `E2E_NOW=1` skips the wait). The sign shows what it waits for from the first moment, so you know it is about to begin. A script that sees your mouse or keyboard while it runs says so on the sign and in its result, since a failure may come from that. It puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
 
@@ -482,7 +483,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | --- | --- |
 | `debugTakeover` | `displayId` and `active` begin or end a Takeover. |
 | `debugShow` | `surface` selects an action from the list below. Supply `displayId` where the action needs one. |
-| `debugViewerInput` | Makes a click, key press or drag through the Viewer's own handler. See the input parameters above. |
+| `debugViewerInput` | Makes a click, key press or drag through the Viewer's own handler, or an input method's marked or committed text. See the input parameters above. |
 | `debugMoveWindow` | Moves the window named by `pid` and `windowId` to global `x`, `y`. |
 | `debugHandOver` | Hands `windowId` over to `displayId`, as from the Windows menu. |
 | `debugFocusUnknown` | `AGENTSCREEN_INSTANCE=e2e` only. `on` true makes the front app's focused window read as unknown to the input routes, as when the app doesn't answer in time; false ends it. |
@@ -509,6 +510,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `peek`, `click`, `menu`, `hide` | Open Peek held, click the menu bar icon, open its menu, or hide Peek. |
 | `icon-hover`, `card-hover` | Simulate pointer entry with `displayId` 1, or exit with 0. |
 | `select`, `viewer`, `collapse`, `focus` | Select a display, open or close its Viewer, or take the keyboard. |
+| `marked` | Open the display's Viewer with "nǐ hǎo" marked by the input method, drawn at the target's caret, or at the last press in the Viewer. |
 | `create`, `dismiss`, `dismiss-confirm` | Create a display, open Dismissal, or confirm the Dismiss sheet's current plan. |
 | `primary`, `give`, `take-back`, `help` | Invoke the display's primary action, open its Give or Take Back menu, or open it for help. |
 | `answer` | Confirm the Viewer's Dismiss sheet with `displayId` nonzero, or cancel it with 0. |

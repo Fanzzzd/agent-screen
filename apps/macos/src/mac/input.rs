@@ -210,6 +210,30 @@ pub struct Forwarder {
     /// Set while the user has taken the display over: an agent's typing or
     /// drag still running stops at its next step.
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Where the user's text goes on the display, for the input method's
+    /// candidates.
+    caret: std::sync::Arc<std::sync::Mutex<Caret>>,
+}
+
+/// The target's caret, in global points.
+#[derive(Default, Clone, Copy)]
+struct Caret {
+    /// The point of the user's last press in the Viewer.
+    pressed: Option<(f64, f64)>,
+    /// The caret of the focused text element, as the target reports it
+    /// since that press.
+    reported: Option<Rect>,
+}
+
+impl Caret {
+    /// The reported caret, else a caret-sized rect at the press.
+    fn rect(self) -> Option<Rect> {
+        const HEIGHT: f64 = 18.0;
+        self.reported.or_else(|| {
+            self.pressed
+                .map(|(x, y)| Rect::new(x, y - HEIGHT / 2.0, 0.0, HEIGHT))
+        })
+    }
 }
 
 impl Default for Forwarder {
@@ -227,6 +251,7 @@ impl Default for Forwarder {
         Forwarder {
             jobs,
             stopped: Default::default(),
+            caret: Default::default(),
         }
     }
 }
@@ -277,6 +302,10 @@ impl Forwarder {
         flags: CGEventFlags,
         trace: Option<Click>,
     ) {
+        *self.caret.lock().unwrap_or_else(|e| e.into_inner()) = Caret {
+            pressed: Some(at),
+            reported: None,
+        };
         self.send(move |w| {
             diagnostics::within(trace, Phase::Down, || {
                 let grabbed = w.grab(at, button);
@@ -352,6 +381,30 @@ impl Forwarder {
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
         self.send(move |w| w.flags_changed(code, flags));
+    }
+
+    /// Text the user's input method finished in the Viewer: to the window
+    /// the user's keys go to, as Unicode text.
+    pub fn text(&self, text: String, within: Rect) {
+        self.send(move |w| w.viewer_text(&text, within));
+    }
+
+    /// Look up the caret of the target's focused text element, after the
+    /// input queued before.
+    pub fn find_caret(&self) {
+        let caret = self.caret.clone();
+        self.send(move |w| {
+            let Some(target) = w.focused else { return };
+            if let Some(rect) = super::ax::caret(target) {
+                caret.lock().unwrap_or_else(|e| e.into_inner()).reported = Some(rect);
+            }
+        });
+    }
+
+    /// Where the user's text goes on the display, in global points: the
+    /// caret the target last reported, else the point last pressed.
+    pub fn caret(&self) -> Option<Rect> {
+        self.caret.lock().unwrap_or_else(|e| e.into_inner()).rect()
     }
 
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
@@ -513,31 +566,7 @@ impl Forwarder {
                 if !front_at_start && is_front(target.pid) {
                     return Sent::Fronted(typed);
                 }
-                let code = match character {
-                    '\n' | '\r' => Some(36),
-                    '\t' => Some(48),
-                    _ => None,
-                };
-                let mut units = [0u16; 2];
-                let units = character.encode_utf16(&mut units);
-                for down in [true, false] {
-                    let Some(event) =
-                        CGEvent::new_keyboard_event(w.source.as_deref(), code.unwrap_or(0), down)
-                    else {
-                        continue;
-                    };
-                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
-                    if code.is_none() {
-                        unsafe {
-                            CGEvent::keyboard_set_unicode_string(
-                                Some(&event),
-                                units.len() as _,
-                                units.as_ptr(),
-                            )
-                        };
-                    }
-                    deliver(&event, target.pid, true);
-                }
+                w.character(target, character);
                 thread::sleep(Duration::from_millis(4));
             }
             // A page can drop keys that come faster than its script runs
@@ -1420,6 +1449,53 @@ impl Worker {
         self.key(code, down, flags, false);
     }
 
+    /// Text the user's input method finished in the Viewer: picked and
+    /// focused as for the user's keys.
+    fn viewer_text(&mut self, text: &str, within: Rect) {
+        let Some(_held) = self.focus_something(within) else {
+            log::debug!("input: composed text dropped, no window on the display");
+            return;
+        };
+        let Some(target) = self.focused else {
+            return;
+        };
+        for character in text.chars() {
+            self.character(target, character);
+            thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    /// One character to `target` as Unicode text, whatever the keyboard
+    /// layout, with no modifiers. Newlines and tabs are the Return and Tab
+    /// keys, so they submit and move between fields.
+    fn character(&self, target: WindowTarget, character: char) {
+        let code = match character {
+            '\n' | '\r' => Some(36),
+            '\t' => Some(48),
+            _ => None,
+        };
+        let mut units = [0u16; 2];
+        let units = character.encode_utf16(&mut units);
+        for down in [true, false] {
+            let Some(event) =
+                CGEvent::new_keyboard_event(self.source.as_deref(), code.unwrap_or(0), down)
+            else {
+                continue;
+            };
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            if code.is_none() {
+                unsafe {
+                    CGEvent::keyboard_set_unicode_string(
+                        Some(&event),
+                        units.len() as _,
+                        units.as_ptr(),
+                    )
+                };
+            }
+            deliver(&event, target.pid, true);
+        }
+    }
+
     /// A key to the focused window, already picked and focused. `ansi` for
     /// an agent's chord, whose codes are ANSI key positions.
     fn key(&mut self, code: u16, down: bool, flags: CGEventFlags, ansi: bool) {
@@ -1982,6 +2058,28 @@ mod wheel_tests {
         // A few clicks stay one event, as before.
         assert_eq!(wheel_chunks((0.0, 3.0)), vec![(0.0, 3.0)]);
         assert!(wheel_chunks((0.0, 0.0)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+
+    #[test]
+    fn the_press_stands_in_until_the_target_reports_its_caret() {
+        assert!(Caret::default().rect().is_none());
+        let pressed = Caret {
+            pressed: Some((500.0, 300.0)),
+            reported: None,
+        };
+        let rect = pressed.rect().unwrap();
+        assert_eq!((rect.x, rect.y + rect.height / 2.0), (500.0, 300.0));
+        let reported = Rect::new(120.0, 80.0, 1.0, 22.0);
+        let caret = Caret {
+            reported: Some(reported),
+            ..pressed
+        };
+        assert_eq!(caret.rect(), Some(reported));
     }
 }
 
