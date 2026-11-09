@@ -30,6 +30,13 @@ cp "$target/$config/AgentScreen" "$app/Contents/MacOS/AgentScreen"
 # The ColorSync helper, copied to a root-owned place when the user sets it up (ADR 0009).
 cp "$target/$config/agent-screen-colorsync" "$app/Contents/MacOS/agent-screen-colorsync"
 cp resources/Info.plist "$app/Contents/Info.plist"
+# The crate's version, as the release has it. Sparkle compares
+# CFBundleVersion with the feed's, and the template's "1" ranks above every
+# 0.x release, so an installed local build said it was up to date while
+# showing version 0.1.0.
+version="$(awk -F'"' '/^version/ { print $2; exit }' Cargo.toml)"
+plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$version" "$app/Contents/Info.plist"
 if [[ "$config" != release ]]; then
   plutil -replace CFBundleIdentifier -string app.agentscreen.AgentScreen.dev "$app/Contents/Info.plist"
   plutil -replace CFBundleName -string "Agent Screen Dev" "$app/Contents/Info.plist"
