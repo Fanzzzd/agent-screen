@@ -607,6 +607,69 @@ fn focus_unknown(
     Ok(())
 }
 
+/// The number of the line in `listing` that holds `wanted`.
+fn listed(listing: &str, wanted: &str) -> Result<u64> {
+    listing
+        .lines()
+        .find(|l| l.contains(wanted))
+        .and_then(|l| l.trim_start().strip_prefix('['))
+        .and_then(|rest| rest.split(']').next())
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("no {wanted} in\n{}", cut(listing, 2000)))
+}
+
+/// File > Close Window from the app's menu bar, pressed from the agent's
+/// window state beside the user's window (#110): a menu command acts on
+/// the app's key window, the user's, so the press is refused and the
+/// user's window stays open and focused.
+fn menu_bar(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let call = |element: u64| {
+        control.call(
+            "elementAction",
+            json!({ "sessionKey": KEY, "displayId": id, "windowId": window_id, "element": element, "action": "press" }),
+        )
+    };
+    // With a text field focused in the agent's window, an Electron menu
+    // item goes through the Input Queue instead; a press on the button
+    // moves focus off the fields.
+    let (_, press) = element(&tree(control, id, window_id)?, "agent press")?;
+    let _ = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": press.0, "y": press.1 }),
+    );
+    sleep_ms(500);
+    let file = listed(&tree(control, id, window_id)?, "menubaritem \"File\"")?;
+    let menu = call(file)?;
+    let close = listed(
+        menu["menu"].as_str().unwrap_or_default(),
+        "\"Close Window\"",
+    )?;
+    let mark = lines(log, 0).len();
+    let pressed = call(close);
+    sleep_ms(800);
+    let seen = lines(log, mark);
+    let now = focused_window(pid);
+    check(
+        "File > Close Window pressed beside the user's window is refused, naming their window",
+        pressed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("menu command acts on")),
+        cut(&said(&pressed), 500),
+    );
+    check(
+        "and the user's window stays open and focused",
+        now == "pair user" && !has(&seen, "win user closed") && !has(&seen, "win user blur"),
+        format!("focused {now:?} | log {seen:?}"),
+    );
+    Ok(())
+}
+
 fn median(mut ms: Vec<u128>) -> u128 {
     ms.sort_unstable();
     ms[ms.len() / 2]
@@ -831,6 +894,7 @@ fn test(
     select_and_link(control, id, window_id, log, pid)?;
     large_page(control, id, window_id, log)?;
     focus_unknown(control, id, window_id, log, pid)?;
+    menu_bar(control, id, window_id, log, pid)?;
 
     let seen = lines(log, from);
     let touched = user_touched(&seen);

@@ -89,6 +89,7 @@ if (pair) {
       const win = new BrowserWindow({ ...bounds, ...frame, title: `pair ${side}`, show: false });
       win.on("focus", () => note(`win ${side} focus`));
       win.on("blur", () => note(`win ${side} blur`));
+      win.on("closed", () => note(`win ${side} closed`));
       // Electron 35 and later pass one event with the message; earlier
       // ones pass it third.
       win.webContents.on("console-message", (...args) => {

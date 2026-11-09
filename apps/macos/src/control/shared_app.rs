@@ -281,6 +281,82 @@ pub async fn user_window(pid: i32, cx: &AsyncApp) -> bool {
     off(cx, move || beside::user_window(pid)).await
 }
 
+/// Why the user may be working in another window of `target`'s app, for
+/// a message, and the window its key commands act on.
+struct Shared {
+    lead: String,
+    app: String,
+    key_window: String,
+}
+
+/// The user's front app is `target`'s, with their window focused, or
+/// with focus unknown while it has a window on the user's screens.
+async fn shared(target: WindowTarget, cx: &AsyncApp) -> Option<Shared> {
+    match front(target, cx).await {
+        (Front::OtherFocused, Some(focused)) => {
+            let n = names(Beside { target, focused });
+            Some(Shared {
+                lead: format!(
+                    "{} is the user's front app with their window {} focused",
+                    n.app, n.user
+                ),
+                key_window: format!("the user's window {}", n.user),
+                app: n.app,
+            })
+        }
+        (Front::FocusUnknown, _) if user_window(target.pid, cx).await => {
+            let app = windows::find(target.window_id).map_or_else(|| "The app".into(), |w| w.app);
+            Some(Shared {
+                lead: format!(
+                    "{app} is the user's front app, it has a window on the user's screen, and Accessibility could not verify which of its windows has focus"
+                ),
+                key_window: "its key window, which may be the user's".into(),
+                app,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// act_on_element's press or click on an item of the app's own menu bar
+/// while the user may be working in another of its windows (#110): the
+/// command acts on the app's key window, the user's, so it is refused.
+/// An Electron app's item pressed with real_input goes through the Input
+/// Queue before this.
+pub async fn menu_bar_refusal(
+    target: WindowTarget,
+    action: &str,
+    element: &ax::Sendable,
+    cx: &AsyncApp,
+) -> Option<ControlError> {
+    if !matches!(action, "press" | "click") {
+        return None;
+    }
+    let pid = target.pid;
+    let e = ax::Sendable(element.get().clone());
+    let title = off(cx, move || {
+        let e = e.get();
+        (ax::string_attribute(e, "AXRole").as_deref() == Some("AXMenuItem")
+            && ax::menu_bar_path(e).is_some_and(|(owner, _)| owner == pid))
+        .then(|| beside::label(e))
+    })
+    .await?;
+    let Shared {
+        lead,
+        app,
+        key_window,
+    } = shared(target, cx).await?;
+    let electron = match crate::mac::app::is_electron(pid) {
+        true => {
+            " For this Electron app, press it with real_input true: once the user allows it, Agent Screen brings your window forward and clicks the item."
+        }
+        false => "",
+    };
+    Some(ControlError::failed(format!(
+        "{lead}, so {action} was not sent: \"{title}\" is an item of {app}'s menu bar, and a menu command acts on {app}'s key window, {key_window}, not on your window. Nothing ran.{electron} Otherwise use the controls in your window, or wait until the user switches to another app."
+    )))
+}
+
 /// act_on_element's `action` on `element` in `target`'s window, when the
 /// user may be working in another window of its app (#110): show_menu is
 /// refused, as the menu opens in the user's front app and takes their
@@ -295,29 +371,7 @@ pub async fn element_refusal(
     if !matches!(action, "press" | "click" | "show_menu") {
         return None;
     }
-    let app = || windows::find(target.window_id).map_or_else(|| "The app".into(), |w| w.app);
-    let (lead, app) = match front(target, cx).await {
-        (Front::OtherFocused, Some(focused)) => {
-            let n = names(Beside { target, focused });
-            (
-                format!(
-                    "{} is the user's front app with their window {} focused",
-                    n.app, n.user
-                ),
-                n.app,
-            )
-        }
-        (Front::FocusUnknown, _) if user_window(target.pid, cx).await => {
-            let app = app();
-            (
-                format!(
-                    "{app} is the user's front app, it has a window on the user's screen, and Accessibility could not verify which of its windows has focus"
-                ),
-                app,
-            )
-        }
-        _ => return None,
-    };
+    let Shared { lead, app, .. } = shared(target, cx).await?;
     if action == "show_menu" {
         return Some(ControlError::failed(format!(
             "{lead}, so show_menu was not sent: the menu it opens shows in {app}, the user's front app, and an open menu takes the user's keyboard. Nothing was opened. Use press or set_value on the element, or wait until the user switches to another app."
@@ -531,6 +585,7 @@ const EFFECT_WAIT: Duration = Duration::from_millis(600);
 struct Watcher {
     display: Option<Arc<crate::mac::capture::Latest>>,
     pid: i32,
+    window: u32,
     page: Option<beside::Page>,
 }
 
@@ -548,6 +603,7 @@ impl Watcher {
         Watcher {
             display,
             pid: target.pid,
+            window: target.window_id,
             page,
         }
     }
@@ -573,8 +629,12 @@ impl Watcher {
         }
         let pid = self.pid;
         let read = self.page.clone();
-        let (windows, quick, page) = off(cx, move || {
-            let quick = read.as_ref().map(|p| beside::quick_digest(p, pid));
+        let window = self.window;
+        let (windows, quick, focus, page) = off(cx, move || {
+            let quick = read.as_ref().map(beside::quick_digest);
+            let focus = read
+                .as_ref()
+                .and_then(|p| beside::focus_digest(p, pid, window));
             let started = Instant::now();
             let page = read.filter(|_| page).map(|p| beside::page_digest(&p));
             if page.is_some() {
@@ -583,13 +643,14 @@ impl Watcher {
                     started.elapsed().as_millis()
                 );
             }
-            (Some(beside::agent_windows(pid)), quick, page)
+            (Some(beside::agent_windows(pid)), quick, focus, page)
         })
         .await;
         Watch {
             display_changes: changes,
             windows,
             quick,
+            focus,
             page,
         }
     }

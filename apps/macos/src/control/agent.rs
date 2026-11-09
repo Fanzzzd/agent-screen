@@ -1386,6 +1386,13 @@ async fn handle_one(
             } else {
                 None
             };
+            // A menu bar command acts on the app's key window, the user's
+            // while they work in another window of it (#110).
+            if let Some(refusal) =
+                shared_app::menu_bar_refusal(window.target, &action, &item, cx).await
+            {
+                return Err(refusal);
+            }
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
                 core.update(cx, |c, _| c.forwarder(id))
                     .remember_user_window(window.target.pid)

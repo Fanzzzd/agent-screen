@@ -95,10 +95,9 @@ pub fn page_digest(page: &Page) -> u64 {
 }
 
 /// A digest of what changes cheaply read while waiting for a press's
-/// effect: the page's address, the window's title, the pressed element's
-/// own tree, and the app's focused element, unless it is the pressed
-/// one, which a press focuses.
-pub fn quick_digest(page: &Page, pid: i32) -> u64 {
+/// effect: the page's address, the window's title and the pressed
+/// element's own tree.
+pub fn quick_digest(page: &Page) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for (element, name) in [(&page.root, "AXURL"), (&page.window, "AXTitle")] {
@@ -107,17 +106,28 @@ pub fn quick_digest(page: &Page, pid: i32) -> u64 {
     ax::page_digest(&page.pressed, PRESSED_ELEMENTS)
         .0
         .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The app's focused element, when it is in the agent's window `window`:
+/// the pressed element, which a press focuses, reads as one value. None
+/// when the read timed out or focus is elsewhere, as in the user's
+/// window, where they may move it while the press is watched.
+pub fn focus_digest(page: &Page, pid: i32, window: u32) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
     let app = ax::application(pid);
     unsafe { app.set_messaging_timeout(0.2) };
-    match ax::element_attribute(&app, "AXFocusedUIElement") {
-        None => 0u8.hash(&mut hasher),
-        Some(f) if ax::same(&f, &page.pressed) => 1u8.hash(&mut hasher),
-        Some(f) => {
-            let f: &objc2_core_foundation::CFType = &f;
-            f.hash(&mut hasher)
-        }
+    let focused = ax::element_attribute(&app, "AXFocusedUIElement")?;
+    if ax::same(&focused, &page.pressed) {
+        return Some(1);
     }
-    hasher.finish()
+    if ax::window_of(&focused) != Some(window) {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let f: &objc2_core_foundation::CFType = &focused;
+    f.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// How many windows of `pid` are on Agent Displays: the user opening or

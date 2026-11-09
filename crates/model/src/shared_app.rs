@@ -219,6 +219,10 @@ pub struct Watch {
     /// address and title, its focused element and the pressed element's
     /// own tree.
     pub quick: Option<u64>,
+    /// The focused element in the agent's window, while one there has
+    /// focus. None, no information, as when the read timed out or focus
+    /// is in the user's window, where they may move it: never a change.
+    pub focus: Option<u64>,
     /// A digest of its page's accessibility tree, which shows a changed
     /// text or value however small; read before the press and once at the
     /// end, as it costs the app tens of milliseconds.
@@ -241,6 +245,7 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     let differ = |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a != b);
     if differ(before.display_changes, after.display_changes)
         || differ(before.quick, after.quick)
+        || differ(before.focus, after.focus)
         || differ(before.page, after.page)
         || differ(
             before.windows.map(|w| w as u64),
@@ -494,6 +499,7 @@ mod tests {
             display_changes,
             windows,
             quick: Some(1),
+            focus: Some(3),
             page,
         };
         let same = watch(Some(4), Some(2), Some(7));
@@ -528,11 +534,24 @@ mod tests {
             quick: Some(2),
             ..same
         };
+        assert_eq!(effect(same, moved), Effect::Seen, "the address moved");
+        let refocused = Watch {
+            focus: Some(4),
+            ..same
+        };
         assert_eq!(
-            effect(same, moved),
+            effect(same, refocused),
             Effect::Seen,
-            "focus or the address moved"
+            "focus moved in the agent's window"
         );
+        // A focus read that timed out, or focus in the user's window,
+        // says nothing.
+        let unread = Watch {
+            focus: None,
+            ..same
+        };
+        assert_eq!(effect(same, unread), Effect::NoneSeen);
+        assert_eq!(effect(unread, same), Effect::NoneSeen);
     }
 
     #[test]
