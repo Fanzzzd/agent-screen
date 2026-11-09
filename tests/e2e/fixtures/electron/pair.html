@@ -14,6 +14,9 @@
       #login { margin: 20px; }
       #login input { width: 180px; }
       #login button { margin: 0 0 0 10px; width: 100px; height: 32px; }
+      #more { margin: 20px; }
+      #more select { width: 140px; height: 28px; font-size: 16px; }
+      #more a { margin-left: 20px; }
     </style>
   </head>
   <body>
@@ -27,7 +30,14 @@
       <input id="first" autocomplete="off" />
       <input id="second" autocomplete="off" />
       <button id="submit">submit</button>
+      <span id="status"></span>
     </form>
+    <!-- A select, whose press opens a native menu, and a link whose page
+         cancels its click, so following it changes nothing (#110). -->
+    <div id="more">
+      <select id="pick"><option>Apple</option><option>Banana</option></select>
+      <a id="dead" href="#gone">dead link</a>
+    </div>
     <script>
       const side = new URLSearchParams(location.search).get("side") || "agent";
       document.title = `pair ${side}`;
@@ -60,6 +70,18 @@
         e.preventDefault();
         const values = ["first", "second"].map((id) => document.getElementById(id).value);
         log("login-submit", JSON.stringify(values));
+        // A page shows what a submit did, so an agent can tell it ran.
+        document.getElementById("status").textContent = "sent";
+      });
+      const pick = document.getElementById("pick");
+      pick.setAttribute("aria-label", `${side} pick`);
+      pick.addEventListener("change", () => log("change", JSON.stringify(pick.value)));
+      pick.addEventListener("focus", () => log("focus", "pick"));
+      const dead = document.getElementById("dead");
+      dead.setAttribute("aria-label", `${side} dead`);
+      dead.addEventListener("click", (e) => {
+        e.preventDefault();
+        log("dead-click");
       });
       // Focus events wait for the page to have focus, which a window that
       // isn't key may not; the focused element shows here either way.

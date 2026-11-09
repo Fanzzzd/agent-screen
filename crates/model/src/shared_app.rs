@@ -8,8 +8,9 @@
 //! agent last clicked through accessibility, read back after; Return and
 //! Escape become that element's confirm, press and cancel actions; Tab and
 //! shift+Tab set focus on the next or previous element of the page; a left
-//! click becomes a press or picks a field. Everything else fails and names
-//! the window that holds focus.
+//! click becomes a press or picks a field. A control whose press opens a
+//! menu, as a select, is never pressed: an open menu takes the user's
+//! keyboard. Everything else fails and names the window that holds focus.
 
 use crate::keychord::KeyChord;
 
@@ -143,19 +144,90 @@ pub enum ElementUse {
     /// Text goes in through its value.
     Text,
     Press,
+    /// A press opens a menu, which takes the user's keyboard while it is
+    /// open: nothing presses it.
+    Menu,
     Nothing,
 }
 
 const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"];
 
-pub fn element_use(role: &str, actions: &[String]) -> ElementUse {
+/// Roles whose press can open a menu: a pop-up button, as AppKit's and a
+/// web page's select, and a pull-down menu button.
+const MENU_ROLES: [&str; 2] = ["AXPopUpButton", "AXMenuButton"];
+
+/// Whether an element's role is one whose press can open a menu.
+pub fn may_open_menu(role: &str) -> bool {
+    MENU_ROLES.contains(&role)
+}
+
+/// Whether pressing an element opens a menu. Chromium also calls a page's
+/// button with aria-haspopup a pop-up button, and the page draws the menu
+/// that one opens; a select holds its menu among its children. So in a
+/// web page a pop-up button without a menu child takes a press, and
+/// everywhere else, or where accessibility can't tell the page, it opens
+/// a menu.
+pub fn opens_menu(role: &str, in_web_page: Option<bool>, holds_menu: bool) -> bool {
+    MENU_ROLES.contains(&role) && (in_web_page != Some(true) || holds_menu)
+}
+
+/// `menu` is what `opens_menu` says of the element.
+pub fn element_use(role: &str, actions: &[String], menu: bool) -> ElementUse {
     if TEXT_ROLES.contains(&role) {
         return ElementUse::Text;
+    }
+    if menu {
+        return ElementUse::Menu;
     }
     if actions.iter().any(|a| a == "AXPress") {
         return ElementUse::Press;
     }
     ElementUse::Nothing
+}
+
+/// What Agent Screen sees of the agent's window around a press. Each is
+/// None when it couldn't be read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Watch {
+    /// Visible changes counted on its display so far. A small change, as
+    /// one digit of a counter, can stay under the count's threshold.
+    pub display_changes: Option<u64>,
+    /// How many windows its app has.
+    pub windows: Option<usize>,
+    /// A digest of its page's accessibility tree, which shows a changed
+    /// text or value however small.
+    pub page: Option<u64>,
+}
+
+/// What a press did, as far as the display, the page and the app's
+/// windows show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    Seen,
+    /// The page was read before and after, and neither it, the display
+    /// nor the app's windows changed.
+    NoneSeen,
+    /// Nothing changed that could be read, but the page couldn't be.
+    Unknown,
+}
+
+pub fn effect(before: Watch, after: Watch) -> Effect {
+    let differ = |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a != b);
+    if differ(before.display_changes, after.display_changes)
+        || differ(before.page, after.page)
+        || differ(
+            before.windows.map(|w| w as u64),
+            after.windows.map(|w| w as u64),
+        )
+    {
+        return Effect::Seen;
+    }
+    // The display's count alone misses small changes, so only a page
+    // read on both sides tells that nothing happened.
+    match (before.page, after.page) {
+        (Some(_), Some(_)) => Effect::NoneSeen,
+        _ => Effect::Unknown,
+    }
 }
 
 /// Whether Tab stops at an element: one that is enabled and lets a client
@@ -326,15 +398,71 @@ mod tests {
     #[test]
     fn a_field_takes_text_and_a_control_takes_a_press() {
         let press = vec!["AXPress".to_string()];
-        assert_eq!(element_use("AXTextField", &press), ElementUse::Text);
-        assert_eq!(element_use("AXTextArea", &[]), ElementUse::Text);
-        assert_eq!(element_use("AXButton", &press), ElementUse::Press);
-        assert_eq!(element_use("AXLink", &press), ElementUse::Press);
-        assert_eq!(element_use("AXGroup", &[]), ElementUse::Nothing);
+        assert_eq!(element_use("AXTextField", &press, false), ElementUse::Text);
+        assert_eq!(element_use("AXTextArea", &[], false), ElementUse::Text);
+        assert_eq!(element_use("AXButton", &press, false), ElementUse::Press);
+        assert_eq!(element_use("AXLink", &press, false), ElementUse::Press);
+        assert_eq!(element_use("AXGroup", &[], false), ElementUse::Nothing);
+        assert_eq!(element_use("AXPopUpButton", &press, true), ElementUse::Menu);
+        assert_eq!(
+            element_use("AXPopUpButton", &press, false),
+            ElementUse::Press
+        );
         assert!(takes_text("AXTextField", true, true));
         assert!(!takes_text("AXTextField", false, true), "a password field");
         assert!(!takes_text("AXTextField", true, false));
         assert!(!takes_text("AXButton", true, true));
+    }
+
+    #[test]
+    fn a_select_or_native_pop_up_opens_a_menu_and_a_page_drawn_one_does_not() {
+        // A web page's select holds its menu.
+        assert!(opens_menu("AXPopUpButton", Some(true), true));
+        // A page's button with aria-haspopup: the page draws its menu.
+        assert!(!opens_menu("AXPopUpButton", Some(true), false));
+        // AppKit's pop-up buttons, and any where the page can't be told.
+        assert!(opens_menu("AXPopUpButton", Some(false), false));
+        assert!(opens_menu("AXPopUpButton", None, false));
+        assert!(opens_menu("AXMenuButton", Some(false), false));
+        assert!(!opens_menu("AXButton", Some(false), true));
+        assert!(!opens_menu("AXLink", None, true));
+    }
+
+    #[test]
+    fn a_press_did_something_when_the_display_the_page_or_the_apps_windows_changed() {
+        let watch = |display_changes, windows, page| Watch {
+            display_changes,
+            windows,
+            page,
+        };
+        let same = watch(Some(4), Some(2), Some(7));
+        assert_eq!(effect(same, same), Effect::NoneSeen);
+        assert_eq!(effect(same, watch(Some(5), Some(2), Some(7))), Effect::Seen);
+        assert_eq!(
+            effect(same, watch(Some(4), Some(3), Some(7))),
+            Effect::Seen,
+            "a window opened off the display"
+        );
+        assert_eq!(
+            effect(same, watch(Some(4), Some(2), Some(8))),
+            Effect::Seen,
+            "a counter's digit, too small for the display's count"
+        );
+        assert_eq!(
+            effect(watch(None, None, Some(7)), watch(None, None, Some(7))),
+            Effect::NoneSeen
+        );
+        // Without the page on both sides, an unchanged display says
+        // nothing.
+        assert_eq!(
+            effect(watch(Some(4), Some(2), None), watch(Some(4), Some(2), None)),
+            Effect::Unknown
+        );
+        assert_eq!(effect(same, watch(Some(4), Some(2), None)), Effect::Unknown);
+        assert_eq!(
+            effect(watch(None, Some(2), None), watch(None, Some(3), None)),
+            Effect::Seen
+        );
     }
 
     #[test]

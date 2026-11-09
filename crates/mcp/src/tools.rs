@@ -186,6 +186,8 @@ pub fn definitions() -> Vec<Value> {
                 "nothing is posted to it, since keys would reach their window: a single left click presses the control or",
                 "picks the text field under it through accessibility, type puts text into the picked field, Return,",
                 "Escape, BackSpace and cmd+a act on what the click picked, and other keys fail and name the user's window.",
+                "A press after which nothing in the window changed within a second fails and says so; a select is never",
+                "pressed there, since its menu would take the user's keyboard: choose its item with act_on_element set_value.",
                 "The text before the screenshot says when an action went in this way.",
                 "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
                 "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",

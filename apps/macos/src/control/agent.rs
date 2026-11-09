@@ -1239,6 +1239,30 @@ async fn handle_one(
                     return reply(json!({ "menu": tree }));
                 }
             }
+            // Beside the user's window of the same app, a menu would open
+            // in their front app and take their keyboard (#110).
+            if matches!(action.as_str(), "press" | "click" | "show_menu")
+                && let (Front::OtherFocused, Some(focused)) =
+                    shared_app::front(window.target, cx).await
+            {
+                let item = ax::Sendable(element.clone());
+                let refusal = off(cx, move || {
+                    let e = item.get();
+                    crate::mac::shared_app::opens_menu(e)
+                        .then(|| crate::mac::shared_app::menu_refusal(e))
+                })
+                .await;
+                if let Some(refusal) = refusal {
+                    return Err(shared_app::menu_press_refusal(
+                        Beside {
+                            target: window.target,
+                            focused,
+                        },
+                        &action,
+                        &refusal,
+                    ));
+                }
+            }
             if action == "read_text" {
                 let item = ax::Sendable(element.clone());
                 let (value, selected) = cx

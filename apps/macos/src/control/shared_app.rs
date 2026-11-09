@@ -15,12 +15,15 @@ use crate::mac::shared_app::{self as beside, Hit, Selection};
 use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
-    ClickRoute, Front, KeyRoute, TextRoute, click_route, key_route, text_route,
+    ClickRoute, Effect, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
+    text_route,
 };
 use gpui::AsyncApp;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The agent's window, in an app that is the user's front app with
 /// another window focused.
@@ -82,6 +85,17 @@ pub fn refusal(b: Beside, what: &str) -> ControlError {
         app = n.app,
         user = n.user,
         agent = n.agent,
+    ))
+}
+
+/// act_on_element's press, click or menu on a control that opens a menu,
+/// beside the user's window.
+pub fn menu_press_refusal(b: Beside, action: &str, refusal: &str) -> ControlError {
+    let n = names(b);
+    ControlError::failed(format!(
+        "{app} is the user's front app with their window {user} focused, so {action} was not sent: {refusal}.",
+        app = n.app,
+        user = n.user,
     ))
 }
 
@@ -184,7 +198,7 @@ async fn resolve(
     let target = b.target;
     let element = off(cx, move || {
         element.or_else(|| match beside::hit(target, point) {
-            Hit::Text(e) | Hit::Press(e) => Some(ax::Sendable(e)),
+            Hit::Text(e) | Hit::Press(e) | Hit::Menu(e) => Some(ax::Sendable(e)),
             Hit::Nothing(_) | Hit::Unknown => None,
         })
     })
@@ -251,28 +265,20 @@ pub async fn click(
     let target = b.target;
     let hit = off(cx, move || {
         let hit = beside::hit(target, point);
-        let label = match &hit {
-            Hit::Text(e) | Hit::Press(e) => beside::label(e),
-            _ => String::new(),
-        };
-        let pressed = match &hit {
-            Hit::Press(e) => ax::try_action(e, "AXPress"),
-            _ => false,
-        };
-        (
-            match hit {
-                Hit::Text(e) => Ok((true, ax::Sendable(e))),
-                Hit::Press(e) => Ok((false, ax::Sendable(e))),
-                Hit::Nothing(role) => Err(Some(role)),
-                Hit::Unknown => Err(None),
-            },
-            label,
-            pressed,
-        )
+        match hit {
+            Hit::Text(e) => Ok((Use::Text, beside::label(&e), ax::Sendable(e))),
+            Hit::Press(e) => Ok((Use::Press, beside::label(&e), ax::Sendable(e))),
+            Hit::Menu(e) => Ok((
+                Use::Menu(beside::menu_refusal(&e)),
+                beside::label(&e),
+                ax::Sendable(e),
+            )),
+            Hit::Nothing(role) => Err(Some(role)),
+            Hit::Unknown => Err(None),
+        }
     })
     .await;
-    let (picked, label, pressed) = hit;
-    let (field, element) = match picked {
+    let (kind, label, element) = match hit {
         Ok(found) => found,
         Err(role) => {
             let there = role.map_or_else(
@@ -295,24 +301,146 @@ pub async fn click(
             },
         )
     });
-    if field {
-        return Ok(json!({
-            "windowId": target.window_id,
-            "route": "accessibility",
-            "note": format!("{why}, so no click was posted. The text field \"{label}\" under the point is picked: type puts text into it through accessibility, with no key events, at the end of its text or over what cmd+a selected."),
-        }));
+    match kind {
+        Use::Text => {
+            return Ok(json!({
+                "windowId": target.window_id,
+                "route": "accessibility",
+                "note": format!("{why}, so no click was posted. The text field \"{label}\" under the point is picked: type puts text into it through accessibility, with no key events, at the end of its text or over what cmd+a selected."),
+            }));
+        }
+        Use::Menu(refusal) => {
+            return Err(ControlError::failed(format!(
+                "{why}, so no click was posted. {refusal}."
+            )));
+        }
+        Use::Press => {}
     }
-    if !pressed {
+    let display = display_watch(id, cx);
+    let before = watch(&display, target, true, true, cx).await;
+    let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
+    if pressed == ax::Action::NotTaken {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press."
         )));
     }
+    let seen = after_press(&display, target, before, cx).await;
     check_focus(b, &format!("The press on \"{label}\""), cx).await?;
+    let what = format!(
+        "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"
+    );
+    let note = outcome(&what, pressed, seen)?;
     Ok(json!({
         "windowId": target.window_id,
         "route": "accessibility",
-        "note": format!("{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events. A page sees a click event but no mousedown or mouseup."),
+        "note": note,
     }))
+}
+
+/// What a click beside the user's window found under the point.
+enum Use {
+    Text,
+    Press,
+    /// A control whose press opens a menu, and why it isn't pressed.
+    Menu(String),
+}
+
+/// How long a press gets to show an effect.
+const EFFECT_WAIT: Duration = Duration::from_millis(1000);
+
+/// The change counter of the display's picture, when it runs.
+fn display_watch(id: DisplayId, cx: &AsyncApp) -> Option<Arc<crate::mac::capture::Latest>> {
+    crate::ui::stream::global()?.read_with(cx, |s, _| s.latest(id))
+}
+
+/// What the display, the page and the app's windows show now. `wait`
+/// gives the display's counter a moment to compare its first frame, as
+/// when its stream just started for this action; `page` reads the page,
+/// which takes longer.
+async fn watch(
+    display: &Option<Arc<crate::mac::capture::Latest>>,
+    target: WindowTarget,
+    wait: bool,
+    page: bool,
+    cx: &AsyncApp,
+) -> Watch {
+    let started = Instant::now();
+    let counted = || display.as_ref().and_then(|d| d.counted());
+    let mut changes = counted();
+    while wait
+        && changes.is_none()
+        && display.is_some()
+        && started.elapsed() < Duration::from_millis(300)
+    {
+        cx.background_executor()
+            .timer(Duration::from_millis(30))
+            .await;
+        changes = counted();
+    }
+    let (windows, page) = off(cx, move || {
+        (
+            ax::window_count(target.pid),
+            page.then(|| beside::page_digest(target)).flatten(),
+        )
+    })
+    .await;
+    Watch {
+        display_changes: changes,
+        windows,
+        page,
+    }
+}
+
+/// Watch for the press's effect, up to `EFFECT_WAIT`: the display and the
+/// app's windows all along, then the page.
+async fn after_press(
+    display: &Option<Arc<crate::mac::capture::Latest>>,
+    target: WindowTarget,
+    before: Watch,
+    cx: &AsyncApp,
+) -> Effect {
+    let started = Instant::now();
+    loop {
+        let last = started.elapsed() >= EFFECT_WAIT;
+        let now = watch(display, target, false, last, cx).await;
+        let seen = effect(before, now);
+        if seen == Effect::Seen || last {
+            return seen;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
+    }
+}
+
+/// The answer to a press beside the user's window, by what the app
+/// answered and what changed after: `what` says where it went. A press
+/// after which nothing changed fails, so the agent doesn't take it for
+/// done, as a link whose page cancels the click.
+fn outcome(what: &str, pressed: ax::Action, seen: Effect) -> Result<String, ControlError> {
+    let answered = match pressed {
+        ax::Action::Unsure(error) => {
+            format!(
+                " The app answered the press with an error ({error:?}), which it also gives when the press ran."
+            )
+        }
+        _ => String::new(),
+    };
+    let wait = EFFECT_WAIT.as_millis();
+    match seen {
+        Effect::Seen => Ok(format!(
+            "{what}. The window changed after it.{answered} A page sees a click event but no mousedown or mouseup."
+        )),
+        Effect::NoneSeen => Err(ControlError::failed(format!(
+            "{what}, but nothing changed: within {wait} ms, the page's text, values and address, your display and the app's windows all stayed the same.{answered} The page may ignore the press, as a link whose page cancels its click does, or act only on a real mouse click, which can't be posted while the user's window of the same app has focus. Don't repeat the press: take a screenshot to check, then try another element or act_on_element, or call request_help."
+        ))),
+        Effect::Unknown if answered.is_empty() => Ok(format!(
+            "{what}. Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything: take a screenshot to check. A page sees a click event but no mousedown or mouseup."
+        )),
+        Effect::Unknown => Err(ControlError::failed(format!(
+            "{what}.{answered} Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything. Take a screenshot to check before you press again."
+        ))),
+    }
 }
 
 /// Text into the picked field beside the user's window. `posted` is how
@@ -397,21 +525,29 @@ pub async fn key(
     }
     let (element, last) = resolve(id, b, cx).await.map_err(&fail)?;
     let target = b.target;
+    let display = display_watch(id, cx);
+    let before = match route {
+        KeyRoute::Confirm => Some(watch(&display, target, true, true, cx).await),
+        _ => None,
+    };
     let (done, element) = off(cx, move || {
         let e = element.get();
         let done = match route {
-            KeyRoute::Confirm => {
-                beside::confirm(e).map(|action| (format!("its {action} action"), None))
-            }
+            KeyRoute::Confirm => beside::confirm(e)
+                .map(|(action, answer)| (format!("its {action} action"), None, Some(answer))),
             KeyRoute::Cancel => {
-                beside::cancel(e).map(|()| ("its AXCancel action".to_string(), None))
+                beside::cancel(e).map(|()| ("its AXCancel action".to_string(), None, None))
             }
             KeyRoute::SelectAll | KeyRoute::DeleteBackward if !beside::takes_text(e, target) => {
                 Err(format!("\"{}\" is no text field", beside::label(e)))
             }
-            KeyRoute::SelectAll => Ok(("selecting its text".into(), Some(beside::select_all(e)))),
+            KeyRoute::SelectAll => Ok((
+                "selecting its text".into(),
+                Some(beside::select_all(e)),
+                None,
+            )),
             KeyRoute::DeleteBackward => beside::delete_backward(e, last.as_ref())
-                .map(|s| ("deleting through its value".into(), Some(s))),
+                .map(|s| ("deleting through its value".into(), Some(s), None)),
             KeyRoute::Post | KeyRoute::Refuse | KeyRoute::FocusNext | KeyRoute::FocusPrevious => {
                 Err("no route".into())
             }
@@ -419,16 +555,24 @@ pub async fn key(
         (done.map(|d| (d, beside::label(e))), element)
     })
     .await;
-    let ((how, selection), label) = done.map_err(fail)?;
+    let ((how, selection, answer), label) = done.map_err(fail)?;
     if let Some(selection) = selection {
         keep_selection(id, &element, selection);
     }
+    let seen = match (before, answer) {
+        (Some(before), Some(_)) => Some(after_press(&display, target, before, cx).await),
+        _ => None,
+    };
     check_focus(b, &format!("The key {name}"), cx).await?;
-    Ok(format!(
-        "{app} is the user's front app with their window {user} focused, so {name} was not posted: it went to \"{label}\" in your window through accessibility, by {how}.",
+    let what = format!(
+        "{app} is the user's front app with their window {user} focused, so {name} was not posted: it went to \"{label}\" in your window through accessibility, by {how}",
         app = n.app,
         user = n.user,
-    ))
+    );
+    match (answer, seen) {
+        (Some(answer), Some(seen)) => outcome(&what, answer, seen),
+        _ => Ok(format!("{what}.")),
+    }
 }
 
 /// Tab or shift+Tab beside the user's window: focus moves to the next or

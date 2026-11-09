@@ -33,6 +33,14 @@ pub struct Latest {
 }
 
 impl Latest {
+    /// The changes counted so far, once counting compares frames: None
+    /// while it is off, or before its first frame, which is what any
+    /// change is compared with.
+    pub fn counted(&self) -> Option<u64> {
+        (self.counting.load(Ordering::Relaxed) && !self.samples.lock().unwrap().is_empty())
+            .then(|| self.changes.load(Ordering::Relaxed))
+    }
+
     pub fn count_changes(&self, on: bool) {
         self.counting.store(on, Ordering::Relaxed);
         if !on {

@@ -24,6 +24,8 @@ pub struct Selection {
 pub enum Hit {
     Text(Element),
     Press(Element),
+    /// A control whose press opens a menu, as a page's select.
+    Menu(Element),
     /// Nothing that takes a press or text: its role.
     Nothing(String),
     /// Accessibility named no element of that window there.
@@ -42,6 +44,45 @@ pub fn label(element: &ax::Element) -> String {
 
 fn role(element: &ax::Element) -> String {
     ax::string_attribute(element, "AXRole").unwrap_or_default()
+}
+
+/// Whether pressing `element` opens a menu, which takes the user's
+/// keyboard while it is open (`rules::opens_menu`).
+pub fn opens_menu(element: &ax::Element) -> bool {
+    let role = role(element);
+    if !rules::may_open_menu(&role) {
+        return false;
+    }
+    // Chromium lists a select's options as menu items right under it.
+    let holds_menu = ax::elements_attribute(element, "AXChildren")
+        .iter()
+        .any(|c| matches!(self::role(c).as_str(), "AXMenu" | "AXMenuItem"));
+    rules::opens_menu(&role, ax::in_web_area(element), holds_menu)
+}
+
+/// A digest of the page in `target`'s window, its address and the
+/// window's title, to tell whether a press changed anything; the window's
+/// whole tree where it shows no page. None when accessibility didn't
+/// answer.
+pub fn page_digest(target: WindowTarget) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let window = ax::window_element(target)?;
+    let root = ax::web_area(&window).unwrap_or_else(|| window.clone());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ax::page_digest(&root, 3000).0.hash(&mut hasher);
+    for (element, name) in [(&root, "AXURL"), (&window, "AXTitle")] {
+        format!("{:?}", ax::attribute(element, name)).hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Why a control that opens a menu isn't pressed beside the user's
+/// window, for the agent.
+pub fn menu_refusal(element: &ax::Element) -> String {
+    format!(
+        "\"{}\" opens a menu when pressed, as a web page's select does, and an open menu takes the user's keyboard, so it was not pressed and no menu was opened. To choose one of its items, call act_on_element with action set_value and the item's exact title, which chooses it without opening the menu where Agent Screen can, and otherwise says why not and what to do instead",
+        label(element)
+    )
 }
 
 fn flag(element: &AXUIElement, name: &str) -> Option<bool> {
@@ -108,9 +149,10 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
         if matches!(role.as_str(), "AXWindow" | "AXWebArea" | "AXSheet") {
             break;
         }
-        match rules::element_use(&role, &ax::actions(&element)) {
+        match rules::element_use(&role, &ax::actions(&element), opens_menu(&element)) {
             ElementUse::Text => return Hit::Text(element),
             ElementUse::Press => return Hit::Press(element),
+            ElementUse::Menu => return Hit::Menu(element),
             ElementUse::Nothing => {}
         }
         let Some(parent) = ax::element_attribute(&element, "AXParent") else {
@@ -207,15 +249,24 @@ pub fn select_all(field: &ax::Element) -> Selection {
     }
 }
 
-/// Return: the element's confirm action, or its press. The action taken.
-pub fn confirm(element: &ax::Element) -> Result<&'static str, String> {
-    let actions = ax::actions(element);
-    if actions.iter().any(|a| a == "AXConfirm") && ax::try_action(element, "AXConfirm") {
-        return Ok("AXConfirm");
+/// Return: the element's confirm action, or its press. The action taken,
+/// and what the app answered: an error may come back from an action that
+/// ran. A control that opens a menu gets neither.
+pub fn confirm(element: &ax::Element) -> Result<(&'static str, ax::Action), String> {
+    let menu = opens_menu(element);
+    if menu {
+        return Err(menu_refusal(element));
     }
-    let field = rules::element_use(&role(element), &actions) == ElementUse::Text;
-    if !field && actions.iter().any(|a| a == "AXPress") && ax::try_action(element, "AXPress") {
-        return Ok("AXPress");
+    let actions = ax::actions(element);
+    let field = rules::element_use(&role(element), &actions, menu) == ElementUse::Text;
+    for (name, allowed) in [("AXConfirm", true), ("AXPress", !field)] {
+        if !allowed || !actions.iter().any(|a| a == name) {
+            continue;
+        }
+        match ax::action_result(element, name) {
+            ax::Action::NotTaken => {}
+            answer => return Ok((name, answer)),
+        }
     }
     if field {
         return Err(no_submit(element));
@@ -286,11 +337,12 @@ pub fn tab(
         .or_else(|| ax::window_element(target).and_then(|w| ax::web_area(&w)))
         .ok_or("your window shows no web page accessibility can reach, and Tab moves focus only within one")?;
     let stops = descendants(&page, |e| {
+        let role = role(e);
         rules::tab_stop(
-            &role(e),
+            &role,
             ax::settable(e, "AXFocused"),
             flag(e, "AXEnabled").unwrap_or(true),
-        )
+        ) && !(role == "AXMenuItem" && in_menu_control(e))
     });
     let picked = from.and_then(|f| stops.iter().position(|s| **s == **f));
     let focused = || {
@@ -321,6 +373,16 @@ pub fn tab(
         std::thread::sleep(Duration::from_millis(30));
     }
     Ok((element, name))
+}
+
+/// Whether a menu item is an option of a closed control that opens a
+/// menu, as a select's, which Chromium lists as focusable but Tab never
+/// stops at.
+fn in_menu_control(item: &ax::Element) -> bool {
+    ancestors(item)
+        .iter()
+        .take(2)
+        .any(|e| rules::may_open_menu(&role(e)))
 }
 
 /// Escape: the element's cancel action.
