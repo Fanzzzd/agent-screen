@@ -332,15 +332,7 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         }
         asked.push(pid);
     }
-    let app = application(pid);
-    let asked = set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
-        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
-            // Chrome applies it but answers an error.
-            && {
-                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
-                true
-            });
-    if !asked {
+    if !publish_web_tree(pid) {
         return;
     }
     let started = std::time::Instant::now();
@@ -355,6 +347,19 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         "web tree of {pid} after {} ms",
         started.elapsed().as_millis()
     );
+}
+
+/// Ask a Chromium or Electron app to publish its pages' elements. False
+/// when it isn't one.
+fn publish_web_tree(pid: i32) -> bool {
+    let app = application(pid);
+    set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
+        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
+            // Chrome applies it but answers an error.
+            && {
+                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
+                true
+            })
 }
 
 /// The window's first web area, breadth first.
@@ -868,12 +873,29 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
 /// What has the keyboard in `target`'s app, and for editable text its caret
 /// in global top-left points (`viewer_keys::caret_in`). Other when the
 /// focused element is in another window or the app doesn't say.
+///
+/// Each call waits at most 100 ms for the app, as the Viewer may wait on
+/// it before a key. A Chromium or Electron app reports no focused element
+/// until it publishes its pages' elements: the first lookup in it asks for
+/// them and waits, once per app, as long as `ensure_web_tree` does.
 pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
-    let Some(element) = element_attribute(&application(target.pid), "AXFocusedUIElement") else {
+    let app = unsafe { AXUIElement::new_application(target.pid) };
+    unsafe { app.set_messaging_timeout(0.1) };
+    let focused = || element_attribute(&app, "AXFocusedUIElement");
+    let Some(element) = focused().or_else(|| {
+        ensure_web_tree(target);
+        focused()
+    }) else {
+        log::debug!("ax: {} reports no focused element", target.pid);
         return (Focus::Other, None);
     };
+    unsafe { element.set_messaging_timeout(0.1) };
     let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
     if window != Some(target.window_id) {
+        log::debug!(
+            "ax: the focused element of {} is in window {window:?}",
+            target.pid
+        );
         return (Focus::Other, None);
     }
     let role = string_attribute(&element, "AXRole");
@@ -890,6 +912,10 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
         selection: range.is_some(),
     });
     if focus != Focus::Text {
+        log::debug!(
+            "ax: the focused element of {} is {role:?} {subrole:?}",
+            target.pid
+        );
         return (focus, None);
     }
     let caret = range.zip(frame(&element)).and_then(|(range, frame)| {

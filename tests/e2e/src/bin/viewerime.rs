@@ -6,22 +6,26 @@
 //! then exactly 你好, and the marked text sits at Field's caret. Keys typed
 //! with a plain keyboard layout, keys with no text and Command shortcuts
 //! go to Field as keys. A composition left when the Takeover ends is
-//! dropped and never comes back. In Field's password field and in a view
+//! dropped and never comes back, even if the input method commits it
+//! then; a click commits it. In Field's password field and in a view
 //! that takes keys but holds no text, as a game, keys go as keys even with
-//! an input method, and nothing is composed. Everything goes through the
+//! an input method, and nothing is composed. A field on an Electron page
+//! composes as Field's does. With a keyboard layout the Viewer never looks
+//! up the target's focus. Everything goes through the
 //! Viewer's own handlers, so the user's keyboard, pointer and input source
 //! are untouched.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e viewerime
 //!
 //! Makes 2 displays: the stage and the one the Viewer shows. Needs
-//! Field.app, which `cargo e2e ime` makes.
+//! Field.app, which `cargo e2e ime` makes; the Electron part runs when
+//! target/e2e/Electron.app is there.
 
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, capture, check, field_app, instance, json, kill_ours, open_stage, our_binary, out,
-    run, sleep_ms, start_test_app, stop_test_app,
+    Control, allow_on_your_screen, capture, check, field_app, fixture, instance, json, kill_ours,
+    open_stage, our_binary, out, run, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -36,6 +40,7 @@ fn main() -> ExitCode {
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&field);
         kill_ours(our_binary("Field"));
+        kill_ours(fixture("electron"));
         stop_test_app();
         result
     })
@@ -100,6 +105,7 @@ fn test(field: &std::path::Path) -> Result<()> {
             "kind": "click",
             "x": (number("x") + number("width") / 2.0) / width,
             "y": (content_top + down) / height,
+            "source": "inputMethod",
         })
     };
     control.call("debugShow", json!({ "surface": "viewer", "displayId": id }))?;
@@ -114,9 +120,19 @@ fn test(field: &std::path::Path) -> Result<()> {
         routed.map_or_else(|e| e.to_string(), |r| r["route"].to_string())
     };
 
-    // The user clicks Field's text in the Viewer: a Takeover.
-    input(at(100.0))?;
+    // The user clicks Field's text in the Viewer with a keyboard layout: a
+    // Takeover, and no lookup of the focus.
+    let inspections = || viewer()["inspections"].as_u64();
+    let before = inspections();
+    let mut click = at(100.0);
+    click["source"] = json!("layout");
+    input(click)?;
     sleep_ms(600);
+    check(
+        "a click with a keyboard layout looks nothing up",
+        before.is_some() && inspections() == before,
+        format!("{before:?} then {:?}", inspections()),
+    );
     let typed = control.call(
         "type",
         json!({ "sessionKey": key, "displayId": id, "text": "x" }),
@@ -126,18 +142,18 @@ fn test(field: &std::path::Path) -> Result<()> {
         typed.is_err(),
         format!("{typed:?}"),
     );
-    check(
-        "the Viewer sees editable text focused in Field",
-        viewer()["focus"] == "text",
-        viewer()["focus"].to_string(),
-    );
-
-    // A key with an input method selected goes to it, not to Field.
+    // A key with an input method selected goes to it, not to Field: the
+    // Viewer looks up the focus it had not looked up before the key.
     let routed = routed_to(45, false, "inputMethod");
     check(
         "a letter typed with an input method goes to the input method",
         routed == "\"inputMethod\"",
         &routed,
+    );
+    check(
+        "the Viewer sees editable text focused in Field",
+        viewer()["focus"] == "text",
+        viewer()["focus"].to_string(),
     );
     check(
         "Field got no key from it",
@@ -241,6 +257,13 @@ fn test(field: &std::path::Path) -> Result<()> {
         marked().is_none(),
         format!("{:?}", marked()),
     );
+    // An input method that commits when told to discard.
+    input(json!({ "kind": "commit", "text": "ni" }))?;
+    check(
+        "text the input method commits after the hand-back is dropped",
+        read() == holds("你好ab"),
+        format!("{:?}", read()),
+    );
     let typed = control.call(
         "type",
         json!({ "sessionKey": key, "displayId": id, "text": "x" }),
@@ -274,6 +297,16 @@ fn test(field: &std::path::Path) -> Result<()> {
         "the next commit sends only its own text",
         read() == holds("你好abx好"),
         format!("{:?}", read()),
+    );
+    // A click while composing commits the marked text where it was typed.
+    routed_to(4, false, "inputMethod");
+    input(json!({ "kind": "mark", "text": "ha" }))?;
+    input(at(100.0))?;
+    sleep_ms(300);
+    check(
+        "a click commits the marked text",
+        marked().is_none() && read() == holds("你好abx好ha"),
+        format!("{:?} {:?}", marked(), read()),
     );
 
     // Field's password field: keys go as keys, and nothing is composed or
@@ -333,9 +366,98 @@ fn test(field: &std::path::Path) -> Result<()> {
     );
     check(
         "Field's text is unchanged",
-        read().text == "你好abx好",
+        read().text == "你好abx好ha",
         format!("{:?}", read()),
     );
+    electron_field(&control, key, id, (width, height))?;
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
+    Ok(())
+}
+
+/// A field on the Electron harness page composes as Field's does: the
+/// page's elements are asked for, so the field reads as text.
+fn electron_field(
+    control: &Control,
+    key: &str,
+    id: u64,
+    (width, height): (f64, f64),
+) -> Result<()> {
+    let electron = out().join("Electron.app");
+    if !electron.exists() {
+        println!("     no target/e2e/Electron.app: the Electron field isn't checked");
+        return Ok(());
+    }
+    // The agent starts it: the user hands the display back first.
+    control.call(
+        "debugShow",
+        json!({ "surface": "primary", "displayId": id }),
+    )?;
+    sleep_ms(600);
+    allow_on_your_screen(
+        "Electron",
+        800,
+        "Electron may show its window on the main screen for a moment as it starts",
+    );
+    control.call(
+        "launchApp",
+        json!({ "sessionKey": key, "displayId": id, "app": electron.to_str(),
+                "arguments": [fixture("electron").to_str()],
+                "environment": { "HARNESS_BACKGROUND": "1", "HARNESS_DISPLAY": id.to_string() } }),
+    )?;
+    let harness = || -> Option<Value> {
+        let list = control
+            .call("listWindows", json!({ "displayId": id }))
+            .ok()?;
+        list["windows"]
+            .as_array()?
+            .iter()
+            .find(|w| w["app"] == "Electron" && w["kind"] == "window")
+            .cloned()
+    };
+    let mut window = None;
+    for _ in 0..50 {
+        window = harness();
+        if window.is_some() {
+            break;
+        }
+        sleep_ms(200);
+    }
+    let window = window.context("no Electron window")?;
+    let number = |name: &str| window[name].as_f64().unwrap_or(0.0);
+    // The page's field: 8 pt from the bottom-left corner, 30 pt high.
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "click", "source": "inputMethod",
+                "x": (number("x") + 60.0) / width,
+                "y": (number("y") + number("height") - 8.0 - 15.0) / height }),
+    )?;
+    // The first look at the app's focus waits for its page's elements.
+    sleep_ms(3500);
+    let routed = control.call(
+        "debugViewerInput",
+        json!({ "kind": "key", "code": 45, "source": "inputMethod" }),
+    );
+    check(
+        "a letter in an Electron page's field goes to the input method",
+        routed.as_ref().is_ok_and(|r| r["route"] == "inputMethod"),
+        format!("{routed:?}"),
+    );
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "mark", "text": "ni hao" }),
+    )?;
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "commit", "text": "你好" }),
+    )?;
+    sleep_ms(800);
+    let title = harness()
+        .map(|w| w["title"].to_string())
+        .unwrap_or_default();
+    check(
+        "the Electron page's field gets exactly 你好",
+        title.ends_with("typed=你好\""),
+        &title,
+    );
     Ok(())
 }

@@ -125,8 +125,12 @@ impl Viewer {
         cx.observe_window_activation(window, |viewer: &mut Viewer, window, cx| {
             if !window.is_window_active() {
                 viewer.core.read(cx).hand_back_keys();
-                // The input method's composition ends with the keyboard.
-                viewer.end_composition(cx);
+                // Leaving the window commits the composition, as in a
+                // native field.
+                if viewer.marked.take().is_some() {
+                    viewer_input::commit_composition();
+                    cx.notify();
+                }
             }
         })
         .detach();

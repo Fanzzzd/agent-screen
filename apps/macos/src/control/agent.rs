@@ -1627,6 +1627,8 @@ async fn handle_one(
                 "caret": crate::mac::viewer_input::caret_in_window(),
                 // What has the keyboard in the target: text, secure or other.
                 "focus": format!("{:?}", crate::mac::viewer_input::focus()).to_lowercase(),
+                // Lookups of it asked for, none with a keyboard layout.
+                "inspections": crate::mac::viewer_input::inspections(),
                 "misrouted": misrouted,
                 "takeBack": take_back,
             }))
@@ -1639,33 +1641,34 @@ async fn handle_one(
                 cx.update(|cx| cx.refresh_windows());
             }
             let mut routed = None;
+            // `source` stands in for the user's input source: "layout" or
+            // "inputMethod".
+            let source = {
+                use agent_screen_model::viewer_keys::Source;
+                match p.string("source").as_deref() {
+                    None => None,
+                    Some("layout") => Some(Source::Layout),
+                    Some("inputMethod") => Some(Source::InputMethod),
+                    Some(_) => {
+                        return Err(ControlError::failed("source is layout or inputMethod"));
+                    }
+                }
+            };
             match p.string("kind").as_deref() {
                 Some("click") => viewer_input::inject_click(
                     p.number("x").unwrap_or(0.5),
                     p.number("y").unwrap_or(0.5),
                     p.int("key").unwrap_or(0) == 1,
+                    source,
                 ),
-                // `source` stands in for the user's input source:
-                // "layout" or "inputMethod". The reply says where the key
-                // went.
-                Some("key") => {
-                    use agent_screen_model::viewer_keys::Source;
-                    let source = match p.string("source").as_deref() {
-                        None => None,
-                        Some("layout") => Some(Source::Layout),
-                        Some("inputMethod") => Some(Source::InputMethod),
-                        Some(_) => {
-                            return Err(ControlError::failed("source is layout or inputMethod"));
-                        }
-                    };
-                    viewer_input::inject_key(
-                        p.int("code").unwrap_or(0) as u16,
-                        p.int("shift").unwrap_or(0) == 1,
-                        p.int("command").unwrap_or(0) == 1,
-                        source,
-                    )
-                    .map(|route| routed = Some(route.name()))
-                }
+                // The reply says where the key went.
+                Some("key") => viewer_input::inject_key(
+                    p.int("code").unwrap_or(0) as u16,
+                    p.int("shift").unwrap_or(0) == 1,
+                    p.int("command").unwrap_or(0) == 1,
+                    source,
+                )
+                .map(|route| routed = Some(route.name())),
                 // A press, a drag in steps and a release, as a hand on
                 // the trackpad makes them.
                 Some("drag") => {

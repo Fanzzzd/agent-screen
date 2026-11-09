@@ -212,13 +212,16 @@ pub struct Forwarder {
     /// drag still running stops at its next step.
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// What has the keyboard in the target, for the Viewer's input
-    /// method, looked up off the main thread.
-    caret: std::sync::Arc<std::sync::Mutex<Caret>>,
+    /// method, looked up on a thread of its own.
+    probe: std::sync::Arc<(std::sync::Mutex<Probe>, std::sync::Condvar)>,
 }
 
-/// What has the keyboard in the target, and its caret in global points.
+/// Lookups of what has the keyboard in the target and its caret, in
+/// global points. They run on their own thread, never the one that posts
+/// input: a hung app answers each accessibility call only at its timeout.
+/// A lookup asked for while one is waiting replaces it.
 #[derive(Default, Clone, Copy)]
-struct Caret {
+struct Probe {
     /// The point of the user's last press in the Viewer.
     pressed: Option<(f64, f64)>,
     /// The focus as the target last reported it since that press.
@@ -226,9 +229,43 @@ struct Caret {
     /// The caret of the focused text element, as the target reports it
     /// since that press.
     reported: Option<Rect>,
+    /// The last lookup asked for, and the last answered.
+    asked: u64,
+    answered: u64,
+    /// Answers to lookups asked up to here are out of date: a press came
+    /// since.
+    floor: u64,
+    /// The lookup waiting to run: the window keys went to, the display,
+    /// and its number.
+    waiting: Option<(Option<WindowTarget>, Rect, u64)>,
 }
 
-impl Caret {
+impl Probe {
+    fn ask(&mut self) -> u64 {
+        self.asked += 1;
+        self.asked
+    }
+
+    /// A press: what was looked up before it may have changed.
+    fn press(&mut self, at: (f64, f64)) {
+        self.pressed = Some(at);
+        self.focus = Focus::Other;
+        self.reported = None;
+        self.floor = self.asked;
+    }
+
+    /// Keep an answer unless a newer one, or a press, came since it was
+    /// asked for.
+    fn answer(&mut self, ticket: u64, focus: Focus, reported: Option<Rect>) -> bool {
+        if ticket <= self.floor || ticket <= self.answered {
+            return false;
+        }
+        self.answered = ticket;
+        self.focus = focus;
+        self.reported = reported;
+        true
+    }
+
     /// The reported caret, else a caret-sized rect at the press.
     fn rect(self) -> Option<Rect> {
         const HEIGHT: f64 = 18.0;
@@ -251,12 +288,66 @@ impl Default for Forwarder {
                 }
             })
             .expect("input thread");
+        let probe: std::sync::Arc<(std::sync::Mutex<Probe>, std::sync::Condvar)> =
+            Default::default();
+        let weak = std::sync::Arc::downgrade(&probe);
+        thread::Builder::new()
+            .name("agent-screen-focus".into())
+            .spawn(move || inspect_loop(weak))
+            .expect("focus thread");
         Forwarder {
             jobs,
             stopped: Default::default(),
-            caret: Default::default(),
+            probe,
         }
     }
+}
+
+/// Run the lookups a display's Viewer asks for, the latest first, until
+/// its Forwarder is gone.
+fn inspect_loop(probe: std::sync::Weak<(std::sync::Mutex<Probe>, std::sync::Condvar)>) {
+    loop {
+        let Some(shared) = probe.upgrade() else {
+            return;
+        };
+        let (lock, changed) = &*shared;
+        let waiting = {
+            let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if p.waiting.is_none() {
+                p = changed
+                    .wait_timeout(p, Duration::from_secs(1))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            p.waiting.take()
+        };
+        let Some((focused, within, ticket)) = waiting else {
+            continue;
+        };
+        let target = keys_target_now(focused, within);
+        let (focus, reported) = target.map_or((Focus::Other, None), super::ax::text_focus);
+        log::debug!("input: focus of {target:?} is {focus:?}, caret {reported:?}");
+        let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+        p.answer(ticket, focus, reported);
+        changed.notify_all();
+    }
+}
+
+/// The window keys would go to now: the one focused while it is on the
+/// display, else the display's topmost.
+fn keys_target_now(focused: Option<WindowTarget>, within: Rect) -> Option<WindowTarget> {
+    let list = hits();
+    focused
+        .filter(|t| {
+            list.iter()
+                .any(|h| (h.host == *t || h.target == *t) && within.intersects(&h.bounds))
+        })
+        .or_else(|| {
+            list.iter()
+                .filter(|h| within.contains(h.bounds.mid()))
+                .find(|h| h.layer == 0)
+                .map(|h| h.target)
+        })
 }
 
 impl Forwarder {
@@ -305,10 +396,11 @@ impl Forwarder {
         flags: CGEventFlags,
         trace: Option<Click>,
     ) {
-        *self.caret.lock().unwrap_or_else(|e| e.into_inner()) = Caret {
-            pressed: Some(at),
-            ..Caret::default()
-        };
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .press(at);
         self.send(move |w| {
             diagnostics::within(trace, Phase::Down, || {
                 let grabbed = w.grab(at, button);
@@ -380,10 +472,6 @@ impl Forwarder {
 
     pub fn key(&self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
         self.send(move |w| w.viewer_key(code, down, flags, within));
-        // A key such as Tab or a click's release may move the focus.
-        if !down {
-            self.inspect(within);
-        }
     }
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
@@ -394,33 +482,56 @@ impl Forwarder {
     /// the user's keys go to, as Unicode text.
     pub fn text(&self, text: String, within: Rect) {
         self.send(move |w| w.viewer_text(&text, within));
-        self.inspect(within);
     }
 
-    /// Look up what has the keyboard in the target and its caret, after
-    /// the input queued before: the window the user's keys go to, or the
-    /// display's topmost one.
-    pub fn inspect(&self, within: Rect) {
-        let caret = self.caret.clone();
+    /// Look up what has the keyboard in the target and its caret, once
+    /// the input queued before has gone out: the window the user's keys go
+    /// to, or the display's topmost one. The lookup's number.
+    pub fn inspect(&self, within: Rect) -> u64 {
+        let probe = self.probe.clone();
+        let ticket = probe.0.lock().unwrap_or_else(|e| e.into_inner()).ask();
+        // The worker only notes where its keys go; the lookup runs on
+        // the focus thread.
         self.send(move |w| {
-            let (focus, reported) = w
-                .keys_target_now(within)
-                .map_or((Focus::Other, None), super::ax::text_focus);
-            let mut caret = caret.lock().unwrap_or_else(|e| e.into_inner());
-            caret.focus = focus;
-            caret.reported = reported;
+            let (lock, changed) = &*probe;
+            lock.lock().unwrap_or_else(|e| e.into_inner()).waiting =
+                Some((w.focused, within, ticket));
+            changed.notify_all();
         });
+        ticket
+    }
+
+    /// What has the keyboard in the target now: a lookup, waited for at
+    /// most `wait`, else what was last looked up.
+    pub fn fresh_text_focus(&self, within: Rect, wait: Duration) -> Focus {
+        let ticket = self.inspect(within);
+        let (lock, changed) = &*self.probe;
+        let p = lock.lock().unwrap_or_else(|e| e.into_inner());
+        changed
+            .wait_timeout_while(p, wait, |p| p.answered < ticket && p.floor < ticket)
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .focus
     }
 
     /// What had the keyboard in the target when last looked up.
     pub fn text_focus(&self) -> Focus {
-        self.caret.lock().unwrap_or_else(|e| e.into_inner()).focus
+        self.probe.0.lock().unwrap_or_else(|e| e.into_inner()).focus
+    }
+
+    /// How many lookups the Viewer has asked for, for tests.
+    pub fn inspections(&self) -> u64 {
+        self.probe.0.lock().unwrap_or_else(|e| e.into_inner()).asked
     }
 
     /// Where the user's text goes on the display, in global points: the
     /// caret the target last reported, else the point last pressed.
     pub fn caret(&self) -> Option<Rect> {
-        self.caret.lock().unwrap_or_else(|e| e.into_inner()).rect()
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rect()
     }
 
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
@@ -1660,23 +1771,6 @@ impl Worker {
     /// The window on the display keys go to: the one last focused, or a
     /// window its app opened on the display since, as a shortcut such as
     /// cmd+n does, or else the topmost.
-    /// The window keys would go to now, with no side effect: the one
-    /// focused while it is on the display, else the display's topmost.
-    fn keys_target_now(&self, within: Rect) -> Option<WindowTarget> {
-        let list = hits();
-        self.focused
-            .filter(|t| {
-                list.iter()
-                    .any(|h| (h.host == *t || h.target == *t) && within.intersects(&h.bounds))
-            })
-            .or_else(|| {
-                list.iter()
-                    .filter(|h| within.contains(h.bounds.mid()))
-                    .find(|h| h.layer == 0)
-                    .map(|h| h.target)
-            })
-    }
-
     fn pick_for_keys(&mut self, within: Rect) -> Option<Hit> {
         let list = hits();
         // A panel shown again reuses its window, and needs waking again.
@@ -2095,24 +2189,38 @@ mod wheel_tests {
 }
 
 #[cfg(test)]
-mod caret_tests {
+mod probe_tests {
     use super::*;
 
     #[test]
     fn the_press_stands_in_until_the_target_reports_its_caret() {
-        assert!(Caret::default().rect().is_none());
-        let pressed = Caret {
-            pressed: Some((500.0, 300.0)),
-            ..Caret::default()
-        };
-        let rect = pressed.rect().unwrap();
+        let mut probe = Probe::default();
+        assert!(probe.rect().is_none());
+        probe.press((500.0, 300.0));
+        let rect = probe.rect().unwrap();
         assert_eq!((rect.x, rect.y + rect.height / 2.0), (500.0, 300.0));
         let reported = Rect::new(120.0, 80.0, 1.0, 22.0);
-        let caret = Caret {
-            reported: Some(reported),
-            ..pressed
-        };
-        assert_eq!(caret.rect(), Some(reported));
+        let ticket = probe.ask();
+        assert!(probe.answer(ticket, Focus::Text, Some(reported)));
+        assert_eq!(probe.rect(), Some(reported));
+        assert_eq!(probe.focus, Focus::Text);
+    }
+
+    #[test]
+    fn the_latest_lookup_wins_and_a_press_voids_older_ones() {
+        let mut probe = Probe::default();
+        let (first, second) = (probe.ask(), probe.ask());
+        assert!(probe.answer(second, Focus::Secure, None));
+        // The first came back late: it is out of date.
+        assert!(!probe.answer(first, Focus::Text, None));
+        assert_eq!(probe.focus, Focus::Secure);
+        // A press after a lookup was asked for: its answer is out of date.
+        let third = probe.ask();
+        probe.press((1.0, 1.0));
+        assert!(!probe.answer(third, Focus::Text, None));
+        assert_eq!(probe.focus, Focus::Other);
+        let fourth = probe.ask();
+        assert!(probe.answer(fourth, Focus::Text, None));
     }
 }
 
