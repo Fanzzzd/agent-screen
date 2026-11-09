@@ -23,8 +23,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, check, hidclick_app, instance, json, locked, probe, run, skip, sleep_ms,
-    start_test_app,
+    Control, Value, check, click_card_button, debug_pid, hid, hidclick_app, instance, json, locked,
+    probe, run, skip, sleep_ms, start_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -75,6 +75,8 @@ fn main() -> ExitCode {
         )?;
         let id = made["displayId"].clone();
         let mut pid = None;
+        let pointer = cursor();
+        let front = probe(&["frontpid"])?;
         let result = test(&control, &id, &mut pid);
         if let Some(pid) = pid {
             let _ = std::process::Command::new("/bin/kill")
@@ -86,6 +88,10 @@ fn main() -> ExitCode {
             json!({ "sessionKey": KEY, "displayId": id, "action": "done" }),
         );
         let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
+        let _ = hid(&["warp", &pointer.x.to_string(), &pointer.y.to_string()]);
+        if probe(&["frontpid"])? != front {
+            probe(&["activate", front.trim()])?;
+        }
         result
     })
 }
@@ -170,10 +176,63 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
         format!("{after:?} {posted:?}"),
     );
 
+    if std::env::args().any(|arg| arg == "--observer-timeout") {
+        // Open a grant with no executable action, then disable the real tap
+        // through the same handler as TapDisabledByTimeout. Recovery must
+        // leave this grant revoked; only the fresh Allow below may execute.
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": KEY, "displayId": id, "action": "request",
+                "operation": "observer-timeout-preview", "reason": "Test observer recovery", "timeout": 0 }),
+        )?;
+        sleep_ms(800);
+        click_card_button(control, debug_pid().context("no test app")?, "input-allow")?;
+        anyhow::ensure!(
+            status()?["grantActive"] == true,
+            "preview grant did not open"
+        );
+        let disabled = control.call("debugInputObserver", json!({ "action": "timeout" }))?;
+        check(
+            "timeout disables the actual tap and observer",
+            disabled["watching"] == false && disabled["enabled"] == false,
+            disabled.to_string(),
+        );
+        sleep_ms(2500);
+        let health = control.call("debugInputObserver", json!({}))?;
+        let queue = status()?;
+        let unchanged = title()?;
+        check(
+            "timeout ends the old grant without executing or resuming it",
+            queue["grantActive"] == false && seen(&unchanged, "real") == 0,
+            format!("{queue}; fixture {unchanged}"),
+        );
+        let recovered = health["watching"] == true && health["enabled"] == true;
+        check(
+            "the observer recovers only after the old grant ends",
+            recovered,
+            health.to_string(),
+        );
+        anyhow::ensure!(recovered, "observer stayed disabled after timeout");
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": KEY, "displayId": id, "action": "done" }),
+        )?;
+    }
+
     // Green: the same click with the user's pointer, once allowed.
     let front = probe(&["frontpid"])?;
-    let pointer = cursor();
-    let (asked, reply) = answered("input-queue-allow", middle, "left", 1)?;
+    let call = control.begin(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": middle.0, "y": middle.1,
+                "button": "left", "count": 1, "realInput": true }),
+    )?;
+    sleep_ms(800);
+    let asked = status()?;
+    let (x, y) = click_card_button(control, debug_pid().context("no test app")?, "input-allow")?;
+    // The grant saves the pointer on Allow, not where it was before the
+    // user moved to the card. The outer cleanup restores the original spot.
+    let pointer = Point { x, y };
+    let reply = call.wait();
     let reason = asked["requests"][0]["reason"].as_str().unwrap_or_default();
     check(
         "the click asks the user first, and the request names the click and the app",
@@ -220,6 +279,9 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
         Ok(())
     };
     put_back("the click")?;
+    if std::env::args().any(|arg| arg == "--allow-only") {
+        return Ok(());
+    }
 
     // A double click, allowed: one double click, two real presses.
     let before = title()?;

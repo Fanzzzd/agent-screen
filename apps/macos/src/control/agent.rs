@@ -1827,6 +1827,27 @@ async fn handle_one(
             .detach();
             Ok(json!({}))
         }
+        "debugInputObserver" if debug_methods() => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Err(ControlError::invalid(
+                    "input observer tests require the isolated e2e instance",
+                ));
+            }
+            let timeout = match p.string("action").as_deref().unwrap_or("status") {
+                "status" => false,
+                "timeout" => true,
+                _ => return Err(ControlError::invalid("action must be status or timeout")),
+            };
+            Ok(cx.update(|_| {
+                if timeout {
+                    crate::mac::real_input::debug_observer_timeout();
+                }
+                json!({
+                    "watching": crate::mac::real_input::watching(),
+                    "enabled": crate::mac::real_input::observer_enabled(),
+                })
+            }))
+        }
         // The Help Card's width and its buttons' bounds at the last paint.
         "debugCard" if debug_methods() => {
             let (width, buttons) = crate::ui::help_card::painted_buttons();

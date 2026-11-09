@@ -1263,6 +1263,13 @@ impl Shell {
             native::show_borders(false);
             self.sync_bar(false, cx);
             real_input::arm(false);
+            // A disabled observer revoked the previous grant. Restore the
+            // tap only after its loan and cleanup have both finished; the
+            // waiting requests still need a fresh Allow.
+            let queue = &self.core.read(cx).input_queue.queue;
+            if queue.active().is_none() && queue.pending_end().is_none() {
+                real_input::recover_observer();
+            }
             return;
         }
         // No observer or indicator, no real input.

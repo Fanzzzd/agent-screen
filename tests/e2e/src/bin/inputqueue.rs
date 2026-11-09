@@ -13,6 +13,11 @@
 //! target/e2e. The card shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue --buttons-only
+//!
+//! --buttons-only clicks the actual Allow and Not Now buttons through HID
+//! input and checks grant state. No queued action executes. The sign counts
+//! down first; the pointer and front app are restored after cleanup.
 //!
 //! Makes 1 display.
 
@@ -20,8 +25,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use agent_screen_tests::{
-    Control, Frame, Value, capture, check, debug_pid, instance, json, run, sh_lenient, sleep_ms,
-    start_test_app, tool, windows_of,
+    Control, Frame, Value, capture, check, click_card_button, debug_pid, hid, instance, json,
+    probe, run, sh_lenient, sleep_ms, start_test_app, tool, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -40,14 +45,85 @@ fn main() -> ExitCode {
             json!({ "sessionKey": key, "title": "Input queue" }),
         )?;
         let id = made["displayId"].clone();
-        let result = test(&control, key, &id, pid);
+        let buttons_only = std::env::args().any(|arg| arg == "--buttons-only");
+        let saved = if buttons_only {
+            Some((hid(&["where"])?, probe(&["frontpid"])?))
+        } else {
+            None
+        };
+        let result = if buttons_only {
+            test_buttons(&control, key, &id, pid)
+        } else {
+            test(&control, key, &id, pid)
+        };
         let _ = control.call(
             "inputQueue",
             json!({ "sessionKey": key, "displayId": id, "action": "done" }),
         );
         let _ = control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }));
+        if let Some((pointer, front)) = saved {
+            let at: Vec<&str> = pointer.split_whitespace().collect();
+            if let [x, y] = at[..] {
+                let _ = hid(&["warp", x, y]);
+            }
+            if probe(&["frontpid"])? != front {
+                probe(&["activate", front.trim()])?;
+            }
+        }
         result
     })
+}
+
+/// Click the painted buttons through the HID helper, never an approval hook.
+/// The preview has no executable action. Keep the pointer still after Allow:
+/// the helper's normal return movement would itself revoke a successful grant.
+fn test_buttons(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {
+    let queue = |action: &str| {
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": key, "displayId": id, "action": action }),
+        )
+    };
+    let click = |button: &str| click_card_button(control, pid, button);
+    control.call(
+        "debugShow",
+        json!({ "sessionKey": key, "surface": "input-queue", "displayId": id }),
+    )?;
+    sleep_ms(800);
+    let before = queue("status")?;
+    anyhow::ensure!(
+        before["grantActive"] == false,
+        "unexpected existing grant: {before}"
+    );
+    click("input-allow")?;
+    let allowed = queue("status")?;
+    check(
+        "a real Allow click opens the grant",
+        allowed["grantActive"] == true,
+        format!("before {before}; after {allowed}"),
+    );
+    sleep_ms(1200);
+    let settled = queue("status")?;
+    check(
+        "the grant survives the next queue tick without further input",
+        settled["grantActive"] == true,
+        format!("{settled}"),
+    );
+    queue("done")?;
+    control.call(
+        "debugShow",
+        json!({ "sessionKey": key, "surface": "input-queue", "displayId": id }),
+    )?;
+    sleep_ms(800);
+    click("input-decline")?;
+    sleep_ms(200);
+    let declined = queue("status")?;
+    check(
+        "a real Not Now click declines the preview request",
+        declined["grantActive"] == false && declined["requests"][0]["state"] == "declined",
+        format!("{declined}"),
+    );
+    Ok(())
 }
 
 fn test(control: &Control, key: &str, id: &Value, pid: u32) -> Result<()> {

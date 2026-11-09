@@ -2,7 +2,7 @@
 // travels the same path as the user's. Every command puts the cursor back.
 //
 //   hid hover X Y [PNG X,Y,W,H] glide there, stay 0.5 s, capture the region while there
-//   hid click X Y              left click
+//   hid click X Y [--stay]     left click; --stay defers cursor restoration
 //   hid scroll X Y STEPS       a trackpad gesture: began, STEPS changes, ended
 //   hid wheel X Y TICKS        mouse wheel ticks, no phases
 //   hid replay LOG FROM TO X Y replay scroll events recorded by `probe tap`
@@ -148,7 +148,7 @@ case "replay":
 default:
   print("unknown command \(args[1])"); exit(2)
 }
-if ProcessInfo.processInfo.environment["HID_STAY"] != "1" {
+if ProcessInfo.processInfo.environment["HID_STAY"] != "1" && !args.contains("--stay") {
   post(.mouseMoved, saved)
   CGWarpMouseCursorPosition(saved)
 }

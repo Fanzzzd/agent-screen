@@ -121,6 +121,54 @@ thread_local! {
     static WATCH: std::cell::RefCell<Option<(CFRetained<CFMachPort>, CFRetained<CFRunLoopSource>)>> = const { std::cell::RefCell::new(None) };
 }
 
+fn observer_disabled() {
+    WATCHING.store(false, Ordering::SeqCst);
+    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
+        native::send(Native::UserTookInput);
+    }
+}
+
+/// Actual tap health, read on the main thread where the tap is retained.
+pub fn observer_enabled() -> bool {
+    WATCH.with(|watch| {
+        watch
+            .borrow()
+            .as_ref()
+            .is_some_and(|(tap, _)| CGEvent::tap_is_enabled(tap))
+    })
+}
+
+/// Recover only after the shell has revoked the old grant and finished
+/// releasing its inputs. This restores observation, never permission.
+pub fn recover_observer() {
+    if watching() {
+        return;
+    }
+    let enabled = WATCH.with(|watch| {
+        let watch = watch.borrow();
+        let Some((tap, _)) = watch.as_ref() else {
+            return false;
+        };
+        CGEvent::tap_enable(tap, true);
+        CGEvent::tap_is_enabled(tap)
+    });
+    WATCHING.store(enabled, Ordering::SeqCst);
+    if enabled {
+        log::info!("input queue: input observer recovered; a new approval is required");
+    }
+}
+
+/// E2E-only control hook: disable the real tap and take its timeout path.
+/// The control handler gates this behind debug_methods and the e2e instance.
+pub fn debug_observer_timeout() {
+    WATCH.with(|watch| {
+        if let Some((tap, _)) = watch.borrow().as_ref() {
+            CGEvent::tap_enable(tap, false);
+        }
+    });
+    observer_disabled();
+}
+
 /// Observe HID events before AppKit manufactures pointer moves when a
 /// window opens under the cursor. ListenOnly neither suppresses nor
 /// changes an event. Failure to create the tap leaves execution disabled.
@@ -136,7 +184,8 @@ pub fn watch() {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
         );
         if disabled {
-            WATCHING.store(false, Ordering::SeqCst);
+            observer_disabled();
+            return event.as_ptr();
         }
         let ours = CGEvent::integer_value_field(
             Some(unsafe { event.as_ref() }),
@@ -206,8 +255,9 @@ pub fn watch() {
     };
     run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
     CGEvent::tap_enable(&tap, true);
+    let enabled = CGEvent::tap_is_enabled(&tap);
     WATCH.with(|watch| *watch.borrow_mut() = Some((tap, source)));
-    WATCHING.store(true, Ordering::SeqCst);
+    WATCHING.store(enabled, Ordering::SeqCst);
 }
 
 /// The pointer, front app and its focused window at grant start, to put
