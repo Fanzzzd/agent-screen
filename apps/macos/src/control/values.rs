@@ -11,8 +11,8 @@
 use super::server::ControlError;
 use agent_screen_model::devtools::Engine;
 use agent_screen_model::selection::{
-    PopupKind, PopupMiss, Refusal, ValueRoute, keys_for, passed, popup_kind, popup_miss,
-    popup_title_is_safe, value_route,
+    PopupMiss, Refusal, ValueRoute, keys_for, popup_kind, popup_miss, popup_title_is_safe,
+    value_route,
 };
 use std::time::{Duration, Instant};
 
@@ -59,7 +59,7 @@ pub(super) enum Typed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PageChoice {
     /// No pipe, or the point is in a frame from another site, which the
-    /// pipe's script can't reach.
+    /// pipe's script can't reach: nothing is typed instead.
     Unpiped,
     /// The pipe reached the page or frame at the point and found no
     /// select there, as for a button that opens a menu.
@@ -87,9 +87,6 @@ pub(super) struct PopupFacts {
     pub engine: Option<Engine>,
     /// Whether the app draws with AppKit; None when that can't be told.
     pub cocoa: Option<bool>,
-    /// Its items, when accessibility lists them while it is closed, as a
-    /// Chromium `<select>` does and an AppKit pop-up button doesn't.
-    pub items: Option<Vec<String>>,
 }
 
 /// The AX and input calls set_value makes. The jobs behind `set`,
@@ -160,55 +157,39 @@ pub(super) async fn set_value(
 const SETTLE: Duration = Duration::from_secs(3);
 
 /// What an agent can do about a pop-up Agent Screen won't type into.
-const INSTEAD: &str = "Call request_help for the user to choose it. In a Chromium app that launch_app started (a browser with its own --user-data-dir), set_value chooses any option of a select in a page's main frame directly";
+const INSTEAD: &str = "Call request_help for the user to choose it";
 
 /// Why no key went to the pop-up, for the agent.
-fn refusal_message(refusal: &Refusal, title: &str, shown: &str) -> String {
+fn refusal_message(refusal: &Refusal, title: &str) -> String {
     let why = match refusal {
-        Refusal::Kind => "Agent Screen types only into an AppKit pop-up button or a Chromium page's select, where a typed letter can't open the menu, and this pop-up is neither: a WebKit page's select, a button that opens a menu, or a control of another toolkit. An open menu would take the user's keyboard".to_string(),
-        Refusal::Space { keys, reached: None } => format!(
+        Refusal::Kind => "Agent Screen types only into an AppKit app's pop-up button, where a typed letter can't open the menu, and this one is a control of another toolkit, such as Qt, Java or Flutter, or one accessibility couldn't describe. An open menu would take the user's keyboard".to_string(),
+        Refusal::Space { keys } => format!(
             "{title:?} holds a space, and a space can press the button and open its menu, so Agent Screen never types one. It would type only {keys:?}, the part before the space, if that alone reached {title:?}, but the pop-up doesn't list its items without opening, so that can't be told"
-        ),
-        Refusal::Space { keys, reached: Some(item) } => format!(
-            "{title:?} holds a space, and a space can press the button and open its menu, so Agent Screen never types one. {keys:?}, the part before the space, doesn't reach {title:?} alone: other items start with it, and it would reach {item:?}"
-        ),
-        Refusal::NotAnItem => format!("the pop-up has no item titled {title:?}. Pass an item's exact title, case included"),
-        Refusal::Reaches(item) => format!(
-            "typing {title:?} would reach {item:?} first, as type-ahead stops at an earlier item that starts with the same text"
-        ),
-        Refusal::RepeatedKey => format!(
-            "a web page's select takes a repeated key as the next item that starts with it, so type-ahead can't reach {title:?}"
-        ),
-        Refusal::FromCurrent => format!(
-            "a web page's select searches one key from the item after the one it shows, {shown:?}, which starts with the same key, so typing {title:?} could reach another item"
         ),
     };
     format!("{why}. Nothing was sent and no menu was opened. {INSTEAD}")
 }
 
-/// What type-ahead with `keys` may have chosen on the way, for the
-/// agent: an app acts on each item a pop-up shows, a web page with a
-/// change event, a native app with the pop-up's action. Named when the
-/// items are known; empty when a single key goes straight to the item.
-fn passed_note(kind: PopupKind, keys: &str, current: &str, items: Option<&[String]>) -> String {
-    match (kind, items) {
-        (PopupKind::ChromiumSelect, Some(items)) => {
-            let on_the_way = passed(kind, keys, current, items);
-            if on_the_way.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " On the way it showed {}, and the page may have taken a change event for each.",
-                    on_the_way
-                        .iter()
-                        .map(|i| format!("{i:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        }
-        _ if keys.chars().count() > 1 => " Type-ahead may have shown other items on the way, and the app may have acted on each, as a pop-up runs its action or a page fires a change event for every item it shows.".to_string(),
-        _ => String::new(),
+/// What a web page's select gets when the pipe can't choose for it.
+fn web_refusal(engine: Option<Engine>) -> String {
+    let why = if engine == Some(Engine::Chromium) {
+        "Agent Screen chooses a web page's select through the private DevTools pipe of a Chromium app that launch_app started, and this one is out of its reach: the app has no pipe, as a browser the user started, or the select is in a frame from another site"
+    } else {
+        "Agent Screen chooses a web page's select only through the private DevTools pipe of a Chromium app that launch_app started, and this page isn't in one"
+    };
+    format!(
+        "{why}. A key typed into a web select could open its menu, which would take the user's keyboard, so nothing was sent and no menu was opened. For a page you can open again, start a Chromium browser with launch_app and its own --user-data-dir. Otherwise call request_help for the user to choose it"
+    )
+}
+
+/// What type-ahead with `keys` may have chosen on the way, for the agent:
+/// a native app runs the pop-up's action for each item the pop-up shows.
+/// Empty when a single key goes straight to the item.
+fn passed_note(keys: &str) -> String {
+    if keys.chars().count() > 1 {
+        " Type-ahead may have shown other items on the way, and the app may have run the pop-up's action for each.".to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -225,20 +206,18 @@ async fn popup(
     check(access, display)?;
     let shown = access.read().await;
     check(access, display)?;
-    // Typing the title it shows could move it on: a web page's select goes
-    // to the next item that starts with a repeated key.
     if shown.as_deref() == Some(title) {
         return Ok(None);
     }
     let before = shown.clone().unwrap_or_default();
     let facts = access.popup_facts().await;
     check(access, display)?;
-    let mut select = facts.items.is_some();
-    if facts.in_web_page == Some(true) && facts.engine == Some(Engine::Chromium) {
+    if facts.in_web_page == Some(true) {
+        if facts.engine != Some(Engine::Chromium) {
+            return Err(ControlError::failed(web_refusal(facts.engine)));
+        }
         match access.choose_in_page(title, &before).await {
-            // A frame from another site: only accessibility's list of
-            // options can tell a select there.
-            PageChoice::Unpiped => {}
+            PageChoice::Unpiped => return Err(ControlError::failed(web_refusal(facts.engine))),
             PageChoice::NotSelect => {
                 return Err(ControlError::failed(format!(
                     "the page has no select at this element, so it is a button that opens a menu or a custom control, and typing into it could open the menu. Nothing was sent and no menu was opened. {INSTEAD}"
@@ -279,20 +258,16 @@ async fn popup(
                 )));
             }
         }
-        // Accessibility lists a select's options; a button that opens a
-        // menu lists none.
-        select = facts.items.is_some();
     }
-    check(access, display)?;
+    let kind = popup_kind(facts.in_web_page, facts.engine, facts.cocoa);
+    let keys = keys_for(title, kind)
+        .map_err(|refusal| ControlError::failed(refusal_message(&refusal, title)))?;
     if shown.is_none() {
         return Err(ControlError::failed(
             "accessibility didn't say what the pop-up button shows, so Agent Screen can't tell where type-ahead would go. Nothing was sent and no menu was opened. Refresh get_window_state and retry, or call request_help",
         ));
     }
-    let kind = popup_kind(facts.in_web_page, facts.engine, facts.cocoa, select);
-    let keys = keys_for(title, kind, &before, facts.items.as_deref())
-        .map_err(|refusal| ControlError::failed(refusal_message(&refusal, title, &before)))?;
-    let passed = passed_note(kind, &keys, &before, facts.items.as_deref());
+    let passed = passed_note(&keys);
     let typed = access.type_popup(&keys).await;
     let total = keys.chars().count();
     let (done, why) = match typed {
@@ -306,7 +281,7 @@ async fn popup(
         Typed::Interrupted(done) => (
             done,
             Some(
-                "another window or control of its app took key focus, as a change handler that focuses the next field does, or its window left the display; the rest of the keys were not sent",
+                "another window or control of its app took key focus, as an action that focuses the next field does, or its window left the display; the rest of the keys were not sent",
             ),
         ),
         Typed::Slow(done) => (
@@ -317,8 +292,11 @@ async fn popup(
     let shown = if done > 0 {
         let shown = access.read().await;
         let sent: String = keys.chars().take(done).collect();
-        let passed = passed_note(kind, &sent, &before, facts.items.as_deref());
-        format!(" It now shows {}.{passed}", shown_text(&shown))
+        format!(
+            " It now shows {}.{}",
+            shown_text(&shown),
+            passed_note(&sent)
+        )
     } else {
         String::new()
     };
@@ -495,7 +473,6 @@ mod tests {
                     in_web_page: Some(false),
                     engine: Some(Engine::WebKit),
                     cocoa: Some(true),
-                    items: None,
                 },
                 page: PageChoice::Unpiped,
                 typed: None,
@@ -571,14 +548,13 @@ mod tests {
         fake
     }
 
-    /// A Chromium page's select that lists `items`, with or without a pipe.
-    fn select(after: &'static str, items: &[&str]) -> Fake {
+    /// A Chromium page's select that shows Apple, then `after`.
+    fn select(after: &'static str) -> Fake {
         let mut fake = popup(after);
         fake.facts = PopupFacts {
             in_web_page: Some(true),
             engine: Some(Engine::Chromium),
             cocoa: Some(false),
-            items: Some(items.iter().map(|s| s.to_string()).collect()),
         };
         fake
     }
@@ -594,21 +570,14 @@ mod tests {
     fn a_native_choice_says_the_app_may_have_acted_on_items_on_the_way() {
         let mut fake = popup("Cherry");
         let note = run(&mut fake, "Cherry").unwrap().unwrap_or_default();
-        assert!(note.contains("may have acted on each"), "{note}");
+        assert!(note.contains("pop-up's action"), "{note}");
         let mut fake = popup("Banana");
         let error = run(&mut fake, "Cherry").unwrap_err();
         assert!(
-            error.message.contains("may have acted on each"),
+            error.message.contains("pop-up's action"),
             "{}",
             error.message
         );
-    }
-
-    #[test]
-    fn a_typed_web_choice_names_the_items_on_the_way() {
-        let mut fake = select("Blueberry", &["Apple", "Banana", "Blueberry"]);
-        let note = run(&mut fake, "Blueberry").unwrap().unwrap_or_default();
-        assert!(note.contains("showed \"Banana\""), "{note}");
     }
 
     #[test]
@@ -620,7 +589,7 @@ mod tests {
                 run(&mut fake, "Cherry")
                     .unwrap_err()
                     .message
-                    .contains("is neither")
+                    .contains("another toolkit")
             );
             assert!(!fake.trace.contains(&"type"));
         }
@@ -667,49 +636,6 @@ mod tests {
     }
 
     #[test]
-    fn a_spaced_title_whose_start_reaches_it_alone_types_only_the_start() {
-        let mut fake = select("United States", &["Apple", "United States", "Uruguay"]);
-        run(&mut fake, "United States").unwrap();
-        assert_eq!(fake.keys.as_deref(), Some("United"));
-    }
-
-    #[test]
-    fn a_spaced_title_whose_start_is_shared_is_refused() {
-        let mut fake = select("New York", &["Apple", "Newark", "New York"]);
-        let error = run(&mut fake, "New York").unwrap_err();
-        assert!(
-            error.message.contains("would reach \"Newark\""),
-            "{}",
-            error.message
-        );
-        assert!(!fake.trace.contains(&"type"));
-    }
-
-    #[test]
-    fn webkit_selects_and_aria_buttons_get_no_key() {
-        for facts in [
-            PopupFacts {
-                in_web_page: Some(true),
-                engine: Some(Engine::WebKit),
-                cocoa: Some(true),
-                items: Some(vec!["Apple".into(), "Cherry".into()]),
-            },
-            PopupFacts {
-                in_web_page: Some(true),
-                engine: Some(Engine::Chromium),
-                cocoa: Some(false),
-                items: None,
-            },
-        ] {
-            let mut fake = popup("Cherry");
-            fake.facts = facts;
-            let error = run(&mut fake, "Cherry").unwrap_err();
-            assert!(error.message.contains("is neither"), "{}", error.message);
-            assert!(!fake.trace.contains(&"type"));
-        }
-    }
-
-    #[test]
     fn an_unknown_page_or_shown_value_gets_no_key() {
         let mut fake = popup("Cherry");
         fake.facts.in_web_page = None;
@@ -717,7 +643,7 @@ mod tests {
             run(&mut fake, "Cherry")
                 .unwrap_err()
                 .message
-                .contains("is neither")
+                .contains("another toolkit")
         );
         assert!(!fake.trace.contains(&"type"));
         let mut fake = popup("Cherry");
@@ -732,8 +658,25 @@ mod tests {
     }
 
     #[test]
+    fn a_web_select_the_pipe_cant_reach_gets_no_key() {
+        let mut fake = select("Cherry");
+        let error = run(&mut fake, "Cherry").unwrap_err();
+        assert!(
+            error.message.contains("out of its reach"),
+            "{}",
+            error.message
+        );
+        assert!(!fake.trace.contains(&"type"));
+        let mut fake = select("Cherry");
+        fake.facts.engine = Some(Engine::WebKit);
+        let error = run(&mut fake, "Cherry").unwrap_err();
+        assert!(error.message.contains("isn't in one"), "{}", error.message);
+        assert!(!fake.trace.contains(&"pipe"));
+    }
+
+    #[test]
     fn a_reachable_page_without_a_select_there_gets_no_key() {
-        let mut fake = select("Cherry", &["Apple", "Cherry"]);
+        let mut fake = select("Cherry");
         fake.page = PageChoice::NotSelect;
         let error = run(&mut fake, "Cherry").unwrap_err();
         assert!(error.message.contains("no select"), "{}", error.message);
@@ -742,7 +685,7 @@ mod tests {
 
     #[test]
     fn a_web_select_with_a_pipe_is_chosen_without_typing() {
-        let mut fake = select("Cherry", &["Apple", "Cherry"]);
+        let mut fake = select("Cherry");
         fake.page = PageChoice::Chosen;
         run(&mut fake, "Cherry").unwrap();
         assert_eq!(fake.trace, ["role", "read", "facts", "pipe", "read"]);
@@ -750,15 +693,15 @@ mod tests {
 
     #[test]
     fn a_pipe_that_finds_another_select_chooses_nothing() {
-        let mut fake = select("Cherry", &["Apple", "Cherry"]);
+        let mut fake = select("Cherry");
         fake.page = PageChoice::Elsewhere;
         assert!(run(&mut fake, "Cherry").is_err());
         assert!(!fake.trace.contains(&"type"));
     }
 
     #[test]
-    fn a_web_select_without_the_option_says_so_and_types_nothing() {
-        let mut fake = select("Apple", &["Apple", "Cherry"]);
+    fn a_web_select_without_the_option_says_so() {
+        let mut fake = select("Apple");
         fake.page = PageChoice::Missing {
             shown: "Apple".into(),
             near: Some("Cherry".into()),
@@ -769,12 +712,11 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(!fake.trace.contains(&"type"));
     }
 
     #[test]
     fn an_unanswered_pipe_is_not_retried_by_typing() {
-        let mut fake = select("Apple", &["Apple", "Cherry"]);
+        let mut fake = select("Apple");
         fake.page = PageChoice::Unknown("no answer".into());
         let error = run(&mut fake, "Cherry").unwrap_err();
         assert!(error.message.contains("may or may not have run"));
@@ -782,32 +724,9 @@ mod tests {
     }
 
     #[test]
-    fn a_web_select_refuses_a_repeated_key_and_a_key_it_starts_with() {
-        let mut fake = select("11", &["Apple", "1", "10", "11"]);
-        let error = run(&mut fake, "11").unwrap_err();
-        assert!(error.message.contains("repeated key"), "{}", error.message);
-        let mut fake = select("1", &["Apple", "1", "10"]);
-        fake.reads = VecDeque::from([Some("10"), Some("1")]);
-        let error = run(&mut fake, "1").unwrap_err();
-        assert!(
-            error.message.contains("searches one key"),
-            "{}",
-            error.message
-        );
-        assert!(!fake.trace.contains(&"type"));
-    }
-
-    #[test]
     fn a_repeated_key_may_be_typed_into_a_native_popup() {
         let mut fake = popup("11");
         run(&mut fake, "11").unwrap();
-    }
-
-    #[test]
-    fn a_typed_web_select_that_misses_names_what_it_passed() {
-        let mut fake = select("Banana", &["Apple", "Banana", "Blueberry"]);
-        let error = run(&mut fake, "Blueberry").unwrap_err();
-        assert!(error.message.contains("change event"), "{}", error.message);
     }
 
     #[test]
@@ -822,7 +741,7 @@ mod tests {
 
     #[test]
     fn a_takeover_before_the_pipe_sends_nothing() {
-        let mut fake = select("Cherry", &["Apple", "Cherry"]);
+        let mut fake = select("Cherry");
         fake.page = PageChoice::Chosen;
         fake.stop_at = Some("facts");
         assert_eq!(run(&mut fake, "Cherry").unwrap_err().code, "takeover");
@@ -836,6 +755,23 @@ mod tests {
         let error = run(&mut fake, "Cherry").unwrap_err();
         assert_eq!(error.code, "takeover");
         assert!(error.message.contains("after 2 of 6"), "{}", error.message);
+        assert!(
+            error.message.contains("now shows \"Banana\""),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_focus_move_mid_title_fails_and_says_what_it_shows() {
+        let mut fake = popup("Banana");
+        fake.typed = Some(Typed::Interrupted(1));
+        let error = run(&mut fake, "Blueberry").unwrap_err();
+        assert!(
+            error.message.contains("took key focus"),
+            "{}",
+            error.message
+        );
         assert!(
             error.message.contains("now shows \"Banana\""),
             "{}",

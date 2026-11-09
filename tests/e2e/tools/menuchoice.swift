@@ -12,6 +12,22 @@ final class SlowCombo: NSComboBox {
     stringValue = text
   }
 }
+// A pop-up that hands focus to `next` once it has taken its first key, as a
+// form that moves on does. AppKit applies a type-ahead choice once, after
+// the search, so a focus move on a new choice would come only after the
+// last key: this one comes mid-title. `keys` counts the keys it took, and
+// `took` writes the count into the title at once, action or not.
+final class Jumpy: NSPopUpButton {
+  weak var next: NSView?
+  var keys = 0
+  var took: (() -> Void)?
+  override func keyDown(with event: NSEvent) {
+    super.keyDown(with: event)
+    keys += 1
+    if keys == 1, let next { window?.makeFirstResponder(next) }
+    took?()
+  }
+}
 // A pop-up that never takes keyboard focus: keys sent to the app go elsewhere.
 final class Unfocusable: NSPopUpButton {
   override var acceptsFirstResponder: Bool { false }
@@ -19,11 +35,12 @@ final class Unfocusable: NSPopUpButton {
 final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var window: NSWindow!
   var opens = 0
+  var acts = 0
   let pop = NSPopUpButton(frame: NSRect(x: 30, y: 380, width: 220, height: 28), pullsDown: false)
   let combo = SlowCombo(frame: NSRect(x: 30, y: 320, width: 220, height: 28))
   let locked = Unfocusable(frame: NSRect(x: 30, y: 260, width: 220, height: 28), pullsDown: false)
-  // Choosing in it focuses the note field, as a form that moves on does.
-  let jump = NSPopUpButton(frame: NSRect(x: 30, y: 200, width: 180, height: 28), pullsDown: false)
+  // `acts` counts its actions, so a script can tell when they ran.
+  let jump = Jumpy(frame: NSRect(x: 30, y: 200, width: 180, height: 28), pullsDown: false)
   let note = NSTextField(frame: NSRect(x: 220, y: 200, width: 120, height: 24))
   // A WebKit page's select: Agent Screen types into none.
   let web = WKWebView(frame: NSRect(x: 20, y: 20, width: 320, height: 160))
@@ -42,6 +59,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     locked.setAccessibilityLabel("Locked")
     locked.target = self; locked.action = #selector(changed); locked.menu?.delegate = self
     jump.addItems(withTitles: ["Apple", "Banana", "Blueberry"])
+    jump.next = note
+    jump.took = { [unowned self] in self.changed() }
     jump.setAccessibilityLabel("Jump")
     jump.target = self; jump.action = #selector(jumped); jump.menu?.delegate = self
     note.setAccessibilityLabel("Note")
@@ -56,9 +75,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
   @objc func changed() {
     if combo.stringValue == "Reject" { combo.stringValue = "Blue" }
-    window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) locked=\(locked.titleOfSelectedItem ?? "") jump=\(jump.titleOfSelectedItem ?? "") note=\(note.stringValue) opens=\(opens)"
+    window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) locked=\(locked.titleOfSelectedItem ?? "") jump=\(jump.titleOfSelectedItem ?? "") acts=\(acts) keys=\(jump.keys) note=\(note.stringValue) opens=\(opens)"
   }
-  @objc func jumped() { window.makeFirstResponder(note); changed() }
+  @objc func jumped() { acts += 1; changed() }
   func menuWillOpen(_ menu: NSMenu) { opens += 1; changed(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { menu.cancelTrackingWithoutAnimation() } }
 }
 let app = NSApplication.shared

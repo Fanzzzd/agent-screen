@@ -180,17 +180,18 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 && shown.contains("opens=0"),
             format!("{locked:?}; {shown}"),
         );
-        // The pop-up's action focuses the note field after the first key:
-        // the rest must not land there, and the call must not succeed.
+        // The note field takes focus once the pop-up has taken its first
+        // key: the rest must not land there, no menu may open, and the
+        // call must not succeed.
         let jump = set(element("popupbutton", "Jump")?, "Blueberry");
         sleep_ms(300);
         let shown = title()?;
         check(
-            "a pop-up whose choice moves focus stops typing, and the next field gets no key",
+            "focus moving to a field mid-title stops typing, and the field gets no key",
             jump.as_ref()
                 .err()
                 .is_some_and(|e| format!("{e:#}").contains("took key focus"))
-                && shown.contains("note= ")
+                && shown.contains("keys=1 note= ")
                 && shown.contains("opens=0"),
             format!("{jump:?}; {shown}"),
         );
@@ -198,9 +199,10 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         let web = set(element("popupbutton", "Web fruit")?, "Kiwi");
         check(
             "a WebKit page's select is refused before any key",
-            web.as_ref()
-                .err()
-                .is_some_and(|e| format!("{e:#}").contains("is neither")),
+            web.as_ref().err().is_some_and(|e| {
+                let e = format!("{e:#}");
+                e.contains("isn't in one") && e.contains("nothing was sent")
+            }),
             format!("{web:?}"),
         );
 

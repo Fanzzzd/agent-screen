@@ -3511,7 +3511,6 @@ impl super::values::ValueAccess for AxValues<'_> {
             in_web_page: ax::in_web_area(item.get()),
             engine: ax::pid_of(item.get()).and_then(devtools::engine),
             cocoa: ax::pid_of(item.get()).and_then(app::is_cocoa),
-            items: ax::closed_menu_items(item.get()),
         })
         .await
     }

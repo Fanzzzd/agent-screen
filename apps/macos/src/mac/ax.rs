@@ -1284,27 +1284,6 @@ pub fn in_web_area(element: &AXUIElement) -> Option<bool> {
     None
 }
 
-/// A closed pop-up button's item titles, when accessibility lists them
-/// without the menu open, as a Chromium `<select>` does with its options in
-/// an AXMenu child. An AppKit pop-up button lists none until it opens, and
-/// a web button that opens a menu has no such child: then None.
-pub fn closed_menu_items(element: &AXUIElement) -> Option<Vec<String>> {
-    let menu = elements_attribute(element, "AXChildren")
-        .into_iter()
-        .find(|c| string_attribute(c, "AXRole").as_deref() == Some("AXMenu"))?;
-    let items: Vec<String> = elements_attribute(&menu, "AXChildren")
-        .iter()
-        .filter(|i| string_attribute(i, "AXRole").as_deref() == Some("AXMenuItem"))
-        .map(|i| {
-            string_attribute(i, "AXTitle")
-                .filter(|t| !t.is_empty())
-                .or_else(|| string_attribute(i, "AXDescription"))
-                .unwrap_or_default()
-        })
-        .collect();
-    (!items.is_empty()).then_some(items)
-}
-
 /// Whether `element` is its app's focused element, the one its keys go to.
 pub fn is_focused_element(pid: i32, element: &AXUIElement) -> bool {
     let app = application(pid);

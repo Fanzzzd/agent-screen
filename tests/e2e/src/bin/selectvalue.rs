@@ -4,10 +4,9 @@
 //! change event, with no option passed on the way and no menu opened.
 //! Titles with a space, a repeated key and CJK are chosen; the title the
 //! select shows already sends nothing; a title no option has fails and says
-//! so. A select in a frame from another site gets type-ahead, which never
-//! sends a space: "United States" goes in as "United", and "New York",
-//! which shares its start with "Newark", and "11" are refused before any
-//! key. The page writes what it holds and its event counts into its title:
+//! so. Selects in a frame from another site, out of the pipe's reach, are
+//! refused before any key, as typing into a web select could open its
+//! menu. The page writes what it holds and its event counts into its title:
 //! tests/e2e/fixtures/web/selects.html.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e selectvalue
@@ -115,7 +114,7 @@ fn test(browser: &str) -> Result<()> {
             let mut shown = String::new();
             for _ in 0..20 {
                 shown = title()?;
-                if shown.contains(&format!("city={city} ")) {
+                if shown.contains(&format!("city={city} |")) {
                     break;
                 }
                 sleep_ms(100);
@@ -139,8 +138,7 @@ fn test(browser: &str) -> Result<()> {
             check(
                 &format!("set_value {city:?} chooses it with one change event and no menu"),
                 result.is_ok()
-                    && shown.contains(&format!("city={city} "))
-                    && shown.contains(&format!("inputs={changes} changes={changes}"))
+                    && shown.contains(&format!("i={changes} c={changes} city={city} "))
                     && open == 0,
                 format!("{result:?} in {took} ms; {shown}; menus open {open}"),
             );
@@ -149,7 +147,7 @@ fn test(browser: &str) -> Result<()> {
         let shown = title()?;
         check(
             "the title the select shows already sends nothing",
-            again.is_ok() && shown.contains(&format!("changes={changes}")),
+            again.is_ok() && shown.contains(&format!("c={changes} city=Newark ")),
             format!("{again:?}; {shown}"),
         );
         let missing = set("new york")?;
@@ -162,97 +160,49 @@ fn test(browser: &str) -> Result<()> {
         check(
             "a title no option has fails, names the near one and changes nothing",
             error.contains("differs in case only")
-                && shown.contains("city=Newark ")
-                && shown.contains(&format!("changes={changes}"))
+                && shown.contains(&format!("c={changes} city=Newark "))
                 && menus() == 0,
             format!("{missing:?}; {shown}"),
         );
-        // The select in the other site's frame gets type-ahead, which never
-        // sends a space: a spaced title goes in as the part before its
-        // space only when that alone reaches it.
-        let town = || -> Result<i64> {
+        // The selects in the other site's frame are out of the pipe's
+        // reach, and typing into a web select could open its menu: each is
+        // refused before any key, and the zip field the country's change
+        // handler would focus stays empty.
+        let framed = |name: &str| -> Result<i64> {
             let tree = call("windowState", json!({}))?["tree"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            let found = Regex::new(r#"\[(\d+)\] popupbutton "Town""#)?
+            let found = Regex::new(&format!(r#"\[(\d+)\] popupbutton "{name}""#))?
                 .captures(&tree)
-                .with_context(|| format!("no framed select in\n{tree}"))?;
+                .with_context(|| format!("no {name} select in\n{tree}"))?;
             Ok(found[1].parse()?)
         };
-        let typed = call(
-            "elementAction",
-            json!({ "element": town()?, "action": "set_value", "value": "United States" }),
-        );
-        let mut shown = String::new();
-        for _ in 0..20 {
-            shown = title()?;
-            if shown.contains("town=United States ") {
-                break;
-            }
-            sleep_ms(100);
-        }
-        let open = menus();
-        check(
-            "\"United States\" is typed as \"United\", which reaches it alone, with one change event and no menu",
-            typed.is_ok()
-                && shown.contains("town=United States ")
-                && shown.contains("tchanges=1 ")
-                && open == 0,
-            format!("{typed:?}; {shown}; menus open {open}"),
-        );
-        for (value, says) in [
-            ("New York", "would reach \"Newark\""),
-            ("11", "repeated key"),
+        for (name, value) in [
+            ("Town", "United States"),
+            ("Town", "11"),
+            ("Country", "Blueberry"),
         ] {
             let before = title()?;
             let refused = call(
                 "elementAction",
-                json!({ "element": town()?, "action": "set_value", "value": value }),
+                json!({ "element": framed(name)?, "action": "set_value", "value": value }),
             );
             sleep_ms(300);
             let after = title()?;
             let open = menus();
             check(
-                &format!("{value:?} is refused for the typed select before any key"),
+                &format!("{name} {value:?} in another site's frame is refused before any key"),
                 refused.as_ref().err().is_some_and(|e| {
                     let e = format!("{e:#}");
-                    e.contains(says) && e.contains("Nothing was sent")
+                    e.contains("out of its reach") && e.contains("nothing was sent")
                 }) && after == before
+                    // The browser trims the title's trailing space.
+                    && after.trim_end().ends_with(" zip=")
                     && open == 0,
                 format!("{refused:?}; {before} -> {after}; menus open {open}"),
             );
         }
-        // The country's change handler focuses the zip field after the
-        // first key: the rest must not land there, and the call must not
-        // succeed.
-        let country = || -> Result<i64> {
-            let tree = call("windowState", json!({}))?["tree"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let found = Regex::new(r#"\[(\d+)\] popupbutton "Country""#)?
-                .captures(&tree)
-                .with_context(|| format!("no country select in\n{tree}"))?;
-            Ok(found[1].parse()?)
-        };
-        let moved = call(
-            "elementAction",
-            json!({ "element": country()?, "action": "set_value", "value": "Blueberry" }),
-        );
-        sleep_ms(300);
-        let shown = title()?;
-        let open = menus();
-        check(
-            "a select whose change handler moves focus stops typing, and the zip field gets no key",
-            moved
-                .as_ref()
-                .err()
-                .is_some_and(|e| format!("{e:#}").contains("took key focus"))
-                && shown.contains("zip= ")
-                && open == 0,
-            format!("{moved:?}; {shown}; menus open {open}"),
-        );
         Ok(())
     })();
     // Close the browser before its display ends.

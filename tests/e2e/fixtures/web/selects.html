@@ -10,8 +10,8 @@
   <option>Apple</option><option>Newark</option><option>New York</option><option>1</option><option>10</option><option>11</option><option>東京</option>
 </select></p>
 <!-- Selects in a frame from another site, out of the pipe's script's
-     reach: set_value types into these. Choosing a country focuses the zip
-     field, as a form that moves on does. -->
+     reach: set_value refuses them before any key. Choosing a country
+     focuses the zip field, as a form that moves on does. -->
 <iframe id="frame" width="400" height="120" src="data:text/html;charset=utf-8,%3Clabel%20for=town%3ETown%3C/label%3E%20%3Cselect%20id=town%20aria-label=Town%3E%3Coption%3EApple%3C/option%3E%3Coption%3ENewark%3C/option%3E%3Coption%3ENew%20York%3C/option%3E%3Coption%3EUnited%20States%3C/option%3E%3Coption%3EUruguay%3C/option%3E%3Coption%3E10%3C/option%3E%3Coption%3E11%3C/option%3E%3C/select%3E%0A%3Clabel%20for=country%3ECountry%3C/label%3E%20%3Cselect%20id=country%20aria-label=Country%3E%3Coption%3EApple%3C/option%3E%3Coption%3EBanana%3C/option%3E%3Coption%3EBlueberry%3C/option%3E%3C/select%3E%0A%3Cinput%20id=zip%20aria-label=Zip%3E%0A%3Cscript%3E%0Aconst%20t%20=%20document.getElementById('town'),%20c%20=%20document.getElementById('country'),%20z%20=%20document.getElementById('zip');%0Alet%20n%20=%200;%0Aconst%20say%20=%20()%20=%3E%20parent.postMessage(%7B%20town:%20t.value,%20changes:%20n,%20country:%20c.value,%20zip:%20z.value%20%7D,%20'*');%0At.addEventListener('change',%20()%20=%3E%20%7B%20n%2B%2B;%20say();%20%7D);%0Ac.addEventListener('change',%20()%20=%3E%20%7B%20z.focus();%20say();%20%7D);%0Az.addEventListener('input',%20say);%0Asay();%0A%3C/script%3E"></iframe>
 <script>
   // The title says what the select shows and how many input and change
@@ -19,7 +19,8 @@
   const city = document.getElementById('city');
   let inputs = 0, changes = 0, frame = {};
   const state = () => {
-    document.title = `city=${city.value} inputs=${inputs} changes=${changes} town=${frame.town} tchanges=${frame.changes} country=${frame.country} zip=${frame.zip} `;
+    // Short: a browser cuts the middle of a long window title.
+    document.title = `i=${inputs} c=${changes} city=${city.value} | ${frame.town} ${frame.changes} ${frame.country} zip=${frame.zip} `;
   };
   window.addEventListener('message', (e) => { frame = e.data; state(); });
   city.addEventListener('input', () => { inputs++; state(); });
