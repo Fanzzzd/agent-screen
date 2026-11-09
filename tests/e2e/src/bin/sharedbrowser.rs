@@ -462,6 +462,19 @@ fn select_and_link(
         format!("{open} menus | {} | log {seen:?}", cut(&said(&set), 600)),
     );
 
+    let dead_number = number(&tree0, "agent dead")?;
+    let shown = action(dead_number, "show_menu", None);
+    sleep_ms(200);
+    let open = menus(pid);
+    check(
+        "act_on_element show_menu beside the user's window opens no menu and says why",
+        open == 0
+            && shown
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("show_menu was not sent")),
+        format!("{open} menus | {}", cut(&said(&shown), 500)),
+    );
+
     let mark = lines(log, 0).len();
     let followed = control.call("click", at(dead));
     sleep_ms(500);
@@ -535,6 +548,19 @@ fn focus_unknown(
     sleep_ms(500);
     let blank_click = control.call("click", at(blank));
     sleep_ms(500);
+    let act = |name: &str, action: &str| -> Result<Result<Value>> {
+        let element = number(&tree(control, id, window_id)?, name)?;
+        let reply = control.call(
+            "elementAction",
+            json!({ "sessionKey": KEY, "displayId": id, "windowId": window_id, "element": element, "action": action }),
+        );
+        sleep_ms(500);
+        Ok(reply)
+    };
+    let select_pressed = act("agent pick", "press")?;
+    let select_menus = menus(pid);
+    let shown = act("agent dead", "show_menu")?;
+    let shown_menus = menus(pid);
     control.call("debugFocusUnknown", json!({ "on": false }))?;
     let seen = lines(log, mark);
     let now = focused_window(pid);
@@ -564,6 +590,19 @@ fn focus_unknown(
         "a click on blank page is refused, saying focus couldn't be verified",
         unknown(&blank_click),
         cut(&said(&blank_click), 500),
+    );
+    check(
+        "act_on_element press on the select opens no menu and is refused, as the click is",
+        select_menus == 0 && unknown(&select_pressed),
+        format!(
+            "{select_menus} menus | {}",
+            cut(&said(&select_pressed), 500)
+        ),
+    );
+    check(
+        "act_on_element show_menu opens no menu and is refused",
+        shown_menus == 0 && unknown(&shown),
+        format!("{shown_menus} menus | {}", cut(&said(&shown), 500)),
     );
     Ok(())
 }

@@ -41,6 +41,11 @@ impl Latest {
             .then(|| self.changes.load(Ordering::Relaxed))
     }
 
+    /// Whether changes are being counted, as while an agent acts.
+    pub fn counting(&self) -> bool {
+        self.counting.load(Ordering::Relaxed)
+    }
+
     pub fn count_changes(&self, on: bool) {
         self.counting.store(on, Ordering::Relaxed);
         if !on {

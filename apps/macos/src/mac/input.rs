@@ -866,7 +866,7 @@ fn on_agent_display(id: u32) -> bool {
 
 /// Whether a window with global `bounds` is on one of Agent Screen's
 /// displays.
-fn on_agent_display_at(bounds: Rect) -> bool {
+pub fn on_agent_display_at(bounds: Rect) -> bool {
     super::cg::active_displays()
         .into_iter()
         .filter(|&d| super::cg::is_agent_screen(d))

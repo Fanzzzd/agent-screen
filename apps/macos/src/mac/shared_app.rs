@@ -88,22 +88,53 @@ pub fn page(target: WindowTarget, pressed: &Element) -> Option<Page> {
     })
 }
 
-/// A digest of the page's first `PAGE_ELEMENTS`, the pressed element and
-/// what is in it, the page's address and the window's title, to tell
-/// whether a press changed anything.
+/// A digest of the page's first `PAGE_ELEMENTS`: read before a press and
+/// once at the end, as it keeps the app busy for tens of milliseconds.
 pub fn page_digest(page: &Page) -> u64 {
+    ax::page_digest(&page.root, PAGE_ELEMENTS).0
+}
+
+/// A digest of what changes cheaply read while waiting for a press's
+/// effect: the page's address, the window's title, the pressed element's
+/// own tree, and the app's focused element, unless it is the pressed
+/// one, which a press focuses.
+pub fn quick_digest(page: &Page, pid: i32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ax::page_digest(&page.root, PAGE_ELEMENTS)
-        .0
-        .hash(&mut hasher);
-    ax::page_digest(&page.pressed, PRESSED_ELEMENTS)
-        .0
-        .hash(&mut hasher);
     for (element, name) in [(&page.root, "AXURL"), (&page.window, "AXTitle")] {
         text(element, name).hash(&mut hasher);
     }
+    ax::page_digest(&page.pressed, PRESSED_ELEMENTS)
+        .0
+        .hash(&mut hasher);
+    let app = ax::application(pid);
+    unsafe { app.set_messaging_timeout(0.2) };
+    match ax::element_attribute(&app, "AXFocusedUIElement") {
+        None => 0u8.hash(&mut hasher),
+        Some(f) if ax::same(&f, &page.pressed) => 1u8.hash(&mut hasher),
+        Some(f) => {
+            let f: &objc2_core_foundation::CFType = &f;
+            f.hash(&mut hasher)
+        }
+    }
     hasher.finish()
+}
+
+/// How many windows of `pid` are on Agent Displays: the user opening or
+/// closing a window of their own doesn't count as a press's effect.
+pub fn agent_windows(pid: i32) -> usize {
+    super::windows::all()
+        .iter()
+        .filter(|w| w.target.pid == pid && super::input::on_agent_display_at(w.bounds))
+        .count()
+}
+
+/// Whether `pid` has a window on the user's screens, off the Agent
+/// Displays, where the user may be working.
+pub fn user_window(pid: i32) -> bool {
+    super::windows::all()
+        .iter()
+        .any(|w| w.target.pid == pid && !super::input::on_agent_display_at(w.bounds))
 }
 
 /// A string or URL attribute as text; empty when it is neither.

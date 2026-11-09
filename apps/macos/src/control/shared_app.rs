@@ -99,17 +99,6 @@ pub fn refusal(b: Beside, what: &str) -> ControlError {
     ))
 }
 
-/// act_on_element's press, click or menu on a control that opens a menu,
-/// beside the user's window.
-pub fn menu_press_refusal(b: Beside, action: &str, refusal: &str) -> ControlError {
-    let n = names(b);
-    ControlError::failed(format!(
-        "{app} is the user's front app with their window {user} focused, so {action} was not sent: {refusal}.",
-        app = n.app,
-        user = n.user,
-    ))
-}
-
 /// Keys when accessibility didn't say which window has focus.
 pub fn unknown_focus(app: &str) -> ControlError {
     ControlError::failed(format!(
@@ -268,7 +257,7 @@ pub async fn click(
         user = n.user,
         agent = n.agent,
     );
-    if click_route(Front::OtherFocused, left, count, modifiers) == ClickRoute::Refuse {
+    if click_route(Front::OtherFocused, true, left, count, modifiers) == ClickRoute::Refuse {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was sent. Beside the user's window only a single left click without modifiers works, through accessibility: it presses the control under the point or picks the text field there for type. Use act_on_element for other actions, or wait until the user switches to another app."
         )));
@@ -286,6 +275,65 @@ fn unverified(target: WindowTarget, what: &str) -> String {
     )
 }
 
+/// Whether `pid` has a window on the user's screens, where they may be
+/// working (`Front::shared`).
+pub async fn user_window(pid: i32, cx: &AsyncApp) -> bool {
+    off(cx, move || beside::user_window(pid)).await
+}
+
+/// act_on_element's `action` on `element` in `target`'s window, when the
+/// user may be working in another window of its app (#110): show_menu is
+/// refused, as the menu opens in the user's front app and takes their
+/// keyboard, and so is a press or click on a control that opens a menu.
+/// None where the action may go ahead.
+pub async fn element_refusal(
+    target: WindowTarget,
+    action: &str,
+    element: &ax::Sendable,
+    cx: &AsyncApp,
+) -> Option<ControlError> {
+    if !matches!(action, "press" | "click" | "show_menu") {
+        return None;
+    }
+    let app = || windows::find(target.window_id).map_or_else(|| "The app".into(), |w| w.app);
+    let (lead, app) = match front(target, cx).await {
+        (Front::OtherFocused, Some(focused)) => {
+            let n = names(Beside { target, focused });
+            (
+                format!(
+                    "{} is the user's front app with their window {} focused",
+                    n.app, n.user
+                ),
+                n.app,
+            )
+        }
+        (Front::FocusUnknown, _) if user_window(target.pid, cx).await => {
+            let app = app();
+            (
+                format!(
+                    "{app} is the user's front app, it has a window on the user's screen, and Accessibility could not verify which of its windows has focus"
+                ),
+                app,
+            )
+        }
+        _ => return None,
+    };
+    if action == "show_menu" {
+        return Some(ControlError::failed(format!(
+            "{lead}, so show_menu was not sent: the menu it opens shows in {app}, the user's front app, and an open menu takes the user's keyboard. Nothing was opened. Use press or set_value on the element, or wait until the user switches to another app."
+        )));
+    }
+    let e = ax::Sendable(element.get().clone());
+    let refusal = off(cx, move || {
+        let e = e.get();
+        beside::opens_menu(e).then(|| beside::menu_refusal(e))
+    })
+    .await?;
+    Some(ControlError::failed(format!(
+        "{lead}, so {action} was not sent: {refusal}."
+    )))
+}
+
 /// A click in the agent's window of the user's front app when
 /// accessibility didn't say which window has focus. Nothing is posted,
 /// as beside the user's window: a press or a picked field through
@@ -300,7 +348,7 @@ pub async fn click_unverified(
     cx: &AsyncApp,
 ) -> Result<Value, ControlError> {
     let why = unverified(target, "click");
-    if click_route(Front::FocusUnknown, left, count, modifiers) == ClickRoute::Refuse {
+    if click_route(Front::FocusUnknown, true, left, count, modifiers) == ClickRoute::Refuse {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was sent. Until it answers, only a single left click without modifiers works, through accessibility. Retry after a moment, or use act_on_element."
         )));
@@ -322,6 +370,9 @@ pub async fn posted_press_allowed(
     };
     match front(target, cx).await {
         (Front::No | Front::TargetFocused, _) => Ok(()),
+        // All the app's windows on Agent Displays: none of the user's can
+        // have focus, as in a Java app that never says which one does.
+        (Front::FocusUnknown, _) if !user_window(target.pid, cx).await => Ok(()),
         (Front::OtherFocused, Some(focused)) => {
             let n = names(Beside { target, focused });
             Err(ControlError::failed(format!(
@@ -391,10 +442,18 @@ async fn press_at(
     });
     match kind {
         Use::Text => {
+            let next = match check {
+                Some(_) => {
+                    "type puts text into it through accessibility, with no key events, at the end of its text or over what cmd+a selected."
+                }
+                None => {
+                    "type and keys stay refused until Accessibility says which window has focus: retry after a moment, or use act_on_element set_value on the field."
+                }
+            };
             return Ok(json!({
                 "windowId": target.window_id,
                 "route": "accessibility",
-                "note": format!("{why}, so no click was posted. The text field \"{label}\" under the point is picked: type puts text into it through accessibility, with no key events, at the end of its text or over what cmd+a selected."),
+                "note": format!("{why}, so no click was posted. The text field \"{label}\" under the point is picked: {next}"),
             }));
         }
         Use::Menu(refusal) => {
@@ -466,14 +525,9 @@ fn press_check() -> bool {
 
 /// How long a press gets to show an effect.
 const EFFECT_WAIT: Duration = Duration::from_millis(600);
-/// When the page is first read after the press, and how often after
-/// that; the display and the app's windows are checked every 50 ms. A
-/// read of a large page takes about 60 ms.
-const PAGE_FIRST: Duration = Duration::from_millis(50);
-const PAGE_EVERY: Duration = Duration::from_millis(150);
 
 /// Where a press's effect is read: the display's change counter, when it
-/// runs, the app's windows and the page.
+/// runs, the app's windows on Agent Displays, and the page.
 struct Watcher {
     display: Option<Arc<crate::mac::capture::Latest>>,
     pid: i32,
@@ -505,9 +559,11 @@ impl Watcher {
         let started = Instant::now();
         let counted = || self.display.as_ref().and_then(|d| d.counted());
         let mut changes = counted();
+        // Only a counter that runs gets its first frame soon.
+        let counting = self.display.as_ref().is_some_and(|d| d.counting());
         while wait
             && changes.is_none()
-            && self.display.is_some()
+            && counting
             && started.elapsed() < Duration::from_millis(300)
         {
             cx.background_executor()
@@ -516,31 +572,35 @@ impl Watcher {
             changes = counted();
         }
         let pid = self.pid;
-        let read = self.page.clone().filter(|_| page);
-        let (windows, page) = off(cx, move || {
-            (ax::window_count(pid), read.map(|p| beside::page_digest(&p)))
+        let read = self.page.clone();
+        let (windows, quick, page) = off(cx, move || {
+            let quick = read.as_ref().map(|p| beside::quick_digest(p, pid));
+            let started = Instant::now();
+            let page = read.filter(|_| page).map(|p| beside::page_digest(&p));
+            if page.is_some() {
+                log::info!(
+                    "shared app: page read in {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
+            (Some(beside::agent_windows(pid)), quick, page)
         })
         .await;
         Watch {
             display_changes: changes,
             windows,
+            quick,
             page,
         }
     }
 
-    /// Watch for the press's effect, up to `EFFECT_WAIT`.
+    /// Watch for the press's effect, up to `EFFECT_WAIT`: the cheap
+    /// signals every 50 ms, the whole page once at the end.
     async fn after(&self, before: Watch, cx: &AsyncApp) -> Effect {
         let started = Instant::now();
-        // A page shows a change in its tree within tens of milliseconds.
-        let mut page_next = PAGE_FIRST;
         loop {
-            let elapsed = started.elapsed();
-            let last = elapsed >= EFFECT_WAIT;
-            let page = last || elapsed >= page_next;
-            if page {
-                page_next = elapsed + PAGE_EVERY;
-            }
-            let now = self.read(false, page, cx).await;
+            let last = started.elapsed() >= EFFECT_WAIT;
+            let now = self.read(false, last, cx).await;
             let seen = effect(before, now);
             if seen == Effect::Seen {
                 log::info!("shared app: a press changed {before:?} to {now:?}");

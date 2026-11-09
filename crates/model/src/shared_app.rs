@@ -46,6 +46,20 @@ impl Front {
     pub fn posts(self) -> bool {
         matches!(self, Front::No | Front::TargetFocused)
     }
+
+    /// Whether the user may be working in another window of the target's
+    /// app, so a posted click or press could take their focus: one of its
+    /// windows has focus, or none is known to and the app has a window on
+    /// the user's screens (`user_window`). An app whose windows are all
+    /// on Agent Displays, as one that never answers which window has
+    /// focus, such as a Java app or a game, has no window of the user's.
+    pub fn shared(self, user_window: bool) -> bool {
+        match self {
+            Front::OtherFocused => true,
+            Front::FocusUnknown => user_window,
+            Front::No | Front::TargetFocused => false,
+        }
+    }
 }
 
 /// How a `type` call's text goes in.
@@ -127,15 +141,20 @@ pub enum ClickRoute {
     Refuse,
 }
 
-pub fn click_route(front: Front, left: bool, count: i64, modifiers: bool) -> ClickRoute {
-    match front {
-        Front::No | Front::TargetFocused => ClickRoute::Post,
+/// `user_window`: whether the app has a window on the user's screens.
+pub fn click_route(
+    front: Front,
+    user_window: bool,
+    left: bool,
+    count: i64,
+    modifiers: bool,
+) -> ClickRoute {
+    match front.shared(user_window) {
+        false => ClickRoute::Post,
         // With no window known to hold focus, the user's may: a posted
         // click could take it, so nothing is posted, as beside it.
-        Front::OtherFocused | Front::FocusUnknown if left && count <= 1 && !modifiers => {
-            ClickRoute::Accessibility
-        }
-        Front::OtherFocused | Front::FocusUnknown => ClickRoute::Refuse,
+        true if left && count <= 1 && !modifiers => ClickRoute::Accessibility,
+        true => ClickRoute::Refuse,
     }
 }
 
@@ -196,8 +215,13 @@ pub struct Watch {
     pub display_changes: Option<u64>,
     /// How many windows its app has.
     pub windows: Option<usize>,
+    /// A digest of what can be read cheaply while waiting: the page's
+    /// address and title, its focused element and the pressed element's
+    /// own tree.
+    pub quick: Option<u64>,
     /// A digest of its page's accessibility tree, which shows a changed
-    /// text or value however small.
+    /// text or value however small; read before the press and once at the
+    /// end, as it costs the app tens of milliseconds.
     pub page: Option<u64>,
 }
 
@@ -216,6 +240,7 @@ pub enum Effect {
 pub fn effect(before: Watch, after: Watch) -> Effect {
     let differ = |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a != b);
     if differ(before.display_changes, after.display_changes)
+        || differ(before.quick, after.quick)
         || differ(before.page, after.page)
         || differ(
             before.windows.map(|w| w as u64),
@@ -382,24 +407,52 @@ mod tests {
     #[test]
     fn only_a_plain_left_click_has_an_accessibility_route() {
         let f = Front::OtherFocused;
-        assert_eq!(click_route(Front::No, false, 2, true), ClickRoute::Post);
         assert_eq!(
-            click_route(Front::TargetFocused, true, 1, false),
+            click_route(Front::No, true, false, 2, true),
             ClickRoute::Post
         );
-        assert_eq!(click_route(f, true, 1, false), ClickRoute::Accessibility);
         assert_eq!(
-            click_route(Front::FocusUnknown, true, 1, false),
-            ClickRoute::Accessibility,
-            "a click when the focused window is unknown is never posted"
+            click_route(Front::TargetFocused, true, true, 1, false),
+            ClickRoute::Post
         );
+        for user_window in [true, false] {
+            assert_eq!(
+                click_route(f, user_window, true, 1, false),
+                ClickRoute::Accessibility
+            );
+            assert_eq!(
+                click_route(f, user_window, false, 1, false),
+                ClickRoute::Refuse
+            );
+            assert_eq!(
+                click_route(f, user_window, true, 2, false),
+                ClickRoute::Refuse
+            );
+            assert_eq!(
+                click_route(f, user_window, true, 1, true),
+                ClickRoute::Refuse
+            );
+        }
+    }
+
+    #[test]
+    fn with_focus_unknown_a_click_is_posted_only_when_the_user_has_no_window_of_the_app() {
+        let u = Front::FocusUnknown;
+        // A window of the app on the user's screens may have focus: a
+        // posted click could take it.
+        assert!(u.shared(true));
         assert_eq!(
-            click_route(Front::FocusUnknown, true, 2, false),
-            ClickRoute::Refuse
+            click_route(u, true, true, 1, false),
+            ClickRoute::Accessibility
         );
-        assert_eq!(click_route(f, false, 1, false), ClickRoute::Refuse);
-        assert_eq!(click_route(f, true, 2, false), ClickRoute::Refuse);
-        assert_eq!(click_route(f, true, 1, true), ClickRoute::Refuse);
+        assert_eq!(click_route(u, true, true, 2, false), ClickRoute::Refuse);
+        // All its windows on Agent Displays, as a Java app or a game that
+        // never says which window has focus: clicks go out as before.
+        assert!(!u.shared(false));
+        assert_eq!(click_route(u, false, true, 1, false), ClickRoute::Post);
+        assert_eq!(click_route(u, false, false, 2, true), ClickRoute::Post);
+        assert!(Front::OtherFocused.shared(false));
+        assert!(!Front::No.shared(true) && !Front::TargetFocused.shared(true));
     }
 
     #[test]
@@ -440,6 +493,7 @@ mod tests {
         let watch = |display_changes, windows, page| Watch {
             display_changes,
             windows,
+            quick: Some(1),
             page,
         };
         let same = watch(Some(4), Some(2), Some(7));
@@ -469,6 +523,15 @@ mod tests {
         assert_eq!(
             effect(watch(None, Some(2), None), watch(None, Some(3), None)),
             Effect::Seen
+        );
+        let moved = Watch {
+            quick: Some(2),
+            ..same
+        };
+        assert_eq!(
+            effect(same, moved),
+            Effect::Seen,
+            "focus or the address moved"
         );
     }
 

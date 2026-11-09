@@ -373,7 +373,13 @@ async fn handle_one(
             if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await {
                 let plain = modifiers == Default::default();
                 let left = button == Button::Left;
-                match shared_app::front(target, cx).await {
+                let (front, focused) = shared_app::front(target, cx).await;
+                // With focus unknown, only an app with a window on the
+                // user's screens may have theirs focused.
+                let shared = front.shared(
+                    front == Front::FocusUnknown && shared_app::user_window(target.pid, cx).await,
+                );
+                match (front, focused) {
                     (Front::OtherFocused, Some(focused)) => {
                         // Keys go to this window from now on, as after a
                         // click. The app is in front, so this sends no
@@ -386,7 +392,7 @@ async fn handle_one(
                     }
                     // The user's window may have focus: no focus record,
                     // and nothing posted (#110).
-                    (Front::OtherFocused | Front::FocusUnknown, _) => {
+                    _ if shared => {
                         show_pointer(&core, id, point, true, cx);
                         return shared_app::click_unverified(
                             id, point, target, left, count, !plain, cx,
@@ -394,7 +400,7 @@ async fn handle_one(
                         .await
                         .and_then(reply);
                     }
-                    (Front::No | Front::TargetFocused, _) => {}
+                    _ => {}
                 }
             }
             let forwarder = show_pointer(&core, id, point, true, cx);
@@ -1266,27 +1272,11 @@ async fn handle_one(
             }
             // Beside the user's window of the same app, a menu would open
             // in their front app and take their keyboard (#110).
-            if matches!(action.as_str(), "press" | "click" | "show_menu")
-                && let (Front::OtherFocused, Some(focused)) =
-                    shared_app::front(window.target, cx).await
+            let item = ax::Sendable(element.clone());
+            if let Some(refusal) =
+                shared_app::element_refusal(window.target, &action, &item, cx).await
             {
-                let item = ax::Sendable(element.clone());
-                let refusal = off(cx, move || {
-                    let e = item.get();
-                    crate::mac::shared_app::opens_menu(e)
-                        .then(|| crate::mac::shared_app::menu_refusal(e))
-                })
-                .await;
-                if let Some(refusal) = refusal {
-                    return Err(shared_app::menu_press_refusal(
-                        Beside {
-                            target: window.target,
-                            focused,
-                        },
-                        &action,
-                        &refusal,
-                    ));
-                }
+                return Err(refusal);
             }
             if action == "read_text" {
                 let item = ax::Sendable(element.clone());

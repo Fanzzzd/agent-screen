@@ -95,6 +95,12 @@ if (pair) {
         const message = typeof args[2] === "string" ? args[2] : args[0] && args[0].message;
         if (typeof message === "string" && message.startsWith("pair ")) note(message);
       });
+      // A page's context menu, as a browser's: a native menu that takes
+      // the keyboard while it is open.
+      win.webContents.on("context-menu", () => {
+        note(`pair ${side} context-menu`);
+        Menu.buildFromTemplate([{ label: "Back" }, { label: "Reload" }]).popup({ window: win });
+      });
       win.loadFile("pair.html", { query: { side } });
       return win;
     };

@@ -192,14 +192,6 @@ pub fn action_result(element: &AXUIElement, action: &str) -> Action {
     }
 }
 
-/// How many windows an app's accessibility lists, None when it didn't
-/// answer.
-pub fn window_count(pid: i32) -> Option<usize> {
-    try_elements_attribute(&application(pid), "AXWindows")
-        .ok()
-        .map(|w| w.len())
-}
-
 /// Make `target` its app's main window, as a click on it would, without
 /// the focus event that would end the front app's text input session.
 /// Open a URL in this browser window through its address field. Safari
@@ -1287,7 +1279,7 @@ pub fn editing(target: WindowTarget) -> bool {
     false
 }
 
-fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
+pub fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     let (a, b): (&CFType, &CFType) = (a, b);
     a == b
 }
