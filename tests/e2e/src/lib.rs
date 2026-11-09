@@ -277,6 +277,12 @@ pub fn hidclick_app() -> Result<PathBuf> {
     swift_app("hidclick", "HIDClick")
 }
 
+/// tools/menuchoice.swift as an app: a closed pop-up button and a combo
+/// box whose window title says what they hold and how often a menu opened.
+pub fn menu_choice_app() -> Result<PathBuf> {
+    swift_app("menuchoice", "MenuChoice")
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));
@@ -330,6 +336,7 @@ const HANDS_OFF: &[&str] = &[
     "launchhere",
     "load",
     "loanfocus",
+    "menuchoice",
     "menuclosed",
     "menupress",
     "realdrag",
@@ -348,6 +355,7 @@ const HANDS_OFF: &[&str] = &[
     "placeheld",
     "samebundle",
     "secondwindow",
+    "selectvalue",
     "settings",
     "shared",
     "sharedbrowser",

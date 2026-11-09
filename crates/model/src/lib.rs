@@ -23,6 +23,7 @@ pub mod real_click;
 pub mod recording_playback;
 pub mod returns;
 pub mod screen_edge;
+pub mod selection;
 pub mod shared_app;
 pub mod substitute;
 pub mod tree;

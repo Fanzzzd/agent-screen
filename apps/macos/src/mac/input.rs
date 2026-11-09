@@ -136,6 +136,73 @@ pub fn typed_text(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
+/// How far typing a closed pop-up button's item title went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupTyped {
+    /// Every character went out.
+    Typed,
+    /// The user took over after this many characters.
+    Stopped(usize),
+    /// The button's window is no longer on the display: nothing typed.
+    Gone,
+    /// Its app's key window is off the Agent Displays, maybe the user's:
+    /// nothing typed. `take_refused` says which.
+    Refused,
+    /// The button didn't become its app's focused element: nothing typed.
+    Unfocused,
+    /// The keys held a space, which is never typed: nothing typed.
+    Spaced,
+    /// Another window of the app took key focus, or the button's window
+    /// left the display, after this many characters.
+    Interrupted(usize),
+    /// The next key would have come so long after the last that the app's
+    /// search might have ended, and a space then presses the button and
+    /// opens its menu: stopped after this many characters.
+    Slow(usize),
+}
+
+/// The longest gap between two keys of a title. AppKit and Chromium end a
+/// type-ahead search about a second after its last key, and a key after
+/// that starts a new search. No space is ever typed, so a late key can't
+/// open the menu, but it could choose another item: the gap is measured
+/// as the key goes out, after the process's real-input gate.
+const KEY_GAP: Duration = Duration::from_millis(300);
+
+/// After a key, give the app a moment to take it and to run what a new
+/// choice triggers, such as a change handler that focuses another field,
+/// so the focus check before the next key sees it: until the pop-up shows
+/// another item, then a little longer, or at most `KEY_SETTLE` in all.
+/// Well under `KEY_GAP`, which the next key must still meet.
+/// `before` is what the pop-up showed just before the key.
+fn settle_key(element: &super::ax::Sendable, before: &Option<String>) {
+    let start = Instant::now();
+    while start.elapsed() < KEY_SETTLE {
+        thread::sleep(Duration::from_millis(15));
+        if super::ax::string_attribute(element.get(), "AXValue") != *before {
+            thread::sleep(Duration::from_millis(80));
+            return;
+        }
+    }
+}
+
+/// How long `settle_key` waits for the pop-up to show a new item.
+const KEY_SETTLE: Duration = Duration::from_millis(90);
+
+/// Wait out a type-ahead search an earlier title may have started, or
+/// until the user takes over. False on a Takeover.
+fn wait_typeahead(stopped: &std::sync::atomic::AtomicBool) -> bool {
+    let until = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < until {
+        if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(
+            Duration::from_millis(10).min(until.saturating_duration_since(Instant::now())),
+        );
+    }
+    !stopped.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// One display's input queue. Cheap to clone.
 #[derive(Clone)]
 pub struct Forwarder {
@@ -499,6 +566,139 @@ impl Forwarder {
         })
         .await
         .unwrap_or(Sent::Nowhere)
+    }
+
+    /// Type `keys` into a closed pop-up button, as type-ahead, with keys
+    /// posted to the button's process only. No menu opens, so nothing takes
+    /// the user's keyboard (ADR 0001): the keys never hold a space, and no
+    /// click wakes the window. The first key goes out only once the button
+    /// is its app's focused element. Each key goes out only while the
+    /// button's window is on this display and is its app's key window, the
+    /// app hasn't come to the front, no Takeover started, and the last key
+    /// went out less than `KEY_GAP` before.
+    ///
+    /// A user who clicks their own window of the same app between the check
+    /// and the key could still get that one key: the check is an AX call,
+    /// the key a post, and nothing makes them one step.
+    pub async fn choose_closed_popup(
+        &self,
+        target: WindowTarget,
+        element: super::ax::Sendable,
+        keys: String,
+        within: Rect,
+    ) -> PopupTyped {
+        if keys.contains(char::is_whitespace) || keys.is_empty() {
+            return PopupTyped::Spaced;
+        }
+        let stopped = self.stopped.clone();
+        self.run(move |w| {
+            let is_stopped = || stopped.load(std::sync::atomic::Ordering::Relaxed);
+            let placed =
+                || cg::window_bounds(target.window_id).is_some_and(|b| within.contains(b.mid()));
+            if !placed() {
+                return PopupTyped::Gone;
+            }
+            let _held = AppKeys::hold(target.pid);
+            // Keys typed while an earlier search goes on add to it.
+            if !wait_typeahead(&stopped) {
+                return PopupTyped::Stopped(0);
+            }
+            if !placed() {
+                return PopupTyped::Gone;
+            }
+            w.refused = None;
+            w.focus_waking(target, false);
+            if is_stopped() {
+                return PopupTyped::Stopped(0);
+            }
+            if !w.keys_reach(target) {
+                return PopupTyped::Refused;
+            }
+            if is_stopped() {
+                return PopupTyped::Stopped(0);
+            }
+            // The keys go to the app's focused element, which must be the
+            // button: read it back.
+            if !super::ax::set_attribute(
+                element.get(),
+                "AXFocused",
+                objc2_core_foundation::CFBoolean::new(true),
+            ) {
+                return PopupTyped::Unfocused;
+            }
+            // Chromium moves focus a moment after it answers: look for up
+            // to 300 ms, and send nothing if it never arrives.
+            let asked = Instant::now();
+            while !super::ax::is_focused_element(target.pid, element.get()) {
+                if is_stopped() {
+                    return PopupTyped::Stopped(0);
+                }
+                if asked.elapsed() >= Duration::from_millis(300) {
+                    return PopupTyped::Unfocused;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let front_at_start = is_front(target.pid);
+            let mut last: Option<Instant> = None;
+            let mut shown = None;
+            for (typed, character) in keys.chars().enumerate() {
+                if typed > 0 {
+                    settle_key(&element, &shown);
+                }
+                if is_stopped() {
+                    return PopupTyped::Stopped(typed);
+                }
+                // The app sends every key to its key window and focused
+                // element: another one now would get the rest, as a window
+                // the user clicked, or a field the page's change handler or
+                // the pop-up's action focused. A Take Back moves the window
+                // off the display.
+                if (!front_at_start && is_front(target.pid))
+                    || !placed()
+                    || super::ax::focused_window_id(target.pid) != Some(target.window_id)
+                    || !super::ax::is_focused_element(target.pid, element.get())
+                {
+                    return PopupTyped::Interrupted(typed);
+                }
+                shown = super::ax::string_attribute(element.get(), "AXValue");
+                let mut units = [0u16; 2];
+                let units = character.encode_utf16(&mut units);
+                let events: Vec<_> = [true, false]
+                    .into_iter()
+                    .filter_map(|down| {
+                        let event = CGEvent::new_keyboard_event(w.source.as_deref(), 0, down)?;
+                        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                        unsafe {
+                            CGEvent::keyboard_set_unicode_string(
+                                Some(&event),
+                                units.len() as _,
+                                units.as_ptr(),
+                            )
+                        };
+                        Some(event)
+                    })
+                    .collect();
+                // A real-input loan holds the gate: measure the gap once
+                // it is ours, just before the key goes out.
+                let gate = super::real_input::process_gate(target.pid);
+                let input = gate.read().unwrap_or_else(|e| e.into_inner());
+                if is_stopped() {
+                    return PopupTyped::Stopped(typed);
+                }
+                if last.is_some_and(|at| at.elapsed() >= KEY_GAP) {
+                    return PopupTyped::Slow(typed);
+                }
+                for event in &events {
+                    post_now(event, target.pid, true);
+                }
+                last = Some(Instant::now());
+                drop(input);
+                thread::sleep(Duration::from_millis(4));
+            }
+            PopupTyped::Typed
+        })
+        .await
+        .unwrap_or(PopupTyped::Gone)
     }
 
     /// Focus the display's window of app `pid` for a menu command: the one
@@ -1531,6 +1731,11 @@ fn stamp_routing_using(
 fn deliver(event: &CGEvent, pid: i32, authenticate: bool) {
     let gate = super::real_input::process_gate(pid);
     let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+    post_now(event, pid, authenticate);
+}
+
+/// `deliver` with the process's real-input gate already held.
+fn post_now(event: &CGEvent, pid: i32, authenticate: bool) {
     super::ime::note_posted();
     stamp_time(event);
     if !unsafe { SSPostEventToPid(pid, event, authenticate) } {
@@ -2075,5 +2280,35 @@ mod scroll_tests {
             assert_eq!(read(CGEventField::ScrollWheelEventDeltaAxis2), 0);
             assert_eq!(read(CGEventField::ScrollWheelEventIsContinuous), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[test]
+    fn a_takeover_ends_the_typeahead_wait_at_once() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let takeover = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        assert!(!wait_typeahead(&stopped));
+        takeover.join().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn the_typeahead_wait_outlasts_a_search() {
+        let start = Instant::now();
+        assert!(wait_typeahead(&AtomicBool::new(false)));
+        assert!(start.elapsed() >= Duration::from_millis(1200));
     }
 }

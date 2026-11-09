@@ -1267,7 +1267,32 @@ fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     a == b
 }
 
-fn pid_of(element: &AXUIElement) -> Option<i32> {
+/// Whether an element is in a web page: it has an AXWebArea above it,
+/// below its window. None when that can't be told, as when a role or
+/// parent read fails or times out before the window: callers that act on
+/// a "no" must treat None as "maybe".
+pub fn in_web_area(element: &AXUIElement) -> Option<bool> {
+    let mut above = element_attribute(element, "AXParent")?;
+    for _ in 0..200 {
+        match string_attribute(&above, "AXRole")?.as_str() {
+            "AXWebArea" => return Some(true),
+            "AXWindow" | "AXSheet" | "AXApplication" => return Some(false),
+            _ => {}
+        }
+        above = element_attribute(&above, "AXParent")?;
+    }
+    None
+}
+
+/// Whether `element` is its app's focused element, the one its keys go to.
+pub fn is_focused_element(pid: i32, element: &AXUIElement) -> bool {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.2) };
+    element_attribute(&app, "AXFocusedUIElement").is_some_and(|f| same(&f, element))
+}
+
+/// The process that owns an accessibility element.
+pub fn pid_of(element: &AXUIElement) -> Option<i32> {
     let mut pid = 0;
     (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
 }

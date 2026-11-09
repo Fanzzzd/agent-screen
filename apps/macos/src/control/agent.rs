@@ -119,7 +119,7 @@ async fn menu_still_open(
         _ => "click",
     };
     Err(ControlError::failed(format!(
-        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. Take a screenshot, open the menu again and choose its item in the next call, with act_on_element press on the item or a click on it; or focus the closed control and type the option's text"
+        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. For a pop-up button or a web page's select, call act_on_element set_value with the item's exact full title: it chooses the item with the menu closed. Otherwise take a screenshot, open the menu again and choose its item in the next call, with act_on_element press on the item or a click on it"
     )))
 }
 
@@ -1352,14 +1352,14 @@ async fn handle_one(
                     .remember_user_window(window.target.pid)
                     .await;
             }
-            act(&core, id, &action, &element, p.string("value"), cx).await?;
+            let action_note = act(&core, id, &action, &element, p.string("value"), cx).await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
                 let forwarder = core.update(cx, |c, _| c.forwarder(id));
                 forwarder.focus(window.target).await;
             }
-            if let Some(note) = menu_note {
+            if let Some(note) = menu_note.map(String::from).or(action_note) {
                 return reply(json!({ "note": note }));
             }
             Ok(json!({}))
@@ -3353,7 +3353,8 @@ async fn act(
     element: &ax::Element,
     value: Option<String>,
     cx: &mut AsyncApp,
-) -> Result<(), ControlError> {
+) -> Result<Option<String>, ControlError> {
+    let mut note = None;
     let bounds = cg::display_bounds(id);
     // Each AX call blocks until the app answers, up to the 1 s timeout,
     // and an action that opens a modal holds it all that time.
@@ -3414,27 +3415,15 @@ async fn act(
         "set_value" => {
             let value =
                 value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
-            // Some elements, static text among them, report success and
-            // keep their value: read it back.
-            let set = off_main(
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let mut access = AxValues {
+                element,
+                forwarder,
+                bounds,
+                id,
                 cx,
-                Box::new(move |e| {
-                    ax::settable(e, "AXValue")
-                        && ax::set_attribute(
-                            e,
-                            "AXValue",
-                            &objc2_core_foundation::CFString::from_str(&value),
-                        )
-                        && ax::string_attribute(e, "AXValue")
-                            .is_none_or(|now| now.replace('\r', "\n") == value.replace('\r', "\n"))
-                }),
-            )
-            .await;
-            if !set {
-                return Err(ControlError::failed(
-                    "the element's value cannot be set; focus it and type instead",
-                ));
-            }
+            };
+            note = super::values::set_value(&mut access, id, &value).await?;
         }
         "insert_text" => {
             let value =
@@ -3484,7 +3473,189 @@ async fn act(
         }
         other => return Err(ControlError::invalid(format!("unknown action {other}"))),
     }
-    Ok(())
+    Ok(note)
+}
+
+/// The window an element is in, and its process.
+fn popup_window(element: &ax::Element) -> Option<WindowTarget> {
+    let window = ax::element_attribute(element, "AXWindow")?;
+    Some(WindowTarget {
+        pid: ax::pid_of(element)?,
+        window_id: ax::window_id(&window)?,
+    })
+}
+
+/// set_value's AX and input calls on one element, each off the main
+/// thread, as an app may take up to the 1 s timeout to answer.
+struct AxValues<'a> {
+    element: &'a ax::Element,
+    forwarder: crate::mac::input::Forwarder,
+    bounds: Rect,
+    id: DisplayId,
+    cx: &'a mut AsyncApp,
+}
+
+impl super::values::ValueAccess for AxValues<'_> {
+    async fn role(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXRole")).await
+    }
+
+    fn stopped(&self) -> bool {
+        self.forwarder.agent_stopped()
+    }
+
+    async fn popup_facts(&mut self) -> super::values::PopupFacts {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || super::values::PopupFacts {
+            in_web_page: ax::in_web_area(item.get()),
+            engine: ax::pid_of(item.get()).and_then(devtools::engine),
+            cocoa: ax::pid_of(item.get()).and_then(app::is_cocoa),
+        })
+        .await
+    }
+
+    async fn choose_in_page(&mut self, title: &str, shown: &str) -> super::values::PageChoice {
+        use super::values::PageChoice;
+        use devtools::SelectChoice;
+        let item = ax::Sendable(self.element.clone());
+        let title = title.to_owned();
+        let shown = shown.to_owned();
+        let forwarder = self.forwarder.clone();
+        let within = self.bounds;
+        off(self.cx, move || {
+            let Some(target) = popup_window(item.get()) else {
+                return PageChoice::Unpiped;
+            };
+            let (Some(bounds), Some(frame)) =
+                (cg::window_bounds(target.window_id), ax::frame(item.get()))
+            else {
+                return PageChoice::Unpiped;
+            };
+            let at = frame.mid();
+            if !within.contains(at) {
+                return PageChoice::Unpiped;
+            }
+            match devtools::choose_option(target, bounds, at, &title, &shown, || {
+                forwarder.agent_stopped()
+            }) {
+                SelectChoice::Unpiped => PageChoice::Unpiped,
+                SelectChoice::NotSelect => PageChoice::NotSelect,
+                SelectChoice::Elsewhere => PageChoice::Elsewhere,
+                SelectChoice::Chosen => PageChoice::Chosen,
+                SelectChoice::Already => PageChoice::Already,
+                SelectChoice::Missing { shown, near } => PageChoice::Missing { shown, near },
+                SelectChoice::Disabled => PageChoice::Disabled,
+                SelectChoice::Unknown(why) => PageChoice::Unknown(why),
+                SelectChoice::Stopped => PageChoice::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn type_popup(&mut self, keys: &str) -> super::values::Typed {
+        use super::values::Typed;
+        use crate::mac::input::PopupTyped;
+        let id = self.id;
+        let item = ax::Sendable(self.element.clone());
+        let Some(target) = off(self.cx, move || popup_window(item.get())).await else {
+            return Typed::NotSent(ControlError::failed(
+                "Accessibility names no window for the pop-up button, so nothing was typed. Refresh get_window_state and retry",
+            ));
+        };
+        let typed = self
+            .forwarder
+            .choose_closed_popup(
+                target,
+                ax::Sendable(self.element.clone()),
+                keys.to_owned(),
+                self.bounds,
+            )
+            .await;
+        match typed {
+            PopupTyped::Typed => Typed::All,
+            PopupTyped::Stopped(done) => Typed::Stopped(done),
+            PopupTyped::Interrupted(done) => Typed::Interrupted(done),
+            PopupTyped::Slow(done) => Typed::Slow(done),
+            PopupTyped::Gone => Typed::NotSent(ControlError::failed(format!(
+                "the pop-up button's window is no longer on display {id}, so nothing was typed. Call list_windows"
+            ))),
+            PopupTyped::Unfocused => Typed::NotSent(ControlError::failed(
+                "the pop-up button didn't become its app's focused element, so keys could have gone to another control. Nothing was typed and no menu was opened. Refresh get_window_state and retry, or call request_help",
+            )),
+            PopupTyped::Spaced => Typed::NotSent(ControlError::invalid(
+                "Agent Screen never types a space into a closed pop-up. Nothing was sent",
+            )),
+            PopupTyped::Refused => {
+                let app = self
+                    .forwarder
+                    .take_refused()
+                    .await
+                    .map(|r| r.app)
+                    .unwrap_or_else(|| "the app".into());
+                Typed::NotSent(ControlError::failed(format!(
+                    "{app}'s focused window is not on an Agent Display, so keys for the pop-up button could reach the user's window instead of yours on display {id}. Nothing was typed and no menu was opened. Click inside your window once and retry"
+                )))
+            }
+        }
+    }
+
+    async fn set(&mut self, value: &str) -> super::values::Set {
+        use super::values::{Set, unless_stopped};
+        let item = ax::Sendable(self.element.clone());
+        let value = value.to_owned();
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            let stopped = || forwarder.agent_stopped();
+            if stopped() {
+                return Set::Stopped;
+            }
+            if !ax::settable(item.get(), "AXValue") {
+                return Set::NotSettable;
+            }
+            match unless_stopped(stopped, || {
+                ax::set_attribute(
+                    item.get(),
+                    "AXValue",
+                    &objc2_core_foundation::CFString::from_str(&value),
+                )
+            }) {
+                Some(true) => Set::Sent,
+                Some(false) => Set::Refused,
+                None => Set::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn read(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXValue")).await
+    }
+
+    async fn confirm(&mut self) -> super::values::Confirm {
+        use super::values::{Confirm, unless_stopped};
+        let item = ax::Sendable(self.element.clone());
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            if !ax::actions(item.get()).iter().any(|a| a == "AXConfirm") {
+                return Confirm::Unsupported;
+            }
+            match unless_stopped(
+                || forwarder.agent_stopped(),
+                || ax::try_action(item.get(), "AXConfirm"),
+            ) {
+                Some(true) => Confirm::Done,
+                Some(false) => Confirm::Refused,
+                None => Confirm::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn pause(&mut self, duration: Duration) {
+        self.cx.background_executor().timer(duration).await;
+    }
 }
 
 /// Open an app in the background and place its new window on a display.

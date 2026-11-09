@@ -726,6 +726,133 @@ impl Drag {
     }
 }
 
+// MARK: Selects
+
+/// What became of choosing a web page's `<select>` option through the pipe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectChoice {
+    /// No pipe, or the point is in a frame from another site, which the
+    /// page's script can't look into: choose another way.
+    Unpiped,
+    /// The script reached the page or frame at the point and found no
+    /// select there, as for a button that opens a menu.
+    NotSelect,
+    /// The select at the point shows something other than accessibility
+    /// said of the element: it may be another one. Nothing changed.
+    Elsewhere,
+    /// The option is chosen, with one input and one change event.
+    Chosen,
+    /// The select already shows the option: nothing was sent.
+    Already,
+    /// No option has the title; the select shows `shown`. `near` is an
+    /// option whose title differs only in case.
+    Missing { shown: String, near: Option<String> },
+    /// The select, its fieldset, the option or its optgroup is disabled:
+    /// nothing changed.
+    Disabled,
+    /// The page didn't answer, so the choice may or may not have run.
+    Unknown(String),
+    /// The user took over first: nothing was sent.
+    Stopped,
+}
+
+/// Finds the select under the point, in the page or a frame of the same
+/// site, and chooses the option titled as the agent asked, or says why
+/// not. One script run: no option in between is chosen, and the page gets
+/// one input event and one change event, as from the user's choice in the
+/// open menu. A page script sees them as untrusted (`isTrusted` false), as
+/// for any script's events.
+const CHOOSE: &str = r#"((x, y, title, expected) => {
+  let doc = document, hit = null;
+  for (let depth = 0; depth < 8; depth++) {
+    hit = doc.elementFromPoint(x, y);
+    if (!hit || !(hit instanceof doc.defaultView.HTMLIFrameElement)) break;
+    let inner = null;
+    try { inner = hit.contentDocument; } catch (e) { inner = null; }
+    // A frame from another site: only accessibility can tell its select.
+    if (!inner) return JSON.stringify({ kind: 'unreachable' });
+    const box = hit.getBoundingClientRect();
+    x -= box.left + hit.clientLeft;
+    y -= box.top + hit.clientTop;
+    doc = inner;
+  }
+  const select = hit && hit.closest ? hit.closest('select') : null;
+  if (!select || select.multiple) return JSON.stringify({ kind: 'none' });
+  const options = Array.from(select.options);
+  const shown = () => select.selectedIndex >= 0 ? options[select.selectedIndex].text : '';
+  if (shown() !== expected) return JSON.stringify({ kind: 'elsewhere' });
+  const i = options.findIndex(o => o.text === title || o.label === title);
+  if (i < 0) {
+    const near = options.find(o => o.text.toLowerCase() === title.toLowerCase());
+    return JSON.stringify({ kind: 'missing', shown: shown(), near: near ? near.text : null });
+  }
+  if (select.selectedIndex === i) return JSON.stringify({ kind: 'already' });
+  if (select.matches(':disabled') || options[i].matches(':disabled')) {
+    return JSON.stringify({ kind: 'disabled' });
+  }
+  select.selectedIndex = i;
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  return JSON.stringify({ kind: 'chosen' });
+})"#;
+
+/// Choose the option titled `title` of the select at the global point `at`
+/// of `window`, whose frame is `bounds`, through the app's pipe: nothing
+/// reaches WindowServer, and no menu opens. `shown` is what accessibility
+/// says the element shows: a select at the point that shows something
+/// else may be another one, and is left alone. `stopped` is asked just
+/// before the page's script runs. Blocks on the app; call it off the main
+/// thread.
+pub fn choose_option(
+    window: WindowTarget,
+    bounds: Rect,
+    at: (f64, f64),
+    title: &str,
+    shown: &str,
+    stopped: impl Fn() -> bool,
+) -> SelectChoice {
+    let Some(area) = super::ax::web_area_at(window, at) else {
+        return SelectChoice::Unpiped;
+    };
+    let Some(channel) = channel(window.pid, Duration::from_millis(500)) else {
+        return SelectChoice::Unpiped;
+    };
+    let Ok(page) = page_at(channel, window, bounds, Some(area), at) else {
+        return SelectChoice::Unpiped;
+    };
+    let (x, y) = page.viewport.to_page(at);
+    let expression = format!("{CHOOSE}({x}, {y}, {}, {})", json!(title), json!(shown));
+    if stopped() {
+        return SelectChoice::Stopped;
+    }
+    let answer = page.channel.call(
+        "Runtime.evaluate",
+        json!({ "expression": expression, "returnByValue": true, "silent": true }),
+        Some(&page.session),
+    );
+    let value = match answer {
+        Ok(value) => value,
+        Err(e) => return SelectChoice::Unknown(e),
+    };
+    let Some(text) = value["result"]["value"].as_str() else {
+        return SelectChoice::Unknown("the page's script returned nothing".into());
+    };
+    let answer: Value = serde_json::from_str(text).unwrap_or_default();
+    let string = |key: &str| answer[key].as_str().map(String::from);
+    match answer["kind"].as_str() {
+        Some("chosen") => SelectChoice::Chosen,
+        Some("already") => SelectChoice::Already,
+        Some("disabled") => SelectChoice::Disabled,
+        Some("elsewhere") => SelectChoice::Elsewhere,
+        Some("none") => SelectChoice::NotSelect,
+        Some("missing") => SelectChoice::Missing {
+            shown: string("shown").unwrap_or_default(),
+            near: string("near"),
+        },
+        _ => SelectChoice::Unpiped,
+    }
+}
+
 /// What an agent hears when its drag lands in a web page of an app that
 /// has no pipe.
 pub fn refused_message(app: &str) -> String {
