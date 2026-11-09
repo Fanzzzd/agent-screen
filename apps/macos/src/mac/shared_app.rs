@@ -8,7 +8,7 @@ use crate::model::WindowTarget;
 use agent_screen_model::shared_app::{self as rules, ElementUse};
 use agent_screen_model::typing::landed;
 use objc2_application_services::AXUIElement;
-use objc2_core_foundation::{CFBoolean, CFString};
+use objc2_core_foundation::{CFBoolean, CFString, CFURL};
 use std::time::{Duration, Instant};
 
 /// What a field holds after the agent's last edit there, and its
@@ -60,20 +60,75 @@ pub fn opens_menu(element: &ax::Element) -> bool {
     rules::opens_menu(&role, ax::in_web_area(element), holds_menu)
 }
 
-/// A digest of the page in `target`'s window, its address and the
-/// window's title, to tell whether a press changed anything; the window's
-/// whole tree where it shows no page. None when accessibility didn't
-/// answer.
-pub fn page_digest(target: WindowTarget) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
+/// Where a press's effect is read: the agent's window, its page, or the
+/// window itself where it shows none, and the element pressed.
+#[derive(Clone)]
+pub struct Page {
+    window: Element,
+    root: Element,
+    pressed: Element,
+}
+
+// SAFETY: accessibility elements are CF objects that may be used from
+// any thread, as `ax::Sendable` does.
+unsafe impl Send for Page {}
+
+/// Elements of the page a digest reads, and of the pressed element: a
+/// read takes about 50 µs an element in Chromium.
+const PAGE_ELEMENTS: usize = 1000;
+const PRESSED_ELEMENTS: usize = 200;
+
+pub fn page(target: WindowTarget, pressed: &Element) -> Option<Page> {
     let window = ax::window_element(target)?;
     let root = ax::web_area(&window).unwrap_or_else(|| window.clone());
+    Some(Page {
+        window,
+        root,
+        pressed: pressed.clone(),
+    })
+}
+
+/// A digest of the page's first `PAGE_ELEMENTS`, the pressed element and
+/// what is in it, the page's address and the window's title, to tell
+/// whether a press changed anything.
+pub fn page_digest(page: &Page) -> u64 {
+    use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ax::page_digest(&root, 3000).0.hash(&mut hasher);
-    for (element, name) in [(&root, "AXURL"), (&window, "AXTitle")] {
-        format!("{:?}", ax::attribute(element, name)).hash(&mut hasher);
+    ax::page_digest(&page.root, PAGE_ELEMENTS)
+        .0
+        .hash(&mut hasher);
+    ax::page_digest(&page.pressed, PRESSED_ELEMENTS)
+        .0
+        .hash(&mut hasher);
+    for (element, name) in [(&page.root, "AXURL"), (&page.window, "AXTitle")] {
+        text(element, name).hash(&mut hasher);
     }
-    Some(hasher.finish())
+    hasher.finish()
+}
+
+/// A string or URL attribute as text; empty when it is neither.
+fn text(element: &ax::Element, name: &str) -> String {
+    let Some(value) = ax::attribute(element, name) else {
+        return String::new();
+    };
+    if let Some(s) = value.downcast_ref::<CFString>() {
+        return s.to_string();
+    }
+    value
+        .downcast_ref::<CFURL>()
+        .map(|u| u.string().to_string())
+        .unwrap_or_default()
+}
+
+/// Whether Return on `element` would press or confirm it, as `confirm`
+/// does, rather than fail.
+pub fn confirm_acts(element: &ax::Element) -> bool {
+    if opens_menu(element) {
+        return false;
+    }
+    let actions = ax::actions(element);
+    let field = rules::element_use(&role(element), &actions, false) == ElementUse::Text;
+    actions.iter().any(|a| a == "AXConfirm") || (!field && actions.iter().any(|a| a == "AXPress"))
 }
 
 /// Why a control that opens a menu isn't pressed beside the user's

@@ -17,6 +17,7 @@
       #more { margin: 20px; }
       #more select { width: 140px; height: 28px; font-size: 16px; }
       #more a { margin-left: 20px; }
+      #more button { margin: 0 0 0 20px; width: 80px; height: 28px; }
     </style>
   </head>
   <body>
@@ -37,7 +38,11 @@
     <div id="more">
       <select id="pick"><option>Apple</option><option>Banana</option></select>
       <a id="dead" href="#gone">dead link</a>
+      <!-- Makes the page large, about 5000 elements, to time a press's
+           check on it. -->
+      <button id="grow">grow</button>
     </div>
+    <ul id="long"></ul>
     <script>
       const side = new URLSearchParams(location.search).get("side") || "agent";
       document.title = `pair ${side}`;
@@ -82,6 +87,17 @@
       dead.addEventListener("click", (e) => {
         e.preventDefault();
         log("dead-click");
+      });
+      const grow = document.getElementById("grow");
+      grow.setAttribute("aria-label", `${side} grow`);
+      grow.addEventListener("click", () => {
+        const list = document.getElementById("long");
+        for (let i = 0; i < 2500; i++) {
+          const item = document.createElement("li");
+          item.textContent = `row ${i}`;
+          list.appendChild(item);
+        }
+        log("grown", list.children.length);
       });
       // Focus events wait for the page to have focus, which a window that
       // isn't key may not; the focused element shows here either way.

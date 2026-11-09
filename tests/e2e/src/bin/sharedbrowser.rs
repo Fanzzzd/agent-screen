@@ -17,7 +17,8 @@
 //! key focus or sees an event. The agent's select gets a click, a press,
 //! set_value and Return: none opens its menu, which would take the user's
 //! keyboard, and each answer says nothing was chosen. A click on a link
-//! whose page cancels it answers that nothing changed. Then, with your front app back, the same
+//! whose page cancels it succeeds with changed false; the button and the
+//! submit, which change the page, say changed true. Then, with your front app back, the same
 //! harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
@@ -331,7 +332,9 @@ fn form(
     } else {
         None
     };
-    let clicked_ok = clicked.as_ref().is_some_and(|c| c.is_ok());
+    let clicked_ok = clicked
+        .as_ref()
+        .is_some_and(|c| c.as_ref().is_ok_and(|v| v["changed"] == true));
     let clicked = clicked.as_ref().map(said);
     let seen = lines(log, from);
     check(
@@ -469,10 +472,12 @@ fn select_and_link(
         format!("{} | log {seen:?}", cut(&said(&followed), 400)),
     );
     check(
-        "and its answer says nothing changed, not a success",
-        followed.as_ref().is_err_and(|e| {
-            let e = e.to_string();
-            e.contains("nothing") && e.contains("changed")
+        "and it succeeds, saying the press ran but nothing changed",
+        followed.as_ref().is_ok_and(|v| {
+            v["changed"] == false
+                && v["note"]
+                    .as_str()
+                    .is_some_and(|n| n.contains("press ran, but nothing"))
         }),
         cut(&said(&followed), 600),
     );
@@ -502,6 +507,68 @@ fn select_and_link(
         "the select chose nothing and the user's window stays focused",
         !has(&seen, "pair agent change") && now == "pair user" && !has(&seen, "win user blur"),
         format!("focused {now:?} | log {seen:?}"),
+    );
+    Ok(())
+}
+
+fn median(mut ms: Vec<u128>) -> u128 {
+    ms.sort_unstable();
+    ms[ms.len() / 2]
+}
+
+/// What the check for a press's effect costs on a page of about 5000
+/// elements: five clicks each on the counter button and the cancelled
+/// link, with the check and without it (debugPressCheck), median times.
+fn large_page(control: &Control, id: &Value, window_id: u64, log: &std::path::Path) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let tree0 = tree(control, id, window_id)?;
+    let (_, grow) = element(&tree0, "agent grow")?;
+    let (_, press) = element(&tree0, "agent press")?;
+    let (_, dead) = element(&tree0, "agent dead")?;
+    let mark = lines(log, 0).len();
+    let grown = control.call("click", at(grow));
+    sleep_ms(1500);
+    check(
+        "the agent's page grows by 2500 rows",
+        has(&lines(log, mark), "pair agent grown 2500"),
+        format!("{} | log {:?}", cut(&said(&grown), 300), lines(log, mark)),
+    );
+    let mut times = Vec::new();
+    for on in [true, false] {
+        control.call("debugPressCheck", json!({ "on": on }))?;
+        for (name, point) in [("button", press), ("link", dead)] {
+            let mut ms = Vec::new();
+            let mut changed = Vec::new();
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                let reply = control.call("click", at(point));
+                ms.push(started.elapsed().as_millis());
+                changed.push(match &reply {
+                    Ok(v) => v["changed"].to_string(),
+                    Err(e) => format!("error: {}", cut(&e.to_string(), 200)),
+                });
+                sleep_ms(300);
+            }
+            println!(
+                "     large page, check {}: {name} median {} ms of {ms:?}, changed {changed:?}",
+                if on { "on" } else { "off" },
+                median(ms.clone())
+            );
+            times.push((on, name, changed));
+        }
+    }
+    control.call("debugPressCheck", json!({ "on": true }))?;
+    check(
+        "on the large page, the button's clicks say changed true and the link's changed false",
+        times.iter().all(|(on, name, changed)| {
+            let wanted = match (on, *name) {
+                (false, _) => "null",
+                (true, "button") => "true",
+                (true, _) => "false",
+            };
+            changed.iter().all(|c| c == wanted)
+        }),
+        format!("{times:?}"),
     );
     Ok(())
 }
@@ -659,17 +726,14 @@ fn test(
     sleep_ms(500);
     let seen = lines(log, from);
     check(
-        "a click on the agent's button presses it, and the answer says the window changed",
-        pressed.as_ref().is_ok_and(|v| {
-            v["note"]
-                .as_str()
-                .is_some_and(|n| n.contains("window changed"))
-        }) && has(&seen, "pair agent click 1"),
+        "a click on the agent's button presses it, and the answer says the window changed (changed true)",
+        pressed.as_ref().is_ok_and(|v| v["changed"] == true) && has(&seen, "pair agent click 1"),
         format!("{} | log {seen:?}", cut(&said(&pressed), 600)),
     );
 
     form(control, id, window_id, log, pid)?;
     select_and_link(control, id, window_id, log, pid)?;
+    large_page(control, id, window_id, log)?;
 
     let seen = lines(log, from);
     let touched = user_touched(&seen);

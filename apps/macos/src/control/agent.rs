@@ -765,6 +765,8 @@ async fn handle_one(
             };
             let pressed = async {
                 let mut notes = Vec::new();
+                // Whether anything changed after the last key that pressed.
+                let mut changed = None;
                 for (pressed, chord) in chords.into_iter().enumerate() {
                     if forwarder.agent_stopped() {
                         return Err(ControlError::takeover(format!(
@@ -782,10 +784,11 @@ async fn handle_one(
                                 shared_app::refusal(beside, &format!("{name} with repeat")),
                             ));
                         }
-                        let note = shared_app::key(id, beside, chord, name, cx)
+                        let (note, after) = shared_app::key(id, beside, chord, name, cx)
                             .await
                             .map_err(|e| partial(pressed, e))?;
                         notes.push(note);
+                        changed = after.or(changed);
                         continue;
                     }
                     // Select All needs a first responder, which an app in the
@@ -825,7 +828,13 @@ async fn handle_one(
                 }
                 Ok(match notes.is_empty() {
                     true => json!({}),
-                    false => json!({ "route": "accessibility", "note": notes.join(" ") }),
+                    false => {
+                        let mut reply = json!({ "route": "accessibility", "note": notes.join(" ") });
+                        if let Some(changed) = changed {
+                            reply["changed"] = json!(changed);
+                        }
+                        reply
+                    }
                 })
             }
             .await;
@@ -1649,6 +1658,13 @@ async fn handle_one(
             }
             .map_err(ControlError::failed)?;
             Ok(json!({}))
+        }
+        // Test hook: turn the check for a press's effect beside the user's
+        // window off or on, to time what it costs.
+        "debugPressCheck" if debug_methods() => {
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::set_press_check(on);
+            Ok(json!({ "on": on }))
         }
         // Test hook: the user hands a window over from the Windows menu.
         "debugHandOver" if debug_methods() => {

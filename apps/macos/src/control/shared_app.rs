@@ -316,24 +316,41 @@ pub async fn click(
         }
         Use::Press => {}
     }
-    let display = display_watch(id, cx);
-    let before = watch(&display, target, true, true, cx).await;
+    let started = Instant::now();
+    let watcher = match press_check() {
+        true => Some(Watcher::new(id, target, &element, cx).await),
+        false => None,
+    };
+    let before = match &watcher {
+        Some(w) => Some(w.read(true, true, cx).await),
+        None => None,
+    };
+    let read = started.elapsed();
     let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
     if pressed == ax::Action::NotTaken {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press."
         )));
     }
-    let seen = after_press(&display, target, before, cx).await;
+    let seen = match (&watcher, before) {
+        (Some(w), Some(before)) => w.after(before, cx).await,
+        _ => Effect::Unknown,
+    };
+    log::info!(
+        "shared app: press on {label:?}: {seen:?}, before {} ms, all {} ms",
+        read.as_millis(),
+        started.elapsed().as_millis()
+    );
     check_focus(b, &format!("The press on \"{label}\""), cx).await?;
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"
     );
-    let note = outcome(&what, pressed, seen)?;
+    let (note, changed) = outcome(&what, pressed, seen)?;
     Ok(json!({
         "windowId": target.window_id,
         "route": "accessibility",
         "note": note,
+        "changed": changed,
     }))
 }
 
@@ -345,100 +362,152 @@ enum Use {
     Menu(String),
 }
 
+/// Whether a press beside the user's window is checked for its effect:
+/// off only through `debugPressCheck`, to time the check.
+static PRESS_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_press_check(on: bool) {
+    PRESS_CHECK.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn press_check() -> bool {
+    PRESS_CHECK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How long a press gets to show an effect.
-const EFFECT_WAIT: Duration = Duration::from_millis(1000);
+const EFFECT_WAIT: Duration = Duration::from_millis(600);
+/// When the page is first read after the press, and how often after
+/// that; the display and the app's windows are checked every 50 ms. A
+/// read of a large page takes about 60 ms.
+const PAGE_FIRST: Duration = Duration::from_millis(50);
+const PAGE_EVERY: Duration = Duration::from_millis(150);
 
-/// The change counter of the display's picture, when it runs.
-fn display_watch(id: DisplayId, cx: &AsyncApp) -> Option<Arc<crate::mac::capture::Latest>> {
-    crate::ui::stream::global()?.read_with(cx, |s, _| s.latest(id))
+/// Where a press's effect is read: the display's change counter, when it
+/// runs, the app's windows and the page.
+struct Watcher {
+    display: Option<Arc<crate::mac::capture::Latest>>,
+    pid: i32,
+    page: Option<beside::Page>,
 }
 
-/// What the display, the page and the app's windows show now. `wait`
-/// gives the display's counter a moment to compare its first frame, as
-/// when its stream just started for this action; `page` reads the page,
-/// which takes longer.
-async fn watch(
-    display: &Option<Arc<crate::mac::capture::Latest>>,
-    target: WindowTarget,
-    wait: bool,
-    page: bool,
-    cx: &AsyncApp,
-) -> Watch {
-    let started = Instant::now();
-    let counted = || display.as_ref().and_then(|d| d.counted());
-    let mut changes = counted();
-    while wait
-        && changes.is_none()
-        && display.is_some()
-        && started.elapsed() < Duration::from_millis(300)
-    {
-        cx.background_executor()
-            .timer(Duration::from_millis(30))
-            .await;
-        changes = counted();
-    }
-    let (windows, page) = off(cx, move || {
-        (
-            ax::window_count(target.pid),
-            page.then(|| beside::page_digest(target)).flatten(),
-        )
-    })
-    .await;
-    Watch {
-        display_changes: changes,
-        windows,
-        page,
-    }
-}
-
-/// Watch for the press's effect, up to `EFFECT_WAIT`: the display and the
-/// app's windows all along, then the page.
-async fn after_press(
-    display: &Option<Arc<crate::mac::capture::Latest>>,
-    target: WindowTarget,
-    before: Watch,
-    cx: &AsyncApp,
-) -> Effect {
-    let started = Instant::now();
-    loop {
-        let last = started.elapsed() >= EFFECT_WAIT;
-        let now = watch(display, target, false, last, cx).await;
-        let seen = effect(before, now);
-        if seen == Effect::Seen || last {
-            return seen;
+impl Watcher {
+    async fn new(
+        id: DisplayId,
+        target: WindowTarget,
+        pressed: &ax::Sendable,
+        cx: &AsyncApp,
+    ) -> Self {
+        let display =
+            crate::ui::stream::global().and_then(|s| s.read_with(cx, |s, _| s.latest(id)));
+        let pressed = ax::Sendable(pressed.get().clone());
+        let page = off(cx, move || beside::page(target, pressed.get())).await;
+        Watcher {
+            display,
+            pid: target.pid,
+            page,
         }
-        cx.background_executor()
-            .timer(Duration::from_millis(50))
-            .await;
+    }
+
+    /// What the display, the app's windows and, with `page`, the page
+    /// show now. `wait` gives the display's counter a moment to compare
+    /// its first frame, as when its stream just started for this action.
+    async fn read(&self, wait: bool, page: bool, cx: &AsyncApp) -> Watch {
+        let started = Instant::now();
+        let counted = || self.display.as_ref().and_then(|d| d.counted());
+        let mut changes = counted();
+        while wait
+            && changes.is_none()
+            && self.display.is_some()
+            && started.elapsed() < Duration::from_millis(300)
+        {
+            cx.background_executor()
+                .timer(Duration::from_millis(30))
+                .await;
+            changes = counted();
+        }
+        let pid = self.pid;
+        let read = self.page.clone().filter(|_| page);
+        let (windows, page) = off(cx, move || {
+            (ax::window_count(pid), read.map(|p| beside::page_digest(&p)))
+        })
+        .await;
+        Watch {
+            display_changes: changes,
+            windows,
+            page,
+        }
+    }
+
+    /// Watch for the press's effect, up to `EFFECT_WAIT`.
+    async fn after(&self, before: Watch, cx: &AsyncApp) -> Effect {
+        let started = Instant::now();
+        // A page shows a change in its tree within tens of milliseconds.
+        let mut page_next = PAGE_FIRST;
+        loop {
+            let elapsed = started.elapsed();
+            let last = elapsed >= EFFECT_WAIT;
+            let page = last || elapsed >= page_next;
+            if page {
+                page_next = elapsed + PAGE_EVERY;
+            }
+            let now = self.read(false, page, cx).await;
+            let seen = effect(before, now);
+            if seen == Effect::Seen {
+                log::info!("shared app: a press changed {before:?} to {now:?}");
+            }
+            if seen == Effect::Seen || last {
+                return seen;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(50))
+                .await;
+        }
     }
 }
 
 /// The answer to a press beside the user's window, by what the app
-/// answered and what changed after: `what` says where it went. A press
-/// after which nothing changed fails, so the agent doesn't take it for
-/// done, as a link whose page cancels the click.
-fn outcome(what: &str, pressed: ax::Action, seen: Effect) -> Result<String, ControlError> {
-    let answered = match pressed {
-        ax::Action::Unsure(error) => {
-            format!(
-                " The app answered the press with an error ({error:?}), which it also gives when the press ran."
-            )
-        }
-        _ => String::new(),
-    };
+/// answered and what changed after: a note, and whether anything changed,
+/// None when that couldn't be read. `what` says where the press went. A
+/// press that ran succeeds whether or not anything changed, since a
+/// button can act without showing it, as a request or a download does;
+/// one the app answered with an error fails unless something changed.
+fn outcome(
+    what: &str,
+    pressed: ax::Action,
+    seen: Effect,
+) -> Result<(String, Option<bool>), ControlError> {
     let wait = EFFECT_WAIT.as_millis();
-    match seen {
-        Effect::Seen => Ok(format!(
-            "{what}. The window changed after it.{answered} A page sees a click event but no mousedown or mouseup."
+    let error = match pressed {
+        ax::Action::Unsure(error) => Some(error),
+        _ => None,
+    };
+    match (seen, error) {
+        (Effect::Seen, None) => Ok((
+            format!(
+                "{what}. The window changed after it. A page sees a click event but no mousedown or mouseup."
+            ),
+            Some(true),
         )),
-        Effect::NoneSeen => Err(ControlError::failed(format!(
-            "{what}, but nothing changed: within {wait} ms, the page's text, values and address, your display and the app's windows all stayed the same.{answered} The page may ignore the press, as a link whose page cancels its click does, or act only on a real mouse click, which can't be posted while the user's window of the same app has focus. Don't repeat the press: take a screenshot to check, then try another element or act_on_element, or call request_help."
-        ))),
-        Effect::Unknown if answered.is_empty() => Ok(format!(
-            "{what}. Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything: take a screenshot to check. A page sees a click event but no mousedown or mouseup."
+        (Effect::Seen, Some(error)) => Ok((
+            format!(
+                "{what}. The app answered with an error ({error:?}), but the window changed after it, so the press ran. A page sees a click event but no mousedown or mouseup."
+            ),
+            Some(true),
         )),
-        Effect::Unknown => Err(ControlError::failed(format!(
-            "{what}.{answered} Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything. Take a screenshot to check before you press again."
+        (Effect::NoneSeen, None) => Ok((
+            format!(
+                "{what}. The press ran, but nothing on the page, your display or the app's windows changed within {wait} ms. The page may have ignored it, as a link whose page cancels its click does, or acted without showing it, as a request or a download. Take a screenshot before pressing again."
+            ),
+            Some(false),
+        )),
+        (Effect::Unknown, None) => Ok((
+            format!(
+                "{what}. Accessibility didn't show the window's contents before and after, so Agent Screen can't say whether the press did anything: take a screenshot to check. A page sees a click event but no mousedown or mouseup."
+            ),
+            None,
+        )),
+        (Effect::NoneSeen | Effect::Unknown, Some(error)) => Err(ControlError::failed(format!(
+            "{what}, but the app answered with an error ({error:?}) and nothing in the window was seen to change within {wait} ms, so the press may not have run. Take a screenshot to check before you press again."
         ))),
     }
 }
@@ -498,14 +567,15 @@ pub async fn type_text(
 
 /// One key chord beside the user's window: Return, Escape, Backspace,
 /// cmd+a, Tab and shift+Tab through accessibility, anything else refused.
-/// A note for the reply, when the key went in.
+/// A note for the reply, when the key went in, and for Return's press
+/// whether anything changed after it.
 pub async fn key(
     id: DisplayId,
     b: Beside,
     chord: KeyChord,
     name: &str,
     cx: &AsyncApp,
-) -> Result<String, ControlError> {
+) -> Result<(String, Option<bool>), ControlError> {
     let route = key_route(Front::OtherFocused, chord);
     if route == KeyRoute::Refuse {
         return Err(refusal(b, &format!("the key {name}")));
@@ -521,14 +591,23 @@ pub async fn key(
     if let KeyRoute::FocusNext | KeyRoute::FocusPrevious = route {
         return tab(id, b, route == KeyRoute::FocusNext, name, cx)
             .await
+            .map(|note| (note, None))
             .map_err(|e| e.unwrap_or_else(fail));
     }
     let (element, last) = resolve(id, b, cx).await.map_err(&fail)?;
     let target = b.target;
-    let display = display_watch(id, cx);
-    let before = match route {
-        KeyRoute::Confirm => Some(watch(&display, target, true, true, cx).await),
-        _ => None,
+    // Return that will press: its effect is watched.
+    let presses = route == KeyRoute::Confirm && press_check() && {
+        let e = ax::Sendable(element.get().clone());
+        off(cx, move || beside::confirm_acts(e.get())).await
+    };
+    let watcher = match presses {
+        true => Some(Watcher::new(id, target, &element, cx).await),
+        false => None,
+    };
+    let before = match &watcher {
+        Some(w) => Some(w.read(true, true, cx).await),
+        None => None,
     };
     let (done, element) = off(cx, move || {
         let e = element.get();
@@ -560,7 +639,10 @@ pub async fn key(
         keep_selection(id, &element, selection);
     }
     let seen = match (before, answer) {
-        (Some(before), Some(_)) => Some(after_press(&display, target, before, cx).await),
+        (Some(before), Some(_)) => match &watcher {
+            Some(w) => Some(w.after(before, cx).await),
+            None => None,
+        },
         _ => None,
     };
     check_focus(b, &format!("The key {name}"), cx).await?;
@@ -571,7 +653,7 @@ pub async fn key(
     );
     match (answer, seen) {
         (Some(answer), Some(seen)) => outcome(&what, answer, seen),
-        _ => Ok(format!("{what}.")),
+        _ => Ok((format!("{what}."), None)),
     }
 }
 
