@@ -569,6 +569,37 @@ pub fn hid(args: &[&str]) -> Result<String> {
     result
 }
 
+/// Click a painted Help Card button in the test app through real HID input.
+/// Leave the pointer there: moving it back would revoke an Input Grant.
+/// The caller restores the pointer after the grant ends.
+pub fn click_card_button(control: &Control, pid: u32, button: &str) -> Result<(f64, f64)> {
+    let card = windows_of(pid)
+        .into_iter()
+        .find(|w| w.width == 320.0 && w.layer > 0)
+        .context("no test card; refusing to click")?;
+    let painted = control.call("debugCard", json!({}))?;
+    let b = &painted["buttons"][button];
+    let rect: Vec<f64> = (0..4).filter_map(|i| b[i].as_f64()).collect();
+    anyhow::ensure!(
+        rect.len() == 4
+            && rect[0] >= 0.0
+            && rect[1] >= 0.0
+            && rect[2] > 0.0
+            && rect[3] > 0.0
+            && rect[0] + rect[2] <= card.width + 0.5
+            && rect[1] + rect[3] <= card.height + 0.5,
+        "invalid {button} bounds: {painted}"
+    );
+    let x = card.x + rect[0] + rect[2] / 2.0;
+    let y = card.y + rect[1] + rect[3] / 2.0;
+    println!(
+        "     actual HID click {button} at ({x}, {y}), card {} bounds {b}",
+        card.id
+    );
+    hid(&["click", &x.to_string(), &y.to_string(), "--stay"])?;
+    Ok((x, y))
+}
+
 pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")

@@ -717,6 +717,26 @@ mod tests {
     }
 
     #[test]
+    fn revocation_before_a_loan_needs_fresh_approval_after_cleanup() {
+        let mut q = queue();
+        let request = add(&mut q, "a", 1, "click", 0);
+        let approval = q.approval();
+        assert!(q.allow(approval, 0));
+        // Observer failure takes this same revocation path, even before
+        // the first loan has armed input monitoring.
+        q.user_input();
+        assert!(q.grant().is_none());
+        assert!(q.pending_end().is_some());
+        assert!(!q.allow(q.approval(), 1));
+        restored(&mut q);
+        assert_eq!(q.start(2), None);
+        assert!(!q.allow(approval, 2));
+        assert_eq!(q.request(request).unwrap().status, Status::Queued);
+        assert!(q.allow(q.approval(), 3));
+        assert_eq!(q.start(3), Some(request));
+    }
+
+    #[test]
     fn completion_by_one_session_does_not_end_anothers_grant() {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "drag", 0);
