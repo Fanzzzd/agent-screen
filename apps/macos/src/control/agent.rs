@@ -370,18 +370,32 @@ async fn handle_one(
             // A window of the user's front app, beside the window they
             // work in: a posted click would make it key and take their
             // typing (#110).
-            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await
-                && let (Front::OtherFocused, Some(focused)) = shared_app::front(target, cx).await
-            {
-                // Keys go to this window from now on, as after a click.
-                // The app is in front, so this sends no focus record.
-                show_pointer(&core, id, point, true, cx).focus(target).await;
-                let beside = Beside { target, focused };
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await {
                 let plain = modifiers == Default::default();
                 let left = button == Button::Left;
-                return shared_app::click(id, point, beside, left, count, !plain, cx)
-                    .await
-                    .and_then(reply);
+                match shared_app::front(target, cx).await {
+                    (Front::OtherFocused, Some(focused)) => {
+                        // Keys go to this window from now on, as after a
+                        // click. The app is in front, so this sends no
+                        // focus record.
+                        show_pointer(&core, id, point, true, cx).focus(target).await;
+                        let beside = Beside { target, focused };
+                        return shared_app::click(id, point, beside, left, count, !plain, cx)
+                            .await
+                            .and_then(reply);
+                    }
+                    // The user's window may have focus: no focus record,
+                    // and nothing posted (#110).
+                    (Front::OtherFocused | Front::FocusUnknown, _) => {
+                        show_pointer(&core, id, point, true, cx);
+                        return shared_app::click_unverified(
+                            id, point, target, left, count, !plain, cx,
+                        )
+                        .await
+                        .and_then(reply);
+                    }
+                    (Front::No | Front::TargetFocused, _) => {}
+                }
             }
             let forwarder = show_pointer(&core, id, point, true, cx);
             let hit = forwarder.click(point, button, count, modifiers).await;
@@ -507,6 +521,7 @@ async fn handle_one(
                 )
                 .await;
             }
+            shared_app::posted_press_allowed(from, "drag", cx).await?;
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
             let released = match dragged {
@@ -629,6 +644,7 @@ async fn handle_one(
                     }
                     Route::Posted => {}
                 }
+                shared_app::posted_press_allowed(point, "press", cx).await?;
             }
             let hit = show_pointer(&core, id, point, down, cx)
                 .button(point, down, modifiers)
@@ -1658,6 +1674,18 @@ async fn handle_one(
             }
             .map_err(ControlError::failed)?;
             Ok(json!({}))
+        }
+        // Test hook: the front app's focused window reads as unknown, as
+        // when the app doesn't answer accessibility in time.
+        "debugFocusUnknown" if debug_methods() => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Err(ControlError::invalid(
+                    "debugFocusUnknown requires the isolated e2e instance",
+                ));
+            }
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::force_focus_unknown(on);
+            Ok(json!({ "on": on }))
         }
         // Test hook: turn the check for a press's effect beside the user's
         // window off or on, to time what it costs.
@@ -3421,6 +3449,7 @@ async fn act(
         let c = center.ok_or_else(|| {
             ControlError::failed("the element has no visible frame on the display")
         })?;
+        shared_app::posted_press_allowed(c, "click", cx).await?;
         show_pointer(core, id, c, true, cx)
             .click(c, button, count, Default::default())
             .await;

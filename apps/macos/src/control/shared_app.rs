@@ -45,8 +45,19 @@ pub async fn front(target: WindowTarget, cx: &AsyncApp) -> (Front, Option<u32>) 
     if crate::mac::input::front() != Some(pid) {
         return (Front::No, None);
     }
-    let focused = off(cx, move || ax::focused_window_id(pid)).await;
+    let focused = match FOCUS_UNKNOWN.load(std::sync::atomic::Ordering::Relaxed) {
+        true => None,
+        false => off(cx, move || ax::focused_window_id(pid)).await,
+    };
     (Front::of(true, focused, target.window_id), focused)
+}
+
+/// Test hook (`debugFocusUnknown`): the front app's focused window reads
+/// as unknown, as when the app doesn't answer in time.
+static FOCUS_UNKNOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn force_focus_unknown(on: bool) {
+    FOCUS_UNKNOWN.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The app's name and both windows' titles, for messages.
@@ -262,7 +273,84 @@ pub async fn click(
             "{why}, so nothing was sent. Beside the user's window only a single left click without modifiers works, through accessibility: it presses the control under the point or picks the text field there for type. Use act_on_element for other actions, or wait until the user switches to another app."
         )));
     }
-    let target = b.target;
+    let instead = "Click a button, link or text field, use act_on_element, or wait until the user switches to another app.";
+    press_at(id, point, b.target, why, Some(b), instead, cx).await
+}
+
+/// Why nothing is posted to a window of the user's front app whose
+/// focused window accessibility couldn't name.
+fn unverified(target: WindowTarget, what: &str) -> String {
+    let app = windows::find(target.window_id).map_or_else(|| "The app".into(), |w| w.app);
+    format!(
+        "{app} is the user's front app, and Accessibility could not verify which of its windows has focus, so a posted {what} on your window could make it {app}'s key window and take the user's typing"
+    )
+}
+
+/// A click in the agent's window of the user's front app when
+/// accessibility didn't say which window has focus. Nothing is posted,
+/// as beside the user's window: a press or a picked field through
+/// accessibility, or a refusal.
+pub async fn click_unverified(
+    id: DisplayId,
+    point: (f64, f64),
+    target: WindowTarget,
+    left: bool,
+    count: i64,
+    modifiers: bool,
+    cx: &AsyncApp,
+) -> Result<Value, ControlError> {
+    let why = unverified(target, "click");
+    if click_route(Front::FocusUnknown, left, count, modifiers) == ClickRoute::Refuse {
+        return Err(ControlError::failed(format!(
+            "{why}, so nothing was sent. Until it answers, only a single left click without modifiers works, through accessibility. Retry after a moment, or use act_on_element."
+        )));
+    }
+    let instead = "Retry after a moment, when the app answers, or use act_on_element.";
+    press_at(id, point, target, why, None, instead, cx).await
+}
+
+/// A posted press, drag or click on `at` that would reach a window of the
+/// user's front app other than its focused one, or one whose focused
+/// window is unknown, takes the user's focus (#110): refused.
+pub async fn posted_press_allowed(
+    at: (f64, f64),
+    what: &str,
+    cx: &AsyncApp,
+) -> Result<(), ControlError> {
+    let Some((target, _)) = off(cx, move || crate::mac::input::window_at(at)).await else {
+        return Ok(());
+    };
+    match front(target, cx).await {
+        (Front::No | Front::TargetFocused, _) => Ok(()),
+        (Front::OtherFocused, Some(focused)) => {
+            let n = names(Beside { target, focused });
+            Err(ControlError::failed(format!(
+                "{app} is the user's front app with their window {user} focused, and a posted {what} on your window {agent} would make it {app}'s key window and take the user's typing, so nothing was sent. Use act_on_element, or wait until the user switches to another app.",
+                app = n.app,
+                user = n.user,
+                agent = n.agent,
+            )))
+        }
+        _ => Err(ControlError::failed(format!(
+            "{}. Nothing was sent. Retry after a moment, when the app answers, or use act_on_element.",
+            unverified(target, what)
+        ))),
+    }
+}
+
+/// A click at `point` in `target`'s window through accessibility: a press,
+/// or a field picked for type. `why` says why nothing is posted, `check`
+/// is the user's window to keep focused, and `instead` what to do where
+/// nothing takes a press.
+async fn press_at(
+    id: DisplayId,
+    point: (f64, f64),
+    target: WindowTarget,
+    why: String,
+    check: Option<Beside>,
+    instead: &str,
+    cx: &AsyncApp,
+) -> Result<Value, ControlError> {
     let hit = off(cx, move || {
         let hit = beside::hit(target, point);
         match hit {
@@ -286,7 +374,7 @@ pub async fn click(
                 |r| format!("the element there is {r}"),
             );
             return Err(ControlError::failed(format!(
-                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). Click a button, link or text field, use act_on_element, or wait until the user switches to another app."
+                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead}"
             )));
         }
     };
@@ -341,7 +429,9 @@ pub async fn click(
         read.as_millis(),
         started.elapsed().as_millis()
     );
-    check_focus(b, &format!("The press on \"{label}\""), cx).await?;
+    if let Some(b) = check {
+        check_focus(b, &format!("The press on \"{label}\""), cx).await?;
+    }
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"
     );

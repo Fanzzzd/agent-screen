@@ -129,11 +129,13 @@ pub enum ClickRoute {
 
 pub fn click_route(front: Front, left: bool, count: i64, modifiers: bool) -> ClickRoute {
     match front {
-        // With no window known to hold focus, as in an app still starting
-        // that doesn't answer yet, the click goes out as before.
-        Front::No | Front::TargetFocused | Front::FocusUnknown => ClickRoute::Post,
-        Front::OtherFocused if left && count <= 1 && !modifiers => ClickRoute::Accessibility,
-        Front::OtherFocused => ClickRoute::Refuse,
+        Front::No | Front::TargetFocused => ClickRoute::Post,
+        // With no window known to hold focus, the user's may: a posted
+        // click could take it, so nothing is posted, as beside it.
+        Front::OtherFocused | Front::FocusUnknown if left && count <= 1 && !modifiers => {
+            ClickRoute::Accessibility
+        }
+        Front::OtherFocused | Front::FocusUnknown => ClickRoute::Refuse,
     }
 }
 
@@ -388,7 +390,12 @@ mod tests {
         assert_eq!(click_route(f, true, 1, false), ClickRoute::Accessibility);
         assert_eq!(
             click_route(Front::FocusUnknown, true, 1, false),
-            ClickRoute::Post
+            ClickRoute::Accessibility,
+            "a click when the focused window is unknown is never posted"
+        );
+        assert_eq!(
+            click_route(Front::FocusUnknown, true, 2, false),
+            ClickRoute::Refuse
         );
         assert_eq!(click_route(f, false, 1, false), ClickRoute::Refuse);
         assert_eq!(click_route(f, true, 2, false), ClickRoute::Refuse);

@@ -511,6 +511,63 @@ fn select_and_link(
     Ok(())
 }
 
+/// When accessibility doesn't say which window of the front app has focus
+/// (debugFocusUnknown), nothing posted may reach the agent's window: a
+/// posted click would make it key and take the user's typing. A click on
+/// a button presses it through accessibility; a click where nothing takes
+/// a press is refused; the user's window keeps key focus. A drag in the
+/// page needs a DevTools pipe and is never posted there, so it isn't tried.
+fn focus_unknown(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let tree0 = tree(control, id, window_id)?;
+    let (_, press) = element(&tree0, "agent press")?;
+    // Blank page beside the button, where nothing takes a press.
+    let blank = (press.0 + 200, press.1);
+    let mark = lines(log, 0).len();
+    control.call("debugFocusUnknown", json!({ "on": true }))?;
+    let pressed = control.call("click", at(press));
+    sleep_ms(500);
+    let blank_click = control.call("click", at(blank));
+    sleep_ms(500);
+    control.call("debugFocusUnknown", json!({ "on": false }))?;
+    let seen = lines(log, mark);
+    let now = focused_window(pid);
+    let took = |l: &String| {
+        l.starts_with("win user blur")
+            || l.starts_with("win agent focus")
+            || l.starts_with("pair user")
+    };
+    check(
+        "with the focused window unknown, nothing makes the agent's window key or touches the user's",
+        now == "pair user" && !seen.iter().any(took),
+        format!("focused {now:?} | log {seen:?}"),
+    );
+    check(
+        "a click on the agent's button presses it through accessibility",
+        pressed
+            .as_ref()
+            .is_ok_and(|v| v["route"] == "accessibility")
+            && has(&seen, "pair agent click"),
+        cut(&said(&pressed), 500),
+    );
+    let unknown = |r: &Result<Value>| {
+        r.as_ref()
+            .is_err_and(|e| e.to_string().contains("could not verify"))
+    };
+    check(
+        "a click on blank page is refused, saying focus couldn't be verified",
+        unknown(&blank_click),
+        cut(&said(&blank_click), 500),
+    );
+    Ok(())
+}
+
 fn median(mut ms: Vec<u128>) -> u128 {
     ms.sort_unstable();
     ms[ms.len() / 2]
@@ -734,6 +791,7 @@ fn test(
     form(control, id, window_id, log, pid)?;
     select_and_link(control, id, window_id, log, pid)?;
     large_page(control, id, window_id, log)?;
+    focus_unknown(control, id, window_id, log, pid)?;
 
     let seen = lines(log, from);
     let touched = user_touched(&seen);
