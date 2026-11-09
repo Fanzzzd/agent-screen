@@ -14,7 +14,11 @@
 //! In that state: a click on the agent's field, `type`, Return, a click on
 //! the agent's button, and Tab. Each either reaches the agent's page or
 //! fails and names the user's window, and the user's window never loses
-//! key focus or sees an event. Then, with your front app back, the same
+//! key focus or sees an event. The agent's select gets a click, a press,
+//! set_value and Return: none opens its menu, which would take the user's
+//! keyboard, and each answer says nothing was chosen. A click on a link
+//! whose page cancels it succeeds with changed false; the button and the
+//! submit, which change the page, say changed true. Then, with your front app back, the same
 //! harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
@@ -28,8 +32,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, allow_on_your_screen, check, cut, fixture, instance, json, out, restore, run,
-    sh_lenient, skip, sleep_ms, snapshot, start_test_app, stop_test_app, tool, wait_for_idle,
+    Control, Value, allow_on_your_screen, check, cut, fixture, instance, json, out, probe, restore,
+    run, sh_lenient, skip, sleep_ms, snapshot, start_test_app, stop_test_app, tool, wait_for_idle,
 };
 use anyhow::{Context, Result, bail};
 
@@ -320,19 +324,24 @@ fn form(
     let named = returned
         .as_ref()
         .is_err_and(|e| e.to_string().contains("\"agent submit\""));
+    // The page shows "sent", so the click's answer is a success.
     let clicked = if returned.is_err() && named && after_return == 0 {
         let clicked = control.call("click", at(submit));
         sleep_ms(500);
-        Some(said(&clicked))
+        Some(clicked)
     } else {
         None
     };
+    let clicked_ok = clicked
+        .as_ref()
+        .is_some_and(|c| c.as_ref().is_ok_and(|v| v["changed"] == true));
+    let clicked = clicked.as_ref().map(said);
     let seen = lines(log, from);
     check(
         "Return in the second field submits the form once, or names its submit button, which a click submits once",
         submits(log) == 1
             && has(&seen, "pair agent login-submit [\"\",\"pw\"]")
-            && (returned.is_ok() || clicked.is_some()),
+            && (returned.is_ok() || clicked_ok),
         format!(
             "{} | click {clicked:?} | log {seen:?}",
             cut(&said(&returned), 600)
@@ -343,6 +352,382 @@ fn form(
         "the user's window is still the focused one",
         now == "pair user",
         now,
+    );
+    Ok(())
+}
+
+/// The app's open menus, windows at the pop-up menu level, each closed at
+/// once through accessibility, as the user's click would: an open menu
+/// holds the user's keyboard, and a regression must not leave it so.
+fn menus(pid: &str) -> usize {
+    let open: Vec<Value> = probe(&["windows", pid])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|w| w["layer"] == 101)
+        .collect();
+    for w in &open {
+        let n = |k: &str| w[k].as_f64().unwrap_or_default();
+        let (x, y) = (n("x") + n("width") / 2.0, n("y") + n("height") / 2.0);
+        let _ = probe(&["cancelmenu", &x.to_string(), &y.to_string()]);
+    }
+    open.len()
+}
+
+/// The number get_window_state gives the element labelled `label`.
+fn number(tree: &str, label: &str) -> Result<u64> {
+    let (line, _) = element(tree, label)?;
+    line.trim_start()
+        .strip_prefix('[')
+        .and_then(|rest| rest.split(']').next())
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("no number in {line}"))
+}
+
+/// The agent's select and a link its page cancels, beside the user's
+/// window (#110). A select's press opens a native menu in the user's
+/// front app, which takes their keyboard, so no route may press it; and a
+/// press the page ignores must not come back as a success.
+fn select_and_link(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let action = |element: u64, action: &str, value: Option<&str>| {
+        let mut params = json!({
+            "sessionKey": KEY,
+            "displayId": id,
+            "windowId": window_id,
+            "element": element,
+            "action": action,
+        });
+        if let Some(value) = value {
+            params["value"] = json!(value);
+        }
+        let reply = control.call("elementAction", params);
+        sleep_ms(500);
+        reply
+    };
+    let tree0 = tree(control, id, window_id)?;
+    let (pick_line, pick) = element(&tree0, "agent pick")?;
+    let pick_number = number(&tree0, "agent pick")?;
+    let (_, dead) = element(&tree0, "agent dead")?;
+    let near: Vec<&str> = tree0
+        .lines()
+        .skip_while(|l| !l.contains("\"agent pick\""))
+        .take(6)
+        .collect();
+    println!("     the select: {pick_line}; then {near:?}");
+    let from = lines(log, 0).len();
+    let refused_choice = |reply: &Result<Value>| {
+        reply.as_ref().is_err_and(|e| {
+            let e = e.to_string();
+            e.contains("set_value") || e.contains("request_help")
+        })
+    };
+
+    let clicked = control.call("click", at(pick));
+    sleep_ms(700);
+    let open = menus(pid);
+    check(
+        "a click on the agent's select opens no menu",
+        open == 0,
+        format!("{open} menus | {}", cut(&said(&clicked), 400)),
+    );
+    check(
+        "and fails, saying nothing was chosen and naming set_value",
+        refused_choice(&clicked),
+        cut(&said(&clicked), 600),
+    );
+
+    let pressed = action(pick_number, "press", None);
+    sleep_ms(200);
+    let open = menus(pid);
+    check(
+        "act_on_element press on the select opens no menu and fails naming set_value",
+        open == 0 && refused_choice(&pressed),
+        format!("{open} menus | {}", cut(&said(&pressed), 600)),
+    );
+
+    let set = action(pick_number, "set_value", Some("Banana"));
+    sleep_ms(200);
+    let open = menus(pid);
+    let seen = lines(log, from);
+    check(
+        "set_value on the select, in an app with no DevTools pipe, opens no menu and says nothing was chosen",
+        open == 0 && set.is_err() && !has(&seen, "pair agent change"),
+        format!("{open} menus | {} | log {seen:?}", cut(&said(&set), 600)),
+    );
+
+    let dead_number = number(&tree0, "agent dead")?;
+    let shown = action(dead_number, "show_menu", None);
+    sleep_ms(200);
+    let open = menus(pid);
+    check(
+        "act_on_element show_menu beside the user's window opens no menu and says why",
+        open == 0
+            && shown
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("show_menu was not sent")),
+        format!("{open} menus | {}", cut(&said(&shown), 500)),
+    );
+
+    let mark = lines(log, 0).len();
+    let followed = control.call("click", at(dead));
+    sleep_ms(500);
+    let seen = lines(log, mark);
+    check(
+        "a click on a link whose page cancels it reaches the page",
+        has(&seen, "pair agent dead-click"),
+        format!("{} | log {seen:?}", cut(&said(&followed), 400)),
+    );
+    check(
+        "and it succeeds, saying the press ran but nothing changed",
+        followed.as_ref().is_ok_and(|v| {
+            v["changed"] == false
+                && v["note"]
+                    .as_str()
+                    .is_some_and(|n| n.contains("press ran, but nothing"))
+        }),
+        cut(&said(&followed), 600),
+    );
+
+    // shift+Tab from the link reaches the select; Return there must not
+    // press it open.
+    let back = key(control, id, "shift+Tab");
+    let reached = back
+        .as_ref()
+        .is_ok_and(|v| v.to_string().contains("agent pick"));
+    let returned = key(control, id, "Return");
+    sleep_ms(200);
+    let open = menus(pid);
+    check(
+        "Return on the select Tab reached opens no menu and fails naming set_value",
+        reached && open == 0 && refused_choice(&returned),
+        format!(
+            "{open} menus | shift+Tab {} | Return {}",
+            cut(&said(&back), 300),
+            cut(&said(&returned), 600)
+        ),
+    );
+
+    let seen = lines(log, from);
+    let now = focused_window(pid);
+    check(
+        "the select chose nothing and the user's window stays focused",
+        !has(&seen, "pair agent change") && now == "pair user" && !has(&seen, "win user blur"),
+        format!("focused {now:?} | log {seen:?}"),
+    );
+    Ok(())
+}
+
+/// When accessibility doesn't say which window of the front app has focus
+/// (debugFocusUnknown), nothing posted may reach the agent's window: a
+/// posted click would make it key and take the user's typing. A click on
+/// a button presses it through accessibility; a click where nothing takes
+/// a press is refused; the user's window keeps key focus. A drag in the
+/// page needs a DevTools pipe and is never posted there, so it isn't tried.
+fn focus_unknown(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let tree0 = tree(control, id, window_id)?;
+    let (_, press) = element(&tree0, "agent press")?;
+    // Blank page beside the button, where nothing takes a press.
+    let blank = (press.0 + 200, press.1);
+    let mark = lines(log, 0).len();
+    control.call("debugFocusUnknown", json!({ "on": true }))?;
+    let pressed = control.call("click", at(press));
+    sleep_ms(500);
+    let blank_click = control.call("click", at(blank));
+    sleep_ms(500);
+    let act = |name: &str, action: &str| -> Result<Result<Value>> {
+        let element = number(&tree(control, id, window_id)?, name)?;
+        let reply = control.call(
+            "elementAction",
+            json!({ "sessionKey": KEY, "displayId": id, "windowId": window_id, "element": element, "action": action }),
+        );
+        sleep_ms(500);
+        Ok(reply)
+    };
+    let select_pressed = act("agent pick", "press")?;
+    let select_menus = menus(pid);
+    let shown = act("agent dead", "show_menu")?;
+    let shown_menus = menus(pid);
+    control.call("debugFocusUnknown", json!({ "on": false }))?;
+    let seen = lines(log, mark);
+    let now = focused_window(pid);
+    let took = |l: &String| {
+        l.starts_with("win user blur")
+            || l.starts_with("win agent focus")
+            || l.starts_with("pair user")
+    };
+    check(
+        "with the focused window unknown, nothing makes the agent's window key or touches the user's",
+        now == "pair user" && !seen.iter().any(took),
+        format!("focused {now:?} | log {seen:?}"),
+    );
+    check(
+        "a click on the agent's button presses it through accessibility",
+        pressed
+            .as_ref()
+            .is_ok_and(|v| v["route"] == "accessibility")
+            && has(&seen, "pair agent click"),
+        cut(&said(&pressed), 500),
+    );
+    let unknown = |r: &Result<Value>| {
+        r.as_ref()
+            .is_err_and(|e| e.to_string().contains("could not verify"))
+    };
+    check(
+        "a click on blank page is refused, saying focus couldn't be verified",
+        unknown(&blank_click),
+        cut(&said(&blank_click), 500),
+    );
+    check(
+        "act_on_element press on the select opens no menu and is refused, as the click is",
+        select_menus == 0 && unknown(&select_pressed),
+        format!(
+            "{select_menus} menus | {}",
+            cut(&said(&select_pressed), 500)
+        ),
+    );
+    check(
+        "act_on_element show_menu opens no menu and is refused",
+        shown_menus == 0 && unknown(&shown),
+        format!("{shown_menus} menus | {}", cut(&said(&shown), 500)),
+    );
+    Ok(())
+}
+
+/// The number of the line in `listing` that holds `wanted`.
+fn listed(listing: &str, wanted: &str) -> Result<u64> {
+    listing
+        .lines()
+        .find(|l| l.contains(wanted))
+        .and_then(|l| l.trim_start().strip_prefix('['))
+        .and_then(|rest| rest.split(']').next())
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("no {wanted} in\n{}", cut(listing, 2000)))
+}
+
+/// File > Close Window from the app's menu bar, pressed from the agent's
+/// window state beside the user's window (#110): a menu command acts on
+/// the app's key window, the user's, so the press is refused and the
+/// user's window stays open and focused.
+fn menu_bar(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let call = |element: u64| {
+        control.call(
+            "elementAction",
+            json!({ "sessionKey": KEY, "displayId": id, "windowId": window_id, "element": element, "action": "press" }),
+        )
+    };
+    // With a text field focused in the agent's window, an Electron menu
+    // item goes through the Input Queue instead; a press on the button
+    // moves focus off the fields.
+    let (_, press) = element(&tree(control, id, window_id)?, "agent press")?;
+    let _ = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": press.0, "y": press.1 }),
+    );
+    sleep_ms(500);
+    let file = listed(&tree(control, id, window_id)?, "menubaritem \"File\"")?;
+    let menu = call(file)?;
+    let close = listed(
+        menu["menu"].as_str().unwrap_or_default(),
+        "\"Close Window\"",
+    )?;
+    let mark = lines(log, 0).len();
+    let pressed = call(close);
+    sleep_ms(800);
+    let seen = lines(log, mark);
+    let now = focused_window(pid);
+    check(
+        "File > Close Window pressed beside the user's window is refused, naming their window",
+        pressed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("menu command acts on")),
+        cut(&said(&pressed), 500),
+    );
+    check(
+        "and the user's window stays open and focused",
+        now == "pair user" && !has(&seen, "win user closed") && !has(&seen, "win user blur"),
+        format!("focused {now:?} | log {seen:?}"),
+    );
+    Ok(())
+}
+
+fn median(mut ms: Vec<u128>) -> u128 {
+    ms.sort_unstable();
+    ms[ms.len() / 2]
+}
+
+/// What the check for a press's effect costs on a page of about 5000
+/// elements: five clicks each on the counter button and the cancelled
+/// link, with the check and without it (debugPressCheck), median times.
+fn large_page(control: &Control, id: &Value, window_id: u64, log: &std::path::Path) -> Result<()> {
+    let at = |(x, y): (i64, i64)| json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y });
+    let tree0 = tree(control, id, window_id)?;
+    let (_, grow) = element(&tree0, "agent grow")?;
+    let (_, press) = element(&tree0, "agent press")?;
+    let (_, dead) = element(&tree0, "agent dead")?;
+    let mark = lines(log, 0).len();
+    let grown = control.call("click", at(grow));
+    sleep_ms(1500);
+    check(
+        "the agent's page grows by 2500 rows",
+        has(&lines(log, mark), "pair agent grown 2500"),
+        format!("{} | log {:?}", cut(&said(&grown), 300), lines(log, mark)),
+    );
+    let mut times = Vec::new();
+    for on in [true, false] {
+        control.call("debugPressCheck", json!({ "on": on }))?;
+        for (name, point) in [("button", press), ("link", dead)] {
+            let mut ms = Vec::new();
+            let mut changed = Vec::new();
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                let reply = control.call("click", at(point));
+                ms.push(started.elapsed().as_millis());
+                changed.push(match &reply {
+                    Ok(v) => v["changed"].to_string(),
+                    Err(e) => format!("error: {}", cut(&e.to_string(), 200)),
+                });
+                sleep_ms(300);
+            }
+            println!(
+                "     large page, check {}: {name} median {} ms of {ms:?}, changed {changed:?}",
+                if on { "on" } else { "off" },
+                median(ms.clone())
+            );
+            times.push((on, name, changed));
+        }
+    }
+    control.call("debugPressCheck", json!({ "on": true }))?;
+    check(
+        "on the large page, the button's clicks say changed true and the link's changed false",
+        times.iter().all(|(on, name, changed)| {
+            let wanted = match (on, *name) {
+                (false, _) => "null",
+                (true, "button") => "true",
+                (true, _) => "false",
+            };
+            changed.iter().all(|c| c == wanted)
+        }),
+        format!("{times:?}"),
     );
     Ok(())
 }
@@ -500,12 +885,16 @@ fn test(
     sleep_ms(500);
     let seen = lines(log, from);
     check(
-        "a click on the agent's button presses it, or fails naming the user's window",
-        (pressed.is_ok() && has(&seen, "pair agent click 1")) || names_users_window(&pressed),
-        format!("{} | log {seen:?}", cut(&said(&pressed), 400)),
+        "a click on the agent's button presses it, and the answer says the window changed (changed true)",
+        pressed.as_ref().is_ok_and(|v| v["changed"] == true) && has(&seen, "pair agent click 1"),
+        format!("{} | log {seen:?}", cut(&said(&pressed), 600)),
     );
 
     form(control, id, window_id, log, pid)?;
+    select_and_link(control, id, window_id, log, pid)?;
+    large_page(control, id, window_id, log)?;
+    focus_unknown(control, id, window_id, log, pid)?;
+    menu_bar(control, id, window_id, log, pid)?;
 
     let seen = lines(log, from);
     let touched = user_touched(&seen);

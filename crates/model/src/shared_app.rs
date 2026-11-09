@@ -8,8 +8,9 @@
 //! agent last clicked through accessibility, read back after; Return and
 //! Escape become that element's confirm, press and cancel actions; Tab and
 //! shift+Tab set focus on the next or previous element of the page; a left
-//! click becomes a press or picks a field. Everything else fails and names
-//! the window that holds focus.
+//! click becomes a press or picks a field. A control whose press opens a
+//! menu, as a select, is never pressed: an open menu takes the user's
+//! keyboard. Everything else fails and names the window that holds focus.
 
 use crate::keychord::KeyChord;
 
@@ -44,6 +45,20 @@ impl Front {
     /// Whether posted events reach the target window and nothing else.
     pub fn posts(self) -> bool {
         matches!(self, Front::No | Front::TargetFocused)
+    }
+
+    /// Whether the user may be working in another window of the target's
+    /// app, so a posted click or press could take their focus: one of its
+    /// windows has focus, or none is known to and the app has a window on
+    /// the user's screens (`user_window`). An app whose windows are all
+    /// on Agent Displays, as one that never answers which window has
+    /// focus, such as a Java app or a game, has no window of the user's.
+    pub fn shared(self, user_window: bool) -> bool {
+        match self {
+            Front::OtherFocused => true,
+            Front::FocusUnknown => user_window,
+            Front::No | Front::TargetFocused => false,
+        }
     }
 }
 
@@ -126,13 +141,20 @@ pub enum ClickRoute {
     Refuse,
 }
 
-pub fn click_route(front: Front, left: bool, count: i64, modifiers: bool) -> ClickRoute {
-    match front {
-        // With no window known to hold focus, as in an app still starting
-        // that doesn't answer yet, the click goes out as before.
-        Front::No | Front::TargetFocused | Front::FocusUnknown => ClickRoute::Post,
-        Front::OtherFocused if left && count <= 1 && !modifiers => ClickRoute::Accessibility,
-        Front::OtherFocused => ClickRoute::Refuse,
+/// `user_window`: whether the app has a window on the user's screens.
+pub fn click_route(
+    front: Front,
+    user_window: bool,
+    left: bool,
+    count: i64,
+    modifiers: bool,
+) -> ClickRoute {
+    match front.shared(user_window) {
+        false => ClickRoute::Post,
+        // With no window known to hold focus, the user's may: a posted
+        // click could take it, so nothing is posted, as beside it.
+        true if left && count <= 1 && !modifiers => ClickRoute::Accessibility,
+        true => ClickRoute::Refuse,
     }
 }
 
@@ -143,19 +165,101 @@ pub enum ElementUse {
     /// Text goes in through its value.
     Text,
     Press,
+    /// A press opens a menu, which takes the user's keyboard while it is
+    /// open: nothing presses it.
+    Menu,
     Nothing,
 }
 
 const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"];
 
-pub fn element_use(role: &str, actions: &[String]) -> ElementUse {
+/// Roles whose press can open a menu: a pop-up button, as AppKit's and a
+/// web page's select, and a pull-down menu button.
+const MENU_ROLES: [&str; 2] = ["AXPopUpButton", "AXMenuButton"];
+
+/// Whether an element's role is one whose press can open a menu.
+pub fn may_open_menu(role: &str) -> bool {
+    MENU_ROLES.contains(&role)
+}
+
+/// Whether pressing an element opens a menu. Chromium also calls a page's
+/// button with aria-haspopup a pop-up button, and the page draws the menu
+/// that one opens; a select holds its menu among its children. So in a
+/// web page a pop-up button without a menu child takes a press, and
+/// everywhere else, or where accessibility can't tell the page, it opens
+/// a menu.
+pub fn opens_menu(role: &str, in_web_page: Option<bool>, holds_menu: bool) -> bool {
+    MENU_ROLES.contains(&role) && (in_web_page != Some(true) || holds_menu)
+}
+
+/// `menu` is what `opens_menu` says of the element.
+pub fn element_use(role: &str, actions: &[String], menu: bool) -> ElementUse {
     if TEXT_ROLES.contains(&role) {
         return ElementUse::Text;
+    }
+    if menu {
+        return ElementUse::Menu;
     }
     if actions.iter().any(|a| a == "AXPress") {
         return ElementUse::Press;
     }
     ElementUse::Nothing
+}
+
+/// What Agent Screen sees of the agent's window around a press. Each is
+/// None when it couldn't be read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Watch {
+    /// Visible changes counted on its display so far. A small change, as
+    /// one digit of a counter, can stay under the count's threshold.
+    pub display_changes: Option<u64>,
+    /// How many windows its app has.
+    pub windows: Option<usize>,
+    /// A digest of what can be read cheaply while waiting: the page's
+    /// address and title, its focused element and the pressed element's
+    /// own tree.
+    pub quick: Option<u64>,
+    /// The focused element in the agent's window, while one there has
+    /// focus. None, no information, as when the read timed out or focus
+    /// is in the user's window, where they may move it: never a change.
+    pub focus: Option<u64>,
+    /// A digest of its page's accessibility tree, which shows a changed
+    /// text or value however small; read before the press and once at the
+    /// end, as it costs the app tens of milliseconds.
+    pub page: Option<u64>,
+}
+
+/// What a press did, as far as the display, the page and the app's
+/// windows show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    Seen,
+    /// The page was read before and after, and neither it, the display
+    /// nor the app's windows changed.
+    NoneSeen,
+    /// Nothing changed that could be read, but the page couldn't be.
+    Unknown,
+}
+
+pub fn effect(before: Watch, after: Watch) -> Effect {
+    let differ = |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a != b);
+    if differ(before.display_changes, after.display_changes)
+        || differ(before.quick, after.quick)
+        || differ(before.focus, after.focus)
+        || differ(before.page, after.page)
+        || differ(
+            before.windows.map(|w| w as u64),
+            after.windows.map(|w| w as u64),
+        )
+    {
+        return Effect::Seen;
+    }
+    // The display's count alone misses small changes, so only a page
+    // read on both sides tells that nothing happened.
+    match (before.page, after.page) {
+        (Some(_), Some(_)) => Effect::NoneSeen,
+        _ => Effect::Unknown,
+    }
 }
 
 /// Whether Tab stops at an element: one that is enabled and lets a client
@@ -308,33 +412,146 @@ mod tests {
     #[test]
     fn only_a_plain_left_click_has_an_accessibility_route() {
         let f = Front::OtherFocused;
-        assert_eq!(click_route(Front::No, false, 2, true), ClickRoute::Post);
         assert_eq!(
-            click_route(Front::TargetFocused, true, 1, false),
+            click_route(Front::No, true, false, 2, true),
             ClickRoute::Post
         );
-        assert_eq!(click_route(f, true, 1, false), ClickRoute::Accessibility);
         assert_eq!(
-            click_route(Front::FocusUnknown, true, 1, false),
+            click_route(Front::TargetFocused, true, true, 1, false),
             ClickRoute::Post
         );
-        assert_eq!(click_route(f, false, 1, false), ClickRoute::Refuse);
-        assert_eq!(click_route(f, true, 2, false), ClickRoute::Refuse);
-        assert_eq!(click_route(f, true, 1, true), ClickRoute::Refuse);
+        for user_window in [true, false] {
+            assert_eq!(
+                click_route(f, user_window, true, 1, false),
+                ClickRoute::Accessibility
+            );
+            assert_eq!(
+                click_route(f, user_window, false, 1, false),
+                ClickRoute::Refuse
+            );
+            assert_eq!(
+                click_route(f, user_window, true, 2, false),
+                ClickRoute::Refuse
+            );
+            assert_eq!(
+                click_route(f, user_window, true, 1, true),
+                ClickRoute::Refuse
+            );
+        }
+    }
+
+    #[test]
+    fn with_focus_unknown_a_click_is_posted_only_when_the_user_has_no_window_of_the_app() {
+        let u = Front::FocusUnknown;
+        // A window of the app on the user's screens may have focus: a
+        // posted click could take it.
+        assert!(u.shared(true));
+        assert_eq!(
+            click_route(u, true, true, 1, false),
+            ClickRoute::Accessibility
+        );
+        assert_eq!(click_route(u, true, true, 2, false), ClickRoute::Refuse);
+        // All its windows on Agent Displays, as a Java app or a game that
+        // never says which window has focus: clicks go out as before.
+        assert!(!u.shared(false));
+        assert_eq!(click_route(u, false, true, 1, false), ClickRoute::Post);
+        assert_eq!(click_route(u, false, false, 2, true), ClickRoute::Post);
+        assert!(Front::OtherFocused.shared(false));
+        assert!(!Front::No.shared(true) && !Front::TargetFocused.shared(true));
     }
 
     #[test]
     fn a_field_takes_text_and_a_control_takes_a_press() {
         let press = vec!["AXPress".to_string()];
-        assert_eq!(element_use("AXTextField", &press), ElementUse::Text);
-        assert_eq!(element_use("AXTextArea", &[]), ElementUse::Text);
-        assert_eq!(element_use("AXButton", &press), ElementUse::Press);
-        assert_eq!(element_use("AXLink", &press), ElementUse::Press);
-        assert_eq!(element_use("AXGroup", &[]), ElementUse::Nothing);
+        assert_eq!(element_use("AXTextField", &press, false), ElementUse::Text);
+        assert_eq!(element_use("AXTextArea", &[], false), ElementUse::Text);
+        assert_eq!(element_use("AXButton", &press, false), ElementUse::Press);
+        assert_eq!(element_use("AXLink", &press, false), ElementUse::Press);
+        assert_eq!(element_use("AXGroup", &[], false), ElementUse::Nothing);
+        assert_eq!(element_use("AXPopUpButton", &press, true), ElementUse::Menu);
+        assert_eq!(
+            element_use("AXPopUpButton", &press, false),
+            ElementUse::Press
+        );
         assert!(takes_text("AXTextField", true, true));
         assert!(!takes_text("AXTextField", false, true), "a password field");
         assert!(!takes_text("AXTextField", true, false));
         assert!(!takes_text("AXButton", true, true));
+    }
+
+    #[test]
+    fn a_select_or_native_pop_up_opens_a_menu_and_a_page_drawn_one_does_not() {
+        // A web page's select holds its menu.
+        assert!(opens_menu("AXPopUpButton", Some(true), true));
+        // A page's button with aria-haspopup: the page draws its menu.
+        assert!(!opens_menu("AXPopUpButton", Some(true), false));
+        // AppKit's pop-up buttons, and any where the page can't be told.
+        assert!(opens_menu("AXPopUpButton", Some(false), false));
+        assert!(opens_menu("AXPopUpButton", None, false));
+        assert!(opens_menu("AXMenuButton", Some(false), false));
+        assert!(!opens_menu("AXButton", Some(false), true));
+        assert!(!opens_menu("AXLink", None, true));
+    }
+
+    #[test]
+    fn a_press_did_something_when_the_display_the_page_or_the_apps_windows_changed() {
+        let watch = |display_changes, windows, page| Watch {
+            display_changes,
+            windows,
+            quick: Some(1),
+            focus: Some(3),
+            page,
+        };
+        let same = watch(Some(4), Some(2), Some(7));
+        assert_eq!(effect(same, same), Effect::NoneSeen);
+        assert_eq!(effect(same, watch(Some(5), Some(2), Some(7))), Effect::Seen);
+        assert_eq!(
+            effect(same, watch(Some(4), Some(3), Some(7))),
+            Effect::Seen,
+            "a window opened off the display"
+        );
+        assert_eq!(
+            effect(same, watch(Some(4), Some(2), Some(8))),
+            Effect::Seen,
+            "a counter's digit, too small for the display's count"
+        );
+        assert_eq!(
+            effect(watch(None, None, Some(7)), watch(None, None, Some(7))),
+            Effect::NoneSeen
+        );
+        // Without the page on both sides, an unchanged display says
+        // nothing.
+        assert_eq!(
+            effect(watch(Some(4), Some(2), None), watch(Some(4), Some(2), None)),
+            Effect::Unknown
+        );
+        assert_eq!(effect(same, watch(Some(4), Some(2), None)), Effect::Unknown);
+        assert_eq!(
+            effect(watch(None, Some(2), None), watch(None, Some(3), None)),
+            Effect::Seen
+        );
+        let moved = Watch {
+            quick: Some(2),
+            ..same
+        };
+        assert_eq!(effect(same, moved), Effect::Seen, "the address moved");
+        let refocused = Watch {
+            focus: Some(4),
+            ..same
+        };
+        assert_eq!(
+            effect(same, refocused),
+            Effect::Seen,
+            "focus moved in the agent's window"
+        );
+        // A focus read that timed out, or focus in the user's window,
+        // says nothing.
+        let unread = Watch {
+            focus: None,
+            ..same
+        };
+        assert_eq!(effect(same, unread), Effect::NoneSeen);
+        assert_eq!(effect(unread, same), Effect::NoneSeen);
     }
 
     #[test]

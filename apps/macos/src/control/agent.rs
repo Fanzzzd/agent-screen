@@ -370,18 +370,38 @@ async fn handle_one(
             // A window of the user's front app, beside the window they
             // work in: a posted click would make it key and take their
             // typing (#110).
-            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await
-                && let (Front::OtherFocused, Some(focused)) = shared_app::front(target, cx).await
-            {
-                // Keys go to this window from now on, as after a click.
-                // The app is in front, so this sends no focus record.
-                show_pointer(&core, id, point, true, cx).focus(target).await;
-                let beside = Beside { target, focused };
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await {
                 let plain = modifiers == Default::default();
                 let left = button == Button::Left;
-                return shared_app::click(id, point, beside, left, count, !plain, cx)
-                    .await
-                    .and_then(reply);
+                let (front, focused) = shared_app::front(target, cx).await;
+                // With focus unknown, only an app with a window on the
+                // user's screens may have theirs focused.
+                let shared = front.shared(
+                    front == Front::FocusUnknown && shared_app::user_window(target.pid, cx).await,
+                );
+                match (front, focused) {
+                    (Front::OtherFocused, Some(focused)) => {
+                        // Keys go to this window from now on, as after a
+                        // click. The app is in front, so this sends no
+                        // focus record.
+                        show_pointer(&core, id, point, true, cx).focus(target).await;
+                        let beside = Beside { target, focused };
+                        return shared_app::click(id, point, beside, left, count, !plain, cx)
+                            .await
+                            .and_then(reply);
+                    }
+                    // The user's window may have focus: no focus record,
+                    // and nothing posted (#110).
+                    _ if shared => {
+                        show_pointer(&core, id, point, true, cx);
+                        return shared_app::click_unverified(
+                            id, point, target, left, count, !plain, cx,
+                        )
+                        .await
+                        .and_then(reply);
+                    }
+                    _ => {}
+                }
             }
             let forwarder = show_pointer(&core, id, point, true, cx);
             let hit = forwarder.click(point, button, count, modifiers).await;
@@ -507,6 +527,7 @@ async fn handle_one(
                 )
                 .await;
             }
+            shared_app::posted_press_allowed(from, "drag", cx).await?;
             let forwarder = show_pointer(&core, id, from, true, cx);
             let dragged = forwarder.drag(from, to, modifiers).await;
             let released = match dragged {
@@ -629,6 +650,7 @@ async fn handle_one(
                     }
                     Route::Posted => {}
                 }
+                shared_app::posted_press_allowed(point, "press", cx).await?;
             }
             let hit = show_pointer(&core, id, point, down, cx)
                 .button(point, down, modifiers)
@@ -765,6 +787,8 @@ async fn handle_one(
             };
             let pressed = async {
                 let mut notes = Vec::new();
+                // Whether anything changed after the last key that pressed.
+                let mut changed = None;
                 for (pressed, chord) in chords.into_iter().enumerate() {
                     if forwarder.agent_stopped() {
                         return Err(ControlError::takeover(format!(
@@ -782,10 +806,11 @@ async fn handle_one(
                                 shared_app::refusal(beside, &format!("{name} with repeat")),
                             ));
                         }
-                        let note = shared_app::key(id, beside, chord, name, cx)
+                        let (note, after) = shared_app::key(id, beside, chord, name, cx)
                             .await
                             .map_err(|e| partial(pressed, e))?;
                         notes.push(note);
+                        changed = after.or(changed);
                         continue;
                     }
                     // Select All needs a first responder, which an app in the
@@ -825,7 +850,13 @@ async fn handle_one(
                 }
                 Ok(match notes.is_empty() {
                     true => json!({}),
-                    false => json!({ "route": "accessibility", "note": notes.join(" ") }),
+                    false => {
+                        let mut reply = json!({ "route": "accessibility", "note": notes.join(" ") });
+                        if let Some(changed) = changed {
+                            reply["changed"] = json!(changed);
+                        }
+                        reply
+                    }
                 })
             }
             .await;
@@ -1239,6 +1270,14 @@ async fn handle_one(
                     return reply(json!({ "menu": tree }));
                 }
             }
+            // Beside the user's window of the same app, a menu would open
+            // in their front app and take their keyboard (#110).
+            let item = ax::Sendable(element.clone());
+            if let Some(refusal) =
+                shared_app::element_refusal(window.target, &action, &item, cx).await
+            {
+                return Err(refusal);
+            }
             if action == "read_text" {
                 let item = ax::Sendable(element.clone());
                 let (value, selected) = cx
@@ -1347,6 +1386,13 @@ async fn handle_one(
             } else {
                 None
             };
+            // A menu bar command acts on the app's key window, the user's
+            // while they work in another window of it (#110).
+            if let Some(refusal) =
+                shared_app::menu_bar_refusal(window.target, &action, &item, cx).await
+            {
+                return Err(refusal);
+            }
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
                 core.update(cx, |c, _| c.forwarder(id))
                     .remember_user_window(window.target.pid)
@@ -1625,6 +1671,25 @@ async fn handle_one(
             }
             .map_err(ControlError::failed)?;
             Ok(json!({}))
+        }
+        // Test hook: the front app's focused window reads as unknown, as
+        // when the app doesn't answer accessibility in time.
+        "debugFocusUnknown" if debug_methods() => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Err(ControlError::invalid(
+                    "debugFocusUnknown requires the isolated e2e instance",
+                ));
+            }
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::force_focus_unknown(on);
+            Ok(json!({ "on": on }))
+        }
+        // Test hook: turn the check for a press's effect beside the user's
+        // window off or on, to time what it costs.
+        "debugPressCheck" if debug_methods() => {
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::set_press_check(on);
+            Ok(json!({ "on": on }))
         }
         // Test hook: the user hands a window over from the Windows menu.
         "debugHandOver" if debug_methods() => {
@@ -3381,6 +3446,7 @@ async fn act(
         let c = center.ok_or_else(|| {
             ControlError::failed("the element has no visible frame on the display")
         })?;
+        shared_app::posted_press_allowed(c, "click", cx).await?;
         show_pointer(core, id, c, true, cx)
             .click(c, button, count, Default::default())
             .await;

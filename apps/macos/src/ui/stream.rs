@@ -81,6 +81,12 @@ impl Streams {
             .map(|s| s.latest.changes.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// The display's latest frame and change count, to watch off the main
+    /// thread.
+    pub fn latest(&self, id: DisplayId) -> Option<Arc<Latest>> {
+        self.streams.get(&id).map(|s| s.latest.clone())
+    }
+
     /// Leave out of every running capture the status items that appeared
     /// since it started. Lists shareable content off the main thread.
     pub fn refresh_filters(&self, cx: &mut Context<Self>) {

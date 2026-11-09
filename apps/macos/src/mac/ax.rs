@@ -161,18 +161,35 @@ pub fn perform(element: &AXUIElement, action: &str) -> bool {
 /// CannotComplete although it ran, so only an unsupported action counts as
 /// not taken: a fallback click then cannot press twice.
 pub fn try_action(element: &AXUIElement, action: &str) -> bool {
+    !matches!(action_result(element, action), Action::NotTaken)
+}
+
+/// What an app answered to an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Done,
+    /// The element doesn't take the action: nothing ran.
+    NotTaken,
+    /// The app reported an error, as Failure or CannotComplete, or answered
+    /// late: the action may have run or not.
+    Unsure(AXError),
+}
+
+/// Perform an action and say what the app answered, for a caller that
+/// checks what the action did rather than trusting the answer.
+pub fn action_result(element: &AXUIElement, action: &str) -> Action {
     let gate = input_gate(element);
     let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let action = CFString::from_str(action);
-    let error = unsafe { element.perform_action(&action) };
-    !matches!(
-        error,
+    match unsafe { element.perform_action(&action) } {
+        AXError::Success => Action::Done,
         AXError::ActionUnsupported
-            | AXError::AttributeUnsupported
-            | AXError::IllegalArgument
-            | AXError::InvalidUIElement
-            | AXError::NoValue
-    )
+        | AXError::AttributeUnsupported
+        | AXError::IllegalArgument
+        | AXError::InvalidUIElement
+        | AXError::NoValue => Action::NotTaken,
+        error => Action::Unsure(error),
+    }
 }
 
 /// Make `target` its app's main window, as a click on it would, without
@@ -1262,7 +1279,7 @@ pub fn editing(target: WindowTarget) -> bool {
     false
 }
 
-fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
+pub fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
     let (a, b): (&CFType, &CFType) = (a, b);
     a == b
 }
@@ -1841,6 +1858,44 @@ fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
         unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
     let values = array.to_vec();
     (values.len() == NAMES.len()).then_some(values)
+}
+
+/// A digest of what a page shows: each element's role, subrole, title,
+/// description, value, enabled state and number of children, in tree
+/// order, as far as `limit` elements go. Focus and frames are left out:
+/// a press focuses what it presses, and a frame moves when the page
+/// scrolls. The digest, and whether elements were left out past `limit`.
+pub fn page_digest(root: &AXUIElement, limit: usize) -> (u64, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut stack = vec![unsafe { CFRetained::retain(NonNull::from(root)) }];
+    let mut visits = 0;
+    while let Some(element) = stack.pop() {
+        if visits >= limit {
+            return (hasher.finish(), true);
+        }
+        visits += 1;
+        let Some(values) = multiple_values(&element) else {
+            0u8.hash(&mut hasher);
+            continue;
+        };
+        for i in [0, 1, 2, 3, 4, 5] {
+            let v = &values[i];
+            if let Some(s) = v.downcast_ref::<CFString>() {
+                s.to_string().hash(&mut hasher);
+            } else if let Some(n) = v.downcast_ref::<CFNumber>().and_then(|n| n.as_f64()) {
+                n.to_bits().hash(&mut hasher);
+            } else if let Some(b) = v.downcast_ref::<CFBoolean>() {
+                b.as_bool().hash(&mut hasher);
+            } else {
+                i.hash(&mut hasher);
+            }
+        }
+        let children = elements(&values[9]);
+        children.len().hash(&mut hasher);
+        stack.extend(children.into_iter().rev());
+    }
+    (hasher.finish(), false)
 }
 
 /// The app whose Dock icon is at the global point `at`: its name, as the
