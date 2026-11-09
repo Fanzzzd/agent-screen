@@ -12,6 +12,7 @@ use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::key_window::{AppWindow, KeyWindow, key_window};
+use agent_screen_model::viewer_keys::Focus;
 use futures::channel::oneshot;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -210,16 +211,18 @@ pub struct Forwarder {
     /// Set while the user has taken the display over: an agent's typing or
     /// drag still running stops at its next step.
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Where the user's text goes on the display, for the input method's
-    /// candidates.
+    /// What has the keyboard in the target, for the Viewer's input
+    /// method, looked up off the main thread.
     caret: std::sync::Arc<std::sync::Mutex<Caret>>,
 }
 
-/// The target's caret, in global points.
+/// What has the keyboard in the target, and its caret in global points.
 #[derive(Default, Clone, Copy)]
 struct Caret {
     /// The point of the user's last press in the Viewer.
     pressed: Option<(f64, f64)>,
+    /// The focus as the target last reported it since that press.
+    focus: Focus,
     /// The caret of the focused text element, as the target reports it
     /// since that press.
     reported: Option<Rect>,
@@ -304,7 +307,7 @@ impl Forwarder {
     ) {
         *self.caret.lock().unwrap_or_else(|e| e.into_inner()) = Caret {
             pressed: Some(at),
-            reported: None,
+            ..Caret::default()
         };
         self.send(move |w| {
             diagnostics::within(trace, Phase::Down, || {
@@ -377,6 +380,10 @@ impl Forwarder {
 
     pub fn key(&self, code: u16, down: bool, flags: CGEventFlags, within: Rect) {
         self.send(move |w| w.viewer_key(code, down, flags, within));
+        // A key such as Tab or a click's release may move the focus.
+        if !down {
+            self.inspect(within);
+        }
     }
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
@@ -387,18 +394,27 @@ impl Forwarder {
     /// the user's keys go to, as Unicode text.
     pub fn text(&self, text: String, within: Rect) {
         self.send(move |w| w.viewer_text(&text, within));
+        self.inspect(within);
     }
 
-    /// Look up the caret of the target's focused text element, after the
-    /// input queued before.
-    pub fn find_caret(&self) {
+    /// Look up what has the keyboard in the target and its caret, after
+    /// the input queued before: the window the user's keys go to, or the
+    /// display's topmost one.
+    pub fn inspect(&self, within: Rect) {
         let caret = self.caret.clone();
         self.send(move |w| {
-            let Some(target) = w.focused else { return };
-            if let Some(rect) = super::ax::caret(target) {
-                caret.lock().unwrap_or_else(|e| e.into_inner()).reported = Some(rect);
-            }
+            let (focus, reported) = w
+                .keys_target_now(within)
+                .map_or((Focus::Other, None), super::ax::text_focus);
+            let mut caret = caret.lock().unwrap_or_else(|e| e.into_inner());
+            caret.focus = focus;
+            caret.reported = reported;
         });
+    }
+
+    /// What had the keyboard in the target when last looked up.
+    pub fn text_focus(&self) -> Focus {
+        self.caret.lock().unwrap_or_else(|e| e.into_inner()).focus
     }
 
     /// Where the user's text goes on the display, in global points: the
@@ -1644,6 +1660,23 @@ impl Worker {
     /// The window on the display keys go to: the one last focused, or a
     /// window its app opened on the display since, as a shortcut such as
     /// cmd+n does, or else the topmost.
+    /// The window keys would go to now, with no side effect: the one
+    /// focused while it is on the display, else the display's topmost.
+    fn keys_target_now(&self, within: Rect) -> Option<WindowTarget> {
+        let list = hits();
+        self.focused
+            .filter(|t| {
+                list.iter()
+                    .any(|h| (h.host == *t || h.target == *t) && within.intersects(&h.bounds))
+            })
+            .or_else(|| {
+                list.iter()
+                    .filter(|h| within.contains(h.bounds.mid()))
+                    .find(|h| h.layer == 0)
+                    .map(|h| h.target)
+            })
+    }
+
     fn pick_for_keys(&mut self, within: Rect) -> Option<Hit> {
         let list = hits();
         // A panel shown again reuses its window, and needs waking again.
@@ -2070,7 +2103,7 @@ mod caret_tests {
         assert!(Caret::default().rect().is_none());
         let pressed = Caret {
             pressed: Some((500.0, 300.0)),
-            reported: None,
+            ..Caret::default()
         };
         let rect = pressed.rect().unwrap();
         assert_eq!((rect.x, rect.y + rect.height / 2.0), (500.0, 300.0));

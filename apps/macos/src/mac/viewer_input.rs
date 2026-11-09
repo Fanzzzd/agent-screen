@@ -16,7 +16,7 @@ use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, 
 use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
-use agent_screen_model::viewer_keys::{self, Press, Route, Source};
+use agent_screen_model::viewer_keys::{self, Focus, Press, Route, Source};
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
@@ -69,6 +69,50 @@ pub fn set_marked(text: Option<&str>) {
 
 pub fn marked() -> Option<String> {
     MARKED.with(|m| m.borrow().clone())
+}
+
+/// End the input method's composition without committing it: the
+/// display changed or ended, the Takeover ended, the sheet came up or the
+/// Viewer lost the keyboard. The input context discards its marked text
+/// too, so none of it comes back in the next Takeover. That call goes out
+/// after the current event: the input method may call back into the
+/// Viewer's view, inside GPUI.
+pub fn drop_composition() {
+    let had = MARKED.with(|m| m.borrow_mut().take()).is_some();
+    // Releases of keys the input method had: the next real ones go out.
+    STATE.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            s.composed.clear();
+        }
+    });
+    if !had {
+        return;
+    }
+    log::debug!("viewer: composition dropped");
+    native::main_async(|| {
+        let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+        if window == 0 {
+            return;
+        }
+        let window = unsafe { &*(window as *const NSWindow) };
+        if let Some(context) = input_context(window) {
+            let _: () = unsafe { objc2::msg_send![context, discardMarkedText] };
+        }
+    });
+}
+
+/// What has the keyboard in the target of the display the Viewer shows,
+/// as last looked up. Secure input anywhere counts as a password field.
+pub fn focus() -> Focus {
+    if super::ime::secure_input() {
+        return Focus::Secure;
+    }
+    STATE.with(|s| {
+        s.try_borrow()
+            .ok()
+            .and_then(|s| s.display.as_ref().map(|(_, f)| f.text_focus()))
+            .unwrap_or_default()
+    })
 }
 
 /// Text the user's input method finished in the Viewer, for the target on
@@ -289,9 +333,12 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.pressed = None;
         s.click = None;
         s.composed.clear();
+        if let Some((display, forwarder)) = &s.display {
+            forwarder.inspect(cg::display_bounds(*display));
+        }
     });
     // A composition belongs to the display it started on.
-    set_marked(None);
+    drop_composition();
 }
 
 /// Where the image is, and whether the sheet covers it. The Viewer reports
@@ -512,6 +559,11 @@ fn handle_in(
                     });
                     return true;
                 }
+                // A click ends a composition: the focus may move.
+                if MARKED.with(|m| m.borrow().is_some()) {
+                    s.composed.clear();
+                    drop_composition();
+                }
                 // The user's first input takes the display over from its agent.
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
@@ -543,6 +595,8 @@ fn handle_in(
                 }) {
                     forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
                 }
+                // The click may have focused a field: once it lands.
+                forwarder.inspect(cg::display_bounds(display));
                 true
             }
             NSEventType::MouseMoved => {
@@ -590,18 +644,21 @@ fn handle_in(
                     .with(|s| s.get())
                     .unwrap_or_else(super::ime::current_kind);
                 let composing = MARKED.with(|m| m.borrow().is_some());
-                let route = viewer_keys::route(source, composing, press);
+                let focus = if super::ime::secure_input() {
+                    Focus::Secure
+                } else {
+                    forwarder.text_focus()
+                };
+                let route = viewer_keys::route(source, focus, composing, press);
                 ROUTED.with(|r| r.set(Some(route)));
                 if route == Route::InputMethod {
-                    // On to GPUI's view and the input method. A new
-                    // composition looks up the target's caret first.
-                    if !composing {
-                        forwarder.find_caret();
-                    }
+                    // On to GPUI's view and the input method.
                     s.sent_up.remove(&code);
                     s.composed.insert(code);
                     return false;
                 }
+                // A release the input method had and the Viewer missed.
+                s.composed.remove(&code);
                 forwarder.key(code, true, flags(event), cg::display_bounds(display));
                 // Command shortcuts often never report their release, so
                 // send it now and skip the real one if it comes.
@@ -628,7 +685,9 @@ fn handle_in(
                 forwarder.flags_changed(event.keyCode(), flags(event));
                 // An input method switches modes on Shift alone: it sees
                 // the modifiers too.
-                if !INJECTING.with(|i| i.get()) && super::ime::current_kind() == Source::InputMethod
+                if !INJECTING.with(|i| i.get())
+                    && forwarder.text_focus() == Focus::Text
+                    && super::ime::current_kind() == Source::InputMethod
                 {
                     input_method_sees(&window, event);
                 }
@@ -642,15 +701,16 @@ fn handle_in(
 /// Hand `event` to the input context of the Viewer's view, as AppKit's
 /// own text views do with modifier changes.
 fn input_method_sees(window: &NSWindow, event: &NSEvent) {
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
-    let Some(view) = window.firstResponder() else {
-        return;
-    };
-    let context: *mut AnyObject = unsafe { msg_send![&*view, inputContext] };
-    if let Some(context) = unsafe { context.as_ref() } {
-        let _: bool = unsafe { msg_send![context, handleEvent: event] };
+    if let Some(context) = input_context(window) {
+        let _: bool = unsafe { objc2::msg_send![context, handleEvent: event] };
     }
+}
+
+/// The input context of the Viewer's view, GPUI's.
+fn input_context(window: &NSWindow) -> Option<&objc2::runtime::AnyObject> {
+    let view = window.firstResponder()?;
+    let context: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![&*view, inputContext] };
+    unsafe { context.as_ref() }
 }
 
 pub fn install() {

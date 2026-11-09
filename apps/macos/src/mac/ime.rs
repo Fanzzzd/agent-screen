@@ -106,6 +106,11 @@ fn on_main<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     out.expect("the main queue ran it")
 }
 
+/// Whether secure input is on, as a focused password field turns it on.
+pub fn secure_input() -> bool {
+    unsafe { IsSecureEventInputEnabled() }
+}
+
 /// Whether the user's current input source is a keyboard layout or an
 /// input method, for keys typed in the Viewer. Main thread only, as the
 /// Viewer's event monitor runs there.

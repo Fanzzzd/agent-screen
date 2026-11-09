@@ -1625,6 +1625,8 @@ async fn handle_one(
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
                 "caret": crate::mac::viewer_input::caret_in_window(),
+                // What has the keyboard in the target: text, secure or other.
+                "focus": format!("{:?}", crate::mac::viewer_input::focus()).to_lowercase(),
                 "misrouted": misrouted,
                 "takeBack": take_back,
             }))

@@ -2,6 +2,7 @@
 
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::tree::{MAX_DEPTH, MAX_VISITS};
+use agent_screen_model::viewer_keys::{Element as FocusedElement, Focus, caret_in, focus_of};
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
@@ -864,62 +865,85 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     )
 }
 
-/// The caret of `target`'s focused text element, in global top-left
-/// points: the bounds of its selection, or of the character before an
-/// empty one. None when the element is in another window or doesn't say.
-pub fn caret(target: WindowTarget) -> Option<Rect> {
-    use objc2_core_foundation::CFRange;
-    let element = element_attribute(&application(target.pid), "AXFocusedUIElement")?;
+/// What has the keyboard in `target`'s app, and for editable text its caret
+/// in global top-left points (`viewer_keys::caret_in`). Other when the
+/// focused element is in another window or the app doesn't say.
+pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
+    let Some(element) = element_attribute(&application(target.pid), "AXFocusedUIElement") else {
+        return (Focus::Other, None);
+    };
     let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
     if window != Some(target.window_id) {
-        return None;
+        return (Focus::Other, None);
     }
-    let selected = attribute(&element, "AXSelectedTextRange")?;
-    let selected = selected.downcast_ref::<AXValue>()?;
-    let mut range = CFRange::new(0, 0);
+    let role = string_attribute(&element, "AXRole");
+    let subrole = string_attribute(&element, "AXSubrole");
+    let editable = attribute(&element, "AXEditable")
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        .unwrap_or(false);
+    let range = attribute(&element, "AXSelectedTextRange").and_then(|v| range_value(&v));
+    let focus = focus_of(FocusedElement {
+        role: role.as_deref(),
+        subrole: subrole.as_deref(),
+        editable,
+        value_settable: settable(&element, "AXValue"),
+        selection: range.is_some(),
+    });
+    if focus != Focus::Text {
+        return (focus, None);
+    }
+    let caret = range.zip(frame(&element)).and_then(|(range, frame)| {
+        let (location, length) = (range.location.max(0) as usize, range.length.max(0) as usize);
+        let before = (length == 0 && location > 0)
+            .then(|| bounds_for_range(&element, location - 1, 1))
+            .flatten();
+        let selection = bounds_for_range(&element, location, length);
+        caret_in(frame, location, length, before, selection)
+    });
+    (focus, caret)
+}
+
+fn range_value(value: &CFType) -> Option<objc2_core_foundation::CFRange> {
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut range = objc2_core_foundation::CFRange::new(0, 0);
     unsafe {
-        selected.value(
+        value.value(
             AXValueType::CFRange,
             NonNull::from(&mut range).cast::<c_void>(),
         )
     }
-    .then_some(())?;
-    let bounds = |range: CFRange| -> Option<Rect> {
-        let parameter = ax_value(AXValueType::CFRange, &range)?;
-        let name = CFString::from_static_str("AXBoundsForRange");
-        let mut value: *const CFType = std::ptr::null();
-        let error = unsafe {
-            element.copy_parameterized_attribute_value(&name, &parameter, NonNull::from(&mut value))
-        };
-        if error != AXError::Success || value.is_null() {
-            return None;
-        }
-        let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
-        let value = value.downcast_ref::<AXValue>()?;
-        let mut rect = objc2_core_foundation::CGRect::default();
-        unsafe {
-            value.value(
-                AXValueType::CGRect,
-                NonNull::from(&mut rect).cast::<c_void>(),
-            )
-        }
-        .then_some(())?;
-        (rect.size.height > 0.0).then(|| {
-            Rect::new(
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-            )
-        })
+    .then_some(range)
+}
+
+/// AXBoundsForRange, in global top-left points, when it has a height.
+fn bounds_for_range(element: &AXUIElement, location: usize, length: usize) -> Option<Rect> {
+    let range = objc2_core_foundation::CFRange::new(location as isize, length as isize);
+    let parameter = ax_value(AXValueType::CFRange, &range)?;
+    let name = CFString::from_static_str("AXBoundsForRange");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe {
+        element.copy_parameterized_attribute_value(&name, &parameter, NonNull::from(&mut value))
     };
-    bounds(range).or_else(|| {
-        // An empty range has no bounds in many apps: the character before
-        // it ends where the caret is.
-        (range.length == 0 && range.location > 0)
-            .then(|| bounds(CFRange::new(range.location - 1, 1)))
-            .flatten()
-            .map(|r| Rect::new(r.x + r.width, r.y, 0.0, r.height))
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut rect = objc2_core_foundation::CGRect::default();
+    unsafe {
+        value.value(
+            AXValueType::CGRect,
+            NonNull::from(&mut rect).cast::<c_void>(),
+        )
+    }
+    .then_some(())?;
+    (rect.size.height > 0.0).then(|| {
+        Rect::new(
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
     })
 }
 
