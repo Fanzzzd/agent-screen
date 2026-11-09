@@ -255,6 +255,29 @@ pub fn tool(name: &str) -> Result<PathBuf> {
     Ok(binary)
 }
 
+/// Build every Swift helper whose source is newer than its binary, before
+/// the countdown, while the sign says the user can keep working. A helper
+/// that fails to build fails later, where the script uses it.
+fn prebuild_tools() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let stale: Vec<String> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "swift"))
+        .filter(|p| modified(&out().join(p.file_stem().unwrap())) < modified(p))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    sign_step("building test helpers, you can keep working / 正在编译测试工具，可以继续操作");
+    for name in stale {
+        let _ = tool(&name);
+    }
+}
+
 /// tools/field.swift as an app, so launch_app takes it.
 pub fn field_app() -> Result<PathBuf> {
     swift_app("field", "Field")
@@ -760,6 +783,9 @@ pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
         open_sign();
         let _ = bundle_debug();
     }
+    // The Swift helpers and fixture apps too: built on first use, they
+    // compiled after the countdown and kept a hands-off user waiting.
+    prebuild_tools();
     start_sign(&name);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(())) => {}
