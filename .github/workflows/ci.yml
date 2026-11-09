@@ -32,6 +32,8 @@ jobs:
       - name: Does every changeset name the default package?
         run: |
           set -euo pipefail
+          # A release PR has consumed every changeset: no file is no error.
+          shopt -s nullglob
           bad=0
           for f in .changeset/*.md; do
             [[ "$(basename "$f")" == README.md ]] && continue
