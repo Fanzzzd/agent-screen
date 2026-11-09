@@ -486,8 +486,9 @@ impl Forwarder {
 
     /// Look up what has the keyboard in the target and its caret, once
     /// the input queued before has gone out: the window the user's keys go
-    /// to, or the display's topmost one. The lookup's number.
-    pub fn inspect(&self, within: Rect) -> u64 {
+    /// to, or the display's topmost one. Nobody waits for it: keys go by
+    /// what was last looked up.
+    pub fn inspect(&self, within: Rect) {
         let probe = self.probe.clone();
         let ticket = probe.0.lock().unwrap_or_else(|e| e.into_inner()).ask();
         // The worker only notes where its keys go; the lookup runs on
@@ -498,20 +499,6 @@ impl Forwarder {
                 Some((w.focused, within, ticket));
             changed.notify_all();
         });
-        ticket
-    }
-
-    /// What has the keyboard in the target now: a lookup, waited for at
-    /// most `wait`, else what was last looked up.
-    pub fn fresh_text_focus(&self, within: Rect, wait: Duration) -> Focus {
-        let ticket = self.inspect(within);
-        let (lock, changed) = &*self.probe;
-        let p = lock.lock().unwrap_or_else(|e| e.into_inner());
-        changed
-            .wait_timeout_while(p, wait, |p| p.answered < ticket && p.floor < ticket)
-            .unwrap_or_else(|e| e.into_inner())
-            .0
-            .focus
     }
 
     /// What had the keyboard in the target when last looked up.

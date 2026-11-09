@@ -1,16 +1,13 @@
 //! Where a key the user types in the Viewer goes during a Takeover (ADR
 //! 0008, issue #117). With a keyboard layout, the key goes to the target
-//! app as a key, so shortcuts, arrows and key repeat act there as on a
-//! keyboard. With an input method, such as pinyin, the key goes to the
-//! input method, which composes in the Viewer, and the target gets only the
-//! finished text. Command and Control shortcuts, and keys that type no
-//! text, skip the input method unless it is composing: then it takes every
-//! key, as Return commits, Escape cancels and the arrows pick.
-//!
-//! The input method only gets keys while the target's focus is editable
-//! text. In a password field the keys go as keys: composing there would
-//! show the password in the Viewer in the clear. A game, a VM or a page's
-//! j and k shortcuts want the keys themselves.
+//! app as a key, as before. With an input method, such as pinyin, every
+//! key without Command or Control goes through the Viewer's input context
+//! first, and what the input method does with it decides what the target
+//! gets (`outcome`): a key it passes through unchanged goes out as the key
+//! itself, keycode and all, so arrows, Return, a game's letters and a
+//! page's shortcuts act as on a keyboard; only text it composed goes out as
+//! text. A password field, or secure input, never goes through the input
+//! method: composing there would show the password in the Viewer.
 
 /// The kind of the user's current input source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,22 +100,13 @@ pub fn caret_in(
 /// A line's height when the element reports none.
 const LINE: f64 = 18.0;
 
-/// Where a key goes.
+/// Where a key goes first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     /// To the target app, as the key itself.
     Raw,
-    /// To the input method in the Viewer.
+    /// Through the Viewer's input context; `outcome` says what follows.
     InputMethod,
-}
-
-impl Route {
-    pub fn name(self) -> &'static str {
-        match self {
-            Route::Raw => "raw",
-            Route::InputMethod => "inputMethod",
-        }
-    }
 }
 
 /// The key press, as the Viewer sees it.
@@ -130,51 +118,80 @@ pub struct Press {
     pub control: bool,
 }
 
-/// Where `press` goes, with `source` selected, `focus` in the target and
-/// the input method `composing` text in the Viewer.
-pub fn route(source: Source, focus: Focus, composing: bool, press: Press) -> Route {
-    if focus == Focus::Secure {
-        return Route::Raw;
+/// Where `press` goes first, with `source` selected, and `secure` when the
+/// target's field is a password field or secure input is on.
+pub fn route(source: Source, secure: bool, press: Press) -> Route {
+    if source == Source::Layout || secure || press.command || press.control {
+        Route::Raw
+    } else {
+        Route::InputMethod
     }
-    if composing {
-        return Route::InputMethod;
-    }
-    if source == Source::Layout
-        || focus != Focus::Text
-        || press.command
-        || press.control
-        || !types_text(press.code)
-    {
-        return Route::Raw;
-    }
-    Route::InputMethod
 }
 
-/// Whether the key at virtual key code `code` types text. Return, Tab,
-/// Delete, Escape, the arrows, the function keys and the other keys that
-/// move or edit don't. Their codes are the same on every keyboard layout.
-pub fn types_text(code: u16) -> bool {
-    !matches!(
-        code,
-        36 // Return
-        | 48 // Tab
-        | 51 // Delete
-        | 53 // Escape
-        | 76 // keypad Enter
-        | 71 // keypad Clear
-        | 114 // Help
-        | 115 // Home
-        | 116 // Page Up
-        | 117 // Forward Delete
-        | 119 // End
-        | 121 // Page Down
-        | 123..=126 // arrows
-        // F1 to F20
-        | 64 | 79 | 80 | 90 | 96..=101 | 103 | 105..=107 | 109 | 111 | 113 | 118 | 120 | 122
-        // Caps Lock and the modifier keys, which macOS reports as key
-        // codes too
-        | 54..=63
-    )
+/// What the input method did with a key, in order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// It marked this text, empty for none: composing.
+    Marked(String),
+    /// It inserted this text, ending any composition.
+    Inserted(String),
+    /// It made a call the Viewer can't follow, such as replacing text
+    /// already sent: the key is spent.
+    Ignored,
+}
+
+/// What the target gets for a key that went through the input context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// The key itself, keycode and all: the input method passed it through.
+    Key,
+    /// Text the input method composed, as Unicode text.
+    Text(String),
+    /// Nothing: the input method kept the key, as part of a composition.
+    Nothing,
+}
+
+impl Outcome {
+    /// The name the debug protocol reports.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Outcome::Key => "raw",
+            Outcome::Text(_) => "text",
+            Outcome::Nothing => "inputMethod",
+        }
+    }
+}
+
+/// What the target gets for a key whose characters are `characters`, from
+/// what the input method did with it: `calls`, with text marked before it
+/// when `composing`. Inserting exactly the key's characters with nothing
+/// marked, or doing nothing the Viewer sees, as for a command such as an
+/// arrow, Return or Delete, passes the key through. Doing nothing while
+/// composing keeps it, as a key that moves through the candidates does.
+pub fn outcome(composing: bool, characters: &str, calls: &[Call]) -> Outcome {
+    if calls.is_empty() {
+        return if composing {
+            Outcome::Nothing
+        } else {
+            Outcome::Key
+        };
+    }
+    let marked = calls.iter().any(|c| matches!(c, Call::Marked(_)));
+    let ignored = calls.contains(&Call::Ignored);
+    let inserted: String = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Inserted(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !composing && !marked && !ignored && !characters.is_empty() && inserted == characters {
+        Outcome::Key
+    } else if inserted.is_empty() {
+        Outcome::Nothing
+    } else {
+        Outcome::Text(inserted)
+    }
 }
 
 #[cfg(test)]
@@ -182,13 +199,8 @@ mod tests {
     use super::*;
 
     const A: u16 = 0;
-    const N: u16 = 45;
-    const SPACE: u16 = 49;
     const RETURN: u16 = 36;
-    const ESCAPE: u16 = 53;
-    const DELETE: u16 = 51;
     const LEFT: u16 = 123;
-    const F5: u16 = 96;
 
     fn key(code: u16) -> Press {
         Press {
@@ -200,38 +212,19 @@ mod tests {
 
     #[test]
     fn a_layout_sends_every_key_as_a_key() {
-        for code in [A, N, SPACE, RETURN, LEFT, F5] {
-            assert_eq!(
-                route(Source::Layout, Focus::Text, false, key(code)),
-                Route::Raw
-            );
+        for code in [A, RETURN, LEFT] {
+            assert_eq!(route(Source::Layout, false, key(code)), Route::Raw);
         }
     }
 
     #[test]
-    fn an_input_method_takes_the_keys_that_type_text() {
-        for code in [A, N, SPACE, 18, 43] {
+    fn an_input_method_sees_every_key_but_shortcuts() {
+        for code in [A, RETURN, LEFT] {
             assert_eq!(
-                route(Source::InputMethod, Focus::Text, false, key(code)),
-                Route::InputMethod,
-                "code {code}"
+                route(Source::InputMethod, false, key(code)),
+                Route::InputMethod
             );
         }
-    }
-
-    #[test]
-    fn keys_with_no_text_skip_an_input_method_with_nothing_marked() {
-        for code in [RETURN, ESCAPE, DELETE, 48, LEFT, 126, 115, 117, F5, 122] {
-            assert_eq!(
-                route(Source::InputMethod, Focus::Text, false, key(code)),
-                Route::Raw,
-                "code {code}"
-            );
-        }
-    }
-
-    #[test]
-    fn shortcuts_skip_the_input_method() {
         let command = Press {
             command: true,
             ..key(A)
@@ -240,61 +233,67 @@ mod tests {
             control: true,
             ..key(A)
         };
+        assert_eq!(route(Source::InputMethod, false, command), Route::Raw);
+        assert_eq!(route(Source::InputMethod, false, control), Route::Raw);
+    }
+
+    #[test]
+    fn a_password_field_bypasses_the_input_method() {
+        assert_eq!(route(Source::InputMethod, true, key(A)), Route::Raw);
+    }
+
+    fn marked(text: &str) -> Call {
+        Call::Marked(text.into())
+    }
+
+    fn inserted(text: &str) -> Call {
+        Call::Inserted(text.into())
+    }
+
+    #[test]
+    fn a_key_passed_through_goes_as_the_key() {
+        // English mode, a digit, a space, a game's letter.
+        assert_eq!(outcome(false, "a", &[inserted("a")]), Outcome::Key);
+        assert_eq!(outcome(false, " ", &[inserted(" ")]), Outcome::Key);
+        // A command: arrows, Return, Delete, Escape, Tab.
+        assert_eq!(outcome(false, "\u{f702}", &[]), Outcome::Key);
+        assert_eq!(outcome(false, "\r", &[]), Outcome::Key);
+    }
+
+    #[test]
+    fn composed_text_goes_as_text() {
+        // Pinyin's own punctuation.
         assert_eq!(
-            route(Source::InputMethod, Focus::Text, false, command),
-            Route::Raw
+            outcome(false, ",", &[inserted("，")]),
+            Outcome::Text("，".into())
         );
+        // Space or Return commits a composition.
         assert_eq!(
-            route(Source::InputMethod, Focus::Text, false, control),
-            Route::Raw
+            outcome(true, " ", &[inserted("你好")]),
+            Outcome::Text("你好".into())
+        );
+        // Even the key's own character: it ends a composition.
+        assert_eq!(
+            outcome(true, "a", &[inserted("a")]),
+            Outcome::Text("a".into())
+        );
+        // A commit and a new composition from one key.
+        assert_eq!(
+            outcome(false, "n", &[inserted("n"), marked("n")]),
+            Outcome::Text("n".into())
         );
     }
 
     #[test]
-    fn a_composing_input_method_takes_every_key() {
-        for code in [A, SPACE, RETURN, ESCAPE, DELETE, LEFT, F5] {
-            assert_eq!(
-                route(Source::InputMethod, Focus::Text, true, key(code)),
-                Route::InputMethod,
-                "code {code}"
-            );
-        }
-        let command = Press {
-            command: true,
-            ..key(A)
-        };
-        assert_eq!(
-            route(Source::InputMethod, Focus::Text, true, command),
-            Route::InputMethod
-        );
-        // The user switched to a layout mid-composition: the marked text
-        // still needs its Return or Escape.
-        assert_eq!(
-            route(Source::Layout, Focus::Text, true, key(RETURN)),
-            Route::InputMethod
-        );
-    }
-
-    #[test]
-    fn keys_go_as_keys_unless_the_focus_is_editable_text() {
-        for focus in [Focus::Other, Focus::Secure] {
-            for code in [A, N, SPACE] {
-                assert_eq!(
-                    route(Source::InputMethod, focus, false, key(code)),
-                    Route::Raw,
-                    "{focus:?} code {code}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_password_field_never_composes() {
-        // Not even with a composition left over from another field.
-        assert_eq!(
-            route(Source::InputMethod, Focus::Secure, true, key(A)),
-            Route::Raw
-        );
+    fn a_key_the_input_method_keeps_sends_nothing() {
+        assert_eq!(outcome(false, "n", &[marked("n")]), Outcome::Nothing);
+        assert_eq!(outcome(true, "i", &[marked("ni")]), Outcome::Nothing);
+        // Escape cancels.
+        assert_eq!(outcome(true, "\u{1b}", &[marked("")]), Outcome::Nothing);
+        // A candidate page key, with no call the Viewer sees.
+        assert_eq!(outcome(true, "=", &[]), Outcome::Nothing);
+        // A correction of text already sent.
+        assert_eq!(outcome(false, "a", &[Call::Ignored]), Outcome::Nothing);
     }
 
     #[test]
@@ -368,8 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn route_names_match_the_debug_protocol() {
-        assert_eq!(Route::Raw.name(), "raw");
-        assert_eq!(Route::InputMethod.name(), "inputMethod");
+    fn outcome_names_match_the_debug_protocol() {
+        assert_eq!(Outcome::Key.name(), "raw");
+        assert_eq!(Outcome::Text("x".into()).name(), "text");
+        assert_eq!(Outcome::Nothing.name(), "inputMethod");
     }
 }

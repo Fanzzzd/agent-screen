@@ -870,22 +870,23 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     )
 }
 
+/// Lookups of the text focus made on the main thread, which none should be.
+pub static MAIN_THREAD_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// What has the keyboard in `target`'s app, and for editable text its caret
 /// in global top-left points (`viewer_keys::caret_in`). Other when the
 /// focused element is in another window or the app doesn't say.
 ///
-/// Each call waits at most 100 ms for the app, as the Viewer may wait on
-/// it before a key. A Chromium or Electron app reports no focused element
-/// until it publishes its pages' elements: the first lookup in it asks for
-/// them and waits, once per app, as long as `ensure_web_tree` does.
+/// Each call waits at most 100 ms for the app. Never on the main thread,
+/// where keys are handled: `MAIN_THREAD_LOOKUPS` counts any that is, for
+/// tests.
 pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
+    if unsafe { libc::pthread_main_np() } == 1 {
+        MAIN_THREAD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let app = unsafe { AXUIElement::new_application(target.pid) };
     unsafe { app.set_messaging_timeout(0.1) };
-    let focused = || element_attribute(&app, "AXFocusedUIElement");
-    let Some(element) = focused().or_else(|| {
-        ensure_web_tree(target);
-        focused()
-    }) else {
+    let Some(element) = element_attribute(&app, "AXFocusedUIElement") else {
         log::debug!("ax: {} reports no focused element", target.pid);
         return (Focus::Other, None);
     };

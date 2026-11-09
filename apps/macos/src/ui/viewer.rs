@@ -11,7 +11,6 @@ use crate::dismissal::Item;
 use crate::i18n::t;
 use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
-use agent_screen_model::viewer_keys::Focus;
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt, App, Bounds, Context, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
@@ -104,8 +103,6 @@ pub struct Viewer {
     /// The text the input method has marked, and the selection in it, in
     /// UTF-16 units.
     marked: Option<(String, Option<Range<usize>>)>,
-    /// The display was in a Takeover at the last render.
-    took_over: bool,
 }
 
 impl Viewer {
@@ -126,11 +123,11 @@ impl Viewer {
             if !window.is_window_active() {
                 viewer.core.read(cx).hand_back_keys();
                 // Leaving the window commits the composition, as in a
-                // native field.
+                // native field. A hand-back dropped it first.
                 if viewer.marked.take().is_some() {
-                    viewer_input::commit_composition();
                     cx.notify();
                 }
+                viewer_input::commit_composition();
             }
         })
         .detach();
@@ -158,16 +155,7 @@ impl Viewer {
             focus: cx.focus_handle(),
             typing: cx.focus_handle(),
             marked: None,
-            took_over: false,
         }
-    }
-
-    /// Drop the input method's marked text, uncommitted.
-    fn end_composition(&mut self, cx: &mut Context<Self>) {
-        if self.marked.take().is_some() {
-            cx.notify();
-        }
-        viewer_input::drop_composition();
     }
 
     /// Tests: show `text` as the input method's marked text.
@@ -264,14 +252,12 @@ impl Render for Viewer {
         // has one, unless the sheet or a missing permission covers it.
         let typing =
             !display.is_ended() && self.sheet.is_none() && crate::mac::permissions::last().screen;
-        // A composition ends with the display it was for, with the
-        // Takeover, or when the keys can't reach the image.
-        let ended_takeover = self.took_over && !display.takeover;
-        self.took_over = display.takeover;
-        if !typing || ended_takeover {
-            self.marked = None;
+        // A composition ends when the keys can't reach the image; the
+        // Takeover's end drops it as it happens.
+        if !typing && (self.marked.is_some() || viewer_input::marked().is_some()) {
             viewer_input::drop_composition();
-        } else if viewer_input::marked().is_none() {
+        }
+        if viewer_input::marked().is_none() {
             self.marked = None;
         }
         if typing && !self.typing.is_focused(window) {
@@ -807,7 +793,6 @@ impl EntityInputHandler for Viewer {
     /// AppKit's unmark accepts the marked text as typed.
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if let Some((text, _)) = self.marked.take() {
-            viewer_input::set_marked(None);
             viewer_input::commit(&text);
             cx.notify();
         }
@@ -824,14 +809,10 @@ impl EntityInputHandler for Viewer {
         cx: &mut Context<Self>,
     ) {
         let composing = self.marked.take().is_some();
-        viewer_input::set_marked(None);
         cx.notify();
-        if viewer_input::focus() == Focus::Secure {
-            log::warn!("viewer: input method text dropped, a password field has the keyboard");
-            return;
-        }
         if !composing && range.is_some_and(|r| !r.is_empty()) {
             log::warn!("viewer: input method replaced text already sent; left out");
+            viewer_input::ignored();
             return;
         }
         viewer_input::commit(text);
@@ -845,11 +826,6 @@ impl EntityInputHandler for Viewer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if viewer_input::focus() == Focus::Secure {
-            log::warn!("viewer: no composition while a password field has the keyboard");
-            self.end_composition(cx);
-            return;
-        }
         self.marked = (!text.is_empty()).then(|| (text.to_string(), selected));
         viewer_input::set_marked((!text.is_empty()).then_some(text));
         cx.notify();
@@ -927,7 +903,7 @@ impl Viewer {
         let marked = typing
             .as_ref()
             .and(self.marked.as_ref())
-            .filter(|_| viewer_input::focus() != Focus::Secure)
+            .filter(|_| !viewer_input::secure())
             .map(|(text, _)| text.clone());
         let input = canvas(
             |_, _, _| {},

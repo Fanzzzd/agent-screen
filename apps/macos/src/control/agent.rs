@@ -1625,10 +1625,14 @@ async fn handle_one(
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
                 "caret": crate::mac::viewer_input::caret_in_window(),
-                // What has the keyboard in the target: text, secure or other.
-                "focus": format!("{:?}", crate::mac::viewer_input::focus()).to_lowercase(),
-                // Lookups of it asked for, none with a keyboard layout.
+                // A password field has the keyboard in the target, as last
+                // looked up, or secure input is on.
+                "secure": crate::mac::viewer_input::secure(),
+                // Lookups of the target's focus asked for, none with a
+                // keyboard layout, and any made on the main thread.
                 "inspections": crate::mac::viewer_input::inspections(),
+                "mainThreadLookups": crate::mac::ax::MAIN_THREAD_LOOKUPS
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 "misrouted": misrouted,
                 "takeBack": take_back,
             }))
@@ -1661,14 +1665,27 @@ async fn handle_one(
                     p.int("key").unwrap_or(0) == 1,
                     source,
                 ),
-                // The reply says where the key went.
-                Some("key") => viewer_input::inject_key(
-                    p.int("code").unwrap_or(0) as u16,
-                    p.int("shift").unwrap_or(0) == 1,
-                    p.int("command").unwrap_or(0) == 1,
-                    source,
-                )
-                .map(|route| routed = Some(route.name())),
+                // `characters` are what the key types, and `ime` what the
+                // input method does with it: "pass", "nothing",
+                // "mark:TEXT" or "insert:TEXT". The reply says what the
+                // key came to.
+                Some("key") => {
+                    let script = match p.string("ime") {
+                        None => None,
+                        Some(ime) => Some(viewer_input::Script::parse(&ime).ok_or_else(|| {
+                            ControlError::failed("ime is pass, nothing, mark:TEXT or insert:TEXT")
+                        })?),
+                    };
+                    viewer_input::inject_key(
+                        p.int("code").unwrap_or(0) as u16,
+                        p.int("shift").unwrap_or(0) == 1,
+                        p.int("command").unwrap_or(0) == 1,
+                        &p.string("characters").unwrap_or_default(),
+                        source,
+                        script,
+                    )
+                    .map(|route| routed = Some(route))
+                }
                 // A press, a drag in steps and a release, as a hand on
                 // the trackpad makes them.
                 Some("drag") => {

@@ -569,6 +569,9 @@ impl Core {
     /// The user took the display over, or handed it back: an agent's
     /// typing or drag in flight stops while they're in control.
     pub fn stop_agent_input(&self, id: DisplayId, stop: bool) {
+        // Before anything renders or a card takes the keyboard: the
+        // Viewer's composition ends with the Takeover.
+        crate::mac::viewer_input::takeover_changed(id, stop);
         crate::mac::recording::note(
             id,
             serde_json::json!({ "action": if stop { "takeoverStart" } else { "takeoverEnd" } }),

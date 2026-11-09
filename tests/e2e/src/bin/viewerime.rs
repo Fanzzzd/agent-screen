@@ -6,12 +6,14 @@
 //! then exactly 你好, and the marked text sits at Field's caret. Keys typed
 //! with a plain keyboard layout, keys with no text and Command shortcuts
 //! go to Field as keys. A composition left when the Takeover ends is
-//! dropped and never comes back, even if the input method commits it
-//! then; a click commits it. In Field's password field and in a view
-//! that takes keys but holds no text, as a game, keys go as keys even with
-//! an input method, and nothing is composed. A field on an Electron page
-//! composes as Field's does. With a keyboard layout the Viewer never looks
-//! up the target's focus. Everything goes through the
+//! dropped at once, even when the agent's request card is up, and text the
+//! input method commits later never comes back; a click commits it. A
+//! key the input method passes through, as in a view with no text, goes as
+//! the key itself. In Field's password field keys skip the input method. A
+//! field on an Electron page composes from the first word. With a keyboard
+//! layout the Viewer never looks up the target's focus, and no key waits
+//! on a lookup. The input method's part is played by the script, through
+//! the view's own NSTextInputClient calls. Everything goes through the
 //! Viewer's own handlers, so the user's keyboard, pointer and input source
 //! are untouched.
 //!
@@ -73,6 +75,17 @@ fn test(field: &std::path::Path) -> Result<()> {
             keys: parts.next().unwrap_or_default(),
         }
     };
+    // Field once it holds what is wanted, within 2 s; for text on its way.
+    let until = |want: &dyn Fn(&Field) -> bool| {
+        let mut now = read();
+        for _ in 0..8 {
+            if want(&now) {
+                break;
+            }
+            now = read();
+        }
+        now
+    };
     let holds = |text: &str| Field {
         text: text.into(),
         ..Field::default()
@@ -113,11 +126,15 @@ fn test(field: &std::path::Path) -> Result<()> {
     let input = |params: Value| control.call("debugViewerInput", params);
     let viewer = || control.call("debugViewer", json!({})).unwrap_or_default();
     let marked = || viewer()["marked"].as_str().map(str::to_string);
-    let routed_to = |code: u16, command: bool, source: &str| -> String {
-        let routed = input(
-            json!({ "kind": "key", "code": code, "command": u8::from(command), "source": source }),
-        );
-        routed.map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+    // A key typed with `source`, the input method doing `ime` with it:
+    // what the key came to.
+    let typed_key = |code: u16, characters: &str, source: &str, ime: &str| -> String {
+        let mut key =
+            json!({ "kind": "key", "code": code, "characters": characters, "source": source });
+        if !ime.is_empty() {
+            key["ime"] = json!(ime);
+        }
+        input(key).map_or_else(|e| e.to_string(), |r| r["route"].to_string())
     };
 
     // The user clicks Field's text in the Viewer with a keyboard layout: a
@@ -142,27 +159,15 @@ fn test(field: &std::path::Path) -> Result<()> {
         typed.is_err(),
         format!("{typed:?}"),
     );
-    // A key with an input method selected goes to it, not to Field: the
-    // Viewer looks up the focus it had not looked up before the key.
-    let routed = routed_to(45, false, "inputMethod");
+
+    // Pinyin marks the letters as the user types them: Field gets nothing.
+    let routed = typed_key(45, "n", "inputMethod", "mark:n");
     check(
-        "a letter typed with an input method goes to the input method",
+        "a letter pinyin marks stays in the Viewer",
         routed == "\"inputMethod\"",
         &routed,
     );
-    check(
-        "the Viewer sees editable text focused in Field",
-        viewer()["focus"] == "text",
-        viewer()["focus"].to_string(),
-    );
-    check(
-        "Field got no key from it",
-        read() == holds(""),
-        format!("{:?}", read()),
-    );
-
-    // Pinyin marks the letters as the user types them.
-    for text in ["n", "ni", "ni h", "ni hao"] {
+    for text in ["ni", "ni h", "ni hao"] {
         input(json!({ "kind": "mark", "text": text }))?;
     }
     check(
@@ -206,20 +211,18 @@ fn test(field: &std::path::Path) -> Result<()> {
         let shot = capture("viewerime-marked", [frame[0], frame[1], frame[2], frame[3]])?;
         println!("     the Viewer while composing: {}", shot.display());
     }
-    // While composing, Return goes to the input method too, even with a
-    // plain layout reported.
-    let routed = routed_to(36, false, "layout");
+    // Return commits 你好: Field gets it as text.
+    let routed = typed_key(36, "\r", "inputMethod", "insert:你好");
     check(
-        "Return while composing goes to the input method",
-        routed == "\"inputMethod\"",
+        "Return that commits sends the composed text",
+        routed == "\"text\"",
         &routed,
     );
-    // The user picks 你好.
-    input(json!({ "kind": "commit", "text": "你好" }))?;
+    let now = until(&|f| *f == holds("你好"));
     check(
         "Field gets exactly 你好 after the commit",
-        read() == holds("你好"),
-        format!("{:?}", read()),
+        now == holds("你好"),
+        format!("{now:?}"),
     );
     check(
         "the Viewer shows no marked text after the commit",
@@ -227,37 +230,42 @@ fn test(field: &std::path::Path) -> Result<()> {
         format!("{:?}", marked()),
     );
 
-    // A plain layout: keys go to Field as keys.
-    for code in [0, 11] {
-        let routed = routed_to(code, false, "layout");
+    // A plain layout: keys go to Field as keys, as before.
+    for (code, characters) in [(0, "a"), (11, "b")] {
+        let routed = typed_key(code, characters, "layout", "");
         check(
             "a key typed with a plain layout goes to Field as a key",
             routed == "\"raw\"",
             &routed,
         );
     }
+    let now = until(&|f| *f == holds("你好ab"));
     check(
         "Field shows 你好ab",
-        read() == holds("你好ab"),
-        format!("{:?}", read()),
+        now == holds("你好ab"),
+        format!("{now:?}"),
     );
 
-    // The user starts composing and hands the display back: the
-    // composition is dropped, nothing of it reaches Field, and the agent's
-    // typing goes on.
-    routed_to(45, false, "inputMethod");
-    input(json!({ "kind": "mark", "text": "ni" }))?;
+    // The agent asks for the display back while the user composes, and the
+    // user lets it continue on the card: the composition is dropped, at
+    // once and for good.
+    typed_key(45, "n", "inputMethod", "mark:ni");
+    control.call(
+        "requestControl",
+        json!({ "sessionKey": key, "displayId": id, "reason": "I'll finish the form." }),
+    )?;
+    sleep_ms(400);
     control.call(
         "debugShow",
-        json!({ "surface": "primary", "displayId": id }),
+        json!({ "surface": "card-continue", "displayId": id }),
     )?;
     sleep_ms(600);
     check(
-        "handing back drops the composition",
-        marked().is_none(),
-        format!("{:?}", marked()),
+        "handing back on the card drops the composition",
+        marked().is_none() && read() == holds("你好ab"),
+        format!("{:?} {:?}", marked(), read()),
     );
-    // An input method that commits when told to discard.
+    // An input method that commits when told to discard, late.
     input(json!({ "kind": "commit", "text": "ni" }))?;
     check(
         "text the input method commits after the hand-back is dropped",
@@ -273,109 +281,115 @@ fn test(field: &std::path::Path) -> Result<()> {
         typed.is_ok(),
         format!("{typed:?}"),
     );
+    let now = until(&|f| *f == holds("你好abx"));
     check(
         "Field gets only the agent's text",
-        read() == holds("你好abx"),
-        format!("{:?}", read()),
+        now == holds("你好abx"),
+        format!("{now:?}"),
     );
-    // A new Takeover: the old composition stays gone.
+    // A new Takeover: a late commit from the old one is still dropped.
     input(at(100.0))?;
     sleep_ms(600);
-    let routed = routed_to(45, false, "inputMethod");
+    input(json!({ "kind": "commit", "text": "ni" }))?;
     check(
-        "the next Takeover's key goes to the input method",
-        routed == "\"inputMethod\"",
-        &routed,
-    );
-    check(
-        "no old marked text comes back",
+        "a late commit after the next click is dropped",
         marked().is_none() && read() == holds("你好abx"),
         format!("{:?} {:?}", marked(), read()),
     );
-    input(json!({ "kind": "commit", "text": "好" }))?;
+    typed_key(4, "h", "inputMethod", "mark:h");
+    let routed = typed_key(49, " ", "inputMethod", "insert:好");
+    let now = until(&|f| *f == holds("你好abx好"));
     check(
-        "the next commit sends only its own text",
-        read() == holds("你好abx好"),
-        format!("{:?}", read()),
+        "the next composition sends only its own text",
+        routed == "\"text\"" && now == holds("你好abx好"),
+        format!("{routed} {now:?}"),
     );
     // A click while composing commits the marked text where it was typed.
-    routed_to(4, false, "inputMethod");
-    input(json!({ "kind": "mark", "text": "ha" }))?;
+    typed_key(4, "h", "inputMethod", "mark:ha");
     input(at(100.0))?;
     sleep_ms(300);
+    let now = until(&|f| *f == holds("你好abx好ha"));
     check(
         "a click commits the marked text",
-        marked().is_none() && read() == holds("你好abx好ha"),
-        format!("{:?} {:?}", marked(), read()),
+        marked().is_none() && now == holds("你好abx好ha"),
+        format!("{:?} {now:?}", marked()),
     );
 
-    // Field's password field: keys go as keys, and nothing is composed or
-    // drawn.
+    // Field's password field: keys skip the input method.
     input(at(232.0))?;
     sleep_ms(600);
     check(
         "the Viewer sees the password field",
-        viewer()["focus"] == "secure",
-        viewer()["focus"].to_string(),
+        viewer()["secure"] == true,
+        viewer()["secure"].to_string(),
     );
-    let routed = routed_to(0, false, "inputMethod");
+    let routed = typed_key(0, "a", "inputMethod", "mark:a");
     check(
         "a letter in a password field goes as a key with an input method",
         routed == "\"raw\"",
         &routed,
     );
-    input(json!({ "kind": "mark", "text": "ni" }))?;
     check(
         "nothing is marked over a password field",
         marked().is_none(),
         format!("{:?}", marked()),
     );
+    let now = until(&|f| f.password == "a");
     check(
         "the password field got the key",
-        read().password == "a",
-        format!("{:?}", read()),
+        now.password == "a",
+        format!("{now:?}"),
     );
 
-    // A view that takes keys but holds no text, as a game.
+    // A view that takes keys but holds no text, as a game: pinyin passes
+    // its letters through, and they arrive as keys, keycodes and all, as
+    // do arrows and shortcuts.
     input(at(276.0))?;
     sleep_ms(600);
+    let routed = typed_key(0, "a", "inputMethod", "pass");
     check(
-        "the Viewer sees no editable text in the key view",
-        viewer()["focus"] == "other",
-        viewer()["focus"].to_string(),
-    );
-    let routed = routed_to(0, false, "inputMethod");
-    check(
-        "a letter in a view with no text goes as a key with an input method",
+        "a letter the input method passes through goes as the key",
         routed == "\"raw\"",
         &routed,
     );
-    // Keys with no text and Command shortcuts never go to it either.
-    let routed = routed_to(123, false, "inputMethod");
-    check("Left Arrow goes as a key", routed == "\"raw\"", &routed);
-    let routed = routed_to(124, true, "inputMethod");
+    let routed = typed_key(123, "\u{f702}", "inputMethod", "nothing");
     check(
-        "a Command shortcut goes as a key",
+        "Left Arrow the input method doesn't take goes as the key",
         routed == "\"raw\"",
         &routed,
     );
+    let routed = input(
+        json!({ "kind": "key", "code": 124, "command": 1, "characters": "\u{f703}", "source": "inputMethod", "ime": "mark:x" }),
+    )
+    .map_or_else(|e| e.to_string(), |r| r["route"].to_string());
     check(
-        "the key view got the letter",
-        read().keys.starts_with('a'),
-        format!("{:?}", read()),
+        "a Command shortcut skips the input method",
+        routed == "\"raw\"",
+        &routed,
+    );
+    let now = until(&|f| f.keys == "a\u{f702}\u{f703}");
+    check(
+        "the key view got the letter and the arrows",
+        now.keys == "a\u{f702}\u{f703}",
+        format!("{now:?}"),
     );
     check(
         "Field's text is unchanged",
         read().text == "你好abx好ha",
         format!("{:?}", read()),
     );
+    check(
+        "no key waited on a lookup on the main thread",
+        viewer()["mainThreadLookups"] == 0,
+        viewer()["mainThreadLookups"].to_string(),
+    );
     electron_field(&control, key, id, (width, height))?;
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
     Ok(())
 }
 
-/// A field on the Electron harness page composes as Field's does: the
-/// page's elements are asked for, so the field reads as text.
+/// A field on the Electron harness page composes as Field's does, from
+/// the first word after the click: no lookup has to finish first.
 fn electron_field(
     control: &Control,
     key: &str,
@@ -431,25 +445,24 @@ fn electron_field(
                 "x": (number("x") + 60.0) / width,
                 "y": (number("y") + number("height") - 8.0 - 15.0) / height }),
     )?;
-    // The first look at the app's focus waits for its page's elements.
-    sleep_ms(3500);
-    let routed = control.call(
-        "debugViewerInput",
-        json!({ "kind": "key", "code": 45, "source": "inputMethod" }),
-    );
+    sleep_ms(300);
+    let key = |code: u16, characters: &str, ime: &str| -> String {
+        control
+            .call(
+                "debugViewerInput",
+                json!({ "kind": "key", "code": code, "characters": characters,
+                        "source": "inputMethod", "ime": ime }),
+            )
+            .map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+    };
+    let first = key(45, "n", "mark:n");
+    key(34, "i", "mark:ni");
+    let committed = key(49, " ", "insert:你好");
     check(
-        "a letter in an Electron page's field goes to the input method",
-        routed.as_ref().is_ok_and(|r| r["route"] == "inputMethod"),
-        format!("{routed:?}"),
+        "the first word in an Electron page's field composes",
+        first == "\"inputMethod\"" && committed == "\"text\"",
+        format!("{first} {committed}"),
     );
-    control.call(
-        "debugViewerInput",
-        json!({ "kind": "mark", "text": "ni hao" }),
-    )?;
-    control.call(
-        "debugViewerInput",
-        json!({ "kind": "commit", "text": "你好" }),
-    )?;
     sleep_ms(800);
     let title = harness()
         .map(|w| w["title"].to_string())

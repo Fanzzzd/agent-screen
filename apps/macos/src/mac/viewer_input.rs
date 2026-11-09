@@ -7,23 +7,27 @@
 //! Events outside the image, and every event while the Dismissal sheet is
 //! up, go on to GPUI.
 //!
-//! Keys follow `viewer_keys::route` (ADR 0008). With a keyboard layout
-//! they go to the target as keys. With an input method they go on to GPUI,
-//! whose view hands them to the input method; it composes in the Viewer,
-//! which sends the target the finished text through `commit`.
+//! Keys follow `viewer_keys` (ADR 0008). With a keyboard layout they go to
+//! the target as keys. With an input method, every key without Command or
+//! Control goes through the Viewer's input context; a key the input method
+//! passes through goes on as the key itself, and text it composed goes as
+//! text. A composition belongs to one generation: a drop, a Takeover's
+//! start or end and a display switch each start a new one, and text from
+//! an older composition is dropped.
 
 use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, Phase};
 use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
-use agent_screen_model::viewer_keys::{self, Focus, Press, Route, Source};
+use agent_screen_model::viewer_keys::{self, Call, Focus, Outcome, Press, Route, Source};
 use block2::RcBlock;
 use objc2::MainThreadMarker;
+use objc2::rc::Retained;
 use objc2_app_kit::{
     NSEvent, NSEventMask, NSEventModifierFlags, NSEventPhase, NSEventType, NSWindow,
 };
 use objc2_core_graphics::CGEventFlags;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ptr::NonNull;
 
@@ -42,37 +46,66 @@ struct State {
     frame_pixels: Option<[usize; 2]>,
     /// Keys sent with Command, whose release AppKit may never report.
     sent_up: HashSet<u16>,
-    /// Keys that went to the input method: their release goes there too.
+    /// Keys the input method kept: their release goes nowhere.
     composed: HashSet<u16>,
+}
+
+/// A key on its way through the input context, out of the state's borrow:
+/// the input method calls back into the Viewer.
+struct Through {
+    event: Retained<NSEvent>,
+    window: Retained<NSWindow>,
+    display: u32,
+    forwarder: Forwarder,
+}
+
+/// Tests: what the input method does with a key, in place of the user's.
+#[derive(Clone, Debug)]
+pub enum Script {
+    /// Marks this text.
+    Mark(String),
+    /// Inserts this text.
+    Insert(String),
+    /// Inserts the key's own characters.
+    Pass,
+    /// Nothing the Viewer sees, as for a command such as an arrow.
+    Nothing,
+}
+
+impl Script {
+    pub fn parse(text: &str) -> Option<Script> {
+        Some(match text {
+            "pass" => Script::Pass,
+            "nothing" => Script::Nothing,
+            _ => match text.split_once(':')? {
+                ("mark", t) => Script::Mark(t.into()),
+                ("insert", t) => Script::Insert(t.into()),
+                _ => return None,
+            },
+        })
+    }
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
     /// Handling an event a test made: the Viewer must not take the keyboard.
-    static INJECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INJECTING: Cell<bool> = const { Cell::new(false) };
     /// Except this one, which takes it as the user's click does.
-    static TAKE_KEY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TAKE_KEY: Cell<bool> = const { Cell::new(false) };
     /// The text the input method has marked in the Viewer, while it
-    /// composes. The Viewer sets it.
-    static MARKED: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// Tests: the input source a key made by `inject_key` is typed with.
-    static SOURCE: std::cell::Cell<Option<Source>> = const { std::cell::Cell::new(None) };
-    /// Where the last key down went.
-    static ROUTED: std::cell::Cell<Option<Route>> = const { std::cell::Cell::new(None) };
-    /// The user has clicked, scrolled or typed on the display since its
-    /// composition was last dropped: their Takeover is on. Text the input
-    /// method commits otherwise, as some do when told to discard, is
-    /// dropped, so it never reaches the target while the agent works, or
-    /// another display.
-    static LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Marked text the Viewer committed itself, and when: an input method
-    /// may commit it too, when told to discard it.
-    static COMMITTED: RefCell<Option<(String, std::time::Instant)>> = const { RefCell::new(None) };
+    /// composes, and the generation it started in.
+    static MARKED: RefCell<Option<(String, u64)>> = const { RefCell::new(None) };
+    /// Counts drops, Takeover starts and ends, and display switches.
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
+    /// What the input method did with the key going through it now.
+    static CALLS: RefCell<Option<Vec<Call>>> = const { RefCell::new(None) };
+    /// Tests: the input source a key or click made by `inject_key` or
+    /// `inject_click` is typed with, and what the input method does.
+    static SOURCE: Cell<Option<Source>> = const { Cell::new(None) };
+    static SCRIPT: RefCell<Option<Script>> = const { RefCell::new(None) };
+    /// What the last key down came to: its route, or its outcome.
+    static ROUTED: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
-
-/// How long the Viewer waits for a fresh lookup of the target's focus
-/// before a key that would start a composition.
-const FRESH_FOCUS: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The user's input source, or the one a test stands in.
 fn source_now() -> Source {
@@ -81,31 +114,83 @@ fn source_now() -> Source {
         .unwrap_or_else(super::ime::current_kind)
 }
 
-/// Look up the target's focus and caret, for an input method only: with a
-/// keyboard layout nothing needs them.
+/// Look up the target's password field and caret, for an input method
+/// only, off the main thread: nothing waits for it.
 fn inspect_for_input_method(forwarder: &Forwarder, display: u32) {
     if source_now() == Source::InputMethod {
         forwarder.inspect(cg::display_bounds(display));
     }
 }
 
-/// The input method's marked text in the Viewer, None once it commits or
-/// cancels.
+fn next_generation() -> u64 {
+    GENERATION.with(|g| {
+        g.set(g.get() + 1);
+        g.get()
+    })
+}
+
+/// The input method marked `text`, or None: it cancelled. A composition
+/// that starts belongs to the current generation.
 pub fn set_marked(text: Option<&str>) {
-    MARKED.with(|m| *m.borrow_mut() = text.map(str::to_string));
+    CALLS.with(|c| {
+        if let Some(calls) = c.borrow_mut().as_mut() {
+            calls.push(Call::Marked(text.unwrap_or_default().into()));
+        }
+    });
+    let generation = GENERATION.with(Cell::get);
+    MARKED.with(|m| {
+        let mut m = m.borrow_mut();
+        *m = text.map(|t| {
+            let started = m.as_ref().map_or(generation, |(_, g)| *g);
+            (t.to_string(), started)
+        });
+    });
 }
 
 pub fn marked() -> Option<String> {
-    MARKED.with(|m| m.borrow().clone())
+    MARKED.with(|m| m.borrow().as_ref().map(|(t, _)| t.clone()))
+}
+
+/// The input method made a call the Viewer can't follow, such as
+/// replacing text already sent.
+pub fn ignored() {
+    CALLS.with(|c| {
+        if let Some(calls) = c.borrow_mut().as_mut() {
+            calls.push(Call::Ignored);
+        }
+    });
+}
+
+/// The Takeover of `display` started or ended. An end drops a composition,
+/// now, before the card or anything else can take the keyboard and commit
+/// it. A start keeps the one the key that started it began.
+pub fn takeover_changed(display: u32, active: bool) {
+    let shown = STATE.with(|s| {
+        s.try_borrow()
+            .map(|s| s.display.as_ref().map(|(d, _)| *d))
+            .unwrap_or(None)
+    });
+    if shown != Some(display) {
+        return;
+    }
+    if active {
+        let generation = next_generation();
+        MARKED.with(|m| {
+            if let Some((_, g)) = m.borrow_mut().as_mut() {
+                *g = generation;
+            }
+        });
+    } else {
+        drop_composition();
+    }
 }
 
 /// End the input method's composition without committing it: the
-/// display changed or ended, the Takeover ended or the sheet came up. The
-/// input context discards its marked text too, so none of it comes back
-/// in the next Takeover, and text it commits is dropped until the user
-/// acts on the display again.
+/// Takeover ended, the display changed or ended, or the sheet came up.
+/// The input context discards its marked text too, and text from it that
+/// comes after is dropped.
 pub fn drop_composition() {
-    LIVE.with(|l| l.set(false));
+    next_generation();
     let had = MARKED.with(|m| m.borrow_mut().take()).is_some();
     // Releases of keys the input method had: the next real ones go out.
     STATE.with(|s| {
@@ -113,33 +198,31 @@ pub fn drop_composition() {
             s.composed.clear();
         }
     });
-    if !had {
-        return;
+    if had {
+        log::debug!("viewer: composition dropped");
+        discard_in_input_context();
     }
-    log::debug!("viewer: composition dropped");
-    discard_in_input_context();
 }
 
 /// Commit the input method's marked text as typed, as a native field does
-/// when the user clicks elsewhere or leaves the window.
+/// when the Viewer gives up the keyboard.
 pub fn commit_composition() {
     if let Some(text) = take_for_commit() {
         send_text(&text);
     }
 }
 
-/// The marked text, to commit: the composition ends, and the input
-/// context is told to drop its copy.
+/// The marked text of the current generation, to commit: the composition
+/// ends, and the input context is told to drop its copy. Anything it then
+/// commits belongs to no composition, and is dropped.
 fn take_for_commit() -> Option<String> {
-    let text = MARKED.with(|m| m.borrow_mut().take())?;
-    STATE.with(|s| {
-        if let Ok(mut s) = s.try_borrow_mut() {
-            s.composed.clear();
-        }
-    });
-    log::debug!("viewer: composition committed by the Viewer");
-    COMMITTED.with(|c| *c.borrow_mut() = Some((text.clone(), std::time::Instant::now())));
+    let (text, started) = MARKED.with(|m| m.borrow_mut().take())?;
     discard_in_input_context();
+    if started != GENERATION.with(Cell::get) {
+        log::warn!("viewer: a composition from an earlier Takeover dropped");
+        return None;
+    }
+    log::debug!("viewer: composition committed by the Viewer");
     Some(text)
 }
 
@@ -169,43 +252,48 @@ pub fn inspections() -> Option<u64> {
     })
 }
 
-/// What has the keyboard in the target of the display the Viewer shows,
-/// as last looked up. Secure input anywhere counts as a password field.
-pub fn focus() -> Focus {
-    if super::ime::secure_input() {
-        return Focus::Secure;
-    }
+/// Whether the target of the display the Viewer shows has a password
+/// field focused, as last looked up, or secure input is on. Unknown is no.
+pub fn secure() -> bool {
     STATE.with(|s| {
         s.try_borrow()
             .ok()
-            .and_then(|s| s.display.as_ref().map(|(_, f)| f.text_focus()))
-            .unwrap_or_default()
+            .and_then(|s| s.display.as_ref().map(|(_, f)| secure_for(f)))
+            .unwrap_or_else(super::ime::secure_input)
     })
 }
 
-/// Text the user's input method finished in the Viewer, for the target on
-/// the display it shows. It goes where the user's keys go, through the
-/// same checks, as Unicode text that no keyboard layout changes.
+fn secure_for(forwarder: &Forwarder) -> bool {
+    super::ime::secure_input() || forwarder.text_focus() == Focus::Secure
+}
+
+/// Text the input method inserted in the Viewer. For a key going through
+/// it, the key's outcome decides; otherwise, as for a candidate the user
+/// clicked, it goes to the target only if it ends a composition of the
+/// current generation.
 pub fn commit(text: &str) {
-    // The input method committing marked text the Viewer already sent.
-    let echo = COMMITTED.with(|c| {
+    let in_key = CALLS.with(|c| {
         c.borrow_mut()
-            .take_if(|(sent, at)| sent == text && at.elapsed() < std::time::Duration::from_secs(1))
+            .as_mut()
+            .map(|calls| calls.push(Call::Inserted(text.into())))
             .is_some()
     });
-    if echo {
-        log::debug!("viewer: input method committed text the Viewer sent; left out");
+    if in_key {
+        MARKED.with(|m| m.borrow_mut().take());
+        return;
+    }
+    let started = MARKED.with(|m| m.borrow_mut().take()).map(|(_, g)| g);
+    if started != Some(GENERATION.with(Cell::get)) {
+        log::warn!("viewer: input method text dropped, it belongs to no current composition");
         return;
     }
     send_text(text);
 }
 
+/// Text to the target where the user's keys go, through the same checks,
+/// as Unicode text that no keyboard layout changes.
 fn send_text(text: &str) {
     if text.is_empty() {
-        return;
-    }
-    if !LIVE.with(|l| l.get()) {
-        log::warn!("viewer: input method text dropped, the user isn't operating the display");
         return;
     }
     let shown = STATE.with(|s| match s.try_borrow() {
@@ -218,7 +306,6 @@ fn send_text(text: &str) {
             native::send(Native::ScreenTouched { display });
             super::catch::agent_acted(display);
             forwarder.text(text.to_string(), cg::display_bounds(display));
-            inspect_for_input_method(&forwarder, display);
         }
         Ok(None) => log::debug!("viewer: composed text dropped, no display to send it to"),
         // Inside the event handler, which holds the state: after it.
@@ -226,6 +313,61 @@ fn send_text(text: &str) {
             let text = text.to_string();
             native::main_async(move || send_text(&text));
         }
+    }
+}
+
+/// A key through the input context, and what the target gets for it.
+fn through_input_method(key: Through) {
+    let code = key.event.keyCode();
+    let characters = key
+        .event
+        .characters()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    let composing = MARKED.with(|m| m.borrow().is_some());
+    CALLS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    match SCRIPT.with(|s| s.borrow_mut().take()) {
+        Some(script) => run_script(&key.window, script, &characters),
+        None => {
+            if let Some(context) = input_context(&key.window) {
+                let _: bool = unsafe { objc2::msg_send![context, handleEvent: &*key.event] };
+            }
+        }
+    }
+    let calls = CALLS.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    let outcome = viewer_keys::outcome(composing, &characters, &calls);
+    ROUTED.with(|r| r.set(Some(outcome.name())));
+    let bounds = cg::display_bounds(key.display);
+    match outcome {
+        Outcome::Key => {
+            key.forwarder.key(code, true, flags(&key.event), bounds);
+            return;
+        }
+        Outcome::Text(text) => send_text(&text),
+        Outcome::Nothing => {}
+    }
+    STATE.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            s.composed.insert(code);
+        }
+    });
+    // A composition starts: where its candidates go, without waiting.
+    if !composing && MARKED.with(|m| m.borrow().is_some()) {
+        key.forwarder.inspect(bounds);
+    }
+}
+
+/// Tests: what the input method does, through the view's own
+/// NSTextInputClient methods.
+fn run_script(window: &NSWindow, script: Script, characters: &str) {
+    let result = match script {
+        Script::Mark(text) => text_input(window, &text, false),
+        Script::Insert(text) => text_input(window, &text, true),
+        Script::Pass => text_input(window, characters, true),
+        Script::Nothing => Ok(()),
+    };
+    if let Err(e) = result {
+        log::warn!("viewer: test input method failed: {e}");
     }
 }
 
@@ -315,15 +457,19 @@ pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
 }
 
 /// Tests: press and release a key on the Viewer, as if the user typed it,
-/// with Shift and Command held as asked, and `source`, when given, as the
-/// input source selected. Where the key went. A key for the input method
-/// stops there: the user's real input method would take it.
+/// with Shift and Command held as asked, typing `characters`. `source`,
+/// when given, stands in for the input source selected, and `script` for
+/// what the input method does with the key. What the key came to: "raw"
+/// for the key itself, "text" for composed text, "inputMethod" for
+/// nothing yet.
 pub fn inject_key(
     code: u16,
     shift: bool,
     command: bool,
+    characters: &str,
     source: Option<Source>,
-) -> Result<Route, String> {
+    script: Option<Script>,
+) -> Result<&'static str, String> {
     let window = STATE.with(|s| s.borrow().window);
     if window == 0 {
         return Err("no Viewer".into());
@@ -336,8 +482,8 @@ pub fn inject_key(
     if command {
         flags |= objc2_app_kit::NSEventModifierFlags::Command;
     }
-    let empty = objc2_foundation::NSString::new();
-    let mut route = Route::Raw;
+    let characters = objc2_foundation::NSString::from_str(characters);
+    let mut routed = "raw";
     for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             kind,
@@ -346,24 +492,24 @@ pub fn inject_key(
             0.0,
             window.windowNumber(),
             None,
-            &empty,
-            &empty,
+            &characters,
+            &characters,
             false,
             code,
         )
         .ok_or("no event")?;
         SOURCE.with(|s| s.set(source));
+        SCRIPT.with(|s| *s.borrow_mut() = script.clone());
         ROUTED.with(|r| r.set(None));
         let injected = inject(&event);
         SOURCE.with(|s| s.set(None));
+        SCRIPT.with(|s| s.borrow_mut().take());
         if kind == NSEventType::KeyDown {
-            route = ROUTED.with(|r| r.get()).unwrap_or(Route::Raw);
+            routed = ROUTED.with(|r| r.get()).unwrap_or("raw");
         }
-        if route == Route::Raw {
-            injected?;
-        }
+        injected?;
     }
-    Ok(route)
+    Ok(routed)
 }
 
 /// Tests: an input method's call on the Viewer's view, as the user's makes
@@ -373,6 +519,14 @@ pub fn inject_key(
 /// routing runs. Never from inside a GPUI update: the view calls back into
 /// it.
 pub fn inject_text_input(text: &str, commit: bool) -> Result<(), String> {
+    let window = STATE.with(|s| s.borrow().window);
+    if window == 0 {
+        return Err("no Viewer".into());
+    }
+    text_input(unsafe { &*(window as *const NSWindow) }, text, commit)
+}
+
+fn text_input(window: &NSWindow, text: &str, commit: bool) -> Result<(), String> {
     use objc2::msg_send;
     use objc2_foundation::{NSNotFound, NSString};
     /// NSRange as GPUI's view declares it, `{NSRange=QQ}`, which
@@ -384,11 +538,6 @@ pub fn inject_text_input(text: &str, commit: bool) -> Result<(), String> {
         const ENCODING: objc2::Encoding =
             objc2::Encoding::Struct("NSRange", &[usize::ENCODING, usize::ENCODING]);
     }
-    let window = STATE.with(|s| s.borrow().window);
-    if window == 0 {
-        return Err("no Viewer".into());
-    }
-    let window = unsafe { &*(window as *const NSWindow) };
     let view = window
         .firstResponder()
         .ok_or("the Viewer has no first responder")?;
@@ -590,11 +739,16 @@ fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64
 /// Handle one event; false lets it go on to GPUI.
 fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     let mut take_key = None;
-    let handled = handle_in(event, mtm, &mut take_key);
+    let mut through = None;
+    let handled = handle_in(event, mtm, &mut take_key, &mut through);
     // Outside the state: a window becoming key draws at once, and its
     // paint reports the layout here.
     if let Some(window) = take_key {
         native::make_key(&window);
+    }
+    // Outside the state too: the input method calls back into the Viewer.
+    if let Some(key) = through {
+        through_input_method(key);
     }
     handled
 }
@@ -603,6 +757,7 @@ fn handle_in(
     event: &NSEvent,
     mtm: MainThreadMarker,
     take_key: &mut Option<objc2::rc::Retained<NSWindow>>,
+    through: &mut Option<Through>,
 ) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -655,7 +810,6 @@ fn handle_in(
                 }
                 // A click commits a composition, where the keys went, before
                 // the focus moves.
-                LIVE.with(|l| l.set(true));
                 s.composed.clear();
                 if MARKED.with(|m| m.borrow().is_some())
                     && let Some(text) = take_for_commit()
@@ -715,7 +869,6 @@ fn handle_in(
                 // events: only a scroll that moves something takes over.
                 let moved = event.scrollingDeltaX() != 0.0 || event.scrollingDeltaY() != 0.0;
                 if moved && !event.phase().contains(NSEventPhase::MayBegin) {
-                    LIVE.with(|l| l.set(true));
                     native::send(Native::ScreenTouched { display });
                     super::catch::agent_acted(display);
                 }
@@ -731,7 +884,6 @@ fn handle_in(
             }
             NSEventType::KeyDown => {
                 let code = event.keyCode();
-                LIVE.with(|l| l.set(true));
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
                 let held = event.modifierFlags();
@@ -740,30 +892,20 @@ fn handle_in(
                     command: held.contains(NSEventModifierFlags::Command),
                     control: held.contains(NSEventModifierFlags::Control),
                 };
-                let source = source_now();
-                let composing = MARKED.with(|m| m.borrow().is_some());
-                let mut focus = if super::ime::secure_input() {
-                    Focus::Secure
-                } else {
-                    forwarder.text_focus()
-                };
-                // A key that would start a composition: the app may have
-                // moved its focus by itself since the last look, as a new
-                // tab or a dialog does. Look again, briefly.
-                let would_compose = !composing
-                    && focus != Focus::Secure
-                    && viewer_keys::route(source, Focus::Text, false, press) == Route::InputMethod;
-                if would_compose {
-                    focus = forwarder.fresh_text_focus(cg::display_bounds(display), FRESH_FOCUS);
-                }
-                let route = viewer_keys::route(source, focus, composing, press);
-                ROUTED.with(|r| r.set(Some(route)));
+                // What was last looked up, after a click: never waited for.
+                let route = viewer_keys::route(source_now(), secure_for(&forwarder), press);
                 if route == Route::InputMethod {
-                    // On to GPUI's view and the input method.
                     s.sent_up.remove(&code);
-                    s.composed.insert(code);
-                    return false;
+                    s.composed.remove(&code);
+                    *through = Some(Through {
+                        event: objc2::Message::retain(event),
+                        window: window.clone(),
+                        display,
+                        forwarder: forwarder.clone(),
+                    });
+                    return true;
                 }
+                ROUTED.with(|r| r.set(Some("raw")));
                 // A release the input method had and the Viewer missed.
                 s.composed.remove(&code);
                 forwarder.key(code, true, flags(event), cg::display_bounds(display));
@@ -781,13 +923,11 @@ fn handle_in(
             NSEventType::KeyUp => {
                 let code = event.keyCode();
                 if s.composed.remove(&code) {
-                    return false;
+                    return true;
                 }
                 if !s.sent_up.remove(&code) {
                     forwarder.key(code, false, flags(event), cg::display_bounds(display));
                 }
-                // A key such as Tab may have moved the focus.
-                inspect_for_input_method(&forwarder, display);
                 true
             }
             NSEventType::FlagsChanged => {
@@ -795,8 +935,8 @@ fn handle_in(
                 // An input method switches modes on Shift alone: it sees
                 // the modifiers too.
                 if !INJECTING.with(|i| i.get())
-                    && forwarder.text_focus() == Focus::Text
                     && super::ime::current_kind() == Source::InputMethod
+                    && !secure_for(&forwarder)
                 {
                     input_method_sees(&window, event);
                 }
