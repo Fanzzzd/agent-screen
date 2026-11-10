@@ -27,8 +27,8 @@
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="preload" as="image" href="/media/hero.jpg" media="(min-width: 601px)" fetchpriority="high">
-<link rel="preload" as="image" href="/media/hero-m.jpg" media="(max-width: 600px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero.webp?v=f3a96771a4" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero-m.webp?v=44147799df" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -43,10 +43,10 @@
         <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
         <div class="peek" id="peek" tabindex="-1">
           <div class="tiles">
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.jpg" data-src="/media/tile-checkout.mp4"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.jpg" data-src="/media/tile-kanban.mp4"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.jpg" data-src="/media/tile-booking.mp4"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
-            <figure class="asks"><img src="/media/tile-help.jpg" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.webp?v=051b6561fb" data-src="/media/tile-checkout.mp4?v=1288f1959f"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.webp?v=6111b17acc" data-src="/media/tile-kanban.mp4?v=ed4120870f"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.webp?v=10e7b188c4" data-src="/media/tile-booking.mp4?v=47b281a3c7"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
+            <figure class="asks"><img src="/media/tile-help.webp?v=c6e2822d7c" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
           </div>
           <p class="peek-note">In the app, Peek drops from the menu bar icon.</p>
         </div>
@@ -76,7 +76,7 @@
     <figure class="film">
       <div class="backscreen" aria-hidden="true"></div>
       <video id="hero" muted loop playsinline preload="none"
-        data-poster="/media/hero.jpg" data-src="/media/hero.mp4" data-src-m="/media/hero-m.mp4" data-poster-m="/media/hero-m.jpg"
+        data-poster="/media/hero.webp?v=f3a96771a4" data-src="/media/hero.mp4?v=fdd04bf8d9" data-av1="/media/hero.av1.mp4?v=333115970d" data-src-m="/media/hero-m.mp4?v=55a91fb03e" data-av1-m="/media/hero-m.av1.mp4?v=ebec6d81f3" data-poster-m="/media/hero-m.webp?v=44147799df"
         aria-label="You work in your editor and spreadsheet. Agents take over your pointer, then Agent Screen moves each agent onto a display of its own while your pointer stays put. One agent asks for help with a sign-in; you take over, sign in and hand it back."></video>
       <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
     </figure>
@@ -123,7 +123,7 @@
         <h2>Every Agent Display, one hover away.</h2>
         <p>Hover the menu bar icon to see every Agent Display live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-poster-m="/media/peek-m.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live Agent Displays. One grows into the Viewer, where Claude Code fills a checkout form."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.webp?v=5e6db37fe7" data-poster-m="/media/peek-m.webp?v=f983cbf6f0" data-src="/media/peek.mp4?v=85509e8fdc" data-av1="/media/peek.av1.mp4?v=bf17c4e3ec" data-src-m="/media/peek-m.mp4?v=76b5eb314c" data-av1-m="/media/peek-m.av1.mp4?v=05d834416b" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live Agent Displays. One grows into the Viewer, where Claude Code fills a checkout form."></video>
     </div>
 
     <div class="feature flip">
@@ -132,7 +132,7 @@
         <h2>It asks when it's stuck. You take the wheel.</h2>
         <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it. To hand the display back, press Let … Continue or tell the agent to continue in the conversation.</p>
       </div>
-      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-src="/media/help.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
+      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.webp?v=d58726d9fe" data-src="/media/help.mp4?v=7b483cc014" data-av1="/media/help.av1.mp4?v=9057087f27" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
 
     <div class="feature">
@@ -141,7 +141,7 @@
         <h2>Hand a window over. Take it back.</h2>
         <p>Drag one of your windows onto the Viewer, or tell the agent to take it in the conversation. Press Take Back or ask the agent to return it, and the window goes back to where it was. An agent can also ask for a window; you answer Hand Over or Keep.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/handover.jpg" data-poster-m="/media/handover-m.jpg" data-src="/media/handover.mp4" data-src-m="/media/handover-m.mp4" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/handover.webp?v=33e133afe9" data-poster-m="/media/handover-m.webp?v=6c1b24da23" data-src="/media/handover.mp4?v=7a7c6649dc" data-av1="/media/handover.av1.mp4?v=f0cabeeda5" data-src-m="/media/handover-m.mp4?v=5a943403de" data-av1-m="/media/handover-m.av1.mp4?v=b69afac198" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
     </div>
   </section>
 
@@ -150,7 +150,7 @@
       <h2>One display per agent session.</h2>
       <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows stay put unless you give them to an agent. With many displays, turn on Smooth Display Changes in Settings.</p>
     </div>
-    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve Agent Displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.webp?v=aeb239a206" data-poster-m="/media/fleet-m.webp?v=5eb343b866" data-src="/media/fleet.mp4?v=16aaf07726" data-av1="/media/fleet.av1.mp4?v=ed740079fb" data-src-m="/media/fleet-m.mp4?v=0faa120b47" data-av1-m="/media/fleet-m.av1.mp4?v=f71b12b3e0" aria-label="Twelve Agent Displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
       <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. They choose an item in a standard Mac pop-up, or in a select on a page in a browser they started, without opening its menu. They step sliders that support it without dragging.</p></li>
       <li><h3>Input Queue</h3><p>When background input can't do a web drag or a click, the agent asks to use your pointer. A card shows what it wants to do, and nothing runs until you press Allow. Move the mouse, press a key or press Stop to take your pointer back.</p></li>
@@ -238,7 +238,24 @@
   // Films load as they come near the viewport; phones get their own cut where there is one.
   const small = matchMedia('(max-width: 600px)').matches;
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const pick = (v) => (small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src);
+  // Each film comes in AV1 and H.264. The AV1 file is smaller, but only a browser that decodes it smoothly gets it,
+  // so Safari on a Mac without an AV1 decoder keeps H.264.
+  let av1 = false;
+  const pick = (v) => {
+    const d = v.dataset;
+    const m = small && d.srcM;
+    return (av1 && (m ? d.av1M : d.av1)) || (m ? d.srcM : d.src);
+  };
+  const av1Type = 'video/mp4; codecs="av01.0.08M.08"';
+  async function canAv1() {
+    const said = document.createElement('video').canPlayType(av1Type);
+    if (!navigator.mediaCapabilities) return said === 'probably';
+    if (!said) return false;
+    // The largest film each layout plays: help has no phone cut, so a phone plays its 1440x810 file.
+    const size = small ? { width: 1440, height: 810 } : { width: 1920, height: 1080 };
+    const info = await navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: av1Type, ...size, bitrate: 1000000, framerate: 30 } });
+    return info.smooth;
+  }
   // One button pauses and plays every looping film, the Peek tiles included.
   // A refused play() (iOS Low Power Mode, for one) shows as paused, so the button tells the truth.
   let paused = false;
@@ -257,10 +274,21 @@
       } else { inView.delete(v); v.pause(); }
     }
   }, { rootMargin: '200px' });
-  document.querySelectorAll('main video[data-src]').forEach((v) => {
-    near.observe(v);
-    // With reduced motion nothing plays by itself; each film gets controls and loads on demand.
-    if (still) { v.controls = true; v.preload = 'none'; v.src = pick(v); } else play.observe(v);
+  // A browser that never answers gets H.264 after 300 ms, so the films don't wait on it.
+  Promise.race([canAv1().catch(() => false), new Promise((r) => setTimeout(r, 300, false))]).then((ok) => {
+    av1 = ok;
+    document.querySelectorAll('main video[data-src]').forEach((v) => {
+      // An AV1 file that fails to play after all sends this film, and any that load later, to H.264.
+      v.addEventListener('error', () => {
+        if (!v.src.includes('.av1.')) return;
+        av1 = false;
+        v.src = pick(v);
+        if ((still || inView.has(v)) && !paused) start(v);
+      });
+      near.observe(v);
+      // With reduced motion nothing plays by itself; each film gets controls and loads on demand.
+      if (still) { v.controls = true; v.preload = 'none'; v.src = pick(v); } else play.observe(v);
+    });
   });
 
   // Peek in the header: hover, focus or click the icon.
@@ -270,7 +298,7 @@
   const show = (on) => {
     wrap.classList.toggle('open', on);
     btn.setAttribute('aria-expanded', on);
-    tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still && !paused) start(v); } else v.pause(); });
+    tiles.forEach((v) => { if (on) { if (!v.src) v.src = pick(v); if (!still && !paused) start(v); } else v.pause(); });
   };
   let pinned = false;
   let hover = 0;
