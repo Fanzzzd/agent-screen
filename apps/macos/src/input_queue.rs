@@ -52,8 +52,13 @@ pub enum Plan {
 /// One complete drag, in global points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drag {
+    /// The window under `from` when the agent asked, and its frame.
     pub target: WindowTarget,
     pub frame: Rect,
+    /// The window under `to` then, and its frame: `target` and `frame` for
+    /// a drag within one window (ADR 0013, "Drags between windows").
+    pub drop: WindowTarget,
+    pub drop_frame: Rect,
     pub area: Rect,
     pub from: (f64, f64),
     pub to: (f64, f64),
@@ -663,6 +668,8 @@ mod tests {
         Plan::Drag(Drag {
             target,
             frame: area,
+            drop: target,
+            drop_frame: area,
             area,
             from: (x, 100.0),
             to: (x + 50.0, 200.0),

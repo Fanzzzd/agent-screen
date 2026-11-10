@@ -20,6 +20,7 @@ pub mod new_window;
 pub mod numbers;
 pub mod placement;
 pub mod real_click;
+pub mod real_drag;
 pub mod recording_playback;
 pub mod returns;
 pub mod screen_edge;

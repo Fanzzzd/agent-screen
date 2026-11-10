@@ -1452,44 +1452,83 @@ impl Shell {
                             );
                         }
                     };
-                    let Some(window) = crate::mac::windows::on_display(display)
-                        .into_iter()
-                        .find(|w| w.target == plan.target)
-                    else {
+                    // A drag may go from one window of its display to
+                    // another (ADR 0013, "Drags between windows").
+                    use agent_screen_model::real_drag;
+                    let on_display = crate::mac::windows::on_display(display);
+                    let frame_of = |target: WindowTarget| {
+                        on_display
+                            .iter()
+                            .find(|w| w.target == target)
+                            .map(|w| w.bounds.offset(area.x, area.y))
+                    };
+                    let Some(frame) = frame_of(plan.target) else {
                         return Outcome::Refused("the window is no longer on the display");
                     };
-                    let frame = window.bounds.offset(area.x, area.y);
+                    let Some(drop_frame) = frame_of(plan.drop) else {
+                        return Outcome::Refused("the drop window is no longer on the display");
+                    };
                     if area != plan.area
                         || frame != plan.frame
-                        || ![plan.from, plan.to]
-                            .iter()
-                            .all(|p| area.contains(*p) && frame.contains(*p))
+                        || !frame.contains(plan.from)
+                        || ![plan.from, plan.to].iter().all(|p| area.contains(*p))
                     {
                         return Outcome::Refused(
                             "the drag is outside its authorized window or display",
                         );
                     }
+                    if drop_frame != plan.drop_frame
+                        || cg::window_bounds(plan.drop.window_id) != Some(plan.drop_frame)
+                        || !drop_frame.contains(plan.to)
+                    {
+                        return Outcome::Refused(
+                            "the drop window moved or changed size, so the drag would end elsewhere",
+                        );
+                    }
+                    let path = real_drag::Path {
+                        area,
+                        from: plan.from,
+                        to: plan.to,
+                        source: plan.target,
+                        drop: plan.drop,
+                    };
+                    let windows: Vec<WindowTarget> = on_display.iter().map(|w| w.target).collect();
                     real_input::drag(
                         plan.target,
+                        plan.drop.pid,
                         plan.from,
                         plan.to,
                         objc2_core_graphics::CGEventFlags(plan.flags),
                         |at| {
-                            // Recheck geometry and the top window before
-                            // every event. A moved or covered target must
-                            // not receive input at its old coordinates.
+                            // Recheck geometry and the window under the
+                            // point before every event. A moved or covered
+                            // window must not receive input at its old
+                            // coordinates.
+                            let under = |p| crate::mac::input::window_under_drag(p, plan.target.pid);
                             let why = if !ok.load(Ordering::SeqCst) {
                                 Some("the loan was cancelled")
-                            } else if cg::display_bounds(display) != area || !area.contains(at) {
+                            } else if cg::display_bounds(display) != area {
                                 Some("the display geometry changed")
                             } else if cg::window_bounds(plan.target.window_id) != Some(frame) {
                                 Some("the window geometry changed")
-                            } else if !crate::mac::input::window_at(at)
-                                .is_some_and(|(target, _)| target == plan.target)
-                            {
-                                Some("the window was covered or left the screen")
+                            } else if cg::window_bounds(plan.drop.window_id) != Some(drop_frame) {
+                                Some("the drop window's geometry changed")
                             } else {
-                                None
+                                real_drag::refusal(&path, at, under(at), &windows).or_else(|| {
+                                    // At the press, the end must lie
+                                    // uncovered too: the source coming
+                                    // forward may cover it.
+                                    (at == plan.from && plan.to != plan.from)
+                                        .then(|| {
+                                            real_drag::refusal(
+                                                &path,
+                                                plan.to,
+                                                under(plan.to),
+                                                &windows,
+                                            )
+                                        })
+                                        .flatten()
+                                })
                             };
                             if let Some(why) = why {
                                 log::debug!("input queue containment: {why}");

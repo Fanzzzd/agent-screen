@@ -2227,6 +2227,20 @@ fn wheel_steps(delta: f64) -> i32 {
     }
 }
 
+/// The app window under a point of a drag with the user's pointer: as
+/// `window_at`, but the drag's own image, which the source app (pid
+/// `source`) draws at the dragging level under the pointer, doesn't cover
+/// it. Another app's window at that level still does.
+pub fn window_under_drag(at: (f64, f64), source: i32) -> Option<WindowTarget> {
+    let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
+    hits()
+        .into_iter()
+        .filter(|h| !(h.layer == dragging && h.target.pid == source))
+        .find(|h| h.bounds.contains(at))
+        .filter(|h| h.layer == 0 && h.target == h.host)
+        .map(|h| h.target)
+}
+
 /// Windows input can reach, front to back. The desktop is left out on
 /// purpose: a click on Finder's desktop window counts as a wallpaper click,
 /// and with "click wallpaper to reveal desktop" on (the default since macOS

@@ -634,12 +634,15 @@ fn inputs_busy() -> Option<&'static str> {
     held.then_some("a mouse button or modifier is already held")
 }
 
-/// Drag from `from` to `to`, global points, with the user's pointer.
+/// Drag from `from` to `to`, global points, with the user's pointer, from
+/// `target`'s window to a window of `drop_pid`'s, which may be another app.
 /// `go` is checked before every event, with the user's touch: a loan the
-/// queue stopped, or a window that left the display, ends it. The button
+/// queue stopped, or a window that left the display, ends it. It gets
+/// exactly `from` at the press and exactly `to` at the release. The button
 /// goes up before this returns, however it ends.
 pub fn drag(
     target: WindowTarget,
+    drop_pid: i32,
     from: (f64, f64),
     to: (f64, f64),
     flags: CGEventFlags,
@@ -652,6 +655,19 @@ pub fn drag(
     let Ok(_process) = gate.try_write() else {
         return Outcome::Refused("background input into this process is still running");
     };
+    // Background input into the drop app waits too.
+    let drop_gate = (drop_pid != target.pid).then(|| process_gate(drop_pid));
+    let _drop_process = match &drop_gate {
+        Some(gate) => match gate.try_write() {
+            Ok(held) => Some(held),
+            Err(_) => {
+                return Outcome::Refused(
+                    "background input into the drop window's app is still running",
+                );
+            }
+        },
+        None => None,
+    };
     if let Some(why) = inputs_busy() {
         return Outcome::Refused(why);
     }
@@ -663,8 +679,9 @@ pub fn drag(
         flags,
     };
     let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    const BEFORE_PRESS: &str = "nothing was pressed: before the press, the approval ended, the user used their pointer or keyboard, secure input came on, or a window moved or now covers the drag's start or end";
     if !allowed(from) {
-        return Outcome::Refused("the approval ended before the drag began");
+        return Outcome::Refused(BEFORE_PRESS);
     }
     // A click on an app in the background only brings it forward, and the
     // page never sees the press: the app comes to the front first. The
@@ -678,7 +695,7 @@ pub fn drag(
     }
     thread::sleep(Duration::from_millis(60));
     if !allowed(from) || super::app::frontmost_pid() != Some(target.pid) {
-        return Outcome::Refused("the approval ended before the drag began");
+        return Outcome::Refused(BEFORE_PRESS);
     }
     let Some(up) = poster.event(CGEventType::LeftMouseUp, from) else {
         return Outcome::Refused("the release event could not be created before pressing");
@@ -710,7 +727,11 @@ pub fn drag(
             break;
         }
         let t = i as f64 / steps as f64;
-        at = (from.0 + dx * t, from.1 + dy * t);
+        at = if i == steps {
+            to
+        } else {
+            (from.0 + dx * t, from.1 + dy * t)
+        };
         release.at = at;
         if !allowed(at) {
             stopped = Some(if touched() {

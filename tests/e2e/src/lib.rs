@@ -306,8 +306,23 @@ pub fn menu_choice_app() -> Result<PathBuf> {
     swift_app("menuchoice", "MenuChoice")
 }
 
+/// tools/filedrag.swift as two apps, FileSource and FileDrop: a file icon
+/// that starts a system drag session, and a view that takes a dropped
+/// file. Separate bundle ids, so launch_app starts each in its own process.
+pub fn file_drag_apps() -> Result<(PathBuf, PathBuf)> {
+    Ok((
+        swift_app_as("filedrag", "FileSource", "filesource")?,
+        swift_app_as("filedrag", "FileDrop", "filedrop")?,
+    ))
+}
+
 /// A tool as an app named `name`, so launch_app takes it.
 fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
+    swift_app_as(tool_name, name, tool_name)
+}
+
+/// A tool as an app named `name` with the bundle id ending in `id`.
+fn swift_app_as(tool_name: &str, name: &str, id: &str) -> Result<PathBuf> {
     let app = out().join(format!("{name}.app"));
     let macos = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos)?;
@@ -317,7 +332,7 @@ fn swift_app(tool_name: &str, name: &str) -> Result<PathBuf> {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.{tool_name}</string>
+<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.{id}</string>
 <key>CFBundleExecutable</key><string>{name}</string>
 <key>CFBundleName</key><string>{name}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
@@ -364,6 +379,7 @@ const HANDS_OFF: &[&str] = &[
     "menupress",
     "realdrag",
     "realclick",
+    "filedrag",
     "oneclick",
     "openpanel",
     "peekanim",
