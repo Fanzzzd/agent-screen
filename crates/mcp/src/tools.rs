@@ -182,7 +182,7 @@ pub fn definitions() -> Vec<Value> {
                 "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. To copy and paste, use",
                 "act_on_element's read_text and insert_text; set_value replaces a field's text. Shortcuts for app commands,",
                 "such as cmd+n or cmd+w, work.",
-                "When the app is also the user's front app with another of its windows focused, as a browser they work in,",
+                "When the app is also the user's front app with another of its windows focused on their screen, as a browser they work in,",
                 "nothing is posted to it, since keys would reach their window: a single left click presses the control or",
                 "picks the text field under it through accessibility, type puts text into the picked field, Return,",
                 "Escape, BackSpace and cmd+a act on what the click picked, and other keys fail and name the user's window.",

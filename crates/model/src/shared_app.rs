@@ -20,8 +20,10 @@ pub enum Front {
     /// Not the front app: posted input and the focus record reach the
     /// agent's window.
     No,
-    /// The front app, with the agent's window focused, as when an app the
-    /// agent started brought itself forward: posted input reaches it.
+    /// The front app, with a window of the agent's focused, as when an app
+    /// the agent started brought itself forward: the target, or another
+    /// window on the target's Agent Display, such as a Handover of the
+    /// app's (#162). Posted input reaches the agent's windows only.
     TargetFocused,
     /// The front app, with another window focused, the user's: posted
     /// input would reach that window or take its focus.
@@ -30,13 +32,35 @@ pub enum Front {
     FocusUnknown,
 }
 
+/// The front app's focused window, as accessibility reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Focused {
+    pub window: u32,
+    /// Whether it is on the Agent Display the target window is on, the
+    /// Agent Session's own: a Handover there, or another window of the
+    /// agent's. Such a window isn't the user's, even when the app is their
+    /// front app, as WeCom was with its only window handed over (#162).
+    pub on_target_display: bool,
+    /// Whether the app also has a window on the user's screens. The user
+    /// may click it during a long `type`, and the keys still going out
+    /// would reach it, so then a focused window on the target's display
+    /// counts as the user's too.
+    pub user_window: bool,
+}
+
 impl Front {
     /// From what the system says: whether the target's app is in front, and
-    /// its focused window, if accessibility answered.
-    pub fn of(target_is_front: bool, focused: Option<u32>, target_window: u32) -> Front {
+    /// its focused window, if accessibility answered. A focused window
+    /// anywhere off the target's display, on the user's screen, is the
+    /// user's (#110).
+    pub fn of(target_is_front: bool, focused: Option<Focused>, target_window: u32) -> Front {
         match (target_is_front, focused) {
             (false, _) => Front::No,
-            (true, Some(id)) if id == target_window => Front::TargetFocused,
+            (true, Some(f))
+                if f.window == target_window || (f.on_target_display && !f.user_window) =>
+            {
+                Front::TargetFocused
+            }
             (true, Some(_)) => Front::OtherFocused,
             (true, None) => Front::FocusUnknown,
         }
@@ -343,15 +367,59 @@ mod tests {
         KeyChord::parse(text).unwrap()
     }
 
+    fn users(window: u32) -> Option<Focused> {
+        Some(Focused {
+            window,
+            on_target_display: false,
+            user_window: true,
+        })
+    }
+
     #[test]
     fn front_state_comes_from_the_front_app_and_its_focused_window() {
-        assert_eq!(Front::of(false, Some(9), 7), Front::No);
+        assert_eq!(Front::of(false, users(9), 7), Front::No);
         assert_eq!(Front::of(false, None, 7), Front::No);
-        assert_eq!(Front::of(true, Some(7), 7), Front::TargetFocused);
-        assert_eq!(Front::of(true, Some(9), 7), Front::OtherFocused);
+        assert_eq!(Front::of(true, users(7), 7), Front::TargetFocused);
+        assert_eq!(Front::of(true, users(9), 7), Front::OtherFocused);
         assert_eq!(Front::of(true, None, 7), Front::FocusUnknown);
         assert!(Front::No.posts() && Front::TargetFocused.posts());
         assert!(!Front::OtherFocused.posts() && !Front::FocusUnknown.posts());
+    }
+
+    #[test]
+    fn a_focused_window_on_the_agents_display_is_not_the_users() {
+        // #162: WeCom's only window, handed over, is focused, and the
+        // agent's click lands on another of its windows there.
+        let handover = Some(Focused {
+            window: 9,
+            on_target_display: true,
+            user_window: false,
+        });
+        let front = Front::of(true, handover, 7);
+        assert_eq!(front, Front::TargetFocused);
+        assert!(front.posts() && !front.shared(true));
+        assert_eq!(text_route(front, "hi\n"), TextRoute::Post);
+        assert_eq!(key_route(front, chord("Right")), KeyRoute::Post);
+        assert_eq!(click_route(front, true, true, 2, false), ClickRoute::Post);
+        // #110: the user's window focused on their screen still refuses.
+        let theirs = Front::of(true, users(9), 7);
+        assert_eq!(theirs, Front::OtherFocused);
+        assert_eq!(
+            click_route(theirs, true, true, 2, false),
+            ClickRoute::Refuse
+        );
+        assert_eq!(key_route(theirs, chord("Right")), KeyRoute::Refuse);
+        // Not the front app: nothing changes.
+        assert_eq!(Front::of(false, handover, 7), Front::No);
+        // A Handover focused while the app has another window on the
+        // user's screen: they may click that window mid-type, so it
+        // refuses as theirs.
+        let beside_theirs = Some(Focused {
+            window: 9,
+            on_target_display: true,
+            user_window: true,
+        });
+        assert_eq!(Front::of(true, beside_theirs, 7), Front::OtherFocused);
     }
 
     #[test]

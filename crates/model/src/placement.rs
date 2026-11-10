@@ -109,7 +109,7 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
             "{name} isn't running. Start it with launch_app, which opens its window on the display"
         ),
         AppSighting::NoWindow { name } => format!(
-            "{name} is running, but none of its windows is on screen: they are closed, minimized, hidden or on another macOS Space. Ask the user to open or bring up its window, then call place_window again"
+            "{name} is running, but none of its windows is on screen: they are closed, minimized, hidden or on another macOS Space. Ask the user to open or bring up its window, then call place_window again. An app whose only window was closed, as a chat app's main window, reopens it when the user clicks its Dock icon; launch_app opens no window in a running app whose menus have no New Window"
         ),
         AppSighting::OnlyPanels { name } => format!(
             "{name}'s only windows on the user's screen are panels or dialogs; place_window moves document windows. Ask the user to open its main window"
@@ -242,10 +242,10 @@ mod tests {
             "claims only what it checked"
         );
         let name = || "企业微信".to_string();
-        assert!(
-            no_app_window("企业微信", &AppSighting::NoWindow { name: name() })
-                .starts_with("企业微信 is running")
-        );
+        let closed = no_app_window("企业微信", &AppSighting::NoWindow { name: name() });
+        assert!(closed.starts_with("企业微信 is running"));
+        // #162: how a closed main window comes back.
+        assert!(closed.contains("Dock icon") && closed.contains("launch_app"));
         let panels = no_app_window("企业微信", &AppSighting::OnlyPanels { name: name() });
         assert!(panels.contains("panels or dialogs") && !panels.contains("none of its windows"));
         assert!(
