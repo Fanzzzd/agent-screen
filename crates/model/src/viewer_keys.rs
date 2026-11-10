@@ -172,11 +172,12 @@ pub fn route(source: Source, secrecy: Secrecy, press: Press) -> Route {
     }
 }
 
-/// How long a key waits for the lookup of the target's focus before it
-/// goes as the key, in milliseconds. Lookups in the e2e runs took 55 ms
-/// at the median and 142 ms at most; a timeout sends pinyin's first
-/// letter as the key, so the limit leaves room above that.
-pub const HOLD_MS: u64 = 250;
+/// How long a key waits for the target's focus to settle before it goes
+/// as the key, in milliseconds. Settling takes a second look 100 ms after
+/// the key at the soonest; in the e2e runs held keys waited 118 ms at the
+/// median and 267 ms at most. A timeout sends pinyin's first letter as the
+/// key, so the limit leaves room above that.
+pub const HOLD_MS: u64 = 400;
 
 /// Whether `press` waits for the lookup of the target's focus, with
 /// `source` selected: only a key the input method would see, while the
