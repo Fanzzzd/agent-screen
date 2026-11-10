@@ -454,9 +454,58 @@ fn park_owned(
             return Some(made);
         }
     }
-    log::warn!("display {id}: macOS did not verify a safe position; releasing it");
-    crate::lifecycle::note("released", id, "parking failed");
+    let why = parking_failure(id, &ids, &fillers, before);
+    log::warn!("display {id}: macOS did not verify a safe position ({why}); releasing it");
+    crate::lifecycle::note("released", id, &format!("parking failed: {why}"));
     None
+}
+
+/// Why the last parking check failed, for the display log: each display
+/// not back where it was before, whether `id` and each filler is out of
+/// the way, and where every display is.
+fn parking_failure(id: u32, ids: &[u32], fillers: &[u32], before: &[(u32, (f64, f64))]) -> String {
+    // The closet included, which macOS may move too.
+    let online = cg::online();
+    let rect = |d: u32| {
+        let b = cg::display_bounds(d);
+        format!("{},{} {}x{}", b.x, b.y, b.width, b.height)
+    };
+    let role = |d: u32| {
+        if ids.contains(&d) {
+            "ours"
+        } else if cg::is_agent_screen(d) {
+            "other instance"
+        } else if cg::is_closet(d) {
+            "closet"
+        } else {
+            "user"
+        }
+    };
+    let moved: Vec<String> = before
+        .iter()
+        .filter(|&&(d, _)| d != id && online.contains(&d))
+        .filter_map(|&(d, (x, y))| {
+            let now = cg::display_bounds(d);
+            ((now.x, now.y) != (x, y))
+                .then(|| format!("{d} ({}) {x},{y} -> {},{}", role(d), now.x, now.y))
+        })
+        .collect();
+    let untucked: Vec<String> = fillers
+        .iter()
+        .filter(|&&f| cg::is_online(f) && !is_tucked(f, ids))
+        .map(|f| f.to_string())
+        .collect();
+    let all: Vec<String> = online
+        .iter()
+        .map(|&d| format!("{d} {} {}", role(d), rect(d)))
+        .collect();
+    format!(
+        "tucked={} not restored=[{}] untucked fillers=[{}] online=[{}]",
+        is_tucked(id, ids),
+        moved.join("; "),
+        untucked.join(", "),
+        all.join("; ")
+    )
 }
 
 /// Park Agent Screen's displays where `arrangement::plan` puts them: a
