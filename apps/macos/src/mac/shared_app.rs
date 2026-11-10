@@ -139,6 +139,27 @@ pub fn agent_windows(pid: i32) -> usize {
         .count()
 }
 
+/// Whether window `focused` is on the Agent Display that window `target`
+/// is on, the Agent Session's own, which holds only Handovers and the
+/// agent's windows (#162). False when either isn't on screen, or `target`
+/// isn't on an Agent Display.
+pub fn on_display_of(target: u32, focused: u32) -> bool {
+    let all = super::windows::all();
+    let mid = |id: u32| {
+        all.iter()
+            .find(|w| w.target.window_id == id)
+            .map(|w| w.bounds.mid())
+    };
+    let (Some(target), Some(focused)) = (mid(target), mid(focused)) else {
+        return false;
+    };
+    super::cg::active_displays()
+        .into_iter()
+        .filter(|&d| super::cg::is_agent_screen(d))
+        .map(super::cg::display_bounds)
+        .any(|area| area.contains(target) && area.contains(focused))
+}
+
 /// Whether `pid` has a window on the user's screens, off the Agent
 /// Displays, where the user may be working.
 pub fn user_window(pid: i32) -> bool {

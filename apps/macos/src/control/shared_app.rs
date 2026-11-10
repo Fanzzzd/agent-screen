@@ -15,7 +15,7 @@ use crate::mac::shared_app::{self as beside, Hit, Selection};
 use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
-    ClickRoute, Effect, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
+    ClickRoute, Effect, Focused, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
     text_route,
 };
 use gpui::AsyncApp;
@@ -45,11 +45,20 @@ pub async fn front(target: WindowTarget, cx: &AsyncApp) -> (Front, Option<u32>) 
     if crate::mac::input::front() != Some(pid) {
         return (Front::No, None);
     }
+    let window = target.window_id;
     let focused = match FOCUS_UNKNOWN.load(std::sync::atomic::Ordering::Relaxed) {
         true => None,
-        false => off(cx, move || ax::focused_window_id(pid)).await,
+        false => {
+            off(cx, move || {
+                ax::focused_window_id(pid).map(|focused| Focused {
+                    window: focused,
+                    on_target_display: focused != window && beside::on_display_of(window, focused),
+                })
+            })
+            .await
+        }
     };
-    (Front::of(true, focused, target.window_id), focused)
+    (Front::of(true, focused, window), focused.map(|f| f.window))
 }
 
 /// Test hook (`debugFocusUnknown`): the front app's focused window reads
