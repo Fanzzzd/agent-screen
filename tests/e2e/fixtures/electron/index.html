@@ -78,17 +78,31 @@
       });
       split.addEventListener("pointerup", () => { pressed = null; show(); });
       // A drop target for an HTML5 drag of row 1 (#37): dropped counts the
-      // drops it took.
+      // drops it took. A file dragged in from another app (#177) names it
+      // (got); over counts the dragover events the last drop had on the
+      // bin, and overms how long from the first to the drop.
       document.getElementById("r1").addEventListener("dragstart", (e) => {
         e.dataTransfer.setData("text/plain", "row 1");
       });
       const bin = document.getElementById("bin");
-      bin.addEventListener("dragover", (e) => e.preventDefault());
+      let overs = 0, first = 0;
+      bin.addEventListener("dragenter", () => { overs = 0; first = 0; });
+      bin.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        overs++;
+        if (!first) first = e.timeStamp;
+      });
       bin.addEventListener("drop", (e) => {
         e.preventDefault();
         seen.dropped = (seen.dropped || 0) + 1;
+        const file = e.dataTransfer.files[0];
+        if (file) seen.got = file.name;
+        seen.over = overs;
+        seen.overms = first ? Math.round(e.timeStamp - first) : -1;
         show();
       });
+      // Elsewhere the page refuses a drop, as most of a page does: the drag
+      // reaches the bin over a page that said no a moment before.
       // A slider an agent sets through accessibility when the page has no
       // pipe: level is its value after the last change.
       document.getElementById("level").addEventListener("input", (e) => {

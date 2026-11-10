@@ -74,24 +74,76 @@ pub fn steps(distance: f64) -> usize {
     ((distance / SPACING).ceil() as usize).clamp(MIN_STEPS, MAX_STEPS)
 }
 
+/// At least this many moves of a drag land on its drop window, the
+/// release point's included: a web page hears each as a dragover.
+pub const MOVES_OVER_DROP: usize = 3;
+/// The pointer is over the drop window at least this long before the
+/// release, from its first move there. Chromium answers each dragover
+/// from the page's process a moment later, and AppKit drops nothing when
+/// the last answer it had was a refusal, which is what a page's answer is
+/// until it has heard the drag.
+pub const OVER_DROP_MS: u64 = 200;
+/// The pointer rests on the release point at least this long.
+pub const REST_MS: u64 = 50;
+
 /// The points of a drag's travel after the press at `from`, the last
-/// exactly `to`. They ease in and out, as a person's hand does: the first
-/// moves are a few points, so the source sees the drag start where it was
-/// pressed, and the last ones land close to `to`, so the drop window sees
-/// several moves over it before the release.
-pub fn travel(from: (f64, f64), to: (f64, f64)) -> Vec<(f64, f64)> {
+/// exactly `to`, which lies on the drop window's frame `drop`. They ease
+/// in and out, as a person's hand does: the first moves are a few points,
+/// so the source sees the drag start where it was pressed, and the last
+/// ones land close to `to`. When fewer than `MOVES_OVER_DROP` land on
+/// `drop`, as on a small drop window, the moves from where the path enters
+/// it are spread evenly to `to` instead.
+pub fn travel(from: (f64, f64), to: (f64, f64), drop: Rect) -> Vec<(f64, f64)> {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let n = steps(dx.hypot(dy));
-    (1..=n)
+    let at = |t: f64| (from.0 + dx * t, from.1 + dy * t);
+    let mut points: Vec<(f64, f64)> = (1..=n)
         .map(|i| {
             if i == n {
                 return to;
             }
             let t = i as f64 / n as f64;
-            let eased = t * t * (3.0 - 2.0 * t);
-            (from.0 + dx * eased, from.1 + dy * eased)
+            at(t * t * (3.0 - 2.0 * t))
         })
-        .collect()
+        .collect();
+    if points.iter().filter(|p| drop.contains(**p)).count() >= MOVES_OVER_DROP
+        || !drop.contains(to)
+        || drop.contains(from)
+    {
+        return points;
+    }
+    // The straight path enters the frame once, as a frame is convex and
+    // `to` lies on it: find where, between the press and the release.
+    let (mut outside, mut inside) = (0.0, 1.0);
+    for _ in 0..40 {
+        let mid = (outside + inside) / 2.0;
+        if drop.contains(at(mid)) {
+            inside = mid;
+        } else {
+            outside = mid;
+        }
+    }
+    points.retain(|p| !drop.contains(*p) && length(from, *p) < length(from, at(inside)));
+    let k = MOVES_OVER_DROP as f64;
+    points.extend((1..=MOVES_OVER_DROP).map(|i| {
+        if i == MOVES_OVER_DROP {
+            to
+        } else {
+            at(inside + (1.0 - inside) * i as f64 / k)
+        }
+    }));
+    points
+}
+
+fn length(a: (f64, f64), b: (f64, f64)) -> f64 {
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// How long the pointer rests on the release point, once it has been over
+/// the drop window for `over_ms`: `REST_MS`, or longer until it has been
+/// there `OVER_DROP_MS`.
+pub fn rest_before_release(over_ms: u64) -> u64 {
+    REST_MS.max(OVER_DROP_MS.saturating_sub(over_ms))
 }
 
 /// The index in `points` after which a drag between two windows waits for
@@ -179,10 +231,6 @@ mod tests {
         assert!(refusal(&p, p.to, None, &on).is_some());
     }
 
-    fn length(a: (f64, f64), b: (f64, f64)) -> f64 {
-        (b.0 - a.0).hypot(b.1 - a.1)
-    }
-
     #[test]
     fn the_number_of_moves_follows_the_distance_within_its_limits() {
         assert_eq!(steps(0.0), 1);
@@ -197,7 +245,8 @@ mod tests {
     #[test]
     fn the_travel_eases_from_the_press_to_exactly_the_release() {
         let (from, to) = ((320.0, 268.0), (900.0, 268.0));
-        let points = travel(from, to);
+        let drop = Rect::new(700.0, 120.0, 400.0, 300.0);
+        let points = travel(from, to, drop);
         assert_eq!(points.len(), MAX_STEPS);
         assert_eq!(*points.last().unwrap(), to);
         // Each move goes further, none back, and none sits on the press.
@@ -209,20 +258,54 @@ mod tests {
         // Several moves land near the drop point before the release.
         let near = points.iter().filter(|p| length(**p, to) < 16.0).count();
         assert!(near >= 3, "{near} points near the end");
+        assert!(points.iter().filter(|p| drop.contains(**p)).count() >= MOVES_OVER_DROP);
         // A zero-length drag releases where it pressed.
-        assert_eq!(travel(from, from), vec![from]);
+        assert_eq!(travel(from, from, drop), vec![from]);
+    }
+
+    #[test]
+    fn a_small_drop_window_still_gets_several_moves_over_it() {
+        let (from, to) = ((100.0, 300.0), (900.0, 300.0));
+        // 16 points wide around the end: the eased path puts 2 moves on it.
+        let drop = Rect::new(892.0, 290.0, 16.0, 20.0);
+        let eased = travel(from, to, Rect::new(0.0, 0.0, 0.0, 0.0));
+        assert!(eased.iter().filter(|p| drop.contains(**p)).count() < MOVES_OVER_DROP);
+        let points = travel(from, to, drop);
+        assert_eq!(*points.last().unwrap(), to);
+        let over: Vec<_> = points.iter().filter(|p| drop.contains(**p)).collect();
+        assert_eq!(over.len(), MOVES_OVER_DROP);
+        // Still ever further from the press, and the ones over the window
+        // come last.
+        let far: Vec<f64> = points.iter().map(|p| length(from, *p)).collect();
+        assert!(far.windows(2).all(|w| w[1] > w[0]));
+        assert!(
+            points[points.len() - MOVES_OVER_DROP..]
+                .iter()
+                .all(|p| drop.contains(*p))
+        );
+        // A drag within one window keeps its eased path.
+        let window = Rect::new(0.0, 0.0, 1000.0, 600.0);
+        assert_eq!(travel(from, to, window), eased);
+    }
+
+    #[test]
+    fn the_pointer_waits_over_the_drop_window_before_the_release() {
+        assert_eq!(rest_before_release(0), OVER_DROP_MS);
+        assert_eq!(rest_before_release(120), OVER_DROP_MS - 120);
+        assert_eq!(rest_before_release(180), REST_MS);
+        assert_eq!(rest_before_release(5_000), REST_MS);
     }
 
     #[test]
     fn the_session_wait_comes_once_the_drag_is_past_its_threshold() {
         let from = (100.0, 100.0);
-        let points = travel(from, (700.0, 100.0));
+        let points = travel(from, (700.0, 100.0), Rect::new(600.0, 0.0, 200.0, 200.0));
         let i = session_step(from, &points).unwrap();
         assert!(length(from, points[i]) >= SESSION_AFTER);
         assert!(length(from, points[i - 1]) < SESSION_AFTER);
         assert!(i <= 3, "the session wait comes at move {i}");
         // A drag shorter than the threshold waits after its last move.
-        let short = travel(from, (103.0, 100.0));
+        let short = travel(from, (103.0, 100.0), Rect::new(0.0, 0.0, 200.0, 200.0));
         assert_eq!(session_step(from, &short), Some(short.len() - 1));
         assert_eq!(session_step(from, &[]), None);
     }

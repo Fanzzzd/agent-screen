@@ -665,10 +665,6 @@ const HOVER: Duration = Duration::from_millis(16);
 const PRESS_HOLD: Duration = Duration::from_millis(30);
 /// Between two moves: about two moves per frame, which the app coalesces.
 const STEP_GAP: Duration = Duration::from_millis(8);
-/// The pointer rests on the drop point before the release, so the drop
-/// window hears the drag over it and answers, as a web page does to
-/// dragover, before the drop.
-const DWELL: Duration = Duration::from_millis(50);
 /// After the release, before the loan ends and anything else may move the
 /// front app, so the drop reaches its window first.
 const AFTER_RELEASE: Duration = Duration::from_millis(40);
@@ -678,14 +674,22 @@ const AFTER_RELEASE: Duration = Duration::from_millis(40);
 const SESSION_WAIT: Duration = Duration::from_millis(500);
 
 /// How many drags the system drag pasteboard has carried: a source that
-/// starts a system drag session writes its items there first.
+/// starts a system drag session writes its items there first. The loan's
+/// thread has no autorelease pool of its own, so the read gets one.
 fn drag_board() -> isize {
-    unsafe { objc2_app_kit::NSPasteboard::pasteboardWithName(objc2_app_kit::NSPasteboardNameDrag) }
+    objc2::rc::autoreleasepool(|_| {
+        unsafe {
+            objc2_app_kit::NSPasteboard::pasteboardWithName(objc2_app_kit::NSPasteboardNameDrag)
+        }
         .changeCount()
+    })
 }
 
 /// Drag from `from` to `to`, global points, with the user's pointer, from
-/// `target`'s window to `drop`, which may be a window of another app. `go`
+/// `target`'s window to `drop`, framed `drop_frame`, which may be a window
+/// of another app. The pointer is over the drop window for
+/// `real_drag::OVER_DROP_MS` before the release, so a web page there has
+/// heard the drag and answered. `go`
 /// is checked before every event, with the user's touch: a loan the queue
 /// stopped, or a window that left the display, ends it. It gets exactly
 /// `from` at the press and exactly `to` at the release. The button goes up
@@ -693,6 +697,7 @@ fn drag_board() -> isize {
 pub fn drag(
     target: WindowTarget,
     drop: WindowTarget,
+    drop_frame: Rect,
     from: (f64, f64),
     to: (f64, f64),
     flags: CGEventFlags,
@@ -774,7 +779,8 @@ pub fn drag(
     release.pressed = true;
     let pressed = began.elapsed();
     thread::sleep(PRESS_HOLD);
-    let points = agent_screen_model::real_drag::travel(from, to);
+    let points = agent_screen_model::real_drag::travel(from, to, drop_frame);
+    let mut over: Option<std::time::Instant> = None;
     let wait_after = between
         .then(|| agent_screen_model::real_drag::session_step(from, &points))
         .flatten();
@@ -800,6 +806,9 @@ pub fn drag(
         }
         at = next;
         release.at = at;
+        if over.is_none() && drop_frame.contains(at) {
+            over = Some(std::time::Instant::now());
+        }
         thread::sleep(STEP_GAP);
         if session.is_none()
             && let Some(board) = board
@@ -826,18 +835,21 @@ pub fn drag(
     }
     let travelled = began.elapsed();
     if stopped.is_none() {
-        thread::sleep(DWELL);
+        let so_far = over.map_or(0, |t| t.elapsed().as_millis() as u64);
+        let rest = agent_screen_model::real_drag::rest_before_release(so_far);
+        thread::sleep(Duration::from_millis(rest));
     }
     if stopped.is_none() && (!allowed(at) || super::app::frontmost_pid() != Some(target.pid)) {
         stopped = Some("the approval ended before release");
     }
     std::mem::drop(release);
     let released = began.elapsed();
+    let over_ms = over.map_or(0, |t| t.elapsed().as_millis());
     thread::sleep(AFTER_RELEASE);
     let (count, spent) = checks.get();
     let ms = |d: Duration| d.as_millis();
     log::info!(
-        "input queue: drag of {:.0} pt took {} ms: window forward {} ms, press at {} ms, {} moves until {} ms, release at {} ms; {count} checks took {} ms; {}",
+        "input queue: drag of {:.0} pt took {} ms: window forward {} ms, press at {} ms, {} moves until {} ms, release at {} ms after {over_ms} ms over the drop window; {count} checks took {} ms; {}",
         (to.0 - from.0).hypot(to.1 - from.1),
         ms(began.elapsed()),
         ms(forward),

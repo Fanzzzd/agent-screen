@@ -265,6 +265,7 @@ impl Queue {
         match r.status {
             Status::Queued => {
                 r.status = Status::Stopped(Stop::Withdrawn);
+                r.times.ended = Some(now);
                 self.waiting.retain(|queued| *queued != id);
                 if self.grant.is_none() {
                     self.approval = self.approval.saturating_add(1);
@@ -342,6 +343,7 @@ impl Queue {
             };
             if r.owner == owner {
                 r.status = Status::Stopped(Stop::Replaced);
+                r.times.ended = Some(now);
                 false
             } else {
                 true
@@ -488,7 +490,7 @@ impl Queue {
     }
 
     /// Not Now declines the waiting batch; it is not a timeout.
-    pub fn decline(&mut self, approval: u64) {
+    pub fn decline(&mut self, approval: u64, now: u64) {
         if approval != self.approval || self.grant.is_some() {
             return;
         }
@@ -496,6 +498,7 @@ impl Queue {
         for id in self.waiting.drain(..) {
             if let Some(r) = self.requests.get_mut(&id) {
                 r.status = Status::Declined;
+                r.times.ended = Some(now);
             }
         }
     }
@@ -645,6 +648,7 @@ impl Queue {
             };
             if matches(&r.owner) {
                 r.status = Status::Stopped(why);
+                r.times.ended = Some(now);
                 false
             } else {
                 true
@@ -751,6 +755,29 @@ mod tests {
         assert_eq!(times(b).elapsed_ms(2_200), 2_000);
         assert_eq!(times(c).allowed, Some(1_600));
         assert_eq!((times(c).started, times(c).ended), (None, None));
+        assert!(q.withdraw(b, &owner("b", 2), 2_300));
+        let b_times = q.request(b).unwrap().times;
+        assert_eq!(b_times.ended, Some(2_300));
+        assert_eq!(b_times.elapsed_ms(9_000), 2_100);
+    }
+
+    #[test]
+    fn every_way_a_request_ends_stops_its_clock() {
+        let mut q = queue();
+        let declined = add(&mut q, "a", 1, "A", 0);
+        q.decline(q.approval(), 10);
+        let replaced = add(&mut q, "b", 2, "B", 20);
+        add(&mut q, "b", 2, "B2", 30);
+        let gone = add(&mut q, "c", 3, "C", 40);
+        q.disconnect(owner("c", 3).connection, 50);
+        let ended = |id| q.request(id).unwrap().times.ended;
+        assert_eq!(q.request(declined).unwrap().status, Status::Declined);
+        assert_eq!(ended(declined), Some(10));
+        assert_eq!(ended(replaced), Some(30));
+        assert_eq!(q.request(gone).map(|r| r.times.ended), Some(Some(50)));
+        for r in q.requests() {
+            assert_eq!(r.status.terminal(), r.times.ended.is_some(), "{r:?}");
+        }
     }
 
     #[test]
@@ -899,7 +926,7 @@ mod tests {
         assert_eq!(add(&mut q, "a", 1, "drag", 60_000), a);
         assert_eq!(q.waiting().count(), 1);
         assert!(!q.forget(a));
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(add(&mut q, "a", 1, "drag", 60_001), a);
         assert_eq!(q.request(a).unwrap().status, Status::Declined);
         assert_eq!(q.waiting().count(), 0);
@@ -942,11 +969,11 @@ mod tests {
     fn declined_and_completed_tokens_stay_sticky_after_another_request() {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "A", 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         add(&mut q, "a", 1, "B", 1);
         assert_eq!(add(&mut q, "a", 1, "A", 2), a);
         assert_eq!(q.request(a).unwrap().status, Status::Declined);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         let c = add(&mut q, "b", 2, "C", 3);
         assert!(q.allow(q.approval(), 3));
         assert_eq!(q.start(3), Some(c));
@@ -1135,7 +1162,7 @@ mod tests {
                 7 => q.disconnect(who.connection, now),
                 8 => {
                     if seed & 8 != 0 {
-                        q.decline(q.approval());
+                        q.decline(q.approval(), 0);
                     } else if let Some(id) = q.requests.keys().next().copied() {
                         q.withdraw(id, &who, now);
                     }
@@ -1182,7 +1209,7 @@ mod tests {
         assert!(q.allow(card, 0));
         q.user_input();
         assert!(!q.allow(card, 1));
-        q.decline(card);
+        q.decline(card, 0);
         assert_eq!(q.waiting().count(), 1);
         restored(&mut q);
         assert!(q.allow(q.approval(), 2));
@@ -1193,7 +1220,7 @@ mod tests {
         let mut q = queue();
         add(&mut q, "a", 1, "drag", 0);
         let card = q.approval();
-        q.decline(card);
+        q.decline(card, 0);
         add(&mut q, "b", 2, "drag", 1);
         assert!(!q.allow(card, 2));
         assert!(q.allow(q.approval(), 2));
@@ -1364,7 +1391,7 @@ mod tests {
         assert_eq!(q.owner(9), None);
         let a = add(&mut q, "a", 1, "drag", 0);
         let b = add(&mut q, "b", 2, "drag", 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(q.requests().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
         q.end_display(1, 1);
         assert_eq!(q.owner(1), None);
@@ -1486,7 +1513,7 @@ mod tests {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "drag", 0);
         q.allow(q.approval(), 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(q.start(1), Some(a));
     }
 

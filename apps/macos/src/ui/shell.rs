@@ -1529,6 +1529,7 @@ impl Shell {
                     real_input::drag(
                         plan.target,
                         plan.drop,
+                        drop_frame,
                         plan.from,
                         plan.to,
                         objc2_core_graphics::CGEventFlags(plan.flags),

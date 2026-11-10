@@ -15,12 +15,28 @@ const REASON_CHARS: usize = 300;
 const OPERATION_CHARS: usize = 2048;
 const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended before it ran and they will not be asked about it again. Waiting or retrying the same operation returns at once. Make a new request to ask again, use a background alternative or request_help, then withdraw this one.";
 
+/// A request's times on the wall clock, in milliseconds since 1970.
+#[derive(Clone, Copy, Debug, Default)]
+struct Walls {
+    asked: Option<u64>,
+    allowed: Option<u64>,
+    started: Option<u64>,
+    ended: Option<u64>,
+}
+
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 pub struct InputQueue {
     pub queue: Queue,
     clock: Instant,
-    /// The wall clock at `clock`'s start, in milliseconds since 1970, for
-    /// the times agents read.
-    wall: u64,
+    /// When each request was asked, allowed, started and ended, read from
+    /// the wall clock as it happened, in milliseconds since 1970. `clock`
+    /// stops while the Mac sleeps, so it gives only the durations.
+    walls: BTreeMap<RequestId, Walls>,
     /// Requests the user already allowed whose grant ended with nothing
     /// executed. Presentation only: they stay queued for the agent, and
     /// only a new request or a revocation asks again.
@@ -118,9 +134,7 @@ impl Default for InputQueue {
         Self {
             queue: Queue::default(),
             clock: Instant::now(),
-            wall: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64),
+            walls: BTreeMap::new(),
             approved: BTreeSet::new(),
             plans: BTreeMap::new(),
             failures: BTreeMap::new(),
@@ -323,7 +337,7 @@ impl InputQueue {
     }
 
     pub fn decline(&mut self, approval: u64) {
-        self.queue.decline(approval);
+        self.queue.decline(approval, self.now());
         self.tick();
     }
 
@@ -410,6 +424,22 @@ impl InputQueue {
             .retain(|id, _| requests.request(*id).is_some());
         self.changed
             .retain(|owner, _| requests.owner(owner.display) == Some(owner));
+        self.walls.retain(|id, _| requests.request(*id).is_some());
+        // Every change to the queue ends here, so what the queue noted
+        // just now gets the wall clock's time now.
+        let now = wall_now();
+        for r in requests.requests() {
+            let walls = self.walls.entry(r.id).or_default();
+            let stamp = |wall: &mut Option<u64>, noted: Option<u64>| {
+                if noted.is_some() && wall.is_none() {
+                    *wall = Some(now);
+                }
+            };
+            stamp(&mut walls.asked, Some(r.times.asked));
+            stamp(&mut walls.allowed, r.times.allowed);
+            stamp(&mut walls.started, r.times.started);
+            stamp(&mut walls.ended, r.times.ended);
+        }
         let ok = self
             .queue
             .active()
@@ -494,13 +524,13 @@ impl InputQueue {
 
     /// When a request was asked, allowed, started and ended, in
     /// milliseconds since 1970, and the waits between, in milliseconds.
-    fn timing(&self, times: &agent_screen_model::input_queue::Times) -> Value {
-        let at = |ms: Option<u64>| ms.map(|ms| self.wall + ms);
+    fn timing(&self, id: RequestId, times: &agent_screen_model::input_queue::Times) -> Value {
+        let walls = self.walls.get(&id).copied().unwrap_or_default();
         json!({
-            "askedAt": at(Some(times.asked)),
-            "allowedAt": at(times.allowed),
-            "startedAt": at(times.started),
-            "endedAt": at(times.ended),
+            "askedAt": walls.asked,
+            "allowedAt": walls.allowed,
+            "startedAt": walls.started,
+            "endedAt": walls.ended,
             "approvalMs": times.approval_ms(),
             "turnMs": times.turn_ms(),
             "runMs": times.run_ms(),
@@ -567,7 +597,7 @@ impl InputQueue {
                     "failure": self.failures.get(&request.id),
                     "runnable": self.plans.contains_key(&request.id),
                     "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
-                    "timing": self.timing(&request.times),
+                    "timing": self.timing(request.id, &request.times),
                 })
             })
             .collect();
@@ -747,7 +777,9 @@ mod tests {
             .submit(owner.clone(), "a".into(), "Drag".into(), Some(drag(10.0)))
             .unwrap();
         let asked = &input.status(&owner, Some(id), false)["requests"][0];
-        assert!(asked["timing"]["askedAt"].as_u64().unwrap() >= input.wall);
+        let before = wall_now();
+        assert!(asked["timing"]["askedAt"].as_u64().unwrap() <= before);
+        assert!(asked["timing"]["askedAt"].as_u64().unwrap() + 60_000 > before);
         assert!(asked["timing"]["allowedAt"].is_null());
         assert!(asked["elapsedSeconds"].as_f64().is_some());
         assert!(input.approve(input.queue.approval()));
