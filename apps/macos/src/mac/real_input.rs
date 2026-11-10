@@ -679,8 +679,9 @@ pub fn drag(
         flags,
     };
     let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    const BEFORE_PRESS: &str = "nothing was pressed: before the press, the approval ended, the user used their pointer or keyboard, secure input came on, or a window moved or now covers the drag's start or end";
     if !allowed(from) {
-        return Outcome::Refused("the approval ended before the drag began");
+        return Outcome::Refused(BEFORE_PRESS);
     }
     // A click on an app in the background only brings it forward, and the
     // page never sees the press: the app comes to the front first. The
@@ -694,7 +695,7 @@ pub fn drag(
     }
     thread::sleep(Duration::from_millis(60));
     if !allowed(from) || super::app::frontmost_pid() != Some(target.pid) {
-        return Outcome::Refused("the approval ended before the drag began");
+        return Outcome::Refused(BEFORE_PRESS);
     }
     let Some(up) = poster.event(CGEventType::LeftMouseUp, from) else {
         return Outcome::Refused("the release event could not be created before pressing");

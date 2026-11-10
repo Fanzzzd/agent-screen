@@ -2228,13 +2228,14 @@ fn wheel_steps(delta: f64) -> i32 {
 }
 
 /// The app window under a point of a drag with the user's pointer: as
-/// `window_at`, but the drag's own image, which macOS draws at the
-/// dragging level under the pointer, doesn't cover it.
-pub fn window_under_drag(at: (f64, f64)) -> Option<WindowTarget> {
+/// `window_at`, but the drag's own image, which the source app (pid
+/// `source`) draws at the dragging level under the pointer, doesn't cover
+/// it. Another app's window at that level still does.
+pub fn window_under_drag(at: (f64, f64), source: i32) -> Option<WindowTarget> {
     let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
     hits()
         .into_iter()
-        .filter(|h| h.layer != dragging)
+        .filter(|h| !(h.layer == dragging && h.target.pid == source))
         .find(|h| h.bounds.contains(at))
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| h.target)

@@ -1504,7 +1504,7 @@ impl Shell {
                             // point before every event. A moved or covered
                             // window must not receive input at its old
                             // coordinates.
-                            let under = crate::mac::input::window_under_drag;
+                            let under = |p| crate::mac::input::window_under_drag(p, plan.target.pid);
                             let why = if !ok.load(Ordering::SeqCst) {
                                 Some("the loan was cancelled")
                             } else if cg::display_bounds(display) != area {

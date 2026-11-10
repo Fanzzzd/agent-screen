@@ -112,10 +112,11 @@ fn test(control: &Control, id: &Value, pids: &mut Vec<i64>) -> Result<()> {
     std::fs::write(&file, "dropped by filedrag\n")?;
     let (source_app, drop_app) = file_drag_apps()?;
     // A system drag session shows a transparent window of the source app
-    // over every screen at the dragging level, 500, while it runs.
+    // over every screen at the dragging level, 500, while it runs. One run
+    // measured 6046 ms for it, so allow 10 s.
     allow_on_your_screen(
         "FileSource",
-        6000,
+        10_000,
         "the system drag session's transparent window",
     );
     let mut launch = |app: &std::path::Path, role: &str, x: i64| -> Result<(i64, Value)> {
