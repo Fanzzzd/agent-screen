@@ -1376,8 +1376,8 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     handled
 }
 
-/// The Viewer's window, when `event` is a press in it that takes the
-/// keyboard: the user's, or a test's that stands in for one. The window
+/// The Viewer's window, when `event` is a press on its picture that takes
+/// the keyboard: the user's, or a test's that stands in for one. The window
 /// becomes key before the press is handled, as handling it makes Agent
 /// Screen WindowServer's front process (`note_viewer_press`). The other
 /// way round, AppKit takes that for an activation by a click and waits for
@@ -1389,8 +1389,19 @@ fn pressed_viewer(event: &NSEvent, mtm: MainThreadMarker) -> Option<Retained<NSW
         return None;
     }
     let window = event.window(mtm)?;
-    let viewer = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
-    (viewer != 0 && &*window as *const NSWindow as usize == viewer).then_some(window)
+    let height = window.contentView()?.frame().size.height;
+    let at = event.locationInWindow();
+    let on_picture = STATE.with(|s| {
+        s.try_borrow().is_ok_and(|s| {
+            s.window == &*window as *const NSWindow as usize
+                && !s.blocked
+                && s.display.is_some()
+                && s.content.is_some_and(|content| {
+                    normalized_point((at.x, at.y), height, content, false).is_some()
+                })
+        })
+    });
+    on_picture.then_some(window)
 }
 
 /// Work for after the event's state borrow, as it may come back into it.
@@ -1625,6 +1636,22 @@ fn input_method_sees(window: &NSWindow, event: &NSEvent) {
     if let Some(context) = input_context(window) {
         let _: bool = unsafe { objc2::msg_send![context, handleEvent: event] };
     }
+}
+
+/// Whether the Viewer's input context is AppKit's current one, for tests:
+/// the input method composes only through the current context.
+pub fn input_context_current() -> bool {
+    let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+    if window == 0 {
+        return false;
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let Some(ours) = input_context(window) else {
+        return false;
+    };
+    let current: *mut objc2::runtime::AnyObject =
+        unsafe { objc2::msg_send![objc2::class!(NSTextInputContext), currentInputContext] };
+    std::ptr::eq(current.cast_const(), ours)
 }
 
 /// The input context of the Viewer's view, GPUI's.

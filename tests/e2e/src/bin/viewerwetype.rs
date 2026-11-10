@@ -301,6 +301,11 @@ fn test(control: &Control, field: &std::path::Path, source: &str, typed: &mut bo
             before["key"] == true,
             format!("key {}", before["key"]),
         );
+        check(
+            &format!("{name}: the Viewer's input context is the current one"),
+            before["inputContext"] == true,
+            format!("inputContext {}", before["inputContext"]),
+        );
         // The user may have switched since the script began.
         if before["source"] != "inputMethod" {
             bail!(
@@ -402,6 +407,16 @@ fn test(control: &Control, field: &std::path::Path, source: &str, typed: &mut bo
                 && letters.iter().all(|(_, route)| route == "inputMethod"),
             format!("{letters:?}"),
         );
+        // Through the current context, the input method gave every letter
+        // back to type as it is: WeType does that in its English mode.
+        if before["inputContext"] == true
+            && !letters.is_empty()
+            && letters.iter().all(|(_, route)| route == "raw")
+        {
+            println!(
+                "     {name}: the input method passed every letter through, as in its English mode (Shift switches it)"
+            );
+        }
         let picked = routes
             .iter()
             .rev()

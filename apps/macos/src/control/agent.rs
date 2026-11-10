@@ -1624,6 +1624,9 @@ async fn handle_one(
                 // target's caret, where it shows, in points from the
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
+                // The Viewer's input context is AppKit's current one: the
+                // input method composes only then.
+                "inputContext": crate::mac::viewer_input::input_context_current(),
                 // The kind of input source the Viewer types with now.
                 "source": match crate::mac::ime::current_kind() {
                     agent_screen_model::viewer_keys::Source::Layout => "layout",
