@@ -65,18 +65,18 @@ pub trait AppLookup {
 /// one the user knows, as Safari in its cryptex, so the familiar folders
 /// come first.
 pub fn app_folders(home: &str) -> Vec<PathBuf> {
-    [
-        "/Applications",
-        "/Applications/Utilities",
+    let system = [
         "/System/Applications",
         "/System/Applications/Utilities",
         "/System/Library/CoreServices",
         "/System/Library/CoreServices/Applications",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .chain([Path::new(home).join("Applications")])
-    .collect()
+    ];
+    ["/Applications", "/Applications/Utilities"]
+        .iter()
+        .map(PathBuf::from)
+        .chain([Path::new(home).join("Applications")])
+        .chain(system.iter().map(PathBuf::from))
+        .collect()
 }
 
 /// The app bundle `launch_app` opens for `app`: an .app path (absolute or
@@ -174,6 +174,8 @@ mod tests {
                 CRYPTEX_SAFARI,
                 "/System/Library/CoreServices/Applications/Archive Utility.app",
                 "/Users/me/Applications/Tool.app",
+                "/Users/me/Applications/Dock.app",
+                "/System/Library/CoreServices/Dock.app",
                 "/tmp/build/MyApp.app",
                 "/Volumes/Work/Odd.app",
             ],
@@ -214,6 +216,14 @@ mod tests {
         assert_eq!(
             find("Tool"),
             Some(PathBuf::from("/Users/me/Applications/Tool.app"))
+        );
+    }
+
+    #[test]
+    fn the_users_apps_come_before_system_agents() {
+        assert_eq!(
+            find("Dock"),
+            Some(PathBuf::from("/Users/me/Applications/Dock.app"))
         );
     }
 

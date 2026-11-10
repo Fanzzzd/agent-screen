@@ -3452,17 +3452,35 @@ async fn frame_window(
         })?;
         if !asked.is_empty() {
             // Some apps, Electron's among them, answer a resize a moment
-            // later: wait until two reads agree, up to half a second.
+            // later: wait until two reads agree, up to half a second. An app
+            // that answered with an error may be busy, with writes still
+            // queued while its window stands still, so for it wait up to
+            // 1.5 s for the frame asked for.
+            let reads = if refused.is_some() { 30 } else { 10 };
             let mut last = None;
-            for _ in 0..10 {
+            for _ in 0..reads {
                 std::thread::sleep(Duration::from_millis(50));
                 let read = now().ok_or_else(closed)?;
-                if last == Some(read) {
+                let steady = last == Some(read);
+                last = Some(read);
+                let took = refused.is_none_or(|frame| {
+                    agent_screen_model::placement::frame_write(before, frame, read)
+                        == agent_screen_model::placement::FrameWrite::Took
+                });
+                if steady && took {
                     break;
                 }
-                last = Some(read);
             }
             bounds = last.unwrap_or(bounds);
+            let centre = (
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            );
+            if !area.contains(centre) {
+                return Err(
+                    "the app moved the window off the display after the frame was set".to_string(),
+                );
+            }
         }
         // An error from the app says only that some write failed: the frame
         // the window settled at says what it did (#167).
