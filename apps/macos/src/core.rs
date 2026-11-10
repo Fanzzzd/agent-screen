@@ -542,23 +542,31 @@ impl Core {
     }
 
     /// The user's windows go home as the agent stops using display `id`
-    /// (#161), one at a time, as window_access return sends them. A window
-    /// that can't leave stays a Handover there, for the dismissal to
-    /// return. The display closes once none is left.
+    /// (#161), one at a time, as window_access return sends them, each
+    /// given back right before its move. Only a window still on the display
+    /// moves: one that already left, as one its app put back on the user's
+    /// screen, stays where the user has it. A window that can't leave stays
+    /// a Handover there, for the dismissal to return. The display closes
+    /// once none is left.
     fn return_handovers(&mut self, id: DisplayId, cx: &mut Context<Self>) {
         let Some(shell) = crate::ui::shell::current() else {
             return;
         };
-        let given = self.displays.return_handovers_at_end(id);
-        if given.is_empty() {
+        let targets = self.displays.handovers_at_end(id);
+        if targets.is_empty() {
             return;
         }
         // After this update: sending a window home updates Core too.
         cx.spawn(async move |this, cx| {
-            for given in given {
-                let window = given.target.window_id;
+            for target in targets {
+                let window = target.window_id;
+                let Ok(given) = this.update(cx, |core, _| {
+                    core.displays.get_mut(id).map(|d| d.give_back(target))
+                }) else {
+                    return;
+                };
                 let Ok(task) =
-                    shell.update(cx, |shell, cx| shell.send_home(given.target, id, Some(given), cx))
+                    shell.update(cx, |shell, cx| shell.send_home_if_there(target, id, given, cx))
                 else {
                     return;
                 };

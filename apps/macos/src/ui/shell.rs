@@ -3188,6 +3188,30 @@ impl Shell {
         given: Option<GivenBack>,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
+        self.send_home_from(target, id, given, false, cx)
+    }
+
+    /// As `send_home`, but a window no longer on display `id` stays where it
+    /// is: the agent ending its display must not move a window the user
+    /// already works in elsewhere (#161).
+    pub fn send_home_if_there(
+        &mut self,
+        target: WindowTarget,
+        id: DisplayId,
+        given: Option<GivenBack>,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        self.send_home_from(target, id, given, true, cx)
+    }
+
+    fn send_home_from(
+        &mut self,
+        target: WindowTarget,
+        id: DisplayId,
+        given: Option<GivenBack>,
+        only_from_display: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let home = given.as_ref().and_then(GivenBack::home);
         let ticket = self.core.update(cx, |core, _| {
             // Taking a window back says the app is the user's now: its
@@ -3217,6 +3241,17 @@ impl Shell {
             let left = cx
                 .background_executor()
                 .spawn(async move {
+                    if only_from_display
+                        && !windows::on_display(id)
+                            .iter()
+                            .any(|w| w.target.window_id == target.window_id)
+                    {
+                        log::info!(
+                            "display {id}: window {} already left the display; it stays where it is",
+                            target.window_id
+                        );
+                        return true;
+                    }
                     let left = windows::return_home(target.window_id, || {
                         dismissal::give_back(target, home.as_ref(), main_name.as_deref())
                     });

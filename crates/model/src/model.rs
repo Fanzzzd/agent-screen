@@ -787,22 +787,17 @@ impl<H> Displays<H> {
         true
     }
 
-    /// The Handovers of ended display `id` to send home now, given back
-    /// as the user's Take Back would, when its end reason returns them.
-    /// The agent's own windows stay for review. A Handover that then can't
-    /// leave goes back through `give_back_failed`, and the dismissal plan
-    /// returns it later.
-    pub fn return_handovers_at_end(&mut self, id: DisplayId) -> Vec<GivenBack> {
-        let Some(d) = self.get_mut(id) else {
-            return Vec::new();
-        };
-        if !d.ended.is_some_and(EndReason::returns_handovers) {
-            return Vec::new();
-        }
-        d.handovers()
-            .into_iter()
-            .map(|target| d.give_back(target))
-            .collect()
+    /// The Handovers of ended display `id` to send home now, when its end
+    /// reason returns them. The caller gives each back, as the user's Take
+    /// Back would, right before moving it, so the others stay recorded
+    /// until their turn. The agent's own windows stay for review. A
+    /// Handover that then can't leave goes back through
+    /// `give_back_failed`, and the dismissal plan returns it later.
+    pub fn handovers_at_end(&self, id: DisplayId) -> Vec<WindowTarget> {
+        self.get(id)
+            .filter(|d| d.ended.is_some_and(EndReason::returns_handovers))
+            .map(|d| d.handovers())
+            .unwrap_or_default()
     }
 
     /// End every display a closed connection owned.
@@ -1796,21 +1791,17 @@ mod tests {
             d.get_mut(7)
                 .unwrap()
                 .claim(launched, Origin::Launched, None);
-            assert!(d.return_handovers_at_end(7).is_empty(), "still live");
+            assert!(d.handovers_at_end(7).is_empty(), "still live");
             assert!(d.end(7, reason));
-            let given = d.return_handovers_at_end(7);
-            assert_eq!(
-                given.iter().map(|g| g.target).collect::<Vec<_>>(),
-                vec![users(1)],
-                "{reason:?}"
-            );
+            assert_eq!(d.handovers_at_end(7), vec![users(1)], "{reason:?}");
+            d.get_mut(7).unwrap().give_back(users(1));
             let display = d.get(7).unwrap();
             assert!(display.handovers().is_empty());
             assert!(
                 display.records.contains_key(&2),
                 "the agent's window stays for review"
             );
-            assert!(d.return_handovers_at_end(7).is_empty(), "given back once");
+            assert!(d.handovers_at_end(7).is_empty(), "given back once");
         }
     }
 
@@ -1819,7 +1810,7 @@ mod tests {
         let mut d = displays();
         assert!(d.hand_over(7, users(1), &Authority::Once, None).is_ok());
         assert!(d.end(7, EndReason::ClosedByUser));
-        assert!(d.return_handovers_at_end(7).is_empty());
+        assert!(d.handovers_at_end(7).is_empty());
         assert_eq!(d.get(7).unwrap().handovers(), vec![users(1)]);
     }
 
