@@ -386,6 +386,7 @@ const HANDS_OFF: &[&str] = &[
     "statusicon",
     "timing",
     "viewerheader",
+    "viewerwetype",
     "typedrops",
     "webdrag",
 ];
@@ -598,6 +599,12 @@ pub fn hid(args: &[&str]) -> Result<String> {
     let result = sh(tool("hid")?, args);
     OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
     result
+}
+
+/// A script posts real input of its own now, through another tool than
+/// `hid`: the watch for the user's input leaves it out.
+pub fn own_input_now() {
+    OWN_INPUT.store(now_ms() as u64, Ordering::SeqCst);
 }
 
 /// Click a painted Help Card button in the test app through real HID input.

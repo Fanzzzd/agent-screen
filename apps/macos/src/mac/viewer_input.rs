@@ -1353,6 +1353,11 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
             NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown
         )
     {
+        // Outside the state: a window becoming key draws at once, and its
+        // paint reports the layout here.
+        if let Some(window) = pressed_viewer(event, mtm) {
+            native::make_key(&window);
+        }
         flush_before_click(event, mtm);
     }
     // A composition's keys reach a password field before any key typed
@@ -1360,21 +1365,32 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     if event.r#type() == NSEventType::KeyDown {
         secure_found();
     }
-    let mut take_key = None;
     let mut after = None;
-    let handled = handle_in(event, mtm, &mut take_key, &mut after);
-    // Outside the state: a window becoming key draws at once, and its
-    // paint reports the layout here.
-    if let Some(window) = take_key {
-        native::make_key(&window);
-    }
-    // Outside the state too: the input method calls back into the Viewer.
+    let handled = handle_in(event, mtm, &mut after);
+    // Outside the state: the input method calls back into the Viewer.
     match after {
         Some(After::Through(key)) => through_input_method(key),
         Some(After::Sees(window, event)) => input_method_sees(&window, &event),
         None => {}
     }
     handled
+}
+
+/// The Viewer's window, when `event` is a press in it that takes the
+/// keyboard: the user's, or a test's that stands in for one. The window
+/// becomes key before the press is handled, as handling it makes Agent
+/// Screen WindowServer's front process (`note_viewer_press`). The other
+/// way round, AppKit takes that for an activation by a click and waits for
+/// the press to finish it, and the monitor keeps the press from AppKit: the
+/// app then has no key window, the Viewer's input context is never the
+/// current one, and the input method composes nothing (ADR 0008).
+fn pressed_viewer(event: &NSEvent, mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
+    if INJECTING.with(Cell::get) && !TAKE_KEY.with(Cell::get) {
+        return None;
+    }
+    let window = event.window(mtm)?;
+    let viewer = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+    (viewer != 0 && &*window as *const NSWindow as usize == viewer).then_some(window)
 }
 
 /// Work for after the event's state borrow, as it may come back into it.
@@ -1385,12 +1401,7 @@ enum After {
     Sees(Retained<NSWindow>, Retained<NSEvent>),
 }
 
-fn handle_in(
-    event: &NSEvent,
-    mtm: MainThreadMarker,
-    take_key: &mut Option<objc2::rc::Retained<NSWindow>>,
-    after: &mut Option<After>,
-) -> bool {
+fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
         let Some(window) = event.window(mtm) else {
@@ -1435,9 +1446,6 @@ fn handle_in(
                 }) else {
                     return false;
                 };
-                if !INJECTING.with(|i| i.get()) || TAKE_KEY.with(|k| k.get()) {
-                    *take_key = Some(window.clone());
-                }
                 // A test's press never takes the user's keyboard.
                 if !INJECTING.with(|i| i.get()) {
                     super::input::note_viewer_press(window.windowNumber() as u32);

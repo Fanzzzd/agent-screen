@@ -1624,6 +1624,11 @@ async fn handle_one(
                 // target's caret, where it shows, in points from the
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
+                // The kind of input source the Viewer types with now.
+                "source": match crate::mac::ime::current_kind() {
+                    agent_screen_model::viewer_keys::Source::Layout => "layout",
+                    agent_screen_model::viewer_keys::Source::InputMethod => "inputMethod",
+                },
                 "caret": crate::mac::viewer_input::caret_in_window(),
                 // A password field has the keyboard in the target, as last
                 // looked up, or secure input is on.
