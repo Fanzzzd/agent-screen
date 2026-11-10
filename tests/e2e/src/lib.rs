@@ -5,8 +5,12 @@
 //! the keyboard and pointer alone, and put everything back: the cursor, the
 //! front app, the AeroSpace workspace and the installed Agent Screen.
 
+pub mod budget;
 pub mod control;
+pub mod manifest;
 pub mod mcp;
+pub mod plan;
+pub mod select;
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -358,65 +362,6 @@ pub fn probe(args: &[&str]) -> Result<String> {
 
 // MARK: The sign
 
-/// Scripts that move the user's pointer, take their keyboard or input
-/// source, mute their sound, or put windows, alerts, cards or focus on their
-/// screen. Their sign asks the user to keep their hands off; the others'
-/// only says a test runs.
-const HANDS_OFF: &[&str] = &[
-    "alerts",
-    "appwhere",
-    "browsers",
-    "chrome",
-    "claims",
-    "closetwindow",
-    "coldflash",
-    "displaychange",
-    "flash",
-    "helpcard",
-    "ime",
-    "inputqueue",
-    "keys",
-    "latewindow",
-    "launchhere",
-    "load",
-    "loanfocus",
-    "menuchoice",
-    "menuclosed",
-    "menupress",
-    "realdrag",
-    "realclick",
-    "filedrag",
-    "oneclick",
-    "openpanel",
-    "peekanim",
-    "peekhover",
-    "peekrapid",
-    "requestcontrol",
-    "requestwindow",
-    "restart",
-    "robust",
-    "run",
-    "reopened",
-    "placeheld",
-    "samebundle",
-    "secondwindow",
-    "selectvalue",
-    "settings",
-    "shared",
-    "sharedbrowser",
-    "sound",
-    "statusicon",
-    "timing",
-    "viewerheader",
-    "viewerwetype",
-    "typedrops",
-    "webdrag",
-];
-
-/// Scripts that never start the debug app, so `run` builds nothing for
-/// them.
-const NO_APP: &[&str] = &["control", "selfupdate", "smoke", "stop"];
-
 /// The sign `run` shows on the main screen (`tools/overlay.swift`): a count
 /// from 3 in the middle with the script's name, then a badge in the
 /// bottom-right corner with the current step and each check, then the
@@ -461,7 +406,7 @@ fn start_sign(name: &str) {
     let Some(mut sign) = self::sign().take() else {
         return;
     };
-    if HANDS_OFF.contains(&name) {
+    if manifest::hands_off(name) {
         sign.say(&format!(
             "count 3 {name}: don't touch the mouse or keyboard / 请勿操作鼠标和键盘"
         ));
@@ -808,7 +753,7 @@ pub fn run(body: impl FnOnce() -> Result<()>) -> ExitCode {
     let name = script_name();
     // The build comes before the countdown, so the user keeps the Mac
     // while it runs. A failed build fails the script when it starts the app.
-    if !NO_APP.contains(&name.as_str()) {
+    if manifest::needs_app(&name) {
         open_sign();
         let _ = bundle_debug();
     }
@@ -1580,17 +1525,5 @@ pub fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
     let _ = std::fs::remove_file(support().join("wallpaper-recording.png"));
     if let Some((path, bytes)) = saved {
         let _ = std::fs::write(path, bytes);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// Every hands-off name is a script, so a rename can't drop its warning.
-    #[test]
-    fn hands_off_names_scripts() {
-        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin");
-        for name in super::HANDS_OFF {
-            assert!(bin.join(format!("{name}.rs")).exists(), "no script {name}");
-        }
     }
 }
