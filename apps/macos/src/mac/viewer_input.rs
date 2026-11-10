@@ -19,7 +19,7 @@ use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, 
 use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
-use agent_screen_model::viewer_keys::{self, Call, Focus, Outcome, Press, Route, Source};
+use agent_screen_model::viewer_keys::{self, Call, Outcome, Press, Route, Secrecy, Source};
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -28,7 +28,7 @@ use objc2_app_kit::{
 };
 use objc2_core_graphics::CGEventFlags;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
 #[derive(Default)]
@@ -44,10 +44,21 @@ struct State {
     pressed: Option<Button>,
     click: Option<Click>,
     frame_pixels: Option<[usize; 2]>,
-    /// Keys sent with Command, whose release AppKit may never report.
-    sent_up: HashSet<u16>,
-    /// Keys the input method kept: their release goes nowhere.
-    composed: HashSet<u16>,
+    /// How each key's last press went, so its release goes the same way
+    /// whatever changed meanwhile.
+    downs: HashMap<u16, Down>,
+}
+
+/// How a key's press went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Down {
+    /// To the target as the key: its release goes there too.
+    Raw,
+    /// To the target with its release, as for a Command shortcut, whose
+    /// release AppKit may never report.
+    UpSent,
+    /// The input method kept it: its release goes nowhere.
+    Kept,
 }
 
 /// A key on its way through the input context, out of the state's borrow:
@@ -68,6 +79,9 @@ pub enum Script {
     Insert(String),
     /// Inserts the key's own characters.
     Pass,
+    /// Inserts this text, then asks for the key's command, as Korean input
+    /// does for Return after a syllable.
+    InsertCommand(String),
     /// Nothing the Viewer sees, as for a command such as an arrow.
     Nothing,
 }
@@ -80,6 +94,7 @@ impl Script {
             _ => match text.split_once(':')? {
                 ("mark", t) => Script::Mark(t.into()),
                 ("insert", t) => Script::Insert(t.into()),
+                ("insertcommand", t) => Script::InsertCommand(t.into()),
                 _ => return None,
             },
         })
@@ -114,11 +129,12 @@ fn source_now() -> Source {
         .unwrap_or_else(super::ime::current_kind)
 }
 
-/// Look up the target's password field and caret, for an input method
-/// only, off the main thread: nothing waits for it.
+/// The focus may have moved: look up whether it is a password field, and
+/// its caret, for an input method only, off the main thread. Until the
+/// answer, keys go to the target as keys.
 fn inspect_for_input_method(forwarder: &Forwarder, display: u32) {
     if source_now() == Source::InputMethod {
-        forwarder.inspect(cg::display_bounds(display));
+        forwarder.inspect(cg::display_bounds(display), true);
     }
 }
 
@@ -192,12 +208,6 @@ pub fn takeover_changed(display: u32, active: bool) {
 pub fn drop_composition() {
     next_generation();
     let had = MARKED.with(|m| m.borrow_mut().take()).is_some();
-    // Releases of keys the input method had: the next real ones go out.
-    STATE.with(|s| {
-        if let Ok(mut s) = s.try_borrow_mut() {
-            s.composed.clear();
-        }
-    });
     if had {
         log::debug!("viewer: composition dropped");
         discard_in_input_context();
@@ -253,18 +263,37 @@ pub fn inspections() -> Option<u64> {
 }
 
 /// Whether the target of the display the Viewer shows has a password
-/// field focused, as last looked up, or secure input is on. Unknown is no.
+/// field focused, as last looked up, or secure input is on.
 pub fn secure() -> bool {
+    secrecy() == Secrecy::Secure
+}
+
+/// Whether the shown target's focus is a password field, or unknown since
+/// it may have moved.
+pub fn secrecy() -> Secrecy {
     STATE.with(|s| {
         s.try_borrow()
             .ok()
-            .and_then(|s| s.display.as_ref().map(|(_, f)| secure_for(f)))
-            .unwrap_or_else(super::ime::secure_input)
+            .and_then(|s| s.display.as_ref().map(|(_, f)| secrecy_for(f)))
+            .unwrap_or(Secrecy::Unknown)
     })
 }
 
-fn secure_for(forwarder: &Forwarder) -> bool {
-    super::ime::secure_input() || forwarder.text_focus() == Focus::Secure
+fn secrecy_for(forwarder: &Forwarder) -> Secrecy {
+    if super::ime::secure_input() {
+        Secrecy::Secure
+    } else {
+        forwarder.secrecy()
+    }
+}
+
+/// A lookup found a password field focused in a target: a composition in
+/// the Viewer is dropped, never committed, so none of it reaches the field.
+pub fn secure_found() {
+    if marked().is_some() && secure() {
+        log::warn!("viewer: a password field has the keyboard; composition dropped");
+        drop_composition();
+    }
 }
 
 /// Text the input method inserted in the Viewer. For a key going through
@@ -306,6 +335,9 @@ fn send_text(text: &str) {
             native::send(Native::ScreenTouched { display });
             super::catch::agent_acted(display);
             forwarder.text(text.to_string(), cg::display_bounds(display));
+            // The app may move its focus on the text, as a search box that
+            // submits does.
+            inspect_for_input_method(&forwarder, display);
         }
         Ok(None) => log::debug!("viewer: composed text dropped, no display to send it to"),
         // Inside the event handler, which holds the state: after it.
@@ -325,6 +357,7 @@ fn through_input_method(key: Through) {
         .map(|c| c.to_string())
         .unwrap_or_default();
     let composing = MARKED.with(|m| m.borrow().is_some());
+    watch_commands(&key.window);
     CALLS.with(|c| *c.borrow_mut() = Some(Vec::new()));
     match SCRIPT.with(|s| s.borrow_mut().take()) {
         Some(script) => run_script(&key.window, script, &characters),
@@ -338,23 +371,80 @@ fn through_input_method(key: Through) {
     let outcome = viewer_keys::outcome(composing, &characters, &calls);
     ROUTED.with(|r| r.set(Some(outcome.name())));
     let bounds = cg::display_bounds(key.display);
-    match outcome {
+    let press = press_of(&key.event);
+    let down = match outcome {
         Outcome::Key => {
             key.forwarder.key(code, true, flags(&key.event), bounds);
-            return;
+            Down::Raw
         }
-        Outcome::Text(text) => send_text(&text),
-        Outcome::Nothing => {}
-    }
+        // The text first, then the key, down now and up on its release.
+        Outcome::TextThenKey(text) => {
+            send_text(&text);
+            key.forwarder.key(code, true, flags(&key.event), bounds);
+            Down::Raw
+        }
+        Outcome::Text(text) => {
+            send_text(&text);
+            Down::Kept
+        }
+        Outcome::Nothing => Down::Kept,
+    };
     STATE.with(|s| {
         if let Ok(mut s) = s.try_borrow_mut() {
-            s.composed.insert(code);
+            s.downs.insert(code, down);
         }
     });
-    // A composition starts: where its candidates go, without waiting.
-    if !composing && MARKED.with(|m| m.borrow().is_some()) {
-        key.forwarder.inspect(bounds);
+    if down == Down::Raw && viewer_keys::moves_focus(press) {
+        key.forwarder.inspect(bounds, true);
+    } else if MARKED.with(|m| m.borrow().is_some()) {
+        // Composing: the app may have moved its focus by itself, maybe to
+        // a password field, which drops the composition. Without waiting.
+        key.forwarder.inspect(bounds, false);
     }
+}
+
+fn press_of(event: &NSEvent) -> Press {
+    let held = event.modifierFlags();
+    Press {
+        code: event.keyCode(),
+        command: held.contains(NSEventModifierFlags::Command),
+        control: held.contains(NSEventModifierFlags::Control),
+    }
+}
+
+/// GPUI's view drops the input method's doCommandBySelector: when no key
+/// of its own is in flight, so the Viewer can't see a command that
+/// follows composed text. Its implementation is wrapped once: while a key
+/// goes through the input context, the call is noted; otherwise GPUI's
+/// runs.
+fn watch_commands(window: &NSWindow) {
+    use objc2::runtime::{AnyObject, Imp, Sel};
+    type Command = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, Sel);
+    static ORIGINAL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    unsafe extern "C-unwind" fn noted(this: *mut AnyObject, cmd: Sel, selector: Sel) {
+        let in_key = CALLS.with(|c| {
+            c.borrow_mut()
+                .as_mut()
+                .map(|calls| calls.push(Call::Command))
+                .is_some()
+        });
+        if in_key {
+            return;
+        }
+        if let Some(Some(original)) = ORIGINAL.get() {
+            let original: Command = unsafe { std::mem::transmute::<usize, Command>(*original) };
+            unsafe { original(this, cmd, selector) };
+        }
+    }
+    ORIGINAL.get_or_init(|| {
+        let view = window.firstResponder()?;
+        let method = view
+            .class()
+            .instance_method(objc2::sel!(doCommandBySelector:))?;
+        let ours: Imp = unsafe { std::mem::transmute::<Command, Imp>(noted) };
+        let original = unsafe { method.set_implementation(ours) };
+        Some(original as usize)
+    });
 }
 
 /// Tests: what the input method does, through the view's own
@@ -364,6 +454,14 @@ fn run_script(window: &NSWindow, script: Script, characters: &str) {
         Script::Mark(text) => text_input(window, &text, false),
         Script::Insert(text) => text_input(window, &text, true),
         Script::Pass => text_input(window, characters, true),
+        Script::InsertCommand(text) => text_input(window, &text, true).map(|()| {
+            let view = window.firstResponder();
+            if let Some(view) = view {
+                let _: () = unsafe {
+                    objc2::msg_send![&*view, doCommandBySelector: objc2::sel!(insertNewline:)]
+                };
+            }
+        }),
         Script::Nothing => Ok(()),
     };
     if let Err(e) = result {
@@ -575,7 +673,6 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.display = display;
         s.pressed = None;
         s.click = None;
-        s.composed.clear();
         if let Some((display, forwarder)) = &s.display {
             inspect_for_input_method(forwarder, *display);
         }
@@ -739,25 +836,38 @@ fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64
 /// Handle one event; false lets it go on to GPUI.
 fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     let mut take_key = None;
-    let mut through = None;
-    let handled = handle_in(event, mtm, &mut take_key, &mut through);
+    let mut after = None;
+    let handled = handle_in(event, mtm, &mut take_key, &mut after);
     // Outside the state: a window becoming key draws at once, and its
     // paint reports the layout here.
     if let Some(window) = take_key {
         native::make_key(&window);
     }
     // Outside the state too: the input method calls back into the Viewer.
-    if let Some(key) = through {
-        through_input_method(key);
+    match after {
+        Some(After::Through(key)) => through_input_method(key),
+        Some(After::Sees(window, event)) => input_method_sees(&window, &event),
+        Some(After::DropComposition) => drop_composition(),
+        None => {}
     }
     handled
+}
+
+/// Work for after the event's state borrow, as it may come back into it.
+enum After {
+    /// A key through the input context.
+    Through(Through),
+    /// A modifier change for the input context to see.
+    Sees(Retained<NSWindow>, Retained<NSEvent>),
+    /// Drop the composition: a password field has the keyboard.
+    DropComposition,
 }
 
 fn handle_in(
     event: &NSEvent,
     mtm: MainThreadMarker,
     take_key: &mut Option<objc2::rc::Retained<NSWindow>>,
-    through: &mut Option<Through>,
+    after: &mut Option<After>,
 ) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -810,7 +920,6 @@ fn handle_in(
                 }
                 // A click commits a composition, where the keys went, before
                 // the focus moves.
-                s.composed.clear();
                 if MARKED.with(|m| m.borrow().is_some())
                     && let Some(text) = take_for_commit()
                 {
@@ -886,59 +995,68 @@ fn handle_in(
                 let code = event.keyCode();
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
-                let held = event.modifierFlags();
-                let press = Press {
-                    code,
-                    command: held.contains(NSEventModifierFlags::Command),
-                    control: held.contains(NSEventModifierFlags::Control),
-                };
-                // What was last looked up, after a click: never waited for.
-                let route = viewer_keys::route(source_now(), secure_for(&forwarder), press);
+                let press = press_of(event);
+                let source = source_now();
+                // As last looked up, never waited for.
+                let secrecy = secrecy_for(&forwarder);
+                let bounds = cg::display_bounds(display);
+                if source == Source::InputMethod {
+                    match secrecy {
+                        // A lookup is on its way, or this asks for one.
+                        Secrecy::Unknown => forwarder.inspect_unless_pending(bounds),
+                        // A composition never reaches a password field.
+                        Secrecy::Secure if MARKED.with(|m| m.borrow().is_some()) => {
+                            *after = Some(After::DropComposition);
+                        }
+                        _ => {}
+                    }
+                }
+                let route = viewer_keys::route(source, secrecy, press);
                 if route == Route::InputMethod {
-                    s.sent_up.remove(&code);
-                    s.composed.remove(&code);
-                    *through = Some(Through {
+                    s.downs.remove(&code);
+                    *after = Some(After::Through(Through {
                         event: objc2::Message::retain(event),
                         window: window.clone(),
                         display,
                         forwarder: forwarder.clone(),
-                    });
+                    }));
                     return true;
                 }
                 ROUTED.with(|r| r.set(Some("raw")));
-                // A release the input method had and the Viewer missed.
-                s.composed.remove(&code);
-                forwarder.key(code, true, flags(event), cg::display_bounds(display));
+                forwarder.key(code, true, flags(event), bounds);
                 // Command shortcuts often never report their release, so
                 // send it now and skip the real one if it comes.
                 if flags(event).contains(CGEventFlags::MaskCommand) {
-                    forwarder.key(code, false, flags(event), cg::display_bounds(display));
-                    s.sent_up.insert(code);
+                    forwarder.key(code, false, flags(event), bounds);
+                    s.downs.insert(code, Down::UpSent);
                 } else {
-                    // A plain press: its release is a real one.
-                    s.sent_up.remove(&code);
+                    s.downs.insert(code, Down::Raw);
+                }
+                if source == Source::InputMethod && viewer_keys::moves_focus(press) {
+                    forwarder.inspect(bounds, true);
                 }
                 true
             }
             NSEventType::KeyUp => {
                 let code = event.keyCode();
-                if s.composed.remove(&code) {
-                    return true;
-                }
-                if !s.sent_up.remove(&code) {
-                    forwarder.key(code, false, flags(event), cg::display_bounds(display));
+                // As its press went; one the Viewer never saw goes out.
+                match s.downs.remove(&code) {
+                    Some(Down::Kept) | Some(Down::UpSent) => {}
+                    Some(Down::Raw) | None => {
+                        forwarder.key(code, false, flags(event), cg::display_bounds(display));
+                    }
                 }
                 true
             }
             NSEventType::FlagsChanged => {
                 forwarder.flags_changed(event.keyCode(), flags(event));
                 // An input method switches modes on Shift alone: it sees
-                // the modifiers too.
+                // the modifiers too, after the state's borrow.
                 if !INJECTING.with(|i| i.get())
                     && super::ime::current_kind() == Source::InputMethod
-                    && !secure_for(&forwarder)
+                    && secrecy_for(&forwarder) == Secrecy::Open
                 {
-                    input_method_sees(&window, event);
+                    *after = Some(After::Sees(window.clone(), objc2::Message::retain(event)));
                 }
                 true
             }

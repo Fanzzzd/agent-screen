@@ -2,7 +2,9 @@
 // marked text included, is written to $FIELD_OUT as "text\tmarked".
 // FIELD_CONTROLS=1 adds a password field and a view that takes keys but
 // holds no text, as a game does, under the text view, and appends
-// "\tpassword\tkeys" to the line.
+// "\tpassword\tkeys" to the line. There, Tab in the text view moves to the
+// password field, and the file $FIELD_OUT.focus, once it exists, makes
+// the password field take the keyboard by itself, as a page's autofocus.
 import AppKit
 
 /// Takes the keyboard on a click and keeps the characters of its keys.
@@ -104,9 +106,20 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     }
   }
 
+  func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
+    guard controls, selector == #selector(NSResponder.insertTab(_:)) else { return false }
+    window.makeFirstResponder(password)
+    return true
+  }
+
   func save() {
     guard let out = ProcessInfo.processInfo.environment["FIELD_OUT"] else { return }
     let marked = text.hasMarkedText() ? (text.string as NSString).substring(with: text.markedRange()) : ""
+    let focus = out + ".focus"
+    if controls, FileManager.default.fileExists(atPath: focus) {
+      try? FileManager.default.removeItem(atPath: focus)
+      window.makeFirstResponder(password)
+    }
     let extra = controls ? "\t\(password.stringValue)\t\(keys.typed)" : ""
     try? "\(text.string)\t\(marked)\(extra)".write(toFile: out, atomically: true, encoding: .utf8)
   }

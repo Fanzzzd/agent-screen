@@ -1628,6 +1628,9 @@ async fn handle_one(
                 // A password field has the keyboard in the target, as last
                 // looked up, or secure input is on.
                 "secure": crate::mac::viewer_input::secure(),
+                // "unknown" until a lookup answers after the focus may
+                // have moved; keys go as keys meanwhile.
+                "secrecy": secrecy_name(crate::mac::viewer_input::secrecy()),
                 // Lookups of the target's focus asked for, none with a
                 // keyboard layout, and any made on the main thread.
                 "inspections": crate::mac::viewer_input::inspections(),
@@ -1645,6 +1648,7 @@ async fn handle_one(
                 cx.update(|cx| cx.refresh_windows());
             }
             let mut routed = None;
+            let mut secrecy = None;
             // `source` stands in for the user's input source: "layout" or
             // "inputMethod".
             let source = {
@@ -1667,15 +1671,18 @@ async fn handle_one(
                 ),
                 // `characters` are what the key types, and `ime` what the
                 // input method does with it: "pass", "nothing",
-                // "mark:TEXT" or "insert:TEXT". The reply says what the
-                // key came to.
+                // "mark:TEXT", "insert:TEXT" or "insertcommand:TEXT". The
+                // reply says what the key came to.
                 Some("key") => {
                     let script = match p.string("ime") {
                         None => None,
                         Some(ime) => Some(viewer_input::Script::parse(&ime).ok_or_else(|| {
-                            ControlError::failed("ime is pass, nothing, mark:TEXT or insert:TEXT")
+                            ControlError::failed(
+                                "ime is pass, nothing, mark:TEXT, insert:TEXT or insertcommand:TEXT",
+                            )
                         })?),
                     };
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
                     viewer_input::inject_key(
                         p.int("code").unwrap_or(0) as u16,
                         p.int("shift").unwrap_or(0) == 1,
@@ -1727,7 +1734,8 @@ async fn handle_one(
                 _ => Err("kind is click, key, drag, mark or commit".into()),
             }
             .map_err(ControlError::failed)?;
-            Ok(json!({ "route": routed }))
+            // `secrecy`: what the key was routed by.
+            Ok(json!({ "route": routed, "secrecy": secrecy }))
         }
         // Test hook: the front app's focused window reads as unknown, as
         // when the app doesn't answer accessibility in time.
@@ -6522,6 +6530,16 @@ fn preview_click(
 
 /// Test hooks: in debug builds, or with AGENTSCREEN_DEBUG=1 for measuring a
 /// release build.
+/// What the Viewer knows of the target's focus, for debug replies.
+fn secrecy_name(secrecy: agent_screen_model::viewer_keys::Secrecy) -> &'static str {
+    use agent_screen_model::viewer_keys::Secrecy;
+    match secrecy {
+        Secrecy::Unknown => "unknown",
+        Secrecy::Secure => "secure",
+        Secrecy::Open => "open",
+    }
+}
+
 fn debug_methods() -> bool {
     cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }

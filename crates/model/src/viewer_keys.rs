@@ -118,14 +118,35 @@ pub struct Press {
     pub control: bool,
 }
 
-/// Where `press` goes first, with `source` selected, and `secure` when the
-/// target's field is a password field or secure input is on.
-pub fn route(source: Source, secure: bool, press: Press) -> Route {
-    if source == Source::Layout || secure || press.command || press.control {
+/// Whether the target's focus is a password field, as last looked up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secrecy {
+    /// Not looked up since the focus may have moved: a click, Tab, Return,
+    /// an arrow, a shortcut or a commit.
+    Unknown,
+    /// A password field, or secure input is on.
+    Secure,
+    /// Anything else.
+    Open,
+}
+
+/// Where `press` goes first, with `source` selected and the target's focus
+/// `secrecy`. Until a lookup says the focus is no password field, keys go
+/// as keys: a field reached by Tab or Return, or one a page focused by
+/// itself, may be one.
+pub fn route(source: Source, secrecy: Secrecy, press: Press) -> Route {
+    if source == Source::Layout || secrecy != Secrecy::Open || press.command || press.control {
         Route::Raw
     } else {
         Route::InputMethod
     }
+}
+
+/// Whether a key the target got may have moved its focus, so whether the
+/// focus is a password field must be looked up again: Tab, Return, Enter,
+/// the arrows, and any Command or Control shortcut, as one opening a tab.
+pub fn moves_focus(press: Press) -> bool {
+    press.command || press.control || matches!(press.code, 36 | 48 | 76 | 123..=126)
 }
 
 /// What the input method did with a key, in order.
@@ -135,6 +156,9 @@ pub enum Call {
     Marked(String),
     /// It inserted this text, ending any composition.
     Inserted(String),
+    /// It asked for the key's command, as doCommandBySelector: Return,
+    /// Tab, an arrow, Delete, Escape.
+    Command,
     /// It made a call the Viewer can't follow, such as replacing text
     /// already sent: the key is spent.
     Ignored,
@@ -147,6 +171,9 @@ pub enum Outcome {
     Key,
     /// Text the input method composed, as Unicode text.
     Text(String),
+    /// Text it composed, then the key itself, as Korean input commits a
+    /// syllable and then moves on with Return, Tab or an arrow.
+    TextThenKey(String),
     /// Nothing: the input method kept the key, as part of a composition.
     Nothing,
 }
@@ -157,6 +184,7 @@ impl Outcome {
         match self {
             Outcome::Key => "raw",
             Outcome::Text(_) => "text",
+            Outcome::TextThenKey(_) => "textThenKey",
             Outcome::Nothing => "inputMethod",
         }
     }
@@ -168,6 +196,9 @@ impl Outcome {
 /// marked, or doing nothing the Viewer sees, as for a command such as an
 /// arrow, Return or Delete, passes the key through. Doing nothing while
 /// composing keeps it, as a key that moves through the candidates does.
+/// Asking for the key's command passes it through too, after any text it
+/// inserted; Pinyin's Return, which commits the letters as typed, asks for
+/// none, so it adds no Return.
 pub fn outcome(composing: bool, characters: &str, calls: &[Call]) -> Outcome {
     if calls.is_empty() {
         return if composing {
@@ -176,6 +207,7 @@ pub fn outcome(composing: bool, characters: &str, calls: &[Call]) -> Outcome {
             Outcome::Key
         };
     }
+    let commanded = calls.contains(&Call::Command);
     let marked = calls.iter().any(|c| matches!(c, Call::Marked(_)));
     let ignored = calls.contains(&Call::Ignored);
     let inserted: String = calls
@@ -185,6 +217,13 @@ pub fn outcome(composing: bool, characters: &str, calls: &[Call]) -> Outcome {
             _ => None,
         })
         .collect();
+    if commanded && !ignored {
+        return if inserted.is_empty() {
+            Outcome::Key
+        } else {
+            Outcome::TextThenKey(inserted)
+        };
+    }
     if !composing && !marked && !ignored && !characters.is_empty() && inserted == characters {
         Outcome::Key
     } else if inserted.is_empty() {
@@ -213,7 +252,7 @@ mod tests {
     #[test]
     fn a_layout_sends_every_key_as_a_key() {
         for code in [A, RETURN, LEFT] {
-            assert_eq!(route(Source::Layout, false, key(code)), Route::Raw);
+            assert_eq!(route(Source::Layout, Secrecy::Open, key(code)), Route::Raw);
         }
     }
 
@@ -221,7 +260,7 @@ mod tests {
     fn an_input_method_sees_every_key_but_shortcuts() {
         for code in [A, RETURN, LEFT] {
             assert_eq!(
-                route(Source::InputMethod, false, key(code)),
+                route(Source::InputMethod, Secrecy::Open, key(code)),
                 Route::InputMethod
             );
         }
@@ -233,13 +272,60 @@ mod tests {
             control: true,
             ..key(A)
         };
-        assert_eq!(route(Source::InputMethod, false, command), Route::Raw);
-        assert_eq!(route(Source::InputMethod, false, control), Route::Raw);
+        assert_eq!(
+            route(Source::InputMethod, Secrecy::Open, command),
+            Route::Raw
+        );
+        assert_eq!(
+            route(Source::InputMethod, Secrecy::Open, control),
+            Route::Raw
+        );
     }
 
     #[test]
     fn a_password_field_bypasses_the_input_method() {
-        assert_eq!(route(Source::InputMethod, true, key(A)), Route::Raw);
+        assert_eq!(
+            route(Source::InputMethod, Secrecy::Secure, key(A)),
+            Route::Raw
+        );
+    }
+
+    #[test]
+    fn keys_go_as_keys_until_the_focus_is_known_to_be_no_password_field() {
+        assert_eq!(
+            route(Source::InputMethod, Secrecy::Unknown, key(A)),
+            Route::Raw
+        );
+    }
+
+    #[test]
+    fn tab_return_arrows_and_shortcuts_may_move_the_focus() {
+        for code in [36, 48, 76, 123, 124, 125, 126] {
+            assert!(moves_focus(key(code)), "code {code}");
+        }
+        assert!(!moves_focus(key(A)));
+        assert!(!moves_focus(key(51)));
+        assert!(moves_focus(Press {
+            command: true,
+            ..key(17)
+        }));
+    }
+
+    #[test]
+    fn a_command_after_composed_text_sends_the_text_then_the_key() {
+        // Korean 2-Set: Return after a syllable commits it and moves on.
+        assert_eq!(
+            outcome(true, "\r", &[inserted("한"), Call::Command]),
+            Outcome::TextThenKey("한".into())
+        );
+        // A command alone, even while composing, is the key.
+        assert_eq!(outcome(true, "\u{f702}", &[Call::Command]), Outcome::Key);
+        assert_eq!(outcome(false, "\r", &[Call::Command]), Outcome::Key);
+        // Pinyin's Return commits the letters and asks for no command.
+        assert_eq!(
+            outcome(true, "\r", &[inserted("nihao")]),
+            Outcome::Text("nihao".into())
+        );
     }
 
     fn marked(text: &str) -> Call {
@@ -370,6 +456,7 @@ mod tests {
     fn outcome_names_match_the_debug_protocol() {
         assert_eq!(Outcome::Key.name(), "raw");
         assert_eq!(Outcome::Text("x".into()).name(), "text");
+        assert_eq!(Outcome::TextThenKey("x".into()).name(), "textThenKey");
         assert_eq!(Outcome::Nothing.name(), "inputMethod");
     }
 }

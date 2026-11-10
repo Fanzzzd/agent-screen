@@ -128,13 +128,33 @@ fn test(field: &std::path::Path) -> Result<()> {
     let marked = || viewer()["marked"].as_str().map(str::to_string);
     // A key typed with `source`, the input method doing `ime` with it:
     // what the key came to.
+    // What the Viewer knew of the focus when it routed the last key.
+    let routed_by = std::cell::RefCell::new(String::new());
     let typed_key = |code: u16, characters: &str, source: &str, ime: &str| -> String {
         let mut key =
             json!({ "kind": "key", "code": code, "characters": characters, "source": source });
         if !ime.is_empty() {
             key["ime"] = json!(ime);
         }
-        input(key).map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+        let reply = input(key);
+        *routed_by.borrow_mut() = reply
+            .as_ref()
+            .map(|r| r["secrecy"].to_string())
+            .unwrap_or_default();
+        reply.map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+    };
+    // After a click the Viewer doesn't know whether a password field has
+    // the keyboard, and sends keys as keys, until its lookup answers.
+    let settled = || -> String {
+        let mut secrecy = String::new();
+        for _ in 0..40 {
+            secrecy = viewer()["secrecy"].as_str().unwrap_or_default().to_string();
+            if secrecy == "open" || secrecy == "secure" {
+                break;
+            }
+            sleep_ms(50);
+        }
+        secrecy
     };
 
     // The user clicks Field's text in the Viewer with a keyboard layout: a
@@ -159,13 +179,21 @@ fn test(field: &std::path::Path) -> Result<()> {
         typed.is_err(),
         format!("{typed:?}"),
     );
+    // With an input method, a click looks up what it focused.
+    input(at(100.0))?;
+    let secrecy = settled();
+    check(
+        "a click with an input method looks up the focus",
+        secrecy == "open",
+        &secrecy,
+    );
 
     // Pinyin marks the letters as the user types them: Field gets nothing.
     let routed = typed_key(45, "n", "inputMethod", "mark:n");
     check(
         "a letter pinyin marks stays in the Viewer",
         routed == "\"inputMethod\"",
-        &routed,
+        format!("{routed} by {}", routed_by.borrow()),
     );
     for text in ["ni", "ni h", "ni hao"] {
         input(json!({ "kind": "mark", "text": text }))?;
@@ -290,6 +318,7 @@ fn test(field: &std::path::Path) -> Result<()> {
     // A new Takeover: a late commit from the old one is still dropped.
     input(at(100.0))?;
     sleep_ms(600);
+    settled();
     input(json!({ "kind": "commit", "text": "ni" }))?;
     check(
         "a late commit after the next click is dropped",
@@ -304,20 +333,31 @@ fn test(field: &std::path::Path) -> Result<()> {
         routed == "\"text\"" && now == holds("你好abx好"),
         format!("{routed} {now:?}"),
     );
+    // Korean 2-Set: Return after a syllable commits it, then asks for its
+    // command: Field gets the syllable, then Return as the key.
+    typed_key(5, "g", "inputMethod", "mark:하");
+    let routed = typed_key(36, "\r", "inputMethod", "insertcommand:한");
+    let now = until(&|f| *f == holds("你好abx好한\n"));
+    check(
+        "a command after composed text sends the text, then the key",
+        routed == "\"textThenKey\"" && now == holds("你好abx好한\n"),
+        format!("{routed} {now:?}"),
+    );
     // A click while composing commits the marked text where it was typed.
     typed_key(4, "h", "inputMethod", "mark:ha");
     input(at(100.0))?;
     sleep_ms(300);
-    let now = until(&|f| *f == holds("你好abx好ha"));
+    let now = until(&|f| *f == holds("你好abx好한\nha"));
     check(
         "a click commits the marked text",
-        marked().is_none() && now == holds("你好abx好ha"),
+        marked().is_none() && now == holds("你好abx好한\nha"),
         format!("{:?} {now:?}", marked()),
     );
 
     // Field's password field: keys skip the input method.
     input(at(232.0))?;
     sleep_ms(600);
+    settled();
     check(
         "the Viewer sees the password field",
         viewer()["secure"] == true,
@@ -346,6 +386,7 @@ fn test(field: &std::path::Path) -> Result<()> {
     // do arrows and shortcuts.
     input(at(276.0))?;
     sleep_ms(600);
+    settled();
     let routed = typed_key(0, "a", "inputMethod", "pass");
     check(
         "a letter the input method passes through goes as the key",
@@ -375,9 +416,67 @@ fn test(field: &std::path::Path) -> Result<()> {
     );
     check(
         "Field's text is unchanged",
-        read().text == "你好abx好ha",
+        read().text == "你好abx好한\nha",
         format!("{:?}", read()),
     );
+    // Field moves its focus to the password field by itself while the
+    // user composes: the composition is dropped, never committed.
+    // Taking the keyboard selects what the password field holds, so a key
+    // typed into it replaces it.
+    input(at(100.0))?;
+    sleep_ms(600);
+    settled();
+    let first = typed_key(45, "n", "inputMethod", "mark:n");
+    let first = format!("{first} by {}", routed_by.borrow());
+    std::fs::write(format!("{}.focus", saved.display()), "")?;
+    sleep_ms(500);
+    // The next letter: composed and dropped once a lookup finds the
+    // password field, or sent as the key if one found it already.
+    let second = typed_key(34, "i", "inputMethod", "mark:ni");
+    let second = format!("{second} by {}", routed_by.borrow());
+    sleep_ms(500);
+    let now = read();
+    check(
+        "a composition is dropped once the focus turns out to be a password field",
+        first.starts_with("\"inputMethod\"")
+            && marked().is_none()
+            && (now.password == "a" || now.password == "i")
+            && now.text == "你好abx好한\nha",
+        format!("{first}, {second}: {:?} {now:?}", marked()),
+    );
+    input(json!({ "kind": "commit", "text": "ni" }))?;
+    let now = read();
+    check(
+        "nothing of it reaches the password field later",
+        !now.password.contains('n'),
+        format!("{now:?}"),
+    );
+    // Tab from the text view into the password field, then typing at once,
+    // before any lookup answers: every letter goes to the field as a key.
+    input(at(100.0))?;
+    sleep_ms(600);
+    settled();
+    let tabbed = typed_key(48, "\t", "inputMethod", "nothing");
+    let letters: Vec<String> = [(7, "x"), (16, "y"), (6, "z")]
+        .into_iter()
+        .map(|(code, c)| typed_key(code, c, "inputMethod", &format!("mark:{c}")))
+        .collect();
+    let now = until(&|f| f.password == "xyz");
+    check(
+        "after Tab into a password field, pinyin's letters go as keys",
+        tabbed == "\"raw\"" && letters.iter().all(|r| r == "\"raw\"") && marked().is_none(),
+        format!("{tabbed} {letters:?} {:?}", marked()),
+    );
+    check(
+        "the password field gets every letter",
+        now.password == "xyz" && now.text == "你好abx好한\nha",
+        format!("{now:?}"),
+    );
+    // Field turns secure input on while its password field has the
+    // keyboard, and input methods are off everywhere then: leave it.
+    input(at(100.0))?;
+    sleep_ms(600);
+    settled();
     check(
         "no key waited on a lookup on the main thread",
         viewer()["mainThreadLookups"] == 0,
@@ -389,7 +488,8 @@ fn test(field: &std::path::Path) -> Result<()> {
 }
 
 /// A field on the Electron harness page composes as Field's does, from
-/// the first word after the click: no lookup has to finish first.
+/// the first word after the click: the lookup only has to answer, not
+/// find the field, which Electron may not report yet.
 fn electron_field(
     control: &Control,
     key: &str,
@@ -446,6 +546,16 @@ fn electron_field(
                 "y": (number("y") + number("height") - 8.0 - 15.0) / height }),
     )?;
     sleep_ms(300);
+    for _ in 0..40 {
+        let secrecy = control
+            .call("debugViewer", json!({}))
+            .map(|v| v["secrecy"].clone())
+            .unwrap_or_default();
+        if secrecy == "open" || secrecy == "secure" {
+            break;
+        }
+        sleep_ms(50);
+    }
     let key = |code: u16, characters: &str, ime: &str| -> String {
         control
             .call(
@@ -453,14 +563,17 @@ fn electron_field(
                 json!({ "kind": "key", "code": code, "characters": characters,
                         "source": "inputMethod", "ime": ime }),
             )
-            .map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+            .map_or_else(
+                |e| e.to_string(),
+                |r| format!("{} by {}", r["route"], r["secrecy"]),
+            )
     };
     let first = key(45, "n", "mark:n");
     key(34, "i", "mark:ni");
     let committed = key(49, " ", "insert:你好");
     check(
         "the first word in an Electron page's field composes",
-        first == "\"inputMethod\"" && committed == "\"text\"",
+        first.starts_with("\"inputMethod\"") && committed.starts_with("\"text\""),
         format!("{first} {committed}"),
     );
     sleep_ms(800);

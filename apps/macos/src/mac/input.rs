@@ -12,7 +12,7 @@ use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::key_window::{AppWindow, KeyWindow, key_window};
-use agent_screen_model::viewer_keys::Focus;
+use agent_screen_model::viewer_keys::{Focus, Secrecy};
 use futures::channel::oneshot;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -235,6 +235,9 @@ struct Probe {
     /// Answers to lookups asked up to here are out of date: a press came
     /// since.
     floor: u64,
+    /// The latest lookup asked for has answered since the focus last may
+    /// have moved.
+    known: bool,
     /// The lookup waiting to run: the window keys went to, the display,
     /// and its number.
     waiting: Option<(Option<WindowTarget>, Rect, u64)>,
@@ -252,6 +255,22 @@ impl Probe {
         self.focus = Focus::Other;
         self.reported = None;
         self.floor = self.asked;
+        self.known = false;
+    }
+
+    /// A lookup asked for since the last press has yet to answer.
+    fn pending(&self) -> bool {
+        self.asked > self.answered.max(self.floor)
+    }
+
+    /// Whether the focus is a password field, as last looked up, or
+    /// unknown since it may have moved.
+    fn secrecy(&self) -> Secrecy {
+        match (self.known, self.focus) {
+            (false, _) => Secrecy::Unknown,
+            (true, Focus::Secure) => Secrecy::Secure,
+            (true, _) => Secrecy::Open,
+        }
     }
 
     /// Keep an answer unless a newer one, or a press, came since it was
@@ -263,6 +282,10 @@ impl Probe {
         self.answered = ticket;
         self.focus = focus;
         self.reported = reported;
+        // Only the latest lookup tells where the focus is now.
+        if ticket == self.asked {
+            self.known = true;
+        }
         true
     }
 
@@ -328,8 +351,14 @@ fn inspect_loop(probe: std::sync::Weak<(std::sync::Mutex<Probe>, std::sync::Cond
         let (focus, reported) = target.map_or((Focus::Other, None), super::ax::text_focus);
         log::debug!("input: focus of {target:?} is {focus:?}, caret {reported:?}");
         let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
-        p.answer(ticket, focus, reported);
+        let kept = p.answer(ticket, focus, reported);
         changed.notify_all();
+        drop(p);
+        // A password field: a composition already started must not reach
+        // it, committed or not.
+        if kept && focus == Focus::Secure {
+            super::native::main_async(super::viewer_input::secure_found);
+        }
     }
 }
 
@@ -487,10 +516,17 @@ impl Forwarder {
     /// Look up what has the keyboard in the target and its caret, once
     /// the input queued before has gone out: the window the user's keys go
     /// to, or the display's topmost one. Nobody waits for it: keys go by
-    /// what was last looked up.
-    pub fn inspect(&self, within: Rect) {
+    /// what was last looked up. With `moved`, the focus may have moved, and
+    /// whether it is a password field is unknown until this answers.
+    pub fn inspect(&self, within: Rect, moved: bool) {
         let probe = self.probe.clone();
-        let ticket = probe.0.lock().unwrap_or_else(|e| e.into_inner()).ask();
+        let ticket = {
+            let mut p = probe.0.lock().unwrap_or_else(|e| e.into_inner());
+            if moved {
+                p.known = false;
+            }
+            p.ask()
+        };
         // The worker only notes where its keys go; the lookup runs on
         // the focus thread.
         self.send(move |w| {
@@ -501,9 +537,28 @@ impl Forwarder {
         });
     }
 
-    /// What had the keyboard in the target when last looked up.
-    pub fn text_focus(&self) -> Focus {
-        self.probe.0.lock().unwrap_or_else(|e| e.into_inner()).focus
+    /// Look up the focus unless a lookup is already on its way: keys
+    /// typed faster than lookups answer would otherwise keep the latest
+    /// one ahead of every answer.
+    pub fn inspect_unless_pending(&self, within: Rect) {
+        let pending = self
+            .probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending();
+        if !pending {
+            self.inspect(within, false);
+        }
+    }
+
+    /// Whether the target's focus is a password field, as last looked up.
+    pub fn secrecy(&self) -> Secrecy {
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .secrecy()
     }
 
     /// How many lookups the Viewer has asked for, for tests.
@@ -2208,6 +2263,38 @@ mod probe_tests {
         assert_eq!(probe.focus, Focus::Other);
         let fourth = probe.ask();
         assert!(probe.answer(fourth, Focus::Text, None));
+    }
+
+    #[test]
+    fn the_focus_is_unknown_until_the_latest_lookup_answers() {
+        let mut probe = Probe::default();
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        let (first, second) = (probe.ask(), probe.ask());
+        // An older lookup's answer doesn't say where the focus is now.
+        assert!(probe.answer(first, Focus::Text, None));
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        assert!(probe.answer(second, Focus::Secure, None));
+        assert_eq!(probe.secrecy(), Secrecy::Secure);
+        probe.press((1.0, 1.0));
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        let third = probe.ask();
+        assert!(probe.answer(third, Focus::Text, None));
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+    }
+
+    #[test]
+    fn a_lookup_is_pending_until_it_answers_or_a_press_voids_it() {
+        let mut probe = Probe::default();
+        assert!(!probe.pending());
+        let first = probe.ask();
+        assert!(probe.pending());
+        assert!(probe.answer(first, Focus::Text, None));
+        assert!(!probe.pending());
+        // A press voids the lookup in flight: its answer won't count, so
+        // the next key asks again.
+        probe.ask();
+        probe.press((1.0, 1.0));
+        assert!(!probe.pending());
     }
 }
 
