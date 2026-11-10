@@ -1046,7 +1046,7 @@ pub async fn run(
             let reply = tokio::select! {
                 reply = call => reply,
                 () = cancelled => {
-                    let _ = control.call("cancelWaitForChange", json!({ "waitId": wait })).await;
+                    let _ = control.call_open("cancelWaitForChange", json!({ "waitId": wait })).await;
                     return Err(ControlError::new("failed", "the call was cancelled"));
                 }
             };
@@ -1067,7 +1067,8 @@ pub async fn run(
             if let Some(tree) = reply.get("tree").and_then(Value::as_str)
                 && (fired || agent_screen_model::watch::shown_whole(changes))
             {
-                let cut = reply.get("truncated") == Some(&Value::Bool(true));
+                // The tree's own read, not whether any read of the wait was cut.
+                let cut = reply.get("treeTruncated") == Some(&Value::Bool(true));
                 control.swap_tree(display, window, scope, tree.to_string(), cut);
             }
             Ok(Output::Content(vec![text(wait_output(

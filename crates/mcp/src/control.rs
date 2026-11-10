@@ -161,6 +161,28 @@ impl Control {
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Object, ControlError> {
         let connection = self.open().await?;
+        self.call_on(&connection, method, params).await
+    }
+
+    /// Call on the open connection only, never starting the app or opening
+    /// another: a cancel means nothing to an app that didn't get the call.
+    pub async fn call_open(&self, method: &str, params: Value) -> Result<Object, ControlError> {
+        let connection = self
+            .connection
+            .lock()
+            .await
+            .clone()
+            .filter(|c| c.open.load(Ordering::Relaxed))
+            .ok_or_else(|| closed("no open connection"))?;
+        self.call_on(&connection, method, params).await
+    }
+
+    async fn call_on(
+        &self,
+        connection: &Connection,
+        method: &str,
+        params: Value,
+    ) -> Result<Object, ControlError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         connection.pending.lock().unwrap().insert(id, tx);

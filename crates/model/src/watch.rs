@@ -210,6 +210,97 @@ pub fn check(conditions: &Conditions, before: &str, after: &str, truncated: bool
     fired
 }
 
+/// A tree read during a wait, and whether that read stopped at the
+/// element budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Read {
+    pub tree: String,
+    pub truncated: bool,
+}
+
+/// One wait's reads: the baseline, the last read and how many reads in a
+/// row found the tree as before. Each read is checked with its own cut and
+/// the baseline's, so one cut read doesn't turn disappears off for the
+/// rest of the wait, nor a cut baseline for later waits.
+#[derive(Debug)]
+pub struct Watch {
+    conditions: Conditions,
+    baseline: Option<Read>,
+    last: Option<Read>,
+    quiet: u32,
+    any_cut: bool,
+}
+
+impl Watch {
+    /// A wait from the agent's last tree, or from its first read when
+    /// `baseline` is None.
+    pub fn new(conditions: Conditions, baseline: Option<Read>) -> Watch {
+        let any_cut = baseline.as_ref().is_some_and(|b| b.truncated);
+        Watch {
+            conditions,
+            baseline,
+            last: None,
+            quiet: 0,
+            any_cut,
+        }
+    }
+
+    /// Take a read: the conditions it fires, none for the first read of a
+    /// wait with no baseline.
+    pub fn read(&mut self, read: Read) -> Vec<Fired> {
+        self.any_cut |= read.truncated;
+        let fired = match &self.baseline {
+            None => {
+                self.baseline = Some(read.clone());
+                Vec::new()
+            }
+            Some(before) => check(
+                &self.conditions,
+                &before.tree,
+                &read.tree,
+                before.truncated || read.truncated,
+            ),
+        };
+        let same = self.last.as_ref().is_some_and(|l| l.tree == read.tree);
+        self.quiet = if same { self.quiet + 1 } else { 0 };
+        self.last = Some(read);
+        fired
+    }
+
+    pub fn baseline(&self) -> Option<&Read> {
+        self.baseline.as_ref()
+    }
+
+    pub fn last(&self) -> Option<&Read> {
+        self.last.as_ref()
+    }
+
+    /// Reads in a row that found the tree as the one before.
+    pub fn quiet(&self) -> u32 {
+        self.quiet
+    }
+
+    /// Whether the baseline or any read was cut: for the notice only.
+    pub fn any_cut(&self) -> bool {
+        self.any_cut
+    }
+
+    /// What changed from the baseline to the last read.
+    pub fn changes(&self) -> Option<String> {
+        crate::tree::changes(&self.baseline.as_ref()?.tree, &self.last.as_ref()?.tree)
+    }
+
+    /// Whether the baseline has no element `disappears` matches, so
+    /// nothing could disappear.
+    pub fn disappears_absent(&self) -> bool {
+        self.conditions
+            .disappears
+            .as_ref()
+            .zip(self.baseline.as_ref())
+            .is_some_and(|(m, b)| count(m, &b.tree) == 0)
+    }
+}
+
 /// How many elements of `tree` match: a timed-out wait says when the
 /// element to disappear was never there.
 pub fn count(m: &Match, tree: &str) -> usize {
@@ -552,6 +643,46 @@ mod tests {
                 "[9] statictext value=\"Delivered\"".into()
             ])]
         );
+    }
+
+    #[test]
+    fn a_cut_read_turns_disappears_off_for_that_read_only() {
+        let c = conditions(json!({ "disappears": { "text": "sending" } }));
+        let read = |tree: &str, truncated| Read {
+            tree: tree.into(),
+            truncated,
+        };
+        let gone = BEFORE.replace(
+            "  [2] statictext value=\"Sending…\" at (40,40) 300×20\n",
+            "",
+        );
+        // A window that shrank below the budget: its cut baseline was
+        // stored with the cut, the reads since aren't cut.
+        let mut shrunk = Watch::new(c.clone(), Some(read(BEFORE, true)));
+        assert!(
+            shrunk.read(read(&gone, false)).is_empty(),
+            "the baseline was cut"
+        );
+        assert!(shrunk.any_cut() && !shrunk.last().unwrap().truncated);
+        // The next wait starts from that uncut read and fires.
+        let mut next = Watch::new(c.clone(), Some(read(BEFORE, false)));
+        assert_eq!(next.read(read(&gone, false)).len(), 1);
+        // Within one wait: a cut read fires nothing, the next uncut one does.
+        let mut one = Watch::new(c, None);
+        assert!(
+            one.read(read(BEFORE, false)).is_empty(),
+            "the first read is the baseline"
+        );
+        assert!(one.read(read(&gone, true)).is_empty());
+        assert_eq!(
+            one.read(read(&gone, false)),
+            vec![Fired::Disappeared(vec![
+                "[2] statictext value=\"Sending…\" at (40,40) 300×20".into()
+            ])]
+        );
+        assert!(one.any_cut());
+        assert_eq!(one.quiet(), 1);
+        assert!(one.changes().is_some() && !one.disappears_absent());
     }
 
     #[test]

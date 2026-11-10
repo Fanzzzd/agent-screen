@@ -1236,8 +1236,8 @@ async fn handle_one(
             let wait = p
                 .int("waitId")
                 .ok_or_else(|| ControlError::invalid("waitId is required"))?;
-            let stop = WAITS.with(|w| w.borrow_mut().remove(&(connection, wait as u64)));
-            Ok(json!({ "cancelled": stop.is_some_and(|stop| stop.send(()).is_ok()) }))
+            cancel_wait((connection, wait as u64));
+            Ok(json!({ "cancelled": true }))
         }
         "elementAction" => {
             let scope = read_scope(&p)?;
@@ -6632,20 +6632,66 @@ async fn read_root(
 }
 
 thread_local! {
-    /// Running waits for change, by connection and the MCP's wait id: the
-    /// way to stop each when its MCP call is cancelled.
-    static WAITS: std::cell::RefCell<
-        std::collections::HashMap<(u64, u64), futures::channel::oneshot::Sender<()>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Waits for change by connection and the MCP's wait id: running ones,
+    /// with the way to stop each when its MCP call is cancelled, and cancels
+    /// that came before their wait registered.
+    static WAITS: std::cell::RefCell<std::collections::HashMap<(u64, u64), WaitSlot>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Takes a wait out of `WAITS` however it ends.
+enum WaitSlot {
+    Running(futures::channel::oneshot::Sender<()>),
+    /// Cancelled before it started, at this time.
+    Cancelled(Instant),
+}
+
+/// Forget early cancels older than this, as for a wait that never came.
+const EARLY_CANCEL: Duration = Duration::from_secs(30);
+
+/// Register a wait: the receiver its cancel fires, or None when the cancel
+/// already came.
+fn register_wait(key: (u64, u64)) -> Option<futures::channel::oneshot::Receiver<()>> {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        waits.retain(
+            |_, slot| !matches!(slot, WaitSlot::Cancelled(at) if at.elapsed() > EARLY_CANCEL),
+        );
+        if matches!(waits.remove(&key), Some(WaitSlot::Cancelled(_))) {
+            return None;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        waits.insert(key, WaitSlot::Running(tx));
+        Some(rx)
+    })
+}
+
+/// Stop a running wait, or remember the cancel for one not started yet.
+fn cancel_wait(key: (u64, u64)) {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        match waits.remove(&key) {
+            Some(WaitSlot::Running(stop)) => {
+                let _ = stop.send(());
+            }
+            _ => {
+                waits.insert(key, WaitSlot::Cancelled(Instant::now()));
+            }
+        }
+    });
+}
+
+/// Takes a running wait out of `WAITS` however it ends.
 struct Waiting(Option<(u64, u64)>);
 
 impl Drop for Waiting {
     fn drop(&mut self) {
         if let Some(key) = self.0 {
-            WAITS.with(|w| w.borrow_mut().remove(&key));
+            WAITS.with(|w| {
+                let mut waits = w.borrow_mut();
+                if matches!(waits.get(&key), Some(WaitSlot::Running(_))) {
+                    waits.remove(&key);
+                }
+            });
         }
     }
 }
@@ -6663,6 +6709,17 @@ async fn wait_for_change(
     cx: &mut AsyncApp,
 ) -> Result<Value, ControlError> {
     use agent_screen_model::watch;
+    let cancelled = || ControlError::failed("the wait was cancelled");
+    // Registered before anything waits, so a cancel can't slip in first.
+    // Without a wait id, from an older MCP, nothing cancels it.
+    let key = p.int("waitId").map(|wait| (connection, wait as u64));
+    let (_never, idle) = futures::channel::oneshot::channel();
+    let mut cancel = match key {
+        Some(key) => register_wait(key).ok_or_else(cancelled)?,
+        None => idle,
+    }
+    .fuse();
+    let _waiting = Waiting(key);
     let scope = read_scope(p)?;
     let conditions = watch::Conditions::from_json(p.0.get("conditions").unwrap_or(&Value::Null))
         .map_err(ControlError::invalid)?;
@@ -6679,26 +6736,18 @@ async fn wait_for_change(
     // The agent's tree names numbers of this app run only if it read the
     // window since the app started.
     let numbered = core.read_with(cx, |c, _| c.elements.contains_key(&(id, target.window_id)));
-    let from_agent = numbered && p.string("baseline").is_some();
-    let mut baseline = p.string("baseline").filter(|_| numbered);
-    // Whether a read stopped at the element budget, the baseline's or any
-    // since: elements past it are unseen.
-    let mut truncated = from_agent && p.0.get("baselineTruncated") == Some(&Value::Bool(true));
+    let baseline = p
+        .string("baseline")
+        .filter(|_| numbered)
+        .map(|tree| watch::Read {
+            tree,
+            truncated: p.0.get("baselineTruncated") == Some(&Value::Bool(true)),
+        });
+    let from_agent = baseline.is_some();
+    let mut watch = watch::Watch::new(conditions, baseline);
     let mut depth_limited = false;
-    let mut last: Option<(String, usize)> = None;
+    let mut count = None;
     let mut unanswered = 0;
-    let mut quiet = 0;
-    let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
-    let mut cancel = cancel_rx.fuse();
-    // Without a wait id, from an older MCP, the sender stays here, so the
-    // receiver never fires.
-    let mut cancel_tx = Some(cancel_tx);
-    let _waiting = Waiting(p.int("waitId").and_then(|wait| {
-        let key = (connection, wait as u64);
-        let tx = cancel_tx.take()?;
-        WAITS.with(|w| w.borrow_mut().insert(key, tx));
-        Some(key)
-    }));
     let waited = |started: Instant| (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
     let outcome = loop {
         let (closed, ended, by_user) = core.read_with(cx, |c, _| {
@@ -6753,16 +6802,15 @@ async fn wait_for_change(
         let snapshot = futures::select! {
             snapshot = FutureExt::fuse(read) => snapshot,
             _ = FutureExt::fuse(timer) => break "timedOut",
-            _ = cancel => return Err(ControlError::failed("the wait was cancelled")),
+            _ = cancel => return Err(cancelled()),
         };
         let read_time = read_started.elapsed();
         match snapshot {
             Ok(snapshot) => {
-                let count = snapshot.elements.len();
-                truncated |= snapshot.truncated;
+                count = Some(snapshot.elements.len());
                 depth_limited |= snapshot.depth_limited;
-                let complete =
-                    scope.root.is_none() && !snapshot.truncated && !snapshot.depth_limited;
+                let truncated = snapshot.truncated;
+                let complete = scope.root.is_none() && !truncated && !snapshot.depth_limited;
                 let tree = core.update(cx, |c, _| {
                     let numbers = c.elements.entry((id, target.window_id)).or_default();
                     numbers::relabel(
@@ -6770,33 +6818,25 @@ async fn wait_for_change(
                         &numbers.refresh(snapshot.elements, complete),
                     )
                 });
-                match &baseline {
-                    None => baseline = Some(tree.clone()),
-                    Some(before) => {
-                        let fired = watch::check(&conditions, before, &tree, truncated);
-                        if !fired.is_empty() {
-                            let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
-                            let matched: Vec<&String> =
-                                fired.iter().flat_map(|f| f.elements()).collect();
-                            return Ok(json!({
-                                "outcome": "fired",
-                                "fired": names,
-                                "matched": matched,
-                                "changes": agent_screen_model::tree::changes(before, &tree),
-                                "tree": tree,
-                                "elements": count,
-                                "truncated": truncated,
-                                "depthLimited": depth_limited,
-                                "baselineFromAgent": from_agent,
-                                "takeover": takeover(core, id, cx),
-                                "waitedSeconds": waited(started),
-                            }));
-                        }
-                    }
+                let fired = watch.read(watch::Read { tree, truncated });
+                if !fired.is_empty() {
+                    let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
+                    let matched: Vec<&String> = fired.iter().flat_map(|f| f.elements()).collect();
+                    return Ok(json!({
+                        "outcome": "fired",
+                        "fired": names,
+                        "matched": matched,
+                        "changes": watch.changes(),
+                        "tree": watch.last().map(|r| &r.tree),
+                        "treeTruncated": truncated,
+                        "elements": count,
+                        "truncated": watch.any_cut(),
+                        "depthLimited": depth_limited,
+                        "baselineFromAgent": from_agent,
+                        "takeover": takeover(core, id, cx),
+                        "waitedSeconds": waited(started),
+                    }));
                 }
-                let same = last.as_ref().is_some_and(|(t, _)| *t == tree);
-                quiet = if same { quiet + 1 } else { 0 };
-                last = Some((tree, count));
             }
             Err(ax::SnapshotError::RootUnavailable) => {
                 return Ok(json!({ "outcome": "rootGone", "waitedSeconds": waited(started) }));
@@ -6807,32 +6847,24 @@ async fn wait_for_change(
         if Instant::now() >= deadline {
             break "timedOut";
         }
-        let gap = watch::poll_gap(read_time, quiet)
+        let gap = watch::poll_gap(read_time, watch.quiet())
             .min(deadline.saturating_duration_since(Instant::now()));
         let timer = cx.background_executor().timer(gap);
         futures::select! {
             _ = FutureExt::fuse(timer) => {}
-            _ = cancel => return Err(ControlError::failed("the wait was cancelled")),
+            _ = cancel => return Err(cancelled()),
         }
     };
-    let unmatched = baseline
-        .as_deref()
-        .zip(last.as_ref())
-        .and_then(|(before, (tree, _))| agent_screen_model::tree::changes(before, tree));
-    let missing = conditions
-        .disappears
-        .as_ref()
-        .zip(baseline.as_deref())
-        .is_some_and(|(m, before)| watch::count(m, before) == 0);
     Ok(json!({
         "outcome": outcome,
-        "changes": unmatched,
-        "tree": last.as_ref().map(|(tree, _)| tree),
-        "elements": last.as_ref().map(|(_, count)| count),
+        "changes": watch.changes(),
+        "tree": watch.last().map(|r| &r.tree),
+        "treeTruncated": watch.last().is_some_and(|r| r.truncated),
+        "elements": watch.last().and(count),
         "unanswered": unanswered,
-        "truncated": truncated,
+        "truncated": watch.any_cut(),
         "depthLimited": depth_limited,
-        "disappearsAbsent": missing,
+        "disappearsAbsent": watch.disappears_absent(),
         "baselineFromAgent": from_agent,
         "takeover": takeover(core, id, cx),
         "waitedSeconds": waited(started),
