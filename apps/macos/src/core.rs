@@ -535,9 +535,42 @@ impl Core {
             // An ended display takes no more windows, from catches either.
             self.kept_catches.retain(|(display, _)| *display != id);
             stop_recording(id, cx);
+            self.return_handovers(id, cx);
             cx.notify();
             schedule_sweep(cx);
         }
+    }
+
+    /// The user's windows go home as the agent stops using display `id`
+    /// (#161), one at a time, as window_access return sends them. A window
+    /// that can't leave stays a Handover there, for the dismissal to
+    /// return. The display closes once none is left.
+    fn return_handovers(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        let Some(shell) = crate::ui::shell::current() else {
+            return;
+        };
+        let given = self.displays.return_handovers_at_end(id);
+        if given.is_empty() {
+            return;
+        }
+        // After this update: sending a window home updates Core too.
+        cx.spawn(async move |this, cx| {
+            for given in given {
+                let window = given.target.window_id;
+                let Ok(task) =
+                    shell.update(cx, |shell, cx| shell.send_home(given.target, id, Some(given), cx))
+                else {
+                    return;
+                };
+                if task.await {
+                    log::info!("display {id}: window {window} went back to the user as the display ended");
+                } else {
+                    log::warn!("display {id}: window {window} didn't leave the ended display; it stays a Handover there");
+                }
+            }
+            let _ = this.update(cx, |core, cx| core.sweep_ended(cx));
+        })
+        .detach();
     }
 
     /// The user takes the display over: by their first input in the
@@ -601,6 +634,7 @@ impl Core {
                 }
                 crate::control::agent::release_hold(id);
                 stop_recording(id, cx);
+                self.return_handovers(id, cx);
             }
             cx.notify();
             schedule_sweep(cx);

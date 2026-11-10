@@ -58,8 +58,40 @@ pub enum WindowSighting {
     /// On the user's screen, but a panel, dialog or menu rather than a
     /// document window.
     NotDocument { app: String },
-    /// On another Agent Display.
-    OnAgentDisplay,
+    /// On another Agent Display, which `Holder` has.
+    OnAgentDisplay(Holder),
+}
+
+/// Who has the Agent Display a window place_window didn't offer is on. A
+/// `not_found` blames another agent session only when one holds the
+/// display: an agent was told other sessions held a window that sat on its
+/// own ended display, with no other session running (#161).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    /// Another Agent Session uses it.
+    OtherSession,
+    /// A Review Display: its Agent Session stopped using it, and it waits
+    /// for the user.
+    Review,
+    /// No Agent Session of this app uses it: a display the user made from
+    /// Peek, a spare, or another Agent Screen instance's display.
+    Other,
+}
+
+impl Holder {
+    /// The holder to name for an app's windows on displays with these
+    /// holders: a Review Display first, since the user can take a window
+    /// back from it, and another session only when every display is one.
+    pub fn of_all(holders: impl IntoIterator<Item = Holder>) -> Holder {
+        let holders: Vec<Holder> = holders.into_iter().collect();
+        if holders.contains(&Holder::Review) {
+            Holder::Review
+        } else if !holders.is_empty() && holders.iter().all(|h| *h == Holder::OtherSession) {
+            Holder::OtherSession
+        } else {
+            Holder::Other
+        }
+    }
 }
 
 /// The `not_found` message for window `id`.
@@ -74,9 +106,15 @@ pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
         WindowSighting::NotDocument { app } => format!(
             "window {id} ({app}) is a panel or dialog; place_window moves document windows. Place the {app} window it belongs to"
         ),
-        WindowSighting::OnAgentDisplay => {
+        WindowSighting::OnAgentDisplay(Holder::OtherSession) => {
             format!("window {id} is on another Agent Display, which another agent session holds")
         }
+        WindowSighting::OnAgentDisplay(Holder::Review) => format!(
+            "window {id} is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+        ),
+        WindowSighting::OnAgentDisplay(Holder::Other) => format!(
+            "window {id} is on another Agent Display, which isn't yours. Ask the user to bring it to their screen, then call place_window again"
+        ),
     }
 }
 
@@ -93,8 +131,9 @@ pub enum AppSighting {
     OnlyPanels { name: String },
     /// Its document window is on this display already.
     OnThisDisplay { window_id: u32 },
-    /// Its document windows on screen are on other Agent Displays.
-    OnAgentDisplay,
+    /// Its document windows on screen are on other Agent Displays, which
+    /// `Holder` has.
+    OnAgentDisplay(Holder),
 }
 
 /// The `not_found` message for an app the agent named. It says what was
@@ -117,8 +156,16 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
         AppSighting::OnThisDisplay { window_id } => format!(
             "its window {window_id} is on your display already; pass that window_id to set its frame"
         ),
-        AppSighting::OnAgentDisplay => {
+        AppSighting::OnAgentDisplay(Holder::OtherSession) => {
             "its windows on screen are on other Agent Displays, which other agent sessions hold"
+                .into()
+        }
+        AppSighting::OnAgentDisplay(Holder::Review) => {
+            "its window is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+                .into()
+        }
+        AppSighting::OnAgentDisplay(Holder::Other) => {
+            "its windows on screen are on another Agent Display, which isn't yours. Ask the user to bring one to their screen, then call place_window again"
                 .into()
         }
     }
@@ -261,7 +308,7 @@ mod tests {
             no_window(7, &WindowSighting::OffScreen),
             "window 7 isn't on screen: it is minimized, hidden or on another macOS Space. Ask the user to bring it up, then call place_window again"
         );
-        let other = no_window(7, &WindowSighting::OnAgentDisplay);
+        let other = no_window(7, &WindowSighting::OnAgentDisplay(Holder::OtherSession));
         assert!(other.starts_with("window 7 is on another Agent Display"));
         assert!(
             no_window(
@@ -271,6 +318,33 @@ mod tests {
                 }
             )
             .starts_with("window 7 (WeCom) is a panel")
+        );
+    }
+
+    #[test]
+    fn only_a_display_another_session_holds_is_blamed_on_one() {
+        use Holder::*;
+        assert_eq!(Holder::of_all([OtherSession, OtherSession]), OtherSession);
+        assert_eq!(Holder::of_all([OtherSession, Review]), Review);
+        assert_eq!(Holder::of_all([OtherSession, Other]), Other);
+        assert_eq!(Holder::of_all([]), Other);
+        for holder in [Review, Other] {
+            let app = no_app_window("WeCom", &AppSighting::OnAgentDisplay(holder));
+            let window = no_window(7, &WindowSighting::OnAgentDisplay(holder));
+            for text in [&app, &window] {
+                assert!(!text.contains("session holds"), "{text}");
+                assert!(!text.contains("sessions hold"), "{text}");
+                assert!(text.contains("place_window again"), "{text}");
+            }
+        }
+        // #161: the session's own ended display, waiting for review.
+        assert!(
+            no_app_window("WeCom", &AppSighting::OnAgentDisplay(Review))
+                .contains("waiting for the user to review it")
+        );
+        assert!(
+            no_app_window("WeCom", &AppSighting::OnAgentDisplay(OtherSession))
+                .contains("other agent sessions hold")
         );
     }
 }

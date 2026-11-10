@@ -165,8 +165,12 @@ impl Publication {
         apply(&mut self.desired);
         if force || self.desired.to_json() != self.published.to_json() {
             persist(&self.desired)?;
-            self.published = self.desired.clone();
         }
+        // The file names windows, not their displays: a claimed window
+        // claimed for another display leaves it as it is, and it holds the
+        // new claim too. Kept stale, a Handover going home to the user
+        // stand-in stage read as not claimed there and stayed put.
+        self.published = self.desired.clone();
         Ok(())
     }
 }
@@ -397,5 +401,23 @@ mod tests {
         claims.release(8);
         claims.remove_display(4);
         assert!(claims.is_empty());
+    }
+
+    #[test]
+    fn a_window_claimed_for_another_display_is_published_there() {
+        let mut state = Publication::new();
+        let writes = std::cell::Cell::new(0);
+        let write = |_: &Claims| -> Result<(), ()> {
+            writes.set(writes.get() + 1);
+            Ok(())
+        };
+        state.publish(false, |c| c.add_display(3), write).unwrap();
+        state.publish(false, |c| c.add_display(4), write).unwrap();
+        state.publish(false, |c| c.claim(7, 4), write).unwrap();
+        assert_eq!(writes.get(), 3);
+        // Home to display 3: the file reads the same, and isn't written.
+        state.publish(false, |c| c.claim(7, 3), write).unwrap();
+        assert_eq!(writes.get(), 3);
+        assert_eq!(state.published().display_of(7), Some(3));
     }
 }
