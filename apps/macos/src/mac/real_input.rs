@@ -44,8 +44,8 @@ pub static SESSION_INPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// "ASQ!" in the event's source user data.
 pub const TAG: i64 = 0x4153_5121;
-/// Points per drag step: small enough for apps that start a drag only after
-/// a few points of movement.
+/// Half the points per move of the pointer's glide to a menu: small enough
+/// for menu tracking to follow it.
 const STEP: f64 = 4.0;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
@@ -359,6 +359,17 @@ const SETTLED: Duration = Duration::from_millis(300);
 /// How long a loan waits for all that before it gives up.
 const SETTLE_LIMIT: Duration = Duration::from_millis(1500);
 
+/// Whether `target`'s app is in front with `target` its main window.
+fn already_forward(target: WindowTarget) -> bool {
+    if super::app::frontmost_pid() != Some(target.pid) {
+        return false;
+    }
+    let app = super::ax::application(target.pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    super::ax::element_attribute(&app, "AXMainWindow").and_then(|w| super::ax::window_id(&w))
+        == Some(target.window_id)
+}
+
 fn write_main(target: WindowTarget) {
     let key = objc2_core_foundation::CFString::from_static_str("AXMain");
     let yes = objc2_core_foundation::CFBoolean::new(true);
@@ -388,7 +399,18 @@ fn write_front(pid: i32) {
 /// one replaces the refresh for the activation. If the window moves all
 /// the same, it goes back to where it was before anything is pressed;
 /// claimed, AeroSpace leaves it alone from then on.
+///
+/// A window already main in the app in front, as after an earlier loan of
+/// the same grant, needs none of this: nothing activates, so no window
+/// manager lays anything out.
 pub fn come_forward(target: WindowTarget, go: impl Fn() -> bool) -> Result<(), &'static str> {
+    if already_forward(target) {
+        return if go() {
+            Ok(())
+        } else {
+            Err("the approval ended before anything was pressed")
+        };
+    }
     let home = super::cg::window_bounds(target.window_id);
     let aerospace = super::app::is_running("bobko.aerospace");
     let element = super::ax::window_element(target);
@@ -634,15 +656,43 @@ fn inputs_busy() -> Option<&'static str> {
     held.then_some("a mouse button or modifier is already held")
 }
 
+/// The pace of a drag with the user's pointer, after its window came
+/// forward. The pointer rests on the press point for a frame, so the app
+/// there sees it arrive before the press.
+const HOVER: Duration = Duration::from_millis(16);
+/// The button stays down this long before the first move: apps that read
+/// the session's button state, as Chromium does, see it held.
+const PRESS_HOLD: Duration = Duration::from_millis(30);
+/// Between two moves: about two moves per frame, which the app coalesces.
+const STEP_GAP: Duration = Duration::from_millis(8);
+/// The pointer rests on the drop point before the release, so the drop
+/// window hears the drag over it and answers, as a web page does to
+/// dragover, before the drop.
+const DWELL: Duration = Duration::from_millis(50);
+/// After the release, before the loan ends and anything else may move the
+/// front app, so the drop reaches its window first.
+const AFTER_RELEASE: Duration = Duration::from_millis(40);
+/// How long a drag between windows waits, once past the drag threshold,
+/// for the source to start its system drag session. The session follows
+/// the real pointer, so moves made before it starts carry nothing.
+const SESSION_WAIT: Duration = Duration::from_millis(500);
+
+/// How many drags the system drag pasteboard has carried: a source that
+/// starts a system drag session writes its items there first.
+fn drag_board() -> isize {
+    unsafe { objc2_app_kit::NSPasteboard::pasteboardWithName(objc2_app_kit::NSPasteboardNameDrag) }
+        .changeCount()
+}
+
 /// Drag from `from` to `to`, global points, with the user's pointer, from
-/// `target`'s window to a window of `drop_pid`'s, which may be another app.
-/// `go` is checked before every event, with the user's touch: a loan the
-/// queue stopped, or a window that left the display, ends it. It gets
-/// exactly `from` at the press and exactly `to` at the release. The button
-/// goes up before this returns, however it ends.
+/// `target`'s window to `drop`, which may be a window of another app. `go`
+/// is checked before every event, with the user's touch: a loan the queue
+/// stopped, or a window that left the display, ends it. It gets exactly
+/// `from` at the press and exactly `to` at the release. The button goes up
+/// before this returns, however it ends.
 pub fn drag(
     target: WindowTarget,
-    drop_pid: i32,
+    drop: WindowTarget,
     from: (f64, f64),
     to: (f64, f64),
     flags: CGEventFlags,
@@ -656,7 +706,7 @@ pub fn drag(
         return Outcome::Refused("background input into this process is still running");
     };
     // Background input into the drop app waits too.
-    let drop_gate = (drop_pid != target.pid).then(|| process_gate(drop_pid));
+    let drop_gate = (drop.pid != target.pid).then(|| process_gate(drop.pid));
     let _drop_process = match &drop_gate {
         Some(gate) => match gate.try_write() {
             Ok(held) => Some(held),
@@ -678,7 +728,15 @@ pub fn drag(
         source: Some(source),
         flags,
     };
-    let allowed = |at| go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+    let began = std::time::Instant::now();
+    let checks = std::cell::Cell::new((0u32, Duration::ZERO));
+    let allowed = |at| {
+        let t = std::time::Instant::now();
+        let ok = go(at) && !touched() && !unsafe { IsSecureEventInputEnabled() };
+        let (n, spent) = checks.get();
+        checks.set((n + 1, spent + t.elapsed()));
+        ok
+    };
     const BEFORE_PRESS: &str = "nothing was pressed: before the press, the approval ended, the user used their pointer or keyboard, secure input came on, or a window moved or now covers the drag's start or end";
     if !allowed(from) {
         return Outcome::Refused(BEFORE_PRESS);
@@ -690,10 +748,11 @@ pub fn drag(
     if let Err(why) = come_forward(target, || allowed(from)) {
         return Outcome::Refused(why);
     }
+    let forward = began.elapsed();
     if !poster.post(CGEventType::MouseMoved, from) {
         return Outcome::Refused("the mouse event could not be created");
     }
-    thread::sleep(Duration::from_millis(60));
+    thread::sleep(HOVER);
     if !allowed(from) || super::app::frontmost_pid() != Some(target.pid) {
         return Outcome::Refused(BEFORE_PRESS);
     }
@@ -706,34 +765,28 @@ pub fn drag(
         pressed: false,
         button: LEFT,
     };
+    // Only a drag between windows needs a system drag session.
+    let between = drop != target;
+    let board = between.then(drag_board);
     if !poster.post(CGEventType::LeftMouseDown, from) {
         return Outcome::Refused("the press could not be created");
     }
     release.pressed = true;
-    thread::sleep(Duration::from_millis(80));
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let steps = ((dx.hypot(dy) / STEP).ceil() as usize).clamp(8, 400);
+    let pressed = began.elapsed();
+    thread::sleep(PRESS_HOLD);
+    let points = agent_screen_model::real_drag::travel(from, to);
+    let wait_after = between
+        .then(|| agent_screen_model::real_drag::session_step(from, &points))
+        .flatten();
+    let mut session: Option<Duration> = None;
     let mut at = from;
     let mut stopped = None;
-    for i in 1..=steps {
-        if !allowed(at) || super::app::frontmost_pid() != Some(target.pid) {
-            stopped = Some(if touched() {
-                "the user moved the mouse or pressed a key"
-            } else if super::app::frontmost_pid() != Some(target.pid) {
-                "the foreground app changed"
-            } else {
-                "the approval or target geometry changed"
-            });
+    for (i, &next) in points.iter().enumerate() {
+        if super::app::frontmost_pid() != Some(target.pid) {
+            stopped = Some("the foreground app changed");
             break;
         }
-        let t = i as f64 / steps as f64;
-        at = if i == steps {
-            to
-        } else {
-            (from.0 + dx * t, from.1 + dy * t)
-        };
-        release.at = at;
-        if !allowed(at) {
+        if !allowed(next) {
             stopped = Some(if touched() {
                 "the user moved the mouse or pressed a key"
             } else {
@@ -741,20 +794,64 @@ pub fn drag(
             });
             break;
         }
-        if !poster.post(CGEventType::LeftMouseDragged, at) {
+        if !poster.post(CGEventType::LeftMouseDragged, next) {
             stopped = Some("a drag event could not be created");
             break;
         }
-        thread::sleep(Duration::from_millis(8));
+        at = next;
+        release.at = at;
+        thread::sleep(STEP_GAP);
+        if session.is_none()
+            && let Some(board) = board
+        {
+            // Past the threshold, the rest of the travel waits for the
+            // session, which may take the source a moment to start.
+            let limit = if wait_after == Some(i) {
+                SESSION_WAIT
+            } else {
+                Duration::ZERO
+            };
+            let waiting = std::time::Instant::now();
+            loop {
+                if drag_board() != board {
+                    session = Some(began.elapsed() - pressed);
+                    break;
+                }
+                if waiting.elapsed() >= limit || touched() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
     }
+    let travelled = began.elapsed();
     if stopped.is_none() {
-        thread::sleep(Duration::from_millis(60));
+        thread::sleep(DWELL);
     }
     if stopped.is_none() && (!allowed(at) || super::app::frontmost_pid() != Some(target.pid)) {
         stopped = Some("the approval ended before release");
     }
-    drop(release);
-    thread::sleep(Duration::from_millis(40));
+    std::mem::drop(release);
+    let released = began.elapsed();
+    thread::sleep(AFTER_RELEASE);
+    let (count, spent) = checks.get();
+    let ms = |d: Duration| d.as_millis();
+    log::info!(
+        "input queue: drag of {:.0} pt took {} ms: window forward {} ms, press at {} ms, {} moves until {} ms, release at {} ms; {count} checks took {} ms; {}",
+        (to.0 - from.0).hypot(to.1 - from.1),
+        ms(began.elapsed()),
+        ms(forward),
+        ms(pressed),
+        points.len(),
+        ms(travelled),
+        ms(released),
+        ms(spent),
+        match (between, session) {
+            (false, _) => "within one window".to_string(),
+            (true, Some(after)) => format!("drag session began {} ms after the press", ms(after)),
+            (true, None) => "no drag session seen".to_string(),
+        }
+    );
     match stopped {
         Some(why) => Outcome::Stopped(why),
         None => Outcome::Done,

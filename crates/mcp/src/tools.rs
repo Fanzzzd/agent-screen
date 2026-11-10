@@ -276,6 +276,7 @@ pub fn definitions() -> Vec<Value> {
                 "Queue approval includes new requests while it lasts, and ends after 30 idle seconds or when all participants are done.",
                 "approved means allowed, not completed. A complete drag or click waits for its turn and runs with the user's pointer. Only completed means it ran. request here asks for approval but contains no executable action; once approved, submit the complete drag or click with real_input.",
                 "approval_lapsed means the user allowed it, the approval ended with nothing run, and they will not be asked again; wait and retry return at once.",
+                "Each request's timing gives when it was asked, allowed, started and ended, so approvalMs, the user's time, is apart from runMs, the run with their pointer.",
                 "Do not continue a split drag or assume success after input_pending. You can use a background alternative or request_help.",
                 "The tool returns only your session's requests. It does not end a Takeover or grant access to other windows.",
             ],

@@ -285,9 +285,13 @@ fn test(
         format!("{dragged:?} {start:?} -> {moved:?} -> {back:?} {state}"),
     );
     // Take control back during an actual held-button sequence, not just
-    // during the grace period after it. Poll the owned page's down count
-    // so the synthetic user move lands after the press reached the page.
+    // during the grace period after it. The whole drag takes a fraction of
+    // a second, so watch the pointer rather than the page: it jumps to the
+    // press point, rests there through the press, and its next move is the
+    // drag's first, with the button down. Move at once; the page's down
+    // count then shows the press reached it.
     let before = seen(&harness(control, id)?.context("window")?, "down");
+    let start = cursor();
     let pending = control.begin(
         "drag",
         json!({
@@ -296,6 +300,25 @@ fn test(
             "toX": splitter.0 + 240, "toY": splitter.1,
         }),
     )?;
+    // Watching starts before the Allow: its reply may come after the drag
+    // began.
+    let watcher = std::thread::spawn(move || {
+        // The first position other than `from`, within 8 s.
+        let moved_from = |from: Point| {
+            let watching = std::time::Instant::now();
+            while watching.elapsed() < std::time::Duration::from_secs(8) {
+                let at = cursor();
+                if at != from {
+                    return Some(at);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            None
+        };
+        let held = moved_from(start).and_then(moved_from).is_some();
+        nudge();
+        held
+    });
     sleep_ms(600);
     control.call(
         "debugShow",
@@ -303,17 +326,10 @@ fn test(
             "sessionKey": key, "displayId": id, "surface": "input-queue-allow",
         }),
     )?;
-    let mut pressed = false;
-    for _ in 0..150 {
-        if harness(control, id)?.is_some_and(|w| seen(&w, "down") > before) {
-            pressed = true;
-            break;
-        }
-        sleep_ms(20);
-    }
-    nudge();
+    let held = watcher.join().unwrap_or(false);
     let interrupted = pending.wait();
     sleep_ms(600);
+    let pressed = held && seen(&harness(control, id)?.context("window")?, "down") > before;
     let state = status(control, key, id)?;
     check(
         "a user move during the drag stops it, releases its button and never reports completed",

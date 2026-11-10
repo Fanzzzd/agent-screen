@@ -5,7 +5,9 @@
 // (down), sessions begun (began), sessions ended (ended) and the last
 // session's operation (op, 0 for none). FILEDRAG_ROLE=target takes a
 // dropped file URL; its title counts drags that entered it (entered) and
-// drops (drops), and names the last dropped file (got). FILEDRAG_DISPLAY
+// drops (drops), names the last dropped file (got), and counts the
+// updates the last drop had over the view before it (over): a web page
+// hears each as a dragover. FILEDRAG_DISPLAY
 // names the Agent Display to open on, FILEDRAG_X the window's distance
 // from the display's left edge. Agent Screen centers a new window, so the
 // window takes its place again 1 and 2 s after it shows. SIGUSR1 moves it
@@ -72,7 +74,7 @@ final class Source: NSView, NSDraggingSource {
 }
 
 final class Drop: NSView {
-  var entered = 0, drops = 0, got = "-"
+  var entered = 0, drops = 0, got = "-", updates = 0, over = 0
 
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -82,16 +84,21 @@ final class Drop: NSView {
 
   override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
     entered += 1
+    updates = 0
     show()
     return .copy
   }
 
-  override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+  override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+    updates += 1
+    return .copy
+  }
 
   override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
     let urls = sender.draggingPasteboard.readObjects(
       forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
     drops += 1
+    over = updates
     got = urls?.first?.lastPathComponent ?? "?"
     show()
     return true
@@ -99,7 +106,7 @@ final class Drop: NSView {
 
   func show() {
     needsDisplay = true
-    window?.title = "Drop entered=\(entered) drops=\(drops) got=\(got)"
+    window?.title = "Drop entered=\(entered) drops=\(drops) got=\(got) over=\(over)"
   }
 
   override func draw(_ dirtyRect: NSRect) {

@@ -231,6 +231,12 @@ fn test(control: &Control, id: &Value, pids: &mut Vec<i64>) -> Result<()> {
             && !unsafe { CGEventSourceButtonState(0, 0) },
         format!("{src:?} {dst:?} {dragged:?}"),
     );
+    // A web page needs a few dragover events before the drop.
+    check(
+        "the drop window heard the drag over it a few times before the drop",
+        count(&dst, "over") >= 3,
+        format!("{dst:?}"),
+    );
 
     // The session is done, so the approval ends and the next drag asks
     // again instead of running at once.

@@ -53,6 +53,58 @@ pub fn refusal(
         .then_some("the drag would cross a window that isn't on its Agent Display")
 }
 
+/// A drag's travel never takes fewer events than this, so a short drag
+/// still reaches the drop window as several moves, or more than this, so
+/// a long one doesn't take longer than a person's.
+pub const MIN_STEPS: usize = 12;
+pub const MAX_STEPS: usize = 24;
+/// Points of travel per event between the two limits.
+const SPACING: f64 = 24.0;
+/// How far from the press the source must see the pointer before the drag
+/// waits for its system drag session: past AppKit's few points of drag
+/// threshold, which Finder's icons and the filedrag fixture use.
+pub const SESSION_AFTER: f64 = 6.0;
+
+/// How many events carry a drag of `distance` points from the press to
+/// the release.
+pub fn steps(distance: f64) -> usize {
+    if distance <= 0.0 || !distance.is_finite() {
+        return 1;
+    }
+    ((distance / SPACING).ceil() as usize).clamp(MIN_STEPS, MAX_STEPS)
+}
+
+/// The points of a drag's travel after the press at `from`, the last
+/// exactly `to`. They ease in and out, as a person's hand does: the first
+/// moves are a few points, so the source sees the drag start where it was
+/// pressed, and the last ones land close to `to`, so the drop window sees
+/// several moves over it before the release.
+pub fn travel(from: (f64, f64), to: (f64, f64)) -> Vec<(f64, f64)> {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let n = steps(dx.hypot(dy));
+    (1..=n)
+        .map(|i| {
+            if i == n {
+                return to;
+            }
+            let t = i as f64 / n as f64;
+            let eased = t * t * (3.0 - 2.0 * t);
+            (from.0 + dx * eased, from.1 + dy * eased)
+        })
+        .collect()
+}
+
+/// The index in `points` after which a drag between two windows waits for
+/// the source's system drag session: the first point `SESSION_AFTER` from
+/// the press, or the last point of a shorter drag.
+pub fn session_step(from: (f64, f64), points: &[(f64, f64)]) -> Option<usize> {
+    let last = points.last()?;
+    let far = SESSION_AFTER.min((last.0 - from.0).hypot(last.1 - from.1));
+    points
+        .iter()
+        .position(|p| (p.0 - from.0).hypot(p.1 - from.1) >= far)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +177,54 @@ mod tests {
         };
         assert_eq!(refusal(&p, p.to, Some(SOURCE), &on), None);
         assert!(refusal(&p, p.to, None, &on).is_some());
+    }
+
+    fn length(a: (f64, f64), b: (f64, f64)) -> f64 {
+        (b.0 - a.0).hypot(b.1 - a.1)
+    }
+
+    #[test]
+    fn the_number_of_moves_follows_the_distance_within_its_limits() {
+        assert_eq!(steps(0.0), 1);
+        assert_eq!(steps(f64::NAN), 1);
+        assert_eq!(steps(5.0), MIN_STEPS);
+        assert_eq!(steps(80.0), MIN_STEPS);
+        assert_eq!(steps(400.0), 17);
+        assert_eq!(steps(580.0), MAX_STEPS);
+        assert_eq!(steps(5000.0), MAX_STEPS);
+    }
+
+    #[test]
+    fn the_travel_eases_from_the_press_to_exactly_the_release() {
+        let (from, to) = ((320.0, 268.0), (900.0, 268.0));
+        let points = travel(from, to);
+        assert_eq!(points.len(), MAX_STEPS);
+        assert_eq!(*points.last().unwrap(), to);
+        // Each move goes further, none back, and none sits on the press.
+        let far: Vec<f64> = points.iter().map(|p| length(from, *p)).collect();
+        assert!(far.windows(2).all(|w| w[1] > w[0]));
+        assert!(far[0] > 0.0);
+        // The first move stays under the drag threshold, as a hand's does.
+        assert!(far[0] < 4.0);
+        // Several moves land near the drop point before the release.
+        let near = points.iter().filter(|p| length(**p, to) < 16.0).count();
+        assert!(near >= 3, "{near} points near the end");
+        // A zero-length drag releases where it pressed.
+        assert_eq!(travel(from, from), vec![from]);
+    }
+
+    #[test]
+    fn the_session_wait_comes_once_the_drag_is_past_its_threshold() {
+        let from = (100.0, 100.0);
+        let points = travel(from, (700.0, 100.0));
+        let i = session_step(from, &points).unwrap();
+        assert!(length(from, points[i]) >= SESSION_AFTER);
+        assert!(length(from, points[i - 1]) < SESSION_AFTER);
+        assert!(i <= 3, "the session wait comes at move {i}");
+        // A drag shorter than the threshold waits after its last move.
+        let short = travel(from, (103.0, 100.0));
+        assert_eq!(session_step(from, &short), Some(short.len() - 1));
+        assert_eq!(session_step(from, &[]), None);
     }
 
     #[test]
