@@ -160,6 +160,13 @@ unsafe extern "C" {
         context: *mut c_void,
         work: extern "C" fn(*mut c_void),
     );
+    fn dispatch_after_f(
+        when: u64,
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+    fn dispatch_time(when: u64, delta: i64) -> u64;
 }
 
 /// Run `f` on the main queue, after the current event is handled.
@@ -171,6 +178,25 @@ pub fn main_async(f: impl FnOnce() + 'static) {
     let boxed: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
     unsafe {
         dispatch_async_f(
+            &raw const _dispatch_main_q,
+            Box::into_raw(boxed).cast(),
+            trampoline,
+        )
+    };
+}
+
+/// Run `f` on the main queue once `delay` has passed.
+pub fn main_after(delay: std::time::Duration, f: impl FnOnce() + 'static) {
+    extern "C" fn trampoline(context: *mut c_void) {
+        let f = unsafe { Box::from_raw(context as *mut Box<dyn FnOnce()>) };
+        f();
+    }
+    let boxed: Box<Box<dyn FnOnce()>> = Box::new(Box::new(f));
+    let nanos = i64::try_from(delay.as_nanos()).unwrap_or(i64::MAX);
+    unsafe {
+        // DISPATCH_TIME_NOW is 0.
+        dispatch_after_f(
+            dispatch_time(0, nanos),
             &raw const _dispatch_main_q,
             Box::into_raw(boxed).cast(),
             trampoline,

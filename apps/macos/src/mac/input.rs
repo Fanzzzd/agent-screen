@@ -238,6 +238,8 @@ struct Probe {
     /// The latest lookup asked for has answered since the focus last may
     /// have moved.
     known: bool,
+    /// When the latest lookup was asked for, to measure how long it took.
+    asked_at: Option<(u64, std::time::Instant)>,
     /// The lookup waiting to run: the window keys went to, the display,
     /// and its number.
     waiting: Option<(Option<WindowTarget>, Rect, u64)>,
@@ -246,6 +248,7 @@ struct Probe {
 impl Probe {
     fn ask(&mut self) -> u64 {
         self.asked += 1;
+        self.asked_at = Some((self.asked, std::time::Instant::now()));
         self.asked
     }
 
@@ -285,6 +288,11 @@ impl Probe {
         // Only the latest lookup tells where the focus is now.
         if ticket == self.asked {
             self.known = true;
+            if let Some((asked, at)) = self.asked_at
+                && asked == ticket
+            {
+                note_lookup(at.elapsed());
+            }
         }
         true
     }
@@ -326,6 +334,23 @@ impl Default for Forwarder {
     }
 }
 
+/// How long the latest focus lookups took, from asking to the answer, in
+/// milliseconds, for tests: keys wait for them.
+static LOOKUP_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+fn note_lookup(took: Duration) {
+    let mut list = LOOKUP_MS.lock().unwrap_or_else(|e| e.into_inner());
+    if list.len() >= 256 {
+        list.remove(0);
+    }
+    list.push(took.as_secs_f64() * 1000.0);
+}
+
+/// How long the latest focus lookups took, in milliseconds.
+pub fn lookup_ms() -> Vec<f64> {
+    LOOKUP_MS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Run the lookups a display's Viewer asks for, the latest first, until
 /// its Forwarder is gone.
 fn inspect_loop(probe: std::sync::Weak<(std::sync::Mutex<Probe>, std::sync::Condvar)>) {
@@ -354,10 +379,10 @@ fn inspect_loop(probe: std::sync::Weak<(std::sync::Mutex<Probe>, std::sync::Cond
         let kept = p.answer(ticket, focus, reported);
         changed.notify_all();
         drop(p);
-        // A password field: a composition already started must not reach
-        // it, committed or not.
-        if kept && focus == Focus::Secure {
-            super::native::main_async(super::viewer_input::secure_found);
+        // Keys held for the answer go on, and a composition already
+        // started must not reach a password field, committed or not.
+        if kept {
+            super::native::main_async(super::viewer_input::lookup_answered);
         }
     }
 }

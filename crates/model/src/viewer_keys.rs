@@ -133,13 +133,31 @@ pub enum Secrecy {
 /// Where `press` goes first, with `source` selected and the target's focus
 /// `secrecy`. Until a lookup says the focus is no password field, keys go
 /// as keys: a field reached by Tab or Return, or one a page focused by
-/// itself, may be one.
+/// itself, may be one. The Viewer holds such keys for the lookup first
+/// (see `holds`), so this applies once the wait is over.
 pub fn route(source: Source, secrecy: Secrecy, press: Press) -> Route {
     if source == Source::Layout || secrecy != Secrecy::Open || press.command || press.control {
         Route::Raw
     } else {
         Route::InputMethod
     }
+}
+
+/// How long a key waits for the lookup of the target's focus before it
+/// goes as the key, in milliseconds.
+pub const HOLD_MS: u64 = 200;
+
+/// Whether `press` waits for the lookup of the target's focus, with
+/// `source` selected: only a key the input method would see, while the
+/// focus is unknown, unless an earlier wait ran out (`gave_up`) and no
+/// lookup has answered since. A key that went as the key at once would
+/// put pinyin's first letter in a text field as a letter.
+pub fn holds(source: Source, secrecy: Secrecy, press: Press, gave_up: bool) -> bool {
+    source == Source::InputMethod
+        && secrecy == Secrecy::Unknown
+        && !press.command
+        && !press.control
+        && !gave_up
 }
 
 /// Whether a key the target got may have moved its focus, so whether the
@@ -296,6 +314,33 @@ mod tests {
             route(Source::InputMethod, Secrecy::Unknown, key(A)),
             Route::Raw
         );
+    }
+
+    #[test]
+    fn a_key_waits_for_the_lookup_only_while_the_focus_is_unknown() {
+        assert!(holds(Source::InputMethod, Secrecy::Unknown, key(A), false));
+        assert!(holds(
+            Source::InputMethod,
+            Secrecy::Unknown,
+            key(RETURN),
+            false
+        ));
+        assert!(!holds(Source::InputMethod, Secrecy::Open, key(A), false));
+        assert!(!holds(Source::InputMethod, Secrecy::Secure, key(A), false));
+        assert!(!holds(Source::Layout, Secrecy::Unknown, key(A), false));
+        // Once a wait ran out, keys go as keys until a lookup answers.
+        assert!(!holds(Source::InputMethod, Secrecy::Unknown, key(A), true));
+        // Shortcuts never go through the input method, so never wait.
+        let command = Press {
+            command: true,
+            ..key(A)
+        };
+        assert!(!holds(
+            Source::InputMethod,
+            Secrecy::Unknown,
+            command,
+            false
+        ));
     }
 
     #[test]

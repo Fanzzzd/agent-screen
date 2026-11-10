@@ -14,6 +14,12 @@
 //! text. A composition belongs to one generation: a drop, a Takeover's
 //! start or end and a display switch each start a new one, and text from
 //! an older composition is dropped.
+//!
+//! While it is unknown whether a password field has the target's keyboard,
+//! keys the input method would see wait, in order, for the lookup, up to
+//! `viewer_keys::HOLD_MS`; every key event after them waits behind them.
+//! The answer routes them; when the wait runs out they go as keys. Held
+//! keys belong to a generation too, and a drop discards them.
 
 use super::click_diagnostics::{self as diagnostics, Click, Event as ClickEvent, Phase};
 use super::input::{Button, Forwarder};
@@ -28,8 +34,9 @@ use objc2_app_kit::{
 };
 use objc2_core_graphics::CGEventFlags;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct State {
@@ -47,6 +54,25 @@ struct State {
     /// How each key's last press went, so its release goes the same way
     /// whatever changed meanwhile.
     downs: HashMap<u16, Down>,
+    /// Key events waiting for the lookup of the target's focus, in order.
+    held: VecDeque<Held>,
+    /// When the current wait started.
+    held_since: Option<Instant>,
+    /// Counts waits, so the timer of an earlier one ends nothing.
+    wait: u64,
+    /// A wait ran out before any lookup answered: keys go as keys until
+    /// one does, or the focus may have moved again.
+    gave_up: bool,
+}
+
+/// A key event waiting for the lookup, with what it was typed with.
+struct Held {
+    event: Retained<NSEvent>,
+    source: Source,
+    /// Tests: what the input method does with it.
+    script: Option<Script>,
+    injected: bool,
+    generation: u64,
 }
 
 /// How a key's press went.
@@ -120,6 +146,14 @@ thread_local! {
     static SCRIPT: RefCell<Option<Script>> = const { RefCell::new(None) };
     /// What the last key down came to: its route, or its outcome.
     static ROUTED: Cell<Option<&'static str>> = const { Cell::new(None) };
+    /// Replaying a held key event: it waits no longer.
+    static REPLAYING: Cell<bool> = const { Cell::new(false) };
+    /// The keys that made the composition under way, with their modifiers:
+    /// should a password field turn out to have the keyboard, they go to
+    /// it as keys, as they would have had the Viewer known.
+    static COMPOSED_KEYS: RefCell<Vec<(u16, CGEventFlags)>> = const { RefCell::new(Vec::new()) };
+    /// Tests: how long held keys waited, in milliseconds.
+    static HELD_MS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The user's input source, or the one a test stands in.
@@ -153,6 +187,9 @@ pub fn set_marked(text: Option<&str>) {
             calls.push(Call::Marked(text.unwrap_or_default().into()));
         }
     });
+    if text.is_none() {
+        COMPOSED_KEYS.with(|k| k.borrow_mut().clear());
+    }
     let generation = GENERATION.with(Cell::get);
     MARKED.with(|m| {
         let mut m = m.borrow_mut();
@@ -196,6 +233,7 @@ pub fn takeover_changed(display: u32, active: bool) {
                 *g = generation;
             }
         });
+        retag_held(generation);
     } else {
         drop_composition();
     }
@@ -205,13 +243,234 @@ pub fn takeover_changed(display: u32, active: bool) {
 /// Takeover ended, the display changed or ended, or the sheet came up.
 /// The input context discards its marked text too, and text from it that
 /// comes after is dropped.
+/// Keys held for a lookup go with it.
 pub fn drop_composition() {
+    drop_marked();
+    clear_held();
+}
+
+/// The composition alone, uncommitted: a new generation.
+fn drop_marked() {
     next_generation();
+    COMPOSED_KEYS.with(|k| k.borrow_mut().clear());
     let had = MARKED.with(|m| m.borrow_mut().take()).is_some();
     if had {
         log::debug!("viewer: composition dropped");
         discard_in_input_context();
     }
+}
+
+/// Discard the held key events; a release of a key held down goes nowhere.
+fn clear_held() {
+    STATE.with(|s| {
+        // Busy inside an event: the generation tells the drain they're stale.
+        let Ok(mut s) = s.try_borrow_mut() else {
+            return;
+        };
+        let dropped = std::mem::take(&mut s.held);
+        s.held_since = None;
+        forget_downs(&mut s, &dropped);
+        if !dropped.is_empty() {
+            log::debug!("viewer: {} held key event(s) dropped", dropped.len());
+        }
+    });
+}
+
+fn forget_downs(s: &mut State, dropped: &VecDeque<Held>) {
+    for held in dropped {
+        if held.event.r#type() == NSEventType::KeyDown {
+            s.downs.insert(held.event.keyCode(), Down::Kept);
+        }
+    }
+}
+
+/// Held key events stay current across a new generation that drops no
+/// keys: a Takeover's start, or a composition dropped for a password field.
+fn retag_held(generation: u64) {
+    STATE.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            for held in s.held.iter_mut() {
+                held.generation = generation;
+            }
+        }
+    });
+}
+
+/// Hold `event` for the lookup, behind any held before it.
+fn hold(s: &mut State, event: &NSEvent) {
+    s.held.push_back(Held {
+        event: objc2::Message::retain(event),
+        source: source_now(),
+        script: SCRIPT.with(|t| t.borrow_mut().take()),
+        injected: INJECTING.with(Cell::get),
+        generation: GENERATION.with(Cell::get),
+    });
+    if s.held_since.is_none() {
+        start_wait(s);
+    }
+}
+
+fn start_wait(s: &mut State) {
+    s.held_since = Some(Instant::now());
+    s.wait += 1;
+    let wait = s.wait;
+    native::main_after(Duration::from_millis(viewer_keys::HOLD_MS), move || {
+        wait_ended(wait)
+    });
+}
+
+fn note_wait(since: Instant) {
+    HELD_MS.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.len() >= 256 {
+            h.remove(0);
+        }
+        h.push(since.elapsed().as_secs_f64() * 1000.0);
+    });
+}
+
+/// How long held keys waited, in milliseconds, for tests.
+pub fn held_ms() -> Vec<f64> {
+    HELD_MS.with(|h| h.borrow().clone())
+}
+
+/// The wait ran out with no answer: held keys go as keys, the safe way
+/// for a password field.
+fn wait_ended(wait: u64) {
+    let ended = STATE.with(|s| {
+        s.try_borrow_mut().map(|mut s| {
+            let ended = s.wait == wait && !s.held.is_empty();
+            if ended {
+                s.gave_up = true;
+            }
+            ended
+        })
+    });
+    match ended {
+        Err(_) => native::main_async(move || wait_ended(wait)),
+        Ok(true) => {
+            log::debug!(
+                "viewer: no focus lookup answered in {} ms; held keys go as keys",
+                viewer_keys::HOLD_MS
+            );
+            drain();
+        }
+        Ok(false) => {}
+    }
+}
+
+/// A lookup of the shown target's focus answered: held keys go on as it
+/// says, and a composition never reaches a password field.
+pub fn lookup_answered() {
+    secure_found();
+    if secrecy() != Secrecy::Unknown {
+        STATE.with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                s.gave_up = false;
+            }
+        });
+    }
+    drain();
+}
+
+/// Whether held keys wait for the click's own lookup instead: a click goes
+/// after the keys typed before it, which go now, as keys unless a lookup
+/// already answered.
+fn flush_before_click(event: &NSEvent, mtm: MainThreadMarker) {
+    let held = STATE.with(|s| {
+        let Ok(mut s) = s.try_borrow_mut() else {
+            return false;
+        };
+        let ours = event
+            .window(mtm)
+            .is_some_and(|w| &*w as *const NSWindow as usize == s.window);
+        if ours && !s.held.is_empty() {
+            s.gave_up = true;
+            true
+        } else {
+            false
+        }
+    });
+    if held {
+        drain();
+    }
+}
+
+/// Route held key events, oldest first, while none of them has to wait:
+/// one may again, as after a Tab that moved the focus.
+fn drain() {
+    enum Next {
+        Busy,
+        Done,
+        Replay(Held),
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let mut replayed = false;
+    loop {
+        let next = STATE.with(|state| {
+            let Ok(mut s) = state.try_borrow_mut() else {
+                return Next::Busy;
+            };
+            let generation = GENERATION.with(Cell::get);
+            // Stale held keys never go out.
+            let (current, stale): (VecDeque<Held>, VecDeque<Held>) = std::mem::take(&mut s.held)
+                .into_iter()
+                .partition(|h| h.generation == generation);
+            s.held = current;
+            forget_downs(&mut s, &stale);
+            let Some(front) = s.held.front() else {
+                if let Some(since) = s.held_since.take() {
+                    note_wait(since);
+                }
+                return Next::Done;
+            };
+            if front.event.r#type() == NSEventType::KeyDown {
+                let secrecy = s
+                    .display
+                    .as_ref()
+                    .map_or(Secrecy::Unknown, |(_, f)| secrecy_for(f));
+                if viewer_keys::holds(front.source, secrecy, press_of(&front.event), s.gave_up) {
+                    // A key replayed now made the focus unknown again.
+                    if replayed {
+                        if let Some(since) = s.held_since.take() {
+                            note_wait(since);
+                        }
+                        start_wait(&mut s);
+                    }
+                    return Next::Done;
+                }
+            }
+            s.held.pop_front().map_or(Next::Done, Next::Replay)
+        });
+        match next {
+            Next::Busy => {
+                native::main_async(drain);
+                return;
+            }
+            Next::Done => return,
+            Next::Replay(held) => {
+                replayed = true;
+                replay(held, mtm);
+            }
+        }
+    }
+}
+
+/// Handle a held key event as when it was typed, with its input source.
+fn replay(held: Held, mtm: MainThreadMarker) {
+    let was = (
+        REPLAYING.with(|r| r.replace(true)),
+        SOURCE.with(|s| s.replace(Some(held.source))),
+        INJECTING.with(|i| i.replace(held.injected)),
+    );
+    SCRIPT.with(|s| *s.borrow_mut() = held.script);
+    handle(&held.event, mtm);
+    SCRIPT.with(|s| s.borrow_mut().take());
+    REPLAYING.with(|r| r.set(was.0));
+    SOURCE.with(|s| s.set(was.1));
+    INJECTING.with(|i| i.set(was.2));
 }
 
 /// Commit the input method's marked text as typed, as a native field does
@@ -227,6 +486,7 @@ pub fn commit_composition() {
 /// commits belongs to no composition, and is dropped.
 fn take_for_commit() -> Option<String> {
     let (text, started) = MARKED.with(|m| m.borrow_mut().take())?;
+    COMPOSED_KEYS.with(|k| k.borrow_mut().clear());
     discard_in_input_context();
     if started != GENERATION.with(Cell::get) {
         log::warn!("viewer: a composition from an earlier Takeover dropped");
@@ -288,11 +548,26 @@ fn secrecy_for(forwarder: &Forwarder) -> Secrecy {
 }
 
 /// A lookup found a password field focused in a target: a composition in
-/// the Viewer is dropped, never committed, so none of it reaches the field.
+/// the Viewer is dropped, never committed, so none of it reaches the field
+/// as text, and the keys that made it go to the field as keys.
 pub fn secure_found() {
-    if marked().is_some() && secure() {
-        log::warn!("viewer: a password field has the keyboard; composition dropped");
-        drop_composition();
+    if marked().is_none() || !secure() {
+        return;
+    }
+    let keys = COMPOSED_KEYS.with(|k| std::mem::take(&mut *k.borrow_mut()));
+    log::warn!(
+        "viewer: a password field has the keyboard; composition dropped, its {} key(s) sent as keys",
+        keys.len()
+    );
+    drop_marked();
+    retag_held(GENERATION.with(Cell::get));
+    let shown = STATE.with(|s| s.try_borrow().ok().and_then(|s| s.display.clone()));
+    if let Some((display, forwarder)) = shown {
+        let bounds = cg::display_bounds(display);
+        for (code, flags) in keys {
+            forwarder.key(code, true, flags, bounds);
+            forwarder.key(code, false, flags, bounds);
+        }
     }
 }
 
@@ -312,6 +587,7 @@ pub fn commit(text: &str) {
         return;
     }
     let started = MARKED.with(|m| m.borrow_mut().take()).map(|(_, g)| g);
+    COMPOSED_KEYS.with(|k| k.borrow_mut().clear());
     if started != Some(GENERATION.with(Cell::get)) {
         log::warn!("viewer: input method text dropped, it belongs to no current composition");
         return;
@@ -372,6 +648,17 @@ fn through_input_method(key: Through) {
     ROUTED.with(|r| r.set(Some(outcome.name())));
     let bounds = cg::display_bounds(key.display);
     let press = press_of(&key.event);
+    // The keys of the composition under way, from the one that began it.
+    let only_marked = outcome == Outcome::Nothing;
+    COMPOSED_KEYS.with(|k| {
+        let mut k = k.borrow_mut();
+        if !composing || !only_marked {
+            k.clear();
+        }
+        if MARKED.with(|m| m.borrow().is_some()) {
+            k.push((code, flags(&key.event)));
+        }
+    });
     let down = match outcome {
         Outcome::Key => {
             key.forwarder.key(code, true, flags(&key.event), bounds);
@@ -396,6 +683,11 @@ fn through_input_method(key: Through) {
     });
     if down == Down::Raw && viewer_keys::moves_focus(press) {
         key.forwarder.inspect(bounds, true);
+        STATE.with(|s| {
+            if let Ok(mut s) = s.try_borrow_mut() {
+                s.gave_up = false;
+            }
+        });
     } else if MARKED.with(|m| m.borrow().is_some()) {
         // Composing: the app may have moved its focus by itself, maybe to
         // a password field, which drops the composition. Without waiting.
@@ -559,7 +851,7 @@ pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
 /// when given, stands in for the input source selected, and `script` for
 /// what the input method does with the key. What the key came to: "raw"
 /// for the key itself, "text" for composed text, "inputMethod" for
-/// nothing yet.
+/// nothing yet, "held" for waiting on the focus lookup.
 pub fn inject_key(
     code: u16,
     shift: bool,
@@ -835,6 +1127,19 @@ fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64
 
 /// Handle one event; false lets it go on to GPUI.
 fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
+    if !REPLAYING.with(Cell::get)
+        && matches!(
+            event.r#type(),
+            NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown
+        )
+    {
+        flush_before_click(event, mtm);
+    }
+    // A composition's keys reach a password field before any key typed
+    // after them, which the field gets as a key.
+    if event.r#type() == NSEventType::KeyDown {
+        secure_found();
+    }
     let mut take_key = None;
     let mut after = None;
     let handled = handle_in(event, mtm, &mut take_key, &mut after);
@@ -847,7 +1152,6 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     match after {
         Some(After::Through(key)) => through_input_method(key),
         Some(After::Sees(window, event)) => input_method_sees(&window, &event),
-        Some(After::DropComposition) => drop_composition(),
         None => {}
     }
     handled
@@ -859,8 +1163,6 @@ enum After {
     Through(Through),
     /// A modifier change for the input context to see.
     Sees(Retained<NSWindow>, Retained<NSEvent>),
-    /// Drop the composition: a password field has the keyboard.
-    DropComposition,
 }
 
 fn handle_in(
@@ -881,6 +1183,19 @@ fn handle_in(
             return false;
         };
         let kind = event.r#type();
+        // Key events wait behind held ones, in order.
+        if matches!(
+            kind,
+            NSEventType::KeyDown | NSEventType::KeyUp | NSEventType::FlagsChanged
+        ) && !REPLAYING.with(Cell::get)
+            && !s.held.is_empty()
+        {
+            if kind == NSEventType::KeyDown {
+                ROUTED.with(|r| r.set(Some("held")));
+            }
+            hold(&mut s, event);
+            return true;
+        }
         let button = match kind {
             NSEventType::LeftMouseDown
             | NSEventType::LeftMouseDragged
@@ -928,6 +1243,8 @@ fn handle_in(
                 // The user's first input takes the display over from its agent.
                 native::send(Native::ScreenTouched { display });
                 super::catch::agent_acted(display);
+                // The focus may move: a new wait may begin.
+                s.gave_up = false;
                 s.pressed = Some(button);
                 s.click = click;
                 forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event), click);
@@ -1000,16 +1317,14 @@ fn handle_in(
                 // As last looked up, never waited for.
                 let secrecy = secrecy_for(&forwarder);
                 let bounds = cg::display_bounds(display);
-                if source == Source::InputMethod {
-                    match secrecy {
-                        // A lookup is on its way, or this asks for one.
-                        Secrecy::Unknown => forwarder.inspect_unless_pending(bounds),
-                        // A composition never reaches a password field.
-                        Secrecy::Secure if MARKED.with(|m| m.borrow().is_some()) => {
-                            *after = Some(After::DropComposition);
-                        }
-                        _ => {}
-                    }
+                // A lookup is on its way, or this asks for one.
+                if source == Source::InputMethod && secrecy == Secrecy::Unknown {
+                    forwarder.inspect_unless_pending(bounds);
+                }
+                if viewer_keys::holds(source, secrecy, press, s.gave_up) {
+                    ROUTED.with(|r| r.set(Some("held")));
+                    hold(&mut s, event);
+                    return true;
                 }
                 let route = viewer_keys::route(source, secrecy, press);
                 if route == Route::InputMethod {
@@ -1034,6 +1349,7 @@ fn handle_in(
                 }
                 if source == Source::InputMethod && viewer_keys::moves_focus(press) {
                     forwarder.inspect(bounds, true);
+                    s.gave_up = false;
                 }
                 true
             }

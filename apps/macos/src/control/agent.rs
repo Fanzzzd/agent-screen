@@ -1631,6 +1631,10 @@ async fn handle_one(
                 // "unknown" until a lookup answers after the focus may
                 // have moved; keys go as keys meanwhile.
                 "secrecy": secrecy_name(crate::mac::viewer_input::secrecy()),
+                // How long the latest focus lookups took, and how long
+                // held keys waited for them, in milliseconds.
+                "lookupMs": crate::mac::input::lookup_ms(),
+                "heldMs": crate::mac::viewer_input::held_ms(),
                 // Lookups of the target's focus asked for, none with a
                 // keyboard layout, and any made on the main thread.
                 "inspections": crate::mac::viewer_input::inspections(),
