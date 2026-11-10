@@ -357,10 +357,14 @@ struct Published {
     at: std::time::Instant,
     ready: bool,
     /// The app took the request. One busy at its first lookup is asked
-    /// again, at most once a second.
+    /// again, at most once a second, within the wait for its tree.
     set: bool,
     tried: std::time::Instant,
 }
+
+/// How long a request to publish may hold the lookup thread when asked
+/// again: a busy app would hold it for `application`'s whole timeout.
+const REPUBLISH_TIMEOUT: f32 = 0.1;
 
 static PUBLISHED: std::sync::Mutex<Vec<(i32, Published)>> = std::sync::Mutex::new(Vec::new());
 
@@ -370,24 +374,39 @@ const WEB_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Ask a Chromium or Electron app to publish its pages' elements, once per
 /// process. Whether it is one.
 fn publish_once(pid: i32) -> bool {
-    {
+    // Known: whether it is a web app, and whether to ask it again.
+    let known = {
         let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
-            if p.set || !p.web || p.tried.elapsed() < std::time::Duration::from_secs(1) {
-                return p.web;
+        published.iter_mut().find(|(p, _)| *p == pid).map(|(_, p)| {
+            let again = p.web
+                && !p.set
+                && p.tried.elapsed() >= std::time::Duration::from_secs(1)
+                && p.at.elapsed() < WEB_TREE_WAIT;
+            if again {
+                p.tried = std::time::Instant::now();
             }
-            p.tried = std::time::Instant::now();
+            (p.web, again)
+        })
+    };
+    match known {
+        Some((web, false)) => return web,
+        Some((_, true)) => {
+            if publish_web_tree(pid, REPUBLISH_TIMEOUT) {
+                let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+                    // Its page tree comes up from now.
+                    p.set = true;
+                    p.at = std::time::Instant::now();
+                }
+            }
+            return true;
         }
+        None => {}
     }
-    let set = publish_web_tree(pid);
+    let set = publish_web_tree(pid, 1.0);
     let now = std::time::Instant::now();
     let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
-        // Asked again: its page tree comes up from now.
-        if set {
-            p.set = true;
-            p.at = now;
-        }
+    if let Some((_, p)) = published.iter().find(|(p, _)| *p == pid) {
         return p.web;
     }
     // Whether it is one comes from its bundle too: an app that times out
@@ -436,8 +455,9 @@ fn web_tree_pending(pid: i32) -> bool {
 
 /// Ask a Chromium or Electron app to publish its pages' elements: whether
 /// it took the request.
-fn publish_web_tree(pid: i32) -> bool {
+fn publish_web_tree(pid: i32, timeout: f32) -> bool {
     let app = application(pid);
+    unsafe { app.set_messaging_timeout(timeout) };
     set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
         || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
             // Chrome applies it but answers an error.

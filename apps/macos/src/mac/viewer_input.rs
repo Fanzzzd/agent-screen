@@ -272,6 +272,33 @@ pub fn takeover_changed(display: u32, active: bool) {
         retag_held(generation);
     } else {
         drop_composition();
+        release_after_takeover();
+    }
+}
+
+/// The display the Viewer shows, if any.
+fn shown_display() -> Option<u32> {
+    STATE.with(|s| {
+        s.try_borrow()
+            .ok()
+            .and_then(|s| s.display.as_ref().map(|(d, _)| *d))
+    })
+}
+
+/// A Takeover ended: keys the target got the press of come up there now,
+/// as their releases may never reach the Viewer.
+fn release_after_takeover() {
+    let busy = STATE.with(|s| match s.try_borrow_mut() {
+        Ok(mut s) => {
+            if release_downs(&mut s) {
+                log::debug!("viewer: keys released as the Takeover ended");
+            }
+            false
+        }
+        Err(_) => true,
+    });
+    if busy {
+        native::main_async(release_after_takeover);
     }
 }
 
@@ -354,8 +381,20 @@ fn release_all(s: &mut State) {
     let dropped = std::mem::take(&mut s.held);
     s.held_since = None;
     forget_downs(s, &dropped);
-    // The keys stay down on the keyboard: their releases, when they come,
-    // go nowhere, as the next display's target never got the presses.
+    let sent = release_downs(s);
+    if let Some((display, _)) = &s.display
+        && (sent || !dropped.is_empty())
+    {
+        log::debug!("viewer: keys released on display {display} as the Viewer left it");
+    }
+    // The next display's keys wait for its own lookup.
+    s.gave_up = false;
+}
+
+/// Release every key the shown target got the press of. The keys stay
+/// down on the keyboard: their releases, when they come, go nowhere.
+/// Whether any went.
+fn release_downs(s: &mut State) -> bool {
     let shown = s.display.clone();
     let mut sent = false;
     for (code, down) in s.downs.iter_mut() {
@@ -367,13 +406,7 @@ fn release_all(s: &mut State) {
             *down = Down::UpSent;
         }
     }
-    if let Some((display, _)) = &shown
-        && (sent || !dropped.is_empty())
-    {
-        log::debug!("viewer: keys released on display {display} as the Viewer left it");
-    }
-    // The next display's keys wait for its own lookup.
-    s.gave_up = false;
+    sent
 }
 
 /// Held key events stay current across a new generation that drops no
@@ -732,13 +765,21 @@ fn send_text(text: &str) {
             native::send(Native::ScreenTouched { display });
             super::catch::agent_acted(display);
             forwarder.text(text.to_string(), cg::display_bounds(display));
-            // A look runs, as the app may move its focus by itself, but the
-            // focus stays known: text moves it no more than typing does,
-            // and the next word's first letter mustn't wait. A Return or
-            // Tab that follows as the key looks up the focus again itself,
-            // and a look that finds a password field drops a composition.
+            // Looks run, as the app may move its focus on the text, as a
+            // form that advances to its password field does, but the focus
+            // stays known: the next word's first letter mustn't wait. One
+            // now, and one 100 ms on, by when a page's tree has caught up.
+            // A Return or Tab that follows as the key looks up the focus
+            // again itself, and a look that finds a password field drops a
+            // composition.
             if source_now() == Source::InputMethod {
-                forwarder.inspect(cg::display_bounds(display), false);
+                let bounds = cg::display_bounds(display);
+                forwarder.inspect(bounds, false);
+                native::main_after(Duration::from_millis(100), move || {
+                    if shown_display() == Some(display) {
+                        forwarder.inspect(bounds, false);
+                    }
+                });
             }
         }
         Ok(None) => log::debug!("viewer: composed text dropped, no display to send it to"),

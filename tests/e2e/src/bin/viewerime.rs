@@ -57,6 +57,7 @@ struct Field {
     password: String,
     keys: String,
     down: String,
+    pin: String,
 }
 
 fn test(field: &std::path::Path) -> Result<()> {
@@ -64,6 +65,8 @@ fn test(field: &std::path::Path) -> Result<()> {
     let key = "viewerime";
     let saved = out().join("viewerime-field.txt");
     let _ = std::fs::remove_file(&saved);
+    let moves = out().join("viewerime-field.txt.moves");
+    let _ = std::fs::remove_file(&moves);
     // Field writes its line ten times a second.
     let read = || {
         sleep_ms(400);
@@ -74,7 +77,8 @@ fn test(field: &std::path::Path) -> Result<()> {
             marked: parts.next().unwrap_or_default(),
             password: parts.next().unwrap_or_default(),
             keys: parts.next().unwrap_or_default(),
-            down: parts.next().unwrap_or_default().trim().to_string(),
+            down: parts.next().unwrap_or_default(),
+            pin: parts.next().unwrap_or_default().trim().to_string(),
         }
     };
     // Field once it holds what is wanted, within 2 s; for text on its way.
@@ -426,10 +430,11 @@ fn test(field: &std::path::Path) -> Result<()> {
     );
     // Return held down in the key view: its press goes as the key and may
     // move the focus, so its repeat waits for the lookup. The user hands
-    // the display back on the agent's request at once: the repeat is
-    // dropped, and Return's release still reaches the key view, so it
-    // isn't left down. (A Command shortcut's key stays down there: AppKit
-    // sends no keyUp for one.)
+    // the display back on the agent's request at once, Return still down:
+    // the repeat is dropped, and the key view gets Return's release from
+    // the Takeover's end, before any release reaches the Viewer. (A
+    // Command shortcut's key stays down there: AppKit sends no keyUp for
+    // one.)
     let enter = |phase: &str, repeat: u8| {
         input(
             json!({ "kind": "key", "code": 36, "characters": "\r", "source": "inputMethod",
@@ -449,10 +454,11 @@ fn test(field: &std::path::Path) -> Result<()> {
         json!({ "surface": "card-continue", "displayId": id }),
     )?;
     sleep_ms(600);
-    enter("up", 0);
     let now = until(&|f| !f.down.split(',').any(|c| c == "36"));
+    // The release on the keyboard, later, goes nowhere.
+    enter("up", 0);
     check(
-        "a key whose repeat was dropped with the Takeover comes up in the target",
+        "a key held down as the Takeover ends, its repeat dropped, comes up in the target",
         pressed == "\"raw\""
             && repeated == "\"held\""
             && !now.down.split(',').any(|c| c == "36")
@@ -545,6 +551,30 @@ fn test(field: &std::path::Path) -> Result<()> {
     // keyboard, and input methods are off everywhere then: leave it.
     input(at(100.0))?;
     sleep_ms(600);
+    // A form that advances on a commit: 60 ms after its text ends in "→",
+    // Field moves its focus to the PIN field, a password field that turns
+    // no secure input on. The commit's looks find it, so the letter typed
+    // 300 ms on goes as a key, never composed.
+    typed_key(17, "t", "inputMethod", "mark:t");
+    let (from, found) = (routes(&control).len(), secure_found(&control));
+    typed_key(49, " ", "inputMethod", "insert:→");
+    sleep_ms(300);
+    let letter = typed_key(12, "q", "inputMethod", "mark:q");
+    let letter = format!("{letter} by {}", routed_by.borrow());
+    let now = until(&|f| f.pin == "q");
+    let went = routes_after(&control, from, 2);
+    check(
+        "after a commit moves the focus to a password field, the next letter goes as a key",
+        went == [(49, "text".to_string()), (12, "raw".to_string())]
+            && secure_found(&control) == found
+            && marked().is_none()
+            && now.pin == "q",
+        format!(
+            "{letter}, {went:?}, compositions dropped {found} then {}: {:?} {now:?}",
+            secure_found(&control),
+            marked()
+        ),
+    );
     check(
         "no key waited on a lookup on the main thread",
         viewer()["mainThreadLookups"] == 0,
@@ -571,6 +601,11 @@ fn test(field: &std::path::Path) -> Result<()> {
             );
         }
     }
+    let moved = std::fs::read_to_string(&moves).unwrap_or_default();
+    println!(
+        "     Field's 60 ms focus moves ran after: {} ms",
+        moved.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
     Ok(())
 }
