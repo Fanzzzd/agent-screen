@@ -3,8 +3,9 @@
 // FIELD_CONTROLS=1 adds a password field and a view that takes keys but
 // holds no text, as a game does, under the text view, and appends
 // "\tpassword\tkeys" to the line. There, Tab in the text view moves to the
-// password field, and the file $FIELD_OUT.focus, once it exists, makes
-// the password field take the keyboard by itself, as a page's autofocus.
+// password field 60 ms later, as Chrome's renderer moves its focus after
+// the key, and the file $FIELD_OUT.focus, once it exists, makes the
+// password field take the keyboard by itself, as a page's autofocus.
 import AppKit
 
 /// Takes the keyboard on a click and keeps the characters of its keys.
@@ -108,7 +109,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
 
   func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
     guard controls, selector == #selector(NSResponder.insertTab(_:)) else { return false }
-    window.makeFirstResponder(password)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+      self.window.makeFirstResponder(self.password)
+    }
     return true
   }
 

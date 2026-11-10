@@ -10,6 +10,7 @@
       #bin { position: fixed; left: 380px; top: 380px; width: 120px; height: 50px; background: #ff00ff; }
       #level { position: fixed; left: 380px; top: 250px; width: 200px; height: 20px; margin: 0; }
       #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
+      #secret { position: fixed; left: 320px; bottom: 8px; width: 150px; height: 30px; box-sizing: border-box; }
     </style>
   </head>
   <body>
@@ -22,6 +23,7 @@
     <div id="bin"></div>
     <input id="level" type="range" min="0" max="100" value="20" aria-label="level" />
     <input id="field" />
+    <input id="secret" type="password" />
     <button id="later">later</button>
     <button id="popup">open window</button>
     <script>
@@ -104,6 +106,11 @@
       addEventListener("keydown", () => { seen.keys = (seen.keys || 0) + 1; show(); });
       document.getElementById("field").addEventListener("input", (e) => {
         seen.typed = e.target.value;
+        show();
+      });
+      // A password field: secret is what it holds.
+      document.getElementById("secret").addEventListener("input", (e) => {
+        seen.secret = e.target.value;
         show();
       });
       show();

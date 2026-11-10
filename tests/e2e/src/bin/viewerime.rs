@@ -180,12 +180,14 @@ fn test(field: &std::path::Path) -> Result<()> {
     // before the click's lookup can answer: the letter waits for it, then
     // pinyin marks it, and Field gets nothing.
     input(at(100.0))?;
+    let from = routes(&control).len();
     let routed = typed_key(45, "n", "inputMethod", "mark:n");
     let shown = until_marked(Some("n"));
+    let went = routes_after(&control, from, 1);
     check(
         "the first letter typed at once after a click composes",
-        (routed == "\"held\"" || routed == "\"inputMethod\"") && shown.as_deref() == Some("n"),
-        format!("{routed} by {}: {shown:?}", routed_by.borrow()),
+        went == [(45, "inputMethod".to_string())] && shown.as_deref() == Some("n"),
+        format!("{routed} then {went:?}: {shown:?}"),
     );
     for text in ["ni", "ni h", "ni hao"] {
         input(json!({ "kind": "mark", "text": text }))?;
@@ -348,12 +350,17 @@ fn test(field: &std::path::Path) -> Result<()> {
     // Field's password field, typed into at once after the click: the
     // letter waits for the lookup, then skips the input method.
     input(at(232.0))?;
+    let (from, found) = (routes(&control).len(), secure_found(&control));
     let routed = typed_key(0, "a", "inputMethod", "mark:a");
     let now = until(&|f| f.password == "a");
+    let went = routes_after(&control, from, 1);
     check(
-        "the first letter typed at once into a password field goes as a key",
-        (routed == "\"held\"" || routed == "\"raw\"") && now.password == "a",
-        format!("{routed} {now:?}"),
+        "the first letter typed at once into a password field goes as a key, never composed",
+        went == [(0, "raw".to_string())] && secure_found(&control) == found && now.password == "a",
+        format!(
+            "{routed} then {went:?}, compositions dropped {found} then {}: {now:?}",
+            secure_found(&control)
+        ),
     );
     check(
         "nothing is marked over a password field",
@@ -406,7 +413,9 @@ fn test(field: &std::path::Path) -> Result<()> {
     // Field moves its focus to the password field by itself while the
     // user composes: the composition is dropped, never committed, and the
     // letters typed for it reach the field as keys. Taking the keyboard
-    // selects what the password field holds, so they replace it.
+    // selects what the password field holds, so they replace it. Nothing
+    // the Viewer sees moves the focus here, so no lookup can come first:
+    // the composition shows until the next one.
     input(at(100.0))?;
     let first = typed_key(45, "n", "inputMethod", "mark:n");
     let first = format!(
@@ -433,20 +442,28 @@ fn test(field: &std::path::Path) -> Result<()> {
     );
     // Tab from the text view into the password field, then typing at once,
     // before any lookup answers: every letter goes to the field as a key.
+    // Field moves its focus 60 ms after the Tab, as Chrome does: a look
+    // right after the key still sees the text view.
     input(at(100.0))?;
     sleep_ms(600);
+    let (from, found) = (routes(&control).len(), secure_found(&control));
     let tabbed = typed_key(48, "\t", "inputMethod", "nothing");
-    let letters: Vec<String> = [(7, "x"), (16, "y"), (6, "z")]
-        .into_iter()
-        .map(|(code, c)| typed_key(code, c, "inputMethod", &format!("mark:{c}")))
-        .collect();
+    for (code, c) in [(7, "x"), (16, "y"), (6, "z")] {
+        typed_key(code, c, "inputMethod", &format!("mark:{c}"));
+    }
     let now = until(&|f| f.password == "xyz");
+    let went = routes_after(&control, from, 4);
+    let raw = |code: u64| (code, "raw".to_string());
     check(
-        "after Tab into a password field, pinyin's letters go as keys",
-        tabbed == "\"raw\""
-            && letters.iter().all(|r| r == "\"raw\"" || r == "\"held\"")
+        "after Tab into a password field, pinyin's letters go as keys, never composed",
+        went == [raw(48), raw(7), raw(16), raw(6)]
+            && secure_found(&control) == found
             && marked().is_none(),
-        format!("{tabbed} {letters:?} {:?}", marked()),
+        format!(
+            "{tabbed} then {went:?}, compositions dropped {found} then {}: {:?}",
+            secure_found(&control),
+            marked()
+        ),
     );
     check(
         "the password field gets every letter",
@@ -489,6 +506,39 @@ fn test(field: &std::path::Path) -> Result<()> {
 /// the first word typed at once after the click: the keys wait for the
 /// lookup, which only has to answer, not find the field, which Electron
 /// may not report yet.
+/// Each key press's final route so far, by key code, as the app reports
+/// them.
+fn routes(control: &Control) -> Vec<(u64, String)> {
+    control.call("debugViewer", json!({})).unwrap_or_default()["routes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| Some((r[0].as_u64()?, r[1].as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How many compositions the app dropped as a lookup found a password
+/// field: one the lookup came too late for.
+fn secure_found(control: &Control) -> u64 {
+    control.call("debugViewer", json!({})).unwrap_or_default()["secureFound"]
+        .as_u64()
+        .unwrap_or(u64::MAX)
+}
+
+/// The final routes of the key presses after the first `from`, waiting up
+/// to 2 s until there are `count`.
+fn routes_after(control: &Control, from: usize, count: usize) -> Vec<(u64, String)> {
+    for _ in 0..40 {
+        if routes(control).len() >= from + count {
+            break;
+        }
+        sleep_ms(50);
+    }
+    routes(control).into_iter().skip(from).collect()
+}
+
 fn electron_field(
     control: &Control,
     key: &str,
@@ -537,14 +587,16 @@ fn electron_field(
     }
     let window = window.context("no Electron window")?;
     let number = |name: &str| window[name].as_f64().unwrap_or(0.0);
-    // The page's field: 8 pt from the bottom-left corner, 30 pt high.
-    control.call(
-        "debugViewerInput",
-        json!({ "kind": "click", "source": "inputMethod",
-                "x": (number("x") + 60.0) / width,
-                "y": (number("y") + number("height") - 8.0 - 15.0) / height }),
-    )?;
-    // Typed at once: the keys wait for the click's lookup.
+    // The page's fields, 30 pt high, 8 pt above the bottom: a text field
+    // from the left edge, a password field 320 pt in.
+    let click = |x: f64| {
+        control.call(
+            "debugViewerInput",
+            json!({ "kind": "click", "source": "inputMethod",
+                    "x": (number("x") + x) / width,
+                    "y": (number("y") + number("height") - 8.0 - 15.0) / height }),
+        )
+    };
     let key = |code: u16, characters: &str, ime: &str| -> String {
         control
             .call(
@@ -557,6 +609,31 @@ fn electron_field(
                 |r| format!("{} by {}", r["route"], r["secrecy"]),
             )
     };
+    // The password field first, before anything asked Electron for its
+    // page: until the page is up, the lookup can't see the field, and a
+    // letter typed at once must not compose.
+    click(380.0)?;
+    let (from, found) = (routes(control).len(), secure_found(control));
+    let typed = key(0, "a", "mark:a");
+    sleep_ms(800);
+    let went = routes_after(control, from, 1);
+    let title = harness()
+        .map(|w| w["title"].to_string())
+        .unwrap_or_default();
+    check(
+        "a letter typed at once into an Electron page's password field goes as a key, never composed",
+        went == [(0, "raw".to_string())]
+            && secure_found(control) == found
+            && title.trim_matches('"').split(' ').any(|p| p == "secret=a"),
+        format!(
+            "{typed} then {went:?}, compositions dropped {found} then {}: {title}",
+            secure_found(control)
+        ),
+    );
+    // The page is up within 3 s of being asked for.
+    sleep_ms(3000);
+    click(60.0)?;
+    // Typed at once: the keys wait for the click's lookup.
     let first = key(45, "n", "mark:n");
     key(34, "i", "mark:ni");
     let committed = key(49, " ", "insert:你好");

@@ -1635,6 +1635,14 @@ async fn handle_one(
                 // held keys waited for them, in milliseconds.
                 "lookupMs": crate::mac::input::lookup_ms(),
                 "heldMs": crate::mac::viewer_input::held_ms(),
+                // Each key press's final route, by key code, in order, and
+                // how many compositions a lookup dropped for a password
+                // field, which a lookup in time leaves at none.
+                "routes": crate::mac::viewer_input::routes()
+                    .into_iter()
+                    .map(|(code, route)| json!([code, route]))
+                    .collect::<Vec<_>>(),
+                "secureFound": crate::mac::viewer_input::secure_found_count(),
                 // Lookups of the target's focus asked for, none with a
                 // keyboard layout, and any made on the main thread.
                 "inspections": crate::mac::viewer_input::inspections(),

@@ -27,9 +27,36 @@ pub enum Focus {
     Text,
     /// A password field, or secure input is on.
     Secure,
-    /// Anything else, or not known yet.
+    /// Anything else the app reported: no field, or one in another
+    /// window.
     #[default]
     Other,
+    /// No answer to rely on: an accessibility call failed or timed out, or
+    /// a Chromium or Electron app has yet to publish its page, whose
+    /// focused element may be a password field it doesn't report yet.
+    Unanswered,
+}
+
+/// What a lookup of the focus saw: the focus and the focused element, as
+/// a hash of its accessibility element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look {
+    pub focus: Focus,
+    pub element: Option<u64>,
+}
+
+/// Whether a lookup after the focus may have moved tells where it is now.
+/// An app may move its focus some time after it handles the key or click,
+/// as Chrome's renderer does, so a first look can still see the old field:
+/// a look settles it when its element differs from the one focused before
+/// (`before`), or when it agrees with the look just before it
+/// (`previous`). A password field is no exception: a click from one into a
+/// text field first sees the password field still. Keys wait meanwhile,
+/// so nothing composes in one. An unanswered look never settles.
+pub fn settled(before: Option<u64>, previous: Option<Look>, now: Look) -> bool {
+    now.focus != Focus::Unanswered
+        && ((before.is_some() && now.element.is_some() && now.element != before)
+            || previous == Some(now))
 }
 
 /// The focused element's accessibility, for `focus_of`.
@@ -116,6 +143,8 @@ pub struct Press {
     pub code: u16,
     pub command: bool,
     pub control: bool,
+    /// A repeat of a key held down.
+    pub repeat: bool,
 }
 
 /// Whether the target's focus is a password field, as last looked up.
@@ -162,11 +191,35 @@ pub fn holds(source: Source, secrecy: Secrecy, press: Press, gave_up: bool) -> b
         && !gave_up
 }
 
+/// Whether a modifier change waits for the lookup like a key: Shift and
+/// Caps Lock, which switch an input method between Chinese and English, so
+/// it must see them in order with the keys around them. Command, Control
+/// and Option go on at once, as the shortcuts they begin do.
+pub fn holds_modifier(source: Source, secrecy: Secrecy, code: u16, gave_up: bool) -> bool {
+    matches!(code, 56 | 57 | 60)
+        && holds(
+            source,
+            secrecy,
+            Press {
+                code,
+                command: false,
+                control: false,
+                repeat: false,
+            },
+            gave_up,
+        )
+}
+
 /// Whether a key the target got may have moved its focus, so whether the
-/// focus is a password field must be looked up again: Tab, Return, Enter,
-/// the arrows, and any Command or Control shortcut, as one opening a tab.
+/// focus is a password field must be looked up again: Tab, which moves to
+/// the next field; Return and Enter, which submit a form, as a login page
+/// that asks for the password next; and any Command or Control shortcut,
+/// as one opening a tab or focusing the address bar. Arrows move within a
+/// field, a list or a group of buttons, never into a password field, and
+/// a held key's repeats move nothing its first press didn't: a lookup for
+/// each would hold the next key back while the arrow keeps firing.
 pub fn moves_focus(press: Press) -> bool {
-    press.command || press.control || matches!(press.code, 36 | 48 | 76 | 123..=126)
+    !press.repeat && (press.command || press.control || matches!(press.code, 36 | 48 | 76))
 }
 
 /// What the input method did with a key, in order.
@@ -266,6 +319,7 @@ mod tests {
             code,
             command: false,
             control: false,
+            repeat: false,
         }
     }
 
@@ -346,16 +400,76 @@ mod tests {
     }
 
     #[test]
-    fn tab_return_arrows_and_shortcuts_may_move_the_focus() {
-        for code in [36, 48, 76, 123, 124, 125, 126] {
+    fn shift_and_caps_lock_wait_with_the_keys() {
+        for code in [56, 57, 60] {
+            assert!(holds_modifier(
+                Source::InputMethod,
+                Secrecy::Unknown,
+                code,
+                false
+            ));
+            assert!(!holds_modifier(
+                Source::InputMethod,
+                Secrecy::Open,
+                code,
+                false
+            ));
+            assert!(!holds_modifier(
+                Source::InputMethod,
+                Secrecy::Unknown,
+                code,
+                true
+            ));
+        }
+        // Command and Option.
+        for code in [55, 58] {
+            assert!(!holds_modifier(
+                Source::InputMethod,
+                Secrecy::Unknown,
+                code,
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn tab_return_and_shortcuts_may_move_the_focus() {
+        for code in [36, 48, 76] {
             assert!(moves_focus(key(code)), "code {code}");
         }
-        assert!(!moves_focus(key(A)));
-        assert!(!moves_focus(key(51)));
+        for code in [A, 51, 123, 124, 125, 126] {
+            assert!(!moves_focus(key(code)), "code {code}");
+        }
         assert!(moves_focus(Press {
             command: true,
             ..key(17)
         }));
+        // A held Return's repeats look nothing up again.
+        assert!(!moves_focus(Press {
+            repeat: true,
+            ..key(RETURN)
+        }));
+    }
+
+    #[test]
+    fn a_look_settles_the_focus_once_it_moved_or_two_agree() {
+        let look = |focus, element| Look { focus, element };
+        let field = look(Focus::Text, Some(1));
+        // The field focused before the key: maybe the app hasn't moved on.
+        assert!(!settled(Some(1), None, field));
+        // A second look that agrees settles it.
+        assert!(settled(Some(1), Some(field), field));
+        // Another element: the focus moved.
+        assert!(settled(Some(1), None, look(Focus::Text, Some(2))));
+        // Nothing known before: two looks must agree.
+        assert!(!settled(None, None, look(Focus::Text, Some(2))));
+        // The password field focused before: maybe the app hasn't moved on
+        // to the field clicked.
+        assert!(!settled(Some(1), None, look(Focus::Secure, Some(1))));
+        assert!(settled(Some(1), None, look(Focus::Secure, Some(2))));
+        // No answer never settles, even twice.
+        let none = look(Focus::Unanswered, None);
+        assert!(!settled(Some(1), Some(none), none));
     }
 
     #[test]

@@ -332,13 +332,14 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         }
         asked.push(pid);
     }
-    if !publish_web_tree(pid) {
+    if !publish_once(pid) {
         return;
     }
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(3) {
         if web_area(window).is_some_and(|area| !elements_attribute(&area, "AXChildren").is_empty())
         {
+            web_tree_ready(pid);
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -347,6 +348,61 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         "web tree of {pid} after {} ms",
         started.elapsed().as_millis()
     );
+}
+
+/// Apps asked to publish their web pages: whether each is a Chromium or
+/// Electron app, when it was asked, and whether its page tree came up.
+struct Published {
+    web: bool,
+    at: std::time::Instant,
+    ready: bool,
+}
+
+static PUBLISHED: std::sync::Mutex<Vec<(i32, Published)>> = std::sync::Mutex::new(Vec::new());
+
+/// How long a page tree takes to come up after it's asked for, at most.
+const WEB_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Ask a Chromium or Electron app to publish its pages' elements, once per
+/// process. Whether it is one.
+fn publish_once(pid: i32) -> bool {
+    {
+        let published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, p)) = published.iter().find(|(p, _)| *p == pid) {
+            return p.web;
+        }
+    }
+    let web = publish_web_tree(pid);
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if published.len() >= 256 {
+        published.remove(0);
+    }
+    published.push((
+        pid,
+        Published {
+            web,
+            at: std::time::Instant::now(),
+            ready: false,
+        },
+    ));
+    web
+}
+
+fn web_tree_ready(pid: i32) {
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+        p.ready = true;
+    }
+}
+
+/// Whether `pid` is a Chromium or Electron app whose page tree may not be
+/// up yet: asked for less than `WEB_TREE_WAIT` ago and not seen since.
+fn web_tree_pending(pid: i32) -> bool {
+    let published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    published
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .is_some_and(|(_, p)| p.web && !p.ready && p.at.elapsed() < WEB_TREE_WAIT)
 }
 
 /// Ask a Chromium or Electron app to publish its pages' elements. False
@@ -873,34 +929,76 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
 /// Lookups of the text focus made on the main thread, which none should be.
 pub static MAIN_THREAD_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// What has the keyboard in `target`'s app, and for editable text its caret
-/// in global top-left points (`viewer_keys::caret_in`). Other when the
-/// focused element is in another window or the app doesn't say.
+/// An attribute's value: None when the app says it has none, the error
+/// when it gave no answer, as one that times out.
+fn try_attribute(element: &AXUIElement, name: &str) -> Result<Option<CFRetained<CFType>>, AXError> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    match error {
+        AXError::Success if !value.is_null() => Ok(Some(unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType))
+        })),
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => Ok(None),
+        error => Err(error),
+    }
+}
+
+/// What has the keyboard in `target`'s app, for editable text its caret in
+/// global top-left points (`viewer_keys::caret_in`), and a hash of the
+/// focused element. Other when the app reports no focused element, or one
+/// in another window that is no password field. Unanswered, so keys don't
+/// compose, when a call fails or times out, or when a Chromium or Electron
+/// app, asked to publish its page here the first time, hasn't yet: until
+/// then it reports no element, or the page itself, for a focused password
+/// field.
 ///
 /// Each call waits at most 100 ms for the app. Never on the main thread,
 /// where keys are handled: `MAIN_THREAD_LOOKUPS` counts any that is, for
 /// tests.
-pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
+pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
+    use std::hash::{Hash, Hasher};
     if unsafe { libc::pthread_main_np() } == 1 {
         MAIN_THREAD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+    let web = publish_once(target.pid);
+    let pending = || web && web_tree_pending(target.pid);
     let app = unsafe { AXUIElement::new_application(target.pid) };
     unsafe { app.set_messaging_timeout(0.1) };
-    let Some(element) = element_attribute(&app, "AXFocusedUIElement") else {
+    let element = match try_attribute(&app, "AXFocusedUIElement") {
+        Ok(Some(value)) => value.downcast::<AXUIElement>().ok(),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("ax: {} gave no focused element: {error:?}", target.pid);
+            return (Focus::Unanswered, None, None);
+        }
+    };
+    let Some(element) = element else {
         log::debug!("ax: {} reports no focused element", target.pid);
-        return (Focus::Other, None);
+        let focus = if pending() {
+            Focus::Unanswered
+        } else {
+            Focus::Other
+        };
+        return (focus, None, None);
+    };
+    let id = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        element.hash(&mut hasher);
+        Some(hasher.finish())
     };
     unsafe { element.set_messaging_timeout(0.1) };
-    let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
-    if window != Some(target.window_id) {
-        log::debug!(
-            "ax: the focused element of {} is in window {window:?}",
-            target.pid
-        );
-        return (Focus::Other, None);
-    }
-    let role = string_attribute(&element, "AXRole");
-    let subrole = string_attribute(&element, "AXSubrole");
+    let (Ok(role), Ok(subrole)) = (
+        try_attribute(&element, "AXRole"),
+        try_attribute(&element, "AXSubrole"),
+    ) else {
+        log::debug!("ax: {} gave no role for its focused element", target.pid);
+        return (Focus::Unanswered, None, None);
+    };
+    let text = |v: Option<CFRetained<CFType>>| {
+        v.and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+    };
+    let (role, subrole) = (text(role), text(subrole));
     let editable = attribute(&element, "AXEditable")
         .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
         .unwrap_or(false);
@@ -912,12 +1010,34 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
         value_settable: settable(&element, "AXValue"),
         selection: range.is_some(),
     });
+    let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
+    if window != Some(target.window_id) {
+        log::debug!(
+            "ax: the focused element of {} is {focus:?} in window {window:?}",
+            target.pid
+        );
+        // A password field in a sheet or panel still is one.
+        let focus = match focus {
+            Focus::Secure => Focus::Secure,
+            _ if pending() => Focus::Unanswered,
+            _ => Focus::Other,
+        };
+        return (focus, None, id);
+    }
+    if web && matches!(focus, Focus::Text | Focus::Secure) {
+        web_tree_ready(target.pid);
+    }
     if focus != Focus::Text {
         log::debug!(
             "ax: the focused element of {} is {role:?} {subrole:?}",
             target.pid
         );
-        return (focus, None);
+        let focus = if focus == Focus::Other && pending() {
+            Focus::Unanswered
+        } else {
+            focus
+        };
+        return (focus, None, id);
     }
     let caret = range.zip(frame(&element)).and_then(|(range, frame)| {
         let (location, length) = (range.location.max(0) as usize, range.length.max(0) as usize);
@@ -927,7 +1047,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>) {
         let selection = bounds_for_range(&element, location, length);
         caret_in(frame, location, length, before, selection)
     });
-    (focus, caret)
+    (focus, caret, id)
 }
 
 fn range_value(value: &CFType) -> Option<objc2_core_foundation::CFRange> {
