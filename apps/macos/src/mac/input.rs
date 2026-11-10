@@ -2329,7 +2329,10 @@ pub fn note_activation(front: Option<i32>) {
 /// becoming WindowServer's front process: an app that made itself active
 /// before, as aTrust does when it shows its login window, stays that, and
 /// a Chromium window of it then drops every press. So Agent Screen takes
-/// that too, as the app the user is clicking.
+/// that too, as the app the user is clicking. The Viewer is its key window
+/// by then (`viewer_input::pressed_viewer`): AppKit takes this for an
+/// activation by a click, and without a key window it would wait for the
+/// press, which the Viewer's monitor keeps, to make one.
 pub fn note_viewer_press(viewer: u32) {
     let own = std::process::id() as i32;
     if front() != Some(own) {

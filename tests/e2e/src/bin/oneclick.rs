@@ -232,13 +232,21 @@ fn test(electron: &Path, field: &Path) -> Result<()> {
         title(&control, id).contains("focus=password"),
         title(&control, id),
     );
-    // "a", through the Viewer's own handler.
-    control.call("debugViewerInput", json!({ "kind": "key", "code": 0 }))?;
-    sleep_ms(400);
+    // "a", through the Viewer's own handler. With an input method selected
+    // and the page answering no focus lookup yet, the key waits for one up
+    // to `HOLD_MS` (400 ms), then goes as the key: the title has until
+    // then and a second more.
+    let routed = control.call("debugViewerInput", json!({ "kind": "key", "code": 0 }))?;
+    let typed_at = std::time::Instant::now();
+    let mut typed = title(&control, id);
+    while !typed.contains("text=|a ") && typed_at.elapsed().as_millis() < 1400 {
+        sleep_ms(100);
+        typed = title(&control, id);
+    }
     check(
         "the key typed next lands in the password field",
-        title(&control, id).contains("text=|a "),
-        title(&control, id),
+        typed.contains("text=|a "),
+        format!("{typed}, the key went {routed}"),
     );
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;
     Ok(())

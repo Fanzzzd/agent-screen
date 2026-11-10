@@ -12,11 +12,11 @@ use crate::i18n::t;
 use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
 use gpui::{
-    AnchoredPositionMode, Animation, AnimationExt, App, Bounds, Context, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ObjectFit, ParentElement, Pixels, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, UTF16Selection, WeakEntity, Window, anchored, canvas,
-    deferred, div, point, prelude::FluentBuilder, px, size, surface, svg,
+    Animation, AnimationExt, App, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ObjectFit,
+    ParentElement, Pixels, Render, Role, SharedString, StatefulInteractiveElement, Styled,
+    UTF16Selection, WeakEntity, Window, canvas, div, point, prelude::FluentBuilder, px, size,
+    surface, svg,
 };
 use std::cell::Cell;
 use std::ops::Range;
@@ -707,39 +707,6 @@ fn icon_button(
 }
 
 /// Where the display image sits in `bounds`: aspect-fit, centered.
-/// The input method's marked text, drawn over the display image at the
-/// target's caret, underlined as AppKit draws it in its own fields. The
-/// input method's candidates show under it.
-fn marked_text(text: String, caret: [f64; 4], theme: &Theme) -> impl IntoElement {
-    let [x, y, _, height] = caret.map(|v| v as f32);
-    let size = 15.;
-    // Centered on the caret's line, however large the display shows.
-    let top = y + height / 2. - (size + 8.) / 2.;
-    deferred(
-        anchored()
-            .position_mode(AnchoredPositionMode::Window)
-            .position(point(px(x), px(top)))
-            .snap_to_window()
-            .child(
-                div()
-                    .px(px(4.))
-                    .py(px(2.))
-                    .rounded(px(4.))
-                    .bg(theme.sheet)
-                    .border_1()
-                    .border_color(theme.card_border)
-                    .text_size(px(size))
-                    .line_height(px(size + 4.))
-                    .text_color(theme.label)
-                    .text_decoration_1()
-                    .text_decoration_color(theme.accent)
-                    .whitespace_nowrap()
-                    .child(text),
-            ),
-    )
-    .with_priority(1)
-}
-
 fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
@@ -899,12 +866,6 @@ impl Viewer {
         // takes the clicks.
         let denied = !crate::mac::permissions::last().screen;
         let blocked = self.sheet.is_some() || denied;
-        // Never over a password field.
-        let marked = typing
-            .as_ref()
-            .and(self.marked.as_ref())
-            .filter(|_| !viewer_input::secure())
-            .map(|(text, _)| text.clone());
         let input = canvas(
             |_, _, _| {},
             move |bounds, _, window: &mut Window, cx| {
@@ -964,10 +925,6 @@ impl Viewer {
                 )
             })
             .child(input)
-            .when_some(
-                marked.zip(viewer_input::caret_in_window()),
-                |d, (text, caret)| d.child(marked_text(text, caret, theme)),
-            )
             .when(denied, |d| {
                 d.child(denied_notice(self.shell.clone(), theme))
             })

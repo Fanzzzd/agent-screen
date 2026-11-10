@@ -8,9 +8,9 @@
 use std::process::{Command, ExitCode, Stdio};
 
 use agent_screen_tests::{
-    Control, Rect, check, document_text, instance, json, open_stage, probe, quit_discarding,
-    quoted, run, running, skip, sleep_ms, start_test_app, stop_test_app, type_in_viewer,
-    wait_for_unlocked,
+    Control, Rect, allow_on_your_screen, check, document_text, instance, json, open_stage, probe,
+    quit_discarding, quoted, run, running, skip, sleep_ms, start_test_app, stop_test_app,
+    type_in_viewer, wait_for_unlocked,
 };
 use anyhow::{Context, Result};
 
@@ -88,7 +88,13 @@ fn test(control: &Control) -> Result<()> {
     );
 
     // A screen recording spreads an overlay over every display, the agent's
-    // too; clicks must still reach the app under it.
+    // too; clicks must still reach the app under it. The overlay is the
+    // test's own screencapture, on the user's screens as well.
+    allow_on_your_screen(
+        "screencapture",
+        4000,
+        "the screen recording the test starts lays its overlay over every screen",
+    );
     let recording = Command::new("/usr/sbin/screencapture")
         .args([
             "-v",

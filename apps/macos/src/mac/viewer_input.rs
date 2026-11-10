@@ -1353,6 +1353,11 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
             NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown
         )
     {
+        // Outside the state: a window becoming key draws at once, and its
+        // paint reports the layout here.
+        if let Some(window) = pressed_viewer(event, mtm) {
+            native::make_key(&window);
+        }
         flush_before_click(event, mtm);
     }
     // A composition's keys reach a password field before any key typed
@@ -1360,21 +1365,43 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     if event.r#type() == NSEventType::KeyDown {
         secure_found();
     }
-    let mut take_key = None;
     let mut after = None;
-    let handled = handle_in(event, mtm, &mut take_key, &mut after);
-    // Outside the state: a window becoming key draws at once, and its
-    // paint reports the layout here.
-    if let Some(window) = take_key {
-        native::make_key(&window);
-    }
-    // Outside the state too: the input method calls back into the Viewer.
+    let handled = handle_in(event, mtm, &mut after);
+    // Outside the state: the input method calls back into the Viewer.
     match after {
         Some(After::Through(key)) => through_input_method(key),
         Some(After::Sees(window, event)) => input_method_sees(&window, &event),
         None => {}
     }
     handled
+}
+
+/// The Viewer's window, when `event` is a press on its picture that takes
+/// the keyboard: the user's, or a test's that stands in for one. The window
+/// becomes key before the press is handled, as handling it makes Agent
+/// Screen WindowServer's front process (`note_viewer_press`). The other
+/// way round, AppKit takes that for an activation by a click and waits for
+/// the press to finish it, and the monitor keeps the press from AppKit: the
+/// app then has no key window, the Viewer's input context is never the
+/// current one, and the input method composes nothing (ADR 0008).
+fn pressed_viewer(event: &NSEvent, mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
+    if INJECTING.with(Cell::get) && !TAKE_KEY.with(Cell::get) {
+        return None;
+    }
+    let window = event.window(mtm)?;
+    let height = window.contentView()?.frame().size.height;
+    let at = event.locationInWindow();
+    let on_picture = STATE.with(|s| {
+        s.try_borrow().is_ok_and(|s| {
+            s.window == &*window as *const NSWindow as usize
+                && !s.blocked
+                && s.display.is_some()
+                && s.content.is_some_and(|content| {
+                    normalized_point((at.x, at.y), height, content, false).is_some()
+                })
+        })
+    });
+    on_picture.then_some(window)
 }
 
 /// Work for after the event's state borrow, as it may come back into it.
@@ -1385,12 +1412,7 @@ enum After {
     Sees(Retained<NSWindow>, Retained<NSEvent>),
 }
 
-fn handle_in(
-    event: &NSEvent,
-    mtm: MainThreadMarker,
-    take_key: &mut Option<objc2::rc::Retained<NSWindow>>,
-    after: &mut Option<After>,
-) -> bool {
+fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
         let Some(window) = event.window(mtm) else {
@@ -1435,9 +1457,6 @@ fn handle_in(
                 }) else {
                     return false;
                 };
-                if !INJECTING.with(|i| i.get()) || TAKE_KEY.with(|k| k.get()) {
-                    *take_key = Some(window.clone());
-                }
                 // A test's press never takes the user's keyboard.
                 if !INJECTING.with(|i| i.get()) {
                     super::input::note_viewer_press(window.windowNumber() as u32);
@@ -1617,6 +1636,22 @@ fn input_method_sees(window: &NSWindow, event: &NSEvent) {
     if let Some(context) = input_context(window) {
         let _: bool = unsafe { objc2::msg_send![context, handleEvent: event] };
     }
+}
+
+/// Whether the Viewer's input context is AppKit's current one, for tests:
+/// the input method composes only through the current context.
+pub fn input_context_current() -> bool {
+    let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+    if window == 0 {
+        return false;
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let Some(ours) = input_context(window) else {
+        return false;
+    };
+    let current: *mut objc2::runtime::AnyObject =
+        unsafe { objc2::msg_send![objc2::class!(NSTextInputContext), currentInputContext] };
+    std::ptr::eq(current.cast_const(), ours)
 }
 
 /// The input context of the Viewer's view, GPUI's.

@@ -199,7 +199,16 @@ fn test(login_path: &str, field_path: &str) -> Result<()> {
             after.contains(&format!("focus={name}")),
             format!("{before} then {after}"),
         );
-        control.call("debugViewerInput", json!({ "kind": "key", "code": code }))?;
+        // A password field gets the key as it is with any input source. In
+        // the user field an input method selected on this Mac would compose
+        // it in the Viewer, and the test is about where the keyboard went,
+        // not about composing (viewerime, viewerwetype): the key goes as
+        // with a keyboard layout.
+        let mut press = json!({ "kind": "key", "code": code });
+        if name == "user" {
+            press["source"] = json!("layout");
+        }
+        let routed = control.call("debugViewerInput", press)?;
         sleep_ms(400);
         if name == "user" {
             typed_user.push_str(letter);
@@ -210,7 +219,7 @@ fn test(login_path: &str, field_path: &str) -> Result<()> {
         check(
             &format!("the key typed next lands in the {name} field {how}"),
             typed.contains(&format!("text={typed_user}|{typed_password} ")),
-            typed,
+            format!("{typed}, the key went {routed}"),
         );
     }
     control.call("endDisplay", json!({ "sessionKey": key, "displayId": id }))?;

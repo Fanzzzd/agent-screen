@@ -723,16 +723,25 @@ fn electron_field(
     click(380.0)?;
     let (from, found) = (routes(control).len(), secure_found(control));
     let typed = key(0, "a", "mark:a");
-    sleep_ms(800);
+    // The letter waits for the lookup up to `HOLD_MS` (400 ms), and the
+    // page, busy answering its first accessibility calls, shows it in its
+    // title up to a second after that.
+    let typed_at = std::time::Instant::now();
+    let has_letter = |title: &str| title.trim_matches('"').split(' ').any(|p| p == "secret=a");
+    let mut title = String::new();
+    while typed_at.elapsed().as_millis() < 2000 {
+        sleep_ms(200);
+        title = harness()
+            .map(|w| w["title"].to_string())
+            .unwrap_or_default();
+        if has_letter(&title) {
+            break;
+        }
+    }
     let went = routes_after(control, from, 1);
-    let title = harness()
-        .map(|w| w["title"].to_string())
-        .unwrap_or_default();
     check(
         "a letter typed at once into an Electron page's password field goes as a key, never composed",
-        went == [(0, "raw".to_string())]
-            && secure_found(control) == found
-            && title.trim_matches('"').split(' ').any(|p| p == "secret=a"),
+        went == [(0, "raw".to_string())] && secure_found(control) == found && has_letter(&title),
         format!(
             "{typed} then {went:?}, compositions dropped {found} then {}: {title}",
             secure_found(control)
