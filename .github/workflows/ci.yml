@@ -44,9 +44,14 @@ jobs:
             fi
           done
           exit "$bad"
-      # The Worker lets browsers keep a versioned /media/ file for a year,
-      # so a film changed without its new version would never reach them.
-      - name: The website's media versions match the files
+
+  website:
+    # The Worker lets browsers keep a versioned /media/ file for a year,
+    # so a film changed without its new version would never reach them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Do the website's media versions match the files?
         run: node apps/website/scripts/version-media.mjs --check
 
   changeset:

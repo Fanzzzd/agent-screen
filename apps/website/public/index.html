@@ -251,7 +251,8 @@
     const said = document.createElement('video').canPlayType(av1Type);
     if (!navigator.mediaCapabilities) return said === 'probably';
     if (!said) return false;
-    const size = small ? { width: 960, height: 720 } : { width: 1920, height: 1080 };
+    // The largest film each layout plays: help has no phone cut, so a phone plays its 1440x810 file.
+    const size = small ? { width: 1440, height: 810 } : { width: 1920, height: 1080 };
     const info = await navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: av1Type, ...size, bitrate: 1000000, framerate: 30 } });
     return info.smooth;
   }
@@ -273,7 +274,8 @@
       } else { inView.delete(v); v.pause(); }
     }
   }, { rootMargin: '200px' });
-  canAv1().catch(() => false).then((ok) => {
+  // A browser that never answers gets H.264 after 300 ms, so the films don't wait on it.
+  Promise.race([canAv1().catch(() => false), new Promise((r) => setTimeout(r, 300, false))]).then((ok) => {
     av1 = ok;
     document.querySelectorAll('main video[data-src]').forEach((v) => {
       // An AV1 file that fails to play after all sends this film, and any that load later, to H.264.
@@ -281,7 +283,7 @@
         if (!v.src.includes('.av1.')) return;
         av1 = false;
         v.src = pick(v);
-        if (inView.has(v) && !paused) start(v);
+        if ((still || inView.has(v)) && !paused) start(v);
       });
       near.observe(v);
       // With reduced motion nothing plays by itself; each film gets controls and loads on demand.

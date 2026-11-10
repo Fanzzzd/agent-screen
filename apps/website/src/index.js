@@ -19,10 +19,17 @@ export default {
     const ask = new Headers(request.headers);
     ask.delete("range");
     const full = await env.ASSETS.fetch(new Request(request.url, { method: request.method, headers: ask }));
+    const versioned = url.searchParams.has("v");
+    if (full.status === 304 && versioned) {
+      // A revalidated copy stays kept for a year, as the first answer said.
+      const kept = new Headers(full.headers);
+      kept.set("cache-control", VERSIONED);
+      return new Response(null, { status: 304, headers: kept });
+    }
     if (full.status !== 200) return full;
     const headers = new Headers(full.headers);
     headers.set("accept-ranges", "bytes");
-    if (url.searchParams.has("v")) headers.set("cache-control", VERSIONED);
+    if (versioned) headers.set("cache-control", VERSIONED);
     if (!range || request.method === "HEAD") return new Response(full.body, { status: 200, headers });
     return byteRange(await full.arrayBuffer(), range, headers);
   },
