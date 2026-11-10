@@ -276,9 +276,9 @@
   canAv1().catch(() => false).then((ok) => {
     av1 = ok;
     document.querySelectorAll('main video[data-src]').forEach((v) => {
-      // An AV1 file that fails to play after all sends this film and the later ones to H.264.
+      // An AV1 file that fails to play after all sends this film, and any that load later, to H.264.
       v.addEventListener('error', () => {
-        if (!av1) return;
+        if (!v.src.includes('.av1.')) return;
         av1 = false;
         v.src = pick(v);
         if (inView.has(v) && !paused) start(v);
