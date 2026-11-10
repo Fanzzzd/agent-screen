@@ -144,8 +144,10 @@ pub fn route(source: Source, secrecy: Secrecy, press: Press) -> Route {
 }
 
 /// How long a key waits for the lookup of the target's focus before it
-/// goes as the key, in milliseconds.
-pub const HOLD_MS: u64 = 200;
+/// goes as the key, in milliseconds. Lookups in the e2e runs took 55 ms
+/// at the median and 142 ms at most; a timeout sends pinyin's first
+/// letter as the key, so the limit leaves room above that.
+pub const HOLD_MS: u64 = 250;
 
 /// Whether `press` waits for the lookup of the target's focus, with
 /// `source` selected: only a key the input method would see, while the
