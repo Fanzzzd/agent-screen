@@ -2,6 +2,7 @@
 
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::tree::{MAX_DEPTH, MAX_VISITS};
+use agent_screen_model::viewer_keys::{Element as FocusedElement, Focus, caret_in, focus_of};
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
@@ -331,21 +332,14 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         }
         asked.push(pid);
     }
-    let app = application(pid);
-    let asked = set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
-        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
-            // Chrome applies it but answers an error.
-            && {
-                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
-                true
-            });
-    if !asked {
+    if !publish_once(pid) {
         return;
     }
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(3) {
         if web_area(window).is_some_and(|area| !elements_attribute(&area, "AXChildren").is_empty())
         {
+            web_tree_ready(pid);
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -354,6 +348,123 @@ fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
         "web tree of {pid} after {} ms",
         started.elapsed().as_millis()
     );
+}
+
+/// Apps asked to publish their web pages: whether each is a Chromium or
+/// Electron app, when it was asked, and whether its page tree came up.
+struct Published {
+    web: bool,
+    at: std::time::Instant,
+    ready: bool,
+    /// The app took the request. One busy at its first lookup is asked
+    /// again, at most once a second, within the wait for its tree.
+    set: bool,
+    tried: std::time::Instant,
+}
+
+/// How long a request to publish may hold the lookup thread when asked
+/// again: a busy app would hold it for `application`'s whole timeout.
+const REPUBLISH_TIMEOUT: f32 = 0.1;
+
+static PUBLISHED: std::sync::Mutex<Vec<(i32, Published)>> = std::sync::Mutex::new(Vec::new());
+
+/// How long a page tree takes to come up after it's asked for, at most.
+const WEB_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Ask a Chromium or Electron app to publish its pages' elements, once per
+/// process. Whether it is one.
+fn publish_once(pid: i32) -> bool {
+    // Known: whether it is a web app, and whether to ask it again.
+    let known = {
+        let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+        published.iter_mut().find(|(p, _)| *p == pid).map(|(_, p)| {
+            let again = p.web
+                && !p.set
+                && p.tried.elapsed() >= std::time::Duration::from_secs(1)
+                && p.at.elapsed() < WEB_TREE_WAIT;
+            if again {
+                p.tried = std::time::Instant::now();
+            }
+            (p.web, again)
+        })
+    };
+    match known {
+        Some((web, false)) => return web,
+        Some((_, true)) => {
+            if publish_web_tree(pid, REPUBLISH_TIMEOUT) {
+                let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+                    // Its page tree comes up from now.
+                    p.set = true;
+                    p.at = std::time::Instant::now();
+                }
+            }
+            return true;
+        }
+        None => {}
+    }
+    let set = publish_web_tree(pid, 1.0);
+    let now = std::time::Instant::now();
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter().find(|(p, _)| *p == pid) {
+        return p.web;
+    }
+    // Whether it is one comes from its bundle too: an app that times out
+    // or fails the first request is still asked again.
+    let web = set || super::app::bundle_of(pid).is_some_and(|b| chromium(&b));
+    if published.len() >= 256 {
+        published.remove(0);
+    }
+    published.push((
+        pid,
+        Published {
+            web,
+            at: now,
+            ready: false,
+            set,
+            tried: now,
+        },
+    ));
+    web
+}
+
+/// Whether a bundle is a Chromium browser or an Electron app.
+fn chromium(bundle: &std::path::Path) -> bool {
+    super::app::handles_web(bundle)
+        || bundle
+            .join("Contents/Frameworks/Electron Framework.framework")
+            .exists()
+}
+
+fn web_tree_ready(pid: i32) {
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+        p.ready = true;
+    }
+}
+
+/// Whether `pid` is a Chromium or Electron app whose page tree may not be
+/// up yet: asked for less than `WEB_TREE_WAIT` ago and not seen since.
+fn web_tree_pending(pid: i32) -> bool {
+    let published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    published
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .is_some_and(|(_, p)| p.web && !p.ready && p.at.elapsed() < WEB_TREE_WAIT)
+}
+
+/// Ask a Chromium or Electron app to publish its pages' elements: whether
+/// it took the request.
+fn publish_web_tree(pid: i32, timeout: f32) -> bool {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(timeout) };
+    set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
+        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
+            // Chrome applies it but answers an error.
+            && {
+                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
+                true
+            })
 }
 
 /// The window's first web area, breadth first.
@@ -862,6 +973,181 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
                 element_attribute(e, "AXParent")
             }),
     )
+}
+
+/// Lookups of the text focus made on the main thread, which none should be.
+pub static MAIN_THREAD_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An attribute's value: None when the app says it has none, the error
+/// when it gave no answer, as one that times out.
+fn try_attribute(element: &AXUIElement, name: &str) -> Result<Option<CFRetained<CFType>>, AXError> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    match error {
+        AXError::Success if !value.is_null() => Ok(Some(unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType))
+        })),
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => Ok(None),
+        error => Err(error),
+    }
+}
+
+/// What has the keyboard in `target`'s app, for editable text its caret in
+/// global top-left points (`viewer_keys::caret_in`), and a hash of the
+/// focused element. Other when the app reports no focused element, or one
+/// in another window that is no password field. Unanswered, so keys don't
+/// compose, when a call fails or times out, or when a Chromium or Electron
+/// app, asked to publish its page here the first time, hasn't yet: until
+/// then it reports no element, or the page itself, for a focused password
+/// field.
+///
+/// Each call waits at most 100 ms for the app. Never on the main thread,
+/// where keys are handled: `MAIN_THREAD_LOOKUPS` counts any that is, for
+/// tests.
+/// What has the keyboard in `target`, its caret, the focused element as a
+/// hash, and the element's frame.
+pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>, Option<Rect>) {
+    use std::hash::{Hash, Hasher};
+    if unsafe { libc::pthread_main_np() } == 1 {
+        MAIN_THREAD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let web = publish_once(target.pid);
+    let pending = || web && web_tree_pending(target.pid);
+    let app = unsafe { AXUIElement::new_application(target.pid) };
+    unsafe { app.set_messaging_timeout(0.1) };
+    let element = match try_attribute(&app, "AXFocusedUIElement") {
+        Ok(Some(value)) => value.downcast::<AXUIElement>().ok(),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("ax: {} gave no focused element: {error:?}", target.pid);
+            return (Focus::Unanswered, None, None, None);
+        }
+    };
+    let Some(element) = element else {
+        log::debug!("ax: {} reports no focused element", target.pid);
+        let focus = if pending() {
+            Focus::Unanswered
+        } else {
+            Focus::Other
+        };
+        return (focus, None, None, None);
+    };
+    let id = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        element.hash(&mut hasher);
+        Some(hasher.finish())
+    };
+    unsafe { element.set_messaging_timeout(0.1) };
+    let (Ok(role), Ok(subrole)) = (
+        try_attribute(&element, "AXRole"),
+        try_attribute(&element, "AXSubrole"),
+    ) else {
+        log::debug!("ax: {} gave no role for its focused element", target.pid);
+        return (Focus::Unanswered, None, None, None);
+    };
+    let text = |v: Option<CFRetained<CFType>>| {
+        v.and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+    };
+    let (role, subrole) = (text(role), text(subrole));
+    let editable = attribute(&element, "AXEditable")
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        .unwrap_or(false);
+    let range = attribute(&element, "AXSelectedTextRange").and_then(|v| range_value(&v));
+    let focus = focus_of(FocusedElement {
+        role: role.as_deref(),
+        subrole: subrole.as_deref(),
+        editable,
+        value_settable: settable(&element, "AXValue"),
+        selection: range.is_some(),
+    });
+    let element_frame = frame(&element);
+    let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
+    if window != Some(target.window_id) {
+        log::debug!(
+            "ax: the focused element of {} is {focus:?} in window {window:?}",
+            target.pid
+        );
+        // A password field in a sheet or panel still is one.
+        let focus = match focus {
+            Focus::Secure => Focus::Secure,
+            _ if pending() => Focus::Unanswered,
+            _ => Focus::Other,
+        };
+        return (focus, None, id, element_frame);
+    }
+    // A field in the page shows its tree is up; the address bar doesn't.
+    if matches!(focus, Focus::Text | Focus::Secure)
+        && pending()
+        && in_web_area(&element) == Some(true)
+    {
+        web_tree_ready(target.pid);
+    }
+    if focus != Focus::Text {
+        log::debug!(
+            "ax: the focused element of {} is {role:?} {subrole:?}",
+            target.pid
+        );
+        let focus = if focus == Focus::Other && pending() {
+            Focus::Unanswered
+        } else {
+            focus
+        };
+        return (focus, None, id, element_frame);
+    }
+    let caret = range.zip(element_frame).and_then(|(range, frame)| {
+        let (location, length) = (range.location.max(0) as usize, range.length.max(0) as usize);
+        let before = (length == 0 && location > 0)
+            .then(|| bounds_for_range(&element, location - 1, 1))
+            .flatten();
+        let selection = bounds_for_range(&element, location, length);
+        caret_in(frame, location, length, before, selection)
+    });
+    (focus, caret, id, element_frame)
+}
+
+fn range_value(value: &CFType) -> Option<objc2_core_foundation::CFRange> {
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut range = objc2_core_foundation::CFRange::new(0, 0);
+    unsafe {
+        value.value(
+            AXValueType::CFRange,
+            NonNull::from(&mut range).cast::<c_void>(),
+        )
+    }
+    .then_some(range)
+}
+
+/// AXBoundsForRange, in global top-left points, when it has a height.
+fn bounds_for_range(element: &AXUIElement, location: usize, length: usize) -> Option<Rect> {
+    let range = objc2_core_foundation::CFRange::new(location as isize, length as isize);
+    let parameter = ax_value(AXValueType::CFRange, &range)?;
+    let name = CFString::from_static_str("AXBoundsForRange");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe {
+        element.copy_parameterized_attribute_value(&name, &parameter, NonNull::from(&mut value))
+    };
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut rect = objc2_core_foundation::CGRect::default();
+    unsafe {
+        value.value(
+            AXValueType::CGRect,
+            NonNull::from(&mut rect).cast::<c_void>(),
+        )
+    }
+    .then_some(())?;
+    (rect.size.height > 0.0).then(|| {
+        Rect::new(
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
+    })
 }
 
 pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {

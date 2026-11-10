@@ -1620,6 +1620,34 @@ async fn handle_one(
                 "frame": frame,
                 "image": image,
                 "key": key,
+                // The input method's marked text in the Viewer, and the
+                // target's caret, where it shows, in points from the
+                // Viewer's top-left corner.
+                "marked": crate::mac::viewer_input::marked(),
+                "caret": crate::mac::viewer_input::caret_in_window(),
+                // A password field has the keyboard in the target, as last
+                // looked up, or secure input is on.
+                "secure": crate::mac::viewer_input::secure(),
+                // "unknown" until a lookup answers after the focus may
+                // have moved; keys go as keys meanwhile.
+                "secrecy": secrecy_name(crate::mac::viewer_input::secrecy()),
+                // How long the latest focus lookups took, and how long
+                // held keys waited for them, in milliseconds.
+                "lookupMs": crate::mac::input::lookup_ms(),
+                "heldMs": crate::mac::viewer_input::held_ms(),
+                // Each key press's final route, by key code, in order, and
+                // how many compositions a lookup dropped for a password
+                // field, which a lookup in time leaves at none.
+                "routes": crate::mac::viewer_input::routes()
+                    .into_iter()
+                    .map(|(code, route)| json!([code, route]))
+                    .collect::<Vec<_>>(),
+                "secureFound": crate::mac::viewer_input::secure_found_count(),
+                // Lookups of the target's focus asked for, none with a
+                // keyboard layout, and any made on the main thread.
+                "inspections": crate::mac::viewer_input::inspections(),
+                "mainThreadLookups": crate::mac::ax::MAIN_THREAD_LOOKUPS
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 "misrouted": misrouted,
                 "takeBack": take_back,
             }))
@@ -1631,17 +1659,67 @@ async fn handle_one(
             if p.int("key") == Some(1) {
                 cx.update(|cx| cx.refresh_windows());
             }
+            let mut routed = None;
+            let mut secrecy = None;
+            // `source` stands in for the user's input source: "layout" or
+            // "inputMethod".
+            let source = {
+                use agent_screen_model::viewer_keys::Source;
+                match p.string("source").as_deref() {
+                    None => None,
+                    Some("layout") => Some(Source::Layout),
+                    Some("inputMethod") => Some(Source::InputMethod),
+                    Some(_) => {
+                        return Err(ControlError::failed("source is layout or inputMethod"));
+                    }
+                }
+            };
             match p.string("kind").as_deref() {
                 Some("click") => viewer_input::inject_click(
                     p.number("x").unwrap_or(0.5),
                     p.number("y").unwrap_or(0.5),
                     p.int("key").unwrap_or(0) == 1,
+                    source,
                 ),
-                Some("key") => viewer_input::inject_key(
-                    p.int("code").unwrap_or(0) as u16,
-                    p.int("shift").unwrap_or(0) == 1,
-                    p.int("command").unwrap_or(0) == 1,
-                ),
+                // `characters` are what the key types, and `ime` what the
+                // input method does with it: "pass", "nothing",
+                // "mark:TEXT", "insert:TEXT" or "insertcommand:TEXT". The
+                // reply says what the key came to.
+                Some("key") => {
+                    let script = match p.string("ime") {
+                        None => None,
+                        Some(ime) => Some(viewer_input::Script::parse(&ime).ok_or_else(|| {
+                            ControlError::failed(
+                                "ime is pass, nothing, mark:TEXT, insert:TEXT or insertcommand:TEXT",
+                            )
+                        })?),
+                    };
+                    // `phase`: "down" or "up" alone, else both; `repeat`:
+                    // the press is a held key's repeat.
+                    use objc2_app_kit::NSEventType;
+                    let kinds: &[NSEventType] = match p.string("phase").as_deref() {
+                        None => &[NSEventType::KeyDown, NSEventType::KeyUp],
+                        Some("down") => &[NSEventType::KeyDown],
+                        Some("up") => &[NSEventType::KeyUp],
+                        Some(_) => return Err(ControlError::failed("phase is down or up")),
+                    };
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
+                    let characters = p.string("characters").unwrap_or_default();
+                    let key = viewer_input::TestKey {
+                        code: p.int("code").unwrap_or(0) as u16,
+                        shift: p.int("shift").unwrap_or(0) == 1,
+                        command: p.int("command").unwrap_or(0) == 1,
+                        characters: &characters,
+                        repeat: p.int("repeat").unwrap_or(0) == 1,
+                    };
+                    viewer_input::inject_key(key, source, script, kinds)
+                    .map(|route| routed = Some(route))
+                }
+                // Shift pressed (`down`: 1) or released.
+                Some("shift") => {
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
+                    viewer_input::inject_shift(p.int("down").unwrap_or(0) == 1, source)
+                }
                 // A press, a drag in steps and a release, as a hand on
                 // the trackpad makes them.
                 Some("drag") => {
@@ -1667,10 +1745,24 @@ async fn handle_one(
                     }
                     viewer_input::inject_mouse(NSEventType::LeftMouseUp, to.0, to.1)
                 }
-                _ => Err("kind is click, key or drag".into()),
+                // The input method's calls on the Viewer's view while the
+                // user composes: text marked, or the composition ended.
+                Some(kind @ ("mark" | "commit")) => {
+                    // A frame paints the Viewer's input handler first.
+                    cx.update(|cx| cx.refresh_windows());
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    viewer_input::inject_text_input(
+                        &p.string("text").unwrap_or_default(),
+                        kind == "commit",
+                    )
+                }
+                _ => Err("kind is click, key, shift, drag, mark or commit".into()),
             }
             .map_err(ControlError::failed)?;
-            Ok(json!({}))
+            // `secrecy`: what the key was routed by.
+            Ok(json!({ "route": routed, "secrecy": secrecy }))
         }
         // Test hook: the front app's focused window reads as unknown, as
         // when the app doesn't answer accessibility in time.
@@ -6465,6 +6557,16 @@ fn preview_click(
 
 /// Test hooks: in debug builds, or with AGENTSCREEN_DEBUG=1 for measuring a
 /// release build.
+/// What the Viewer knows of the target's focus, for debug replies.
+fn secrecy_name(secrecy: agent_screen_model::viewer_keys::Secrecy) -> &'static str {
+    use agent_screen_model::viewer_keys::Secrecy;
+    match secrecy {
+        Secrecy::Unknown => "unknown",
+        Secrecy::Secure => "secure",
+        Secrecy::Open => "open",
+    }
+}
+
 fn debug_methods() -> bool {
     cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
 }

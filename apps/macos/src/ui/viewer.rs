@@ -12,12 +12,14 @@ use crate::i18n::t;
 use crate::mac::viewer_input;
 use crate::model::{DisplayId, Fate};
 use gpui::{
-    Animation, AnimationExt, App, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ObjectFit, ParentElement, Pixels, Render, Role,
-    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window, canvas, div, point,
-    prelude::FluentBuilder, px, size, surface, svg,
+    AnchoredPositionMode, Animation, AnimationExt, App, Bounds, Context, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, ObjectFit, ParentElement, Pixels, Render, Role, SharedString,
+    StatefulInteractiveElement, Styled, UTF16Selection, WeakEntity, Window, anchored, canvas,
+    deferred, div, point, prelude::FluentBuilder, px, size, surface, svg,
 };
 use std::cell::Cell;
+use std::ops::Range;
 use std::time::Instant;
 
 pub const HEADER: f32 = 52.;
@@ -95,6 +97,12 @@ pub struct Viewer {
     /// A Handover just landed: a brief accent ring.
     pub flash_until: Option<Instant>,
     pub focus: FocusHandle,
+    /// Holds the keyboard on the display image, so the user's input method
+    /// composes there (ADR 0008).
+    typing: FocusHandle,
+    /// The text the input method has marked, and the selection in it, in
+    /// UTF-16 units.
+    marked: Option<(String, Option<Range<usize>>)>,
 }
 
 impl Viewer {
@@ -114,6 +122,12 @@ impl Viewer {
         cx.observe_window_activation(window, |viewer: &mut Viewer, window, cx| {
             if !window.is_window_active() {
                 viewer.core.read(cx).hand_back_keys();
+                // Leaving the window commits the composition, as in a
+                // native field. A hand-back dropped it first.
+                if viewer.marked.take().is_some() {
+                    cx.notify();
+                }
+                viewer_input::commit_composition();
             }
         })
         .detach();
@@ -139,7 +153,16 @@ impl Viewer {
             drop_target: false,
             flash_until: None,
             focus: cx.focus_handle(),
+            typing: cx.focus_handle(),
+            marked: None,
         }
+    }
+
+    /// Tests: show `text` as the input method's marked text.
+    pub fn show_marked(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.marked = Some((text.to_string(), None));
+        viewer_input::set_marked(Some(text));
+        cx.notify();
     }
 
     /// Card size for a display on a screen with `visible` room, in points.
@@ -225,7 +248,23 @@ impl Render for Viewer {
             &theme,
             &self.shell,
         );
-        let screen = self.screen(id, size, frame, pointer, outline, &theme);
+        // Keys typed on the display go to its input method, if the user
+        // has one, unless the sheet or a missing permission covers it.
+        let typing =
+            !display.is_ended() && self.sheet.is_none() && crate::mac::permissions::last().screen;
+        // A composition ends when the keys can't reach the image; the
+        // Takeover's end drops it as it happens.
+        if !typing && (self.marked.is_some() || viewer_input::marked().is_some()) {
+            viewer_input::drop_composition();
+        }
+        if viewer_input::marked().is_none() {
+            self.marked = None;
+        }
+        if typing && !self.typing.is_focused(window) {
+            window.focus(&self.typing, cx);
+        }
+        let input = typing.then(|| (self.typing.clone(), cx.entity()));
+        let screen = self.screen(id, size, frame, pointer, outline, input, &theme);
         div()
             .id("viewer")
             .role(Role::Group)
@@ -668,6 +707,154 @@ fn icon_button(
 }
 
 /// Where the display image sits in `bounds`: aspect-fit, centered.
+/// The input method's marked text, drawn over the display image at the
+/// target's caret, underlined as AppKit draws it in its own fields. The
+/// input method's candidates show under it.
+fn marked_text(text: String, caret: [f64; 4], theme: &Theme) -> impl IntoElement {
+    let [x, y, _, height] = caret.map(|v| v as f32);
+    let size = 15.;
+    // Centered on the caret's line, however large the display shows.
+    let top = y + height / 2. - (size + 8.) / 2.;
+    deferred(
+        anchored()
+            .position_mode(AnchoredPositionMode::Window)
+            .position(point(px(x), px(top)))
+            .snap_to_window()
+            .child(
+                div()
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .bg(theme.sheet)
+                    .border_1()
+                    .border_color(theme.card_border)
+                    .text_size(px(size))
+                    .line_height(px(size + 4.))
+                    .text_color(theme.label)
+                    .text_decoration_1()
+                    .text_decoration_color(theme.accent)
+                    .whitespace_nowrap()
+                    .child(text),
+            ),
+    )
+    .with_priority(1)
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The input method composes in the Viewer: its text stays here, marked,
+/// until the user picks, and only the finished text goes to the target
+/// (ADR 0008, issue #117). The document is the marked text alone, since
+/// the target's text is the target's.
+impl EntityInputHandler for Viewer {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let units: Vec<u16> = self
+            .marked
+            .as_ref()
+            .map(|(text, _)| text.encode_utf16().collect())
+            .unwrap_or_default();
+        let end = range.end.min(units.len());
+        let start = range.start.min(end);
+        *adjusted = Some(start..end);
+        Some(String::from_utf16_lossy(&units[start..end]))
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let range = match &self.marked {
+            Some((text, selected)) => selected.clone().unwrap_or_else(|| {
+                let end = utf16_len(text);
+                end..end
+            }),
+            None => 0..0,
+        };
+        Some(UTF16Selection {
+            range,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|(text, _)| 0..utf16_len(text))
+    }
+
+    /// AppKit's unmark accepts the marked text as typed.
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((text, _)) = self.marked.take() {
+            viewer_input::commit(&text);
+            cx.notify();
+        }
+    }
+
+    /// The target gets the text. A range outside the marked text names
+    /// text already sent, which the Viewer can't take back: sending the
+    /// correction too would type it twice, so it is left out.
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let composing = self.marked.take().is_some();
+        cx.notify();
+        if !composing && range.is_some_and(|r| !r.is_empty()) {
+            log::warn!("viewer: input method replaced text already sent; left out");
+            viewer_input::ignored();
+            return;
+        }
+        viewer_input::commit(text);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty()).then(|| (text.to_string(), selected));
+        viewer_input::set_marked((!text.is_empty()).then_some(text));
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let [x, y, width, height] = viewer_input::caret_in_window()?.map(|v| v as f32);
+        Some(Bounds::new(
+            point(px(x), px(y)),
+            size(px(width.max(1.)), px(height.max(1.))),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 fn content_rect(bounds: Bounds<Pixels>, display: (f64, f64)) -> Bounds<Pixels> {
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let scale = (w / display.0 as f32).min(h / display.1 as f32);
@@ -682,6 +869,7 @@ fn content_rect(bounds: Bounds<Pixels>, display: (f64, f64)) -> Bounds<Pixels> {
 }
 
 impl Viewer {
+    #[allow(clippy::too_many_arguments)]
     fn screen(
         &self,
         id: DisplayId,
@@ -689,6 +877,7 @@ impl Viewer {
         frame: Option<core_video::pixel_buffer::CVPixelBuffer>,
         pointer: Option<crate::model::AgentPointer>,
         outline: Option<(Hsla, f32)>,
+        typing: Option<(FocusHandle, Entity<Viewer>)>,
         theme: &Theme,
     ) -> impl IntoElement {
         let frame_pixels = crate::mac::click_diagnostics::enabled()
@@ -710,9 +899,18 @@ impl Viewer {
         // takes the clicks.
         let denied = !crate::mac::permissions::last().screen;
         let blocked = self.sheet.is_some() || denied;
+        // Never over a password field.
+        let marked = typing
+            .as_ref()
+            .and(self.marked.as_ref())
+            .filter(|_| !viewer_input::secure())
+            .map(|(text, _)| text.clone());
         let input = canvas(
             |_, _, _| {},
-            move |bounds, _, _: &mut Window, _| {
+            move |bounds, _, window: &mut Window, cx| {
+                if let Some((focus, viewer)) = typing {
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, viewer), cx);
+                }
                 let c = content_rect(bounds, size);
                 IMAGE.with(|i| {
                     i.set(Some((
@@ -766,6 +964,10 @@ impl Viewer {
                 )
             })
             .child(input)
+            .when_some(
+                marked.zip(viewer_input::caret_in_window()),
+                |d, (text, caret)| d.child(marked_text(text, caret, theme)),
+            )
             .when(denied, |d| {
                 d.child(denied_notice(self.shell.clone(), theme))
             })

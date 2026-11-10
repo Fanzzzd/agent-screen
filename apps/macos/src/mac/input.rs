@@ -12,6 +12,7 @@ use super::windows::Grab;
 use crate::keychord::{KeyChord, Modifiers};
 use crate::model::{Rect, WindowTarget};
 use agent_screen_model::key_window::{AppWindow, KeyWindow, key_window};
+use agent_screen_model::viewer_keys::{Focus, Look, Secrecy, look_again_unanswered, settled};
 use futures::channel::oneshot;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
@@ -210,6 +211,208 @@ pub struct Forwarder {
     /// Set while the user has taken the display over: an agent's typing or
     /// drag still running stops at its next step.
     stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// What has the keyboard in the target, for the Viewer's input
+    /// method, looked up on a thread of its own.
+    probe: std::sync::Arc<(std::sync::Mutex<Probe>, std::sync::Condvar)>,
+}
+
+/// Lookups of what has the keyboard in the target and its caret, in
+/// global points. They run on their own thread, never the one that posts
+/// input: a hung app answers each accessibility call only at its timeout.
+/// A lookup asked for while one is waiting replaces it.
+#[derive(Default, Clone, Copy)]
+struct Probe {
+    /// The point of the user's last press in the Viewer.
+    pressed: Option<(f64, f64)>,
+    /// The focus as the target last reported it since that press.
+    focus: Focus,
+    /// The caret of the focused text element, as the target reports it
+    /// since that press.
+    reported: Option<Rect>,
+    /// The last lookup asked for, and the last answered.
+    asked: u64,
+    answered: u64,
+    /// Answers to lookups asked up to here are out of date: a press came
+    /// since.
+    floor: u64,
+    /// The latest lookup asked for has answered since the focus last may
+    /// have moved.
+    known: bool,
+    /// When the latest lookup was asked for, to measure how long it took.
+    asked_at: Option<(u64, std::time::Instant)>,
+    /// The focused element as last looked up, as a hash.
+    element: Option<u64>,
+    /// The focus may have moved, and no look has settled where it is
+    /// (`viewer_keys::settled`): the element focused before, and the look
+    /// just before this one.
+    unsettled: bool,
+    /// When the focus last may have moved: once the key or click that may
+    /// have moved it went out.
+    moved_at: Option<std::time::Instant>,
+    /// The point of the click the focus may have moved on, until a look
+    /// settles it.
+    clicked: Option<(f64, f64)>,
+    /// When the lookups for the latest ask began; a look again keeps it.
+    chain_at: Option<std::time::Instant>,
+    before: Option<u64>,
+    previous: Option<Look>,
+    /// The lookup waiting to run: the window keys went to, the display,
+    /// and its number.
+    waiting: Option<(Option<WindowTarget>, Rect, u64)>,
+}
+
+impl Probe {
+    fn ask(&mut self) -> u64 {
+        self.chain_at = Some(std::time::Instant::now());
+        self.ask_again()
+    }
+
+    /// Another look for the same lookup.
+    fn ask_again(&mut self) -> u64 {
+        self.asked += 1;
+        self.asked_at = Some((self.asked, std::time::Instant::now()));
+        self.asked
+    }
+
+    /// A press: what was looked up before it may have changed.
+    fn press(&mut self, at: (f64, f64)) {
+        self.pressed = Some(at);
+        self.focus = Focus::Other;
+        self.reported = None;
+        self.floor = self.asked;
+        self.moved();
+        self.clicked = Some(at);
+    }
+
+    /// The focus may have moved: unknown until a look settles it.
+    fn moved(&mut self) {
+        self.known = false;
+        self.unsettled = true;
+        self.moved_at = Some(std::time::Instant::now());
+        self.before = self.element;
+        self.previous = None;
+    }
+
+    /// A lookup asked for since the last press has yet to answer.
+    fn pending(&self) -> bool {
+        self.asked > self.answered.max(self.floor)
+    }
+
+    /// Whether the focus is a password field, as last looked up, or
+    /// unknown since it may have moved.
+    fn secrecy(&self) -> Secrecy {
+        match (self.known, self.focus) {
+            (false, _) => Secrecy::Unknown,
+            (true, Focus::Secure) => Secrecy::Secure,
+            (true, _) => Secrecy::Open,
+        }
+    }
+
+    /// Keep an answer unless a newer one, or a press, came since it was
+    /// asked for.
+    #[cfg(test)]
+    fn answer(&mut self, ticket: u64, focus: Focus, reported: Option<Rect>) -> bool {
+        let seen = Seen {
+            focus,
+            ..Seen::default()
+        };
+        self.answer_look(ticket, seen, reported) != Answered::Stale
+    }
+
+    /// Keep an answer unless a newer one, or a press, came since it was
+    /// asked for. Only the latest lookup tells where the focus is now, and
+    /// after the focus may have moved, only once a look settles it: until
+    /// then the answer asks for another look.
+    fn answer_look(&mut self, ticket: u64, seen: Seen, reported: Option<Rect>) -> Answered {
+        if ticket <= self.floor || ticket <= self.answered {
+            return Answered::Stale;
+        }
+        self.answered = ticket;
+        self.focus = seen.focus;
+        self.reported = reported;
+        self.element = seen.element;
+        if ticket != self.asked {
+            return Answered::Kept;
+        }
+        if let Some((asked, at)) = self.asked_at
+            && asked == ticket
+        {
+            note_lookup(at.elapsed());
+        }
+        let ms = |at: Option<std::time::Instant>| {
+            at.map_or(u64::MAX, |at| at.elapsed().as_millis() as u64)
+        };
+        // A transient failure: look again while keys may wait for it.
+        if seen.focus == Focus::Unanswered {
+            self.known = false;
+            return if look_again_unanswered(ms(self.chain_at)) {
+                Answered::Again
+            } else {
+                Answered::Kept
+            };
+        }
+        let look = Look {
+            focus: seen.focus,
+            element: seen.element,
+            // Nothing focused is away from no click; an element without a
+            // frame may be.
+            under_click: self
+                .clicked
+                .filter(|_| seen.element.is_some())
+                .map(|at| seen.frame.is_some_and(|frame| frame.contains(at))),
+        };
+        if !self.unsettled || settled(self.before, self.previous, look, ms(self.moved_at)) {
+            self.known = true;
+            self.unsettled = false;
+            self.clicked = None;
+            return Answered::Kept;
+        }
+        self.known = false;
+        self.previous = Some(look);
+        Answered::Again
+    }
+
+    /// The reported caret, else a caret-sized rect at the press.
+    fn rect(self) -> Option<Rect> {
+        const HEIGHT: f64 = 18.0;
+        self.reported.or_else(|| {
+            self.pressed
+                .map(|(x, y)| Rect::new(x, y - HEIGHT / 2.0, 0.0, HEIGHT))
+        })
+    }
+}
+
+/// What a lookup saw: the focus, the focused element as a hash, and its
+/// frame in global points.
+#[derive(Clone, Copy, Debug, Default)]
+struct Seen {
+    focus: Focus,
+    element: Option<u64>,
+    frame: Option<Rect>,
+}
+
+/// What came of a lookup's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    /// Out of date: a newer lookup, or a press, came since it was asked.
+    Stale,
+    Kept,
+    /// Kept, but it doesn't settle where the focus moved: look again.
+    Again,
+}
+
+/// How long after an unsettled look the next one runs, and how long after
+/// the key or click at the soonest: long enough for an app that moves its
+/// focus some time after the key, as Chrome's renderer does, to have.
+const LOOK_AGAIN: Duration = Duration::from_millis(40);
+const LOOK_AGAIN_AFTER_MOVE: Duration = Duration::from_millis(100);
+
+/// How long to wait before the next look, `since` the focus may have moved.
+fn look_again_in(since: Option<Duration>) -> Duration {
+    let rest = since.map_or(Duration::ZERO, |since| {
+        LOOK_AGAIN_AFTER_MOVE.saturating_sub(since)
+    });
+    LOOK_AGAIN.max(rest)
 }
 
 impl Default for Forwarder {
@@ -224,11 +427,109 @@ impl Default for Forwarder {
                 }
             })
             .expect("input thread");
+        let probe: std::sync::Arc<(std::sync::Mutex<Probe>, std::sync::Condvar)> =
+            Default::default();
+        let weak = std::sync::Arc::downgrade(&probe);
+        thread::Builder::new()
+            .name("agent-screen-focus".into())
+            .spawn(move || inspect_loop(weak))
+            .expect("focus thread");
         Forwarder {
             jobs,
             stopped: Default::default(),
+            probe,
         }
     }
+}
+
+/// How long the latest focus lookups took, from asking to the answer, in
+/// milliseconds, for tests: keys wait for them.
+static LOOKUP_MS: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+fn note_lookup(took: Duration) {
+    let mut list = LOOKUP_MS.lock().unwrap_or_else(|e| e.into_inner());
+    if list.len() >= 256 {
+        list.remove(0);
+    }
+    list.push(took.as_secs_f64() * 1000.0);
+}
+
+/// How long the latest focus lookups took, in milliseconds.
+pub fn lookup_ms() -> Vec<f64> {
+    LOOKUP_MS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Run the lookups a display's Viewer asks for, the latest first, until
+/// its Forwarder is gone.
+fn inspect_loop(probe: std::sync::Weak<(std::sync::Mutex<Probe>, std::sync::Condvar)>) {
+    loop {
+        let Some(shared) = probe.upgrade() else {
+            return;
+        };
+        let (lock, changed) = &*shared;
+        let waiting = {
+            let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if p.waiting.is_none() {
+                p = changed
+                    .wait_timeout(p, Duration::from_secs(1))
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+            p.waiting.take()
+        };
+        let Some((focused, within, ticket)) = waiting else {
+            continue;
+        };
+        let target = keys_target_now(focused, within);
+        let (focus, reported, element, frame) =
+            target.map_or((Focus::Other, None, None, None), super::ax::text_focus);
+        log::debug!("input: focus of {target:?} is {focus:?}, caret {reported:?}");
+        let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = Seen {
+            focus,
+            element,
+            frame,
+        };
+        let answered = p.answer_look(ticket, seen, reported);
+        changed.notify_all();
+        drop(p);
+        match answered {
+            Answered::Stale => {}
+            // Keys held for the answer go on, and a composition already
+            // started must not reach a password field, committed or not.
+            Answered::Kept => super::native::main_async(super::viewer_input::lookup_answered),
+            Answered::Again => {
+                let since = {
+                    let p = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    p.moved_at.map(|at| at.elapsed())
+                };
+                std::thread::sleep(look_again_in(since));
+                let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+                // Unless a newer lookup was asked for meanwhile.
+                if p.waiting.is_none() && p.asked == ticket {
+                    let again = p.ask_again();
+                    p.waiting = Some((focused, within, again));
+                }
+            }
+        }
+    }
+}
+
+/// The window keys would go to now: the one focused while it is on the
+/// display, else the display's topmost.
+fn keys_target_now(focused: Option<WindowTarget>, within: Rect) -> Option<WindowTarget> {
+    let list = hits();
+    focused
+        .filter(|t| {
+            list.iter()
+                .any(|h| (h.host == *t || h.target == *t) && within.intersects(&h.bounds))
+        })
+        .or_else(|| {
+            list.iter()
+                .filter(|h| within.contains(h.bounds.mid()))
+                .find(|h| h.layer == 0)
+                .map(|h| h.target)
+        })
 }
 
 impl Forwarder {
@@ -277,6 +578,11 @@ impl Forwarder {
         flags: CGEventFlags,
         trace: Option<Click>,
     ) {
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .press(at);
         self.send(move |w| {
             diagnostics::within(trace, Phase::Down, || {
                 let grabbed = w.grab(at, button);
@@ -352,6 +658,80 @@ impl Forwarder {
 
     pub fn flags_changed(&self, code: u16, flags: CGEventFlags) {
         self.send(move |w| w.flags_changed(code, flags));
+    }
+
+    /// Text the user's input method finished in the Viewer: to the window
+    /// the user's keys go to, as Unicode text.
+    pub fn text(&self, text: String, within: Rect) {
+        self.send(move |w| w.viewer_text(&text, within));
+    }
+
+    /// Look up what has the keyboard in the target and its caret, once
+    /// the input queued before has gone out: the window the user's keys go
+    /// to, or the display's topmost one. Nobody waits for it: keys go by
+    /// what was last looked up. With `moved`, the focus may have moved, and
+    /// whether it is a password field is unknown until this answers.
+    pub fn inspect(&self, within: Rect, moved: bool) {
+        let probe = self.probe.clone();
+        let ticket = {
+            let mut p = probe.0.lock().unwrap_or_else(|e| e.into_inner());
+            if moved {
+                p.moved();
+            }
+            p.ask()
+        };
+        // The worker only notes where its keys go; the lookup runs on
+        // the focus thread.
+        self.send(move |w| {
+            let (lock, changed) = &*probe;
+            let mut p = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // The key or click before went out just now: the app gets it
+            // from here.
+            if moved {
+                p.moved_at = Some(std::time::Instant::now());
+            }
+            p.waiting = Some((w.focused, within, ticket));
+            changed.notify_all();
+        });
+    }
+
+    /// Look up the focus unless a lookup is already on its way: keys
+    /// typed faster than lookups answer would otherwise keep the latest
+    /// one ahead of every answer.
+    pub fn inspect_unless_pending(&self, within: Rect) {
+        let pending = self
+            .probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending();
+        if !pending {
+            self.inspect(within, false);
+        }
+    }
+
+    /// Whether the target's focus is a password field, as last looked up.
+    pub fn secrecy(&self) -> Secrecy {
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .secrecy()
+    }
+
+    /// How many lookups the Viewer has asked for, for tests.
+    pub fn inspections(&self) -> u64 {
+        self.probe.0.lock().unwrap_or_else(|e| e.into_inner()).asked
+    }
+
+    /// Where the user's text goes on the display, in global points: the
+    /// caret the target last reported, else the point last pressed.
+    pub fn caret(&self) -> Option<Rect> {
+        self.probe
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rect()
     }
 
     // MARK: Whole gestures for Agent Sessions. Each returns once every event
@@ -513,31 +893,7 @@ impl Forwarder {
                 if !front_at_start && is_front(target.pid) {
                     return Sent::Fronted(typed);
                 }
-                let code = match character {
-                    '\n' | '\r' => Some(36),
-                    '\t' => Some(48),
-                    _ => None,
-                };
-                let mut units = [0u16; 2];
-                let units = character.encode_utf16(&mut units);
-                for down in [true, false] {
-                    let Some(event) =
-                        CGEvent::new_keyboard_event(w.source.as_deref(), code.unwrap_or(0), down)
-                    else {
-                        continue;
-                    };
-                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
-                    if code.is_none() {
-                        unsafe {
-                            CGEvent::keyboard_set_unicode_string(
-                                Some(&event),
-                                units.len() as _,
-                                units.as_ptr(),
-                            )
-                        };
-                    }
-                    deliver(&event, target.pid, true);
-                }
+                w.character(target, character);
                 thread::sleep(Duration::from_millis(4));
             }
             // A page can drop keys that come faster than its script runs
@@ -1420,6 +1776,53 @@ impl Worker {
         self.key(code, down, flags, false);
     }
 
+    /// Text the user's input method finished in the Viewer: picked and
+    /// focused as for the user's keys.
+    fn viewer_text(&mut self, text: &str, within: Rect) {
+        let Some(_held) = self.focus_something(within) else {
+            log::debug!("input: composed text dropped, no window on the display");
+            return;
+        };
+        let Some(target) = self.focused else {
+            return;
+        };
+        for character in text.chars() {
+            self.character(target, character);
+            thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    /// One character to `target` as Unicode text, whatever the keyboard
+    /// layout, with no modifiers. Newlines and tabs are the Return and Tab
+    /// keys, so they submit and move between fields.
+    fn character(&self, target: WindowTarget, character: char) {
+        let code = match character {
+            '\n' | '\r' => Some(36),
+            '\t' => Some(48),
+            _ => None,
+        };
+        let mut units = [0u16; 2];
+        let units = character.encode_utf16(&mut units);
+        for down in [true, false] {
+            let Some(event) =
+                CGEvent::new_keyboard_event(self.source.as_deref(), code.unwrap_or(0), down)
+            else {
+                continue;
+            };
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            if code.is_none() {
+                unsafe {
+                    CGEvent::keyboard_set_unicode_string(
+                        Some(&event),
+                        units.len() as _,
+                        units.as_ptr(),
+                    )
+                };
+            }
+            deliver(&event, target.pid, true);
+        }
+    }
+
     /// A key to the focused window, already picked and focused. `ansi` for
     /// an agent's chord, whose codes are ANSI key positions.
     fn key(&mut self, code: u16, down: bool, flags: CGEventFlags, ansi: bool) {
@@ -1982,6 +2385,204 @@ mod wheel_tests {
         // A few clicks stay one event, as before.
         assert_eq!(wheel_chunks((0.0, 3.0)), vec![(0.0, 3.0)]);
         assert!(wheel_chunks((0.0, 0.0)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn the_press_stands_in_until_the_target_reports_its_caret() {
+        let mut probe = Probe::default();
+        assert!(probe.rect().is_none());
+        probe.press((500.0, 300.0));
+        let rect = probe.rect().unwrap();
+        assert_eq!((rect.x, rect.y + rect.height / 2.0), (500.0, 300.0));
+        let reported = Rect::new(120.0, 80.0, 1.0, 22.0);
+        let ticket = probe.ask();
+        assert!(probe.answer(ticket, Focus::Text, Some(reported)));
+        assert_eq!(probe.rect(), Some(reported));
+        assert_eq!(probe.focus, Focus::Text);
+    }
+
+    #[test]
+    fn the_latest_lookup_wins_and_a_press_voids_older_ones() {
+        let mut probe = Probe::default();
+        let (first, second) = (probe.ask(), probe.ask());
+        assert!(probe.answer(second, Focus::Secure, None));
+        // The first came back late: it is out of date.
+        assert!(!probe.answer(first, Focus::Text, None));
+        assert_eq!(probe.focus, Focus::Secure);
+        // A press after a lookup was asked for: its answer is out of date.
+        let third = probe.ask();
+        probe.press((1.0, 1.0));
+        assert!(!probe.answer(third, Focus::Text, None));
+        assert_eq!(probe.focus, Focus::Other);
+        let fourth = probe.ask();
+        assert!(probe.answer(fourth, Focus::Text, None));
+    }
+
+    #[test]
+    fn the_focus_is_unknown_until_the_latest_lookup_answers() {
+        let mut probe = Probe::default();
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        let (first, second) = (probe.ask(), probe.ask());
+        // An older lookup's answer doesn't say where the focus is now.
+        assert!(probe.answer(first, Focus::Text, None));
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        assert!(probe.answer(second, Focus::Secure, None));
+        assert_eq!(probe.secrecy(), Secrecy::Secure);
+        probe.press((1.0, 1.0));
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        // After a press, one look doesn't settle it; two that agree on the
+        // field clicked do.
+        let clicked = Seen {
+            focus: Focus::Text,
+            element: None,
+            frame: Some(Rect::new(0.0, 0.0, 10.0, 10.0)),
+        };
+        let third = probe.ask();
+        assert_eq!(probe.answer_look(third, clicked, None), Answered::Again);
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        let fourth = probe.ask();
+        assert_eq!(probe.answer_look(fourth, clicked, None), Answered::Kept);
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+    }
+
+    #[test]
+    fn the_second_look_runs_100_ms_after_the_key_at_the_soonest() {
+        let ms = Duration::from_millis;
+        assert_eq!(look_again_in(Some(ms(30))), ms(70));
+        assert_eq!(look_again_in(Some(ms(80))), ms(40));
+        assert_eq!(look_again_in(Some(ms(300))), ms(40));
+        assert_eq!(look_again_in(None), ms(40));
+    }
+
+    #[test]
+    fn after_a_click_the_old_field_away_from_it_must_wait() {
+        let away = Seen {
+            focus: Focus::Text,
+            element: Some(1),
+            frame: Some(Rect::new(0.0, 0.0, 100.0, 20.0)),
+        };
+        let mut probe = Probe::default();
+        let first = probe.ask();
+        probe.answer_look(first, away, None);
+        // A click below the field: an app that moves its focus late still
+        // shows the old field to both looks.
+        probe.press((50.0, 200.0));
+        for _ in 0..3 {
+            let ticket = probe.ask_again();
+            assert_eq!(probe.answer_look(ticket, away, None), Answered::Again);
+        }
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        // It moves: settled.
+        let ticket = probe.ask_again();
+        let moved = Seen {
+            element: Some(2),
+            ..away
+        };
+        assert_eq!(probe.answer_look(ticket, moved, None), Answered::Kept);
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+        // A click on a button leaves the focus: settled in the end.
+        probe.press((50.0, 200.0));
+        probe.moved_at = std::time::Instant::now().checked_sub(Duration::from_millis(
+            agent_screen_model::viewer_keys::SETTLE_AWAY_MS,
+        ));
+        let ticket = probe.ask_again();
+        assert_eq!(probe.answer_look(ticket, moved, None), Answered::Again);
+        let ticket = probe.ask_again();
+        assert_eq!(probe.answer_look(ticket, moved, None), Answered::Kept);
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+    }
+
+    #[test]
+    fn an_unanswered_look_looks_again_until_keys_stop_waiting() {
+        let mut probe = Probe::default();
+        let ticket = probe.ask();
+        assert!(probe.answer(ticket, Focus::Unanswered, None));
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        let ticket = probe.ask();
+        assert_eq!(
+            probe.answer_look(
+                ticket,
+                Seen {
+                    focus: Focus::Unanswered,
+                    ..Seen::default()
+                },
+                None
+            ),
+            Answered::Again
+        );
+        // Keys gave up waiting: no more looks until the next key or click.
+        probe.chain_at = std::time::Instant::now().checked_sub(Duration::from_millis(
+            agent_screen_model::viewer_keys::HOLD_MS,
+        ));
+        let ticket = probe.ask_again();
+        assert_eq!(
+            probe.answer_look(
+                ticket,
+                Seen {
+                    focus: Focus::Unanswered,
+                    ..Seen::default()
+                },
+                None
+            ),
+            Answered::Kept
+        );
+    }
+
+    #[test]
+    fn after_a_key_that_moves_the_focus_the_old_field_must_be_seen_twice() {
+        let look = |focus, element| Seen {
+            focus,
+            element,
+            frame: Some(Rect::new(0.0, 0.0, 10.0, 10.0)),
+        };
+        let mut probe = Probe::default();
+        let first = probe.ask();
+        probe.answer_look(first, look(Focus::Text, Some(1)), None);
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+        // Tab: the app may not have moved its focus yet.
+        probe.moved();
+        let second = probe.ask();
+        assert_eq!(
+            probe.answer_look(second, look(Focus::Text, Some(1)), None),
+            Answered::Again
+        );
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+        // The look again finds the password field it moved to.
+        let third = probe.ask();
+        probe.answer_look(third, look(Focus::Secure, Some(2)), None);
+        assert_eq!(probe.secrecy(), Secrecy::Secure);
+        // A click into another field settles at once.
+        probe.press((1.0, 1.0));
+        let fourth = probe.ask();
+        assert_eq!(
+            probe.answer_look(fourth, look(Focus::Text, Some(3)), None),
+            Answered::Kept
+        );
+        assert_eq!(probe.secrecy(), Secrecy::Open);
+        // No answer leaves it unknown.
+        let fifth = probe.ask();
+        probe.answer_look(fifth, look(Focus::Unanswered, None), None);
+        assert_eq!(probe.secrecy(), Secrecy::Unknown);
+    }
+
+    #[test]
+    fn a_lookup_is_pending_until_it_answers_or_a_press_voids_it() {
+        let mut probe = Probe::default();
+        assert!(!probe.pending());
+        let first = probe.ask();
+        assert!(probe.pending());
+        assert!(probe.answer(first, Focus::Text, None));
+        assert!(!probe.pending());
+        // A press voids the lookup in flight: its answer won't count, so
+        // the next key asks again.
+        probe.ask();
+        probe.press((1.0, 1.0));
+        assert!(!probe.pending());
     }
 }
 
