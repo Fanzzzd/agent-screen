@@ -56,6 +56,18 @@ fn tree_root() -> Value {
     json!({ "type": "integer", "minimum": 0, "description": "A bracketed element number from this window to use as the returned tree's root. Omit for the whole window. If a long list hides the branch you need, first read without root and with a small max_depth, then use the number of a branch marked \"more inside\". A stale root fails instead of reading another window." })
 }
 
+fn element_match(purpose: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": format!("{purpose} Give role, text or both."),
+        "properties": {
+            "role": { "type": "string", "description": "A role as the tree writes it, such as button, statictext or row; also matches a subrole." },
+            "text": { "type": "string", "description": "Part of the element's label or value, in any case." }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn user_instruction(purpose: &str) -> Value {
     json!({ "type": "string", "description": format!("The user's own words from the chat that tell you to {purpose}, quoted as they wrote them. Agent Screen trusts you to relay them: it can't see the chat, and it shows and records these words.") })
 }
@@ -547,6 +559,50 @@ pub fn definitions() -> Vec<Value> {
             ),
             PLAIN,
         ),
+        tool(
+            "wait_for_change",
+            "Wait for a window to change",
+            &[
+                "Wait until one window on your display changes, then say what changed, with no screenshot or tree read per check:",
+                "use it after an action whose effect lands later, such as a sent message, a page load or a reply.",
+                "It compares the window's accessibility tree with the last tree you got for it with the same root and max_depth,",
+                "from get_window_state, act_on_element or an earlier wait, so a change that landed before the call fires at once;",
+                "with no such tree, with the tree when the call starts. It reads the tree again at most twice a second, less often",
+                "while nothing changes, and gives a slow app three times as long between reads as a read takes.",
+                "Conditions, any of: changed, an element appearing, changing or going away; appears, more elements matching role",
+                "and text than that tree had; disappears, fewer. With neither appears nor disappears, changed applies.",
+                "role is a role as the tree writes it (button, statictext); text is part of an element's label or of its value,",
+                "any case, within the first 80 characters the tree shows. Position, focus and enabled state don't make an element",
+                "appear or disappear. A read takes at most 400 elements: in a longer window, such as a chat history, pass root to",
+                "watch the part you need, as elements past the budget are not seen, and the result says when a read was cut.",
+                "Returns the conditions that fired and the elements that changed since that tree, in act_on_element's changes form",
+                "(+ new, ~ changed, - gone), without a picture; or timed_out with the window's element count and the changes that",
+                "matched no condition. It also returns when the window closes or leaves your display, or the display ends.",
+                "timeout_seconds is 30 by default and at most 120, since a longer wait holds your turn with no news: call again to",
+                "keep waiting. It reads during a Takeover, as get_window_state does, and says so, since the changes may be the user's.",
+            ],
+            object(
+                json!({
+                    "display_id": display_id(),
+                    "window_id": window_id(),
+                    "root": tree_root(),
+                    "max_depth": max_depth(),
+                    "changed": {
+                        "type": "boolean",
+                        "description": "Fire on any element appearing, changing or going away. Default: true when appears and disappears are left out, false otherwise."
+                    },
+                    "appears": element_match("Fire when more elements match than the tree it compares with had: a new row, a status that turned into this text."),
+                    "disappears": element_match("Fire when fewer elements match than the tree it compares with had: a spinner or a \"Sending\" label gone."),
+                    "timeout_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": "Seconds to wait. Default 30, at most 120; 0 checks once."
+                    }
+                }),
+                &["display_id", "window_id"],
+            ),
+            READ_ONLY,
+        ),
     ]
 }
 
@@ -655,11 +711,15 @@ pub fn ended_with_app(id: i64) -> ControlError {
 
 // MARK: Handlers
 
+/// Resolves when the client cancels the call.
+pub type Cancelled = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 pub async fn run(
     name: &str,
     args: &Object,
     session: &Session,
     control: &Control,
+    cancelled: Cancelled,
 ) -> Result<Output, ControlError> {
     let a = Args(args);
     match name {
@@ -949,6 +1009,71 @@ pub async fn run(
                 "requestId": request_id, "operation": operation, "reason": reason, "timeout": timeout,
             })).await?;
             Ok(Output::Object(Value::Object(result)))
+        }
+        "wait_for_change" => {
+            let display = a.require_int("display_id")?;
+            let window = a.require_int("window_id")?;
+            let scope = scope_arg(&a)?;
+            let conditions = json!({
+                "changed": a.0.get("changed"),
+                "appears": a.0.get("appears"),
+                "disappears": a.0.get("disappears"),
+            });
+            // The app checks the same rules, before it reads anything.
+            agent_screen_model::watch::Conditions::from_json(&conditions)
+                .map_err(ControlError::invalid)?;
+            let timeout = agent_screen_model::watch::timeout(a.number("timeout_seconds")?)
+                .map_err(ControlError::invalid)?;
+            static NEXT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let wait = NEXT_WAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let baseline = control.last_tree(display, window, scope);
+            let call = control.call(
+                "waitForChange",
+                json!({
+                    "displayId": display,
+                    "windowId": window,
+                    "root": scope.root,
+                    "maxDepth": scope.max_depth,
+                    "conditions": conditions,
+                    "timeoutSeconds": timeout.as_secs_f64(),
+                    "baseline": baseline.as_ref().map(|(tree, _)| tree),
+                    "baselineTruncated": baseline.as_ref().is_some_and(|(_, cut)| *cut),
+                    "waitId": wait,
+                }),
+            );
+            // The client cancelled the call: stop the app's reads too. An
+            // older app doesn't know the method; its wait ends at the timeout.
+            let reply = tokio::select! {
+                reply = call => reply,
+                () = cancelled => {
+                    let _ = control.call_open("cancelWaitForChange", json!({ "waitId": wait })).await;
+                    return Err(ControlError::new("failed", "the call was cancelled"));
+                }
+            };
+            let reply = reply.map_err(|error| {
+                if error.message.contains("unknown method") {
+                    ControlError::new(
+                        "failed",
+                        "this Agent Screen app predates wait_for_change; update Agent Screen",
+                    )
+                } else {
+                    error
+                }
+            })?;
+            // The tree becomes the one the agent got only if it saw every
+            // change; otherwise the next comparison still shows the rest.
+            let fired = reply.get("outcome").and_then(Value::as_str) == Some("fired");
+            let changes = reply.get("changes").and_then(Value::as_str);
+            if let Some(tree) = reply.get("tree").and_then(Value::as_str)
+                && (fired || agent_screen_model::watch::shown_whole(changes))
+            {
+                // The tree's own read, not whether any read of the wait was cut.
+                let cut = reply.get("treeTruncated") == Some(&Value::Bool(true));
+                control.swap_tree(display, window, scope, tree.to_string(), cut);
+            }
+            Ok(Output::Content(vec![text(wait_output(
+                display, window, scope.root, &reply,
+            ))]))
         }
         "act_on_element" => {
             let display = a.require_int("display_id")?;
@@ -1387,6 +1512,117 @@ impl WindowState {
     }
 }
 
+/// What wait_for_change came to, for the agent: the outcome's name first,
+/// then the elements, in act_on_element's changes form.
+fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -> String {
+    let waited = reply
+        .get("waitedSeconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let scope = root
+        .map(|root| format!(", subtree [{root}]"))
+        .unwrap_or_default();
+    let since = if reply.get("baselineFromAgent") == Some(&Value::Bool(true)) {
+        "since its last tree you got in the same scope"
+    } else {
+        "since the call started"
+    };
+    let takeover = if reply.get("takeover") == Some(&Value::Bool(true)) {
+        " The user is operating the display, so these changes may be theirs."
+    } else {
+        ""
+    };
+    let changes = reply.get("changes").and_then(Value::as_str);
+    let mut cut = String::new();
+    if reply.get("truncated") == Some(&Value::Bool(true)) {
+        cut.push_str(&format!(
+            " A read stopped at its budget of {} elements, so elements past it are not watched and none counts as gone; pass root to watch the part you need.",
+            agent_screen_model::tree::MAX_ELEMENTS
+        ));
+    }
+    if reply.get("depthLimited") == Some(&Value::Bool(true)) {
+        cut.push_str(" Elements deeper than max_depth are not watched.");
+    }
+    match reply.get("outcome").and_then(Value::as_str) {
+        Some("fired") => {
+            let fired: Vec<&str> = reply
+                .get("fired")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let matched: Vec<&str> = reply
+                .get("matched")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let matched = if matched.is_empty() {
+                String::new()
+            } else {
+                format!(" Matching: {}.", matched.join("; "))
+            };
+            format!(
+                "{} after {waited} s in window {window}{scope}.{matched}{takeover}{cut} Changes {since} (+ new, ~ changed, - gone):\n\n{}",
+                fired.join(" and "),
+                changes.unwrap_or_default()
+            )
+        }
+        Some("timedOut") => {
+            let elements = match reply.get("elements").and_then(Value::as_u64) {
+                Some(n) => format!(" The window has {n} elements."),
+                None => " The app answered no read of the window's accessibility tree: it may be busy, or Accessibility is off.".into(),
+            };
+            let unanswered = match reply.get("unanswered").and_then(Value::as_u64) {
+                Some(n) if n > 0 && reply.get("elements").is_some_and(|e| !e.is_null()) => {
+                    format!(" {n} reads got no answer from the app.")
+                }
+                _ => String::new(),
+            };
+            let absent = if reply.get("disappearsAbsent") == Some(&Value::Bool(true)) {
+                " No element matched disappears in the tree it compared with, so nothing could disappear."
+            } else {
+                ""
+            };
+            let rest = match changes {
+                Some(changes) => format!(
+                    " These changes {since} matched no condition (+ new, ~ changed, - gone):\n\n{}",
+                    agent_screen_model::watch::first_lines(
+                        changes,
+                        agent_screen_model::watch::SUMMARY_LINES
+                    )
+                ),
+                None if reply.get("elements").is_some_and(|e| !e.is_null()) => {
+                    format!(" Nothing changed {since}.")
+                }
+                None => String::new(),
+            };
+            format!(
+                "timed_out after {waited} s in window {window}{scope}: no condition fired.{elements}{unanswered}{absent}{takeover}{cut}{rest}"
+            )
+        }
+        Some("windowClosed") => format!(
+            "window_closed after {waited} s: window {window} closed, or its app hid or minimized it, during the wait. See list_windows."
+        ),
+        Some("windowLeft") => format!(
+            "window_left after {waited} s: window {window} moved off display {display} and shows elsewhere. See list_windows with strays: true."
+        ),
+        Some("rootGone") => format!(
+            "root_gone after {waited} s: element [{}] left window {window}. Call get_window_state without root to find the current tree.",
+            root.unwrap_or_default()
+        ),
+        Some("displayEnded") if reply.get("closedByUser") == Some(&Value::Bool(true)) => format!(
+            "display_ended after {waited} s: the user closed display {display}, so stop working on screen. Ask the user before you call create_display again."
+        ),
+        Some("displayEnded") => format!(
+            "display_ended after {waited} s: display {display} has ended. Call create_display for a new one."
+        ),
+        other => format!("The app answered an unknown outcome {other:?}; update Agent Screen."),
+    }
+}
+
 async fn window_state_reply(
     control: &Control,
     display: i64,
@@ -1448,7 +1684,13 @@ async fn window_state(
             get("elements")
         ),
         strayed: strayed_note(&state),
-        before: control.swap_tree(display, window, scope, tree.clone()),
+        before: control.swap_tree(
+            display,
+            window,
+            scope,
+            tree.clone(),
+            get("truncated") == Value::Bool(true),
+        ),
         tree,
         image: image(&get("data"), &get("mimeType")),
     })
@@ -1816,6 +2058,149 @@ mod tests {
     }
 
     #[test]
+    fn wait_output_names_what_fired_and_lists_changes() {
+        let reply = |v: Value| v.as_object().unwrap().clone();
+        let fired = wait_output(
+            3,
+            5,
+            None,
+            &reply(json!({
+                "outcome": "fired", "fired": ["appeared", "disappeared"],
+                "matched": ["[9] statictext value=\"Delivered\"", "[7] statictext value=\"Sending\""],
+                "changes": "+ [9] statictext value=\"Delivered\"\n- [7] statictext value=\"Sending\"",
+                "baselineFromAgent": true, "waitedSeconds": 1.6
+            })),
+        );
+        assert!(
+            fired.starts_with("appeared and disappeared after 1.6 s in window 5."),
+            "{fired}"
+        );
+        assert!(fired.contains("since its last tree you got"), "{fired}");
+        assert!(
+            fired.ends_with(
+                "\n\n+ [9] statictext value=\"Delivered\"\n- [7] statictext value=\"Sending\""
+            ),
+            "{fired}"
+        );
+        assert!(!fired.contains("operating"), "{fired}");
+        let mine = wait_output(
+            3,
+            5,
+            Some(4),
+            &reply(
+                json!({ "outcome": "fired", "fired": ["changed"], "changes": "~ [6] row", "takeover": true, "waitedSeconds": 0.5 }),
+            ),
+        );
+        assert!(
+            mine.starts_with("changed after 0.5 s in window 5, subtree [4]."),
+            "{mine}"
+        );
+        assert!(
+            mine.contains("since the call started") && mine.contains("may be theirs"),
+            "{mine}"
+        );
+    }
+
+    #[test]
+    fn wait_output_summarizes_a_timeout_and_says_why_nothing_could_fire() {
+        let reply = |v: Value| v.as_object().unwrap().clone();
+        let quiet = wait_output(
+            3,
+            5,
+            None,
+            &reply(
+                json!({ "outcome": "timedOut", "elements": 12, "baselineFromAgent": false, "waitedSeconds": 2.0 }),
+            ),
+        );
+        assert!(
+            !quiet.contains("budget") && !quiet.contains("max_depth"),
+            "{quiet}"
+        );
+        let cut = wait_output(
+            3,
+            5,
+            None,
+            &reply(
+                json!({ "outcome": "fired", "fired": ["appeared"], "changes": "+ [500] row", "truncated": true, "depthLimited": true }),
+            ),
+        );
+        assert!(
+            cut.contains("budget of 400 elements") && cut.contains("pass root"),
+            "{cut}"
+        );
+        assert!(cut.contains("deeper than max_depth"), "{cut}");
+        assert!(
+            quiet.starts_with("timed_out after 2 s in window 5: no condition fired."),
+            "{quiet}"
+        );
+        assert!(
+            quiet.contains("12 elements")
+                && quiet.ends_with("Nothing changed since the call started."),
+            "{quiet}"
+        );
+        let many = (0..30)
+            .map(|n| format!("~ [{n}] row"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let busy = wait_output(
+            3,
+            5,
+            None,
+            &reply(
+                json!({ "outcome": "timedOut", "elements": 40, "changes": many, "disappearsAbsent": true, "waitedSeconds": 30.0 }),
+            ),
+        );
+        assert!(
+            busy.contains("matched no condition") && busy.ends_with("… and 10 more"),
+            "{busy}"
+        );
+        assert!(busy.contains("nothing could disappear"), "{busy}");
+        let silent = wait_output(
+            3,
+            5,
+            None,
+            &reply(json!({ "outcome": "timedOut", "elements": null, "unanswered": 4 })),
+        );
+        assert!(silent.contains("answered no read"), "{silent}");
+        for (outcome, start) in [
+            (json!({ "outcome": "windowClosed" }), "window_closed"),
+            (json!({ "outcome": "windowLeft" }), "window_left"),
+            (json!({ "outcome": "rootGone" }), "root_gone"),
+            (json!({ "outcome": "displayEnded" }), "display_ended"),
+        ] {
+            assert!(wait_output(3, 5, None, &reply(outcome)).starts_with(start));
+        }
+        let closed = wait_output(
+            3,
+            5,
+            None,
+            &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
+        );
+        assert!(closed.contains("the user closed display 3"), "{closed}");
+    }
+
+    #[test]
+    fn wait_for_change_says_its_default_and_cap() {
+        let tools = definitions();
+        let wait = tools
+            .iter()
+            .find(|t| t["name"] == "wait_for_change")
+            .unwrap();
+        let description = wait["description"].as_str().unwrap();
+        assert!(
+            description.contains("30 by default and at most 120"),
+            "{description}"
+        );
+        assert!(
+            description.contains("(+ new, ~ changed, - gone)"),
+            "{description}"
+        );
+        let props = &wait["inputSchema"]["properties"];
+        assert_eq!(props["appears"]["additionalProperties"], false);
+        assert!(props["root"].is_object() && props["max_depth"].is_object());
+    }
+
+    #[test]
     fn place_output_reports_the_frame_and_what_the_app_refused() {
         let reply = |w: Value| json!({ "window": w }).as_object().unwrap().clone();
         let asked = [
@@ -1894,9 +2279,9 @@ mod tests {
     }
 
     #[test]
-    fn sixteen_tools_with_object_schemas() {
+    fn seventeen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 17);
         let diagnostics = tools
             .iter()
             .find(|t| t["name"] == "get_diagnostics")

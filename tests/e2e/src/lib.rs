@@ -306,6 +306,12 @@ pub fn menu_choice_app() -> Result<PathBuf> {
     swift_app("menuchoice", "MenuChoice")
 }
 
+/// tools/watch.swift as an app: buttons that change its window seconds
+/// after a press, for wait_for_change.
+pub fn watch_app() -> Result<PathBuf> {
+    swift_app("watch", "Watch")
+}
+
 /// tools/filedrag.swift as two apps, FileSource and FileDrop: a file icon
 /// that starts a system drag session, and a view that takes a dropped
 /// file. Separate bundle ids, so launch_app starts each in its own process.

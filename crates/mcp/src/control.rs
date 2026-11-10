@@ -70,9 +70,13 @@ pub struct Control {
     /// and the apps launch_app started there.
     made: std::sync::Mutex<HashMap<u64, Made>>,
     /// The last element tree each window sent, by display, window and read scope, for
-    /// act_on_element's changes.
-    trees: std::sync::Mutex<HashMap<(i64, i64, agent_screen_model::tree::Scope), String>>,
+    /// act_on_element's changes and wait_for_change, and whether its read
+    /// stopped at the element budget.
+    trees: std::sync::Mutex<HashMap<TreeKey, (String, bool)>>,
 }
+
+/// A window's tree in one read scope: display, window and scope.
+type TreeKey = (i64, i64, agent_screen_model::tree::Scope);
 
 #[derive(Default)]
 struct Made {
@@ -83,18 +87,36 @@ struct Made {
 }
 
 impl Control {
-    /// Keep a window's latest tree; the one before it, if any.
+    /// Keep a window's latest tree, and whether its read was truncated;
+    /// the tree before it, if any.
     pub fn swap_tree(
         &self,
         display: i64,
         window: i64,
         scope: agent_screen_model::tree::Scope,
         tree: String,
+        truncated: bool,
     ) -> Option<String> {
         self.trees
             .lock()
             .unwrap()
-            .insert((display, window, scope), tree)
+            .insert((display, window, scope), (tree, truncated))
+            .map(|(tree, _)| tree)
+    }
+
+    /// A window's latest tree in a scope, and whether its read was
+    /// truncated, kept.
+    pub fn last_tree(
+        &self,
+        display: i64,
+        window: i64,
+        scope: agent_screen_model::tree::Scope,
+    ) -> Option<(String, bool)> {
+        self.trees
+            .lock()
+            .unwrap()
+            .get(&(display, window, scope))
+            .cloned()
     }
 
     /// Note a display this session made on the current connection.
@@ -139,6 +161,28 @@ impl Control {
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Object, ControlError> {
         let connection = self.open().await?;
+        self.call_on(&connection, method, params).await
+    }
+
+    /// Call on the open connection only, never starting the app or opening
+    /// another: a cancel means nothing to an app that didn't get the call.
+    pub async fn call_open(&self, method: &str, params: Value) -> Result<Object, ControlError> {
+        let connection = self
+            .connection
+            .lock()
+            .await
+            .clone()
+            .filter(|c| c.open.load(Ordering::Relaxed))
+            .ok_or_else(|| closed("no open connection"))?;
+        self.call_on(&connection, method, params).await
+    }
+
+    async fn call_on(
+        &self,
+        connection: &Connection,
+        method: &str,
+        params: Value,
+    ) -> Result<Object, ControlError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         connection.pending.lock().unwrap().insert(id, tx);
@@ -368,15 +412,18 @@ mod tests {
             root: Some(2),
             max_depth: Some(1),
         };
-        assert_eq!(control.swap_tree(7, 8, full, "full".into()), None);
-        assert_eq!(control.swap_tree(7, 8, shallow, "shallow".into()), None);
-        assert_eq!(control.swap_tree(7, 8, pane, "pane".into()), None);
+        assert_eq!(control.swap_tree(7, 8, full, "full".into(), false), None);
         assert_eq!(
-            control.swap_tree(7, 8, pane, "new pane".into()),
+            control.swap_tree(7, 8, shallow, "shallow".into(), false),
+            None
+        );
+        assert_eq!(control.swap_tree(7, 8, pane, "pane".into(), false), None);
+        assert_eq!(
+            control.swap_tree(7, 8, pane, "new pane".into(), false),
             Some("pane".into())
         );
         assert_eq!(
-            control.swap_tree(7, 8, full, "new full".into()),
+            control.swap_tree(7, 8, full, "new full".into(), false),
             Some("full".into())
         );
     }

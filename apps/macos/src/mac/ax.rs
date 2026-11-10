@@ -2075,8 +2075,7 @@ impl TreeWalker {
             let text = values[i].downcast_ref::<CFString>()?.to_string();
             // Apps wrap numbers and names in invisible direction marks.
             let text: String = text.chars().filter(|c| !is_direction_mark(*c)).collect();
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.chars().take(80).collect::<String>())
+            agent_screen_model::tree::preview(&text)
         };
         let boolean = |i: usize| values[i].downcast_ref::<CFBoolean>().map(|b| b.as_bool());
         let role = string(0).unwrap_or_else(|| "AXUnknown".into());

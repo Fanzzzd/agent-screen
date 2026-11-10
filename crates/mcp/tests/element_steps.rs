@@ -352,3 +352,73 @@ async fn scoped_actions_preflight_legacy_peers_and_keep_success_when_the_root_is
     }).await.unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_cancelled_wait_for_change_stops_the_apps_wait() {
+    let fixture = Fixture::new();
+    let listener = fixture.listener();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut methods = Vec::new();
+        let mut waiting = None;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap().to_string();
+            let reply = match method.as_str() {
+                "agentReady" => json!({"id": request["id"], "result": {}}),
+                // The app answers a wait only when it ends.
+                "waitForChange" => {
+                    assert_eq!(
+                        request["params"]["conditions"]["appears"]["text"],
+                        "Delivered"
+                    );
+                    assert_eq!(request["params"]["timeoutSeconds"], 120.0);
+                    waiting = Some((request["id"].clone(), request["params"]["waitId"].clone()));
+                    methods.push(method);
+                    continue;
+                }
+                "cancelWaitForChange" => {
+                    let (id, wait) = waiting.take().expect("a running wait");
+                    assert_eq!(request["params"]["waitId"], wait);
+                    methods.push(method);
+                    let ended = json!({"id": id, "error": {"code": "failed", "message": "the wait was cancelled"}});
+                    write
+                        .write_all(format!("{ended}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    json!({"id": request["id"], "result": {"cancelled": true}})
+                }
+                other => panic!("unexpected control method {other}"),
+            };
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        methods
+    });
+    let mut client = fixture.child();
+    tokio::task::spawn_blocking(move || {
+        let mut input = client.0.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(client.0.stdout.take().unwrap());
+        let mut send = |request: Value| writeln!(input, "{request}").unwrap();
+        send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"steps-test","version":"1"}}}));
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"display_id":7,"window_id":8,"appears":{"text":"Delivered"},"timeout_seconds":500}}}));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"user"}}));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        drop(input);
+        assert!(client.0.wait().unwrap().success());
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.await.unwrap(),
+        ["waitForChange", "cancelWaitForChange"]
+    );
+}

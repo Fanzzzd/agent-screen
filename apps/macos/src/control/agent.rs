@@ -1231,6 +1231,14 @@ async fn handle_one(
             add_strayed(&core, id, &mut result, cx);
             Ok(result)
         }
+        "waitForChange" => wait_for_change(&core, connection, &p, cx).await,
+        "cancelWaitForChange" => {
+            let wait = p
+                .int("waitId")
+                .ok_or_else(|| ControlError::invalid("waitId is required"))?;
+            cancel_wait((connection, wait as u64));
+            Ok(json!({ "cancelled": true }))
+        }
         "elementAction" => {
             let scope = read_scope(&p)?;
             let id = input_display(&core, &p, cx).await?;
@@ -2307,6 +2315,7 @@ fn needs_permissions(method: &str) -> bool {
             | "listWindows"
             | "agentReady"
             | "inputQueue"
+            | "cancelWaitForChange"
     ) && !method.starts_with("debug")
 }
 
@@ -6620,6 +6629,251 @@ async fn read_root(
         }
     }
     Ok(Some(ax::Sendable(element)))
+}
+
+thread_local! {
+    /// Waits for change by connection and the MCP's wait id: running ones,
+    /// with the way to stop each when its MCP call is cancelled, and cancels
+    /// that came before their wait registered.
+    static WAITS: std::cell::RefCell<std::collections::HashMap<(u64, u64), WaitSlot>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+enum WaitSlot {
+    Running(futures::channel::oneshot::Sender<()>),
+    /// Cancelled before it started, at this time.
+    Cancelled(Instant),
+}
+
+/// Forget early cancels older than this, as for a wait that never came.
+const EARLY_CANCEL: Duration = Duration::from_secs(30);
+
+/// Register a wait: the receiver its cancel fires, or None when the cancel
+/// already came.
+fn register_wait(key: (u64, u64)) -> Option<futures::channel::oneshot::Receiver<()>> {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        waits.retain(
+            |_, slot| !matches!(slot, WaitSlot::Cancelled(at) if at.elapsed() > EARLY_CANCEL),
+        );
+        if matches!(waits.remove(&key), Some(WaitSlot::Cancelled(_))) {
+            return None;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        waits.insert(key, WaitSlot::Running(tx));
+        Some(rx)
+    })
+}
+
+/// Stop a running wait, or remember the cancel for one not started yet.
+fn cancel_wait(key: (u64, u64)) {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        match waits.remove(&key) {
+            Some(WaitSlot::Running(stop)) => {
+                let _ = stop.send(());
+            }
+            _ => {
+                waits.insert(key, WaitSlot::Cancelled(Instant::now()));
+            }
+        }
+    });
+}
+
+/// Takes a running wait out of `WAITS` however it ends.
+struct Waiting(Option<(u64, u64)>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some(key) = self.0 {
+            WAITS.with(|w| {
+                let mut waits = w.borrow_mut();
+                if matches!(waits.get(&key), Some(WaitSlot::Running(_))) {
+                    waits.remove(&key);
+                }
+            });
+        }
+    }
+}
+
+/// wait_for_change: read one window's tree, off the main thread, until a
+/// condition holds against the baseline, the window goes, the display
+/// ends, the connection closes, the MCP cancels the call or the time is
+/// up. The baseline is the tree the agent last got in this scope, which
+/// the MCP sends, or the first read. Reads work in a Takeover, as
+/// windowState's do.
+async fn wait_for_change(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    use agent_screen_model::watch;
+    let cancelled = || ControlError::failed("the wait was cancelled");
+    // Registered before anything waits, so a cancel can't slip in first.
+    // Without a wait id, from an older MCP, nothing cancels it.
+    let key = p.int("waitId").map(|wait| (connection, wait as u64));
+    let (_never, idle) = futures::channel::oneshot::channel();
+    let mut cancel = match key {
+        Some(key) => register_wait(key).ok_or_else(cancelled)?,
+        None => idle,
+    }
+    .fuse();
+    let _waiting = Waiting(key);
+    let scope = read_scope(p)?;
+    let conditions = watch::Conditions::from_json(p.0.get("conditions").unwrap_or(&Value::Null))
+        .map_err(ControlError::invalid)?;
+    let timeout = watch::timeout(p.number("timeoutSeconds")).map_err(ControlError::invalid)?;
+    let id = display(core, p, true, cx)?;
+    let window = window_on(id, p, cx).await?;
+    let target = window.target;
+    let root = read_root(core, id, target, scope.root, cx).await?;
+    let area = cg::display_bounds(id);
+    let origin = (area.x, area.y);
+    let scale = display_scale(core, id, cx);
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // The agent's tree names numbers of this app run only if it read the
+    // window since the app started.
+    let numbered = core.read_with(cx, |c, _| c.elements.contains_key(&(id, target.window_id)));
+    let baseline = p
+        .string("baseline")
+        .filter(|_| numbered)
+        .map(|tree| watch::Read {
+            tree,
+            truncated: p.0.get("baselineTruncated") == Some(&Value::Bool(true)),
+        });
+    let from_agent = baseline.is_some();
+    let mut watch = watch::Watch::new(conditions, baseline);
+    let mut depth_limited = false;
+    let mut count = None;
+    let mut unanswered = 0;
+    let waited = |started: Instant| (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    let outcome = loop {
+        let (closed, ended, by_user) = core.read_with(cx, |c, _| {
+            let d = c.displays.get(id);
+            (
+                c.closed.contains(&connection),
+                d.is_none_or(|d| d.is_ended()),
+                c.displays.closed_by_user.contains(&id)
+                    || d.is_some_and(|d| d.ended == Some(EndReason::ClosedByUser)),
+            )
+        });
+        if closed {
+            return Err(ControlError::failed("the connection closed"));
+        }
+        if ended {
+            return Ok(json!({
+                "outcome": "displayEnded",
+                "closedByUser": by_user,
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let window_id = target.window_id;
+        // Off the display and on screen elsewhere, it left; off screen, it
+        // closed, or its app hid or minimized it, which keeps its id.
+        let (here, elsewhere) = off(cx, move || {
+            let here = windows::on_display(id)
+                .iter()
+                .any(|w| w.target.window_id == window_id);
+            (here, !here && cg::on_screen_ids().contains(&window_id))
+        })
+        .await;
+        if !here {
+            return Ok(json!({
+                "outcome": if elsewhere { "windowLeft" } else { "windowClosed" },
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let read_root = root.as_ref().map(|r| ax::Sendable(r.get().clone()));
+        let read_started = Instant::now();
+        let read = cx.background_executor().spawn(async move {
+            ax::snapshot(
+                target,
+                origin,
+                scale,
+                read_root.map(|r| r.0),
+                scope.max_depth,
+            )
+        });
+        // A read still running at the deadline is left to finish alone.
+        let timer = cx.background_executor().timer(remaining.max(watch::POLL));
+        let snapshot = futures::select! {
+            snapshot = FutureExt::fuse(read) => snapshot,
+            _ = FutureExt::fuse(timer) => break "timedOut",
+            _ = cancel => return Err(cancelled()),
+        };
+        let read_time = read_started.elapsed();
+        match snapshot {
+            Ok(snapshot) => {
+                count = Some(snapshot.elements.len());
+                depth_limited |= snapshot.depth_limited;
+                let truncated = snapshot.truncated;
+                let complete = scope.root.is_none() && !truncated && !snapshot.depth_limited;
+                let tree = core.update(cx, |c, _| {
+                    let numbers = c.elements.entry((id, target.window_id)).or_default();
+                    numbers::relabel(
+                        &snapshot.tree,
+                        &numbers.refresh(snapshot.elements, complete),
+                    )
+                });
+                let fired = watch.read(watch::Read { tree, truncated });
+                if !fired.is_empty() {
+                    let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
+                    let matched: Vec<&String> = fired.iter().flat_map(|f| f.elements()).collect();
+                    return Ok(json!({
+                        "outcome": "fired",
+                        "fired": names,
+                        "matched": matched,
+                        "changes": watch.changes(),
+                        "tree": watch.last().map(|r| &r.tree),
+                        "treeTruncated": truncated,
+                        "elements": count,
+                        "truncated": watch.any_cut(),
+                        "depthLimited": depth_limited,
+                        "baselineFromAgent": from_agent,
+                        "takeover": takeover(core, id, cx),
+                        "waitedSeconds": waited(started),
+                    }));
+                }
+            }
+            Err(ax::SnapshotError::RootUnavailable) => {
+                return Ok(json!({ "outcome": "rootGone", "waitedSeconds": waited(started) }));
+            }
+            // Busy or not answering: try again at the next read.
+            Err(ax::SnapshotError::WindowUnavailable) => unanswered += 1,
+        }
+        if Instant::now() >= deadline {
+            break "timedOut";
+        }
+        let gap = watch::poll_gap(read_time, watch.quiet())
+            .min(deadline.saturating_duration_since(Instant::now()));
+        let timer = cx.background_executor().timer(gap);
+        futures::select! {
+            _ = FutureExt::fuse(timer) => {}
+            _ = cancel => return Err(cancelled()),
+        }
+    };
+    Ok(json!({
+        "outcome": outcome,
+        "changes": watch.changes(),
+        "tree": watch.last().map(|r| &r.tree),
+        "treeTruncated": watch.last().is_some_and(|r| r.truncated),
+        "elements": watch.last().and(count),
+        "unanswered": unanswered,
+        "truncated": watch.any_cut(),
+        "depthLimited": depth_limited,
+        "disappearsAbsent": watch.disappears_absent(),
+        "baselineFromAgent": from_agent,
+        "takeover": takeover(core, id, cx),
+        "waitedSeconds": waited(started),
+    }))
+}
+
+/// Whether the user is operating display `id`.
+fn takeover(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
 }
 
 /// Loosely typed request parameters from JSON.
