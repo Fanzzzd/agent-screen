@@ -1,5 +1,7 @@
 // Serves the static site, sends www.agentscreen.app to the apex and plain http to https,
 // and answers byte ranges for the films, which Safari needs to play MP4.
+// A /media/ URL with ?v= names one version of the file (scripts/version-media.mjs writes them), so browsers may keep it for a year.
+const VERSIONED = "public, max-age=31536000, immutable";
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -20,6 +22,7 @@ export default {
     if (full.status !== 200) return full;
     const headers = new Headers(full.headers);
     headers.set("accept-ranges", "bytes");
+    if (url.searchParams.has("v")) headers.set("cache-control", VERSIONED);
     if (!range || request.method === "HEAD") return new Response(full.body, { status: 200, headers });
     return byteRange(await full.arrayBuffer(), range, headers);
   },
