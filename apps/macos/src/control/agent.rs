@@ -1231,6 +1231,7 @@ async fn handle_one(
             add_strayed(&core, id, &mut result, cx);
             Ok(result)
         }
+        "waitForChange" => wait_for_change(&core, connection, &p, cx).await,
         "elementAction" => {
             let scope = read_scope(&p)?;
             let id = input_display(&core, &p, cx).await?;
@@ -6620,6 +6621,170 @@ async fn read_root(
         }
     }
     Ok(Some(ax::Sendable(element)))
+}
+
+/// wait_for_change: read one window's tree, off the main thread, about
+/// twice a second until a condition holds against the baseline, the window
+/// goes, the display ends, the connection closes or the time is up. The
+/// baseline is the tree the agent last got in this scope, which the MCP
+/// sends, or the first read. Reads work in a Takeover, as windowState's do.
+async fn wait_for_change(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    use agent_screen_model::watch;
+    let scope = read_scope(p)?;
+    let conditions = watch::Conditions::from_json(p.0.get("conditions").unwrap_or(&Value::Null))
+        .map_err(ControlError::invalid)?;
+    let timeout = watch::timeout(p.number("timeoutSeconds")).map_err(ControlError::invalid)?;
+    let id = display(core, p, true, cx)?;
+    let window = window_on(id, p, cx).await?;
+    let target = window.target;
+    let root = read_root(core, id, target, scope.root, cx).await?;
+    let area = cg::display_bounds(id);
+    let origin = (area.x, area.y);
+    let scale = display_scale(core, id, cx);
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // The agent's tree names numbers of this app run only if it read the
+    // window since the app started.
+    let numbered = core.read_with(cx, |c, _| c.elements.contains_key(&(id, target.window_id)));
+    let from_agent = numbered && p.string("baseline").is_some();
+    let mut baseline = p.string("baseline").filter(|_| numbered);
+    let mut last: Option<(String, usize)> = None;
+    let mut unanswered = 0;
+    let waited = |started: Instant| (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    let outcome = loop {
+        let (closed, ended, by_user) = core.read_with(cx, |c, _| {
+            let d = c.displays.get(id);
+            (
+                c.closed.contains(&connection),
+                d.is_none_or(|d| d.is_ended()),
+                c.displays.closed_by_user.contains(&id)
+                    || d.is_some_and(|d| d.ended == Some(EndReason::ClosedByUser)),
+            )
+        });
+        if closed {
+            return Err(ControlError::failed("the connection closed"));
+        }
+        if ended {
+            return Ok(json!({
+                "outcome": "displayEnded",
+                "closedByUser": by_user,
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let window_id = target.window_id;
+        // Off the display and on screen elsewhere, it left; off screen, it
+        // closed, or its app hid or minimized it, which keeps its id.
+        let (here, elsewhere) = off(cx, move || {
+            let here = windows::on_display(id)
+                .iter()
+                .any(|w| w.target.window_id == window_id);
+            (here, !here && cg::on_screen_ids().contains(&window_id))
+        })
+        .await;
+        if !here {
+            return Ok(json!({
+                "outcome": if elsewhere { "windowLeft" } else { "windowClosed" },
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let read_root = root.as_ref().map(|r| ax::Sendable(r.get().clone()));
+        let read_started = Instant::now();
+        let read = cx.background_executor().spawn(async move {
+            ax::snapshot(
+                target,
+                origin,
+                scale,
+                read_root.map(|r| r.0),
+                scope.max_depth,
+            )
+        });
+        // A read still running at the deadline is left to finish alone.
+        let timer = cx.background_executor().timer(remaining.max(watch::POLL));
+        let snapshot = futures::select! {
+            snapshot = FutureExt::fuse(read) => snapshot,
+            _ = FutureExt::fuse(timer) => break "timedOut",
+        };
+        let read_time = read_started.elapsed();
+        match snapshot {
+            Ok(snapshot) => {
+                let count = snapshot.elements.len();
+                let complete =
+                    scope.root.is_none() && !snapshot.truncated && !snapshot.depth_limited;
+                let tree = core.update(cx, |c, _| {
+                    let numbers = c.elements.entry((id, target.window_id)).or_default();
+                    numbers::relabel(
+                        &snapshot.tree,
+                        &numbers.refresh(snapshot.elements, complete),
+                    )
+                });
+                match &baseline {
+                    None => baseline = Some(tree.clone()),
+                    Some(before) => {
+                        let fired = watch::check(&conditions, before, &tree);
+                        if !fired.is_empty() {
+                            let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
+                            let matched: Vec<&String> =
+                                fired.iter().flat_map(|f| f.elements()).collect();
+                            return Ok(json!({
+                                "outcome": "fired",
+                                "fired": names,
+                                "matched": matched,
+                                "changes": agent_screen_model::tree::changes(before, &tree),
+                                "tree": tree,
+                                "elements": count,
+                                "baselineFromAgent": from_agent,
+                                "takeover": takeover(core, id, cx),
+                                "waitedSeconds": waited(started),
+                            }));
+                        }
+                    }
+                }
+                last = Some((tree, count));
+            }
+            Err(ax::SnapshotError::RootUnavailable) => {
+                return Ok(json!({ "outcome": "rootGone", "waitedSeconds": waited(started) }));
+            }
+            // Busy or not answering: try again at the next read.
+            Err(ax::SnapshotError::WindowUnavailable) => unanswered += 1,
+        }
+        if Instant::now() >= deadline {
+            break "timedOut";
+        }
+        let gap =
+            watch::poll_gap(read_time).min(deadline.saturating_duration_since(Instant::now()));
+        cx.background_executor().timer(gap).await;
+    };
+    let unmatched = baseline
+        .as_deref()
+        .zip(last.as_ref())
+        .and_then(|(before, (tree, _))| agent_screen_model::tree::changes(before, tree));
+    let missing = conditions
+        .disappears
+        .as_ref()
+        .zip(baseline.as_deref())
+        .is_some_and(|(m, before)| watch::count(m, before) == 0);
+    Ok(json!({
+        "outcome": outcome,
+        "changes": unmatched,
+        "tree": last.as_ref().map(|(tree, _)| tree),
+        "elements": last.as_ref().map(|(_, count)| count),
+        "unanswered": unanswered,
+        "disappearsAbsent": missing,
+        "baselineFromAgent": from_agent,
+        "takeover": takeover(core, id, cx),
+        "waitedSeconds": waited(started),
+    }))
+}
+
+/// Whether the user is operating display `id`.
+fn takeover(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
 }
 
 /// Loosely typed request parameters from JSON.

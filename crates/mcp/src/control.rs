@@ -97,6 +97,20 @@ impl Control {
             .insert((display, window, scope), tree)
     }
 
+    /// A window's latest tree in a scope, kept.
+    pub fn last_tree(
+        &self,
+        display: i64,
+        window: i64,
+        scope: agent_screen_model::tree::Scope,
+    ) -> Option<String> {
+        self.trees
+            .lock()
+            .unwrap()
+            .get(&(display, window, scope))
+            .cloned()
+    }
+
     /// Note a display this session made on the current connection.
     pub fn made_display(&self, id: u64) {
         let connection = self.connections.load(Ordering::Relaxed);

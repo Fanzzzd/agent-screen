@@ -22,6 +22,7 @@ const INSTRUCTIONS: &[&str] = &[
     "Agent Screen gives this session its own virtual display for operating GUI apps in the background.",
     "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
+    "To wait for a window to update after an action, call wait_for_change instead of sleeping and taking another screenshot.",
     "Mark each window with set_disposition so the user knows what to keep.",
     "If an action returns input_pending, use input_queue to inspect, wait or withdraw. Queue approval is not completion. Complete drags may use the user's pointer after they allow it; only completed means the drag ran.",
     "If the user takes over, tools fail with a takeover error: call wait_for_control, or request_control",
