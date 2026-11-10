@@ -1694,16 +1694,31 @@ async fn handle_one(
                             )
                         })?),
                     };
+                    // `phase`: "down" or "up" alone, else both; `repeat`:
+                    // the press is a held key's repeat.
+                    use objc2_app_kit::NSEventType;
+                    let kinds: &[NSEventType] = match p.string("phase").as_deref() {
+                        None => &[NSEventType::KeyDown, NSEventType::KeyUp],
+                        Some("down") => &[NSEventType::KeyDown],
+                        Some("up") => &[NSEventType::KeyUp],
+                        Some(_) => return Err(ControlError::failed("phase is down or up")),
+                    };
                     secrecy = Some(secrecy_name(viewer_input::secrecy()));
-                    viewer_input::inject_key(
-                        p.int("code").unwrap_or(0) as u16,
-                        p.int("shift").unwrap_or(0) == 1,
-                        p.int("command").unwrap_or(0) == 1,
-                        &p.string("characters").unwrap_or_default(),
-                        source,
-                        script,
-                    )
+                    let characters = p.string("characters").unwrap_or_default();
+                    let key = viewer_input::TestKey {
+                        code: p.int("code").unwrap_or(0) as u16,
+                        shift: p.int("shift").unwrap_or(0) == 1,
+                        command: p.int("command").unwrap_or(0) == 1,
+                        characters: &characters,
+                        repeat: p.int("repeat").unwrap_or(0) == 1,
+                    };
+                    viewer_input::inject_key(key, source, script, kinds)
                     .map(|route| routed = Some(route))
+                }
+                // Shift pressed (`down`: 1) or released.
+                Some("shift") => {
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
+                    viewer_input::inject_shift(p.int("down").unwrap_or(0) == 1, source)
                 }
                 // A press, a drag in steps and a release, as a hand on
                 // the trackpad makes them.
@@ -1743,7 +1758,7 @@ async fn handle_one(
                         kind == "commit",
                     )
                 }
-                _ => Err("kind is click, key, drag, mark or commit".into()),
+                _ => Err("kind is click, key, shift, drag, mark or commit".into()),
             }
             .map_err(ControlError::failed)?;
             // `secrecy`: what the key was routed by.

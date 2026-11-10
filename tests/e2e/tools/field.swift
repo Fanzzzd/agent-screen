@@ -2,18 +2,30 @@
 // marked text included, is written to $FIELD_OUT as "text\tmarked".
 // FIELD_CONTROLS=1 adds a password field and a view that takes keys but
 // holds no text, as a game does, under the text view, and appends
-// "\tpassword\tkeys" to the line. There, Tab in the text view moves to the
+// "\tpassword\tkeys\tdown" to the line: the key view's characters, with
+// Shift's press and release as "[S]" and "[s]", and the keycodes it has
+// down, comma-separated. There, Tab in the text view moves to the
 // password field 60 ms later, as Chrome's renderer moves its focus after
 // the key, and the file $FIELD_OUT.focus, once it exists, makes the
 // password field take the keyboard by itself, as a page's autofocus.
 import AppKit
 
-/// Takes the keyboard on a click and keeps the characters of its keys.
+/// Takes the keyboard on a click and keeps the characters of its keys,
+/// Shift's changes, and which keys are down.
 final class Keys: NSView {
   var typed = ""
+  var down = Set<UInt16>()
   override var acceptsFirstResponder: Bool { true }
   override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
-  override func keyDown(with event: NSEvent) { typed += event.characters ?? "" }
+  override func keyDown(with event: NSEvent) {
+    typed += event.characters ?? ""
+    down.insert(event.keyCode)
+  }
+  override func keyUp(with event: NSEvent) { down.remove(event.keyCode) }
+  override func flagsChanged(with event: NSEvent) {
+    guard event.keyCode == 56 || event.keyCode == 60 else { return }
+    typed += event.modifierFlags.contains(.shift) ? "[S]" : "[s]"
+  }
   override func draw(_ dirtyRect: NSRect) {
     NSColor.systemTeal.setFill()
     bounds.fill()
@@ -123,7 +135,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
       try? FileManager.default.removeItem(atPath: focus)
       window.makeFirstResponder(password)
     }
-    let extra = controls ? "\t\(password.stringValue)\t\(keys.typed)" : ""
+    let down = keys.down.sorted().map(String.init).joined(separator: ",")
+    let extra = controls ? "\t\(password.stringValue)\t\(keys.typed)\t\(down)" : ""
     try? "\(text.string)\t\(marked)\(extra)".write(toFile: out, atomically: true, encoding: .utf8)
   }
 }

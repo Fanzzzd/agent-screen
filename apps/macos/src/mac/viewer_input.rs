@@ -321,8 +321,10 @@ fn forget_downs(s: &mut State, dropped: &VecDeque<Held>) {
     for held in dropped {
         let code = held.event.keyCode();
         match held.event.r#type() {
+            // A repeat keeps the way its key's press went: a press sent
+            // as the key still gets its release.
             NSEventType::KeyDown => {
-                s.downs.insert(code, Down::Kept);
+                s.downs.entry(code).or_insert(Down::Kept);
             }
             NSEventType::KeyUp => {
                 if s.downs.remove(&code) == Some(Down::Raw)
@@ -352,20 +354,26 @@ fn release_all(s: &mut State) {
     let dropped = std::mem::take(&mut s.held);
     s.held_since = None;
     forget_downs(s, &dropped);
-    let downs = std::mem::take(&mut s.downs);
-    if let Some((display, forwarder)) = &s.display {
-        let bounds = cg::display_bounds(*display);
-        let mut sent = false;
-        for (code, down) in downs {
-            if down == Down::Raw {
-                forwarder.key(code, false, CGEventFlags(0), bounds);
+    // The keys stay down on the keyboard: their releases, when they come,
+    // go nowhere, as the next display's target never got the presses.
+    let shown = s.display.clone();
+    let mut sent = false;
+    for (code, down) in s.downs.iter_mut() {
+        if *down == Down::Raw {
+            if let Some((display, forwarder)) = &shown {
+                forwarder.key(*code, false, CGEventFlags(0), cg::display_bounds(*display));
                 sent = true;
             }
-        }
-        if sent || !dropped.is_empty() {
-            log::debug!("viewer: keys released on display {display} as the Viewer left it");
+            *down = Down::UpSent;
         }
     }
+    if let Some((display, _)) = &shown
+        && (sent || !dropped.is_empty())
+    {
+        log::debug!("viewer: keys released on display {display} as the Viewer left it");
+    }
+    // The next display's keys wait for its own lookup.
+    s.gave_up = false;
 }
 
 /// Held key events stay current across a new generation that drops no
@@ -724,16 +732,13 @@ fn send_text(text: &str) {
             native::send(Native::ScreenTouched { display });
             super::catch::agent_acted(display);
             forwarder.text(text.to_string(), cg::display_bounds(display));
-            // The app may move its focus on the text, as a search box that
-            // submits does. While a composition goes on, as Korean's next
-            // syllable, a look runs but the focus stays known: the next key
-            // neither waits nor lands outside the composition.
-            if MARKED.with(|m| m.borrow().is_some()) {
-                if source_now() == Source::InputMethod {
-                    forwarder.inspect(cg::display_bounds(display), false);
-                }
-            } else {
-                inspect_for_input_method(&forwarder, display);
+            // A look runs, as the app may move its focus by itself, but the
+            // focus stays known: text moves it no more than typing does,
+            // and the next word's first letter mustn't wait. A Return or
+            // Tab that follows as the key looks up the focus again itself,
+            // and a look that finds a password field drops a composition.
+            if source_now() == Source::InputMethod {
+                forwarder.inspect(cg::display_bounds(display), false);
             }
         }
         Ok(None) => log::debug!("viewer: composed text dropped, no display to send it to"),
@@ -974,14 +979,29 @@ pub fn inject_mouse(kind: NSEventType, x: f64, y: f64) -> Result<(), String> {
 /// what the input method does with the key. What the key came to: "raw"
 /// for the key itself, "text" for composed text, "inputMethod" for
 /// nothing yet, "held" for waiting on the focus lookup.
+/// A key a test types in the Viewer.
+pub struct TestKey<'a> {
+    pub code: u16,
+    pub shift: bool,
+    pub command: bool,
+    pub characters: &'a str,
+    /// A held key's repeat.
+    pub repeat: bool,
+}
+
 pub fn inject_key(
-    code: u16,
-    shift: bool,
-    command: bool,
-    characters: &str,
+    key: TestKey,
     source: Option<Source>,
     script: Option<Script>,
+    kinds: &[NSEventType],
 ) -> Result<&'static str, String> {
+    let TestKey {
+        code,
+        shift,
+        command,
+        characters,
+        repeat,
+    } = key;
     let window = STATE.with(|s| s.borrow().window);
     if window == 0 {
         return Err("no Viewer".into());
@@ -996,7 +1016,7 @@ pub fn inject_key(
     }
     let characters = objc2_foundation::NSString::from_str(characters);
     let mut routed = "raw";
-    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+    for &kind in kinds {
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
             kind,
             objc2_foundation::NSPoint::new(0.0, 0.0),
@@ -1006,7 +1026,7 @@ pub fn inject_key(
             None,
             &characters,
             &characters,
-            false,
+            repeat && kind == NSEventType::KeyDown,
             code,
         )
         .ok_or("no event")?;
@@ -1022,6 +1042,39 @@ pub fn inject_key(
         injected?;
     }
     Ok(routed)
+}
+
+/// Tests: Shift pressed (`down`) or released in the Viewer, with `source`
+/// standing in for the user's input source.
+pub fn inject_shift(down: bool, source: Option<Source>) -> Result<(), String> {
+    let window = STATE.with(|s| s.borrow().window);
+    if window == 0 {
+        return Err("no Viewer".into());
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    let flags = if down {
+        objc2_app_kit::NSEventModifierFlags::Shift
+    } else {
+        objc2_app_kit::NSEventModifierFlags::empty()
+    };
+    let none = objc2_foundation::NSString::from_str("");
+    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        NSEventType::FlagsChanged,
+        objc2_foundation::NSPoint::new(0.0, 0.0),
+        flags,
+        0.0,
+        window.windowNumber(),
+        None,
+        &none,
+        &none,
+        false,
+        56,
+    )
+    .ok_or("no event")?;
+    SOURCE.with(|s| s.set(source));
+    let injected = inject(&event);
+    SOURCE.with(|s| s.set(None));
+    injected
 }
 
 /// Tests: an input method's call on the Viewer's view, as the user's makes

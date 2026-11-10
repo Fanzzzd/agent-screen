@@ -56,6 +56,7 @@ struct Field {
     marked: String,
     password: String,
     keys: String,
+    down: String,
 }
 
 fn test(field: &std::path::Path) -> Result<()> {
@@ -73,6 +74,7 @@ fn test(field: &std::path::Path) -> Result<()> {
             marked: parts.next().unwrap_or_default(),
             password: parts.next().unwrap_or_default(),
             keys: parts.next().unwrap_or_default(),
+            down: parts.next().unwrap_or_default().trim().to_string(),
         }
     };
     // Field once it holds what is wanted, within 2 s; for text on its way.
@@ -320,12 +322,24 @@ fn test(field: &std::path::Path) -> Result<()> {
     );
     typed_key(4, "h", "inputMethod", "mark:h");
     let routed = typed_key(49, " ", "inputMethod", "insert:好");
+    // The next word's first letter, typed at once after the commit,
+    // composes without waiting: text moves no focus.
+    let started = std::time::Instant::now();
+    let next = typed_key(45, "n", "inputMethod", "mark:n");
+    let after_commit = started.elapsed().as_secs_f64() * 1000.0;
+    let next = format!("{next} by {}", routed_by.borrow());
     let now = until(&|f| *f == holds("你好abx好"));
     check(
         "the next composition sends only its own text",
         routed == "\"text\"" && now == holds("你好abx好"),
         format!("{routed} {now:?}"),
     );
+    check(
+        "the first letter typed at once after a commit composes without waiting",
+        next == "\"inputMethod\" by \"open\"" && marked().as_deref() == Some("n"),
+        format!("{next}: {:?}", marked()),
+    );
+    println!("     first letter after a commit: {next}, its reply in {after_commit:.1} ms");
     // Korean 2-Set: Return after a syllable commits it, then asks for its
     // command: Field gets the syllable, then Return as the key.
     typed_key(5, "g", "inputMethod", "mark:하");
@@ -410,6 +424,63 @@ fn test(field: &std::path::Path) -> Result<()> {
         read().text == "你好abx好한\nha",
         format!("{:?}", read()),
     );
+    // Return held down in the key view: its press goes as the key and may
+    // move the focus, so its repeat waits for the lookup. The user hands
+    // the display back on the agent's request at once: the repeat is
+    // dropped, and Return's release still reaches the key view, so it
+    // isn't left down. (A Command shortcut's key stays down there: AppKit
+    // sends no keyUp for one.)
+    let enter = |phase: &str, repeat: u8| {
+        input(
+            json!({ "kind": "key", "code": 36, "characters": "\r", "source": "inputMethod",
+                      "ime": "pass", "phase": phase, "repeat": repeat }),
+        )
+        .map_or_else(|e| e.to_string(), |r| r["route"].to_string())
+    };
+    control.call(
+        "requestControl",
+        json!({ "sessionKey": key, "displayId": id, "reason": "I'll finish the form." }),
+    )?;
+    sleep_ms(400);
+    let pressed = enter("down", 0);
+    let repeated = enter("down", 1);
+    control.call(
+        "debugShow",
+        json!({ "surface": "card-continue", "displayId": id }),
+    )?;
+    sleep_ms(600);
+    enter("up", 0);
+    let now = until(&|f| !f.down.split(',').any(|c| c == "36"));
+    check(
+        "a key whose repeat was dropped with the Takeover comes up in the target",
+        pressed == "\"raw\""
+            && repeated == "\"held\""
+            && !now.down.split(',').any(|c| c == "36")
+            && now.keys.matches('\r').count() == 1,
+        format!(
+            "{pressed} then {repeated}: down {:?}, keys {:?}",
+            now.down, now.keys
+        ),
+    );
+    // Shift right after a click into the key view waits with the keys, so
+    // the target gets Shift, the letter and Shift's release in order.
+    input(at(276.0))?;
+    let shift = |down: u8| {
+        input(json!({ "kind": "shift", "down": down, "source": "inputMethod" }))
+            .map_or_else(|e| e.to_string(), |r| r["secrecy"].to_string())
+    };
+    let pressed = shift(1);
+    input(
+        json!({ "kind": "key", "code": 0, "shift": 1, "characters": "A",
+                  "source": "inputMethod", "ime": "pass" }),
+    )?;
+    shift(0);
+    let now = until(&|f| f.keys.ends_with("[S]A[s]"));
+    check(
+        "Shift typed at once after a click waits with the letter and arrives in order",
+        pressed == "\"unknown\"" && now.keys.ends_with("[S]A[s]"),
+        format!("Shift by {pressed}: {:?}", now.keys),
+    );
     // Field moves its focus to the password field by itself while the
     // user composes: the composition is dropped, never committed, and the
     // letters typed for it reach the field as keys. Taking the keyboard
@@ -490,11 +561,13 @@ fn test(field: &std::path::Path) -> Result<()> {
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_f64).collect())
             .unwrap_or_default();
+        let in_order: Vec<String> = list.iter().map(|ms| format!("{ms:.0}")).collect();
         list.sort_by(f64::total_cmp);
         if let (Some(p50), Some(max)) = (list.get(list.len() / 2), list.last()) {
             println!(
-                "     {name}: {} times, p50 {p50:.1} ms, max {max:.1} ms",
-                list.len()
+                "     {name}: {} times, p50 {p50:.1} ms, max {max:.1} ms; in order: {}",
+                list.len(),
+                in_order.join(" ")
             );
         }
     }

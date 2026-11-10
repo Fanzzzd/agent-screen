@@ -356,6 +356,10 @@ struct Published {
     web: bool,
     at: std::time::Instant,
     ready: bool,
+    /// The app took the request. One busy at its first lookup is asked
+    /// again, at most once a second.
+    set: bool,
+    tried: std::time::Instant,
 }
 
 static PUBLISHED: std::sync::Mutex<Vec<(i32, Published)>> = std::sync::Mutex::new(Vec::new());
@@ -367,13 +371,28 @@ const WEB_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// process. Whether it is one.
 fn publish_once(pid: i32) -> bool {
     {
-        let published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, p)) = published.iter().find(|(p, _)| *p == pid) {
-            return p.web;
+        let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+            if p.set || !p.web || p.tried.elapsed() < std::time::Duration::from_secs(1) {
+                return p.web;
+            }
+            p.tried = std::time::Instant::now();
         }
     }
-    let web = publish_web_tree(pid);
+    let set = publish_web_tree(pid);
+    let now = std::time::Instant::now();
     let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+        // Asked again: its page tree comes up from now.
+        if set {
+            p.set = true;
+            p.at = now;
+        }
+        return p.web;
+    }
+    // Whether it is one comes from its bundle too: an app that times out
+    // or fails the first request is still asked again.
+    let web = set || super::app::bundle_of(pid).is_some_and(|b| chromium(&b));
     if published.len() >= 256 {
         published.remove(0);
     }
@@ -381,11 +400,21 @@ fn publish_once(pid: i32) -> bool {
         pid,
         Published {
             web,
-            at: std::time::Instant::now(),
+            at: now,
             ready: false,
+            set,
+            tried: now,
         },
     ));
     web
+}
+
+/// Whether a bundle is a Chromium browser or an Electron app.
+fn chromium(bundle: &std::path::Path) -> bool {
+    super::app::handles_web(bundle)
+        || bundle
+            .join("Contents/Frameworks/Electron Framework.framework")
+            .exists()
 }
 
 fn web_tree_ready(pid: i32) {
@@ -405,8 +434,8 @@ fn web_tree_pending(pid: i32) -> bool {
         .is_some_and(|(_, p)| p.web && !p.ready && p.at.elapsed() < WEB_TREE_WAIT)
 }
 
-/// Ask a Chromium or Electron app to publish its pages' elements. False
-/// when it isn't one.
+/// Ask a Chromium or Electron app to publish its pages' elements: whether
+/// it took the request.
 fn publish_web_tree(pid: i32) -> bool {
     let app = application(pid);
     set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
@@ -956,7 +985,9 @@ fn try_attribute(element: &AXUIElement, name: &str) -> Result<Option<CFRetained<
 /// Each call waits at most 100 ms for the app. Never on the main thread,
 /// where keys are handled: `MAIN_THREAD_LOOKUPS` counts any that is, for
 /// tests.
-pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
+/// What has the keyboard in `target`, its caret, the focused element as a
+/// hash, and the element's frame.
+pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>, Option<Rect>) {
     use std::hash::{Hash, Hasher};
     if unsafe { libc::pthread_main_np() } == 1 {
         MAIN_THREAD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -970,7 +1001,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         Ok(None) => None,
         Err(error) => {
             log::debug!("ax: {} gave no focused element: {error:?}", target.pid);
-            return (Focus::Unanswered, None, None);
+            return (Focus::Unanswered, None, None, None);
         }
     };
     let Some(element) = element else {
@@ -980,7 +1011,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         } else {
             Focus::Other
         };
-        return (focus, None, None);
+        return (focus, None, None, None);
     };
     let id = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -993,7 +1024,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         try_attribute(&element, "AXSubrole"),
     ) else {
         log::debug!("ax: {} gave no role for its focused element", target.pid);
-        return (Focus::Unanswered, None, None);
+        return (Focus::Unanswered, None, None, None);
     };
     let text = |v: Option<CFRetained<CFType>>| {
         v.and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
@@ -1010,6 +1041,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         value_settable: settable(&element, "AXValue"),
         selection: range.is_some(),
     });
+    let element_frame = frame(&element);
     let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
     if window != Some(target.window_id) {
         log::debug!(
@@ -1022,9 +1054,13 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
             _ if pending() => Focus::Unanswered,
             _ => Focus::Other,
         };
-        return (focus, None, id);
+        return (focus, None, id, element_frame);
     }
-    if web && matches!(focus, Focus::Text | Focus::Secure) {
+    // A field in the page shows its tree is up; the address bar doesn't.
+    if matches!(focus, Focus::Text | Focus::Secure)
+        && pending()
+        && in_web_area(&element) == Some(true)
+    {
         web_tree_ready(target.pid);
     }
     if focus != Focus::Text {
@@ -1037,9 +1073,9 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         } else {
             focus
         };
-        return (focus, None, id);
+        return (focus, None, id, element_frame);
     }
-    let caret = range.zip(frame(&element)).and_then(|(range, frame)| {
+    let caret = range.zip(element_frame).and_then(|(range, frame)| {
         let (location, length) = (range.location.max(0) as usize, range.length.max(0) as usize);
         let before = (length == 0 && location > 0)
             .then(|| bounds_for_range(&element, location - 1, 1))
@@ -1047,7 +1083,7 @@ pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>) {
         let selection = bounds_for_range(&element, location, length);
         caret_in(frame, location, length, before, selection)
     });
-    (focus, caret, id)
+    (focus, caret, id, element_frame)
 }
 
 fn range_value(value: &CFType) -> Option<objc2_core_foundation::CFRange> {

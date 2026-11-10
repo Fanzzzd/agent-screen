@@ -38,12 +38,20 @@ pub enum Focus {
 }
 
 /// What a lookup of the focus saw: the focus and the focused element, as
-/// a hash of its accessibility element.
+/// a hash of its accessibility element. After a click, `under_click` says
+/// whether the element's frame holds the click point; None after a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
     pub focus: Focus,
     pub element: Option<u64>,
+    pub under_click: Option<bool>,
 }
+
+/// How long after a click two agreeing looks away from the click settle
+/// the focus anyway, in milliseconds: a click on a button or blank space
+/// leaves the focus where it was. Before then, an app that moves its focus
+/// late still gets to. Under `HOLD_MS`, so keys held meanwhile compose.
+pub const SETTLE_AWAY_MS: u64 = 300;
 
 /// Whether a lookup after the focus may have moved tells where it is now.
 /// An app may move its focus some time after it handles the key or click,
@@ -52,11 +60,24 @@ pub struct Look {
 /// (`before`), or when it agrees with the look just before it
 /// (`previous`). A password field is no exception: a click from one into a
 /// text field first sees the password field still. Keys wait meanwhile,
-/// so nothing composes in one. An unanswered look never settles.
-pub fn settled(before: Option<u64>, previous: Option<Look>, now: Look) -> bool {
-    now.focus != Focus::Unanswered
-        && ((before.is_some() && now.element.is_some() && now.element != before)
-            || previous == Some(now))
+/// so nothing composes in one. After a click, agreeing looks at an element
+/// away from the click settle it only `SETTLE_AWAY_MS` after the click
+/// (`since_ms`): the app may not have moved its focus yet. An unanswered
+/// look never settles.
+pub fn settled(before: Option<u64>, previous: Option<Look>, now: Look, since_ms: u64) -> bool {
+    if now.focus == Focus::Unanswered {
+        return false;
+    }
+    let moved = before.is_some() && now.element.is_some() && now.element != before;
+    let agree =
+        previous == Some(now) && (now.under_click != Some(false) || since_ms >= SETTLE_AWAY_MS);
+    moved || agree
+}
+
+/// Whether an unanswered look, `since_ms` after the lookups for it began,
+/// is worth another: while held keys still wait for an answer.
+pub fn look_again_unanswered(since_ms: u64) -> bool {
+    since_ms < HOLD_MS
 }
 
 /// The focused element's accessibility, for `focus_of`.
@@ -454,23 +475,57 @@ mod tests {
 
     #[test]
     fn a_look_settles_the_focus_once_it_moved_or_two_agree() {
-        let look = |focus, element| Look { focus, element };
+        let look = |focus, element| Look {
+            focus,
+            element,
+            under_click: None,
+        };
         let field = look(Focus::Text, Some(1));
         // The field focused before the key: maybe the app hasn't moved on.
-        assert!(!settled(Some(1), None, field));
+        assert!(!settled(Some(1), None, field, 50));
         // A second look that agrees settles it.
-        assert!(settled(Some(1), Some(field), field));
+        assert!(settled(Some(1), Some(field), field, 100));
         // Another element: the focus moved.
-        assert!(settled(Some(1), None, look(Focus::Text, Some(2))));
+        assert!(settled(Some(1), None, look(Focus::Text, Some(2)), 50));
         // Nothing known before: two looks must agree.
-        assert!(!settled(None, None, look(Focus::Text, Some(2))));
+        assert!(!settled(None, None, look(Focus::Text, Some(2)), 50));
         // The password field focused before: maybe the app hasn't moved on
         // to the field clicked.
-        assert!(!settled(Some(1), None, look(Focus::Secure, Some(1))));
-        assert!(settled(Some(1), None, look(Focus::Secure, Some(2))));
+        assert!(!settled(Some(1), None, look(Focus::Secure, Some(1)), 50));
+        assert!(settled(Some(1), None, look(Focus::Secure, Some(2)), 50));
         // No answer never settles, even twice.
         let none = look(Focus::Unanswered, None);
-        assert!(!settled(Some(1), Some(none), none));
+        assert!(!settled(Some(1), Some(none), none, 1000));
+    }
+
+    #[test]
+    fn after_a_click_the_old_field_away_from_it_settles_only_late() {
+        let at = |under| Look {
+            focus: Focus::Text,
+            element: Some(1),
+            under_click: Some(under),
+        };
+        // The field clicked: two looks agree.
+        assert!(settled(Some(1), Some(at(true)), at(true), 140));
+        // A field away from the click: the app may move its focus later.
+        assert!(!settled(Some(1), Some(at(false)), at(false), 140));
+        assert!(!settled(
+            Some(1),
+            Some(at(false)),
+            at(false),
+            SETTLE_AWAY_MS - 1
+        ));
+        // A click that moved no focus, as on a button: settled in the end.
+        assert!(settled(Some(1), Some(at(false)), at(false), SETTLE_AWAY_MS));
+        // Settled before the keys give up, so they still compose.
+        const { assert!(SETTLE_AWAY_MS + 60 < HOLD_MS) };
+    }
+
+    #[test]
+    fn an_unanswered_look_looks_again_while_keys_wait() {
+        assert!(look_again_unanswered(0));
+        assert!(look_again_unanswered(HOLD_MS - 1));
+        assert!(!look_again_unanswered(HOLD_MS));
     }
 
     #[test]
