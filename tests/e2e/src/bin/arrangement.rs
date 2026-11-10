@@ -1,7 +1,8 @@
 //! New displays park in a compact grid off the top-right corner of the
-//! user's displays (`arrangement::plan`): the first touches them only at
-//! that corner, the next sits beside it while the row is no wider than the
-//! user's displays. The user's displays and other instances' don't move.
+//! rightmost user display (`arrangement::plan`): the first touches it only
+//! at that corner, the next sits beside it while the row is no wider than
+//! the user's displays. Neither shares an edge with a user display (#132,
+//! #155). The user's displays and other instances' don't move.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e arrangement
 //!
@@ -89,11 +90,23 @@ fn test() -> Result<()> {
         .copied()
         .filter(|d| d.vendor != 0x5353)
         .collect();
-    let (left, top) = users
-        .iter()
-        .fold((f64::MAX, f64::MAX), |(l, t), d| (l.min(d.x), t.min(d.y)));
+    let left = users.iter().map(|d| d.x).fold(f64::MAX, f64::min);
     let right = users.iter().map(|d| d.x + d.width).fold(f64::MIN, f64::max);
     let width = right - left;
+    // The rightmost display's top, the topmost one's when several end there.
+    let top = users
+        .iter()
+        .filter(|d| d.x + d.width == right)
+        .map(|d| d.y)
+        .fold(f64::MAX, f64::min);
+    // Touching along a segment of positive length, not just at a corner.
+    let shares_edge = |a: &Shown, b: &Shown| {
+        let overlap = |a0: f64, a1: f64, b0: f64, b1: f64| a1.min(b1) > a0.max(b0);
+        ((a.x == b.x + b.width || a.x + a.width == b.x)
+            && overlap(a.y, a.y + a.height, b.y, b.y + b.height))
+            || ((a.y == b.y + b.height || a.y + a.height == b.y)
+                && overlap(a.x, a.x + a.width, b.x, b.x + b.width))
+    };
 
     let a = Control::connect()?;
     let first = create(&a, "a")?;
@@ -110,13 +123,21 @@ fn test() -> Result<()> {
 
     for d in [one, two] {
         check(
-            &format!("display {} is above and right of the user's displays", d.id),
+            &format!(
+                "display {} is right of the user's displays, no lower than the rightmost's top",
+                d.id
+            ),
             d.y + d.height <= top && d.x >= right,
-            format!("{d:?}, user's displays span x {left}..{right} from y {top}"),
+            format!("{d:?}, user's displays span x {left}..{right}, rightmost top {top}"),
+        );
+        check(
+            &format!("display {} shares no edge with a user display", d.id),
+            users.iter().all(|u| !shares_edge(&d, u)),
+            format!("{d:?} {users:?}"),
         );
     }
     check(
-        "the first touches the user's displays' row only at the top-right corner",
+        "the first touches the rightmost user display only at its top-right corner",
         one.y + one.height == top,
         format!("{one:?}"),
     );
