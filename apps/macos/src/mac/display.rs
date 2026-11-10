@@ -460,11 +460,13 @@ fn park_owned(
 }
 
 /// Park Agent Screen's displays where `arrangement::plan` puts them: a
-/// compact grid off the top-right corner of the user's displays, out of
-/// the real cursor's way.
+/// compact grid off the top-right corner of the rightmost user display,
+/// out of the real cursor's way.
 ///
-/// True once display `id` sits there. A display WindowServer has only just
-/// added ignores the configuration, so callers try again.
+/// True once display `id` sits somewhere `arrangement::out_of_the_way`
+/// accepts, the plan or wherever macOS attached it instead. A display
+/// WindowServer has only just added ignores the configuration, so callers
+/// try again.
 pub fn tuck_away(id: u32, virtual_ids: &[u32]) -> bool {
     if knob("AGENTSCREEN_NO_PARK").is_some() {
         return true;
@@ -534,7 +536,7 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
     });
     !parking_refused()
         && restored
-        && arrangement::at_planned_origin(id, &self::screens(&after, virtual_ids, &[]))
+        && arrangement::parked_safely(id, &self::screens(&after, virtual_ids, &[]))
 }
 
 /// Exercise an unverified parking result without leaving a test display
@@ -573,9 +575,9 @@ fn screens(
         .collect()
 }
 
-/// Whether display `id` is still out of the cursor's way, above and right
-/// of the user's displays. The user may have dragged it elsewhere in System
-/// Settings.
+/// Whether display `id` is still out of the cursor's way, right of the
+/// user's displays and touching them at most at a corner. The user may have
+/// dragged it elsewhere in System Settings.
 pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
     if parking_refused() {
         return false;
@@ -588,10 +590,7 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
     if !online.contains(&id) || !virtual_ids.contains(&id) {
         return false;
     }
-    let Some(user) = arrangement::user_bounds(&screens(&online, virtual_ids, &[])) else {
-        return false;
-    };
-    arrangement::out_of_the_way(&cg::display_bounds(id), &user)
+    arrangement::out_of_the_way(&cg::display_bounds(id), &screens(&online, virtual_ids, &[]))
 }
 
 /// A setting a test build takes from the environment, to measure what a
