@@ -17,11 +17,12 @@
 <meta property="og:image" content="https://agentscreen.app/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Agent Screen: agent displays working around your own screen.">
+<meta property="og:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Agent Screen: give each AI agent its own Mac screen">
 <meta name="twitter:description" content="Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.">
 <meta name="twitter:image" content="https://agentscreen.app/og.png">
+<meta name="twitter:image:alt" content="Agent Screen: Agent Displays working around your own screen.">
 
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
@@ -51,9 +52,11 @@
         </div>
       </div>
       <a class="gh" aria-label="GitHub" href="https://github.com/Fanzzzd/agent-screen"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+      <button class="motion" type="button" aria-label="Pause films" title="Pause films" hidden><svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="1"/><rect x="9.5" y="2.5" width="3" height="11" rx="1"/></svg><svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.9v10.2a.8.8 0 0 0 1.2.7l8-5.1a.8.8 0 0 0 0-1.4l-8-5.1a.8.8 0 0 0-1.2.7z"/></svg></button>
     </nav>
   </div>
 </header>
+
 
 <main>
   <section class="hero">
@@ -62,9 +65,7 @@
       <p class="lede">Claude Code or Codex opens apps, clicks and types on a virtual display, while your cursor, keyboard and windows stay yours.</p>
       <div class="code hero-code">
         <div class="code-bar"><span>Install with Homebrew</span><button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button></div>
-        <pre><code>brew tap fanzzzd/agent-screen
-brew trust fanzzzd/agent-screen
-brew install --cask agent-screen</code></pre>
+        <pre class="cmds"><code><span class="ln">brew tap <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew trust <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew install <span class="arg">--cask</span> <span class="arg">agent-screen</span></span></code></pre>
       </div>
       <div class="actions">
         <a class="button primary" href="https://github.com/Fanzzzd/agent-screen/releases/latest">Download the DMG</a>
@@ -119,17 +120,17 @@ brew install --cask agent-screen</code></pre>
     <div class="feature">
       <div class="f-text">
         <p class="tag">Peek</p>
-        <h2>Every agent's screen, one hover away.</h2>
-        <p>Hover the menu bar icon to see every agent's screen live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
+        <h2>Every Agent Display, one hover away.</h2>
+        <p>Hover the menu bar icon to see every Agent Display live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-poster-m="/media/peek-m.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live agent screens. One grows into the Viewer, where Claude Code fills a checkout form."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.jpg" data-poster-m="/media/peek-m.jpg" data-src="/media/peek.mp4" data-src-m="/media/peek-m.mp4" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live Agent Displays. One grows into the Viewer, where Claude Code fills a checkout form."></video>
     </div>
 
     <div class="feature flip">
       <div class="f-text">
         <p class="tag help">Help Request and Takeover</p>
         <h2>It asks when it's stuck. You take the wheel.</h2>
-        <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it, and Let … Continue hands the screen back.</p>
+        <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Take Over pauses it. To hand the display back, press Let … Continue or tell the agent to continue in the conversation.</p>
       </div>
       <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.jpg" data-src="/media/help.mp4" aria-label="A card drops: Claude Code needs your help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the agent clicks Sign in."></video>
     </div>
@@ -138,7 +139,7 @@ brew install --cask agent-screen</code></pre>
       <div class="f-text">
         <p class="tag you">Handover</p>
         <h2>Hand a window over. Take it back.</h2>
-        <p>Drag one of your windows onto an agent's screen to give it the window, and take it back with Take Back. A handed-over window returns to where it was.</p>
+        <p>Drag one of your windows onto the Viewer, or tell the agent to take it in the conversation. Press Take Back or ask the agent to return it, and the window goes back to where it was. An agent can also ask for a window; you answer Hand Over or Keep.</p>
       </div>
       <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/handover.jpg" data-poster-m="/media/handover-m.jpg" data-src="/media/handover.mp4" data-src-m="/media/handover-m.mp4" aria-label="The user drags a Chrome checkout window onto the Viewer. Claude Code fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
     </div>
@@ -147,11 +148,12 @@ brew install --cask agent-screen</code></pre>
   <section class="fleet">
     <div class="fleet-head">
       <h2>One display per agent session.</h2>
-      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows never move. With many displays, turn on Smooth Display Changes in Settings.</p>
+      <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. Your windows stay put unless you give them to an agent. With many displays, turn on Smooth Display Changes in Settings.</p>
     </div>
-    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve agent displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.jpg" data-poster-m="/media/fleet-m.jpg" data-src="/media/fleet.mp4" data-src-m="/media/fleet-m.mp4" aria-label="Twelve Agent Displays work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
-      <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes.</p></li>
+      <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. They choose an item in a standard Mac pop-up, or in a select on a page in a browser they started, without opening its menu. They step sliders that support it without dragging.</p></li>
+      <li><h3>Input Queue</h3><p>When background input can't do a web drag or a click, the agent asks to use your pointer. A card shows what it wants to do, and nothing runs until you press Allow. Move the mouse, press a key or press Stop to take your pointer back.</p></li>
       <li><h3>Agent Pointer</h3><p>The Viewer and Peek draw an arrow where the agent last acted. Agent screenshots don't contain it.</p></li>
       <li><h3>Recording</h3><p>An agent can record its display to an MP4, with the sound of its apps and a timeline of its actions and your Takeovers.</p></li>
     </ul>
@@ -165,12 +167,11 @@ brew install --cask agent-screen</code></pre>
         <p>It needs macOS 15 or later.</p>
         <div class="code">
           <div class="code-bar"><span>Terminal</span><button class="copy" type="button" data-copy="brew tap fanzzzd/agent-screen&#10;brew trust fanzzzd/agent-screen&#10;brew install --cask agent-screen">Copy</button></div>
-          <pre><code>brew tap fanzzzd/agent-screen
-brew trust fanzzzd/agent-screen
-brew install --cask agent-screen</code></pre>
+          <pre class="cmds"><code><span class="ln">brew tap <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew trust <span class="arg">fanzzzd/agent-screen</span></span><span class="ln">brew install <span class="arg">--cask</span> <span class="arg">agent-screen</span></span></code></pre>
         </div>
         <p>Homebrew loads casks from a tap outside its own only once you trust it, which <code>brew trust</code> does.</p>
         <p>Or <a href="https://github.com/Fanzzzd/agent-screen/releases/latest">download the DMG from the latest release</a> and drag Agent Screen into Applications. Agent Screen is signed with a Developer ID and notarized by Apple, so it opens like any downloaded app.</p>
+        <p>Agent Screen updates itself. It downloads new versions in the background and installs them once no Agent Display is open, so an update never ends an agent's work.</p>
       </li>
       <li>
         <h3>Open Agent Screen</h3>
@@ -204,6 +205,7 @@ brew install --cask agent-screen</code></pre>
         <li>It uses private macOS APIs, so it can't be in the App Store, and a future macOS may break it.</li>
         <li>Copy, paste and undo shortcuts do nothing in an app on an agent's display. Agents copy and paste through the accessibility tree instead.</li>
         <li>Canvas apps and games that filter per-process events may ignore forwarded input.</li>
+        <li>A web drag with no background route waits in the Input Queue for your answer. Allow lets it use your pointer; Not Now declines it.</li>
       </ul>
       <p><a href="https://github.com/Fanzzzd/agent-screen#known-limits">The README lists every known limit.</a></p>
     </div>
@@ -230,11 +232,18 @@ brew install --cask agent-screen</code></pre>
   </div>
 </footer>
 
+<p class="sr-only" id="copy-status" aria-live="polite"></p>
+
 <script>
   // Films load as they come near the viewport; phones get their own cut where there is one.
   const small = matchMedia('(max-width: 600px)').matches;
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const pick = (v) => (small && v.dataset.srcM ? v.dataset.srcM : v.dataset.src);
+  // One button pauses and plays every looping film, the Peek tiles included.
+  // A refused play() (iOS Low Power Mode, for one) shows as paused, so the button tells the truth.
+  let paused = false;
+  const inView = new Set();
+  const start = (v) => v.play().catch((err) => { if (err.name === 'NotAllowedError') setPaused(true); });
   const near = new IntersectionObserver((entries) => {
     for (const e of entries) if (e.isIntersecting && !e.target.poster) e.target.poster = small && e.target.dataset.posterM ? e.target.dataset.posterM : e.target.dataset.poster;
   }, { rootMargin: '900px' });
@@ -242,9 +251,10 @@ brew install --cask agent-screen</code></pre>
     for (const e of entries) {
       const v = e.target;
       if (e.isIntersecting) {
+        inView.add(v);
         if (!v.src) v.src = pick(v);
-        if (!still) v.play().catch(() => {});
-      } else v.pause();
+        if (!paused) start(v);
+      } else { inView.delete(v); v.pause(); }
     }
   }, { rootMargin: '200px' });
   document.querySelectorAll('main video[data-src]').forEach((v) => {
@@ -260,22 +270,22 @@ brew install --cask agent-screen</code></pre>
   const show = (on) => {
     wrap.classList.toggle('open', on);
     btn.setAttribute('aria-expanded', on);
-    tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still) v.play().catch(() => {}); } else v.pause(); });
+    tiles.forEach((v) => { if (on) { if (!v.src) v.src = v.dataset.src; if (!still && !paused) start(v); } else v.pause(); });
   };
   let pinned = false;
   let hover = 0;
   const set = (on) => { clearTimeout(hover); pinned = on; show(on); };
-  // Like the app: a mouse shows Peek after 120 ms on the icon and hides it 280 ms after leaving.
+  // Like the app: a mouse shows Peek after 300 ms on the icon and hides it 500 ms after leaving.
   // Touch taps send pointer events too; only a mouse hovers.
   wrap.addEventListener('pointerenter', (e) => {
     if (e.pointerType !== 'mouse') return;
     clearTimeout(hover);
-    if (!wrap.classList.contains('open')) hover = setTimeout(() => show(true), 120);
+    if (!wrap.classList.contains('open')) hover = setTimeout(() => show(true), 300);
   });
   wrap.addEventListener('pointerleave', (e) => {
     if (e.pointerType !== 'mouse') return;
     clearTimeout(hover);
-    if (!pinned) hover = setTimeout(() => show(false), 280);
+    if (!pinned) hover = setTimeout(() => show(false), 500);
   });
   // A click hides Peek whenever it shows, however it opened, and keeps it up otherwise.
   btn.addEventListener('click', () => set(!wrap.classList.contains('open')));
@@ -285,11 +295,43 @@ brew install --cask agent-screen</code></pre>
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false); });
   document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) set(false); });
 
+  // With reduced motion the films have their own controls and nothing loops by itself.
+  const motion = document.querySelector('.motion');
+  function setPaused(on) {
+    paused = on;
+    const label = on ? 'Play films' : 'Pause films';
+    motion.setAttribute('aria-label', label);
+    motion.title = label;
+    motion.classList.toggle('paused', on);
+    // Stops the Peek dot's pulse too.
+    document.documentElement.classList.toggle('films-paused', on);
+    const looping = [...inView, ...(wrap.classList.contains('open') ? tiles : [])];
+    for (const v of looping) if (on) v.pause(); else start(v);
+  }
+  if (!still) {
+    motion.hidden = false;
+    motion.addEventListener('click', () => setPaused(!paused));
+  }
+
+  // When the clipboard refuses, the command is selected and the button says how to copy it.
+  // Screen readers hear the result from a separate live region.
+  const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform) && navigator.maxTouchPoints < 2;
+  const status = document.getElementById('copy-status');
+  const announce = (text) => { status.textContent = ''; setTimeout(() => (status.textContent = text), 50); };
   for (const b of document.querySelectorAll('.copy')) {
+    let reset = 0;
     b.addEventListener('click', async () => {
-      await navigator.clipboard.writeText(b.dataset.copy);
-      b.textContent = 'Copied';
-      setTimeout(() => (b.textContent = 'Copy'), 1600);
+      clearTimeout(reset);
+      try {
+        await navigator.clipboard.writeText(b.dataset.copy);
+        b.textContent = 'Copied';
+        announce('Copied to the clipboard.');
+      } catch {
+        getSelection().selectAllChildren(b.closest('.code').querySelector('pre'));
+        b.textContent = mac ? 'Press ⌘C to copy' : 'Select and copy';
+        announce(mac ? "Couldn't copy. The command is selected; press Command-C." : "Couldn't copy. The command is selected; copy it from there.");
+      }
+      reset = setTimeout(() => (b.textContent = 'Copy'), 2400);
     });
   }
 </script>
