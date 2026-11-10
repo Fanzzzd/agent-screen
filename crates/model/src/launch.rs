@@ -5,6 +5,8 @@
 //! parent of every app LaunchServices starts, with exactly the arguments
 //! asked for.
 
+use std::path::{Path, PathBuf};
+
 use crate::model::Rect;
 
 /// launchd's pid, the parent of an app `open` started.
@@ -47,9 +49,208 @@ pub fn browser_window_switches(display: Rect) -> Vec<String> {
     ]
 }
 
+/// What `launch_app` asks macOS while it finds the app an agent named.
+pub trait AppLookup {
+    /// The app LaunchServices has for a bundle id.
+    fn by_bundle_id(&self, id: &str) -> Option<PathBuf>;
+    /// The app bundle at `path`, spelled as on disk: the file system
+    /// ignores case, and "finder" should name Finder.app.
+    fn bundle_at(&self, path: &Path) -> Option<PathBuf>;
+    /// The app LaunchServices finds by name, wherever it is installed.
+    fn by_name(&self, name: &str) -> Option<PathBuf>;
+}
+
+/// The folders searched for `<name>.app` before LaunchServices is asked by
+/// name, in order. LaunchServices reports some apps at a path other than the
+/// one the user knows, as Safari in its cryptex, so the familiar folders
+/// come first.
+pub fn app_folders(home: &str) -> Vec<PathBuf> {
+    [
+        "/Applications",
+        "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        "/System/Library/CoreServices",
+        "/System/Library/CoreServices/Applications",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .chain([Path::new(home).join("Applications")])
+    .collect()
+}
+
+/// The app bundle `launch_app` opens for `app`: an .app path (absolute or
+/// from `~/`), a bundle id, or a name, with or without `.app`, found in
+/// [`app_folders`] or by LaunchServices. Finder lives in
+/// /System/Library/CoreServices, which the folders used to leave out
+/// (#168).
+pub fn find_app(app: &str, home: &str, lookup: &impl AppLookup) -> Option<PathBuf> {
+    let app = app.trim();
+    if app.is_empty() {
+        return None;
+    }
+    let by_path = match app.strip_prefix("~/") {
+        Some(rest) => Some(Path::new(home).join(rest)),
+        None => app.starts_with('/').then(|| PathBuf::from(app)),
+    };
+    if let Some(path) = by_path {
+        return lookup.bundle_at(&path);
+    }
+    if let Some(path) = lookup.by_bundle_id(app) {
+        return Some(path);
+    }
+    let name = app.strip_suffix(".app").unwrap_or(app);
+    // A name with a slash isn't a name; Path::join would read it as a path.
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let bundle = format!("{name}.app");
+    app_folders(home)
+        .into_iter()
+        .find_map(|folder| lookup.bundle_at(&folder.join(&bundle)))
+        .or_else(|| lookup.by_name(name))
+}
+
+/// A file URL for an absolute path, as a browser takes it in its address
+/// field: everything but unreserved characters and `/` percent-encoded.
+pub fn file_url(path: &str) -> String {
+    let mut url = String::from("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Mac with these app bundles, and these in LaunchServices.
+    struct Mac {
+        bundles: Vec<&'static str>,
+        ids: Vec<(&'static str, &'static str)>,
+        names: Vec<(&'static str, &'static str)>,
+    }
+
+    impl AppLookup for Mac {
+        fn by_bundle_id(&self, id: &str) -> Option<PathBuf> {
+            self.ids
+                .iter()
+                .find(|(i, _)| i.eq_ignore_ascii_case(id))
+                .map(|(_, p)| PathBuf::from(p))
+        }
+        fn bundle_at(&self, path: &Path) -> Option<PathBuf> {
+            self.bundles
+                .iter()
+                .find(|b| {
+                    Path::new(b)
+                        .as_os_str()
+                        .eq_ignore_ascii_case(path.as_os_str())
+                })
+                .map(PathBuf::from)
+        }
+        fn by_name(&self, name: &str) -> Option<PathBuf> {
+            self.names
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, p)| PathBuf::from(p))
+        }
+    }
+
+    const FINDER: &str = "/System/Library/CoreServices/Finder.app";
+    const SAFARI: &str = "/Applications/Safari.app";
+    const CRYPTEX_SAFARI: &str =
+        "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app";
+
+    fn mac() -> Mac {
+        Mac {
+            bundles: vec![
+                FINDER,
+                SAFARI,
+                CRYPTEX_SAFARI,
+                "/System/Library/CoreServices/Applications/Archive Utility.app",
+                "/Users/me/Applications/Tool.app",
+                "/tmp/build/MyApp.app",
+                "/Volumes/Work/Odd.app",
+            ],
+            ids: vec![("com.apple.finder", FINDER), ("com.apple.Safari", SAFARI)],
+            names: vec![
+                ("Finder", FINDER),
+                ("Safari", CRYPTEX_SAFARI),
+                ("Odd", "/Volumes/Work/Odd.app"),
+            ],
+        }
+    }
+
+    fn find(app: &str) -> Option<PathBuf> {
+        find_app(app, "/Users/me", &mac())
+    }
+
+    #[test]
+    fn finder_is_found_by_its_name() {
+        for name in ["Finder", "finder", "Finder.app", " Finder "] {
+            assert_eq!(find(name), Some(PathBuf::from(FINDER)), "{name}");
+        }
+        assert_eq!(find("com.apple.finder"), Some(PathBuf::from(FINDER)));
+    }
+
+    #[test]
+    fn core_services_apps_are_found_by_name() {
+        assert_eq!(
+            find("Archive Utility"),
+            Some(PathBuf::from(
+                "/System/Library/CoreServices/Applications/Archive Utility.app"
+            ))
+        );
+    }
+
+    #[test]
+    fn the_applications_folders_come_before_launch_services() {
+        assert_eq!(find("Safari"), Some(PathBuf::from(SAFARI)));
+        assert_eq!(
+            find("Tool"),
+            Some(PathBuf::from("/Users/me/Applications/Tool.app"))
+        );
+    }
+
+    #[test]
+    fn launch_services_finds_an_app_outside_the_folders() {
+        assert_eq!(find("Odd"), Some(PathBuf::from("/Volumes/Work/Odd.app")));
+    }
+
+    #[test]
+    fn a_path_is_only_that_path() {
+        assert_eq!(
+            find("/tmp/build/MyApp.app"),
+            Some(PathBuf::from("/tmp/build/MyApp.app"))
+        );
+        assert_eq!(
+            find("~/Applications/Tool.app"),
+            Some(PathBuf::from("/Users/me/Applications/Tool.app"))
+        );
+        assert_eq!(find("/tmp/build/Finder.app"), None);
+    }
+
+    #[test]
+    fn nothing_else_matches() {
+        for app in ["", "  ", ".app", "NoSuchApp", "Work/Odd", "../Finder"] {
+            assert_eq!(find(app), None, "{app:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_path_becomes_a_file_url() {
+        assert_eq!(file_url("/tmp/page.html"), "file:///tmp/page.html");
+        assert_eq!(
+            file_url("/tmp/my page#1?.html"),
+            "file:///tmp/my%20page%231%3F.html"
+        );
+        assert_eq!(file_url("/tmp/页.html"), "file:///tmp/%E9%A1%B5.html");
+    }
 
     #[test]
     fn a_browser_opens_inside_the_display() {

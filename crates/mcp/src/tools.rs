@@ -431,7 +431,7 @@ pub fn definitions() -> Vec<Value> {
             "launch_app",
             "Launch an app on the display",
             &[
-                "Open an app in the background and put its new window on the display. If the app is already running, Agent Screen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is.",
+                "Open an app in the background and put its new window on the display. If the app is already running, Agent Screen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is. A browser opens a file in a new window, as a URL.",
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
                 "the app starts with them, as a development build needs, and its windows go on the display.",
                 "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
@@ -441,7 +441,7 @@ pub fn definitions() -> Vec<Value> {
             object(
                 json!({
                     "display_id": display_id(),
-                    "app": { "type": "string", "description": "App name (\"Safari\"), bundle id (\"com.apple.Safari\") or the absolute path of an .app bundle (\"/tmp/build/MyApp.app\")." },
+                    "app": { "type": "string", "description": "App name (\"Safari\", \"Finder\"), bundle id (\"com.apple.Safari\") or the absolute path of an .app bundle (\"/tmp/build/MyApp.app\")." },
                     "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." },
                     "arguments": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments for a new instance of the app, passed as given." },
                     "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables for a new instance of the app." }

@@ -144,10 +144,15 @@ fn input_gate(element: &AXUIElement) -> std::sync::Arc<std::sync::RwLock<()>> {
 }
 
 pub fn set_attribute(element: &AXUIElement, name: &str, value: &CFType) -> bool {
+    set_attribute_answer(element, name, value) == AXError::Success
+}
+
+/// Set an attribute and return the app's answer.
+fn set_attribute_answer(element: &AXUIElement, name: &str, value: &CFType) -> AXError {
     let gate = input_gate(element);
     let _input = gate.read().unwrap_or_else(|e| e.into_inner());
     let name = CFString::from_str(name);
-    unsafe { element.set_attribute_value(&name, value) == AXError::Success }
+    unsafe { element.set_attribute_value(&name, value) }
 }
 
 pub fn perform(element: &AXUIElement, action: &str) -> bool {
@@ -1334,21 +1339,39 @@ pub fn set_frame_holding_gate(window: &AXUIElement, frame: Rect) -> bool {
 /// Give a window the frame an agent asked for. Position, size, then
 /// position again: an app that keeps its windows on one screen clamps a
 /// size against where the window was, and the second move puts it where
-/// asked once it has its new size.
+/// asked once it has its new size. Every write is made whatever the app
+/// answers to the one before: Chromium answers with an error and takes the
+/// frame anyway (#167). An error means some write was refused, and only the
+/// frame the window has after says what happened.
 pub fn set_frame_asked(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
-    with_moves_direct(&window, || {
-        if !set_position(&window, frame.x, frame.y) {
-            return Err(MoveError::Rejected);
-        }
-        let sized = set_size(&window, frame.width, frame.height);
-        set_position(&window, frame.x, frame.y);
-        if sized {
-            Ok(())
-        } else {
-            Err(MoveError::Rejected)
-        }
-    })
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| match value {
+        Some(value) => set_attribute_answer(&window, name, &value),
+        None => AXError::IllegalArgument,
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let answers = with_moves_direct(&window, || {
+        [
+            write("AXPosition", at()),
+            write(
+                "AXSize",
+                ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+            ),
+            write("AXPosition", at()),
+        ]
+    });
+    if answers.iter().all(|a| *a == AXError::Success) {
+        Ok(())
+    } else {
+        log::info!(
+            "window {}: setting its frame, the app answered AXPosition {}, AXSize {}, AXPosition {}",
+            target.window_id,
+            answers[0].0,
+            answers[1].0,
+            answers[2].0
+        );
+        Err(MoveError::Rejected)
+    }
 }
 
 /// Press the window's close button. The app may still keep it open, for

@@ -2,7 +2,9 @@
 //! the app ended with (#45). An agent checking a responsive layout resized
 //! its window with System Events instead, and its display-relative
 //! position put the window on the user's screen. Field holds to a 500×200
-//! minimum here, as many apps do.
+//! minimum here, as many apps do. A Field that holds its main thread after
+//! each resize answers the size write with an error and takes it anyway, as
+//! Dia did (#167).
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e placesize
 //!
@@ -118,6 +120,32 @@ fn test(field: &str) -> Result<()> {
         "a frame past the display's edge stays inside it",
         got.is_some_and(|[x, _, w, _]| x >= 0.0 && x + w <= 1281.0 && w >= 1200.0),
         wide.text(),
+    );
+
+    // An app too busy to answer the size write within Accessibility's
+    // timeout, which takes the size all the same, as Dia did (#167): the
+    // frame it took comes back, not "the app rejected the change".
+    kill_ours(our_binary("Field"));
+    sleep_ms(300);
+    client.call(
+        "launch_app",
+        json!({ "display_id": id, "app": field, "environment": { "FIELD_SLOW_RESIZE_MS": "1500" } }),
+    )?;
+    // Past the hold of any resize the window had as it opened.
+    sleep_ms(2500);
+    let slow = listed(&client)?.context("no slow Field window on the display")?;
+    let busy = client.call(
+        "place_window",
+        json!({ "display_id": id, "window_id": slow.window_id, "x": 60, "y": 90, "width": 700, "height": 400 }),
+    )?;
+    let got = frame(&busy);
+    check(
+        "a size write the app answers late with an error but takes succeeds",
+        !busy.is_error
+            && got.is_some_and(|[x, y, w, h]| {
+                near(x, 60.0) && near(y, 90.0) && near(w, 700.0) && near(h, 400.0)
+            }),
+        busy.text(),
     );
 
     client.call("end_display", json!({ "display_id": id }))?;

@@ -3437,10 +3437,17 @@ async fn frame_window(
         let now = || windows::find(target.window_id).map(|w| w.bounds);
         let closed = || "the window closed".to_string();
         let mut bounds = now().ok_or_else(closed)?;
+        let before = bounds;
+        // The frame written, when the app answered the write with an error.
+        let mut refused = None;
         let constrained = apply_frame_request(asked, bounds, area, scale, reserved_top, |frame| {
             windows::write_frame_unless_returned(target.window_id, seen, || {
-                ax::set_frame_asked(target, frame)
-                    .map_err(|e| format!("could not set the window's frame: {e}"))
+                match ax::set_frame_asked(target, frame) {
+                    Err(ax::MoveError::Rejected) => refused = Some(frame),
+                    Err(e) => return Err(format!("could not set the window's frame: {e}")),
+                    Ok(()) => {}
+                }
+                Ok(())
             })
         })?;
         if !asked.is_empty() {
@@ -3456,6 +3463,22 @@ async fn frame_window(
                 last = Some(read);
             }
             bounds = last.unwrap_or(bounds);
+        }
+        // An error from the app says only that some write failed: the frame
+        // the window settled at says what it did (#167).
+        if let Some(frame) = refused {
+            let write = agent_screen_model::placement::frame_write(before, frame, bounds);
+            log::info!(
+                "window {}: the app answered a frame write with an error; {write:?}, at {bounds:?} for {frame:?}",
+                target.window_id
+            );
+            if write == agent_screen_model::placement::FrameWrite::Unchanged {
+                let kept = frame_in_shot(bounds, area, scale);
+                return Err(format!(
+                    "could not set the window's frame: the app rejected the change, and the window kept its frame x {}, y {}, width {}, height {}",
+                    kept.x, kept.y, kept.width, kept.height
+                ));
+            }
         }
         Ok::<_, String>((frame_in_shot(bounds, area, scale), constrained))
     })
@@ -4083,8 +4106,10 @@ async fn launch(
         ))
     })?;
     // A plain file URL is its file, except for a browser, which opens it as
-    // a page: then the URL route gives it a window of its own first.
-    let browser = match target.filter(|t| t.starts_with("file://")) {
+    // a page: then the URL route gives it a window of its own first. So
+    // does a file path: a running browser opens one as a tab of its front
+    // window, which may be the user's, and makes no window (#168).
+    let browser = match target.filter(|t| t.starts_with("file://") || t.starts_with('/')) {
         Some(_) => {
             let path = path.clone();
             cx.background_executor()
@@ -4826,10 +4851,14 @@ async fn already_running(
     }
 }
 
-/// What to open for a `file://` target: its path, unless the app is a
-/// browser, which opens it as a page in a window of its own. The file must
-/// exist either way.
+/// What a launch opens in place of `target`, if anything: a file URL's file
+/// for an app that isn't a browser, and a file path's URL for a browser,
+/// which opens either as a page. A file URL's file must exist; open_target
+/// checked a path's.
 fn file_target(target: Option<&str>, browser: bool) -> Result<Option<String>, ControlError> {
+    if let Some(path) = target.filter(|t| browser && t.starts_with('/')) {
+        return Ok(Some(agent_screen_model::launch::file_url(path)));
+    }
     let Some(url) = target.filter(|t| t.starts_with("file://")) else {
         return Ok(None);
     };
@@ -6624,8 +6653,16 @@ mod launch_tests {
             file_target(Some(&format!("{url}?q=1")), false).unwrap(),
             path
         );
-        // A browser keeps the URL.
+        // A browser keeps the URL, and gets one for a path (#168).
         assert_eq!(file_target(Some(&format!("{url}#x")), true).unwrap(), None);
+        assert_eq!(
+            file_target(path.as_deref(), true).unwrap(),
+            Some(agent_screen_model::launch::file_url(
+                path.as_deref().unwrap()
+            ))
+        );
+        // An app that isn't a browser opens the path as it is.
+        assert_eq!(file_target(path.as_deref(), false).unwrap(), None);
         // Missing files fail for both; other targets pass through.
         assert!(file_target(Some("file:///no/such/file.html"), true).is_err());
         assert_eq!(
