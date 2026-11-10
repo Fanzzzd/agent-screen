@@ -17,7 +17,7 @@ use crate::model::{
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
 use agent_screen_model::input_queue::Action;
-use agent_screen_model::placement::{self, AppSighting, NamedApp, WindowSighting};
+use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, WindowSighting};
 use agent_screen_model::real_click;
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
@@ -1058,9 +1058,12 @@ async fn handle_one(
                 .await;
                 if candidates.is_empty() {
                     let text = app.clone().unwrap_or_default();
+                    let holders = core.read_with(cx, |c, _| Holders::of(c));
                     let message = off(cx, move || match (wanted, named) {
-                        (Some(window), _) => no_such_window(window),
-                        (None, Some((named, found))) => no_app_window(id, &text, &named, found),
+                        (Some(window), _) => no_such_window(window, &holders),
+                        (None, Some((named, found))) => {
+                            no_app_window(id, &text, &named, found, &holders)
+                        }
                         (None, None) => unreachable!("window_id or app is required"),
                     })
                     .await;
@@ -2867,10 +2870,37 @@ fn is_named(
     }
 }
 
+/// Who has each of this app's Agent Displays, read on the main thread for
+/// a `not_found` worked out off it.
+struct Holders(std::collections::HashMap<DisplayId, Holder>);
+
+impl Holders {
+    fn of(core: &Core) -> Holders {
+        Holders(
+            core.displays
+                .list
+                .iter()
+                .map(|d| (d.id, d.holder()))
+                .collect(),
+        )
+    }
+
+    /// Who has the Agent Display under the center of `bounds`. One this app doesn't
+    /// know, such as another instance's, has no session of its. Blocking.
+    fn at(&self, bounds: &Rect) -> Holder {
+        let mid = bounds.mid();
+        cg::active_displays()
+            .into_iter()
+            .find(|&id| cg::display_bounds(id).contains(mid))
+            .and_then(|id| self.0.get(&id).copied())
+            .unwrap_or(Holder::Other)
+    }
+}
+
 /// place_window's `not_found` for a window id that is no stray and no
 /// window of the user's on screen: where the window is. It names the app
 /// only for a window on the user's screen. Blocking.
-fn no_such_window(id: i64) -> String {
+fn no_such_window(id: i64, holders: &Holders) -> String {
     let on_screen = windows::all()
         .into_iter()
         .find(|w| w.target.window_id as i64 == id);
@@ -2879,7 +2909,7 @@ fn no_such_window(id: i64) -> String {
             WindowSighting::NotDocument { app: w.app }
         }
         Some(w) if !windows::display_role(&w).accepts_window_request() => {
-            WindowSighting::OnAgentDisplay
+            WindowSighting::OnAgentDisplay(holders.at(&w.bounds))
         }
         // It left the list between the two reads.
         Some(_) => WindowSighting::OffScreen,
@@ -2901,7 +2931,7 @@ fn no_such_window(id: i64) -> String {
                 if windows::display_role(&window).accepts_window_request() {
                     WindowSighting::NotDocument { app: window.app }
                 } else {
-                    WindowSighting::OnAgentDisplay
+                    WindowSighting::OnAgentDisplay(holders.at(&window.bounds))
                 }
             }
             None if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
@@ -2921,6 +2951,7 @@ fn no_app_window(
     text: &str,
     named: &NamedApp,
     found: Option<access::AppId>,
+    holders: &Holders,
 ) -> String {
     let mut ids = AppIds::default();
     let mine: Vec<windows::Window> = windows::all()
@@ -2946,7 +2977,7 @@ fn no_app_window(
             name: w.app.clone(),
         }
     } else if !mine.is_empty() {
-        AppSighting::OnAgentDisplay
+        AppSighting::OnAgentDisplay(Holder::of_all(mine.iter().map(|w| holders.at(&w.bounds))))
     } else {
         // A window anywhere, hidden or on another Space, names its app by
         // its owner name, which the app's own name may not be.

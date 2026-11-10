@@ -139,8 +139,9 @@ pub fn definitions() -> Vec<Value> {
             "end_display",
             "End Agent Display",
             &[
-                "Finish with the display. It accepts no more input and its display_id stops working. If windows remain,",
-                "it waits for the user to review them; give each a set_disposition first. An empty display closes.",
+                "Finish with the display. It accepts no more input and its display_id stops working. Windows the user",
+                "handed over go back to them now. If other windows remain, it waits for the user to review them; give",
+                "each a set_disposition first. An empty display closes.",
             ],
             object(json!({ "display_id": display_id() }), &["display_id"]),
             Hints {

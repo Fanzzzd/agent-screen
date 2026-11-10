@@ -77,7 +77,7 @@ Moving an app window onto or off an Agent Display. Either the Agent Session or t
 _Avoid_: pull, move, send back
 
 **Handover**:
-The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user when its display is dismissed.
+The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed.
 _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
 **Window Request**:

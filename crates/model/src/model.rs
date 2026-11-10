@@ -146,6 +146,18 @@ pub enum EndReason {
     ClosedByUser,
 }
 
+impl EndReason {
+    /// Whether the display's Handovers go back to the user as it ends.
+    /// When the Agent Session stops, by end_display or a closed
+    /// connection, they go at once: the user's window must not wait on a
+    /// Review Display they may never open, where the same session can't
+    /// take it again either (#161). When the user closes the display, the
+    /// dismissal plan returns them.
+    pub fn returns_handovers(self) -> bool {
+        self != Self::ClosedByUser
+    }
+}
+
 /// How a window came onto an Agent Display. Decides what dismissal does with
 /// it when the agent left no Disposition.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -373,6 +385,18 @@ impl<H> Display<H> {
     /// A live Agent Display: an Agent Session still uses it.
     pub fn is_live(&self) -> bool {
         self.owner.is_some() && !self.is_ended()
+    }
+
+    /// Who has this display, as another session's place_window names it.
+    pub fn holder(&self) -> crate::placement::Holder {
+        use crate::placement::Holder;
+        if self.is_ended() {
+            Holder::Review
+        } else if self.owner.is_some() {
+            Holder::OtherSession
+        } else {
+            Holder::Other
+        }
     }
 
     /// Record a window Agent Screen put here. A Handover stays a Handover even
@@ -761,6 +785,19 @@ impl<H> Displays<H> {
         display.access.clear();
         display.resume_waiters(ControlWait::Ended);
         true
+    }
+
+    /// The Handovers of ended display `id` to send home now, when its end
+    /// reason returns them. The caller gives each back, as the user's Take
+    /// Back would, right before moving it, so the others stay recorded
+    /// until their turn. The agent's own windows stay for review. A
+    /// Handover that then can't leave goes back through
+    /// `give_back_failed`, and the dismissal plan returns it later.
+    pub fn handovers_at_end(&self, id: DisplayId) -> Vec<WindowTarget> {
+        self.get(id)
+            .filter(|d| d.ended.is_some_and(EndReason::returns_handovers))
+            .map(|d| d.handovers())
+            .unwrap_or_default()
     }
 
     /// End every display a closed connection owned.
@@ -1740,6 +1777,41 @@ mod tests {
         assert!(display.handovers().is_empty());
         assert!(display.access.excluded.contains(&1), "as after Take Back");
         assert!(d.return_handover(7, 1).is_err(), "already back");
+    }
+
+    #[test]
+    fn handovers_go_back_when_the_agent_ends_its_display() {
+        for reason in [EndReason::Finished, EndReason::Disconnected] {
+            let mut d = displays();
+            assert!(d.hand_over(7, users(1), &Authority::Once, None).is_ok());
+            let launched = WindowTarget {
+                pid: 5,
+                window_id: 2,
+            };
+            d.get_mut(7)
+                .unwrap()
+                .claim(launched, Origin::Launched, None);
+            assert!(d.handovers_at_end(7).is_empty(), "still live");
+            assert!(d.end(7, reason));
+            assert_eq!(d.handovers_at_end(7), vec![users(1)], "{reason:?}");
+            d.get_mut(7).unwrap().give_back(users(1));
+            let display = d.get(7).unwrap();
+            assert!(display.handovers().is_empty());
+            assert!(
+                display.records.contains_key(&2),
+                "the agent's window stays for review"
+            );
+            assert!(d.handovers_at_end(7).is_empty(), "given back once");
+        }
+    }
+
+    #[test]
+    fn the_dismissal_returns_handovers_when_the_user_closes_the_display() {
+        let mut d = displays();
+        assert!(d.hand_over(7, users(1), &Authority::Once, None).is_ok());
+        assert!(d.end(7, EndReason::ClosedByUser));
+        assert!(d.handovers_at_end(7).is_empty());
+        assert_eq!(d.get(7).unwrap().handovers(), vec![users(1)]);
     }
 
     #[test]

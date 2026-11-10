@@ -535,9 +535,59 @@ impl Core {
             // An ended display takes no more windows, from catches either.
             self.kept_catches.retain(|(display, _)| *display != id);
             stop_recording(id, cx);
+            self.return_handovers(id, cx);
             cx.notify();
             schedule_sweep(cx);
         }
+    }
+
+    /// The user's windows go home as the agent stops using display `id`
+    /// (#161), one at a time, as window_access return sends them, each
+    /// given back right before its move. Only a window still on the display
+    /// moves: one that already left, as one its app put back on the user's
+    /// screen, stays where the user has it. A window that can't leave stays
+    /// a Handover there, for the dismissal to return. The display closes
+    /// once none is left.
+    fn return_handovers(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+        let Some(shell) = crate::ui::shell::current() else {
+            return;
+        };
+        let targets = self.displays.handovers_at_end(id);
+        if targets.is_empty() {
+            return;
+        }
+        // After this update: sending a window home updates Core too.
+        cx.spawn(async move |this, cx| {
+            for target in targets {
+                let window = target.window_id;
+                // Only one still a Handover: the user may have taken it
+                // back while an earlier window moved, and a second give-back
+                // would race their move.
+                let Ok(given) = this.update(cx, |core, _| {
+                    core.displays
+                        .get_mut(id)
+                        .filter(|d| d.handovers().contains(&target))
+                        .map(|d| d.give_back(target))
+                }) else {
+                    return;
+                };
+                if given.is_none() {
+                    continue;
+                }
+                let Ok(task) =
+                    shell.update(cx, |shell, cx| shell.send_home_if_there(target, id, given, cx))
+                else {
+                    return;
+                };
+                if task.await {
+                    log::info!("display {id}: window {window} went back to the user as the display ended");
+                } else {
+                    log::warn!("display {id}: window {window} didn't leave the ended display; it stays a Handover there");
+                }
+            }
+            let _ = this.update(cx, |core, cx| core.sweep_ended(cx));
+        })
+        .detach();
     }
 
     /// The user takes the display over: by their first input in the
@@ -601,6 +651,7 @@ impl Core {
                 }
                 crate::control::agent::release_hold(id);
                 stop_recording(id, cx);
+                self.return_handovers(id, cx);
             }
             cx.notify();
             schedule_sweep(cx);
