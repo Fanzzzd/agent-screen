@@ -15,8 +15,12 @@ pub const DEFAULT_TIMEOUT: f64 = 30.0;
 /// can call again to keep waiting.
 pub const MAX_TIMEOUT: f64 = 120.0;
 /// The shortest gap between two reads of the tree. Each read costs the app
-/// a round trip per element.
+/// a round trip per element, on its main thread.
 pub const POLL: Duration = Duration::from_millis(500);
+/// The longest gap a quiet window backs off to, unless reads are slower.
+pub const MAX_QUIET_GAP: Duration = Duration::from_secs(2);
+/// How much the gap grows after each read that found the tree as before.
+pub const BACK_OFF: Duration = Duration::from_millis(100);
 /// Lines of unmatched changes a timed-out wait lists.
 pub const SUMMARY_LINES: usize = 20;
 
@@ -30,11 +34,14 @@ pub fn timeout(requested: Option<f64>) -> Result<Duration, String> {
     }
 }
 
-/// The pause after a read that took `read`: at least `POLL`, and as long
-/// as the read itself, so a slow app spends at most half its time
-/// answering.
-pub fn poll_gap(read: Duration) -> Duration {
-    read.max(POLL)
+/// The pause after a read that took `read`, when the `quiet` reads before
+/// it found the tree unchanged: three times the read, so the app spends at
+/// most a quarter of its main thread answering while it makes the update
+/// being waited for, and at least `POLL`, growing by `BACK_OFF` a quiet
+/// read up to `MAX_QUIET_GAP`.
+pub fn poll_gap(read: Duration, quiet: u32) -> Duration {
+    let floor = (POLL + BACK_OFF * quiet).min(MAX_QUIET_GAP);
+    (read * 3).max(floor)
 }
 
 /// An element to wait for: its role, text it shows, or both.
@@ -76,18 +83,23 @@ impl Match {
         Ok(Some(Match { role, text }))
     }
 
-    /// Whether a tree line's element matches.
+    /// Whether a tree line's element matches. Text is looked for in the
+    /// label and in the value, each on its own, as the tree shows them: the
+    /// first 80 characters.
     pub fn matches(&self, line: &str) -> bool {
         let Some(element) = Element::parse(line) else {
             return false;
         };
+        let (label, value) = element.label_and_value();
         self.role
             .as_ref()
             .is_none_or(|r| *r == element.role || Some(r.as_str()) == element.subrole)
-            && self
-                .text
-                .as_ref()
-                .is_none_or(|t| element.text.to_lowercase().contains(t.as_str()))
+            && self.text.as_ref().is_none_or(|t| {
+                [label, value]
+                    .into_iter()
+                    .flatten()
+                    .any(|s| s.to_lowercase().contains(t.as_str()))
+            })
     }
 }
 
@@ -175,8 +187,10 @@ impl Fired {
 /// content, not by number, keeps a list the app rebuilt with new elements
 /// from firing, and still fires when a matching row is added beside an
 /// equal one, or when an element's text changes to match. Position, focus
-/// and enabled state don't count. Disappearing is the same the other way.
-pub fn check(conditions: &Conditions, before: &str, after: &str) -> Vec<Fired> {
+/// and enabled state don't count. Disappearing is the same the other way,
+/// and never holds when either read stopped at the element budget
+/// (`truncated`): an element past the budget is unseen, not gone.
+pub fn check(conditions: &Conditions, before: &str, after: &str, truncated: bool) -> Vec<Fired> {
     let mut fired = Vec::new();
     if let Some(m) = &conditions.appears {
         let lines = gained(m, before, after);
@@ -184,7 +198,7 @@ pub fn check(conditions: &Conditions, before: &str, after: &str) -> Vec<Fired> {
             fired.push(Fired::Appeared(lines));
         }
     }
-    if let Some(m) = &conditions.disappears {
+    if let Some(m) = conditions.disappears.as_ref().filter(|_| !truncated) {
         let lines = gained(m, after, before);
         if !lines.is_empty() {
             fired.push(Fired::Disappeared(lines));
@@ -256,6 +270,13 @@ fn gained(m: &Match, from: &str, to: &str) -> Vec<String> {
     out
 }
 
+/// Whether a timed-out wait shows every one of these changes: only then
+/// does its tree become the one the agent got, so changes left out of the
+/// summary still show in the next comparison.
+pub fn shown_whole(changes: Option<&str>) -> bool {
+    changes.is_none_or(|c| c.lines().count() <= SUMMARY_LINES)
+}
+
 /// At most `n` lines of `text`, then how many were left out.
 pub fn first_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -309,6 +330,28 @@ impl<'a> Element<'a> {
         })
     }
 
+    /// The label and the value without their quotes: "\"OK\" value=\"x\"",
+    /// "\"OK\"" or "value=\"x\"".
+    fn label_and_value(&self) -> (Option<&'a str>, Option<&'a str>) {
+        let text = self.text;
+        if let Some(value) = text.strip_prefix("value=\"") {
+            return (None, Some(value.strip_suffix('"').unwrap_or(value)));
+        }
+        let Some(quoted) = text.strip_prefix('"') else {
+            return (None, None);
+        };
+        match quoted.rfind("\" value=\"") {
+            Some(at) => {
+                let value = &quoted[at + 9..];
+                (
+                    Some(&quoted[..at]),
+                    Some(value.strip_suffix('"').unwrap_or(value)),
+                )
+            }
+            None => (Some(quoted.strip_suffix('"').unwrap_or(quoted)), None),
+        }
+    }
+
     /// What an element is for counting: role and text, not where it is.
     fn key(&self) -> String {
         format!(
@@ -347,9 +390,9 @@ mod tests {
                 disappears: None
             }
         );
-        assert!(check(&c, BEFORE, BEFORE).is_empty());
+        assert!(check(&c, BEFORE, BEFORE, false).is_empty());
         let moved = BEFORE.replace("at (40,20)", "at (40,22)");
-        assert_eq!(check(&c, BEFORE, &moved), vec![Fired::Changed]);
+        assert_eq!(check(&c, BEFORE, &moved, false), vec![Fired::Changed]);
     }
 
     #[test]
@@ -357,9 +400,9 @@ mod tests {
         let c = conditions(json!({ "appears": { "text": "Delivered" } }));
         assert!(!c.changed);
         let status = BEFORE.replace("Status: idle", "Status: sending");
-        assert!(check(&c, BEFORE, &status).is_empty());
+        assert!(check(&c, BEFORE, &status, false).is_empty());
         let both = conditions(json!({ "changed": true, "appears": { "text": "Delivered" } }));
-        assert_eq!(check(&both, BEFORE, &status), vec![Fired::Changed]);
+        assert_eq!(check(&both, BEFORE, &status, false), vec![Fired::Changed]);
     }
 
     #[test]
@@ -392,7 +435,7 @@ mod tests {
             "disappears": { "text": "sending" }
         }));
         assert_eq!(
-            check(&c, BEFORE, after),
+            check(&c, BEFORE, after, false),
             vec![
                 Fired::Appeared(vec![
                     "[5] statictext value=\"Delivered\" at (40,40) 300×20".into()
@@ -404,7 +447,7 @@ mod tests {
         );
         // The role must match too, as role or subrole.
         let button = conditions(json!({ "appears": { "role": "button", "text": "Delivered" } }));
-        assert!(check(&button, BEFORE, after).is_empty());
+        assert!(check(&button, BEFORE, after, false).is_empty());
         let sub = "[7] button(switch) \"Wi-Fi\" at (1,1) 2×2";
         assert!(
             Match::from_json("appears", &json!({ "role": "switch" }))
@@ -419,10 +462,10 @@ mod tests {
         let c = conditions(json!({ "appears": { "text": "Delivered" } }));
         let one = "[1] row\n  [2] statictext value=\"Delivered\" at (1,1) 2×2";
         let rebuilt = "[8] row\n  [9] statictext value=\"Delivered\" at (1,5) 2×2";
-        assert!(check(&c, one, rebuilt).is_empty());
+        assert!(check(&c, one, rebuilt, false).is_empty());
         let two = format!("{one}\n[3] row\n  [4] statictext value=\"Delivered\" at (1,9) 2×2");
         assert_eq!(
-            check(&c, one, &two),
+            check(&c, one, &two, false),
             vec![Fired::Appeared(vec![
                 "[4] statictext value=\"Delivered\" at (1,9) 2×2".into()
             ])]
@@ -436,7 +479,7 @@ mod tests {
             "\"Send\" disabled at (600,20)",
             "\"Send\" focused at (610,20)",
         );
-        assert!(check(&c, BEFORE, &enabled).is_empty());
+        assert!(check(&c, BEFORE, &enabled, false).is_empty());
     }
 
     #[test]
@@ -472,9 +515,62 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_read_waits_as_long_as_it_took() {
-        assert_eq!(poll_gap(Duration::from_millis(40)), POLL);
-        assert_eq!(poll_gap(Duration::from_secs(2)), Duration::from_secs(2));
+    fn reads_take_at_most_a_quarter_of_the_time_and_back_off_when_quiet() {
+        assert_eq!(poll_gap(Duration::from_millis(40), 0), POLL);
+        assert_eq!(
+            poll_gap(Duration::from_millis(400), 0),
+            Duration::from_millis(1200)
+        );
+        assert_eq!(poll_gap(Duration::from_secs(2), 0), Duration::from_secs(6));
+        assert_eq!(
+            poll_gap(Duration::from_millis(40), 5),
+            Duration::from_millis(1000)
+        );
+        assert_eq!(poll_gap(Duration::from_millis(40), 100), MAX_QUIET_GAP);
+        assert_eq!(
+            poll_gap(Duration::from_secs(1), 100),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn nothing_disappears_past_the_element_budget() {
+        let c = conditions(
+            json!({ "disappears": { "text": "sending" }, "appears": { "text": "Delivered" } }),
+        );
+        let pushed = BEFORE.replace(
+            "  [2] statictext value=\"Sending…\" at (40,40) 300×20\n",
+            "",
+        );
+        assert_eq!(check(&c, BEFORE, &pushed, false).len(), 1);
+        assert!(check(&c, BEFORE, &pushed, true).is_empty());
+        // Appearing still counts in a cut read.
+        let more = format!("{pushed}\n[9] statictext value=\"Delivered\"");
+        assert_eq!(
+            check(&c, BEFORE, &more, true),
+            vec![Fired::Appeared(vec![
+                "[9] statictext value=\"Delivered\"".into()
+            ])]
+        );
+    }
+
+    #[test]
+    fn text_matches_the_label_or_the_value_not_the_markup_between() {
+        let m = |t: &str| {
+            Match::from_json("appears", &json!({ "text": t }))
+                .unwrap()
+                .unwrap()
+        };
+        let both = "[1] textfield \"Search\" value=\"cats\" focused at (1,1) 2×2";
+        assert!(m("search").matches(both) && m("cats").matches(both));
+        assert!(!m("value").matches(both), "the value= markup is not text");
+        assert!(
+            !m("search\" value").matches(both),
+            "one match spans one field"
+        );
+        assert!(m("value").matches("[2] statictext value=\"no value yet\""));
+        assert!(m("ok").matches("[3] button \"OK\""));
+        assert!(!m("ok").matches("[4] group"));
     }
 
     #[test]
@@ -487,5 +583,7 @@ mod tests {
         assert_eq!(cut.lines().count(), 21);
         assert!(cut.ends_with("… and 5 more"), "{cut}");
         assert_eq!(first_lines("+ [1] a", 20), "+ [1] a");
+        assert!(!shown_whole(Some(&text)), "lines were left out");
+        assert!(shown_whole(Some("+ [1] a")) && shown_whole(None));
     }
 }

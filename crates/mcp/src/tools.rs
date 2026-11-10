@@ -567,11 +567,14 @@ pub fn definitions() -> Vec<Value> {
                 "use it after an action whose effect lands later, such as a sent message, a page load or a reply.",
                 "It compares the window's accessibility tree with the last tree you got for it with the same root and max_depth,",
                 "from get_window_state, act_on_element or an earlier wait, so a change that landed before the call fires at once;",
-                "with no such tree, with the tree when the call starts. It reads the tree again about twice a second.",
+                "with no such tree, with the tree when the call starts. It reads the tree again at most twice a second, less often",
+                "while nothing changes, and gives a slow app three times as long between reads as a read takes.",
                 "Conditions, any of: changed, an element appearing, changing or going away; appears, more elements matching role",
                 "and text than that tree had; disappears, fewer. With neither appears nor disappears, changed applies.",
-                "role is a role as the tree writes it (button, statictext); text is part of an element's label or value, any case.",
-                "Position, focus and enabled state don't make an element appear or disappear.",
+                "role is a role as the tree writes it (button, statictext); text is part of an element's label or of its value,",
+                "any case, within the first 80 characters the tree shows. Position, focus and enabled state don't make an element",
+                "appear or disappear. A read takes at most 400 elements: in a longer window, such as a chat history, pass root to",
+                "watch the part you need, as elements past the budget are not seen, and the result says when a read was cut.",
                 "Returns the conditions that fired and the elements that changed since that tree, in act_on_element's changes form",
                 "(+ new, ~ changed, - gone), without a picture; or timed_out with the window's element count and the changes that",
                 "matched no condition. It also returns when the window closes or leaves your display, or the display ends.",
@@ -708,11 +711,15 @@ pub fn ended_with_app(id: i64) -> ControlError {
 
 // MARK: Handlers
 
+/// Resolves when the client cancels the call.
+pub type Cancelled = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 pub async fn run(
     name: &str,
     args: &Object,
     session: &Session,
     control: &Control,
+    cancelled: Cancelled,
 ) -> Result<Output, ControlError> {
     let a = Args(args);
     match name {
@@ -1017,32 +1024,51 @@ pub async fn run(
                 .map_err(ControlError::invalid)?;
             let timeout = agent_screen_model::watch::timeout(a.number("timeout_seconds")?)
                 .map_err(ControlError::invalid)?;
-            let reply = control
-                .call(
-                    "waitForChange",
-                    json!({
-                        "displayId": display,
-                        "windowId": window,
-                        "root": scope.root,
-                        "maxDepth": scope.max_depth,
-                        "conditions": conditions,
-                        "timeoutSeconds": timeout.as_secs_f64(),
-                        "baseline": control.last_tree(display, window, scope),
-                    }),
-                )
-                .await
-                .map_err(|error| {
-                    if error.message.contains("unknown method") {
-                        ControlError::new(
-                            "failed",
-                            "this Agent Screen app predates wait_for_change; update Agent Screen",
-                        )
-                    } else {
-                        error
-                    }
-                })?;
-            if let Some(tree) = reply.get("tree").and_then(Value::as_str) {
-                control.swap_tree(display, window, scope, tree.to_string());
+            static NEXT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let wait = NEXT_WAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let baseline = control.last_tree(display, window, scope);
+            let call = control.call(
+                "waitForChange",
+                json!({
+                    "displayId": display,
+                    "windowId": window,
+                    "root": scope.root,
+                    "maxDepth": scope.max_depth,
+                    "conditions": conditions,
+                    "timeoutSeconds": timeout.as_secs_f64(),
+                    "baseline": baseline.as_ref().map(|(tree, _)| tree),
+                    "baselineTruncated": baseline.as_ref().is_some_and(|(_, cut)| *cut),
+                    "waitId": wait,
+                }),
+            );
+            // The client cancelled the call: stop the app's reads too. An
+            // older app doesn't know the method; its wait ends at the timeout.
+            let reply = tokio::select! {
+                reply = call => reply,
+                () = cancelled => {
+                    let _ = control.call("cancelWaitForChange", json!({ "waitId": wait })).await;
+                    return Err(ControlError::new("failed", "the call was cancelled"));
+                }
+            };
+            let reply = reply.map_err(|error| {
+                if error.message.contains("unknown method") {
+                    ControlError::new(
+                        "failed",
+                        "this Agent Screen app predates wait_for_change; update Agent Screen",
+                    )
+                } else {
+                    error
+                }
+            })?;
+            // The tree becomes the one the agent got only if it saw every
+            // change; otherwise the next comparison still shows the rest.
+            let fired = reply.get("outcome").and_then(Value::as_str) == Some("fired");
+            let changes = reply.get("changes").and_then(Value::as_str);
+            if let Some(tree) = reply.get("tree").and_then(Value::as_str)
+                && (fired || agent_screen_model::watch::shown_whole(changes))
+            {
+                let cut = reply.get("truncated") == Some(&Value::Bool(true));
+                control.swap_tree(display, window, scope, tree.to_string(), cut);
             }
             Ok(Output::Content(vec![text(wait_output(
                 display, window, scope.root, &reply,
@@ -1506,6 +1532,16 @@ fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -
         ""
     };
     let changes = reply.get("changes").and_then(Value::as_str);
+    let mut cut = String::new();
+    if reply.get("truncated") == Some(&Value::Bool(true)) {
+        cut.push_str(&format!(
+            " A read stopped at its budget of {} elements, so elements past it are not watched and none counts as gone; pass root to watch the part you need.",
+            agent_screen_model::tree::MAX_ELEMENTS
+        ));
+    }
+    if reply.get("depthLimited") == Some(&Value::Bool(true)) {
+        cut.push_str(" Elements deeper than max_depth are not watched.");
+    }
     match reply.get("outcome").and_then(Value::as_str) {
         Some("fired") => {
             let fired: Vec<&str> = reply
@@ -1528,7 +1564,7 @@ fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -
                 format!(" Matching: {}.", matched.join("; "))
             };
             format!(
-                "{} after {waited} s in window {window}{scope}.{matched}{takeover} Changes {since} (+ new, ~ changed, - gone):\n\n{}",
+                "{} after {waited} s in window {window}{scope}.{matched}{takeover}{cut} Changes {since} (+ new, ~ changed, - gone):\n\n{}",
                 fired.join(" and "),
                 changes.unwrap_or_default()
             )
@@ -1563,7 +1599,7 @@ fn wait_output(display: i64, window: i64, root: Option<usize>, reply: &Object) -
                 None => String::new(),
             };
             format!(
-                "timed_out after {waited} s in window {window}{scope}: no condition fired.{elements}{unanswered}{absent}{takeover}{rest}"
+                "timed_out after {waited} s in window {window}{scope}: no condition fired.{elements}{unanswered}{absent}{takeover}{cut}{rest}"
             )
         }
         Some("windowClosed") => format!(
@@ -1647,7 +1683,13 @@ async fn window_state(
             get("elements")
         ),
         strayed: strayed_note(&state),
-        before: control.swap_tree(display, window, scope, tree.clone()),
+        before: control.swap_tree(
+            display,
+            window,
+            scope,
+            tree.clone(),
+            get("truncated") == Value::Bool(true),
+        ),
         tree,
         image: image(&get("data"), &get("mimeType")),
     })
@@ -2069,6 +2111,23 @@ mod tests {
                 json!({ "outcome": "timedOut", "elements": 12, "baselineFromAgent": false, "waitedSeconds": 2.0 }),
             ),
         );
+        assert!(
+            !quiet.contains("budget") && !quiet.contains("max_depth"),
+            "{quiet}"
+        );
+        let cut = wait_output(
+            3,
+            5,
+            None,
+            &reply(
+                json!({ "outcome": "fired", "fired": ["appeared"], "changes": "+ [500] row", "truncated": true, "depthLimited": true }),
+            ),
+        );
+        assert!(
+            cut.contains("budget of 400 elements") && cut.contains("pass root"),
+            "{cut}"
+        );
+        assert!(cut.contains("deeper than max_depth"), "{cut}");
         assert!(
             quiet.starts_with("timed_out after 2 s in window 5: no condition fired."),
             "{quiet}"

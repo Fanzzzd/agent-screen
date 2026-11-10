@@ -131,6 +131,24 @@ pub fn within<E: Clone + Eq + std::hash::Hash>(
     false
 }
 
+/// Characters of a label or value the tree shows.
+pub const TEXT_CHARS: usize = 80;
+
+/// A label or value as one tree line shows it: trimmed, line breaks and
+/// other control characters as spaces, so a multi-line value can't start
+/// lines that look like elements, and at most `TEXT_CHARS` characters.
+/// None when nothing is left.
+pub fn preview(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| {
+        trimmed
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(TEXT_CHARS)
+            .collect()
+    })
+}
+
 /// An element's number, from a line such as "    [12] button \"OK\"".
 fn number(line: &str) -> Option<usize> {
     let rest = line.trim_start().strip_prefix('[')?;
@@ -214,6 +232,19 @@ mod tests {
 [5] textfield \"Search\" at (600,20) 200×24
 Menu bar (press a title to list its items):
 [6] menubaritem \"File\"";
+
+    #[test]
+    fn a_multi_line_value_stays_on_its_element_line() {
+        assert_eq!(
+            preview("  first\n[3] button \"fake\"\r\tend "),
+            Some("first [3] button \"fake\"  end".into())
+        );
+        assert_eq!(preview(" \n "), None);
+        assert_eq!(
+            preview(&"x".repeat(100)).unwrap().chars().count(),
+            TEXT_CHARS
+        );
+    }
 
     #[test]
     fn subtree_roots_must_still_belong_to_the_requested_window() {
