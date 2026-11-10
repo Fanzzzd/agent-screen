@@ -3241,7 +3241,11 @@ impl Shell {
             let left = cx
                 .background_executor()
                 .spawn(async move {
+                    // Only on evidence it left: on screen, off the display.
+                    // A minimized window, or one of a hidden app, is off the
+                    // on-screen list and still moves home.
                     if only_from_display
+                        && windows::find(target.window_id).is_some()
                         && !windows::on_display(id)
                             .iter()
                             .any(|w| w.target.window_id == target.window_id)

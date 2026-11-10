@@ -560,11 +560,20 @@ impl Core {
         cx.spawn(async move |this, cx| {
             for target in targets {
                 let window = target.window_id;
+                // Only one still a Handover: the user may have taken it
+                // back while an earlier window moved, and a second give-back
+                // would race their move.
                 let Ok(given) = this.update(cx, |core, _| {
-                    core.displays.get_mut(id).map(|d| d.give_back(target))
+                    core.displays
+                        .get_mut(id)
+                        .filter(|d| d.handovers().contains(&target))
+                        .map(|d| d.give_back(target))
                 }) else {
                     return;
                 };
+                if given.is_none() {
+                    continue;
+                }
                 let Ok(task) =
                     shell.update(cx, |shell, cx| shell.send_home_if_there(target, id, given, cx))
                 else {
