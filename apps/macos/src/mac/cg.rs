@@ -222,6 +222,17 @@ pub fn on_screen_windows() -> Vec<WindowInfo> {
     window_list(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
 }
 
+/// On-screen windows of other processes that `keep` takes by pid, layer
+/// and bounds, front to back, desktop elements left out. Nothing else of
+/// the others is read.
+pub fn on_screen_where(keep: impl Fn(i32, i64, Rect) -> bool) -> Vec<WindowInfo> {
+    window_list_where(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+        keep,
+    )
+}
+
 /// Every normal window of other processes, hidden, minimized and on other
 /// Spaces included.
 pub fn all_windows() -> Vec<WindowInfo> {

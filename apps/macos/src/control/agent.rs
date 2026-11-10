@@ -5879,7 +5879,12 @@ async fn queued_drag(
     match r["state"].as_str() {
         Some("completed") => {
             show_pointer(core, id, to.unwrap_or(from), false, cx);
-            reply(json!({ "route": "real_input", "requestId": request }))
+            reply(json!({
+                "route": "real_input",
+                "requestId": request,
+                "timing": r["timing"],
+                "note": "The drag ran with the user's pointer, which stays on this display until the approval ends. Call input_queue done when you need no more drags with it: the pointer and the user's front app then come back at once, instead of 30 s after your last drag.",
+            }))
         }
         Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
             Err(ControlError::failed(format!(

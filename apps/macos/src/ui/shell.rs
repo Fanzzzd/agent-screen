@@ -167,6 +167,9 @@ pub struct Shell {
     real_saved: Option<crate::mac::real_input::Saved>,
     loan_running: bool,
     restoring: bool,
+    /// The first loan of a grant waits for the user's hand to rest; a
+    /// check is set for the moment it will have.
+    quiet_check: bool,
     streams: Entity<Streams>,
     icon: StatusIcon,
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
@@ -457,6 +460,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             notifications: notify::Auth::Unknown,
             real_saved: None,
             loan_running: false,
+            quiet_check: false,
             restoring: false,
             colorsync: None,
             colorsync_busy: false,
@@ -1289,7 +1293,25 @@ impl Shell {
         // the first loan waits until they leave it alone for a moment, and
         // from then on their touch takes control back.
         if !real_input::armed() {
-            if !self.core.read(cx).input_queue.queue.ready() || crate::mac::ime::user_idle() < 1.0 {
+            if !self.core.read(cx).input_queue.queue.ready() {
+                return;
+            }
+            let idle = crate::mac::ime::user_idle();
+            if idle < 1.0 {
+                // Look again the moment the hand has rested a second,
+                // rather than at the next once-a-second tick.
+                if !self.quiet_check {
+                    self.quiet_check = true;
+                    let wait = Duration::from_secs_f64(1.0 - idle) + Duration::from_millis(10);
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.quiet_check = false;
+                            shell.drive_queue(cx);
+                        });
+                    })
+                    .detach();
+                }
                 return;
             }
             real_input::arm(true);
@@ -1308,7 +1330,17 @@ impl Shell {
         self.loan_running = true;
         self.sync_bar(true, cx);
         let ok = self.core.read(cx).input_queue.loan_ok.clone();
-        log::info!("input queue: running request {id} on display {display}");
+        let grant_ms = {
+            let input = &self.core.read(cx).input_queue;
+            input
+                .queue
+                .grant()
+                .map(|g| input.now().saturating_sub(g.since_ms))
+        };
+        log::info!(
+            "input queue: running request {id} on display {display}, {} ms into the approval",
+            grant_ms.unwrap_or_default()
+        );
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_executor()
@@ -1493,9 +1525,11 @@ impl Shell {
                         drop: plan.drop,
                     };
                     let windows: Vec<WindowTarget> = on_display.iter().map(|w| w.target).collect();
+                    let sight = crate::mac::input::DragSight::default();
                     real_input::drag(
                         plan.target,
-                        plan.drop.pid,
+                        plan.drop,
+                        drop_frame,
                         plan.from,
                         plan.to,
                         objc2_core_graphics::CGEventFlags(plan.flags),
@@ -1503,17 +1537,20 @@ impl Shell {
                             // Recheck geometry and the window under the
                             // point before every event. A moved or covered
                             // window must not receive input at its old
-                            // coordinates.
-                            let under = |p| crate::mac::input::window_under_drag(p, plan.target.pid);
+                            // coordinates. One read of the on-screen
+                            // windows gives both frames and what lies
+                            // under every point the check looks at.
+                            let scene = sight.look(plan.target.pid);
                             let why = if !ok.load(Ordering::SeqCst) {
                                 Some("the loan was cancelled")
                             } else if cg::display_bounds(display) != area {
                                 Some("the display geometry changed")
-                            } else if cg::window_bounds(plan.target.window_id) != Some(frame) {
+                            } else if scene.frame(plan.target.window_id) != Some(frame) {
                                 Some("the window geometry changed")
-                            } else if cg::window_bounds(plan.drop.window_id) != Some(drop_frame) {
+                            } else if scene.frame(plan.drop.window_id) != Some(drop_frame) {
                                 Some("the drop window's geometry changed")
                             } else {
+                                let under = |p| scene.under(p);
                                 real_drag::refusal(&path, at, under(at), &windows).or_else(|| {
                                     // At the press, the end must lie
                                     // uncovered too: the source coming

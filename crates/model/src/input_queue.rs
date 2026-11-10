@@ -64,6 +64,42 @@ pub struct Request {
     /// Whether the agent's call is waiting to perform it now. A call that
     /// gave up waiting leaves its request queued but not runnable.
     pub attached: bool,
+    /// When, by the queue's clock, the agent asked, the user's approval
+    /// came to cover it, its loan started, and its loan ended, so the agent
+    /// can tell the user's time from the executor's.
+    pub times: Times,
+}
+
+/// Milliseconds on the clock the queue is given as `now`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Times {
+    pub asked: u64,
+    pub allowed: Option<u64>,
+    pub started: Option<u64>,
+    pub ended: Option<u64>,
+}
+
+impl Times {
+    /// How long the request waited for the user's approval.
+    pub fn approval_ms(&self) -> Option<u64> {
+        Some(self.allowed?.saturating_sub(self.asked))
+    }
+
+    /// How long it waited for its turn once allowed, the user's hand
+    /// resting before the first loan included.
+    pub fn turn_ms(&self) -> Option<u64> {
+        Some(self.started?.saturating_sub(self.allowed?))
+    }
+
+    /// How long its loan ran, the executor's own time.
+    pub fn run_ms(&self) -> Option<u64> {
+        Some(self.ended?.saturating_sub(self.started?))
+    }
+
+    /// From the ask to the loan's end, or to `now` while it hasn't ended.
+    pub fn elapsed_ms(&self, now: u64) -> u64 {
+        self.ended.unwrap_or(now).saturating_sub(self.asked)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -229,6 +265,7 @@ impl Queue {
         match r.status {
             Status::Queued => {
                 r.status = Status::Stopped(Stop::Withdrawn);
+                r.times.ended = Some(now);
                 self.waiting.retain(|queued| *queued != id);
                 if self.grant.is_none() {
                     self.approval = self.approval.saturating_add(1);
@@ -306,16 +343,19 @@ impl Queue {
             };
             if r.owner == owner {
                 r.status = Status::Stopped(Stop::Replaced);
+                r.times.ended = Some(now);
                 false
             } else {
                 true
             }
         });
+        let mut allowed = None;
         if !self.takeovers.contains(&owner.display)
             && let Some(grant) = self.grant.as_mut()
         {
             grant.participants.insert(owner.clone());
             grant.done.remove(&owner);
+            allowed = Some(now);
         }
         self.requests.insert(
             id,
@@ -326,6 +366,11 @@ impl Queue {
                 reason,
                 status: Status::Queued,
                 attached: true,
+                times: Times {
+                    asked: now,
+                    allowed,
+                    ..Times::default()
+                },
             },
         );
         self.waiting.push_back(id);
@@ -350,6 +395,13 @@ impl Queue {
             .filter(|r| !self.takeovers.contains(&r.owner.display))
             .map(|r| r.owner.clone())
             .collect();
+        for id in &self.waiting {
+            if let Some(r) = self.requests.get_mut(id)
+                && !self.takeovers.contains(&r.owner.display)
+            {
+                r.times.allowed = Some(now);
+            }
+        }
         self.approval += 1;
         self.grant = Some(Grant {
             id: self.approval,
@@ -374,6 +426,8 @@ impl Queue {
         let id = self.waiting.remove(index)?;
         let r = self.requests.get_mut(&id)?;
         r.status = Status::Running;
+        r.times.allowed.get_or_insert(now);
+        r.times.started = Some(now);
         let grant = self.grant.as_mut()?;
         grant.participants.insert(r.owner.clone());
         grant.done.remove(&r.owner);
@@ -416,6 +470,7 @@ impl Queue {
             Status::Running => Status::Completed,
             _ => return false,
         };
+        r.times.ended = Some(now);
         self.active = None;
         self.refresh_idle(now);
         self.tick(now);
@@ -435,7 +490,7 @@ impl Queue {
     }
 
     /// Not Now declines the waiting batch; it is not a timeout.
-    pub fn decline(&mut self, approval: u64) {
+    pub fn decline(&mut self, approval: u64, now: u64) {
         if approval != self.approval || self.grant.is_some() {
             return;
         }
@@ -443,6 +498,7 @@ impl Queue {
         for id in self.waiting.drain(..) {
             if let Some(r) = self.requests.get_mut(&id) {
                 r.status = Status::Declined;
+                r.times.ended = Some(now);
             }
         }
     }
@@ -592,6 +648,7 @@ impl Queue {
             };
             if matches(&r.owner) {
                 r.status = Status::Stopped(why);
+                r.times.ended = Some(now);
                 false
             } else {
                 true
@@ -665,6 +722,62 @@ mod tests {
         assert!(q.may_send(b, &owner("b", 2)));
         assert!(q.finish(b, 6));
         assert_eq!(q.start(6), Some(c));
+    }
+
+    #[test]
+    fn each_request_keeps_when_it_was_asked_allowed_started_and_ended() {
+        let mut q = queue();
+        let a = add(&mut q, "a", 1, "drag", 100);
+        q.takeover(2, true, 150);
+        let b = add(&mut q, "b", 2, "drag", 200);
+        assert!(q.allow(q.approval(), 1_500));
+        // Arriving during the grant, it is covered at once.
+        let c = add(&mut q, "c", 3, "drag", 1_600);
+        assert_eq!(q.start(1_700), Some(a));
+        assert!(q.finish(a, 2_100));
+        let times = |id| q.request(id).unwrap().times;
+        assert_eq!(
+            times(a),
+            Times {
+                asked: 100,
+                allowed: Some(1_500),
+                started: Some(1_700),
+                ended: Some(2_100),
+            }
+        );
+        assert_eq!(times(a).approval_ms(), Some(1_400));
+        assert_eq!(times(a).turn_ms(), Some(200));
+        assert_eq!(times(a).run_ms(), Some(400));
+        assert_eq!(times(a).elapsed_ms(9_000), 2_000);
+        // In a Takeover at approval, the request wasn't allowed then.
+        assert_eq!(times(b).allowed, None);
+        assert_eq!(times(b).approval_ms(), None);
+        assert_eq!(times(b).elapsed_ms(2_200), 2_000);
+        assert_eq!(times(c).allowed, Some(1_600));
+        assert_eq!((times(c).started, times(c).ended), (None, None));
+        assert!(q.withdraw(b, &owner("b", 2), 2_300));
+        let b_times = q.request(b).unwrap().times;
+        assert_eq!(b_times.ended, Some(2_300));
+        assert_eq!(b_times.elapsed_ms(9_000), 2_100);
+    }
+
+    #[test]
+    fn every_way_a_request_ends_stops_its_clock() {
+        let mut q = queue();
+        let declined = add(&mut q, "a", 1, "A", 0);
+        q.decline(q.approval(), 10);
+        let replaced = add(&mut q, "b", 2, "B", 20);
+        add(&mut q, "b", 2, "B2", 30);
+        let gone = add(&mut q, "c", 3, "C", 40);
+        q.disconnect(owner("c", 3).connection, 50);
+        let ended = |id| q.request(id).unwrap().times.ended;
+        assert_eq!(q.request(declined).unwrap().status, Status::Declined);
+        assert_eq!(ended(declined), Some(10));
+        assert_eq!(ended(replaced), Some(30));
+        assert_eq!(q.request(gone).map(|r| r.times.ended), Some(Some(50)));
+        for r in q.requests() {
+            assert_eq!(r.status.terminal(), r.times.ended.is_some(), "{r:?}");
+        }
     }
 
     #[test]
@@ -813,7 +926,7 @@ mod tests {
         assert_eq!(add(&mut q, "a", 1, "drag", 60_000), a);
         assert_eq!(q.waiting().count(), 1);
         assert!(!q.forget(a));
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(add(&mut q, "a", 1, "drag", 60_001), a);
         assert_eq!(q.request(a).unwrap().status, Status::Declined);
         assert_eq!(q.waiting().count(), 0);
@@ -856,11 +969,11 @@ mod tests {
     fn declined_and_completed_tokens_stay_sticky_after_another_request() {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "A", 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         add(&mut q, "a", 1, "B", 1);
         assert_eq!(add(&mut q, "a", 1, "A", 2), a);
         assert_eq!(q.request(a).unwrap().status, Status::Declined);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         let c = add(&mut q, "b", 2, "C", 3);
         assert!(q.allow(q.approval(), 3));
         assert_eq!(q.start(3), Some(c));
@@ -1049,7 +1162,7 @@ mod tests {
                 7 => q.disconnect(who.connection, now),
                 8 => {
                     if seed & 8 != 0 {
-                        q.decline(q.approval());
+                        q.decline(q.approval(), 0);
                     } else if let Some(id) = q.requests.keys().next().copied() {
                         q.withdraw(id, &who, now);
                     }
@@ -1096,7 +1209,7 @@ mod tests {
         assert!(q.allow(card, 0));
         q.user_input();
         assert!(!q.allow(card, 1));
-        q.decline(card);
+        q.decline(card, 0);
         assert_eq!(q.waiting().count(), 1);
         restored(&mut q);
         assert!(q.allow(q.approval(), 2));
@@ -1107,7 +1220,7 @@ mod tests {
         let mut q = queue();
         add(&mut q, "a", 1, "drag", 0);
         let card = q.approval();
-        q.decline(card);
+        q.decline(card, 0);
         add(&mut q, "b", 2, "drag", 1);
         assert!(!q.allow(card, 2));
         assert!(q.allow(q.approval(), 2));
@@ -1278,7 +1391,7 @@ mod tests {
         assert_eq!(q.owner(9), None);
         let a = add(&mut q, "a", 1, "drag", 0);
         let b = add(&mut q, "b", 2, "drag", 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(q.requests().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
         q.end_display(1, 1);
         assert_eq!(q.owner(1), None);
@@ -1400,7 +1513,7 @@ mod tests {
         let mut q = queue();
         let a = add(&mut q, "a", 1, "drag", 0);
         q.allow(q.approval(), 0);
-        q.decline(q.approval());
+        q.decline(q.approval(), 0);
         assert_eq!(q.start(1), Some(a));
     }
 

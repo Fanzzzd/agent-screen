@@ -2227,18 +2227,89 @@ fn wheel_steps(delta: f64) -> i32 {
     }
 }
 
-/// The app window under a point of a drag with the user's pointer: as
-/// `window_at`, but the drag's own image, which the source app (pid
-/// `source`) draws at the dragging level under the pointer, doesn't cover
-/// it. Another app's window at that level still does.
-pub fn window_under_drag(at: (f64, f64), source: i32) -> Option<WindowTarget> {
-    let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
-    hits()
-        .into_iter()
-        .filter(|h| !(h.layer == dragging && h.target.pid == source))
-        .find(|h| h.bounds.contains(at))
-        .filter(|h| h.layer == 0 && h.target == h.host)
-        .map(|h| h.target)
+/// What a drag with the user's pointer reads before each event: the
+/// windows input can reach, as `hits` lists them. The full window list,
+/// where `remote_panels` looks, costs several times the on-screen one, so
+/// the panels are read again only when an on-screen window appears, goes,
+/// moves or changes level. A file panel moves and shows with the empty
+/// window of its app's in front of it, so a change to a panel is a change
+/// on screen too. A panel that closed while that window stayed reads as no
+/// window, which refuses at the press and the release. The drag's own
+/// image, which moves with the pointer, isn't a change.
+#[derive(Default)]
+pub struct DragSight {
+    panels: std::cell::RefCell<Option<(Vec<PanelKey>, Vec<cg::WindowInfo>)>>,
+}
+
+type PanelKey = (WindowTarget, i64, Rect);
+
+/// The windows under a drag at one moment, from `DragSight::look`.
+pub struct DragScene {
+    hits: Vec<Hit>,
+    frames: Vec<(u32, Rect)>,
+    source: i32,
+}
+
+impl DragSight {
+    /// The windows now, read once for every point a check looks at. `source`
+    /// is the pid of the app the drag starts in.
+    pub fn look(&self, source: i32) -> DragScene {
+        let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
+        let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
+        let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
+        // Only windows a press can reach are read in full: the menu bar
+        // strips and status items, most of the list, are sorted out first.
+        let on_screen = cg::on_screen_where(|_, layer, _| {
+            (0..1000).contains(&layer) && layer != menu && layer != status
+        });
+        let frames = on_screen
+            .iter()
+            .map(|w| (w.target.window_id, w.bounds))
+            .collect();
+        let mut hits = reachable(on_screen, menu, status);
+        let key: Vec<PanelKey> = hits
+            .iter()
+            .filter(|h| !(h.layer == dragging && h.target.pid == source))
+            .map(|h| (h.target, h.layer, h.bounds))
+            .collect();
+        let mut cache = self.panels.borrow_mut();
+        if cache.as_ref().is_none_or(|(seen, _)| *seen != key) {
+            *cache = Some((key, cg::remote_panels()));
+        }
+        if let Some((_, panels)) = cache.as_ref() {
+            mark_panels(&mut hits, panels);
+        }
+        DragScene {
+            hits,
+            frames,
+            source,
+        }
+    }
+}
+
+impl DragScene {
+    /// A window's frame, None when it isn't on screen as a window a press
+    /// can reach.
+    pub fn frame(&self, window_id: u32) -> Option<Rect> {
+        self.frames
+            .iter()
+            .find(|(id, _)| *id == window_id)
+            .map(|(_, frame)| *frame)
+    }
+
+    /// The app window under a point of the drag: as `window_at`, but the
+    /// drag's own image, which the source app draws at the dragging level
+    /// under the pointer, doesn't cover it. Another app's window at that
+    /// level still does.
+    pub fn under(&self, at: (f64, f64)) -> Option<WindowTarget> {
+        let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
+        self.hits
+            .iter()
+            .filter(|h| !(h.layer == dragging && h.target.pid == self.source))
+            .find(|h| h.bounds.contains(at))
+            .filter(|h| h.layer == 0 && h.target == h.host)
+            .map(|h| h.target)
+    }
 }
 
 /// Windows input can reach, front to back. The desktop is left out on
@@ -2257,7 +2328,15 @@ fn hit_list(
     menu: i64,
     status: i64,
 ) -> Vec<Hit> {
-    let mut list = on_screen
+    let mut list = reachable(on_screen, menu, status);
+    mark_panels(&mut list, &panels);
+    list
+}
+
+/// The on-screen windows a press can reach, front to back, each its own
+/// target until `mark_panels`.
+fn reachable(on_screen: Vec<cg::WindowInfo>, menu: i64, status: i64) -> Vec<Hit> {
+    on_screen
         .into_iter()
         .filter(|w| {
             // From 1000 up are overlays that take no clicks, such as the
@@ -2275,10 +2354,13 @@ fn hit_list(
             bounds: w.bounds,
             layer: w.layer,
         })
-        .collect::<Vec<_>>();
-    // An app's file panel is drawn by another process, behind an empty
-    // window of the app's: input sent to the app never reaches it.
-    for hit in &mut list {
+        .collect()
+}
+
+/// An app's file panel is drawn by another process, behind an empty
+/// window of the app's: input sent to the app never reaches it.
+fn mark_panels(list: &mut [Hit], panels: &[cg::WindowInfo]) {
+    for hit in list {
         let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
         if let Some(panel) = panels.iter().find(|p| {
             p.target.pid != hit.target.pid
@@ -2291,7 +2373,6 @@ fn hit_list(
             hit.target = panel.target;
         }
     }
-    list
 }
 
 /// The app window at a global point, as a press there would hit it, and

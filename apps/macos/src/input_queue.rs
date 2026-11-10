@@ -15,9 +15,28 @@ const REASON_CHARS: usize = 300;
 const OPERATION_CHARS: usize = 2048;
 const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended before it ran and they will not be asked about it again. Waiting or retrying the same operation returns at once. Make a new request to ask again, use a background alternative or request_help, then withdraw this one.";
 
+/// A request's times on the wall clock, in milliseconds since 1970.
+#[derive(Clone, Copy, Debug, Default)]
+struct Walls {
+    asked: Option<u64>,
+    allowed: Option<u64>,
+    started: Option<u64>,
+    ended: Option<u64>,
+}
+
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 pub struct InputQueue {
     pub queue: Queue,
     clock: Instant,
+    /// When each request was asked, allowed, started and ended, read from
+    /// the wall clock as it happened, in milliseconds since 1970. `clock`
+    /// stops while the Mac sleeps, so it gives only the durations.
+    walls: BTreeMap<RequestId, Walls>,
     /// Requests the user already allowed whose grant ended with nothing
     /// executed. Presentation only: they stay queued for the agent, and
     /// only a new request or a revocation asks again.
@@ -115,6 +134,7 @@ impl Default for InputQueue {
         Self {
             queue: Queue::default(),
             clock: Instant::now(),
+            walls: BTreeMap::new(),
             approved: BTreeSet::new(),
             plans: BTreeMap::new(),
             failures: BTreeMap::new(),
@@ -317,7 +337,7 @@ impl InputQueue {
     }
 
     pub fn decline(&mut self, approval: u64) {
-        self.queue.decline(approval);
+        self.queue.decline(approval, self.now());
         self.tick();
     }
 
@@ -404,6 +424,22 @@ impl InputQueue {
             .retain(|id, _| requests.request(*id).is_some());
         self.changed
             .retain(|owner, _| requests.owner(owner.display) == Some(owner));
+        self.walls.retain(|id, _| requests.request(*id).is_some());
+        // Every change to the queue ends here, so what the queue noted
+        // just now gets the wall clock's time now.
+        let now = wall_now();
+        for r in requests.requests() {
+            let walls = self.walls.entry(r.id).or_default();
+            let stamp = |wall: &mut Option<u64>, noted: Option<u64>| {
+                if noted.is_some() && wall.is_none() {
+                    *wall = Some(now);
+                }
+            };
+            stamp(&mut walls.asked, Some(r.times.asked));
+            stamp(&mut walls.allowed, r.times.allowed);
+            stamp(&mut walls.started, r.times.started);
+            stamp(&mut walls.ended, r.times.ended);
+        }
         let ok = self
             .queue
             .active()
@@ -486,6 +522,21 @@ impl InputQueue {
         id.filter(|id| displays.get(*id).is_some())
     }
 
+    /// When a request was asked, allowed, started and ended, in
+    /// milliseconds since 1970, and the waits between, in milliseconds.
+    fn timing(&self, id: RequestId, times: &agent_screen_model::input_queue::Times) -> Value {
+        let walls = self.walls.get(&id).copied().unwrap_or_default();
+        json!({
+            "askedAt": walls.asked,
+            "allowedAt": walls.allowed,
+            "startedAt": walls.started,
+            "endedAt": walls.ended,
+            "approvalMs": times.approval_ms(),
+            "turnMs": times.turn_ms(),
+            "runMs": times.run_ms(),
+        })
+    }
+
     pub fn elapsed_seconds(&self) -> Option<u64> {
         self.queue
             .grant()
@@ -545,6 +596,8 @@ impl InputQueue {
                     },
                     "failure": self.failures.get(&request.id),
                     "runnable": self.plans.contains_key(&request.id),
+                    "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
+                    "timing": self.timing(request.id, &request.times),
                 })
             })
             .collect();
@@ -554,9 +607,14 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts.",
+            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts. elapsedSeconds at the top is how long the current approval has lasted, null with none; a request's elapsedSeconds runs from your ask to its end, or to now. timing gives when it was asked, allowed, started and ended, in milliseconds since 1970: approvalMs is the user's time, turnMs the wait for its turn, runMs the run with the user's pointer.",
         })
     }
+}
+
+/// Milliseconds as seconds with one decimal.
+fn seconds(ms: u64) -> f64 {
+    (ms / 100) as f64 / 10.0
 }
 
 #[cfg(test)]
@@ -708,6 +766,41 @@ mod tests {
         input.revoke();
         assert!(input.queue.grant().is_none());
         assert!(input.ran().is_empty());
+    }
+
+    #[test]
+    fn a_finished_request_reports_when_it_was_asked_allowed_started_and_ended() {
+        let mut input = InputQueue::default();
+        input.register(1, &display_owner(1));
+        let owner = input.owner(1, 1).unwrap();
+        let id = input
+            .submit(owner.clone(), "a".into(), "Drag".into(), Some(drag(10.0)))
+            .unwrap();
+        let asked = &input.status(&owner, Some(id), false)["requests"][0];
+        let before = wall_now();
+        assert!(asked["timing"]["askedAt"].as_u64().unwrap() <= before);
+        assert!(asked["timing"]["askedAt"].as_u64().unwrap() + 60_000 > before);
+        assert!(asked["timing"]["allowedAt"].is_null());
+        assert!(asked["elapsedSeconds"].as_f64().is_some());
+        assert!(input.approve(input.queue.approval()));
+        assert_eq!(input.start_loan().map(|(id, _)| id), Some(id));
+        input.finish_loan(id, None);
+        let state = input.status(&owner, Some(id), false);
+        let r = &state["requests"][0];
+        assert_eq!(r["state"], "completed");
+        let timing = &r["timing"];
+        for key in ["askedAt", "allowedAt", "startedAt", "endedAt"] {
+            assert!(timing[key].as_u64().is_some(), "{key}: {timing}");
+        }
+        for key in ["approvalMs", "turnMs", "runMs"] {
+            assert!(timing[key].as_u64().is_some(), "{key}: {timing}");
+        }
+        assert!(
+            timing["endedAt"].as_u64() >= timing["startedAt"].as_u64()
+                && timing["startedAt"].as_u64() >= timing["allowedAt"].as_u64()
+                && timing["allowedAt"].as_u64() >= timing["askedAt"].as_u64()
+        );
+        assert_eq!(seconds(1_250), 1.2);
     }
 
     #[test]
