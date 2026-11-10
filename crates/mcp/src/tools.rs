@@ -197,6 +197,7 @@ pub fn definitions() -> Vec<Value> {
                 "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available.",
                 "Sliders with enough accessibility information can instead change their value without moving your pointer.",
                 "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
+                "So does a drag from one window to another, such as a file from Finder onto a web page: only the user's pointer starts the system drag session that carries it.",
                 "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
                 "Click with the normal background route first. Some apps take a background click only partway, for example",
                 "selecting a row without opening it. If a screenshot or get_window_state shows the click had no effect, retry",

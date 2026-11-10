@@ -484,6 +484,27 @@ async fn handle_one(
                 }
                 return reply(json!({ "movedWindow": true, "route": "placement" }));
             }
+            // A drag from one window to another needs a system drag
+            // session, which follows only the real pointer: posted, it
+            // only selects what it grabbed (#166, ADR 0013, "Drags
+            // between windows").
+            let ends = off(cx, move || {
+                let at = |p| crate::mac::input::window_at(p).map(|(w, _)| w);
+                (at(from), at(to))
+            })
+            .await;
+            if agent_screen_model::real_drag::between_windows(ends.0, ends.1) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    agent_screen_model::real_drag::BETWEEN_WINDOWS,
+                    cx,
+                )
+                .await;
+            }
             // A web page takes a drag through the app's DevTools pipe, or
             // not at all (#37, ADR 0010).
             let refused = match web_route(from, cx).await {
@@ -2146,6 +2167,11 @@ async fn handle_one(
                                 window_id: 0,
                             },
                             frame: area,
+                            drop: WindowTarget {
+                                pid: 0,
+                                window_id: 0,
+                            },
+                            drop_frame: area,
                             area,
                             from: at(from),
                             to: at(to),
@@ -5703,6 +5729,15 @@ async fn queued_drag(
     let (target, frame) = off(cx, move || crate::mac::input::window_at(from))
         .await
         .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?;
+    // The window under the end may be another window of the display, as
+    // when a file goes from Finder onto a web page (ADR 0013, "Drags
+    // between windows").
+    let (drop, drop_frame) = match to {
+        Some(to) => off(cx, move || crate::mac::input::window_at(to))
+            .await
+            .ok_or_else(|| ControlError::not_found("no window at the drag's end"))?,
+        None => (target, frame),
+    };
     let area = cg::display_bounds(id);
     let point = |p: (f64, f64)| ((p.0 - area.x).round() as i64, (p.1 - area.y).round() as i64);
     let reason = match to {
@@ -5718,6 +5753,8 @@ async fn queued_drag(
     let plan = to.map(|to| crate::input_queue::Drag {
         target,
         frame,
+        drop,
+        drop_frame,
         area,
         from,
         to,

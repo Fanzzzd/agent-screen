@@ -322,6 +322,11 @@ fn plan(x: f64) -> Plan {
             window_id: 7,
         },
         frame: model::Rect::new(0.0, 0.0, 800.0, 600.0),
+        drop: model::WindowTarget {
+            pid: 1,
+            window_id: 7,
+        },
+        drop_frame: model::Rect::new(0.0, 0.0, 800.0, 600.0),
         area: model::Rect::new(0.0, 0.0, 800.0, 600.0),
         from: (x, 10.0),
         to: (x + 50.0, 10.0),
