@@ -3455,7 +3455,7 @@ async fn frame_window(
             // later: wait until two reads agree, up to half a second. An app
             // that answered with an error may be busy, with writes still
             // queued while its window stands still, so for it wait up to
-            // 1.5 s for the frame asked for.
+            // 1.5 s while the window still has the frame it had.
             let reads = if refused.is_some() { 30 } else { 10 };
             let mut last = None;
             for _ in 0..reads {
@@ -3463,11 +3463,11 @@ async fn frame_window(
                 let read = now().ok_or_else(closed)?;
                 let steady = last == Some(read);
                 last = Some(read);
-                let took = refused.is_none_or(|frame| {
+                let unchanged = refused.is_some_and(|frame| {
                     agent_screen_model::placement::frame_write(before, frame, read)
-                        == agent_screen_model::placement::FrameWrite::Took
+                        == agent_screen_model::placement::FrameWrite::Unchanged
                 });
-                if steady && took {
+                if steady && !unchanged {
                     break;
                 }
             }
