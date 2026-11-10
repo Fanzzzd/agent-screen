@@ -4,6 +4,8 @@
 //! window list's owner name, "WeCom", and every answer was the same
 //! `not_found`.
 
+use crate::model::Rect;
+
 /// An app as an agent named it for place_window, with the bundle id that
 /// name resolved to once, by a running app's name or bundle id, an
 /// installed app's name, or an .app path.
@@ -101,7 +103,7 @@ pub enum AppSighting {
 pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
     match sighting {
         AppSighting::Unknown => format!(
-            "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no app named {app:?}.app in the Applications folders, and no installed app with that bundle id. Check the name, or pass a window_id"
+            "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no installed app macOS knows by that name, and none with that bundle id. Check the name, or pass a window_id"
         ),
         AppSighting::NotRunning { name } => format!(
             "{name} isn't running. Start it with launch_app, which opens its window on the display"
@@ -122,9 +124,75 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
     }
 }
 
+/// What a frame write did to a window, judged by the frame it has after the
+/// write rather than by the app's Accessibility answer. Chromium answers a
+/// size write with an error even when the window takes the size, and
+/// place_window called a Dia window that had moved and resized rejected
+/// (#167).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameWrite {
+    /// The window has the frame asked for.
+    Took,
+    /// It changed, but not all the way: the app kept to its own limits.
+    Partly,
+    /// It kept the frame it had.
+    Unchanged,
+}
+
+/// How far, in points, a frame may be from another and count as the same:
+/// apps round to whole points, some to their content's units.
+const SAME_FRAME: f64 = 1.0;
+
+/// What a write asking for `asked` did to a window at `before` that is at
+/// `after` once it settled. All three are global frames in points.
+pub fn frame_write(before: Rect, asked: Rect, after: Rect) -> FrameWrite {
+    let same = |a: Rect, b: Rect| {
+        [
+            (a.x, b.x),
+            (a.y, b.y),
+            (a.width, b.width),
+            (a.height, b.height),
+        ]
+        .iter()
+        .all(|(p, q)| (p - q).abs() <= SAME_FRAME)
+    };
+    if same(after, asked) {
+        FrameWrite::Took
+    } else if same(after, before) {
+        FrameWrite::Unchanged
+    } else {
+        FrameWrite::Partly
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_write_is_judged_by_the_frame_after_it() {
+        let before = Rect::new(38.0, 38.0, 1281.0, 772.0);
+        let asked = Rect::new(0.0, 30.0, 960.0, 770.0);
+        assert_eq!(frame_write(before, asked, asked), FrameWrite::Took);
+        // Rounded by the app.
+        assert_eq!(
+            frame_write(before, asked, Rect::new(0.0, 30.5, 960.0, 769.0)),
+            FrameWrite::Took
+        );
+        // Moved and resized, but kept a minimum height: #167's Dia window.
+        assert_eq!(
+            frame_write(before, asked, Rect::new(0.0, 30.0, 960.0, 790.0)),
+            FrameWrite::Partly
+        );
+        // Moved only.
+        assert_eq!(
+            frame_write(before, asked, Rect::new(0.0, 30.0, 1281.0, 772.0)),
+            FrameWrite::Partly
+        );
+        assert_eq!(frame_write(before, asked, before), FrameWrite::Unchanged);
+        // Asked for the frame it had: that is taking it.
+        assert_eq!(frame_write(before, before, before), FrameWrite::Took);
+    }
 
     #[test]
     fn an_app_is_named_by_its_owner_its_name_or_its_bundle_id() {

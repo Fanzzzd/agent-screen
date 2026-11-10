@@ -85,6 +85,22 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
        min.count == 2, let w = Double(min[0]), let h = Double(min[1]) {
       window.minSize = NSSize(width: w, height: h)
     }
+    // FIELD_SLOW_RESIZE_MS=ms holds the main thread that long after each
+    // resize, as a Chromium browser laying out a heavy page does: an
+    // Accessibility size write then times out with an error although the
+    // window took the size (#167).
+    // Only Field's own window: AppKit's small windows, such as the input
+    // source indicator, resize all the time.
+    if let ms = Double(env["FIELD_SLOW_RESIZE_MS"] ?? "") {
+      var size = window.frame.size
+      NotificationCenter.default.addObserver(
+        forName: NSWindow.didResizeNotification, object: window, queue: .main
+      ) { [unowned self] _ in
+        guard self.window.frame.size != size else { return }
+        size = self.window.frame.size
+        Thread.sleep(forTimeInterval: min(ms, 5000) / 1000)
+      }
+    }
     // As an app that resizes its window past a small display does (#19,
     // #47): SIGUSR1 puts the window on the main screen once, now; after
     // SIGUSR2, each time it lands on another screen, 300 ms later.

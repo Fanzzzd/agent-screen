@@ -369,36 +369,47 @@ pub fn unhide(pid: i32) {
 
 /// An app by bundle id or name, as an .app path.
 pub fn resolve(app: &str) -> Option<PathBuf> {
-    // A bundle by path, as a build under /tmp that Launch Services skips.
     let home = std::env::var("HOME").unwrap_or_default();
-    let by_path = match app.strip_prefix("~/") {
-        Some(rest) => Some(Path::new(&home).join(rest)),
-        None => app.starts_with('/').then(|| PathBuf::from(app)),
-    };
-    if let Some(path) = by_path {
-        return path.join("Contents/Info.plist").exists().then_some(path);
+    agent_screen_model::launch::find_app(app, &home, &Mac)
+}
+
+/// The app lookups launch_app makes, answered by this Mac.
+struct Mac;
+
+impl agent_screen_model::launch::AppLookup for Mac {
+    fn by_bundle_id(&self, id: &str) -> Option<PathBuf> {
+        let url = NSWorkspace::sharedWorkspace()
+            .URLForApplicationWithBundleIdentifier(&NSString::from_str(id))?;
+        Some(PathBuf::from(url.path()?.to_string()))
     }
-    if let Some(url) = NSWorkspace::sharedWorkspace()
-        .URLForApplicationWithBundleIdentifier(&NSString::from_str(app))
-        && let Some(path) = url.path()
-    {
-        return Some(PathBuf::from(path.to_string()));
+
+    /// A bundle by path, as a build under /tmp that LaunchServices skips.
+    /// The folder's own entry gives the name's case; a link such as
+    /// /Applications/Safari.app stays a link.
+    fn bundle_at(&self, path: &Path) -> Option<PathBuf> {
+        if !path.join("Contents/Info.plist").exists() {
+            return None;
+        }
+        let (folder, name) = (path.parent()?, path.file_name()?.to_str()?);
+        let on_disk = std::fs::read_dir(folder)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name())
+                    .find(|entry| entry.to_str().is_some_and(|e| e.eq_ignore_ascii_case(name)))
+            })
+            .map(|entry| folder.join(entry));
+        Some(on_disk.unwrap_or_else(|| path.to_path_buf()))
     }
-    let name = if app.ends_with(".app") {
-        app.to_string()
-    } else {
-        format!("{app}.app")
-    };
-    let home = std::env::var("HOME").unwrap_or_default();
-    [
-        "/Applications",
-        "/System/Applications",
-        "/System/Applications/Utilities",
-        &format!("{home}/Applications"),
-    ]
-    .iter()
-    .map(|folder| Path::new(folder).join(&name))
-    .find(|path| path.exists())
+
+    fn by_name(&self, name: &str) -> Option<PathBuf> {
+        // Deprecated, but the only LaunchServices lookup by an app's name.
+        #[allow(deprecated)]
+        let path =
+            NSWorkspace::sharedWorkspace().fullPathForApplication(&NSString::from_str(name))?;
+        Some(PathBuf::from(path.to_string()))
+    }
 }
 
 /// Where Agent Screen keeps the picture the user chose for Agent Displays.
@@ -525,4 +536,23 @@ pub fn pids_named(name: &str) -> Vec<i32> {
         .filter(|app| app.localizedName().is_some_and(|n| n.to_string() == name))
         .map(|app| app.processIdentifier())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finder lives in /System/Library/CoreServices (#168).
+    #[test]
+    fn finder_resolves_by_name_and_bundle_id() {
+        let finder = Some(PathBuf::from("/System/Library/CoreServices/Finder.app"));
+        assert_eq!(resolve("Finder"), finder);
+        assert_eq!(resolve("finder"), finder);
+        assert_eq!(resolve("com.apple.finder"), finder);
+        assert_eq!(
+            resolve("Calculator"),
+            Some(PathBuf::from("/System/Applications/Calculator.app"))
+        );
+        assert_eq!(resolve("No Such App Anywhere"), None);
+    }
 }
