@@ -41,6 +41,11 @@ pub struct Focused {
     /// agent's. Such a window isn't the user's, even when the app is their
     /// front app, as WeCom was with its only window handed over (#162).
     pub on_target_display: bool,
+    /// Whether the app also has a window on the user's screens. The user
+    /// may click it during a long `type`, and the keys still going out
+    /// would reach it, so then a focused window on the target's display
+    /// counts as the user's too.
+    pub user_window: bool,
 }
 
 impl Front {
@@ -51,7 +56,9 @@ impl Front {
     pub fn of(target_is_front: bool, focused: Option<Focused>, target_window: u32) -> Front {
         match (target_is_front, focused) {
             (false, _) => Front::No,
-            (true, Some(f)) if f.window == target_window || f.on_target_display => {
+            (true, Some(f))
+                if f.window == target_window || (f.on_target_display && !f.user_window) =>
+            {
                 Front::TargetFocused
             }
             (true, Some(_)) => Front::OtherFocused,
@@ -364,6 +371,7 @@ mod tests {
         Some(Focused {
             window,
             on_target_display: false,
+            user_window: true,
         })
     }
 
@@ -385,6 +393,7 @@ mod tests {
         let handover = Some(Focused {
             window: 9,
             on_target_display: true,
+            user_window: false,
         });
         let front = Front::of(true, handover, 7);
         assert_eq!(front, Front::TargetFocused);
@@ -402,6 +411,15 @@ mod tests {
         assert_eq!(key_route(theirs, chord("Right")), KeyRoute::Refuse);
         // Not the front app: nothing changes.
         assert_eq!(Front::of(false, handover, 7), Front::No);
+        // A Handover focused while the app has another window on the
+        // user's screen: they may click that window mid-type, so it
+        // refuses as theirs.
+        let beside_theirs = Some(Focused {
+            window: 9,
+            on_target_display: true,
+            user_window: true,
+        });
+        assert_eq!(Front::of(true, beside_theirs, 7), Front::OtherFocused);
     }
 
     #[test]

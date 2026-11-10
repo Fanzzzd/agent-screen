@@ -140,9 +140,9 @@ pub fn agent_windows(pid: i32) -> usize {
 }
 
 /// Whether window `focused` is on the Agent Display that window `target`
-/// is on, the Agent Session's own, which holds only Handovers and the
-/// agent's windows (#162). False when either isn't on screen, or `target`
-/// isn't on an Agent Display.
+/// is on, the Agent Session's own: a Handover or the agent's window
+/// (#162), or a stray of the user's under ADR 0007. False when either isn't
+/// on screen, or `target` isn't on an Agent Display.
 pub fn on_display_of(target: u32, focused: u32) -> bool {
     let all = super::windows::all();
     let mid = |id: u32| {

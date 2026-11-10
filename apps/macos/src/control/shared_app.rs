@@ -53,6 +53,7 @@ pub async fn front(target: WindowTarget, cx: &AsyncApp) -> (Front, Option<u32>) 
                 ax::focused_window_id(pid).map(|focused| Focused {
                     window: focused,
                     on_target_display: focused != window && beside::on_display_of(window, focused),
+                    user_window: beside::user_window(pid),
                 })
             })
             .await
