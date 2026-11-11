@@ -847,8 +847,8 @@ fn start_sighting() {
     }
     // The watcher times its sightings from `since`, and allowances count
     // from SIGHTING_SINCE: both clocks start here. Before, the watcher timed
-    // from its own launch, after `tool` may compile it, so a window the
-    // script allowed looked older than the allowance.
+    // from its own launch, some time after the spawn, so a window the script
+    // allowed looked older than the allowance.
     let _ = SIGHTING_SINCE.set(Instant::now());
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
