@@ -9,8 +9,9 @@
 //! real_input. The approval then ends at once and your pointer and front
 //! app come back. A double click allowed the same way arrives as one
 //! double click. A click made while an approval from input_queue's
-//! request lasts runs at once, three times. A right click with realInput is refused at once, as the
-//! menu it opened would close when the user's app came back. A click
+//! request lasts runs at once, three times. A right click with
+//! realInput is refused at once, as the menu it opened would close when
+//! the user's app came back. A click
 //! declined reports input_pending and sends nothing, not even the
 //! background click. A click whose target changes while the user decides,
 //! the fixture turning white, clicks nothing once allowed and tells the
