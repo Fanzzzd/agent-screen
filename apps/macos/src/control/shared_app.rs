@@ -492,11 +492,11 @@ async fn press_at(
                     } else {
                         actions.join(", ")
                     };
-                    format!("the element there is {r} with {actions}, and neither it nor its parents takes AXPress")
+                    format!("the element there is {r} with {actions}, and nothing it sits in takes AXPress")
                 },
             );
             return Err(ControlError::failed(format!(
-                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead} To press a control there anyway, call get_window_state and use act_on_element press on its element, or repeat the click with real_input: true, which asks the user for their pointer."
+                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead} To press a control there anyway, call get_window_state and use act_on_element press on the control's own element, or repeat the click with real_input: true, which asks the user for their pointer."
             )));
         }
     };
@@ -547,7 +547,7 @@ async fn press_at(
     let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
     if pressed == ax::Action::NotTaken {
         return Err(ControlError::failed(format!(
-            "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press."
+            "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press. To click it anyway, repeat the click with real_input: true, which asks the user for their pointer."
         )));
     }
     let seen = match (&watcher, before) {

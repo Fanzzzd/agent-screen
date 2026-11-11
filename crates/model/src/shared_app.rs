@@ -557,8 +557,8 @@ mod tests {
         assert!(press_anyway("AXButton") && press_anyway("AXLink"));
         assert!(!press_anyway("AXGroup") && !press_anyway("AXStaticText"));
         assert!(
-            !press_anyway("AXPopUpButton"),
-            "a pop-up's press opens a menu"
+            MENU_ROLES.iter().all(|r| !press_anyway(r)),
+            "a press role never opens a menu"
         );
         assert_eq!(element_use("AXPopUpButton", &press, true), ElementUse::Menu);
         assert_eq!(

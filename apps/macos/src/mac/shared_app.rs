@@ -263,12 +263,17 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
     }
     let first = role(&element);
     let hit = element.clone();
-    for _ in 0..8 {
+    let mut first_actions = Vec::new();
+    for level in 0..8 {
         let role = role(&element);
         if matches!(role.as_str(), "AXWindow" | "AXWebArea" | "AXSheet") {
             break;
         }
-        match rules::element_use(&role, &ax::actions(&element), opens_menu(&element)) {
+        let actions = ax::actions(&element);
+        if level == 0 {
+            first_actions.clone_from(&actions);
+        }
+        match rules::element_use(&role, &actions, opens_menu(&element)) {
             ElementUse::Text => return Hit::Text(element),
             ElementUse::Press => return Hit::Press(element),
             ElementUse::Menu => return Hit::Menu(element),
@@ -279,11 +284,12 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
         };
         element = parent;
     }
-    if rules::press_anyway(&first) && !opens_menu(&hit) {
+    // No press role opens a menu (`rules::press_anyway`), so this takes no
+    // more reads.
+    if rules::press_anyway(&first) {
         return Hit::Press(hit);
     }
-    let actions = ax::actions(&hit);
-    Hit::Nothing(first, actions)
+    Hit::Nothing(first, first_actions)
 }
 
 /// Whether `field` is a text field of `target`'s window that takes text
