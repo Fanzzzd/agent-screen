@@ -6071,6 +6071,7 @@ async fn queued_click(
             "route": "real_input",
             "requestId": request,
             "waitedSeconds": waited,
+            "timing": r["timing"],
         }));
     }
     if changed && refusals >= 2 {
