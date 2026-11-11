@@ -42,6 +42,9 @@
            check on it. -->
       <button id="grow">grow</button>
     </div>
+    <!-- A page's own expander, a span with role button and no tabindex,
+         as GitHub's settings pages draw one. -->
+    <span id="expander" role="button" aria-expanded="false">permissions</span>
     <ul id="long"></ul>
     <script>
       const side = new URLSearchParams(location.search).get("side") || "agent";
@@ -109,6 +112,13 @@
           log("active", now || "none");
         }
       }, 50);
+      const expander = document.getElementById("expander");
+      expander.setAttribute("aria-label", `${side} expander`);
+      expander.addEventListener("click", () => {
+        const open = expander.getAttribute("aria-expanded") !== "true";
+        expander.setAttribute("aria-expanded", String(open));
+        log("expander", open);
+      });
       let clicks = 0;
       press.addEventListener("click", () => {
         clicks++;

@@ -26,8 +26,9 @@ pub enum Hit {
     Press(Element),
     /// A control whose press opens a menu, as a page's select.
     Menu(Element),
-    /// Nothing that takes a press or text: its role.
-    Nothing(String),
+    /// Nothing that takes a press or text: the role and actions of the
+    /// element under the point.
+    Nothing(String, Vec<String>),
     /// Accessibility named no element of that window there.
     Unknown,
 }
@@ -261,6 +262,7 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
         return Hit::Unknown;
     }
     let first = role(&element);
+    let hit = element.clone();
     for _ in 0..8 {
         let role = role(&element);
         if matches!(role.as_str(), "AXWindow" | "AXWebArea" | "AXSheet") {
@@ -277,7 +279,11 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
         };
         element = parent;
     }
-    Hit::Nothing(first)
+    if rules::press_anyway(&first) && !opens_menu(&hit) {
+        return Hit::Press(hit);
+    }
+    let actions = ax::actions(&hit);
+    Hit::Nothing(first, actions)
 }
 
 /// Whether `field` is a text field of `target`'s window that takes text

@@ -209,7 +209,7 @@ async fn resolve(
     let element = off(cx, move || {
         element.or_else(|| match beside::hit(target, point) {
             Hit::Text(e) | Hit::Press(e) | Hit::Menu(e) => Some(ax::Sendable(e)),
-            Hit::Nothing(_) | Hit::Unknown => None,
+            Hit::Nothing(..) | Hit::Unknown => None,
         })
     })
     .await;
@@ -476,7 +476,7 @@ async fn press_at(
                 beside::label(&e),
                 ax::Sendable(e),
             )),
-            Hit::Nothing(role) => Err(Some(role)),
+            Hit::Nothing(role, actions) => Err(Some((role, actions))),
             Hit::Unknown => Err(None),
         }
     })
@@ -486,10 +486,17 @@ async fn press_at(
         Err(role) => {
             let there = role.map_or_else(
                 || "accessibility names nothing there".to_string(),
-                |r| format!("the element there is {r}"),
+                |(r, actions)| {
+                    let actions = if actions.is_empty() {
+                        "no actions".to_string()
+                    } else {
+                        actions.join(", ")
+                    };
+                    format!("the element there is {r} with {actions}, and neither it nor its parents takes AXPress")
+                },
             );
             return Err(ControlError::failed(format!(
-                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead}"
+                "{why}, so nothing was sent; and nothing under the point takes a press or text through accessibility ({there}). {instead} To press a control there anyway, call get_window_state and use act_on_element press on its element, or repeat the click with real_input: true, which asks the user for their pointer."
             )));
         }
     };

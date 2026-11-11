@@ -216,6 +216,24 @@ pub fn opens_menu(role: &str, in_web_page: Option<bool>, holds_menu: bool) -> bo
     MENU_ROLES.contains(&role) && (in_web_page != Some(true) || holds_menu)
 }
 
+/// Roles drawn as something to press. A click on one is pressed through
+/// accessibility even when it lists no AXPress, as act_on_element's press
+/// already does: a click on a GitHub expander in Dia was refused, its
+/// element an AXButton where neither it nor its parents listed AXPress.
+const PRESS_ROLES: [&str; 5] = [
+    "AXButton",
+    "AXLink",
+    "AXCheckBox",
+    "AXRadioButton",
+    "AXDisclosureTriangle",
+];
+
+/// Whether a click on the element under the point, which neither it nor
+/// its parents says takes a press, is tried as a press all the same.
+pub fn press_anyway(role: &str) -> bool {
+    PRESS_ROLES.contains(&role)
+}
+
 /// `menu` is what `opens_menu` says of the element.
 pub fn element_use(role: &str, actions: &[String], menu: bool) -> ElementUse {
     if TEXT_ROLES.contains(&role) {
@@ -536,6 +554,12 @@ mod tests {
         assert_eq!(element_use("AXButton", &press, false), ElementUse::Press);
         assert_eq!(element_use("AXLink", &press, false), ElementUse::Press);
         assert_eq!(element_use("AXGroup", &[], false), ElementUse::Nothing);
+        assert!(press_anyway("AXButton") && press_anyway("AXLink"));
+        assert!(!press_anyway("AXGroup") && !press_anyway("AXStaticText"));
+        assert!(
+            !press_anyway("AXPopUpButton"),
+            "a pop-up's press opens a menu"
+        );
         assert_eq!(element_use("AXPopUpButton", &press, true), ElementUse::Menu);
         assert_eq!(
             element_use("AXPopUpButton", &press, false),
