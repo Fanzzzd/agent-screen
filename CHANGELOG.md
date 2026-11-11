@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.31 (2026-11-11)
+
+### Fixes
+
+- When you take over a display to help an agent, for example to approve a passkey, and then leave the mouse and keyboard alone for 15 seconds, the agent waiting for the display is told you may be done. It can then ask you in the chat to click Let … Continue, or to tell it to go on, instead of waiting again without knowing why.
+- When you work in a browser while an agent uses another of its windows, an agent's click on a button there now presses it even when the page doesn't announce that the button can be pressed. Before, the click was refused, as on a GitHub settings expander in Dia. When a click is still refused, the message names what is under the point and what the agent can try instead.
+
 ## 0.1.30 (2026-11-11)
 
 ### Fixes
