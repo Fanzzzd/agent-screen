@@ -40,6 +40,13 @@ pub fn stamp(line: &str) -> Option<i64> {
 
 /// When the log says a display was made new: its `created display=` lines.
 /// A reused spare adds no display and isn't one.
+/// The displays a script that makes `displays` adds to WindowServer's
+/// count: each of its own, and the spare the app makes once one is taken.
+/// The log shows them in pairs about 0.6 s apart.
+pub fn need(displays: usize) -> usize {
+    if displays == 0 { 0 } else { displays + 1 }
+}
+
 pub fn created(log: &str) -> Vec<i64> {
     log.lines()
         .filter(|line| line.contains(" created display="))
@@ -233,5 +240,12 @@ mod tests {
             decide(&made, now, began, 2, limits(1, 5)),
             Verdict::Capped { made: 4 }
         );
+    }
+
+    #[test]
+    fn a_script_that_makes_displays_counts_the_apps_spare() {
+        assert_eq!(need(0), 0);
+        assert_eq!(need(1), 2);
+        assert_eq!(need(3), 4);
     }
 }

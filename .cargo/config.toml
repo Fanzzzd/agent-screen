@@ -1,3 +1,5 @@
-# `cargo e2e <name> [args]` runs a script from tests/src/bin.
+# `cargo e2e <name> [-- args]` runs a script from tests/e2e/src/bin, and
+# `cargo suite [args]` runs the scripts that cover a change.
 [alias]
 e2e = "run --quiet --package agent-screen-tests --bin"
+suite = "run --quiet --package agent-screen-tests --bin suite --"

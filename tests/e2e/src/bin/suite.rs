@@ -2,11 +2,11 @@
 //! of them. The manifest (`manifest.rs`) says what each script covers, and
 //! `select.rs` maps changed files to those areas.
 //!
-//!     AGENTSCREEN_INSTANCE=e2e cargo e2e suite --changed
-//!     AGENTSCREEN_INSTANCE=e2e cargo e2e suite --area viewer-input
-//!     AGENTSCREEN_INSTANCE=e2e cargo e2e suite --tier core
-//!     cargo e2e suite --list [--area A] [--tier T]
-//!     cargo e2e suite --changed --base origin/main --dry-run
+//!     AGENTSCREEN_INSTANCE=e2e cargo suite --changed
+//!     AGENTSCREEN_INSTANCE=e2e cargo suite --area viewer-input
+//!     AGENTSCREEN_INSTANCE=e2e cargo suite --tier core
+//!     cargo suite --list [--area A] [--tier T]
+//!     cargo suite --changed --base origin/main --dry-run
 //!
 //! The scripts that leave you alone run first, then the hands-off ones
 //! together. A failing script doesn't stop the rest. Each script's output
@@ -220,7 +220,7 @@ fn describe(order: &[&Script], picked: &Selection, took: &BTreeMap<String, u64>,
         ),
     };
     println!("Estimated time: {}{guess}.", plan::span(secs));
-    let displays: usize = order.iter().map(|s| s.displays).sum();
+    let displays: usize = order.iter().map(|s| budget::need(s.displays)).sum();
     println!(
         "Displays: up to {displays}. The suite waits while more than {} were made in the last 10 minutes, and stops at {} in this run.",
         limits.budget, limits.cap
@@ -247,18 +247,35 @@ fn describe(order: &[&Script], picked: &Selection, took: &BTreeMap<String, u64>,
 
 // MARK: The run
 
-/// When the test instance made displays, from its display log and the
-/// file the log moved to when it grew past its limit.
+/// When displays were made, by the test instance and by the user's own
+/// Agent Screen, as WindowServer carries both: from each display log and
+/// the file a log moved to when it grew past its limit. With no log at
+/// all, the suite says it can't count.
 fn displays_made() -> Vec<i64> {
-    let name = format!("displays-{}", instance().unwrap_or_default());
     let folder =
         PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Logs/Agent Screen");
-    ["old", "log"]
+    let names = [
+        format!("displays-{}", instance().unwrap_or_default()),
+        "displays".to_string(),
+    ];
+    let texts: Vec<String> = names
         .iter()
-        .filter_map(|kind| std::fs::read_to_string(folder.join(format!("{name}.{kind}"))).ok())
-        .flat_map(|text| budget::created(&text))
+        .flat_map(|name| ["old", "log"].map(|kind| folder.join(format!("{name}.{kind}"))))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect();
+    if texts.is_empty() && !NO_LOG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        println!(
+            "No display log in {}, so the suite can't count the displays made before it. It counts the ones its scripts make from now on.",
+            folder.display()
+        );
+    }
+    texts
+        .iter()
+        .flat_map(|text| budget::created(text))
         .collect()
 }
+
+static NO_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The time as the display log writes it, in `budget::stamp`'s seconds.
 fn now() -> Result<i64> {
@@ -287,8 +304,9 @@ fn run_all(
                 rows.push(left_out(
                     script,
                     format!(
-                        "it makes {} displays, over the budget of {}",
-                        script.displays, limits.budget
+                        "it makes {} displays with the app's spare, over the budget of {}",
+                        budget::need(script.displays),
+                        limits.budget
                     ),
                 ));
                 continue;
@@ -348,18 +366,24 @@ fn run_all(
 fn wait_for_room(script: &Script, began: i64, limits: Limits) -> Result<Verdict> {
     let mut said = false;
     loop {
-        let verdict = budget::decide(&displays_made(), now()?, began, script.displays, limits);
+        let verdict = budget::decide(
+            &displays_made(),
+            now()?,
+            began,
+            budget::need(script.displays),
+            limits,
+        );
         let Verdict::Wait { secs, recent } = verdict else {
             return Ok(verdict);
         };
         if !said {
             said = true;
             println!(
-                "Waiting about {} before {}: the test instance made {recent} displays in the last 10 minutes, {} needs {}, and the budget is {}.",
+                "Waiting about {} before {}: {recent} displays were made in the last 10 minutes, {} needs {} with the app's spare, and the budget is {}.",
                 plan::span(secs),
                 script.name,
                 script.name,
-                script.displays,
+                budget::need(script.displays),
                 limits.budget
             );
         }

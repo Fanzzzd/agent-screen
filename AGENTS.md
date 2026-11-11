@@ -44,7 +44,7 @@ pnpm check   # cargo fmt --all --check, clippy -D warnings, cargo test --workspa
 
 The test scripts are Rust too, in `tests/e2e` (see `docs/DEVELOPMENT.md`, Test). Clippy covers them; CI doesn't run them, since they need a Mac with the app's grants.
 
-For a change under `apps/macos` or `crates`, run `AGENTSCREEN_INSTANCE=e2e cargo e2e suite --changed` and say which scripts ran. It picks the scripts that cover the changed files.
+For a change under `apps/macos` or `crates`, run `AGENTSCREEN_INSTANCE=e2e cargo suite --changed` and say which scripts ran. It picks the scripts that cover the changed files.
 
 ## Delivery
 

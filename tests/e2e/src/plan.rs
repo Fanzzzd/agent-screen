@@ -4,11 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::budget::Limits;
+use crate::budget::{BUDGET, CAP, Limits};
 use crate::manifest::{Area, Script, Tier};
 
 pub const USAGE: &str = "\
-usage: AGENTSCREEN_INSTANCE=e2e cargo e2e suite <what> [options]
+usage: AGENTSCREEN_INSTANCE=e2e cargo suite <what> [options]
 
 what, one or more; together they narrow the choice:
   --changed            the scripts that cover the files changed since --base
@@ -19,8 +19,8 @@ options:
   --list               print the chosen scripts, or all of them, and run nothing
   --dry-run            print the plan and run nothing
   --base REF           what --changed compares with (origin/main)
-  --display-budget N   new displays the last 10 minutes may hold (12)
-  --display-cap N      new displays one run may make (60)";
+  --display-budget N   new displays the last 10 minutes may hold (12, or fewer)
+  --display-cap N      new displays one run may make (60, or fewer)";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
@@ -82,8 +82,10 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                     other => return Err(format!("no tier {other}; the tiers are core and full")),
                 })
             }
-            "--display-budget" => options.limits.budget = count(value()?)?,
-            "--display-cap" => options.limits.cap = count(value()?)?,
+            "--display-budget" => {
+                options.limits.budget = lower(count(value()?)?, BUDGET, "--display-budget")?
+            }
+            "--display-cap" => options.limits.cap = lower(count(value()?)?, CAP, "--display-cap")?,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -210,6 +212,17 @@ pub fn table(rows: &[Row]) -> String {
 pub fn passed(rows: &[Row]) -> bool {
     rows.iter()
         .all(|r| matches!(r.outcome, Outcome::Pass | Outcome::Skip))
+}
+
+/// A display limit may only go down: too many displays at once once froze
+/// the Mac.
+fn lower(n: usize, most: usize, flag: &str) -> Result<usize, String> {
+    if n > most {
+        return Err(format!(
+            "{flag} is at most {most}; it can only make the limit stricter"
+        ));
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

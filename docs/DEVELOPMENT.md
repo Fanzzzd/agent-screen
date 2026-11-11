@@ -187,12 +187,12 @@ End-to-end scripts drive the real app. Each is one file in `tests/e2e/src/bin`, 
 ### Run the scripts that cover a change
 
 ```sh
-AGENTSCREEN_INSTANCE=e2e cargo e2e suite --changed            # the scripts that cover what differs from origin/main; --base REF names another commit
-AGENTSCREEN_INSTANCE=e2e cargo e2e suite --area viewer-input  # one area's scripts, or several: --area peek,takeover
-AGENTSCREEN_INSTANCE=e2e cargo e2e suite --tier core          # 16 scripts that reach every area
-AGENTSCREEN_INSTANCE=e2e cargo e2e suite --tier full          # every script the suite runs
-cargo e2e suite --list [--area A] [--tier T]                  # the scripts with their tier, drive, displays and last run; runs nothing
-cargo e2e suite --changed --dry-run                           # the plan and its estimated time; runs nothing
+AGENTSCREEN_INSTANCE=e2e cargo suite --changed            # the scripts that cover what differs from origin/main; --base REF names another commit
+AGENTSCREEN_INSTANCE=e2e cargo suite --area viewer-input  # one area's scripts, or several: --area peek,takeover
+AGENTSCREEN_INSTANCE=e2e cargo suite --tier core          # 17 scripts that reach every area
+AGENTSCREEN_INSTANCE=e2e cargo suite --tier full          # every script the suite runs
+cargo suite --list [--area A] [--tier T]                  # the scripts with their tier, drive, displays and last run; runs nothing
+cargo suite --changed --dry-run                           # the plan and its estimated time; runs nothing
 ```
 
 `suite` maps the changed files to areas (`PATHS` in `tests/e2e/src/select.rs`) and runs the scripts the manifest lists under those areas. A file that cuts across areas, such as `ui/shell.rs` or `control/agent.rs`, or one the map doesn't list, adds the core tier, and `suite` says so. A change outside the app and the test code runs nothing, and `suite` says that too. `--changed`, `--area` and `--tier` narrow each other: `--changed --tier core` runs the core scripts of the changed areas.
@@ -239,11 +239,11 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e keys        # the key action in Chrome: a pag
 
 # input-queue: Input Requests, the Input Queue, Input Grants and Input Loans, which use the user's real pointer
 AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue  # the Input Queue's card with a preview intent: it asks, shows the grant, and leaves when the grant idles out; the agent then sees approval_lapsed, and a wait or same-token retry returns at once; the card fits its content and the Input Bar shows at the bottom, clear of the card, during the grant, and its Stop ends it; a menu item's request (`input-queue-menu`) asks on the same card and names the item, and so does a double click (`input-queue-click`); three preview drags (`input-queue-drags`) ask on one card, and allowed with one shown running (`input-queue-running`) the card fits Stop; captures the cards, the bar, and the red edge at the main screen's top-left corner and top middle (a built-in display's corner and notch); no real input; about 45 s; 1 display
-AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue --buttons-only # real HID clicks on the painted Allow and Not Now buttons: a preview-only request opens a grant that survives the next queue tick, then a new request is declined; no queued action executes; restores pointer and front app; hands off; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue -- --buttons-only # real HID clicks on the painted Allow and Not Now buttons: a preview-only request opens a grant that survives the next queue tick, then a new request is declined; no queued action executes; restores pointer and front app; hands off; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e realdrag    # the Input Queue's executor moves your pointer (ADR 0013): an approved drag on the Electron harness's splitter, opened without a pipe, runs with route real_input and the splitter follows; a red edge shows meanwhile; a pointer move of yours ends the approval and leaves the pointer; after done the pointer goes back; needs target/e2e/Electron.app; hands off; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e realclick   # a click with your pointer (ADR 0013, Clicks): the HIDClick fixture's button takes a click only while the HID system reads the button down, so a background click leaves it red; the same click with realInput asks first, names the click and the app, and an actual HID click on the painted Allow button turns it green with route real_input; the reply says how long the request waited; with no other agent using the approval, it ends at once and your pointer and front app come back; an allowed double click arrives as one; a right click, and a Control-held left click, with realInput are refused at once, naming show_menu, and send nothing; a declined click sends nothing; after the fixture repaints while the request waits (SIGUSR1), an allowed click clicks nothing and tells the agent to take a new screenshot; moves your pointer for a second, twice; hands off; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e filedrag    # a file dragged between two apps' windows on one display (#166, ADR 0013, Drags between windows): FileSource from tools/filedrag.swift starts a system drag session with a file URL, FileDrop takes it; the background drag asks for your pointer instead of reporting route posted, and declined sends nothing; allowed, it runs with route real_input and FileDrop gets the file after at least 3 dragover updates; with E2E_ELECTRON or target/e2e/Electron.app, the same file dropped onto the Electron harness's drop zone reaches the page, which prints its dragover count and time; the app log's `input queue: drag of` line gives the drag's phases in ms; a drop window moved while the request waited gets nothing and nothing is pressed; moves your pointer for a second; hands off; 1 display
-AGENTSCREEN_INSTANCE=e2e cargo e2e realclick --allow-only --observer-timeout # disable the real input observer during a preview grant: the grant ends without executing, the observer recovers without restoring approval, and a fresh actual Allow executes one fixture click and restores pointer/front app; hands off; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e realclick -- --allow-only --observer-timeout # disable the real input observer during a preview grant: the grant ends without executing, the observer recovers without restoring approval, and a fresh actual Allow executes one fixture click and restores pointer/front app; hands off; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alone, 20 rounds (E2E_LOOPS) on one display (#121): a fresh background Electron harness, which AeroSpace has never seen in front, handed over and made main and frontmost; AeroSpace never moves it off the Agent Display, nor the user's windows, and nothing shows on your screen; needs target/e2e/Electron.app; hands off; about 2 min; 1 display
 
 # displays: an Agent Display's life, from creation and parking to spares and review
@@ -340,7 +340,7 @@ AGENTSCREEN_INSTANCE=e2e E2E_NOW=1 cargo e2e flash  # TextEdit launched again RU
 # tools, which cover no area
 AGENTSCREEN_INSTANCE=e2e cargo e2e stop        # quit a test instance a stopped script left running
 cargo e2e demo        # records the README's demo beside your Agent Screen, as the instance `demo`, and writes docs/media/demo.gif; needs ffmpeg
-AGENTSCREEN_INSTANCE=e2e cargo e2e suite --changed  # runs the scripts that cover a change; see above
+AGENTSCREEN_INSTANCE=e2e cargo suite --changed  # runs the scripts that cover a change; see above
 ```
 
 Test scripts count the displays they make in `/tmp/agent-screen-test-displays`. `E2E_DISPLAYS_PER_HOUR=N` makes `createDisplay` fail in the script past N in an hour; there is no limit by default. About 60 displays in 11 minutes froze this Mac once, so compare builds with few rounds rather than loops.

@@ -424,8 +424,12 @@ mod tests {
                 area = heading
                     .split_once(": ")
                     .and_then(|(name, _)| Area::named(name));
-            } else if let Some((_, rest)) = line.split_once("cargo e2e ") {
-                let name = rest.split(|c: char| !c.is_ascii_alphanumeric()).next();
+            } else if let Some(name) = line
+                .split_once("cargo e2e ")
+                .map(|(_, rest)| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+                // `cargo suite` is the alias for the suite script.
+                .or_else(|| line.contains("cargo suite").then_some(Some("suite")))
+            {
                 let name = name.unwrap_or_default().to_string();
                 if let Some(area) = area {
                     grouped.entry(name.clone()).or_insert(area);
@@ -436,7 +440,7 @@ mod tests {
         for s in SCRIPTS {
             assert!(
                 mentioned.contains(s.name),
-                "docs/DEVELOPMENT.md has no `cargo e2e {}` line",
+                "docs/DEVELOPMENT.md has no `cargo e2e {}` line (`cargo suite` for the suite)",
                 s.name
             );
             if let Some(&first) = s.areas.first() {

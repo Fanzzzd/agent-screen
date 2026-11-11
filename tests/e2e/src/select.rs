@@ -286,8 +286,9 @@ fn changed(files: &[String], notes: &mut Vec<String>) -> Vec<&'static str> {
     if !across.is_empty() {
         core = true;
         notes.push(format!(
-            "{} cuts across areas: adding the core tier.",
-            list(&across)
+            "{} {} across areas: adding the core tier.",
+            list(&across),
+            if across.len() == 1 { "cuts" } else { "cut" }
         ));
     }
     if !unmapped.is_empty() {
