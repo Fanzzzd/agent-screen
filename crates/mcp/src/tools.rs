@@ -1384,12 +1384,20 @@ fn describe_wait(reply: &Object, helping: bool) -> Value {
     if reply.get("outcome").and_then(Value::as_str) == Some("timedOut")
         && let Some(idle) = idle
     {
-        // The usual note says the user is still operating the display, which
-        // their quiet contradicts: this note replaces it.
         if idle >= IDLE_HINT_SECONDS {
-            out["note"] = json!(format!(
+            let quiet = format!(
                 "The user still has control, but hasn't touched the mouse or keyboard for {idle} s, so they may be done and only missed the hand-back. Ask them in the chat to click Let ... Continue at the top of the Viewer, or to tell you to continue; then call request_control with their words as user_instruction."
-            ));
+            );
+            // The plain note says the user is still operating the display,
+            // which their quiet contradicts: it goes. A note about an open
+            // request says how to withdraw it: it stays.
+            let asked = helping || reply.get("controlAsked") == Some(&Value::Bool(true));
+            let base = out.get("note").and_then(Value::as_str).unwrap_or_default();
+            out["note"] = json!(if asked {
+                format!("{base} {quiet}")
+            } else {
+                quiet
+            });
         }
         out["userIdleSeconds"] = json!(idle);
     }
@@ -2222,7 +2230,19 @@ mod tests {
                 "{note}"
             );
             assert_eq!(quiet["userIdleSeconds"], 42);
+            // An open Help Request's note keeps how to withdraw it.
+            assert_eq!(note.contains("withdraw: true"), helping, "{note}");
         }
+        let mut asked = reply(json!(42));
+        asked.insert("controlAsked".into(), json!(true));
+        let note = describe_wait(&asked, false)["note"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            note.contains("request_control with withdraw: true") && note.contains("for 42 s"),
+            "{note}"
+        );
         let busy = describe_wait(&reply(json!(3)), true);
         assert!(!busy["note"].as_str().unwrap().contains("touched"));
         assert_eq!(busy["userIdleSeconds"], 3);
