@@ -342,27 +342,9 @@ pub fn restore(saved: Saved) {
                 log::info!("input queue: window {focused} could not be focused again");
             }
         }
-        super::ax::set_attribute(
-            &super::ax::application(front),
-            "AXFrontmost",
-            objc2_core_foundation::CFBoolean::new(true),
-        );
         // Some apps take AXFrontmost and stay behind, as Dia did behind
-        // the loan's app. NSRunningApplication brings those, unless the
-        // user acts first: then what they did stands.
-        let asked = std::time::Instant::now();
-        let mut activated = false;
-        while super::app::frontmost_pid() != Some(front)
-            && asked.elapsed() < Duration::from_secs(1)
-            && !touched()
-        {
-            if !activated && asked.elapsed() > Duration::from_millis(200) {
-                activated = true;
-                log::info!("input queue: pid {front} ignored AXFrontmost; activating it");
-                super::app::activate(front);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        // the loan's app; the user's touch stops the wait.
+        super::ime::return_front_unless(front, touched);
     }
 }
 
