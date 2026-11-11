@@ -18,8 +18,9 @@
 //! set_value and Return: none opens its menu, which would take the user's
 //! keyboard, and each answer says nothing was chosen. A click on a link
 //! whose page cancels it succeeds with changed false; the button and the
-//! submit, which change the page, say changed true. Then, with your front app back, the same
-//! harness takes posted keys as before.
+//! submit, which change the page, say changed true. A click on the page's
+//! own expander, a span with role button, presses it open. Then, with
+//! your front app back, the same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //! Puts a window and the front on your main screen for about half a
@@ -524,6 +525,42 @@ fn select_and_link(
     Ok(())
 }
 
+/// A page's own expander, a span with role button: a click on it beside
+/// the user's window is pressed through accessibility and opens it. The
+/// user's window keeps key focus. Chromium lists AXPress for this span,
+/// so the case passes without the press for button roles that list none;
+/// a GitHub expander in Dia, an AXButton where no AXPress was found, has
+/// no fixture here yet.
+fn expander(
+    control: &Control,
+    id: &Value,
+    window_id: u64,
+    log: &std::path::Path,
+    pid: &str,
+) -> Result<()> {
+    let (line, (x, y)) = element(&tree(control, id, window_id)?, "agent expander")?;
+    let mark = lines(log, 0).len();
+    let clicked = control.call(
+        "click",
+        json!({ "sessionKey": KEY, "displayId": id, "x": x, "y": y }),
+    );
+    sleep_ms(500);
+    let seen = lines(log, mark);
+    let now = focused_window(pid);
+    check(
+        "a click on the page's role=button expander beside the user's window presses it open",
+        clicked.is_ok() && has(&seen, "pair agent expander true"),
+        format!("{line} | {} | {seen:?}", cut(&said(&clicked), 500)),
+    );
+    let touched = user_touched(&seen);
+    check(
+        "and the user's window stays focused and sees nothing",
+        now == "pair user" && touched.is_empty(),
+        format!("focused {now:?} | {touched:?}"),
+    );
+    Ok(())
+}
+
 /// When accessibility doesn't say which window of the front app has focus
 /// (debugFocusUnknown), nothing posted may reach the agent's window: a
 /// posted click would make it key and take the user's typing. A click on
@@ -892,6 +929,7 @@ fn test(
 
     form(control, id, window_id, log, pid)?;
     select_and_link(control, id, window_id, log, pid)?;
+    expander(control, id, window_id, log, pid)?;
     large_page(control, id, window_id, log)?;
     focus_unknown(control, id, window_id, log, pid)?;
     menu_bar(control, id, window_id, log, pid)?;
