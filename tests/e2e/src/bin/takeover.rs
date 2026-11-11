@@ -131,9 +131,15 @@ fn test(control: &Control) -> Result<()> {
     type_in_viewer(control, " User added this.", 0)?;
     // An input method such as pinyin composes the letters in the Viewer
     // and holds the last ones until the user picks: the text can't match.
+    // Waiting for text that can't match only keeps the recording's overlay
+    // on the user's screen past its budget.
     let source = probe(&["source"]).unwrap_or_default();
+    let composes = !source.starts_with("com.apple.keylayout.");
     let typed_at = std::time::Instant::now();
-    while !document_text().contains("User added this.") && typed_at.elapsed().as_secs() < 3 {
+    while !composes
+        && !document_text().contains("User added this.")
+        && typed_at.elapsed().as_secs() < 3
+    {
         sleep_ms(100);
     }
     watch_front(&mut stolen)?;
@@ -141,7 +147,7 @@ fn test(control: &Control) -> Result<()> {
     Command::new("/bin/kill")
         .args(["-TERM", &recording.id().to_string()])
         .status()?;
-    if source.starts_with("com.apple.keylayout.") {
+    if !composes {
         check(
             "the user's keys reach the agent's app, while the screen is recorded",
             document_text().contains("User added this."),
@@ -153,6 +159,19 @@ fn test(control: &Control) -> Result<()> {
             quoted(&document_text())
         );
     }
+
+    // A wait that times out while the user holds the display says how long
+    // they have left the mouse and keyboard alone, so an agent can remind
+    // them to hand back.
+    let waited = control.call(
+        "waitForControl",
+        json!({ "displayId": id, "timeoutSeconds": 1 }),
+    )?;
+    check(
+        "a wait that times out during the Takeover says how long the user has been idle",
+        waited["outcome"] == "timedOut" && waited["userIdleSeconds"].is_u64(),
+        waited.to_string(),
+    );
 
     let resumed = control.begin(
         "waitForControl",

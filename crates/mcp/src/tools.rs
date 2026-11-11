@@ -1372,9 +1372,32 @@ fn access_output(action: &str, reply: Object) -> Value {
     out
 }
 
+/// Seconds of the user's quiet, during a Takeover, after which a wait that
+/// timed out says they may be done.
+const IDLE_HINT_SECONDS: u64 = 15;
+
 /// What a wait for control came to. `helping`: a Help Request is open, and
 /// the user may not have seen it yet.
 fn describe_wait(reply: &Object, helping: bool) -> Value {
+    let mut out = wait_outcome(reply, helping);
+    let idle = reply.get("userIdleSeconds").and_then(Value::as_u64);
+    if reply.get("outcome").and_then(Value::as_str) == Some("timedOut")
+        && let Some(idle) = idle
+        && let Some(note) = out.get("note").and_then(Value::as_str)
+    {
+        let mut note = note.to_string();
+        if idle >= IDLE_HINT_SECONDS {
+            note.push_str(&format!(
+                " The user hasn't touched the mouse or keyboard for {idle} s, so they may be done and only missed the hand-back. Ask them in the chat to click Let ... Continue at the top of the Viewer, or to tell you to continue; then call request_control with their words as user_instruction."
+            ));
+        }
+        out["note"] = json!(note);
+        out["userIdleSeconds"] = json!(idle);
+    }
+    out
+}
+
+fn wait_outcome(reply: &Object, helping: bool) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
         Some("returned") => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
@@ -2178,6 +2201,29 @@ mod tests {
             &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
         );
         assert!(closed.contains("the user closed display 3"), "{closed}");
+    }
+
+    #[test]
+    fn a_timed_out_wait_says_when_the_user_has_gone_quiet() {
+        let reply = |idle: Value| {
+            json!({ "outcome": "timedOut", "helpOpen": false, "controlAsked": false, "userIdleSeconds": idle })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let quiet = describe_wait(&reply(json!(42)), true);
+        let note = quiet["note"].as_str().unwrap();
+        assert!(
+            note.contains("for 42 s")
+                && note.contains("Continue")
+                && note.contains("user_instruction")
+        );
+        assert_eq!(quiet["userIdleSeconds"], 42);
+        let busy = describe_wait(&reply(json!(3)), true);
+        assert!(!busy["note"].as_str().unwrap().contains("touched"));
+        assert_eq!(busy["userIdleSeconds"], 3);
+        let none = describe_wait(&reply(Value::Null), true);
+        assert!(none.get("userIdleSeconds").is_none());
     }
 
     #[test]
