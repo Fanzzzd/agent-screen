@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.30 (2026-11-11)
+
+### Fixes
+
+- After a click or drag with your pointer, the app you were using comes back to the front. Some apps, such as Dia, ignored the request to come back, so the agent's app stayed in front of your work.
+- A click or drag that an agent makes while your approval is still active now starts right away. Before, it could wait up to a second for the app's next check.
+
 ## 0.1.29 (2026-11-10)
 
 ### Fixes
