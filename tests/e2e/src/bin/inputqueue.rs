@@ -13,7 +13,7 @@
 //! target/e2e. The card shows on your screen for about half a minute.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue
-//!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue --buttons-only
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e inputqueue -- --buttons-only
 //!
 //! --buttons-only clicks the actual Allow and Not Now buttons through HID
 //! input and checks grant state. No queued action executes. The sign counts
