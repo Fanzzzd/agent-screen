@@ -8,7 +8,8 @@
 //! pointer clicks the button, it turns green, and the call reports route
 //! real_input. The approval then ends at once and your pointer and front
 //! app come back. A double click allowed the same way arrives as one
-//! double click. A right click with realInput is refused at once, as the
+//! double click. A click made while an approval from input_queue's
+//! request lasts runs at once, three times. A right click with realInput is refused at once, as the
 //! menu it opened would close when the user's app came back. A click
 //! declined reports input_pending and sends nothing, not even the
 //! background click. A click whose target changes while the user decides,
@@ -17,10 +18,11 @@
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e realclick
 //!
-//! Makes 1 display. Moves your pointer for a second, twice: keep your hands
+//! Makes 1 display. Moves your pointer for a second, five times: keep your hands
 //! off the mouse and keyboard while the sign says so.
 
 use std::process::ExitCode;
+use std::time::Instant;
 
 use agent_screen_tests::{
     Control, Value, check, click_card_button, debug_pid, hid, hidclick_app, instance, json, locked,
@@ -299,6 +301,48 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
         format!("{before:?} -> {now:?} {reply:?}"),
     );
     put_back("the double click")?;
+
+    // Allowed ahead with input_queue's request, as an agent does before a
+    // press: the press made while the approval lasts starts at once, not
+    // at the app's next once-a-second check. Three rounds, as that check's
+    // phase is random: the click itself takes about 600 ms, and waiting
+    // for the check as well stays under 800 ms only 20% of the time.
+    let mut rounds = Vec::new();
+    for round in 0..3 {
+        let before = title()?;
+        control.call(
+            "inputQueue",
+            json!({ "sessionKey": KEY, "displayId": id, "action": "request",
+                "operation": format!("ahead-{round}"), "reason": "Test a press during an approval",
+                "timeout": 0 }),
+        )?;
+        control.call(
+            "debugShow",
+            json!({ "sessionKey": KEY, "surface": "input-queue-allow", "displayId": id }),
+        )?;
+        // The hand has rested since Allow, so the first loan need not wait.
+        sleep_ms(1200);
+        let granted = status()?["grantActive"] == true;
+        let started = Instant::now();
+        let reply = control.call(
+            "click",
+            json!({ "sessionKey": KEY, "displayId": id, "x": middle.0 + 10, "y": middle.1,
+                    "button": "left", "realInput": true }),
+        );
+        let took = started.elapsed().as_millis();
+        sleep_ms(300);
+        let now = title()?;
+        let ran = granted
+            && reply.as_ref().is_ok_and(|r| r["route"] == "real_input")
+            && seen(&now, "real") == seen(&before, "real") + 1;
+        rounds.push((took, ran, format!("{reply:?}")));
+        put_back("the click made during an approval")?;
+    }
+    check(
+        "a click made while an approval lasts runs at once: each of three returns within 800 ms",
+        rounds.iter().all(|(took, ran, _)| *ran && *took < 800),
+        format!("{rounds:?}"),
+    );
 
     // A right click with the user's pointer is refused at once: the menu it
     // opened would close when the user's front app came back.
