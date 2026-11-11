@@ -836,11 +836,13 @@ impl Shell {
 
     fn sync(&mut self, cx: &mut Context<Self>) {
         // A grant that just ended, as after a loan that left its session
-        // done, puts the pointer and front app back now, not at the next
-        // once-a-second tick.
+        // done, puts the pointer and front app back now, and a request
+        // made during a grant starts now, not at the next once-a-second
+        // tick.
+        let queue = &self.core.read(cx).input_queue;
         if !self.loan_running
             && !self.restoring
-            && self.core.read(cx).input_queue.ending().is_some()
+            && (queue.ending().is_some() || queue.queue.ready())
         {
             cx.spawn(async move |this, cx| {
                 let _ = this.update(cx, |shell, cx| shell.drive_queue(cx));
