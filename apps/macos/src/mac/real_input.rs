@@ -342,12 +342,9 @@ pub fn restore(saved: Saved) {
                 log::info!("input queue: window {focused} could not be focused again");
             }
         }
-        // Do not wait and activate again: the user may act during a wait.
-        super::ax::set_attribute(
-            &super::ax::application(front),
-            "AXFrontmost",
-            objc2_core_foundation::CFBoolean::new(true),
-        );
+        // Some apps take AXFrontmost and stay behind, as Dia did behind
+        // the loan's app; the user's touch stops the wait.
+        super::ime::return_front_unless(front, touched);
     }
 }
 

@@ -317,18 +317,32 @@ fn give_back(front: Option<i32>, agent: i32, source: Option<&Source>) {
 
 /// Bring the user's app `front` back to the front, waiting up to 1 s.
 pub fn return_front(front: i32) {
+    return_front_unless(front, || false);
+}
+
+/// As `return_front`, but stop waiting once `stop` says so, as when the
+/// user acts: then what they did stands. Some apps, Electron ones and
+/// Dia, take AXFrontmost and stay behind; NSRunningApplication brings
+/// those.
+pub fn return_front_unless(front: i32, stop: impl Fn() -> bool) {
     ax::set_attribute(&ax::application(front), "AXFrontmost", CFBoolean::new(true));
     let asked = Instant::now();
     let mut fallback = false;
     while app::frontmost_pid() != Some(front) && asked.elapsed() < Duration::from_secs(1) {
+        if stop() {
+            return;
+        }
         if !fallback && asked.elapsed() > Duration::from_millis(200) {
             fallback = true;
             log::debug!("front: pid {front} ignored AXFrontmost; activating it");
-            app::activate(front);
+            if !app::activate(front) {
+                // It quit, or macOS refused: waiting won't change that.
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(20));
     }
-    if app::frontmost_pid() != Some(front) {
+    if app::frontmost_pid() != Some(front) && !stop() {
         log::warn!("front: pid {front} didn't come back to the front");
     }
 }

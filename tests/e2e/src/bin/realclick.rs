@@ -23,7 +23,6 @@
 //! off the mouse and keyboard while the sign says so.
 
 use std::process::ExitCode;
-use std::time::Instant;
 
 use agent_screen_tests::{
     Control, Value, check, click_card_button, debug_pid, hid, hidclick_app, instance, json, locked,
@@ -306,8 +305,9 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
     // Allowed ahead with input_queue's request, as an agent does before a
     // press: the press made while the approval lasts starts at once, not
     // at the app's next once-a-second check. Three rounds, as that check's
-    // phase is random: the click itself takes about 600 ms, and waiting
-    // for the check as well stays under 800 ms only 20% of the time.
+    // phase is random: its wait, the request's turnMs, stays under 250 ms
+    // only a quarter of the time. The run itself is left out, as bringing
+    // the window forward takes 0.5 to 1 s under AeroSpace.
     let mut rounds = Vec::new();
     for round in 0..3 {
         let before = title()?;
@@ -324,24 +324,28 @@ fn test(control: &Control, id: &Value, pid: &mut Option<i64>) -> Result<()> {
         // The hand has rested since Allow, so the first loan need not wait.
         sleep_ms(1200);
         let granted = status()?["grantActive"] == true;
-        let started = Instant::now();
         let reply = control.call(
             "click",
             json!({ "sessionKey": KEY, "displayId": id, "x": middle.0 + 10, "y": middle.1,
                     "button": "left", "realInput": true }),
         );
-        let took = started.elapsed().as_millis();
+        let turn = reply
+            .as_ref()
+            .ok()
+            .and_then(|r| r["timing"]["turnMs"].as_u64());
         sleep_ms(300);
         let now = title()?;
         let ran = granted
             && reply.as_ref().is_ok_and(|r| r["route"] == "real_input")
             && seen(&now, "real") == seen(&before, "real") + 1;
-        rounds.push((took, ran, format!("{reply:?}")));
+        rounds.push((turn, ran, format!("{reply:?}")));
         put_back("the click made during an approval")?;
     }
     check(
-        "a click made while an approval lasts runs at once: each of three returns within 800 ms",
-        rounds.iter().all(|(took, ran, _)| *ran && *took < 800),
+        "a click made while an approval lasts starts at once: each of three waits under 250 ms for its turn",
+        rounds
+            .iter()
+            .all(|(turn, ran, _)| *ran && turn.is_some_and(|t| t < 250)),
         format!("{rounds:?}"),
     );
 
