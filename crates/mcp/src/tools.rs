@@ -1372,9 +1372,39 @@ fn access_output(action: &str, reply: Object) -> Value {
     out
 }
 
+/// Seconds of the user's quiet, during a Takeover, after which a wait that
+/// timed out says they may be done.
+const IDLE_HINT_SECONDS: u64 = 15;
+
 /// What a wait for control came to. `helping`: a Help Request is open, and
 /// the user may not have seen it yet.
 fn describe_wait(reply: &Object, helping: bool) -> Value {
+    let mut out = wait_outcome(reply, helping);
+    let idle = reply.get("userIdleSeconds").and_then(Value::as_u64);
+    if reply.get("outcome").and_then(Value::as_str) == Some("timedOut")
+        && let Some(idle) = idle
+    {
+        if idle >= IDLE_HINT_SECONDS {
+            let quiet = format!(
+                "The user still has control, but hasn't touched the mouse or keyboard for {idle} s, so they may be done and only missed the hand-back. Ask them in the chat to click Let ... Continue at the top of the Viewer, or to tell you to continue; then call request_control with their words as user_instruction."
+            );
+            // The plain note says the user is still operating the display,
+            // which their quiet contradicts: it goes. A note about an open
+            // request says how to withdraw it: it stays.
+            let asked = helping || reply.get("controlAsked") == Some(&Value::Bool(true));
+            let base = out.get("note").and_then(Value::as_str).unwrap_or_default();
+            out["note"] = json!(if asked {
+                format!("{base} {quiet}")
+            } else {
+                quiet
+            });
+        }
+        out["userIdleSeconds"] = json!(idle);
+    }
+    out
+}
+
+fn wait_outcome(reply: &Object, helping: bool) -> Value {
     match reply.get("outcome").and_then(Value::as_str) {
         Some("returned") => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
@@ -2178,6 +2208,46 @@ mod tests {
             &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
         );
         assert!(closed.contains("the user closed display 3"), "{closed}");
+    }
+
+    #[test]
+    fn a_timed_out_wait_says_when_the_user_has_gone_quiet() {
+        let reply = |idle: Value| {
+            json!({ "outcome": "timedOut", "helpOpen": false, "controlAsked": false, "userIdleSeconds": idle })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        // During a Takeover no Help Request is open, as in the passkey case.
+        for helping in [false, true] {
+            let quiet = describe_wait(&reply(json!(42)), helping);
+            let note = quiet["note"].as_str().unwrap();
+            assert!(
+                note.contains("for 42 s")
+                    && note.contains("Continue")
+                    && note.contains("user_instruction")
+                    && !note.contains("still operating"),
+                "{note}"
+            );
+            assert_eq!(quiet["userIdleSeconds"], 42);
+            // An open Help Request's note keeps how to withdraw it.
+            assert_eq!(note.contains("withdraw: true"), helping, "{note}");
+        }
+        let mut asked = reply(json!(42));
+        asked.insert("controlAsked".into(), json!(true));
+        let note = describe_wait(&asked, false)["note"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            note.contains("request_control with withdraw: true") && note.contains("for 42 s"),
+            "{note}"
+        );
+        let busy = describe_wait(&reply(json!(3)), true);
+        assert!(!busy["note"].as_str().unwrap().contains("touched"));
+        assert_eq!(busy["userIdleSeconds"], 3);
+        let none = describe_wait(&reply(Value::Null), true);
+        assert!(none.get("userIdleSeconds").is_none());
     }
 
     #[test]

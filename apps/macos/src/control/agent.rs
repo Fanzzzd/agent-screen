@@ -1596,7 +1596,18 @@ async fn handle_one(
                     .get(id)
                     .is_some_and(|d| d.control_request.is_some())
             });
-            Ok(json!({ "outcome": outcome, "helpOpen": help_open, "controlAsked": control_asked }))
+            // How long the user has left the mouse and keyboard alone while
+            // they hold the display: done, they may only have missed the
+            // hand-back, as after a passkey that ended in seconds.
+            let idle = core
+                .read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
+                .then(|| crate::mac::ime::user_idle().floor() as u64);
+            Ok(json!({
+                "outcome": outcome,
+                "helpOpen": help_open,
+                "controlAsked": control_asked,
+                "userIdleSeconds": idle,
+            }))
         }
         // Test hook: stands in for the user's input in the Viewer.
         "debugTakeover" if debug_methods() => {

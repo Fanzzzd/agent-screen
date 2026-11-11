@@ -2,7 +2,7 @@
 // window a process of the test shows there. Samples the window list every
 // INTERVAL ms (default 10) until stdin closes, then prints one JSON line per
 // window seen: owner, pid, executable, title, frame, first and last seen and
-// how long it showed, in ms since the start.
+// how long it showed, in ms since <since>.
 //
 //     sighting <script pid> <since, s since 1970> <mark> [<skip path>...]
 //
@@ -140,7 +140,9 @@ while !done {
     displays = userDisplays()
     lastDisplays = now
   }
-  let elapsed = now.timeIntervalSince(start) * 1000
+  // From <since>, the script's clock, not this process's start: the script
+  // times its allowances from <since>, and this process starts later.
+  let elapsed = (now.timeIntervalSince1970 - since) * 1000
   let step = now.timeIntervalSince(previous) * 1000
   previous = now
   let list =

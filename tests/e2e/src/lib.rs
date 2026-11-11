@@ -845,6 +845,11 @@ fn start_sighting() {
     if env_is("E2E_NO_SIGHTING", "1") {
         return;
     }
+    // The watcher times its sightings from `since`, and allowances count
+    // from SIGHTING_SINCE: both clocks start here. Before, the watcher timed
+    // from its own launch, some time after the spawn, so a window the script
+    // allowed looked older than the allowance.
+    let _ = SIGHTING_SINCE.set(Instant::now());
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
@@ -865,7 +870,6 @@ fn start_sighting() {
             .stderr(Stdio::inherit())
             .spawn()?)
     });
-    let _ = SIGHTING_SINCE.set(Instant::now());
     match started {
         Ok(child) => *SIGHTING.lock().unwrap_or_else(|e| e.into_inner()) = Some(child),
         Err(e) => println!("not watching your screen: {e:#}"),
