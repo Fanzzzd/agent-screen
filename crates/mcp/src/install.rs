@@ -168,12 +168,17 @@ fn codex_skill() -> PathBuf {
 /// Whether Claude Code has the agent-screen plugin from this repository's
 /// marketplace, which carries the skill: a second copy would only repeat it.
 fn claude_plugin_installed() -> bool {
-    let text = std::fs::read_to_string(claude_home().join("plugins/installed_plugins.json"))
-        .unwrap_or_default();
-    plugin_listed(&text)
+    let read = |p: &str| std::fs::read_to_string(claude_home().join(p)).unwrap_or_default();
+    plugin_listed(
+        &read("plugins/installed_plugins.json"),
+        &read("settings.json"),
+    )
 }
 
-fn plugin_listed(installed: &str) -> bool {
+/// Whether `installed` lists the agent-screen plugin for every project, and
+/// the user's `settings` leave it on.
+fn plugin_listed(installed: &str, settings: &str) -> bool {
+    let settings = serde_json::from_str::<serde_json::Value>(settings).unwrap_or_default();
     serde_json::from_str::<serde_json::Value>(installed)
         .ok()
         .and_then(|v| v.get("plugins")?.as_object().cloned())
@@ -181,6 +186,7 @@ fn plugin_listed(installed: &str) -> bool {
             // A project's plugin carries the skill in that project only.
             plugins.iter().any(|(key, entries)| {
                 key.starts_with("agent-screen@")
+                    && settings["enabledPlugins"][key].as_bool() != Some(false)
                     && entries.as_array().is_some_and(|list| {
                         list.iter().any(|e| e["scope"].as_str() == Some("user"))
                     })
@@ -403,13 +409,18 @@ mod tests {
     fn finds_the_plugin_from_any_marketplace() {
         let installed =
             |key: &str| format!(r#"{{"version":2,"plugins":{{"{key}":[{{"scope":"user"}}]}}}}"#);
-        assert!(plugin_listed(&installed("agent-screen@agent-screen")));
-        assert!(plugin_listed(&installed("agent-screen@my-fork")));
-        assert!(!plugin_listed(&installed("agent-screen-tools@other")));
+        assert!(plugin_listed(&installed("agent-screen@agent-screen"), ""));
+        assert!(plugin_listed(&installed("agent-screen@my-fork"), "{}"));
+        assert!(!plugin_listed(&installed("agent-screen-tools@other"), ""));
         assert!(!plugin_listed(
-            r#"{"plugins":{"agent-screen@agent-screen":[{"scope":"project"}]}}"#
+            r#"{"plugins":{"agent-screen@agent-screen":[{"scope":"project"}]}}"#,
+            ""
         ));
-        assert!(!plugin_listed(""));
+        assert!(!plugin_listed("", ""));
+        assert!(!plugin_listed(
+            &installed("agent-screen@agent-screen"),
+            r#"{"enabledPlugins":{"agent-screen@agent-screen":false}}"#
+        ));
     }
 
     #[test]
