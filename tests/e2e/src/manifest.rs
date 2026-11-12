@@ -278,6 +278,7 @@ pub const SCRIPTS: &[Script] = &[
     script("parksafe", &[Displays], Full, Agent, 2),
     script("peekanim", &[Peek], Full, Hook, 2).hands_off(),
     script("peekhover", &[Peek], Core, Hook, 1).hands_off(),
+    script("peekmisroute", &[Peek, Displays], Full, Hook, 1),
     script("peekrapid", &[Peek, Displays], Full, Hook, 4).hands_off(),
     script("perf", &[Performance], Full, Agent, 6).manual(MEASURES),
     script("placebrowser", &[Windows, Browser], Full, Agent, 1),

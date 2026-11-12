@@ -26,12 +26,13 @@ pub struct Shot {
 
 /// Shareable content listed before, and when. Listing costs tens of
 /// milliseconds, more than a capture; status items come and go rarely.
-/// The last listing, when it was made, and the ids of the windows on screen
-/// then.
+/// The last listing, when it was made, the ids of the windows on screen
+/// then, and the display change stamp then.
 type Listing = (
     Arc<SCShareableContent>,
     Instant,
     std::collections::HashSet<u32>,
+    u64,
 );
 static CONTENT: Mutex<Option<Listing>> = Mutex::new(None);
 const CONTENT_AGE: Duration = Duration::from_secs(2);
@@ -42,11 +43,16 @@ const CONTENT_AGE: Duration = Duration::from_secs(2);
 fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
     let mut cache = CONTENT.lock().unwrap();
     let ids = fresh.then(super::cg::on_screen_ids);
-    if let Some((content, at, then)) = &*cache {
-        let current = match &ids {
-            Some(now) => now == then,
-            None => at.elapsed() < CONTENT_AGE,
-        };
+    // A listing from before a display change describes displays as they
+    // were: a stream built from it after an unlock can show another
+    // display (FB17797423).
+    let stamp = super::cg::display_change_stamp();
+    if let Some((content, at, then, changes)) = &*cache {
+        let current = *changes == stamp
+            && match &ids {
+                Some(now) => now == then,
+                None => at.elapsed() < CONTENT_AGE,
+            };
         if current {
             return Ok(content.clone());
         }
@@ -58,7 +64,7 @@ fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
             .get()
             .map_err(|e| format!("could not list displays: {e}"))?,
     );
-    *cache = Some((content.clone(), Instant::now(), ids));
+    *cache = Some((content.clone(), Instant::now(), ids, stamp));
     Ok(content)
 }
 

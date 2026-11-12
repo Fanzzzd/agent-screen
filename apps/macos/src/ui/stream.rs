@@ -24,6 +24,11 @@ struct Stream {
     running: (i32, (u32, u32)),
     /// Frame rate and pixel size wanted, by subscriber.
     wants: HashMap<&'static str, (i32, (u32, u32))>,
+    /// Restarts in a row of a stream that showed another screen or that
+    /// macOS stopped, since its last frame that showed the display.
+    breaks: u32,
+    /// Restarts of broken streams so far, for `debugStreams`.
+    repairs: u32,
 }
 
 /// A display has a new frame.
@@ -43,6 +48,8 @@ pub struct Streams {
     streams: HashMap<DisplayId, Stream>,
     frames: HashMap<DisplayId, CVPixelBuffer>,
     wake: mpsc::UnboundedSender<DisplayId>,
+    /// A capture, by display and serial, needs starting again.
+    broken: mpsc::UnboundedSender<(DisplayId, u64)>,
 }
 
 impl EventEmitter<NewFrame> for Streams {}
@@ -50,10 +57,12 @@ impl EventEmitter<NewFrame> for Streams {}
 impl Streams {
     pub fn new(cx: &mut App) -> Entity<Streams> {
         let (wake, mut woken) = mpsc::unbounded::<DisplayId>();
+        let (broken, mut breaks) = mpsc::unbounded::<(DisplayId, u64)>();
         let entity = cx.new(|_| Streams {
             streams: HashMap::new(),
             frames: HashMap::new(),
             wake,
+            broken,
         });
         let weak = entity.downgrade();
         GLOBAL.with(|g| *g.borrow_mut() = Some(weak.clone()));
@@ -62,11 +71,27 @@ impl Streams {
             while let Some(id) = woken.next().await {
                 let Some(this) = weak.upgrade() else { break };
                 this.update(cx, |streams, cx| {
-                    if let Some(frame) = streams.streams.get(&id).and_then(|s| s.latest.take()) {
+                    let Some(stream) = streams.streams.get_mut(&id) else {
+                        return;
+                    };
+                    if let Some(frame) = stream.latest.take() {
+                        stream.breaks = 0;
                         streams.frames.insert(id, frame);
                         cx.emit(NewFrame(id));
                     }
                 });
+            }
+        })
+        .detach();
+        // A stream that shows another screen keeps doing so: ScreenCaptureKit
+        // can mix displays up after an unlock or another display change,
+        // and the change notification may have come before its first wrong
+        // frame. It starts again as soon as it says so.
+        let weak = entity.downgrade();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            while let Some((id, serial)) = breaks.next().await {
+                let Some(this) = weak.upgrade() else { break };
+                this.update(cx, |streams, cx| streams.repair(id, serial, cx));
             }
         })
         .detach();
@@ -130,6 +155,8 @@ impl Streams {
             latest: Arc::new(Latest::default()),
             running: (0, (0, 0)),
             wants: HashMap::new(),
+            breaks: 0,
+            repairs: 0,
         });
         if fps > 0 {
             stream.wants.insert(who, (fps, pixels));
@@ -192,14 +219,24 @@ impl Streams {
         let (fps, pixels) = stream.running;
         let latest = stream.latest.clone();
         let wake = self.wake.clone();
+        let broken = self.broken.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let started = std::time::Instant::now();
-                    let result = Capture::start(id, pixels, fps, latest, move || {
-                        let _ = wake.unbounded_send(id);
-                    });
+                    let result = Capture::start(
+                        id,
+                        pixels,
+                        fps,
+                        latest,
+                        move || {
+                            let _ = wake.unbounded_send(id);
+                        },
+                        move |serial| {
+                            let _ = broken.unbounded_send((id, serial));
+                        },
+                    );
                     log::debug!(
                         "capture of display {id} at {fps} fps, {pixels:?}: {:?}",
                         started.elapsed()
@@ -226,6 +263,12 @@ impl Streams {
                             return;
                         }
                         stream.capture = Some(capture.clone());
+                        // It broke before it was kept here, and said so to
+                        // no one.
+                        if capture.broken() {
+                            streams.repair(id, capture.serial(), cx);
+                            return;
+                        }
                         if running != (fps, pixels) {
                             let target = stream.target.clone();
                             cx.background_spawn(async move {
@@ -280,26 +323,95 @@ impl Streams {
         .detach();
     }
 
-    /// Start again every stream that shows another display: after a
-    /// display change, a new stream may get the right picture.
+    /// Start again every stream that shows another display or that macOS
+    /// stopped: after a display change, a new stream may get the right
+    /// picture.
     pub fn restart_misrouted(&mut self, cx: &mut Context<Self>) {
-        let misrouted: Vec<DisplayId> = self
+        let broken: Vec<(DisplayId, u64)> = self
             .streams
             .iter()
-            .filter(|(_, s)| s.capture.as_ref().is_some_and(|c| c.misrouted()))
-            .map(|(&id, _)| id)
+            .filter_map(|(&id, s)| {
+                s.capture
+                    .as_ref()
+                    .filter(|c| c.broken())
+                    .map(|c| (id, c.serial()))
+            })
             .collect();
-        for id in misrouted {
-            let Some(stream) = self.streams.get_mut(&id) else {
-                continue;
-            };
-            if let Some(capture) = stream.capture.take() {
-                cx.background_spawn(async move { drop(capture) }).detach();
-            }
-            if !stream.starting {
-                self.start(id, cx);
-            }
+        for (id, serial) in broken {
+            self.repair(id, serial, cx);
         }
+    }
+
+    /// Start a broken capture again, if it is still the display's. The
+    /// first restart is at once; one that breaks again before showing the
+    /// display waits, doubling up to 30 s. Its last frame stays up through
+    /// the first restart, a moment old and of the right display; after
+    /// that the surfaces say they wait for a picture.
+    fn repair(&mut self, id: DisplayId, serial: u64, cx: &mut Context<Self>) {
+        let Some(stream) = self.streams.get_mut(&id) else {
+            return;
+        };
+        if stream.capture.as_ref().map(|c| c.serial()) != Some(serial) {
+            return;
+        }
+        if let Some(capture) = stream.capture.take() {
+            cx.background_spawn(async move { drop(capture) }).detach();
+        }
+        if stream.breaks > 0 && self.frames.remove(&id).is_some() {
+            cx.notify();
+        }
+        let wait = match stream.breaks {
+            0 => std::time::Duration::ZERO,
+            n => std::time::Duration::from_millis(500)
+                .saturating_mul(1 << (n - 1).min(6))
+                .min(std::time::Duration::from_secs(30)),
+        };
+        stream.breaks += 1;
+        stream.repairs += 1;
+        log::info!(
+            "display {id}: its stream starts again in {wait:?} ({} in a row)",
+            stream.breaks
+        );
+        cx.spawn(async move |this, cx| {
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
+            let _ = this.update(cx, |streams, cx| {
+                let restart = streams
+                    .streams
+                    .get(&id)
+                    .is_some_and(|s| s.running.0 > 0 && s.capture.is_none() && !s.starting);
+                if restart {
+                    streams.start(id, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Each stream's state, for `debugStreams`: whether it runs, shows
+    /// another screen, or needs starting again, its frames delivered, and
+    /// how often it was started again.
+    pub fn debug(&self) -> Vec<serde_json::Value> {
+        let mut ids: Vec<_> = self.streams.keys().copied().collect();
+        ids.sort();
+        ids.iter()
+            .map(|id| {
+                let s = &self.streams[id];
+                serde_json::json!({
+                    "displayId": id,
+                    "running": s.capture.is_some(),
+                    "starting": s.starting,
+                    "misrouted": s.capture.as_ref().is_some_and(|c| c.misrouted()),
+                    "broken": s.capture.as_ref().is_some_and(|c| c.broken()),
+                    "delivered": s.latest.delivered.load(std::sync::atomic::Ordering::Relaxed),
+                    "hasFrame": self.frames.contains_key(id),
+                    "breaks": s.breaks,
+                    "repairs": s.repairs,
+                    "fps": s.running.0,
+                })
+            })
+            .collect()
     }
 
     pub fn drop_display(&mut self, id: DisplayId, cx: &mut Context<Self>) {

@@ -56,6 +56,12 @@ pub fn displays_changed_within(span: std::time::Duration) -> bool {
     at != 0 && SINCE.elapsed().as_millis() as u64 <= at + span.as_millis() as u64
 }
 
+/// When displays last began or finished changing: a stamp that differs
+/// from an earlier one means a change came in between. 0 before any.
+pub fn display_change_stamp() -> u64 {
+    CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The display's unit number, which ScreenCaptureKit tells displays apart by.
 pub fn unit_number(id: DisplayId) -> u32 {
     unsafe { CGDisplayUnitNumber(id) }

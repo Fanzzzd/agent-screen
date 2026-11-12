@@ -137,28 +137,64 @@ fn shows(sample: &CMSampleBuffer, display_id: u32) -> Result<(), CGRect> {
 pub struct Capture {
     stream: SCStream,
     turn: Mutex<()>,
+    /// Tells this capture from the one that replaced it.
+    serial: u64,
     /// The last frame showed another screen.
     misrouted: Arc<AtomicBool>,
+    /// macOS stopped the stream.
+    stopped: Arc<AtomicBool>,
+}
+
+static SERIAL: AtomicU64 = AtomicU64::new(1);
+
+/// Test builds in the e2e instance with AGENTSCREEN_TEST_MISROUTE set take
+/// every frame of a stream for another screen's once displays changed after
+/// it started, as ScreenCaptureKit's streams can do after an unlock. A
+/// stream started since passes.
+fn misroute_test() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("AGENTSCREEN_TEST_MISROUTE").is_some()
+        && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e")
 }
 
 impl Capture {
     /// Start capturing `display_id` at its full pixel size. `on_frame` runs on
-    /// ScreenCaptureKit's queue after each new frame is stored.
+    /// ScreenCaptureKit's queue after each new frame is stored. `on_broken`
+    /// runs there with the capture's serial once the stream shows another
+    /// screen or macOS stops it: it needs starting again.
     pub fn start(
         display_id: u32,
         pixels: (u32, u32),
         fps: i32,
         latest: Arc<Latest>,
         on_frame: impl Fn() + Send + Sync + 'static,
+        on_broken: impl Fn(u64) + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         // The menu bar strip, about 24 to 38 pt, is left out of the change
         // count: it shows the user's own menus and clock.
         let skip = 40.0 / super::cg::display_bounds(display_id).height.max(1.0);
         let filter =
             super::screenshot::filter(display_id, true, false).map_err(anyhow::Error::msg)?;
-        let mut stream = SCStream::new(&filter, &configuration(pixels, fps))?;
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let on_broken = Arc::new(on_broken);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let delegate = {
+            let stopped = stopped.clone();
+            let on_broken = on_broken.clone();
+            screencapturekit::stream::delegate_trait::StreamCallbacks::new().on_stop(move |error| {
+                let error = error.unwrap_or_default();
+                log::warn!("display {display_id}: macOS stopped its stream: {error}");
+                crate::lifecycle::note("stream-stopped", display_id, &error);
+                stopped.store(true, Ordering::Relaxed);
+                on_broken(serial);
+            })
+        };
+        let mut stream =
+            SCStream::new_with_delegate(&filter, &configuration(pixels, fps), delegate)?;
         let misrouted = Arc::new(AtomicBool::new(false));
         let flag = misrouted.clone();
+        let born = super::cg::display_change_stamp();
+        let test = misroute_test();
         stream.add_output_handler(
             move |sample: CMSampleBuffer, kind: SCStreamOutputType| {
                 // Idle frames repeat the last image: the display did not
@@ -168,12 +204,32 @@ impl Capture {
                 {
                     return;
                 }
-                if let Err(screen) = shows(&sample, display_id) {
+                let shown = shows(&sample, display_id).and_then(|()| {
+                    if test && super::cg::display_change_stamp() != born {
+                        Err(CGRect {
+                            origin: CGPoint { x: -1.0, y: -1.0 },
+                            size: CGSize {
+                                width: 1.0,
+                                height: 1.0,
+                            },
+                        })
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(screen) = shown {
                     if !flag.swap(true, Ordering::Relaxed) {
-                        log::warn!(
-                            "display {display_id}: the stream shows the screen at {:?}; its frames are dropped",
-                            (screen.origin.x, screen.origin.y, screen.size.width, screen.size.height)
+                        let at = format!(
+                            "shows={},{} {}x{} twin={:?}",
+                            screen.origin.x,
+                            screen.origin.y,
+                            screen.size.width,
+                            screen.size.height,
+                            super::cg::unit_twin(display_id),
                         );
+                        log::warn!("display {display_id}: the stream {at}; its frames are dropped");
+                        crate::lifecycle::note("misroute", display_id, &at);
+                        on_broken(serial);
                     }
                     return;
                 }
@@ -204,13 +260,25 @@ impl Capture {
         Ok(Self {
             stream,
             turn: Mutex::new(()),
+            serial,
             misrouted,
+            stopped,
         })
+    }
+
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// Whether the stream's last frame showed another screen.
     pub fn misrouted(&self) -> bool {
         self.misrouted.load(Ordering::Relaxed)
+    }
+
+    /// Whether the stream needs starting again: it shows another screen,
+    /// or macOS stopped it.
+    pub fn broken(&self) -> bool {
+        self.misrouted() || self.stopped.load(Ordering::Relaxed)
     }
 
     /// Change the rate and size to `target` without restarting the
