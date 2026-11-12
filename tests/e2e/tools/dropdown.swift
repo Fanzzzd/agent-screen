@@ -7,7 +7,7 @@
 // The main window has rows; "open" on its first row opens the list over
 // the rows below it. Its title says what happened:
 // "dropdown open=1|0 got=<what the last press hit> closed=<why>", where
-// got is row3 for a row of the main window and item2 for an item of the
+// got is rowN for a row of the main window and itemN for an item of the
 // list, and closed is outside for a press in another app, item for a pick.
 
 import AppKit
@@ -111,10 +111,8 @@ final class App: NSObject, NSApplicationDelegate {
     // it. Here AppKit takes Agent Screen's background clicks for an
     // activation, so the monitor goes on whatever the app thinks.
     note("monitor on")
-    do {
-      monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-        self?.close(why: "outside")
-      }
+    monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+      self?.close(why: "outside")
     }
     update()
   }

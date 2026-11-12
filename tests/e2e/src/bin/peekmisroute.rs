@@ -84,8 +84,8 @@ fn test() -> Result<()> {
     let switched = sh_lenient(tool("mode")?, &[&id.to_string(), "800", "600"]);
     println!("  switched to 800×600: {}", switched.trim());
     // The stream may misroute once per change: the switch and the switch
-    // back are two. It shows the display again once a frame gets through
-    // and it says it's fine.
+    // back are two. It shows the display again once it has started again,
+    // a frame gets through and it says it's fine.
     let mut now = stream(&control, id)?;
     let mut fine = false;
     for _ in 0..50 {
@@ -94,14 +94,15 @@ fn test() -> Result<()> {
         fine = now["running"] == true
             && now["broken"] == false
             && now["hasFrame"] == true
-            && now["delivered"].as_u64().unwrap_or(0) > delivered;
-        if fine && now["repairs"].as_u64().unwrap_or(0) > 0 {
+            && now["delivered"].as_u64().unwrap_or(0) > delivered
+            && now["repairs"].as_u64().unwrap_or(0) > 0;
+        if fine {
             break;
         }
     }
     check(
         "after a display change, a stream that showed another screen starts again and shows the display",
-        fine && now["repairs"].as_u64().unwrap_or(0) > 0,
+        fine,
         now.to_string(),
     );
     let noted = std::fs::read_to_string(&log)

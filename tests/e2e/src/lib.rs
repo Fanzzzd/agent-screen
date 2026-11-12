@@ -376,7 +376,8 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
             return Ok(None);
         }
     }
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/qtlist.py");
+    let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools");
+    let script = tools.join("qtlist.py");
     let app = out().join("QtList.app");
     let _ = std::fs::remove_dir_all(&app);
     let macos = app.join("Contents/MacOS");
@@ -405,7 +406,6 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
         );
         return Ok(None);
     }
-    let quoted = |s: &str| format!("{s:?}");
     sh(
         "/usr/bin/clang",
         &[
@@ -413,10 +413,7 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
             &format!("-DPYLIB={}", quoted(library)),
             &format!("-DPYPATH={}", quoted(packages)),
             &format!("-DSCRIPT={}", quoted(&script.display().to_string())),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tools/qtlaunch.c")
-                .to_str()
-                .unwrap(),
+            tools.join("qtlaunch.c").to_str().unwrap(),
             "-o",
             macos.join("QtList").to_str().unwrap(),
         ],
@@ -1470,6 +1467,31 @@ pub fn open_user_stage(control: &Control) -> Result<u64> {
         json!({ "surface": "userStage", "displayId": id }),
     )?;
     Ok(id)
+}
+
+/// Let Continue on display `id`: a real click in the Viewer took the
+/// display over, and this hands it back to the agent.
+pub fn let_continue(control: &Control, id: u64) -> Result<()> {
+    control.call(
+        "debugShow",
+        json!({ "surface": "primary", "displayId": id }),
+    )?;
+    sleep_ms(300);
+    Ok(())
+}
+
+/// The window on display `id` whose title starts with `prefix`, as
+/// `listWindows` lists it for the session `key`.
+pub fn window_titled(control: &Control, key: &str, id: u64, prefix: &str) -> Result<Value> {
+    let listed = control.call("listWindows", json!({ "sessionKey": key, "displayId": id }))?;
+    listed["windows"]
+        .as_array()
+        .and_then(|w| {
+            w.iter()
+                .find(|w| w["title"].as_str().is_some_and(|t| t.starts_with(prefix)))
+                .cloned()
+        })
+        .with_context(|| format!("no {prefix} window on the display"))
 }
 
 /// Start recording the stage display, the stand-in for the user's screen,

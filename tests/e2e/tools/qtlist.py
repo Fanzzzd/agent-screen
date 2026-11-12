@@ -5,8 +5,8 @@ so a test sees what a Qt app does, not an imitation of it.
 The window title says the state: "qtlist open=1|0 got=<what was picked>".
 Typing "item" opens the results item1 to item4 over rows 1 to 4, in the
 window QTLIST_POPUP names: "completer" (Qt's pop-up, the default), "keyed"
-or "frameless". A pick
-in the results sets got=itemN; a press on a row sets got=rowN.
+or "frameless". A pick in the results sets got=itemN; a press on a row sets
+got=rowN.
 QTLIST_STATE names a file the app rewrites on each change with the window,
 pop-up and item frames in global top-left points, as JSON.
 QTLIST_LOG names a file each press, open and close is appended to.
@@ -18,7 +18,7 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QObject, QStringListModel, Qt
+from PySide6.QtCore import QEvent, QStringListModel, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -46,6 +46,7 @@ class Window(QMainWindow):
         super().__init__()
         self.got = "none"
         self.picked = False
+        self.keyed = False
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -86,7 +87,6 @@ class Window(QMainWindow):
                 self.results.setAttribute(Qt.WA_ShowWithoutActivating)
                 self.results.setFocusPolicy(Qt.NoFocus)
             self.results.setWindowFlags(flags)
-            self.keyed = False
             for item in ITEMS:
                 self.results.addItem(QListWidgetItem(item))
             self.results.itemClicked.connect(
@@ -117,7 +117,6 @@ class Window(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(100, self.update_title)
 
     def show_results(self, text):
@@ -156,7 +155,6 @@ class Window(QMainWindow):
         self.picked = True
         self.update_title()
         # A new search starts empty, as after a pick in WeCom.
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.search.clear)
 
     def eventFilter(self, obj, event):
@@ -165,7 +163,6 @@ class Window(QMainWindow):
             self.picked = False
             log("open")
             # The frames once the pop-up has its place.
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(50, self.update_title)
         elif kind == QEvent.Hide:
             log("close" + (" after a pick" if self.picked else ""))
