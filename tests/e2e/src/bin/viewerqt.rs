@@ -365,7 +365,7 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
     sleep_ms(1200);
     let shown = list.state();
     check(
-        &label("opening the Viewer leaves the Qt results up, with nothing picked"),
+        &label("opening the Viewer leaves the Qt results up, with no new pick"),
         opened["open"] == true && shown["open"] == true && shown["got"] == "item2",
         format!("before {}, after {}", opened["open"], shown),
     );
