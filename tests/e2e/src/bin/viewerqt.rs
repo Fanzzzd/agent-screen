@@ -468,6 +468,22 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
             got["got"] == "item2" && is_fresh_pick(list),
             got["got"].to_string(),
         );
+        // Then the Viewer has the keyboard, as after any click (ADR 0008).
+        let mut key = Value::Null;
+        for _ in 0..20 {
+            key = list.control.call("debugViewer", json!({}))?["key"].clone();
+            if key == true {
+                break;
+            }
+            sleep_ms(100);
+        }
+        check(
+            &label(&format!(
+                "with {front} in front, the Viewer is the key window after the click"
+            )),
+            key == true,
+            key.to_string(),
+        );
     }
 
     // 4. The user clicks a result while the Viewer is in front. The last

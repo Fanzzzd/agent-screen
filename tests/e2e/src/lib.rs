@@ -384,6 +384,12 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
         paths.next().context("no Python library")?,
         paths.next().context("no site-packages")?,
     );
+    if !Path::new(library).exists() {
+        println!(
+            "the venv's Python is no framework build ({library} is missing); make target/e2e/qtenv with Homebrew's or python.org's 3.13"
+        );
+        return Ok(None);
+    }
     let quoted = |s: &str| format!("{s:?}");
     sh(
         "/usr/bin/clang",

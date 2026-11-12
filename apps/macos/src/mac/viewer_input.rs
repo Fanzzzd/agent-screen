@@ -51,9 +51,9 @@ struct State {
     /// The button the user pressed on the image, until it comes up.
     pressed: Option<Button>,
     click: Option<Click>,
-    /// The Viewer's window number, when the press went to a list or panel
-    /// and Agent Screen takes the front only after its release.
-    front_after_release: Option<u32>,
+    /// When the press went to a list or panel: Agent Screen takes the
+    /// front only after its release, and keys wait until then.
+    front_after_release: Option<AfterList>,
     frame_pixels: Option<[usize; 2]>,
     /// How each key's last press went, so its release goes the same way
     /// whatever changed meanwhile.
@@ -1193,6 +1193,8 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.display = display;
         s.pressed = None;
         s.click = None;
+        // A press on a list that never comes up holds no key.
+        s.front_after_release = None;
         publish_picture(&s);
         if let Some((display, forwarder)) = &s.display {
             inspect_for_input_method(forwarder, *display);
@@ -1414,22 +1416,34 @@ fn press_hits_list(event: &NSEvent, window: &NSWindow) -> bool {
         .is_some_and(|at| super::input::front_for_press(at) == Front::AfterRelease)
 }
 
+/// What a press on a list owes once its release is delivered.
+struct AfterList {
+    viewer: u32,
+    /// Make the Viewer key: the user's press, or a test's that takes it.
+    take_key: bool,
+    /// Make Agent Screen the front process: the user's press only.
+    front: bool,
+    /// Keys wait from the press until this goes.
+    _keys: KeyHold,
+}
+
 /// After a press on a list: the Viewer takes the keyboard, as it does at
-/// any other press, now that the list has the press and its release.
-fn take_keyboard_after_list(viewer: u32, injected: bool) {
+/// any other press, now that the list has the press and its release. The
+/// Viewer becomes key first (ADR 0008).
+fn take_keyboard_after_list(after: &AfterList) {
     let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
     if window == 0 {
         return;
     }
     let window = unsafe { &*(window as *const NSWindow) };
-    if window.windowNumber() as u32 != viewer {
+    if window.windowNumber() as u32 != after.viewer {
         return;
     }
-    if !injected || TAKE_KEY.with(Cell::get) {
+    if after.take_key {
         native::make_key(window);
     }
-    if !injected {
-        super::input::note_viewer_press(viewer);
+    if after.front {
+        super::input::note_viewer_press(after.viewer);
     }
 }
 
@@ -1521,7 +1535,13 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                     log::debug!(
                         "viewer: a press on a list at {at:?} takes the front after its release"
                     );
-                    s.front_after_release = Some(window.windowNumber() as u32);
+                    let injected = INJECTING.with(Cell::get);
+                    s.front_after_release = Some(AfterList {
+                        viewer: window.windowNumber() as u32,
+                        take_key: !injected || TAKE_KEY.with(Cell::get),
+                        front: !injected,
+                        _keys: KeyHold::new(),
+                    });
                 } else if !INJECTING.with(|i| i.get()) {
                     super::input::note_viewer_press(window.windowNumber() as u32);
                 }
@@ -1576,16 +1596,14 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                 }) {
                     forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
                 }
-                if let Some(viewer) = s.front_after_release.take() {
-                    // Keys typed meanwhile wait for the Viewer, as after
-                    // any press (`wait_for_presses`). The Viewer becomes
-                    // key first, as at any other press (ADR 0008).
-                    hold_keys();
-                    let injected = INJECTING.with(Cell::get);
+                if let Some(after) = s.front_after_release.take() {
+                    // Once the release is delivered. Keys wait meanwhile,
+                    // at most `KEY_WAIT` each, and the hold ends however
+                    // the job ends, dropped with it included.
                     forwarder.after(move || {
                         dispatch2::DispatchQueue::main().exec_async(move || {
-                            take_keyboard_after_list(viewer, injected);
-                            release_keys();
+                            take_keyboard_after_list(&after);
+                            drop(after);
                         });
                     });
                 }
@@ -1948,15 +1966,22 @@ unsafe extern "C-unwind" fn private_press_seen(
     std::ptr::null_mut()
 }
 
-/// Keys wait, as behind a press not handled yet, until `release_keys`.
-fn hold_keys() {
-    *PRIVATE_PENDING.lock().unwrap() += 1;
+/// Keys wait, as behind a press not handled yet, while this lives.
+struct KeyHold;
+
+impl KeyHold {
+    fn new() -> Self {
+        *PRIVATE_PENDING.lock().unwrap() += 1;
+        KeyHold
+    }
 }
 
-fn release_keys() {
-    let mut pending = PRIVATE_PENDING.lock().unwrap();
-    *pending = pending.saturating_sub(1);
-    PRIVATE_DONE.notify_all();
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        let mut pending = PRIVATE_PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = pending.saturating_sub(1);
+        PRIVATE_DONE.notify_all();
+    }
 }
 
 /// Hold a key on the tap's thread until the main thread has handled the

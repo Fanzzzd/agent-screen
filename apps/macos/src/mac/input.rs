@@ -594,7 +594,9 @@ impl Forwarder {
                 let grabbed = w.grab(at, button);
                 diagnostics::emit(|| ClickEvent::Grab { held: grabbed });
                 if !grabbed {
+                    w.user_press = true;
                     let target = w.mouse_down(at, button, clicks, flags);
+                    w.user_press = false;
                     w.pressed = target.and_then(|t| held(t, at));
                 }
             })
@@ -1394,6 +1396,8 @@ struct Worker {
     /// The window the user's press in the Viewer went to, as it was then.
     pressed: Option<Grab>,
     cache: Option<(Vec<Hit>, Instant)>,
+    /// Whether the press being handled is the user's, in the Viewer.
+    user_press: bool,
     seed: u64,
 }
 
@@ -1433,6 +1437,7 @@ impl Worker {
             grab_moved: false,
             pressed: None,
             cache: None,
+            user_press: false,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
         }
     }
@@ -1588,13 +1593,19 @@ impl Worker {
             self.pressed_panels.push(target.window_id);
         }
         // The windows the press was hit-tested in, taken a moment ago. A
-        // list of the front app takes the press as it is: making it key
+        // list of the front app takes the user's press as it is: making it key
         // would take key from the window it belongs to, and a list that
         // closes then closes before the press lands. An app in the
         // background drops a press on a window that isn't key, and a file
         // panel is another process's, so there the focus goes as before.
         let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
-        if hit.target == hit.host && is_front(target.pid) && is_list(&windows, at) {
+        // Only for the user's press: an agent's click focuses as before, so
+        // the user's key window is remembered and handed back.
+        if self.user_press
+            && hit.target == hit.host
+            && is_front(target.pid)
+            && is_list(&windows, at)
+        {
             log::debug!("input: press on a list of the front app at {at:?}, focus kept");
         } else {
             let _held = AppKeys::hold(target.pid);
@@ -2401,7 +2412,11 @@ pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
 /// When a press at a global point takes the front for Agent Screen: after
 /// its release where it hits a list or panel (`viewer_press`).
 pub fn front_for_press(at: (f64, f64)) -> agent_screen_model::viewer_press::Front {
-    if is_list(&hits(), at) {
+    // Pid, layer and bounds are all the rule reads: no panel lookup, as
+    // this runs on the main thread at every press.
+    let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
+    let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
+    if is_list(&reachable(cg::on_screen_windows(), menu, status), at) {
         agent_screen_model::viewer_press::Front::AfterRelease
     } else {
         agent_screen_model::viewer_press::Front::BeforePress
