@@ -26,6 +26,7 @@ use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
 use agent_screen_model::viewer_keys::{self, Call, Outcome, Press, Route, Secrecy, Source};
+use agent_screen_model::viewer_press::Front;
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -50,6 +51,9 @@ struct State {
     /// The button the user pressed on the image, until it comes up.
     pressed: Option<Button>,
     click: Option<Click>,
+    /// When the press went to a list or panel: Agent Screen takes the
+    /// front only after its release, and keys wait until then.
+    front_after_release: Option<AfterList>,
     frame_pixels: Option<[usize; 2]>,
     /// How each key's last press went, so its release goes the same way
     /// whatever changed meanwhile.
@@ -1189,6 +1193,8 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.display = display;
         s.pressed = None;
         s.click = None;
+        // A press on a list that never comes up holds no key.
+        s.front_after_release = None;
         publish_picture(&s);
         if let Some((display, forwarder)) = &s.display {
             inspect_for_input_method(forwarder, *display);
@@ -1361,8 +1367,16 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     {
         // Outside the state: a window becoming key draws at once, and its
         // paint reports the layout here.
+        LIST_PRESS.with(|l| l.set(false));
         if let Some(window) = pressed_viewer(event, mtm) {
-            native::make_key(&window);
+            // A list or panel there may close as its app loses active, and
+            // the Viewer becoming key activates Agent Screen: the press and
+            // its release reach the list first (`viewer_press`).
+            if press_hits_list(event, &window) {
+                LIST_PRESS.with(|l| l.set(true));
+            } else {
+                native::make_key(&window);
+            }
         }
         flush_before_click(event, mtm);
     }
@@ -1373,6 +1387,11 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     }
     let mut after = None;
     let handled = handle_in(event, mtm, &mut after);
+    // A release the handler let go, as with a sheet up mid-press, ends a
+    // list's key hold too.
+    if is_release(event.r#type()) {
+        drop_list_hold();
+    }
     // Outside the state: the input method calls back into the Viewer.
     match after {
         Some(After::Through(key)) => through_input_method(key),
@@ -1380,6 +1399,57 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
         None => {}
     }
     handled
+}
+
+thread_local! {
+    /// Whether the press being handled hits a list or panel on the display.
+    static LIST_PRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a press on the Viewer's picture lands on a list or panel of an
+/// app on the display (`viewer_press`).
+fn press_hits_list(event: &NSEvent, window: &NSWindow) -> bool {
+    let mapped = STATE.with(|s| {
+        let s = s.try_borrow().ok()?;
+        let (display, _) = s.display.clone()?;
+        Some((display, s.content?, s.frame_pixels))
+    });
+    let Some((display, content, frame_pixels)) = mapped else {
+        return false;
+    };
+    remote(event, window, content, display, false, frame_pixels)
+        .is_some_and(|at| super::input::front_for_press(at) == Front::AfterRelease)
+}
+
+/// What a press on a list owes once its release is delivered.
+struct AfterList {
+    viewer: u32,
+    /// Make the Viewer key: the user's press, or a test's that takes it.
+    take_key: bool,
+    /// Make Agent Screen the front process: the user's press only.
+    front: bool,
+    /// Keys wait from the press until this goes.
+    _keys: KeyHold,
+}
+
+/// After a press on a list: the Viewer takes the keyboard, as it does at
+/// any other press, now that the list has the press and its release. The
+/// Viewer becomes key first (ADR 0008).
+fn take_keyboard_after_list(after: &AfterList) {
+    let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+    if window == 0 {
+        return;
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    if window.windowNumber() as u32 != after.viewer {
+        return;
+    }
+    if after.take_key {
+        native::make_key(window);
+    }
+    if after.front {
+        super::input::note_viewer_press(after.viewer);
+    }
 }
 
 /// The Viewer's window, when `event` is a press on its picture that takes
@@ -1463,8 +1533,21 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                 }) else {
                     return false;
                 };
-                // A test's press never takes the user's keyboard.
-                if !INJECTING.with(|i| i.get()) {
+                // A test's press never takes the user's keyboard. A press
+                // on a list takes it once the release is delivered.
+                s.front_after_release = None;
+                if LIST_PRESS.with(Cell::get) {
+                    log::debug!(
+                        "viewer: a press on a list at {at:?} takes the front after its release"
+                    );
+                    let injected = INJECTING.with(Cell::get);
+                    s.front_after_release = Some(AfterList {
+                        viewer: window.windowNumber() as u32,
+                        take_key: !injected || TAKE_KEY.with(Cell::get),
+                        front: !injected,
+                        _keys: KeyHold::new(),
+                    });
+                } else if !INJECTING.with(|i| i.get()) {
                     super::input::note_viewer_press(window.windowNumber() as u32);
                 }
                 // The menu bar strip: only a click that opens a menu takes
@@ -1476,6 +1559,8 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                         display,
                         x: event.locationInWindow().x,
                     });
+                    // No release follows here to end a list's key hold.
+                    s.front_after_release = None;
                     return true;
                 }
                 // A click commits a composition, where the keys went, before
@@ -1517,6 +1602,17 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                     remote(event, &window, content, display, true, s.frame_pixels)
                 }) {
                     forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
+                }
+                if let Some(after) = s.front_after_release.take() {
+                    // Once the release is delivered. Keys wait meanwhile,
+                    // at most `KEY_WAIT` each, and the hold ends however
+                    // the job ends, dropped with it included.
+                    forwarder.after(move || {
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            take_keyboard_after_list(&after);
+                            drop(after);
+                        });
+                    });
                 }
                 // The click may have focused a field: once it lands.
                 inspect_for_input_method(&forwarder, display);
@@ -1877,6 +1973,42 @@ unsafe extern "C-unwind" fn private_press_seen(
     std::ptr::null_mut()
 }
 
+fn is_release(kind: NSEventType) -> bool {
+    matches!(
+        kind,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+    )
+}
+
+/// End a press on a list's key hold whose release went unhandled: until it
+/// ends, every key on the Mac waits.
+fn drop_list_hold() {
+    let after = STATE.with(|s| {
+        s.try_borrow_mut()
+            .ok()
+            .and_then(|mut s| s.front_after_release.take())
+    });
+    drop(after);
+}
+
+/// Keys wait, as behind a press not handled yet, while this lives.
+struct KeyHold;
+
+impl KeyHold {
+    fn new() -> Self {
+        *PRIVATE_PENDING.lock().unwrap() += 1;
+        KeyHold
+    }
+}
+
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        let mut pending = PRIVATE_PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = pending.saturating_sub(1);
+        PRIVATE_DONE.notify_all();
+    }
+}
+
 /// Hold a key on the tap's thread until the main thread has handled the
 /// presses taken before it, for at most `KEY_WAIT`.
 fn wait_for_presses() {
@@ -1937,14 +2069,21 @@ fn private_taken(taken: Taken) {
         return;
     };
     super::real_input::user_event(taken.cg_kind);
-    // AppKit drops a press outside a modal window, and so does this.
+    // AppKit drops a press outside a modal window, and so does this. A
+    // release dropped here ends a list's key hold.
     if objc2_app_kit::NSApplication::sharedApplication(mtm)
         .modalWindow()
         .is_some()
     {
+        if is_release(taken.kind) {
+            drop_list_hold();
+        }
         return;
     }
     let Some((window, ns)) = viewer_event(&taken) else {
+        if is_release(taken.kind) {
+            drop_list_hold();
+        }
         return;
     };
     super::native::report_mouse(&ns);

@@ -328,6 +328,7 @@ pub const SCRIPTS: &[Script] = &[
     script("viewerkey", &[ViewerInput], Full, Hook, 2),
     script("viewerpicture", &[Viewer, Screenshots, Displays], Core, Hook, 3),
     script("viewerpopup", &[ViewerInput], Core, Real, 2).hands_off(),
+    script("viewerqt", &[ViewerInput], Core, Real, 2).hands_off(),
     script("viewerwetype", &[InputMethod, ViewerInput], Core, Real, 1).hands_off(),
     script("waitchange", &[Elements], Full, Agent, 1),
     script("warmspare", &[Displays], Full, Agent, 3),

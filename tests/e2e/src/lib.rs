@@ -317,6 +317,127 @@ pub fn dropdown_app() -> Result<PathBuf> {
     swift_app("dropdown", "Dropdown")
 }
 
+/// tools/qtlist.py as an app: a real Qt search box with a list of results,
+/// run by PySide6 from a venv in target/e2e/qtenv. The first call
+/// makes the venv with uv and downloads PySide6 (about 350 MB). None when
+/// uv is missing or the download fails, with the reason printed.
+pub fn qt_list_app() -> Result<Option<PathBuf>> {
+    let env = out().join("qtenv");
+    let python = env.join("bin/python");
+    let has_qt = |python: &Path| {
+        Command::new(python)
+            .args(["-I", "-c", "import PySide6.QtWidgets"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if !has_qt(&python) {
+        let Ok(uv) = sh("/usr/bin/which", &["uv"]) else {
+            println!("no uv to make the Qt venv; install it with `brew install uv`");
+            return Ok(None);
+        };
+        let uv = uv.trim().to_string();
+        println!("making target/e2e/qtenv with PySide6, once");
+        let made = sh(
+            &uv,
+            &[
+                "venv",
+                "-q",
+                // tools/qtlaunch.c loads a framework build: uv's own Pythons
+                // are none, Homebrew's and python.org's are. Any other is
+                // caught below, and the script skips.
+                "--python-preference",
+                "only-system",
+                "-p",
+                "3.13",
+                env.to_str().unwrap(),
+            ],
+        )
+        .and_then(|_| {
+            sh(
+                &uv,
+                &[
+                    "pip",
+                    "install",
+                    "-q",
+                    "-p",
+                    python.to_str().unwrap(),
+                    "PySide6-Essentials",
+                ],
+            )
+        });
+        if let Err(error) = made {
+            println!("could not install PySide6: {error}");
+            return Ok(None);
+        }
+        if !has_qt(&python) {
+            println!("PySide6 installed but doesn't import");
+            return Ok(None);
+        }
+    }
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/qtlist.py");
+    let app = out().join("QtList.app");
+    let _ = std::fs::remove_dir_all(&app);
+    let macos = app.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos)?;
+    // The bundle's executable is tools/qtlaunch.c, which runs the script
+    // with the framework's Python in its own process, so the pid launch_app
+    // starts is the app: Homebrew's python starts Python.app as a second
+    // process, a shell launcher execs a path launch_app doesn't know, and
+    // Python itself stops at the switch launch_app passes every app.
+    let paths = sh(
+        &python,
+        &[
+            "-I",
+            "-c",
+            "import sys, sysconfig; print(sys.base_prefix + '/Python'); print(sysconfig.get_paths()['purelib'])",
+        ],
+    )?;
+    let mut paths = paths.lines();
+    let (library, packages) = (
+        paths.next().context("no Python library")?,
+        paths.next().context("no site-packages")?,
+    );
+    if !Path::new(library).exists() {
+        println!(
+            "the venv's Python is no framework build ({library} is missing); make target/e2e/qtenv with Homebrew's or python.org's 3.13"
+        );
+        return Ok(None);
+    }
+    let quoted = |s: &str| format!("{s:?}");
+    sh(
+        "/usr/bin/clang",
+        &[
+            "-O1",
+            &format!("-DPYLIB={}", quoted(library)),
+            &format!("-DPYPATH={}", quoted(packages)),
+            &format!("-DSCRIPT={}", quoted(&script.display().to_string())),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/qtlaunch.c")
+                .to_str()
+                .unwrap(),
+            "-o",
+            macos.join("QtList").to_str().unwrap(),
+        ],
+    )?;
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.agentscreen.e2e.qtlist</string>
+<key>CFBundleExecutable</key><string>QtList</string>
+<key>CFBundleName</key><string>QtList</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>"#,
+    )?;
+    sh(
+        "/usr/bin/codesign",
+        &["--force", "--sign", "-", app.to_str().unwrap()],
+    )?;
+    Ok(Some(app))
+}
+
 /// tools/watch.swift as an app: buttons that change its window seconds
 /// after a press, for wait_for_change.
 pub fn watch_app() -> Result<PathBuf> {

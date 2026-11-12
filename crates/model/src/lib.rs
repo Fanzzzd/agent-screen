@@ -30,6 +30,7 @@ pub mod substitute;
 pub mod tree;
 pub mod typing;
 pub mod viewer_keys;
+pub mod viewer_press;
 pub mod watch;
 
 pub mod diagnostics;
