@@ -2409,18 +2409,14 @@ pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
         .map(|h| (h.target, h.bounds))
 }
 
-/// When a press at a global point takes the front for Agent Screen: after
-/// its release where it hits a list or panel (`viewer_press`).
-pub fn front_for_press(at: (f64, f64)) -> agent_screen_model::viewer_press::Front {
-    // Pid, layer and bounds are all the rule reads: no panel lookup, as
-    // this runs on the main thread at every press.
+/// Whether a press at a global point hits a list or panel, so Agent Screen
+/// takes the front only after its release (`viewer_press`).
+pub fn on_list(at: (f64, f64)) -> bool {
+    // Pid and bounds are all the rule reads: no panel lookup, as this runs
+    // on the main thread at every press.
     let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
     let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
-    if is_list(&reachable(cg::on_screen_windows(), menu, status), at) {
-        agent_screen_model::viewer_press::Front::AfterRelease
-    } else {
-        agent_screen_model::viewer_press::Front::BeforePress
-    }
+    is_list(&reachable(cg::on_screen_windows(), menu, status), at)
 }
 
 /// Whether a press at `at` hits a list or panel of `list`'s windows, front
@@ -2431,7 +2427,6 @@ fn is_list(list: &[Hit], at: (f64, f64)) -> bool {
         .iter()
         .map(|h| Window {
             pid: h.host.pid,
-            layer: h.layer,
             bounds: h.bounds,
         })
         .collect();
