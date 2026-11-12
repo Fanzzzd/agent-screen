@@ -109,6 +109,14 @@ fn tool(name: &str, title: &str, description: &[&str], input: Value, hints: Hint
     })
 }
 
+/// Claude Code defers MCP tools behind its tool search and shows only their
+/// names. A tool marked here loads upfront, so the model sees what it is for
+/// before it reaches for open -a or AppleScript.
+fn always_load(mut tool: Value) -> Value {
+    tool["_meta"] = json!({ "anthropic/alwaysLoad": true });
+    tool
+}
+
 pub fn definitions() -> Vec<Value> {
     vec![
         tool(
@@ -124,12 +132,13 @@ pub fn definitions() -> Vec<Value> {
             object(json!({}), &[]),
             READ_ONLY,
         ),
-        tool(
+        always_load(tool(
             "create_display",
             "Create Agent Display",
             &[
                 "Get a private virtual display for this session to operate GUI apps on, without touching the user's screen,",
-                "cursor or keyboard. Call it only when you need a screen. Calling it again returns the same display, and so",
+                "cursor or keyboard. Call it when a task needs a screen: to open, operate, test or screenshot a Mac app or a",
+                "web page, in place of open -a, AppleScript, System Events or screencapture. Calling it again returns the same display, and so",
                 "does a call from a subagent of this session: let one subagent do all the GUI work.",
                 "The returned display_id stays valid until end_display or until this session ends.",
                 "The result's width and height are the display in points; scale is screenshot pixels per point",
@@ -146,7 +155,7 @@ pub fn definitions() -> Vec<Value> {
                 &[],
             ),
             PLAIN,
-        ),
+        )),
         tool(
             "end_display",
             "End Agent Display",
@@ -2390,6 +2399,16 @@ mod tests {
                 .unwrap()
                 .contains("does not reuse the user's existing login session")
         );
+    }
+
+    #[test]
+    fn only_create_display_loads_upfront() {
+        let upfront: Vec<_> = definitions()
+            .into_iter()
+            .filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true)
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(upfront, ["create_display"]);
     }
 
     #[test]
