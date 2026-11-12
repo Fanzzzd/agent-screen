@@ -339,7 +339,21 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
         };
         let uv = uv.trim().to_string();
         println!("making target/e2e/qtenv with PySide6, once");
-        let made = sh(&uv, &["venv", "-q", "-p", "3.13", env.to_str().unwrap()]).and_then(|_| {
+        let made = sh(
+            &uv,
+            &[
+                "venv",
+                "-q",
+                // A framework build, which tools/qtlaunch.c loads: uv's own
+                // Pythons are none.
+                "--python-preference",
+                "only-system",
+                "-p",
+                "3.13",
+                env.to_str().unwrap(),
+            ],
+        )
+        .and_then(|_| {
             sh(
                 &uv,
                 &[

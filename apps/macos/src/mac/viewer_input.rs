@@ -1387,6 +1387,11 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     }
     let mut after = None;
     let handled = handle_in(event, mtm, &mut after);
+    // A release the handler let go, as with a sheet up mid-press, ends a
+    // list's key hold too.
+    if is_release(event.r#type()) {
+        drop_list_hold();
+    }
     // Outside the state: the input method calls back into the Viewer.
     match after {
         Some(After::Through(key)) => through_input_method(key),
@@ -1554,6 +1559,8 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                         display,
                         x: event.locationInWindow().x,
                     });
+                    // No release follows here to end a list's key hold.
+                    s.front_after_release = None;
                     return true;
                 }
                 // A click commits a composition, where the keys went, before
@@ -1966,6 +1973,24 @@ unsafe extern "C-unwind" fn private_press_seen(
     std::ptr::null_mut()
 }
 
+fn is_release(kind: NSEventType) -> bool {
+    matches!(
+        kind,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+    )
+}
+
+/// End a press on a list's key hold whose release went unhandled: until it
+/// ends, every key on the Mac waits.
+fn drop_list_hold() {
+    let after = STATE.with(|s| {
+        s.try_borrow_mut()
+            .ok()
+            .and_then(|mut s| s.front_after_release.take())
+    });
+    drop(after);
+}
+
 /// Keys wait, as behind a press not handled yet, while this lives.
 struct KeyHold;
 
@@ -2044,14 +2069,21 @@ fn private_taken(taken: Taken) {
         return;
     };
     super::real_input::user_event(taken.cg_kind);
-    // AppKit drops a press outside a modal window, and so does this.
+    // AppKit drops a press outside a modal window, and so does this. A
+    // release dropped here ends a list's key hold.
     if objc2_app_kit::NSApplication::sharedApplication(mtm)
         .modalWindow()
         .is_some()
     {
+        if is_release(taken.kind) {
+            drop_list_hold();
+        }
         return;
     }
     let Some((window, ns)) = viewer_event(&taken) else {
+        if is_release(taken.kind) {
+            drop_list_hold();
+        }
         return;
     };
     super::native::report_mouse(&ns);
