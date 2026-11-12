@@ -162,7 +162,7 @@ impl List {
     /// The user's app in front again, as when the run began.
     fn users_app_in_front(&self) {
         if !self.users.is_empty() {
-            bring_to_front(&self.users, 200);
+            bring_to_front(&["-b", &self.users], &self.users, 200);
         }
     }
 
@@ -242,9 +242,10 @@ impl List {
     }
 }
 
-/// `bundle`'s app in front, then `settle` ms for it to draw.
-fn bring_to_front(bundle: &str, settle: u64) {
-    let _ = Command::new("/usr/bin/open").args(["-b", bundle]).status();
+/// `bundle`'s app in front, then `settle` ms for it to draw. `open` takes
+/// `target`, a bundle path or `-b` and the id.
+fn bring_to_front(target: &[&str], bundle: &str, settle: u64) {
+    let _ = Command::new("/usr/bin/open").args(target).status();
     for _ in 0..20 {
         if frontmost("bundleid") == bundle {
             break;
@@ -383,8 +384,14 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
         if front == "your app" {
             list.users_app_in_front();
         } else {
-            // As an app that brings itself forward.
-            bring_to_front("app.agentscreen.e2e.qtlist", 300);
+            // As an app that brings itself forward. By its path: by its
+            // id, `open` may start another checkout's copy on your screen.
+            let app = out().join("QtList.app");
+            bring_to_front(
+                &["-a", &app.to_string_lossy()],
+                "app.agentscreen.e2e.qtlist",
+                300,
+            );
         }
         // The agent opens the results with that app in front, and the click
         // follows at once.
