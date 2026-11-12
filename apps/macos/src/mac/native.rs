@@ -137,6 +137,10 @@ pub fn set_sender(sender: UnboundedSender<Native>) {
     EVENTS.with(|e| *e.borrow_mut() = Some(sender));
 }
 
+/// The level of the border Agent Screen draws around the user's screens,
+/// which lets every click through.
+pub const BORDER_LEVEL: isize = 1000;
+
 pub fn send(event: Native) {
     EVENTS.with(|e| {
         if let Some(sender) = e.borrow().as_ref() {
@@ -762,7 +766,7 @@ pub fn show_borders(on: bool) -> bool {
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setIgnoresMouseEvents(true);
             window.setHasShadow(false);
-            window.setLevel(1000);
+            window.setLevel(BORDER_LEVEL);
             window.setCollectionBehavior(
                 NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::Stationary

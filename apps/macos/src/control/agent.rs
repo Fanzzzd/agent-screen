@@ -2296,9 +2296,19 @@ async fn handle_one(
                     .await;
                 return reply(json!({}));
             }
+            // `x` and `y`, in global top-left points, open a Give or Take
+            // Back menu there instead of at the pointer.
+            let menu_at = p.number("x").zip(p.number("y"));
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
-                .update(cx, |shell, cx| shell.debug_show(&surface, id, cx))
+                .update(cx, |shell, cx| {
+                    shell.debug_menu_at = menu_at;
+                    let shown = shell.debug_show(&surface, id, cx);
+                    // A surface that opened no menu leaves no point for
+                    // the next real one.
+                    shell.debug_menu_at = None;
+                    shown
+                })
                 .map_err(|e| ControlError::failed(e.to_string()))?
                 .map_err(ControlError::invalid)?;
             cx.background_executor()

@@ -15,8 +15,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, dropdown_app, hid, instance, json, kill_ours, open_stage, our_binary, out, run,
-    sign_step, sleep_ms, start_test_app, stop_test_app,
+    Control, check, debug_pid, dropdown_app, hid, instance, json, kill_ours, open_user_stage,
+    our_binary, out, probe, run, sign_step, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -82,7 +82,7 @@ fn wait_title(control: &Control, id: u64, part: &str) -> String {
 
 fn test() -> Result<()> {
     let control = Control::connect()?;
-    open_stage(&control)?;
+    open_user_stage(&control)?;
     let display = control.call(
         "createDisplay",
         json!({ "sessionKey": KEY, "title": "Viewer pop-up", "width": 1280, "height": 600 }),
@@ -183,6 +183,89 @@ fn test() -> Result<()> {
             &again,
         );
     }
+
+    // A press closes an open menu, here the Viewer's Give menu on the
+    // stage, which stands in for the user's screen, and the menu takes it:
+    // it never reaches the display. The list is closed, so a press that
+    // went through would pick row2 under it. The menu opens at the
+    // pointer unless told where; here the picture's lower left. AppKit
+    // runs the menu's loop meanwhile and the control socket answers only
+    // once it closes, so the menu is asked for from another thread.
+    let pid = debug_pid().context("the test app's pid")?.to_string();
+    let menu = || {
+        probe(&["windows", &pid])
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"layer\":101"))
+            .find_map(|l| serde_json::from_str::<Value>(l).ok())
+    };
+    let rest = (image[0] + 40.0, image[1] + image[3] - 40.0);
+    let asked = std::thread::spawn(move || -> Result<()> {
+        Control::connect()?.call(
+            "debugShow",
+            json!({ "surface": "give", "displayId": id, "x": rest.0, "y": rest.1 - 160.0 }),
+        )?;
+        Ok(())
+    });
+    let mut open = None;
+    for _ in 0..30 {
+        open = menu();
+        if open.is_some() {
+            break;
+        }
+        sleep_ms(100);
+    }
+    // The menu must be on the stage, beside the Viewer, not on the user's
+    // screen.
+    let on_stage = open.as_ref().is_some_and(|m| {
+        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
+        let frame = &viewer["frame"];
+        let v = |i: usize| frame[i].as_f64().unwrap_or(0.0);
+        f("x") < v(0) + v(2)
+            && f("x") + f("width") > v(0)
+            && f("y") < v(1) + v(3)
+            && f("y") + f("height") > v(1)
+    });
+    let covers = open.as_ref().is_some_and(|m| {
+        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
+        at.0 >= f("x")
+            && at.0 <= f("x") + f("width")
+            && at.1 >= f("y")
+            && at.1 <= f("y") + f("height")
+    });
+    check(
+        "the Viewer's Give menu opens on the stage, beside the list item",
+        open.is_some() && !covers && on_stage,
+        format!("{open:?}"),
+    );
+    if open.is_some() && !covers && on_stage {
+        hid(&["click", &at.0.to_string(), &at.1.to_string()])?;
+    }
+    let mut left = menu();
+    for _ in 0..20 {
+        if left.is_none() {
+            break;
+        }
+        sleep_ms(100);
+        left = menu();
+    }
+    if let Some(m) = &left {
+        // Never leave a menu open on the screen.
+        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
+        let _ = probe(&[
+            "cancelmenu",
+            &(f("x") + 10.0).to_string(),
+            &(f("y") + 10.0).to_string(),
+        ]);
+    }
+    let _ = asked.join();
+    sleep_ms(300);
+    let now = title(&control, id);
+    check(
+        "a click in the Viewer while a menu is open closes the menu and reaches nothing under it",
+        left.is_none() && now.contains("got=item2"),
+        format!("menu left open: {left:?}; {now}"),
+    );
     println!(
         "the fixture's presses:\n{}",
         std::fs::read_to_string(&log).unwrap_or_default()

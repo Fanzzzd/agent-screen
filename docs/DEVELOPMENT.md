@@ -589,7 +589,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `select`, `viewer`, `collapse`, `focus` | Select a display, open or close its Viewer, or take the keyboard. |
 | `marked` | Open the display's Viewer with "nǐ hǎo" marked by the input method, drawn at the target's caret, or at the last press in the Viewer. |
 | `create`, `dismiss`, `dismiss-confirm` | Create a display, open Dismissal, or confirm the Dismiss sheet's current plan. |
-| `primary`, `give`, `take-back`, `help` | Invoke the display's primary action, open its Give or Take Back menu, or open it for help. |
+| `primary`, `give`, `take-back`, `help` | Invoke the display's primary action, open its Give or Take Back menu, or open it for help. A menu opens at the pointer, or at `x` and `y` in global top-left points. |
 | `answer` | Confirm the Viewer's Dismiss sheet with `displayId` nonzero, or cancel it with 0. |
 | `card-open`, `card-later`, `card-take-over` | Open the Help Card's display, put the card off, or take over its display. |
 | `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
