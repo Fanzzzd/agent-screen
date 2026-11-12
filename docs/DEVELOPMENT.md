@@ -11,6 +11,8 @@ crates/colorsync/  the root helper that keeps ColorSync's display registry short
 tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
 vendor/            Zed's gpui_apple, patched
 docs/              ADRs, the AGENTS.md convention, Linux and Windows feasibility notes
+skills/            the agent-screen skill, docs/agents/AGENTS.md with frontmatter
+.claude-plugin/    the Claude Code marketplace that serves the skill as a plugin
 ```
 
 The root holds the Cargo workspace (`target/` builds there) and a pnpm workspace run by Turborepo:

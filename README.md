@@ -72,6 +72,24 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
 
+4. Add the Agent Screen skill, so agents use their display without being told. Claude Code loads MCP tools only when it searches for them, so without the skill it often opens apps with `open -a` or AppleScript on your screen instead. The skill tells it when a task needs a screen: opening, operating or testing a Mac app or a web page, clicking or filling in something on screen, a screenshot of an app, a login to a site.
+
+   For Claude Code, install the plugin from this repository:
+
+   ```sh
+   claude plugin install agent-screen --marketplace Fanzzzd/agent-screen
+   ```
+
+   On Claude Code before 2.1.275, run `claude plugin marketplace add Fanzzzd/agent-screen` first, then `claude plugin install agent-screen@agent-screen`. `claude plugin update agent-screen` fetches a newer skill.
+
+   For Codex, Cursor, Gemini CLI and other agents that read Agent Skills, install it with the [skills](https://github.com/vercel-labs/skills) installer:
+
+   ```sh
+   npx skills add Fanzzzd/agent-screen -g
+   ```
+
+   Or copy [skills/agent-screen](skills/agent-screen) into the agent's skills folder, such as `~/.agents/skills`. For an agent without skills, paste [docs/agents/AGENTS.md](docs/agents/AGENTS.md) into the project's `AGENTS.md` or `CLAUDE.md`. The skill is that file with a description on top.
+
 Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent. If Agent Screen isn't running, the first tool call starts it.
 
 ## Agent tools
@@ -91,7 +109,7 @@ Then ask your agent something like "Use Agent Screen to open Calculator on your 
 | `request_control`                            | During a Takeover, ask the user to hand the display back. With `user_instruction`, relay their explicit chat instruction to hand it back, or with `control: "user"` to pause. |
 | `window_access` | Grant, inspect or revoke session window authorization, or return handed-over windows. Grant and return require the user's explicit `user_instruction`. |
 
-A session can only see and drive its own display. `place_window` with `user_instruction` relays your instruction to hand over that window without another confirmation. Agent Screen trusts the agent's relay and records it; it does not read or independently verify your conversation. [docs/agents/AGENTS.md](docs/agents/AGENTS.md) is a convention you can paste into a project's `AGENTS.md` or `CLAUDE.md`.
+A session can only see and drive its own display. `place_window` with `user_instruction` relays your instruction to hand over that window without another confirmation. Agent Screen trusts the agent's relay and records it; it does not read or independently verify your conversation. The [skill](skills/agent-screen/SKILL.md) from Install step 4 tells agents how to use these tools.
 
 ## Your side
 
