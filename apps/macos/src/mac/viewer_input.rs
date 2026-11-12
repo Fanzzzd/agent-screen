@@ -1661,6 +1661,233 @@ fn input_context(window: &NSWindow) -> Option<&objc2::runtime::AnyObject> {
     unsafe { context.as_ref() }
 }
 
+// MARK: Private press
+
+thread_local! {
+    /// The private press's tap, kept so it stays installed and can be
+    /// enabled again after a timeout.
+    static PRIVATE_TAP: RefCell<Option<(
+        objc2_core_foundation::CFRetained<objc2_core_foundation::CFMachPort>,
+        objc2_core_foundation::CFRetained<objc2_core_foundation::CFRunLoopSource>,
+    )>> = const { RefCell::new(None) };
+    /// The buttons whose press the tap took: their drags and release go
+    /// the same way, wherever the pointer goes meanwhile.
+    static PRIVATE_HELD: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Whether the private press's tap is installed and enabled.
+pub fn private_press() -> bool {
+    PRIVATE_TAP.with(|t| {
+        t.borrow()
+            .as_ref()
+            .is_some_and(|(tap, _)| objc2_core_graphics::CGEvent::tap_is_enabled(tap))
+    })
+}
+
+/// Take the user's presses on the Viewer's picture before WindowServer
+/// routes them, and hand them to the Viewer's handler. A press routed to
+/// Agent Screen also reaches every other app's global event monitor as a
+/// click outside it, and a Qt pop-up, such as WeCom's search results,
+/// closes on one: the press then hit the window under the closed list.
+/// Taken here, no other app sees the press. Only presses the Viewer
+/// handles are taken; any other event, and a press on the Viewer's header,
+/// another window or a blocked Viewer, goes on as it came (ADR 0014).
+/// Installed after `real_input::watch`, so this tap runs first and tells
+/// that observer about each press it takes.
+pub fn install_private_press() {
+    use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopCommonModes};
+    use objc2_core_graphics::{
+        CGEvent, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    };
+    // To tell a problem the tap causes from one it fixes.
+    if std::env::var("AGENTSCREEN_NO_PRIVATE_PRESS").as_deref() == Ok("1") {
+        log::info!("viewer: private press off (AGENTSCREEN_NO_PRIVATE_PRESS)");
+        return;
+    }
+    let kinds = [
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDown,
+        CGEventType::OtherMouseUp,
+        CGEventType::OtherMouseDragged,
+    ];
+    let mask = kinds.iter().fold(0, |mask, kind| mask | (1_u64 << kind.0));
+    let Some(tap) = (unsafe {
+        CGEvent::tap_create(
+            CGEventTapLocation::HIDEventTap,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            mask,
+            Some(private_press_seen),
+            std::ptr::null_mut(),
+        )
+    }) else {
+        log::warn!("viewer: private press unavailable; other apps see presses in the Viewer");
+        return;
+    };
+    let Some(source) = CFMachPort::new_run_loop_source(None, Some(&tap), 0) else {
+        return;
+    };
+    let Some(run_loop) = CFRunLoop::main() else {
+        return;
+    };
+    run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+    CGEvent::tap_enable(&tap, true);
+    PRIVATE_TAP.with(|t| *t.borrow_mut() = Some((tap, source)));
+}
+
+unsafe extern "C-unwind" fn private_press_seen(
+    _proxy: objc2_core_graphics::CGEventTapProxy,
+    kind: objc2_core_graphics::CGEventType,
+    event: NonNull<objc2_core_graphics::CGEvent>,
+    _context: *mut std::ffi::c_void,
+) -> *mut objc2_core_graphics::CGEvent {
+    use objc2_core_graphics::{CGEvent, CGEventField, CGEventType};
+    if matches!(
+        kind,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        log::warn!("viewer: private press tap disabled ({kind:?}); enabling it again");
+        PRIVATE_TAP.with(|t| {
+            if let Some((tap, _)) = t.borrow().as_ref() {
+                CGEvent::tap_enable(tap, true);
+            }
+        });
+        return event.as_ptr();
+    }
+    let cg = unsafe { event.as_ref() };
+    // Input Agent Screen posts for an Input Loan is not the user's.
+    if CGEvent::integer_value_field(Some(cg), CGEventField::EventSourceUserData)
+        == super::real_input::TAG
+    {
+        return event.as_ptr();
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return event.as_ptr();
+    };
+    let Some(press) = private_kind(kind) else {
+        return event.as_ptr();
+    };
+    let held = PRIVATE_HELD.with(Cell::get);
+    let ours = held & press.bit != 0;
+    if !press.down && !ours {
+        return event.as_ptr();
+    }
+    let Some((window, ns)) = viewer_event(cg, press.kind, press.down, mtm) else {
+        if ours && press.up {
+            PRIVATE_HELD.with(|h| h.set(held & !press.bit));
+        }
+        return event.as_ptr();
+    };
+    if press.down && pressed_viewer(&ns, mtm).is_none() {
+        return event.as_ptr();
+    }
+    super::real_input::user_event(kind);
+    super::native::report_mouse(&ns);
+    let handled = handle(&ns, mtm);
+    if press.down {
+        if !handled {
+            return event.as_ptr();
+        }
+        PRIVATE_HELD.with(|h| h.set(held | press.bit));
+        log::debug!(
+            "viewer: took a press on the Viewer {} before other apps saw it",
+            window.windowNumber()
+        );
+    } else if press.up {
+        PRIVATE_HELD.with(|h| h.set(held & !press.bit));
+    }
+    std::ptr::null_mut()
+}
+
+/// One mouse event the private press may take.
+struct PrivateKind {
+    kind: NSEventType,
+    bit: u8,
+    down: bool,
+    up: bool,
+}
+
+fn private_kind(kind: objc2_core_graphics::CGEventType) -> Option<PrivateKind> {
+    use objc2_core_graphics::CGEventType as T;
+    let (kind, bit, down, up) = match kind {
+        T::LeftMouseDown => (NSEventType::LeftMouseDown, 1, true, false),
+        T::LeftMouseDragged => (NSEventType::LeftMouseDragged, 1, false, false),
+        T::LeftMouseUp => (NSEventType::LeftMouseUp, 1, false, true),
+        T::RightMouseDown => (NSEventType::RightMouseDown, 2, true, false),
+        T::RightMouseDragged => (NSEventType::RightMouseDragged, 2, false, false),
+        T::RightMouseUp => (NSEventType::RightMouseUp, 2, false, true),
+        T::OtherMouseDown => (NSEventType::OtherMouseDown, 4, true, false),
+        T::OtherMouseDragged => (NSEventType::OtherMouseDragged, 4, false, false),
+        T::OtherMouseUp => (NSEventType::OtherMouseUp, 4, false, true),
+        _ => return None,
+    };
+    Some(PrivateKind {
+        kind,
+        bit,
+        down,
+        up,
+    })
+}
+
+/// The HID event as the NSEvent AppKit would have made of it for the
+/// Viewer's window, with that window. A press counts only where the Viewer
+/// is the window in front at the point; a drag or release of a press the
+/// tap took goes to the Viewer wherever it is.
+fn viewer_event(
+    cg: &objc2_core_graphics::CGEvent,
+    kind: NSEventType,
+    down: bool,
+    mtm: MainThreadMarker,
+) -> Option<(Retained<NSWindow>, Retained<NSEvent>)> {
+    use objc2_core_graphics::{CGEvent, CGEventField};
+    let viewer = STATE.with(|s| {
+        s.try_borrow()
+            .ok()
+            .filter(|s| s.window != 0 && !s.blocked && s.display.is_some())
+            .map(|s| s.window)
+    })?;
+    let window: Retained<NSWindow> = unsafe { Retained::retain(viewer as *mut NSWindow) }?;
+    let global = CGEvent::location(Some(cg));
+    let top = cg::display_bounds(cg::main_display()).height;
+    let cocoa = objc2_foundation::NSPoint::new(global.x, top - global.y);
+    if down
+        && NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(cocoa, 0, mtm)
+            != window.windowNumber()
+    {
+        return None;
+    }
+    let frame = window.frame();
+    let at = objc2_foundation::NSPoint::new(cocoa.x - frame.origin.x, cocoa.y - frame.origin.y);
+    let clicks = CGEvent::integer_value_field(Some(cg), CGEventField::MouseEventClickState);
+    let flags = NSEventModifierFlags::from_bits_retain(CGEvent::flags(Some(cg)).0 as usize);
+    let seconds = CGEvent::timestamp(Some(cg)) as f64 / 1e9;
+    let pressure = if matches!(
+        kind,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+    ) {
+        0.0
+    } else {
+        1.0
+    };
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,
+        at,
+        flags,
+        seconds,
+        window.windowNumber(),
+        None,
+        0,
+        clicks as isize,
+        pressure,
+    )?;
+    Some((window, event))
+}
+
 pub fn install() {
     let mask = NSEventMask::LeftMouseDown
         | NSEventMask::LeftMouseDragged

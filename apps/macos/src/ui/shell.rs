@@ -401,6 +401,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let accent = native::accent();
     super::theme::set_accent(accent);
     viewer_input::install();
+    // After real_input::watch: a tap inserted later runs first.
+    viewer_input::install_private_press();
     notify::install();
     notify::check();
     native::debug_appearance();

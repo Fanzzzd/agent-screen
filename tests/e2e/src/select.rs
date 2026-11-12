@@ -459,6 +459,7 @@ mod tests {
                 "viewerdrag",
                 "viewerime",
                 "viewerkey",
+                "viewerpopup",
                 "viewerwetype"
             ]
         );
@@ -565,7 +566,14 @@ mod tests {
         });
         assert_eq!(
             names(&narrowed.scripts),
-            ["ime", "oneclick", "takeover", "viewerime", "viewerwetype"]
+            [
+                "ime",
+                "oneclick",
+                "takeover",
+                "viewerime",
+                "viewerpopup",
+                "viewerwetype"
+            ]
         );
     }
 

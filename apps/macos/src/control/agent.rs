@@ -1667,6 +1667,9 @@ async fn handle_one(
                 // target's caret, where it shows, in points from the
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
+                // The tap that keeps presses in the Viewer from other apps
+                // is installed and enabled (ADR 0014).
+                "privatePress": crate::mac::viewer_input::private_press(),
                 // The Viewer's input context is AppKit's current one: the
                 // input method composes only then.
                 "inputContext": crate::mac::viewer_input::input_context_current(),

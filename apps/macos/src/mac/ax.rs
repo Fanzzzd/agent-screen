@@ -1207,7 +1207,7 @@ pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool 
     let mut element = unsafe { CFRetained::from_raw(raw) };
     for _ in 0..64 {
         match string_attribute(&element, "AXRole").as_deref() {
-            Some("AXWindow") => return true,
+            Some("AXWindow") => return has_title_bar(&element),
             Some("AXToolbar" | "AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup") => {}
             // A control, text, a list, a web page, or anything unknown:
             // a drag there is the app's.
@@ -1219,6 +1219,21 @@ pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool 
         element = parent;
     }
     false
+}
+
+/// Whether a window has a title bar: one of its buttons. A borderless
+/// window, such as a Qt pop-up list or a custom-drawn panel, answers for
+/// itself wherever its content has no accessibility element, and its top
+/// edge is its first item: a click to wake it there picked that item.
+fn has_title_bar(window: &AXUIElement) -> bool {
+    [
+        "AXCloseButton",
+        "AXMinimizeButton",
+        "AXZoomButton",
+        "AXFullScreenButton",
+    ]
+    .iter()
+    .any(|button| element_attribute(window, button).is_some())
 }
 
 #[derive(Debug)]
