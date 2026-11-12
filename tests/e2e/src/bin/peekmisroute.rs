@@ -75,6 +75,12 @@ fn test() -> Result<()> {
         before.to_string(),
     );
     let delivered = before["delivered"].as_u64().unwrap_or(0);
+    let log = std::path::PathBuf::from(std::env::var("HOME")?).join(format!(
+        "Library/Logs/Agent Screen/displays-{}.log",
+        instance().unwrap_or_default()
+    ));
+    // Only lines from this run count: display ids come back across runs.
+    let logged_before = std::fs::read_to_string(&log).unwrap_or_default().len();
     let switched = sh_lenient(tool("mode")?, &[&id.to_string(), "800", "600"]);
     println!("  switched to 800×600: {}", switched.trim());
     // The stream may misroute once per change: the switch and the switch
@@ -98,11 +104,9 @@ fn test() -> Result<()> {
         fine && now["repairs"].as_u64().unwrap_or(0) > 0,
         now.to_string(),
     );
-    let log = std::path::PathBuf::from(std::env::var("HOME")?).join(format!(
-        "Library/Logs/Agent Screen/displays-{}.log",
-        instance().unwrap_or_default()
-    ));
     let noted = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .get(logged_before..)
         .unwrap_or_default()
         .lines()
         .any(|l| l.contains(&format!("misroute display={id} ")));

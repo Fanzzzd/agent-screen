@@ -74,8 +74,16 @@ impl Streams {
                     let Some(stream) = streams.streams.get_mut(&id) else {
                         return;
                     };
+                    let from = stream
+                        .latest
+                        .from
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     if let Some(frame) = stream.latest.take() {
-                        stream.breaks = 0;
+                        // Only the current capture's frame shows that it
+                        // works: the one it replaced may still deliver.
+                        if stream.capture.as_ref().is_some_and(|c| c.serial() == from) {
+                            stream.breaks = 0;
+                        }
                         streams.frames.insert(id, frame);
                         cx.emit(NewFrame(id));
                     }
@@ -324,8 +332,9 @@ impl Streams {
     }
 
     /// Start again every stream that shows another display or that macOS
-    /// stopped: after a display change, a new stream may get the right
-    /// picture.
+    /// stopped, and every stream waiting out a restart: after a display
+    /// change, an unlock or a wake, a new stream may get the right picture
+    /// at once.
     pub fn restart_misrouted(&mut self, cx: &mut Context<Self>) {
         let broken: Vec<(DisplayId, u64)> = self
             .streams
@@ -339,6 +348,18 @@ impl Streams {
             .collect();
         for (id, serial) in broken {
             self.repair(id, serial, cx);
+        }
+        let waiting: Vec<DisplayId> = self
+            .streams
+            .iter()
+            .filter(|(_, s)| s.running.0 > 0 && s.capture.is_none() && !s.starting)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in waiting {
+            if let Some(stream) = self.streams.get_mut(&id) {
+                stream.breaks = 0;
+            }
+            self.start(id, cx);
         }
     }
 

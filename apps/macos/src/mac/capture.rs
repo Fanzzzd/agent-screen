@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 pub struct Latest {
     frame: Mutex<Option<Frame>>,
     pub delivered: AtomicU64,
+    /// The serial of the capture that stored the newest frame.
+    pub from: AtomicU64,
     /// Frames that changed the picture visibly below the menu bar. An
     /// animated wallpaper drifts a little everywhere and a menu bar clock
     /// ticks; neither counts, so the number stops once the UI is still.
@@ -250,6 +252,7 @@ impl Capture {
                     }
                     *before = now;
                 }
+                latest.from.store(serial, Ordering::Relaxed);
                 *latest.frame.lock().unwrap() = Some(Frame(buffer));
                 latest.delivered.fetch_add(1, Ordering::Relaxed);
                 on_frame();
