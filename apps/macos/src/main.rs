@@ -181,6 +181,28 @@ fn main() {
                 Some(Ok(done)) => println!("{}: {done}", outcome.client),
                 Some(Err(error)) => println!("{}: failed: {error}", outcome.client),
             }
+            use agent_screen_mcp::install::Skill;
+            match outcome.skill {
+                None => {}
+                Some(Ok(Skill::Written(path))) => {
+                    println!("{}: skill written to {}", outcome.client, path.display())
+                }
+                Some(Ok(Skill::Current(path))) => {
+                    println!("{}: skill up to date in {}", outcome.client, path.display())
+                }
+                Some(Ok(Skill::Linked(path))) => println!(
+                    "{}: skill in {} is another installer's, left alone",
+                    outcome.client,
+                    path.display()
+                ),
+                Some(Ok(Skill::Plugin)) => {
+                    println!(
+                        "{}: skill comes from the agent-screen plugin",
+                        outcome.client
+                    )
+                }
+                Some(Err(error)) => println!("{}: skill failed: {error}", outcome.client),
+            }
         }
         return;
     }
@@ -216,6 +238,13 @@ fn main() {
         mac::claims::delete();
     }));
     log::debug!("language: {:?}", i18n::lang());
+    // An update brings a newer skill: the copies `mcp install` wrote follow.
+    std::thread::spawn(|| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        for path in agent_screen_mcp::install::refresh_skills(&exe) {
+            log::info!("skill updated to this version in {}", path.display());
+        }
+    });
     let platform = gpui_platform::current_platform(false);
     // A menu bar app: in the Dock only while the setup window is open
     // (`Shell::open_setup`). Starting it doesn't activate it.

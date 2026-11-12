@@ -1,5 +1,7 @@
 //! Register Agent Screen's MCP server with the agent clients on this Mac:
-//! Claude Code through its own CLI, Codex through its config file.
+//! Claude Code through its own CLI, Codex through its config file. Each
+//! client also gets the agent-screen skill this copy of the app carries, so
+//! the skill describes the tools this version has.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,7 +10,24 @@ pub struct Outcome {
     pub client: &'static str,
     /// What happened, or why it couldn't; None when the client isn't installed.
     pub result: Option<Result<Done, String>>,
+    /// The skill for this client; None when the client isn't installed.
+    pub skill: Option<Result<Skill, String>>,
 }
+
+/// What installing the skill did.
+pub enum Skill {
+    /// Written there, new or replacing an older copy.
+    Written(PathBuf),
+    /// Already this version there.
+    Current(PathBuf),
+    /// Claude Code's agent-screen plugin carries it.
+    Plugin,
+    /// A link there points to a copy another installer keeps, left alone.
+    Linked(PathBuf),
+}
+
+/// The agent-screen skill, as this version of the app describes its tools.
+pub const SKILL: &str = include_str!("../../../skills/agent-screen/SKILL.md");
 
 /// What registering did, for the caller to put in the user's language.
 pub enum Done {
@@ -74,16 +93,126 @@ fn codex_runs(config: &str, exe: &str) -> bool {
 /// Register `exe mcp` with every client found. Safe to run again: an entry
 /// pointing elsewhere is replaced, one already right is left alone.
 pub fn install(exe: &Path) -> Vec<Outcome> {
+    let claude_found = claude_cli();
+    let codex_found = codex_config();
+    // A development build's skill may describe tools no release has, and
+    // the skill folders are shared with the installed app.
+    let skills = !crate::endpoint::is_dev_exe(exe);
     vec![
         Outcome {
             client: "Claude Code",
-            result: claude_cli().map(|cli| claude(&cli, exe)),
+            skill: claude_found.as_ref().filter(|_| skills).map(|_| {
+                if claude_plugin_installed() {
+                    Ok(Skill::Plugin)
+                } else {
+                    write_skill(&claude_skill())
+                }
+            }),
+            result: claude_found.map(|cli| claude(&cli, exe)),
         },
         Outcome {
             client: "Codex",
-            result: codex_config().map(|config| codex(&config, exe)),
+            skill: codex_found.as_ref().filter(|_| skills).map(|_| {
+                // Codex reads ~/.agents/skills too, where the skills
+                // installer puts it: a second copy would repeat it.
+                let shared = home().join(".agents/skills/agent-screen/SKILL.md");
+                if shared.exists() {
+                    Ok(Skill::Linked(shared))
+                } else {
+                    write_skill(&codex_skill())
+                }
+            }),
+            result: codex_found.map(|config| codex(&config, exe)),
         },
     ]
+}
+
+/// Bring the skill copies an earlier `install` wrote up to this version,
+/// as the app updates itself. A client without a copy is left alone, and so
+/// is a development build, whose skill may not be released yet. Returns the
+/// copies rewritten.
+pub fn refresh_skills(exe: &Path) -> Vec<PathBuf> {
+    // Only the installed app: tests launch builds of a branch, some under
+    // other names, and their skill may not be released.
+    let installed =
+        exe.starts_with("/Applications") || exe.starts_with(home().join("Applications"));
+    if !installed
+        || crate::endpoint::is_dev_exe(exe)
+        || std::env::var_os("AGENTSCREEN_INSTANCE").is_some()
+    {
+        return Vec::new();
+    }
+    [claude_skill(), codex_skill()]
+        .into_iter()
+        .filter(|path| {
+            std::fs::read_to_string(path).is_ok_and(|text| text != SKILL)
+                && matches!(write_skill(path), Ok(Skill::Written(_)))
+        })
+        .collect()
+}
+
+fn claude_home() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".claude"))
+}
+
+fn claude_skill() -> PathBuf {
+    claude_home().join("skills/agent-screen/SKILL.md")
+}
+
+fn codex_skill() -> PathBuf {
+    codex_home().join("skills/agent-screen/SKILL.md")
+}
+
+/// Whether Claude Code has the agent-screen plugin from this repository's
+/// marketplace, which carries the skill: a second copy would only repeat it.
+fn claude_plugin_installed() -> bool {
+    let read = |p: &str| std::fs::read_to_string(claude_home().join(p)).unwrap_or_default();
+    plugin_listed(
+        &read("plugins/installed_plugins.json"),
+        &read("settings.json"),
+    )
+}
+
+/// Whether `installed` lists the agent-screen plugin for every project, and
+/// the user's `settings` leave it on.
+fn plugin_listed(installed: &str, settings: &str) -> bool {
+    let settings = serde_json::from_str::<serde_json::Value>(settings).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(installed)
+        .ok()
+        .and_then(|v| v.get("plugins")?.as_object().cloned())
+        .is_some_and(|plugins| {
+            // A project's plugin carries the skill in that project only.
+            plugins.iter().any(|(key, entries)| {
+                key.starts_with("agent-screen@")
+                    && settings["enabledPlugins"][key].as_bool() != Some(false)
+                    && entries.as_array().is_some_and(|list| {
+                        list.iter().any(|e| e["scope"].as_str() == Some("user"))
+                    })
+            })
+        })
+}
+
+fn write_skill(path: &Path) -> Result<Skill, String> {
+    // The skills installer links each agent's folder to its own copy.
+    // The file, its folder, or the skills folder above it.
+    let linked = path.ancestors().take(3).any(|p| {
+        p.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+    });
+    if linked {
+        return Ok(Skill::Linked(path.to_path_buf()));
+    }
+    if std::fs::read_to_string(path).is_ok_and(|text| text == SKILL) {
+        return Ok(Skill::Current(path.to_path_buf()));
+    }
+    let fail = |e: std::io::Error| format!("could not write {}: {e}", path.display());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(fail)?;
+    }
+    std::fs::write(path, SKILL).map_err(fail)?;
+    Ok(Skill::Written(path.to_path_buf()))
 }
 
 fn home() -> PathBuf {
@@ -177,10 +306,14 @@ fn claude(cli: &Path, exe: &Path) -> Result<Done, String> {
     }
 }
 
-fn codex_config() -> Option<PathBuf> {
-    let dir = std::env::var_os("CODEX_HOME")
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".codex"));
+        .unwrap_or_else(|| home().join(".codex"))
+}
+
+fn codex_config() -> Option<PathBuf> {
+    let dir = codex_home();
     dir.is_dir().then(|| dir.join("config.toml"))
 }
 
@@ -270,6 +403,51 @@ mod tests {
                 && both.contains("[mcp_servers.agent-screen-dev]")
         );
         assert!(codex_runs(&both, EXE) && codex_runs(&both, dev));
+    }
+
+    #[test]
+    fn finds_the_plugin_from_any_marketplace() {
+        let installed =
+            |key: &str| format!(r#"{{"version":2,"plugins":{{"{key}":[{{"scope":"user"}}]}}}}"#);
+        assert!(plugin_listed(&installed("agent-screen@agent-screen"), ""));
+        assert!(plugin_listed(&installed("agent-screen@my-fork"), "{}"));
+        assert!(!plugin_listed(&installed("agent-screen-tools@other"), ""));
+        assert!(!plugin_listed(
+            r#"{"plugins":{"agent-screen@agent-screen":[{"scope":"project"}]}}"#,
+            ""
+        ));
+        assert!(!plugin_listed("", ""));
+        assert!(!plugin_listed(
+            &installed("agent-screen@agent-screen"),
+            r#"{"enabledPlugins":{"agent-screen@agent-screen":false}}"#
+        ));
+    }
+
+    #[test]
+    fn writes_the_skill_once_then_finds_it_current() {
+        let dir = std::env::temp_dir().join(format!("agent-screen-skill-{}", std::process::id()));
+        let path = dir.join("skills/agent-screen/SKILL.md");
+        assert!(matches!(write_skill(&path), Ok(Skill::Written(_))));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL);
+        assert!(matches!(write_skill(&path), Ok(Skill::Current(_))));
+        std::fs::write(&path, "an older skill").unwrap();
+        assert!(matches!(write_skill(&path), Ok(Skill::Written(_))));
+        // A folder linked by another installer keeps that installer's copy.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("SKILL.md"), "theirs").unwrap();
+        let linked = dir.join("linked/agent-screen");
+        std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        assert!(matches!(
+            write_skill(&linked.join("SKILL.md")),
+            Ok(Skill::Linked(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("SKILL.md")).unwrap(),
+            "theirs"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

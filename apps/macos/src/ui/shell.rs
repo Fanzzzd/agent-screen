@@ -3812,8 +3812,33 @@ impl Shell {
             agent_screen_mcp::install::install(&exe)
         });
         cx.spawn(async move |shell, cx| {
-            use agent_screen_mcp::install::Done;
+            use agent_screen_mcp::install::{Done, Skill};
             let outcomes = install.await;
+            let skill_lines = outcomes.iter().filter_map(|o| {
+                Some(match o.skill.as_ref()? {
+                    Ok(Skill::Written(path)) => tf!(
+                        "{}: skill written to {}",
+                        "{}：技能已写入 {}",
+                        o.client,
+                        path.display()
+                    ),
+                    Ok(Skill::Current(_)) => {
+                        tf!("{}: skill up to date", "{}：技能已是最新", o.client)
+                    }
+                    Ok(Skill::Linked(path)) => tf!(
+                        "{}: skill in {} is another installer's, left alone",
+                        "{}：{} 中的技能由其他安装工具管理，未改动",
+                        o.client,
+                        path.display()
+                    ),
+                    Ok(Skill::Plugin) => tf!(
+                        "{}: skill comes from the agent-screen plugin",
+                        "{}：技能由 agent-screen 插件提供",
+                        o.client
+                    ),
+                    Err(error) => tf!("{}: skill failed. {}", "{}：技能写入失败。{}", o.client, error),
+                })
+            });
             let lines: Vec<String> = outcomes
                 .iter()
                 .map(|o| match &o.result {
@@ -3836,6 +3861,7 @@ impl Shell {
                         tf!("{}: failed. {}", "{}：失败。{}", o.client, error)
                     }
                 })
+                .chain(skill_lines)
                 .collect();
             let exe = std::env::current_exe().unwrap_or_default();
             let failed = outcomes.iter().any(|o| matches!(o.result, Some(Err(_))));
