@@ -137,6 +137,10 @@ pub fn set_sender(sender: UnboundedSender<Native>) {
     EVENTS.with(|e| *e.borrow_mut() = Some(sender));
 }
 
+/// The level of the border Agent Screen draws around the user's screens,
+/// which lets every click through.
+pub const BORDER_LEVEL: isize = 1000;
+
 pub fn send(event: Native) {
     EVENTS.with(|e| {
         if let Some(sender) = e.borrow().as_ref() {
@@ -632,6 +636,28 @@ pub fn set_app_icon(item: &NSMenuItem, pid: i32) {
 
 // MARK: Mouse monitors
 
+/// Report one mouse event of the user's, as the monitors in `watch_mouse`
+/// do. The Viewer's private press calls it for the presses it takes before
+/// any monitor sees them.
+pub fn report_mouse(event: &NSEvent) {
+    // The Input Queue's own drag is not the user's.
+    if super::real_input::is_ours(event) {
+        return;
+    }
+    let at = NSEvent::mouseLocation();
+    let (x, y) = (at.x, at.y);
+    match event.r#type() {
+        NSEventType::LeftMouseDown => {
+            send(Native::MouseDown { x, y });
+            send(Native::LeftDown { x, y });
+        }
+        NSEventType::RightMouseDown => send(Native::MouseDown { x, y }),
+        NSEventType::LeftMouseDragged => send(Native::LeftDragged { x, y }),
+        NSEventType::LeftMouseUp => send(Native::LeftUp { x, y }),
+        _ => {}
+    }
+}
+
 /// Report every mouse down anywhere, and left-button drags, for Peek's
 /// outside clicks and for window Handover by drag. Note the user's presses
 /// for the catches.
@@ -640,25 +666,8 @@ pub fn watch_mouse() {
         | NSEventMask::RightMouseDown
         | NSEventMask::LeftMouseDragged
         | NSEventMask::LeftMouseUp;
-    let report = |event: &NSEvent| {
-        // The Input Queue's own drag is not the user's.
-        if super::real_input::is_ours(event) {
-            return;
-        }
-        let at = NSEvent::mouseLocation();
-        let (x, y) = (at.x, at.y);
-        match event.r#type() {
-            NSEventType::LeftMouseDown => {
-                send(Native::MouseDown { x, y });
-                send(Native::LeftDown { x, y });
-            }
-            NSEventType::RightMouseDown => send(Native::MouseDown { x, y }),
-            NSEventType::LeftMouseDragged => send(Native::LeftDragged { x, y }),
-            NSEventType::LeftMouseUp => send(Native::LeftUp { x, y }),
-            _ => {}
-        }
-    };
-    let global = RcBlock::new(move |event: NonNull<NSEvent>| report(unsafe { event.as_ref() }));
+    let global =
+        RcBlock::new(move |event: NonNull<NSEvent>| report_mouse(unsafe { event.as_ref() }));
     if let Some(monitor) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global) {
         keep(monitor);
     }
@@ -698,7 +707,7 @@ pub fn watch_mouse() {
         keep(monitor);
     }
     let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
-        report(unsafe { event.as_ref() });
+        report_mouse(unsafe { event.as_ref() });
         event.as_ptr()
     });
     if let Some(monitor) =
@@ -757,7 +766,7 @@ pub fn show_borders(on: bool) -> bool {
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setIgnoresMouseEvents(true);
             window.setHasShadow(false);
-            window.setLevel(1000);
+            window.setLevel(BORDER_LEVEL);
             window.setCollectionBehavior(
                 NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::Stationary

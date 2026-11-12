@@ -326,6 +326,47 @@ pub(super) fn window_bounds_using(
         })
 }
 
+/// The pop-up menu window level: menus and context menus of every app.
+const POP_UP_MENU_LAYER: i64 = 101;
+
+/// What a press at `at`, in global top-left points, meets on `window`:
+/// None when the window is not on screen, else its bounds, whether a
+/// visible window above it covers the point, and whether a menu is open
+/// above it on the user's screens. A menu on an Agent Display, which the
+/// window may show, doesn't count. Any thread; one window list call.
+pub fn above(window: u32, at: (f64, f64)) -> Option<(Rect, bool, bool)> {
+    let me = std::process::id() as i32;
+    let agent_screens: Vec<Rect> = active_displays()
+        .into_iter()
+        .filter(|&id| window_display_role(id) == crate::model::DisplayRole::Agent)
+        .map(display_bounds)
+        .collect();
+    let mut bounds = None;
+    let (mut covered, mut menu) = (false, false);
+    list_raw(
+        CGWindowListOption::OptionOnScreenAboveWindow | CGWindowListOption::OptionIncludingWindow,
+        window,
+        |pid, id, layer, b, info| {
+            if id == window {
+                bounds = Some(b);
+                return;
+            }
+            // Agent Screen's border lets every click through.
+            if pid == me && layer == super::native::BORDER_LEVEL as i64 {
+                return;
+            }
+            let alpha = unsafe { cf::float(info, cf::kCGWindowAlpha) }.unwrap_or(1.0);
+            if alpha <= 0.0 {
+                return;
+            }
+            let middle = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+            menu |= layer == POP_UP_MENU_LAYER && !agent_screens.iter().any(|s| s.contains(middle));
+            covered |= b.contains(at);
+        },
+    );
+    bounds.map(|b| (b, covered, menu))
+}
+
 fn window_list(options: CGWindowListOption) -> Vec<WindowInfo> {
     window_list_where(options, 0, |_, _, _| true)
 }

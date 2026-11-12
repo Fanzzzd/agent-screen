@@ -1667,6 +1667,9 @@ async fn handle_one(
                 // target's caret, where it shows, in points from the
                 // Viewer's top-left corner.
                 "marked": crate::mac::viewer_input::marked(),
+                // The tap that keeps presses in the Viewer from other apps
+                // is installed and enabled (ADR 0014).
+                "privatePress": crate::mac::viewer_input::private_press(),
                 // The Viewer's input context is AppKit's current one: the
                 // input method composes only then.
                 "inputContext": crate::mac::viewer_input::input_context_current(),
@@ -2303,9 +2306,19 @@ async fn handle_one(
                     .await;
                 return reply(json!({}));
             }
+            // `x` and `y`, in global top-left points, open a Give or Take
+            // Back menu there instead of at the pointer.
+            let menu_at = p.number("x").zip(p.number("y"));
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
-                .update(cx, |shell, cx| shell.debug_show(&surface, id, cx))
+                .update(cx, |shell, cx| {
+                    shell.debug_menu_at = menu_at;
+                    let shown = shell.debug_show(&surface, id, cx);
+                    // A surface that opened no menu leaves no point for
+                    // the next real one.
+                    shell.debug_menu_at = None;
+                    shown
+                })
                 .map_err(|e| ControlError::failed(e.to_string()))?
                 .map_err(ControlError::invalid)?;
             cx.background_executor()

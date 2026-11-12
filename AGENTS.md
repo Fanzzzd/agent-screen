@@ -2,7 +2,7 @@
 
 `CLAUDE.md` is a symlink to this file. Edit only this one.
 
-This file is for agents working on Agent Screen's code. `docs/agents/AGENTS.md` is a different file: the snippet users paste into their own projects so agents use Agent Screen's tools.
+This file is for agents working on Agent Screen's code. `docs/agents/AGENTS.md` is a different file: the snippet users paste into their own projects so agents use Agent Screen's tools. `skills/agent-screen/SKILL.md` is that snippet with skill frontmatter on top. Edit the snippet, then copy it with `AGENTSCREEN_BLESS_SKILL=1 cargo test -p agent-screen-mcp --test skill`.
 
 ## Read before the task
 

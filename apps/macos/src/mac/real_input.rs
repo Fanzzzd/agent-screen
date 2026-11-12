@@ -169,6 +169,33 @@ pub fn debug_observer_timeout() {
     observer_disabled();
 }
 
+/// Note one event of the user's: the buttons they hold, and that they took
+/// input while a grant is armed. The Viewer's private press calls it for
+/// the presses it takes before this observer could see them.
+pub fn user_event(kind: CGEventType) {
+    let (down, bit) = match kind {
+        CGEventType::LeftMouseDown => (Some(true), LEFT),
+        CGEventType::LeftMouseUp => (Some(false), LEFT),
+        CGEventType::RightMouseDown => (Some(true), RIGHT),
+        CGEventType::RightMouseUp => (Some(false), RIGHT),
+        CGEventType::OtherMouseDown => (Some(true), OTHER),
+        CGEventType::OtherMouseUp => (Some(false), OTHER),
+        _ => (None, 0),
+    };
+    match down {
+        Some(true) => {
+            USER_DOWN.fetch_or(bit, Ordering::SeqCst);
+        }
+        Some(false) => {
+            USER_DOWN.fetch_and(!bit, Ordering::SeqCst);
+        }
+        None => {}
+    }
+    if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
+        native::send(Native::UserTookInput);
+    }
+}
+
 /// Observe HID events before AppKit manufactures pointer moves when a
 /// window opens under the cursor. ListenOnly neither suppresses nor
 /// changes an event. Failure to create the tap leaves execution disabled.
@@ -192,27 +219,7 @@ pub fn watch() {
             CGEventField::EventSourceUserData,
         ) == TAG;
         if !ours {
-            let (down, bit) = match kind {
-                CGEventType::LeftMouseDown => (Some(true), LEFT),
-                CGEventType::LeftMouseUp => (Some(false), LEFT),
-                CGEventType::RightMouseDown => (Some(true), RIGHT),
-                CGEventType::RightMouseUp => (Some(false), RIGHT),
-                CGEventType::OtherMouseDown => (Some(true), OTHER),
-                CGEventType::OtherMouseUp => (Some(false), OTHER),
-                _ => (None, 0),
-            };
-            match down {
-                Some(true) => {
-                    USER_DOWN.fetch_or(bit, Ordering::SeqCst);
-                }
-                Some(false) => {
-                    USER_DOWN.fetch_and(!bit, Ordering::SeqCst);
-                }
-                None => {}
-            }
-            if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
-                native::send(Native::UserTookInput);
-            }
+            user_event(kind);
         }
         // A listen-only callback never replaces the original event.
         event.as_ptr()

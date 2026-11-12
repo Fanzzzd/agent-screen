@@ -2,6 +2,10 @@
 
 The user works on the same Mac. Operate GUI apps on your own Agent Display from the `agent-screen` MCP server so their screen, cursor and keyboard stay theirs.
 
+This covers every task that needs a screen: opening, operating or testing a Mac app or a web page, clicking, typing into or checking something on screen, a screenshot of an app, and a login to a site. Use `launch_app` where you would use `open -a`, and the Agent Display where you would use AppleScript, System Events or `screencapture`, which act on the user's screen. Use `open -a` only to show the user something on their own screen when they ask for it.
+
+If your client lists the `agent-screen` tools by name only, load them before the task. In Claude Code, search for `agent-screen` with ToolSearch.
+
 ## Before any GUI work
 
 1. `create_display` with a short task title. It returns a `display_id`; calling it again returns the same one, also from your subagents. Leave the GUI work to one of them.

@@ -161,6 +161,9 @@ struct Drag {
 
 pub struct Shell {
     core: Entity<Core>,
+    /// Where the next Give or Take Back menu opens, in global top-left
+    /// points, for `debugShow`: the pointer's place otherwise.
+    pub debug_menu_at: Option<(f64, f64)>,
     /// The Input Queue's executor (ADR 0013): the pointer and front app at
     /// grant start, whether a loan runs, and whether cleanup after a grant
     /// is under way.
@@ -401,6 +404,8 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let accent = native::accent();
     super::theme::set_accent(accent);
     viewer_input::install();
+    // After real_input::watch: a tap inserted later runs first.
+    viewer_input::install_private_press();
     notify::install();
     notify::check();
     native::debug_appearance();
@@ -471,6 +476,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             agent_ready: Vec::new(),
             waiting: None,
             restart: false,
+            debug_menu_at: None,
             setup_shown_for: None,
             connecting: false,
             rechecking: false,
@@ -2828,7 +2834,11 @@ impl Shell {
                     - 4.0,
             )
         });
-        let (x, y) = at.unwrap_or_else(|| {
+        let debug_at = self
+            .debug_menu_at
+            .take()
+            .map(|(x, y)| (x, native::primary_height() - y));
+        let (x, y) = at.or(debug_at).unwrap_or_else(|| {
             let (x, y) = native::mouse_location();
             (x - 12.0, y - 14.0)
         });
