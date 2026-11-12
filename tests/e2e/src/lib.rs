@@ -344,8 +344,9 @@ pub fn qt_list_app() -> Result<Option<PathBuf>> {
             &[
                 "venv",
                 "-q",
-                // A framework build, which tools/qtlaunch.c loads: uv's own
-                // Pythons are none.
+                // tools/qtlaunch.c loads a framework build: uv's own Pythons
+                // are none, Homebrew's and python.org's are. Any other is
+                // caught below, and the script skips.
                 "--python-preference",
                 "only-system",
                 "-p",
