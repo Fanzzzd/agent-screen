@@ -310,6 +310,13 @@ pub fn menu_choice_app() -> Result<PathBuf> {
     swift_app("menuchoice", "MenuChoice")
 }
 
+/// tools/dropdown.swift as an app: a results list in a window of its own
+/// over the main window's rows, closed by any press in another app, as
+/// a Qt pop-up is.
+pub fn dropdown_app() -> Result<PathBuf> {
+    swift_app("dropdown", "Dropdown")
+}
+
 /// tools/watch.swift as an app: buttons that change its window seconds
 /// after a press, for wait_for_change.
 pub fn watch_app() -> Result<PathBuf> {

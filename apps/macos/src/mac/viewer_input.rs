@@ -1171,7 +1171,11 @@ fn inject(event: &NSEvent) -> Result<(), String> {
 }
 
 pub fn attach(window: &NSWindow) {
-    STATE.with(|s| s.borrow_mut().window = window as *const NSWindow as usize);
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.window = window as *const NSWindow as usize;
+        publish_picture(&s);
+    });
 }
 
 /// The display the Viewer shows, or None once it is closed.
@@ -1185,6 +1189,7 @@ pub fn show(display: Option<(u32, Forwarder)>) {
         s.display = display;
         s.pressed = None;
         s.click = None;
+        publish_picture(&s);
         if let Some((display, forwarder)) = &s.display {
             inspect_for_input_method(forwarder, *display);
         }
@@ -1206,6 +1211,7 @@ pub fn layout(content: Option<[f64; 4]>, blocked: bool, frame_pixels: Option<[us
             s.content = content;
             s.blocked = blocked;
             s.frame_pixels = frame_pixels;
+            publish_picture(&s);
             false
         }
         Err(_) => true,
@@ -1659,6 +1665,359 @@ fn input_context(window: &NSWindow) -> Option<&objc2::runtime::AnyObject> {
     let view = window.firstResponder()?;
     let context: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![&*view, inputContext] };
     unsafe { context.as_ref() }
+}
+
+// MARK: Private press
+
+/// The Viewer's window number and its picture, in points from the window's
+/// top-left corner, for the private press's thread. None while the Viewer
+/// shows no display or the sheet covers it.
+static PICTURE: std::sync::Mutex<Option<(u32, [f64; 4])>> = std::sync::Mutex::new(None);
+/// The buttons whose press the private press took: their drags and release
+/// go the same way, wherever the pointer goes meanwhile.
+static PRIVATE_HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Taken presses the main thread hasn't handled yet. Handling one makes the
+/// Viewer key and Agent Screen the front process, so a key typed right
+/// after it waits for that, as it did while the tap ran on the main thread.
+static PRIVATE_PENDING: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+static PRIVATE_DONE: std::sync::Condvar = std::sync::Condvar::new();
+/// The longest a key waits for the presses before it.
+const KEY_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The private press's tap, to enable it again after macOS disables it.
+struct PrivateTap(objc2_core_foundation::CFRetained<objc2_core_foundation::CFMachPort>);
+// A mach port is a kernel object; enabling the tap and asking whether it
+// is enabled work from any thread.
+unsafe impl Send for PrivateTap {}
+unsafe impl Sync for PrivateTap {}
+static PRIVATE_TAP: std::sync::OnceLock<PrivateTap> = std::sync::OnceLock::new();
+
+/// Tell the private press's thread where the picture is now.
+fn publish_picture(s: &State) {
+    let picture = (s.window != 0 && !s.blocked && s.display.is_some())
+        .then_some(s.content)
+        .flatten()
+        .map(|content| {
+            let window = unsafe { &*(s.window as *const NSWindow) };
+            (window.windowNumber() as u32, content)
+        });
+    *PICTURE.lock().unwrap() = picture;
+}
+
+/// Whether the private press's tap is installed and enabled.
+pub fn private_press() -> bool {
+    PRIVATE_TAP
+        .get()
+        .is_some_and(|tap| objc2_core_graphics::CGEvent::tap_is_enabled(&tap.0))
+}
+
+/// Take the user's presses on the Viewer's picture before WindowServer
+/// routes them, and hand them to the Viewer's handler. A press routed to
+/// Agent Screen also reaches every other app's global event monitor as a
+/// click outside it, and a Qt pop-up, such as WeCom's search results,
+/// closes on one: the press then hit the window under the closed list.
+/// Taken here, no other app sees the press (ADR 0014).
+///
+/// The tap runs on its own thread and decides from the published picture
+/// and one window list call, so no mouse event on the Mac waits for Agent
+/// Screen's main thread. A press passes where another window covers the
+/// picture and while a menu is open, which the press then closes. Installed
+/// after `real_input::watch`, so this tap runs first; the main thread tells
+/// that observer about each press it takes.
+pub fn install_private_press() {
+    use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
+    use objc2_core_graphics::{
+        CGEvent, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    };
+    // To tell a problem the tap causes from one it fixes.
+    if std::env::var("AGENTSCREEN_NO_PRIVATE_PRESS").as_deref() == Ok("1") {
+        log::info!("viewer: private press off (AGENTSCREEN_NO_PRIVATE_PRESS)");
+        return;
+    }
+    let kinds = [
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDown,
+        CGEventType::OtherMouseUp,
+        CGEventType::OtherMouseDragged,
+    ];
+    let keys = [
+        CGEventType::KeyDown,
+        CGEventType::KeyUp,
+        CGEventType::FlagsChanged,
+    ];
+    let mask = kinds
+        .iter()
+        .chain(&keys)
+        .fold(0, |mask, kind| mask | (1_u64 << kind.0));
+    let spawned = std::thread::Builder::new()
+        .name("private-press".into())
+        .spawn(move || {
+            let Some(tap) = (unsafe {
+                CGEvent::tap_create(
+                    CGEventTapLocation::HIDEventTap,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::Default,
+                    mask,
+                    Some(private_press_seen),
+                    std::ptr::null_mut(),
+                )
+            }) else {
+                log::warn!(
+                    "viewer: private press unavailable; other apps see presses in the Viewer"
+                );
+                return;
+            };
+            let Some(source) = CFMachPort::new_run_loop_source(None, Some(&tap), 0) else {
+                return;
+            };
+            let Some(run_loop) = CFRunLoop::current() else {
+                return;
+            };
+            run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
+            CGEvent::tap_enable(&tap, true);
+            let _ = PRIVATE_TAP.set(PrivateTap(tap));
+            CFRunLoop::run();
+        });
+    if let Err(error) = spawned {
+        log::warn!("viewer: private press unavailable: {error}");
+    }
+}
+
+/// A mouse event the private press took, for the main thread.
+#[derive(Clone, Copy)]
+struct Taken {
+    cg_kind: objc2_core_graphics::CGEventType,
+    kind: NSEventType,
+    /// Global top-left points.
+    at: (f64, f64),
+    clicks: i64,
+    flags: u64,
+    /// Nanoseconds since startup.
+    timestamp: u64,
+}
+// Plain values.
+unsafe impl Send for Taken {}
+
+/// Runs on the private press's thread.
+unsafe extern "C-unwind" fn private_press_seen(
+    _proxy: objc2_core_graphics::CGEventTapProxy,
+    kind: objc2_core_graphics::CGEventType,
+    event: NonNull<objc2_core_graphics::CGEvent>,
+    _context: *mut std::ffi::c_void,
+) -> *mut objc2_core_graphics::CGEvent {
+    use objc2_core_graphics::{CGEvent, CGEventField, CGEventType};
+    use std::sync::atomic::Ordering;
+    if matches!(
+        kind,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        log::warn!("viewer: private press tap disabled ({kind:?}); enabling it again");
+        // Releases went by unseen meanwhile.
+        PRIVATE_HELD.store(0, Ordering::Relaxed);
+        if let Some(tap) = PRIVATE_TAP.get() {
+            CGEvent::tap_enable(&tap.0, true);
+        }
+        return event.as_ptr();
+    }
+    let cg = unsafe { event.as_ref() };
+    // Input Agent Screen posts for an Input Loan is not the user's.
+    if CGEvent::integer_value_field(Some(cg), CGEventField::EventSourceUserData)
+        == super::real_input::TAG
+    {
+        return event.as_ptr();
+    }
+    if matches!(
+        kind,
+        CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged
+    ) {
+        wait_for_presses();
+        return event.as_ptr();
+    }
+    let Some(press) = private_kind(kind) else {
+        return event.as_ptr();
+    };
+    let location = CGEvent::location(Some(cg));
+    let at = (location.x, location.y);
+    if press.down {
+        // A press of this button starts anew: a release missed while the
+        // tap was off must not take this press's drags.
+        PRIVATE_HELD.fetch_and(!press.bit, Ordering::Relaxed);
+        if !on_picture(at) {
+            return event.as_ptr();
+        }
+        PRIVATE_HELD.fetch_or(press.bit, Ordering::Relaxed);
+    } else {
+        if PRIVATE_HELD.load(Ordering::Relaxed) & press.bit == 0 {
+            return event.as_ptr();
+        }
+        if press.up {
+            PRIVATE_HELD.fetch_and(!press.bit, Ordering::Relaxed);
+        }
+    }
+    let taken = Taken {
+        cg_kind: kind,
+        kind: press.kind,
+        at,
+        clicks: CGEvent::integer_value_field(Some(cg), CGEventField::MouseEventClickState),
+        flags: CGEvent::flags(Some(cg)).0,
+        timestamp: CGEvent::timestamp(Some(cg)),
+    };
+    *PRIVATE_PENDING.lock().unwrap() += 1;
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        private_taken(taken);
+        let mut pending = PRIVATE_PENDING.lock().unwrap();
+        *pending = pending.saturating_sub(1);
+        PRIVATE_DONE.notify_all();
+    });
+    std::ptr::null_mut()
+}
+
+/// Hold a key on the tap's thread until the main thread has handled the
+/// presses taken before it, for at most `KEY_WAIT`.
+fn wait_for_presses() {
+    let pending = PRIVATE_PENDING.lock().unwrap();
+    if *pending == 0 {
+        return;
+    }
+    let (pending, waited) = PRIVATE_DONE
+        .wait_timeout_while(pending, KEY_WAIT, |p| *p > 0)
+        .unwrap();
+    if waited.timed_out() {
+        log::debug!(
+            "viewer: a key went on with {} press(es) not handled yet",
+            *pending
+        );
+    }
+}
+
+/// Whether a press at `at`, in global top-left points, lands on the
+/// Viewer's picture with nothing over it, and no menu is open: an open menu
+/// closes on a press anywhere and takes it.
+fn on_picture(at: (f64, f64)) -> bool {
+    let Some((window, [cx, cy, cw, ch])) = *PICTURE.lock().unwrap() else {
+        return false;
+    };
+    let Some((bounds, covered, menu)) = cg::above(window, at) else {
+        return false;
+    };
+    let picture = crate::model::Rect {
+        x: bounds.x + cx,
+        y: bounds.y + cy,
+        width: cw,
+        height: ch,
+    };
+    if !picture.contains(at) {
+        return false;
+    }
+    // On the picture but passed on: say why, as other apps see this press.
+    if menu || covered {
+        log::debug!(
+            "viewer: a press on the picture passes: {}",
+            if menu {
+                "a menu is open"
+            } else {
+                "a window covers it"
+            }
+        );
+        return false;
+    }
+    true
+}
+
+/// The main thread's half: the press goes to the Viewer's handler, or to
+/// the Viewer's window as AppKit would have sent it when the handler lets
+/// it go.
+fn private_taken(taken: Taken) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    super::real_input::user_event(taken.cg_kind);
+    // AppKit drops a press outside a modal window, and so does this.
+    if objc2_app_kit::NSApplication::sharedApplication(mtm)
+        .modalWindow()
+        .is_some()
+    {
+        return;
+    }
+    let Some((window, ns)) = viewer_event(&taken) else {
+        return;
+    };
+    super::native::report_mouse(&ns);
+    if !handle(&ns, mtm) {
+        window.sendEvent(&ns);
+    }
+}
+
+/// One mouse event the private press may take.
+struct PrivateKind {
+    kind: NSEventType,
+    bit: u8,
+    down: bool,
+    up: bool,
+}
+
+fn private_kind(kind: objc2_core_graphics::CGEventType) -> Option<PrivateKind> {
+    use objc2_core_graphics::CGEventType as T;
+    let (kind, bit, down, up) = match kind {
+        T::LeftMouseDown => (NSEventType::LeftMouseDown, 1, true, false),
+        T::LeftMouseDragged => (NSEventType::LeftMouseDragged, 1, false, false),
+        T::LeftMouseUp => (NSEventType::LeftMouseUp, 1, false, true),
+        T::RightMouseDown => (NSEventType::RightMouseDown, 2, true, false),
+        T::RightMouseDragged => (NSEventType::RightMouseDragged, 2, false, false),
+        T::RightMouseUp => (NSEventType::RightMouseUp, 2, false, true),
+        T::OtherMouseDown => (NSEventType::OtherMouseDown, 4, true, false),
+        T::OtherMouseDragged => (NSEventType::OtherMouseDragged, 4, false, false),
+        T::OtherMouseUp => (NSEventType::OtherMouseUp, 4, false, true),
+        _ => return None,
+    };
+    Some(PrivateKind {
+        kind,
+        bit,
+        down,
+        up,
+    })
+}
+
+/// The taken event as the NSEvent AppKit would have made of it for the
+/// Viewer's window, with that window. None once the Viewer shows no display.
+fn viewer_event(taken: &Taken) -> Option<(Retained<NSWindow>, Retained<NSEvent>)> {
+    let viewer = STATE.with(|s| {
+        s.try_borrow()
+            .ok()
+            .filter(|s| s.window != 0 && s.display.is_some())
+            .map(|s| s.window)
+    })?;
+    let window: Retained<NSWindow> = unsafe { Retained::retain(viewer as *mut NSWindow) }?;
+    let top = cg::display_bounds(cg::main_display()).height;
+    let cocoa = objc2_foundation::NSPoint::new(taken.at.0, top - taken.at.1);
+    let frame = window.frame();
+    let at = objc2_foundation::NSPoint::new(cocoa.x - frame.origin.x, cocoa.y - frame.origin.y);
+    let flags = NSEventModifierFlags::from_bits_retain(taken.flags as usize);
+    let pressure = if matches!(
+        taken.kind,
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
+    ) {
+        0.0
+    } else {
+        1.0
+    };
+    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        taken.kind,
+        at,
+        flags,
+        taken.timestamp as f64 / 1e9,
+        window.windowNumber(),
+        None,
+        0,
+        taken.clicks as isize,
+        pressure,
+    )?;
+    Some((window, event))
 }
 
 pub fn install() {
