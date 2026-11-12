@@ -70,11 +70,11 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install
    ```
 
-   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
+   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. It also writes the Agent Screen skill (step 4) to `~/.claude/skills/agent-screen` and `~/.codex/skills/agent-screen`. Each update of the app brings those copies up to its version. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
 
-4. Add the Agent Screen skill, so agents use their display without being told. Claude Code loads MCP tools only when it searches for them, so without the skill it often opens apps with `open -a` or AppleScript on your screen instead. The skill tells it when a task needs a screen: opening, operating or testing a Mac app or a web page, clicking or filling in something on screen, a screenshot of an app, a login to a site.
+4. The Agent Screen skill makes agents use their display without being told. Step 3 installs it for Claude Code and Codex. Claude Code loads MCP tools only when it searches for them, so without the skill it often opens apps with `open -a` or AppleScript on your screen instead. The skill tells it when a task needs a screen: opening, operating or testing a Mac app or a web page, clicking or filling in something on screen, a screenshot of an app, a login to a site.
 
-   For Claude Code, install the plugin from this repository:
+   For Claude Code you can install it as a plugin from this repository instead. The plugin follows this repository, so it can describe tools your version doesn't have yet. With the plugin installed, `mcp install` writes no second copy.
 
    ```sh
    claude plugin install agent-screen --marketplace Fanzzzd/agent-screen
@@ -82,7 +82,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    On Claude Code before 2.1.292, run `claude plugin marketplace add Fanzzzd/agent-screen` first, then `claude plugin install agent-screen@agent-screen`. `claude plugin update agent-screen` fetches a newer skill.
 
-   For Codex, Cursor, Gemini CLI and other agents that read Agent Skills, install it with the [skills](https://github.com/vercel-labs/skills) installer:
+   For Cursor, Gemini CLI and other agents that read Agent Skills, install it with the [skills](https://github.com/vercel-labs/skills) installer:
 
    ```sh
    npx skills add Fanzzzd/agent-screen -g
