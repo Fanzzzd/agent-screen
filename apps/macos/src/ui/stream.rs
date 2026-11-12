@@ -31,6 +31,21 @@ struct Stream {
     repairs: u32,
 }
 
+impl Stream {
+    /// The stream should run, yet no capture runs or is starting.
+    fn idle(&self) -> bool {
+        self.running.0 > 0 && self.capture.is_none() && !self.starting
+    }
+}
+
+/// The wait before the `n`th start in a row after the first: 500 ms,
+/// doubling up to 30 s.
+fn backoff(n: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(500)
+        .saturating_mul(1 << n.min(6))
+        .min(std::time::Duration::from_secs(30))
+}
+
 /// A display has a new frame.
 pub struct NewFrame(pub DisplayId);
 
@@ -303,22 +318,9 @@ impl Streams {
                         // A just-created display can take a moment to show
                         // up; without Screen Recording it never does, so the
                         // wait doubles up to 30 s.
-                        let wait = std::time::Duration::from_millis(500)
-                            .saturating_mul(1 << stream.failures.min(6))
-                            .min(std::time::Duration::from_secs(30));
+                        let wait = backoff(stream.failures);
                         stream.failures += 1;
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(wait).await;
-                            let _ = this.update(cx, |streams, cx| {
-                                let retry = streams.streams.get(&id).is_some_and(|s| {
-                                    s.running.0 > 0 && s.capture.is_none() && !s.starting
-                                });
-                                if retry {
-                                    streams.start(id, cx);
-                                }
-                            });
-                        })
-                        .detach();
+                        Self::start_after(id, wait, cx);
                     }
                     // The display went away meanwhile.
                     (None, Ok(capture)) => {
@@ -352,7 +354,7 @@ impl Streams {
         let waiting: Vec<DisplayId> = self
             .streams
             .iter()
-            .filter(|(_, s)| s.running.0 > 0 && s.capture.is_none() && !s.starting)
+            .filter(|(_, s)| s.idle())
             .map(|(&id, _)| id)
             .collect();
         for id in waiting {
@@ -383,9 +385,7 @@ impl Streams {
         }
         let wait = match stream.breaks {
             0 => std::time::Duration::ZERO,
-            n => std::time::Duration::from_millis(500)
-                .saturating_mul(1 << (n - 1).min(6))
-                .min(std::time::Duration::from_secs(30)),
+            n => backoff(n - 1),
         };
         stream.breaks += 1;
         stream.repairs += 1;
@@ -393,16 +393,18 @@ impl Streams {
             "display {id}: its stream starts again in {wait:?} ({} in a row)",
             stream.breaks
         );
+        Self::start_after(id, wait, cx);
+    }
+
+    /// Start the display's stream after `wait`, if none runs or is
+    /// starting then and it is still wanted.
+    fn start_after(id: DisplayId, wait: std::time::Duration, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             if !wait.is_zero() {
                 cx.background_executor().timer(wait).await;
             }
             let _ = this.update(cx, |streams, cx| {
-                let restart = streams
-                    .streams
-                    .get(&id)
-                    .is_some_and(|s| s.running.0 > 0 && s.capture.is_none() && !s.starting);
-                if restart {
+                if streams.streams.get(&id).is_some_and(Stream::idle) {
                     streams.start(id, cx);
                 }
             });
