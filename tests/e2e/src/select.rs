@@ -460,6 +460,7 @@ mod tests {
                 "viewerime",
                 "viewerkey",
                 "viewerpopup",
+                "viewerqt",
                 "viewerwetype"
             ]
         );
@@ -572,6 +573,7 @@ mod tests {
                 "takeover",
                 "viewerime",
                 "viewerpopup",
+                "viewerqt",
                 "viewerwetype"
             ]
         );

@@ -566,6 +566,12 @@ impl Forwarder {
         rx.await.ok()
     }
 
+    /// Run `job` on the input thread once the events sent before it are
+    /// delivered.
+    pub fn after(&self, job: impl FnOnce() + Send + 'static) {
+        self.send(move |_| job());
+    }
+
     // MARK: Live input from the Viewer, one event at a time. Flags are the
     // NSEvent's own modifier flags, whose bits match CGEventFlags, so Caps
     // Lock and the left/right device bits survive.
@@ -1581,15 +1587,22 @@ impl Worker {
         if hit.target != hit.host {
             self.pressed_panels.push(target.window_id);
         }
-        {
+        // The windows the press was hit-tested in, taken a moment ago. A
+        // list of the front app takes the press as it is: making it key
+        // would take key from the window it belongs to, and a list that
+        // closes then closes before the press lands. An app in the
+        // background drops a press on a window that isn't key, and a file
+        // panel is another process's, so there the focus goes as before.
+        let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+        if hit.target == hit.host && is_front(target.pid) && is_list(&windows, at) {
+            log::debug!("input: press on a list of the front app at {at:?}, focus kept");
+        } else {
             let _held = AppKeys::hold(target.pid);
             self.focus(target);
         }
         // Keys go to the window clicked, not to one that opened earlier.
         if let Some(within) = display_of(target.window_id) {
-            // The list the press was hit-tested in, taken a moment ago.
-            let list = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
-            self.known = list
+            self.known = windows
                 .iter()
                 .filter(|h| h.layer == 0 && within.contains(h.bounds.mid()))
                 .map(|h| h.host.window_id)
@@ -2383,6 +2396,31 @@ pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
         .find(|h| h.bounds.contains(at))
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| (h.target, h.bounds))
+}
+
+/// When a press at a global point takes the front for Agent Screen: after
+/// its release where it hits a list or panel (`viewer_press`).
+pub fn front_for_press(at: (f64, f64)) -> agent_screen_model::viewer_press::Front {
+    if is_list(&hits(), at) {
+        agent_screen_model::viewer_press::Front::AfterRelease
+    } else {
+        agent_screen_model::viewer_press::Front::BeforePress
+    }
+}
+
+/// Whether a press at `at` hits a list or panel of `list`'s windows, front
+/// to back (`viewer_press`).
+fn is_list(list: &[Hit], at: (f64, f64)) -> bool {
+    use agent_screen_model::viewer_press::{Front, Window, front_for_press};
+    let windows: Vec<Window> = list
+        .iter()
+        .map(|h| Window {
+            pid: h.host.pid,
+            layer: h.layer,
+            bounds: h.bounds,
+        })
+        .collect();
+    front_for_press(&windows, at) == Front::AfterRelease
 }
 
 /// A key chord through the public API, for apps that need no focus

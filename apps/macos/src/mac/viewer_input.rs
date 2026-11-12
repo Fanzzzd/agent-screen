@@ -26,6 +26,7 @@ use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
 use agent_screen_model::viewer_keys::{self, Call, Outcome, Press, Route, Secrecy, Source};
+use agent_screen_model::viewer_press::Front;
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -50,6 +51,9 @@ struct State {
     /// The button the user pressed on the image, until it comes up.
     pressed: Option<Button>,
     click: Option<Click>,
+    /// The Viewer's window number, when the press went to a list or panel
+    /// and Agent Screen takes the front only after its release.
+    front_after_release: Option<u32>,
     frame_pixels: Option<[usize; 2]>,
     /// How each key's last press went, so its release goes the same way
     /// whatever changed meanwhile.
@@ -1361,8 +1365,16 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     {
         // Outside the state: a window becoming key draws at once, and its
         // paint reports the layout here.
+        LIST_PRESS.with(|l| l.set(false));
         if let Some(window) = pressed_viewer(event, mtm) {
-            native::make_key(&window);
+            // A list or panel there may close as its app loses active, and
+            // the Viewer becoming key activates Agent Screen: the press and
+            // its release reach the list first (`viewer_press`).
+            if press_hits_list(event, &window) {
+                LIST_PRESS.with(|l| l.set(true));
+            } else {
+                native::make_key(&window);
+            }
         }
         flush_before_click(event, mtm);
     }
@@ -1380,6 +1392,45 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
         None => {}
     }
     handled
+}
+
+thread_local! {
+    /// Whether the press being handled hits a list or panel on the display.
+    static LIST_PRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a press on the Viewer's picture lands on a list or panel of an
+/// app on the display (`viewer_press`).
+fn press_hits_list(event: &NSEvent, window: &NSWindow) -> bool {
+    let mapped = STATE.with(|s| {
+        let s = s.try_borrow().ok()?;
+        let (display, _) = s.display.clone()?;
+        Some((display, s.content?, s.frame_pixels))
+    });
+    let Some((display, content, frame_pixels)) = mapped else {
+        return false;
+    };
+    remote(event, window, content, display, false, frame_pixels)
+        .is_some_and(|at| super::input::front_for_press(at) == Front::AfterRelease)
+}
+
+/// After a press on a list: the Viewer takes the keyboard, as it does at
+/// any other press, now that the list has the press and its release.
+fn take_keyboard_after_list(viewer: u32, injected: bool) {
+    let window = STATE.with(|s| s.try_borrow().map(|s| s.window).unwrap_or(0));
+    if window == 0 {
+        return;
+    }
+    let window = unsafe { &*(window as *const NSWindow) };
+    if window.windowNumber() as u32 != viewer {
+        return;
+    }
+    if !injected || TAKE_KEY.with(Cell::get) {
+        native::make_key(window);
+    }
+    if !injected {
+        super::input::note_viewer_press(viewer);
+    }
 }
 
 /// The Viewer's window, when `event` is a press on its picture that takes
@@ -1463,8 +1514,15 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                 }) else {
                     return false;
                 };
-                // A test's press never takes the user's keyboard.
-                if !INJECTING.with(|i| i.get()) {
+                // A test's press never takes the user's keyboard. A press
+                // on a list takes it once the release is delivered.
+                s.front_after_release = None;
+                if LIST_PRESS.with(Cell::get) {
+                    log::debug!(
+                        "viewer: a press on a list at {at:?} takes the front after its release"
+                    );
+                    s.front_after_release = Some(window.windowNumber() as u32);
+                } else if !INJECTING.with(|i| i.get()) {
                     super::input::note_viewer_press(window.windowNumber() as u32);
                 }
                 // The menu bar strip: only a click that opens a menu takes
@@ -1517,6 +1575,19 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                     remote(event, &window, content, display, true, s.frame_pixels)
                 }) {
                     forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
+                }
+                if let Some(viewer) = s.front_after_release.take() {
+                    // Keys typed meanwhile wait for the Viewer, as after
+                    // any press (`wait_for_presses`). The Viewer becomes
+                    // key first, as at any other press (ADR 0008).
+                    hold_keys();
+                    let injected = INJECTING.with(Cell::get);
+                    forwarder.after(move || {
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            take_keyboard_after_list(viewer, injected);
+                            release_keys();
+                        });
+                    });
                 }
                 // The click may have focused a field: once it lands.
                 inspect_for_input_method(&forwarder, display);
@@ -1875,6 +1946,17 @@ unsafe extern "C-unwind" fn private_press_seen(
         PRIVATE_DONE.notify_all();
     });
     std::ptr::null_mut()
+}
+
+/// Keys wait, as behind a press not handled yet, until `release_keys`.
+fn hold_keys() {
+    *PRIVATE_PENDING.lock().unwrap() += 1;
+}
+
+fn release_keys() {
+    let mut pending = PRIVATE_PENDING.lock().unwrap();
+    *pending = pending.saturating_sub(1);
+    PRIVATE_DONE.notify_all();
 }
 
 /// Hold a key on the tap's thread until the main thread has handled the
