@@ -1706,6 +1706,16 @@ async fn handle_one(
                 "takeBack": take_back,
             }))
         }
+        "debugStreams" if debug_methods() => {
+            // Each display's capture stream: running, showing another
+            // screen, frames delivered, restarts.
+            let streams = cx.update(|cx| {
+                crate::ui::stream::global()
+                    .map(|streams| streams.read(cx).debug())
+                    .unwrap_or_default()
+            });
+            Ok(json!({ "streams": streams }))
+        }
         "debugViewerInput" if debug_methods() => {
             use crate::mac::viewer_input;
             // A frame from the display's stream leaves the Viewer to draw,

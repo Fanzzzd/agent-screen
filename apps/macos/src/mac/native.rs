@@ -1418,6 +1418,35 @@ pub fn watch_screens() {
     };
     let observer: Retained<AnyObject> = observer.into();
     keep(observer);
+    // Unlocking and waking the screens can leave streams showing another
+    // display with no screen parameter change after it: look again then.
+    let again = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
+        log::info!("the screens woke or unlocked; streams are checked");
+        send(Native::ScreensChanged)
+    });
+    let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
+    let observer = unsafe {
+        workspace.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSWorkspaceScreensDidWakeNotification),
+            None,
+            Some(&objc2_foundation::NSOperationQueue::mainQueue()),
+            &again,
+        )
+    };
+    let observer: Retained<AnyObject> = observer.into();
+    keep(observer);
+    let distributed = objc2_foundation::NSDistributedNotificationCenter::defaultCenter();
+    let unlocked = NSString::from_str("com.apple.screenIsUnlocked");
+    let observer = unsafe {
+        distributed.addObserverForName_object_queue_usingBlock(
+            Some(&unlocked),
+            None,
+            Some(&objc2_foundation::NSOperationQueue::mainQueue()),
+            &again,
+        )
+    };
+    let observer: Retained<AnyObject> = observer.into();
+    keep(observer);
 }
 
 /// Count the system's front app changing, even for a moment, as when an
