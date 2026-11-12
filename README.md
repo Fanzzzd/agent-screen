@@ -80,7 +80,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    claude plugin install agent-screen --marketplace Fanzzzd/agent-screen
    ```
 
-   On Claude Code before 2.1.275, run `claude plugin marketplace add Fanzzzd/agent-screen` first, then `claude plugin install agent-screen@agent-screen`. `claude plugin update agent-screen` fetches a newer skill.
+   On Claude Code before 2.1.292, run `claude plugin marketplace add Fanzzzd/agent-screen` first, then `claude plugin install agent-screen@agent-screen`. `claude plugin update agent-screen` fetches a newer skill.
 
    For Codex, Cursor, Gemini CLI and other agents that read Agent Skills, install it with the [skills](https://github.com/vercel-labs/skills) installer:
 

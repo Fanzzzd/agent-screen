@@ -21,8 +21,8 @@ use tools::{Output, text};
 const INSTRUCTIONS: &[&str] = &[
     "Agent Screen gives this session its own virtual display for operating GUI apps in the background.",
     "Use it whenever a task needs a screen: to open, operate or test a Mac app or a web page, click, type into or check something on screen, take a screenshot of an app, or log in to a site.",
-    "Use launch_app where you would use open -a, and these tools where you would use AppleScript, System Events or screencapture, which act on the user's screen.",
-    "Call create_display once the task needs a screen, then launch_app or place_window to put windows on it.",
+    "Use launch_app where you would use open -a, and these tools where you would use AppleScript, System Events or screencapture, which act on the user's screen. Use open -a only to show the user something on their own screen when they ask for it.",
+    "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
     "To wait for a window to update after an action, call wait_for_change instead of sleeping and taking another screenshot.",
     "Mark each window with set_disposition so the user knows what to keep.",

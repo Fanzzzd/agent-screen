@@ -9,9 +9,7 @@
     {
       "name": "agent-screen",
       "description": "Has agents open, operate, test and screenshot Mac apps and web pages on their own Agent Display through the agent-screen MCP server, instead of open -a, AppleScript or screencapture.",
-      "source": "./",
-      "strict": false,
-      "skills": ["./skills/agent-screen"],
+      "source": "./skills/agent-screen",
       "homepage": "https://agentscreen.app",
       "repository": "https://github.com/Fanzzzd/agent-screen",
       "license": "MIT",
