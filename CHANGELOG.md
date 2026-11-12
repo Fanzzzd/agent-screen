@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.32 (2026-11-12)
+
+### Fixes
+
+- Agents now use their Agent Display on their own when a task needs a screen. Before, Claude Code often opened apps with `open -a` or AppleScript on your screen unless you told it to use Agent Screen, since it loads MCP tools only when it searches for them. Three changes fix that. Claude Code now sees `create_display` and what it is for from the start of a session. The server's instructions name the tasks that need a screen and the commands its tools replace. And a new Agent Screen skill tells Claude Code, Codex, Cursor and Gemini CLI when and how to use the tools. Install it with `claude plugin install agent-screen --marketplace Fanzzzd/agent-screen` (Claude Code 2.1.292 or later), or `npx skills add Fanzzzd/agent-screen -g` for other agents (README, Install step 4).
+- Peek no longer shows another screen in a display's tile after you lock and unlock your Mac. When macOS mixes displays up after a display change, Agent Screen now starts that display's picture again at once, without waiting for you to open the Viewer. A picture macOS stops is started again too, and the display log notes each case.
+- A click in the Viewer on an item of an app's pop-up list, such as a contact in WeCom's search results, now picks that item. Before, the app took your click in the Viewer for a click outside it and closed the list, and the click landed on whatever was under the list. Opening the Viewer also no longer clicks the top of such a list, which could pick its first item.
+
 ## 0.1.31 (2026-11-11)
 
 ### Fixes
