@@ -26,7 +26,6 @@ use super::input::{Button, Forwarder};
 use super::native::{self, Native};
 use super::{cg, menubar_height};
 use agent_screen_model::viewer_keys::{self, Call, Outcome, Press, Route, Secrecy, Source};
-use agent_screen_model::viewer_press::Front;
 use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -1359,6 +1358,9 @@ fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64
 
 /// Handle one event; false lets it go on to GPUI.
 fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
+    // Whether this press hits a list or panel on the display. Only key
+    // events are replayed, so a replay never needs it.
+    let mut list_press = false;
     if !REPLAYING.with(Cell::get)
         && matches!(
             event.r#type(),
@@ -1367,14 +1369,12 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     {
         // Outside the state: a window becoming key draws at once, and its
         // paint reports the layout here.
-        LIST_PRESS.with(|l| l.set(false));
         if let Some(window) = pressed_viewer(event, mtm) {
             // A list or panel there may close as its app loses active, and
             // the Viewer becoming key activates Agent Screen: the press and
             // its release reach the list first (`viewer_press`).
-            if press_hits_list(event, &window) {
-                LIST_PRESS.with(|l| l.set(true));
-            } else {
+            list_press = press_hits_list(event, &window);
+            if !list_press {
                 native::make_key(&window);
             }
         }
@@ -1386,7 +1386,7 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
         secure_found();
     }
     let mut after = None;
-    let handled = handle_in(event, mtm, &mut after);
+    let handled = handle_in(event, mtm, list_press, &mut after);
     // A release the handler let go, as with a sheet up mid-press, ends a
     // list's key hold too.
     if is_release(event.r#type()) {
@@ -1401,11 +1401,6 @@ fn handle(event: &NSEvent, mtm: MainThreadMarker) -> bool {
     handled
 }
 
-thread_local! {
-    /// Whether the press being handled hits a list or panel on the display.
-    static LIST_PRESS: Cell<bool> = const { Cell::new(false) };
-}
-
 /// Whether a press on the Viewer's picture lands on a list or panel of an
 /// app on the display (`viewer_press`).
 fn press_hits_list(event: &NSEvent, window: &NSWindow) -> bool {
@@ -1417,8 +1412,7 @@ fn press_hits_list(event: &NSEvent, window: &NSWindow) -> bool {
     let Some((display, content, frame_pixels)) = mapped else {
         return false;
     };
-    remote(event, window, content, display, false, frame_pixels)
-        .is_some_and(|at| super::input::front_for_press(at) == Front::AfterRelease)
+    remote(event, window, content, display, false, frame_pixels).is_some_and(super::input::on_list)
 }
 
 /// What a press on a list owes once its release is delivered.
@@ -1488,7 +1482,12 @@ enum After {
     Sees(Retained<NSWindow>, Retained<NSEvent>),
 }
 
-fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) -> bool {
+fn handle_in(
+    event: &NSEvent,
+    mtm: MainThreadMarker,
+    list_press: bool,
+    after: &mut Option<After>,
+) -> bool {
     STATE.with(|state| {
         let mut s = state.borrow_mut();
         let Some(window) = event.window(mtm) else {
@@ -1536,18 +1535,18 @@ fn handle_in(event: &NSEvent, mtm: MainThreadMarker, after: &mut Option<After>) 
                 // A test's press never takes the user's keyboard. A press
                 // on a list takes it once the release is delivered.
                 s.front_after_release = None;
-                if LIST_PRESS.with(Cell::get) {
+                let injected = INJECTING.with(Cell::get);
+                if list_press {
                     log::debug!(
                         "viewer: a press on a list at {at:?} takes the front after its release"
                     );
-                    let injected = INJECTING.with(Cell::get);
                     s.front_after_release = Some(AfterList {
                         viewer: window.windowNumber() as u32,
                         take_key: !injected || TAKE_KEY.with(Cell::get),
                         front: !injected,
                         _keys: KeyHold::new(),
                     });
-                } else if !INJECTING.with(|i| i.get()) {
+                } else if !injected {
                     super::input::note_viewer_press(window.windowNumber() as u32);
                 }
                 // The menu bar strip: only a click that opens a menu takes
@@ -1951,7 +1950,7 @@ unsafe extern "C-unwind" fn private_press_seen(
         if PRIVATE_HELD.load(Ordering::Relaxed) & press.bit == 0 {
             return event.as_ptr();
         }
-        if press.up {
+        if is_release(press.kind) {
             PRIVATE_HELD.fetch_and(!press.bit, Ordering::Relaxed);
         }
     }
@@ -1963,12 +1962,10 @@ unsafe extern "C-unwind" fn private_press_seen(
         flags: CGEvent::flags(Some(cg)).0,
         timestamp: CGEvent::timestamp(Some(cg)),
     };
-    *PRIVATE_PENDING.lock().unwrap() += 1;
+    let hold = KeyHold::new();
     dispatch2::DispatchQueue::main().exec_async(move || {
         private_taken(taken);
-        let mut pending = PRIVATE_PENDING.lock().unwrap();
-        *pending = pending.saturating_sub(1);
-        PRIVATE_DONE.notify_all();
+        drop(hold);
     });
     std::ptr::null_mut()
 }
@@ -2071,16 +2068,10 @@ fn private_taken(taken: Taken) {
     super::real_input::user_event(taken.cg_kind);
     // AppKit drops a press outside a modal window, and so does this. A
     // release dropped here ends a list's key hold.
-    if objc2_app_kit::NSApplication::sharedApplication(mtm)
+    let modal = objc2_app_kit::NSApplication::sharedApplication(mtm)
         .modalWindow()
-        .is_some()
-    {
-        if is_release(taken.kind) {
-            drop_list_hold();
-        }
-        return;
-    }
-    let Some((window, ns)) = viewer_event(&taken) else {
+        .is_some();
+    let Some((window, ns)) = (!modal).then(|| viewer_event(&taken)).flatten() else {
         if is_release(taken.kind) {
             drop_list_hold();
         }
@@ -2097,29 +2088,23 @@ struct PrivateKind {
     kind: NSEventType,
     bit: u8,
     down: bool,
-    up: bool,
 }
 
 fn private_kind(kind: objc2_core_graphics::CGEventType) -> Option<PrivateKind> {
     use objc2_core_graphics::CGEventType as T;
-    let (kind, bit, down, up) = match kind {
-        T::LeftMouseDown => (NSEventType::LeftMouseDown, 1, true, false),
-        T::LeftMouseDragged => (NSEventType::LeftMouseDragged, 1, false, false),
-        T::LeftMouseUp => (NSEventType::LeftMouseUp, 1, false, true),
-        T::RightMouseDown => (NSEventType::RightMouseDown, 2, true, false),
-        T::RightMouseDragged => (NSEventType::RightMouseDragged, 2, false, false),
-        T::RightMouseUp => (NSEventType::RightMouseUp, 2, false, true),
-        T::OtherMouseDown => (NSEventType::OtherMouseDown, 4, true, false),
-        T::OtherMouseDragged => (NSEventType::OtherMouseDragged, 4, false, false),
-        T::OtherMouseUp => (NSEventType::OtherMouseUp, 4, false, true),
+    let (kind, bit, down) = match kind {
+        T::LeftMouseDown => (NSEventType::LeftMouseDown, 1, true),
+        T::LeftMouseDragged => (NSEventType::LeftMouseDragged, 1, false),
+        T::LeftMouseUp => (NSEventType::LeftMouseUp, 1, false),
+        T::RightMouseDown => (NSEventType::RightMouseDown, 2, true),
+        T::RightMouseDragged => (NSEventType::RightMouseDragged, 2, false),
+        T::RightMouseUp => (NSEventType::RightMouseUp, 2, false),
+        T::OtherMouseDown => (NSEventType::OtherMouseDown, 4, true),
+        T::OtherMouseDragged => (NSEventType::OtherMouseDragged, 4, false),
+        T::OtherMouseUp => (NSEventType::OtherMouseUp, 4, false),
         _ => return None,
     };
-    Some(PrivateKind {
-        kind,
-        bit,
-        down,
-        up,
-    })
+    Some(PrivateKind { kind, bit, down })
 }
 
 /// The taken event as the NSEvent AppKit would have made of it for the
@@ -2137,14 +2122,7 @@ fn viewer_event(taken: &Taken) -> Option<(Retained<NSWindow>, Retained<NSEvent>)
     let frame = window.frame();
     let at = objc2_foundation::NSPoint::new(cocoa.x - frame.origin.x, cocoa.y - frame.origin.y);
     let flags = NSEventModifierFlags::from_bits_retain(taken.flags as usize);
-    let pressure = if matches!(
-        taken.kind,
-        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp
-    ) {
-        0.0
-    } else {
-        1.0
-    };
+    let pressure = if is_release(taken.kind) { 0.0 } else { 1.0 };
     let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         taken.kind,
         at,

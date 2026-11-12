@@ -326,9 +326,6 @@ pub(super) fn window_bounds_using(
         })
 }
 
-/// The pop-up menu window level: menus and context menus of every app.
-const POP_UP_MENU_LAYER: i64 = 101;
-
 /// What a press at `at`, in global top-left points, meets on `window`:
 /// None when the window is not on screen, else its bounds, whether a
 /// visible window above it covers the point, and whether a menu is open
@@ -359,8 +356,8 @@ pub fn above(window: u32, at: (f64, f64)) -> Option<(Rect, bool, bool)> {
             if alpha <= 0.0 {
                 return;
             }
-            let middle = (b.x + b.width / 2.0, b.y + b.height / 2.0);
-            menu |= layer == POP_UP_MENU_LAYER && !agent_screens.iter().any(|s| s.contains(middle));
+            menu |= layer == super::native::LEVEL_POP_UP_MENU as i64
+                && !agent_screens.iter().any(|s| s.contains(b.mid()));
             covered |= b.contains(at);
         },
     );

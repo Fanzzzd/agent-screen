@@ -29,8 +29,9 @@
 use std::process::{Command, ExitCode};
 
 use agent_screen_tests::{
-    Control, allow_on_your_screen, check, hid, instance, json, open_user_stage, out, qt_list_app,
-    run, sh_lenient, sign_step, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, Rect, allow_on_your_screen, check, hid, instance, json, kill_ours, let_continue,
+    on_screen, open_user_stage, our_binary, out, qt_list_app, run, sh_lenient, sign_step, skip,
+    sleep_ms, start_test_app, stop_test_app, window_titled, windows_of,
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -59,9 +60,7 @@ fn main() -> ExitCode {
         ])?;
         let result = test(&app);
         // However it was started, its process runs the bundle's binary.
-        let _ = Command::new("/usr/bin/pkill")
-            .args(["-f", "QtList.app/Contents/MacOS/QtList"])
-            .status();
+        kill_ours(our_binary("QtList"));
         stop_test_app();
         result
     })
@@ -75,8 +74,10 @@ struct List {
     id: u64,
     size: (f64, f64),
     state: std::path::PathBuf,
+    /// The Qt list's log, with a line where each case starts.
+    log: std::path::PathBuf,
     /// The running list app's.
-    pid: std::cell::Cell<i64>,
+    pid: std::cell::Cell<u32>,
 }
 
 impl List {
@@ -87,11 +88,7 @@ impl List {
             .unwrap_or(Value::Null)
     }
 
-    fn wait(&self, done: impl Fn(&Value) -> bool) -> Value {
-        self.wait_for(30, done)
-    }
-
-    fn wait_for(&self, tenths: u32, done: impl Fn(&Value) -> bool) -> Value {
+    fn wait(&self, tenths: u32, done: impl Fn(&Value) -> bool) -> Value {
         let mut now = self.state();
         for _ in 0..tenths {
             if done(&now) {
@@ -105,18 +102,7 @@ impl List {
 
     /// A global point in the list's window, in the display's points.
     fn on_display(&self, global: (f64, f64)) -> Result<(f64, f64)> {
-        let listed = self.control.call(
-            "listWindows",
-            json!({ "sessionKey": KEY, "displayId": self.id }),
-        )?;
-        let window = listed["windows"]
-            .as_array()
-            .and_then(|w| {
-                w.iter()
-                    .find(|w| w["title"].as_str().is_some_and(|t| t.starts_with("qtlist")))
-                    .cloned()
-            })
-            .context("no qtlist window on the display")?;
+        let window = window_titled(&self.control, KEY, self.id, "qtlist")?;
         let frame = &self.state()["window"];
         let f = |i: usize| frame[i].as_f64().unwrap_or(0.0);
         Ok((
@@ -127,20 +113,16 @@ impl List {
 
     /// The app's on-screen windows, global: Qt's own idea of where they are
     /// goes stale once Agent Screen moves its window.
-    fn windows(&self) -> Vec<[f64; 4]> {
-        sh_lenient(
-            out().join("probe"),
-            &["windows", &self.pid.get().to_string()],
-        )
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .map(|w| ["x", "y", "width", "height"].map(|k| w[k].as_f64().unwrap_or(0.0)))
-        .collect()
+    fn windows(&self) -> Vec<Rect> {
+        windows_of(self.pid.get())
+            .into_iter()
+            .map(|w| [w.x, w.y, w.width, w.height])
+            .collect()
     }
 
     /// The results' window, as the window list has it: the one the size Qt
     /// gave the list.
-    fn list_window(&self, state: &Value) -> Option<[f64; 4]> {
+    fn list_window(&self, state: &Value) -> Option<Rect> {
         let popup = &state["popup"];
         let (w, h) = (popup[2].as_f64()?, popup[3].as_f64()?);
         (state["open"] == true)
@@ -179,33 +161,9 @@ impl List {
 
     /// The user's app in front again, as when the run began.
     fn users_app_in_front(&self) {
-        if self.users.is_empty() {
-            return;
+        if !self.users.is_empty() {
+            bring_to_front(&["-b", &self.users], &self.users, 200);
         }
-        let _ = Command::new("/usr/bin/open")
-            .args(["-b", &self.users])
-            .status();
-        for _ in 0..20 {
-            if front_bundle() == self.users {
-                break;
-            }
-            sleep_ms(100);
-        }
-        sleep_ms(200);
-    }
-
-    /// The list's app in front, as one that brings itself forward.
-    fn lists_app_in_front(&self) {
-        let _ = Command::new("/usr/bin/open")
-            .args(["-b", "app.agentscreen.e2e.qtlist"])
-            .status();
-        for _ in 0..20 {
-            if front_bundle() == "app.agentscreen.e2e.qtlist" {
-                break;
-            }
-            sleep_ms(100);
-        }
-        sleep_ms(300);
     }
 
     /// An agent's call. Right after a real click the user still holds the
@@ -225,11 +183,7 @@ impl List {
                 }
                 Err(error) if tries < 10 && format!("{error:#}").contains("takeover") => {
                     tries += 1;
-                    self.control.call(
-                        "debugShow",
-                        json!({ "surface": "primary", "displayId": self.id }),
-                    )?;
-                    sleep_ms(300);
+                    let_continue(&self.control, self.id)?;
                 }
                 Err(error) => return Err(error),
             }
@@ -265,7 +219,9 @@ impl List {
             )?;
             sleep_ms(300);
         }
-        self.wait(|s| s["open"] == true && s["items"].as_array().is_some_and(|i| i.len() == 4));
+        self.wait(30, |s| {
+            s["open"] == true && s["items"].as_array().is_some_and(|i| i.len() == 4)
+        });
         // Qt may move the list once more after it shows.
         sleep_ms(300);
         Ok(self.state())
@@ -275,40 +231,36 @@ impl List {
     fn item2_in_viewer(&self, state: &Value) -> Result<(f64, f64)> {
         let at = self.item_on_display(state, 1)?;
         let viewer = self.control.call("debugViewer", json!({}))?;
-        let image: Vec<f64> = viewer["image"]
-            .as_array()
-            .context("image")?
-            .iter()
-            .filter_map(|v| v.as_f64())
-            .collect();
-        Ok((
-            image[0] + at.0 / self.size.0 * image[2],
-            image[1] + at.1 / self.size.1 * image[3],
-        ))
+        let image: Rect = serde_json::from_value(viewer["image"].clone()).context("image")?;
+        Ok(on_screen(image, self.size, at.0, at.1))
+    }
+
+    /// The part of the log since the last case mark.
+    fn last_case(&self) -> String {
+        let log = std::fs::read_to_string(&self.log).unwrap_or_default();
+        log.rsplit("--- ").next().unwrap_or_default().to_string()
     }
 }
 
-/// The front app's bundle id, as `lsappinfo` says.
-fn front_bundle() -> String {
-    let front = sh_lenient("/usr/bin/lsappinfo", &["front"]);
-    sh_lenient(
-        "/usr/bin/lsappinfo",
-        &["info", "-only", "bundleid", front.trim()],
-    )
-    .rsplit('=')
-    .next()
-    .unwrap_or_default()
-    .trim()
-    .trim_matches('"')
-    .to_string()
+/// `bundle`'s app in front, then `settle` ms for it to draw. `open` takes
+/// `target`, a bundle path or `-b` and the id.
+fn bring_to_front(target: &[&str], bundle: &str, settle: u64) {
+    let _ = Command::new("/usr/bin/open").args(target).status();
+    for _ in 0..20 {
+        if frontmost("bundleid") == bundle {
+            break;
+        }
+        sleep_ms(100);
+    }
+    sleep_ms(settle);
 }
 
-/// The front app's name, as `lsappinfo` says.
-fn front_app() -> String {
+/// The front app's `field`, `bundleid` or `name`, as `lsappinfo` says.
+fn frontmost(field: &str) -> String {
     let front = sh_lenient("/usr/bin/lsappinfo", &["front"]);
     sh_lenient(
         "/usr/bin/lsappinfo",
-        &["info", "-only", "name", front.trim()],
+        &["info", "-only", field, front.trim()],
     )
     .rsplit('=')
     .next()
@@ -330,30 +282,24 @@ fn test(app: &std::path::Path) -> Result<()> {
         made["width"].as_f64().unwrap_or(1280.0),
         made["height"].as_f64().unwrap_or(800.0),
     );
-    let users = front_bundle();
     let mut list = List {
-        users,
+        users: frontmost("bundleid"),
         control,
         mode: "completer",
         id,
         size,
         state: out().join("qtlist.json"),
+        log: out().join("qtlist.log"),
         pid: Default::default(),
     };
     for mode in ["completer", "keyed", "frameless"] {
         list.mode = mode;
         cases(&list, app)?;
         // The next kind of list starts in a new process.
-        let _ = Command::new("/usr/bin/pkill")
-            .args(["-f", "QtList.app/Contents/MacOS/QtList"])
-            .status();
+        kill_ours(our_binary("QtList"));
         sleep_ms(500);
         // A real click took the display over; Let Continue hands it back.
-        list.control.call(
-            "debugShow",
-            json!({ "surface": "primary", "displayId": id }),
-        )?;
-        sleep_ms(300);
+        let_continue(&list.control, id)?;
     }
     // The user's app in front again, as the run found it.
     list.users_app_in_front();
@@ -364,10 +310,9 @@ fn test(app: &std::path::Path) -> Result<()> {
 
 /// Every case with the results in a `mode` window (tools/qtlist.py).
 fn cases(list: &List, app: &std::path::Path) -> Result<()> {
-    let (id, mode) = (list.id, list.mode);
-    let log = out().join("qtlist.log");
+    let (id, mode, log) = (list.id, list.mode, &list.log);
     let _ = std::fs::remove_file(&list.state);
-    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(log);
     let label = |what: &str| format!("{mode}: {what}");
     let launched = list.agent(
         "launchApp",
@@ -383,9 +328,9 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
         }),
     )?;
     println!("{mode}: launchApp: {launched}");
-    list.pid.set(launched["pid"].as_i64().unwrap_or(0));
+    list.pid.set(launched["pid"].as_u64().unwrap_or(0) as u32);
     // Qt takes a few seconds to start the first time.
-    let started = list.wait_for(150, |s| s["rows"].as_array().is_some_and(|r| !r.is_empty()));
+    let started = list.wait(150, |s| s["rows"].as_array().is_some_and(|r| !r.is_empty()));
     check(
         &label("the Qt list app is up"),
         !started.is_null(),
@@ -421,7 +366,7 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
     sleep_ms(1200);
     let shown = list.state();
     check(
-        &label("opening the Viewer leaves the Qt results up, with nothing picked"),
+        &label("opening the Viewer leaves the Qt results up, with no new pick"),
         opened["open"] == true && shown["open"] == true && shown["got"] == "item2",
         format!("before {}, after {}", opened["open"], shown),
     );
@@ -439,7 +384,14 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
         if front == "your app" {
             list.users_app_in_front();
         } else {
-            list.lists_app_in_front();
+            // As an app that brings itself forward. By its path: by its
+            // id, `open` may start another checkout's copy on your screen.
+            let app = out().join("QtList.app");
+            bring_to_front(
+                &["-a", &app.to_string_lossy()],
+                "app.agentscreen.e2e.qtlist",
+                300,
+            );
         }
         // The agent opens the results with that app in front, and the click
         // follows at once.
@@ -452,7 +404,7 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
             continue;
         }
         let at = list.item2_in_viewer(&now)?;
-        let app = front_app();
+        let app = frontmost("name");
         check(
             &label(&format!("{front} is in front before the click")),
             !app.starts_with("Agent Screen") && (front == "your app") != (app == "QtList"),
@@ -488,11 +440,7 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
 
     // 4. The user clicks a result while the Viewer is in front. The last
     // click took the display over; Let Continue hands it back.
-    list.control.call(
-        "debugShow",
-        json!({ "surface": "primary", "displayId": id }),
-    )?;
-    sleep_ms(300);
+    let_continue(&list.control, id)?;
     let opened = list.open()?;
     if shows(
         &label("the results with the Viewer in front"),
@@ -514,7 +462,7 @@ fn cases(list: &List, app: &std::path::Path) -> Result<()> {
 
     println!(
         "{mode}: the Qt list's log:\n{}",
-        std::fs::read_to_string(&log).unwrap_or_default()
+        std::fs::read_to_string(log).unwrap_or_default()
     );
     Ok(())
 }
@@ -534,8 +482,7 @@ fn shows(what: &str, list: &List, state: &Value) -> bool {
 /// pressed a row: Qt's pop-up closes before it reports the pick.
 fn wait_pick(list: &List) -> Value {
     for _ in 0..30 {
-        let log = std::fs::read_to_string(out().join("qtlist.log")).unwrap_or_default();
-        let last = log.rsplit("--- ").next().unwrap_or_default();
+        let last = list.last_case();
         if last.contains("pick ") || last.contains("press row") {
             break;
         }
@@ -547,25 +494,15 @@ fn wait_pick(list: &List) -> Value {
 
 /// A line in the Qt list's log that the next case starts here.
 fn mark(list: &List, case: &str) {
-    if let Some(log) = list.state.parent().map(|d| d.join("qtlist.log")) {
-        let _ = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log)
-            .and_then(|mut f| {
-                std::io::Write::write_all(&mut f, format!("--- {case}\n").as_bytes())
-            });
-    }
+    let _ = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&list.log)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("--- {case}\n").as_bytes()));
 }
 
 /// Whether the log shows a pick of item2 after the last case mark, with no
 /// press on a row: `got` alone still says item2 from an earlier case.
 fn is_fresh_pick(list: &List) -> bool {
-    let log = list
-        .state
-        .parent()
-        .map(|d| d.join("qtlist.log"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    let last = log.rsplit("--- ").next().unwrap_or_default();
+    let last = list.last_case();
     last.contains("pick item2") && !last.contains("press row")
 }

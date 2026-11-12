@@ -17,7 +17,6 @@ use crate::model::Rect;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Window {
     pub pid: i32,
-    pub layer: i64,
     pub bounds: Rect,
 }
 
@@ -57,17 +56,16 @@ const LIST_SHARE: f64 = 0.6;
 mod tests {
     use super::*;
 
-    fn window(pid: i32, layer: i64, x: f64, y: f64, w: f64, h: f64) -> Window {
+    fn window(pid: i32, x: f64, y: f64, w: f64, h: f64) -> Window {
         Window {
             pid,
-            layer,
             bounds: Rect::new(x, y, w, h),
         }
     }
 
     #[test]
     fn a_press_on_an_app_window_takes_the_front_first() {
-        let windows = [window(10, 0, 0.0, 0.0, 600.0, 500.0)];
+        let windows = [window(10, 0.0, 0.0, 600.0, 500.0)];
         assert_eq!(
             front_for_press(&windows, (100.0, 100.0)),
             Front::BeforePress
@@ -78,8 +76,8 @@ mod tests {
     fn a_press_on_a_list_over_its_own_app_reaches_it_first() {
         // WeCom's search results: a borderless window over the main one.
         let windows = [
-            window(10, 0, 20.0, 70.0, 560.0, 206.0),
-            window(10, 0, 0.0, 0.0, 600.0, 500.0),
+            window(10, 20.0, 70.0, 560.0, 206.0),
+            window(10, 0.0, 0.0, 600.0, 500.0),
         ];
         assert_eq!(
             front_for_press(&windows, (100.0, 120.0)),
@@ -93,26 +91,11 @@ mod tests {
     }
 
     #[test]
-    fn a_press_on_a_floating_list_over_its_app_reaches_it_first() {
-        // A Qt tool window or pop-up menu, above the normal layer.
-        for layer in [3, 101] {
-            let windows = [
-                window(10, layer, 20.0, 70.0, 560.0, 206.0),
-                window(10, 0, 0.0, 0.0, 600.0, 500.0),
-            ];
-            assert_eq!(
-                front_for_press(&windows, (100.0, 120.0)),
-                Front::AfterRelease
-            );
-        }
-    }
-
-    #[test]
     fn stacked_documents_and_floating_windows_take_the_front_first() {
         // Two document windows of one app, one over the other.
         let stacked = [
-            window(10, 0, 30.0, 30.0, 580.0, 480.0),
-            window(10, 0, 0.0, 0.0, 600.0, 500.0),
+            window(10, 30.0, 30.0, 580.0, 480.0),
+            window(10, 0.0, 0.0, 600.0, 500.0),
         ];
         assert_eq!(
             front_for_press(&stacked, (100.0, 100.0)),
@@ -120,8 +103,8 @@ mod tests {
         );
         // An always-on-top window over another app's window.
         let floating = [
-            window(10, 3, 20.0, 70.0, 560.0, 206.0),
-            window(20, 0, 0.0, 0.0, 600.0, 500.0),
+            window(10, 20.0, 70.0, 560.0, 206.0),
+            window(20, 0.0, 0.0, 600.0, 500.0),
         ];
         assert_eq!(
             front_for_press(&floating, (100.0, 120.0)),
@@ -132,8 +115,8 @@ mod tests {
     #[test]
     fn a_window_over_another_apps_window_is_an_app_window() {
         let windows = [
-            window(10, 0, 0.0, 0.0, 600.0, 500.0),
-            window(20, 0, 0.0, 0.0, 900.0, 700.0),
+            window(10, 0.0, 0.0, 600.0, 500.0),
+            window(20, 0.0, 0.0, 900.0, 700.0),
         ];
         assert_eq!(
             front_for_press(&windows, (100.0, 100.0)),

@@ -15,11 +15,11 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, debug_pid, dropdown_app, hid, instance, json, kill_ours, open_user_stage,
-    our_binary, out, probe, run, sign_step, sleep_ms, start_test_app, stop_test_app,
+    Control, Rect, check, debug_pid, dropdown_app, hid, instance, json, kill_ours, let_continue,
+    on_screen, open_user_stage, our_binary, out, probe, run, sign_step, sleep_ms, start_test_app,
+    stop_test_app, window_titled, windows_of,
 };
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 const KEY: &str = "viewerpopup";
 /// The fixture's row height and list inset, in points.
@@ -45,24 +45,8 @@ fn main() -> ExitCode {
     })
 }
 
-fn window(control: &Control, id: u64) -> Result<Value> {
-    let listed = control.call("listWindows", json!({ "sessionKey": KEY, "displayId": id }))?;
-    listed["windows"]
-        .as_array()
-        .and_then(|w| {
-            w.iter()
-                .find(|w| {
-                    w["title"]
-                        .as_str()
-                        .is_some_and(|t| t.starts_with("dropdown"))
-                })
-                .cloned()
-        })
-        .context("no dropdown window on the display")
-}
-
 fn title(control: &Control, id: u64) -> String {
-    window(control, id)
+    window_titled(control, KEY, id, "dropdown")
         .ok()
         .and_then(|w| w["title"].as_str().map(String::from))
         .unwrap_or_default()
@@ -88,7 +72,7 @@ fn test() -> Result<()> {
         json!({ "sessionKey": KEY, "title": "Viewer pop-up", "width": 1280, "height": 600 }),
     )?;
     let id = display["displayId"].as_u64().context("display id")?;
-    let (dw, dh) = (
+    let size = (
         display["width"].as_f64().unwrap_or(1280.0),
         display["height"].as_f64().unwrap_or(600.0),
     );
@@ -106,7 +90,7 @@ fn test() -> Result<()> {
         }),
     )?;
     sleep_ms(800);
-    let w = window(&control, id)?;
+    let w = window_titled(&control, KEY, id, "dropdown")?;
     let (wx, wy, ww, wh) = (
         w["x"].as_f64().context("x")?,
         w["y"].as_f64().context("y")?,
@@ -145,15 +129,14 @@ fn test() -> Result<()> {
         viewer["privatePress"] == true,
         viewer["privatePress"].to_string(),
     );
-    let image: Vec<f64> = viewer["image"]
-        .as_array()
-        .context("image")?
-        .iter()
-        .filter_map(|v| v.as_f64())
-        .collect();
+    let image: Rect = serde_json::from_value(viewer["image"].clone()).context("image")?;
     // item2 covers row2 of the main window: the list starts one row down.
-    let (px, py) = (wx + INSET + (ww - 2.0 * INSET) / 2.0, top + 2.5 * ROW);
-    let at = (image[0] + px / dw * image[2], image[1] + py / dh * image[3]);
+    let at = on_screen(
+        image,
+        size,
+        wx + INSET + (ww - 2.0 * INSET) / 2.0,
+        top + 2.5 * ROW,
+    );
 
     sign_step("one click on item2 of the list / 点列表的 item2");
     hid(&["click", &at.0.to_string(), &at.1.to_string()])?;
@@ -167,11 +150,7 @@ fn test() -> Result<()> {
     // Once more, after the agent opens the list again: the first click
     // must not have left anything that makes the second land elsewhere.
     // The click took the display over; Let Continue hands it back.
-    control.call(
-        "debugShow",
-        json!({ "surface": "primary", "displayId": id }),
-    )?;
-    sleep_ms(300);
+    let_continue(&control, id)?;
     let opened = open(&control)?;
     if opened.contains("open=1") {
         hid(&["click", &at.0.to_string(), &at.1.to_string()])?;
@@ -191,14 +170,8 @@ fn test() -> Result<()> {
     // pointer unless told where; here the picture's lower left. AppKit
     // runs the menu's loop meanwhile and the control socket answers only
     // once it closes, so the menu is asked for from another thread.
-    let pid = debug_pid().context("the test app's pid")?.to_string();
-    let menu = || {
-        probe(&["windows", &pid])
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| l.contains("\"layer\":101"))
-            .find_map(|l| serde_json::from_str::<Value>(l).ok())
-    };
+    let pid = debug_pid().context("the test app's pid")?;
+    let menu = || windows_of(pid).into_iter().find(|w| w.layer == 101);
     let rest = (image[0] + 40.0, image[1] + image[3] - 40.0);
     let asked = std::thread::spawn(move || -> Result<()> {
         Control::connect()?.call(
@@ -218,27 +191,18 @@ fn test() -> Result<()> {
     // The menu must be on the stage, beside the Viewer, not on the user's
     // screen.
     let on_stage = open.as_ref().is_some_and(|m| {
-        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
         let frame = &viewer["frame"];
         let v = |i: usize| frame[i].as_f64().unwrap_or(0.0);
-        f("x") < v(0) + v(2)
-            && f("x") + f("width") > v(0)
-            && f("y") < v(1) + v(3)
-            && f("y") + f("height") > v(1)
+        m.x < v(0) + v(2) && m.x + m.width > v(0) && m.y < v(1) + v(3) && m.y + m.height > v(1)
     });
     let covers = open.as_ref().is_some_and(|m| {
-        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
-        at.0 >= f("x")
-            && at.0 <= f("x") + f("width")
-            && at.1 >= f("y")
-            && at.1 <= f("y") + f("height")
+        at.0 >= m.x && at.0 <= m.x + m.width && at.1 >= m.y && at.1 <= m.y + m.height
     });
-    check(
+    if check(
         "the Viewer's Give menu opens on the stage, beside the list item",
         open.is_some() && !covers && on_stage,
         format!("{open:?}"),
-    );
-    if open.is_some() && !covers && on_stage {
+    ) {
         hid(&["click", &at.0.to_string(), &at.1.to_string()])?;
     }
     let mut left = menu();
@@ -251,11 +215,10 @@ fn test() -> Result<()> {
     }
     if let Some(m) = &left {
         // Never leave a menu open on the screen.
-        let f = |k: &str| m[k].as_f64().unwrap_or(0.0);
         let _ = probe(&[
             "cancelmenu",
-            &(f("x") + 10.0).to_string(),
-            &(f("y") + 10.0).to_string(),
+            &(m.x + 10.0).to_string(),
+            &(m.y + 10.0).to_string(),
         ]);
     }
     let _ = asked.join();
