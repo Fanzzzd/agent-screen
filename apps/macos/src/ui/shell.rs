@@ -904,7 +904,8 @@ impl Shell {
                     Some(Note::Help {
                         reason: reason.clone(),
                         request,
-                        answers: *answers,
+                        // In a Takeover only the hand-back answers it.
+                        answers: *answers && !display.takeover,
                     }),
                 ),
                 _ => notify::withdraw_help(display.id),

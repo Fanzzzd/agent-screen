@@ -149,6 +149,7 @@ define_class!(
                 native::main_async(|| native::send(Native::InputQueueOpened));
             } else if let Some(display) = display {
                 native::main_async(move || {
+                    let request = answering(&id, request);
                     native::send(Native::NotificationClicked {
                         display,
                         request,
@@ -165,6 +166,26 @@ thread_local! {
     static DELEGATE: RefCell<Option<Retained<Delegate>>> = const { RefCell::new(None) };
     /// What each display's notifications last said, by identifier.
     static POSTED: RefCell<HashMap<String, Note>> = RefCell::new(HashMap::new());
+    /// The Help Request id each delivered help notification carries. A
+    /// request asked again with the same words keeps the banner, and the
+    /// banner answers the newest request.
+    static SHOWN: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+/// The Help Request an answer from notification `id` is for: the one it
+/// was posted for, or, when the agent asked again with the same words and
+/// the banner stayed, the newest.
+fn answering(id: &str, carried: Option<u64>) -> Option<u64> {
+    let carried = carried?;
+    let shown = SHOWN.with(|s| s.borrow().get(id).copied());
+    let current = POSTED.with(|p| match p.borrow().get(id) {
+        Some(Note::Help { request, .. }) => Some(*request),
+        _ => None,
+    });
+    match current {
+        Some(current) if shown == Some(carried) => Some(current),
+        _ => Some(carried),
+    }
 }
 
 fn center() -> Retained<UNUserNotificationCenter> {
@@ -278,12 +299,19 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
         return;
     }
     POSTED.with(|p| p.borrow_mut().insert(id.clone(), note.clone()));
-    // The agent asked again with the same words: post it for the new
-    // request, quietly.
     let same_words = matches!(
         (&before, &note),
         (Some(Note::Help { reason: old, .. }), Note::Help { reason, .. }) if old == reason
     );
+    // The agent asked again with the same words: the banner stays, and
+    // answers the new request (`answering`).
+    let same_actions = matches!(
+        (&before, &note),
+        (Some(Note::Help { answers: old, .. }), Note::Help { answers, .. }) if old == answers
+    );
+    if same_words && same_actions {
+        return;
+    }
 
     let (title, body) = match &note {
         Note::Input(reason) => (
@@ -366,6 +394,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
         } else {
             HELP_CATEGORY
         }));
+        SHOWN.with(|s| s.borrow_mut().insert(id.clone(), *request));
         let key = NSString::from_str(REQUEST_KEY);
         let value = NSNumber::new_u64(*request);
         let info = NSDictionary::<NSString, NSNumber>::from_slices(&[&*key], &[&*value]);
@@ -425,6 +454,7 @@ pub fn withdraw_input(display: u32) {
 
 fn withdraw(display: u32, prefix: &str) {
     let id = identifier(prefix, display);
+    SHOWN.with(|s| s.borrow_mut().remove(&id));
     if POSTED.with(|p| p.borrow_mut().remove(&id)).is_some() {
         withdraw_id(&id);
     }

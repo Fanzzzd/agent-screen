@@ -273,12 +273,18 @@ impl Render for HelpCard {
                 || help_request(&self.core, r.display, cx) != Some(r.request)
         });
         if stale {
-            self.close_reply(window, cx);
+            // Not during the render: closing gives up the keyboard, which
+            // orders the card's own window out and in.
+            cx.defer_in(window, |card, window, cx| card.close_reply(window, cx));
         }
         if self.input_queue {
             return self.render_queue(&theme, cx);
         }
-        let reply = self.reply.as_ref().map(|r| r.field.clone());
+        let reply = self
+            .reply
+            .as_ref()
+            .filter(|_| !stale)
+            .map(|r| r.field.clone());
         let core = self.core.read(cx);
         let Some(display) = self.display.and_then(|id| core.displays.get(id)) else {
             return div().into_any_element();

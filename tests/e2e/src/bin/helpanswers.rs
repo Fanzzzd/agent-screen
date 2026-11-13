@@ -474,8 +474,8 @@ fn test(
         json!({ "display_id": display_id, "timeout_seconds": 5 }),
     )?;
     check(
-        "the hand-back brings the earlier answer",
-        r.get("answer") == "continue",
+        "the hand-back supersedes the earlier answer: the user took over",
+        r.get("answer") == "tookOver",
         r.text(),
     );
 

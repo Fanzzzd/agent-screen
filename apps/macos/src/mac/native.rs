@@ -1046,7 +1046,9 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
     use objc2::ffi::object_setClass;
     use objc2::runtime::{AnyClass, Bool, ClassBuilder, Sel};
     extern "C-unwind" fn yes(_: &AnyObject, _: Sel) -> Bool {
-        Bool::YES
+        // Not while the Help Card gives the keyboard back: AppKit must not
+        // hand it to the Viewer instead of the user's app.
+        Bool::new(!GIVING_BACK.load(std::sync::atomic::Ordering::Relaxed))
     }
     extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
         Bool::NO
@@ -1136,15 +1138,25 @@ pub fn card_keys_on() -> bool {
     CARD_KEYS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Give the keyboard back to the user's app if `window` has it. A panel
-/// that took the keyboard without activating Agent Screen gives it back
-/// only by leaving the screen, so it leaves and comes straight back, in
-/// one turn of the run loop, without taking the keyboard again.
+/// Set while the Help Card gives the keyboard back, until the next turn of
+/// the run loop: no Agent Screen window may become key meanwhile.
+static GIVING_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Give the keyboard back to the user's app if `window` has it. The card is
+/// a non-activating panel: the user's app stayed active while it typed, and
+/// a panel like that gives the keyboard back only by leaving the screen. So
+/// it leaves and comes straight back, in one turn of the run loop, without
+/// taking the keyboard again, and while it is away no other Agent Screen
+/// window, such as the Viewer, may take it.
 pub fn give_up_keys(window: &NSWindow) {
-    if window.isKeyWindow() {
-        window.orderOut(None);
-        window.orderFrontRegardless();
+    if !window.isKeyWindow() {
+        return;
     }
+    use std::sync::atomic::Ordering;
+    GIVING_BACK.store(true, Ordering::Relaxed);
+    window.orderOut(None);
+    window.orderFrontRegardless();
+    later(|| GIVING_BACK.store(false, Ordering::Relaxed));
 }
 
 pub fn is_key(window: &NSWindow) -> bool {

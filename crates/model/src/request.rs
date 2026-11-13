@@ -569,8 +569,8 @@ impl<H> Displays<H> {
     /// Request with HandedBack and a Help Request with TookOver, and the
     /// agent's waits hear the Help Request's end first: the user stepped in
     /// for it. With no Help Request open, an answer the agent hasn't heard
-    /// comes next, then the plain hand-back. Empty when the user wasn't in
-    /// control.
+    /// comes as TookOver too, as the Takeover came after it; else the plain
+    /// hand-back. Empty when the user wasn't in control.
     pub fn end_takeover(&mut self, id: DisplayId) -> Vec<Effect> {
         let Some(d) = self.get_mut(id).filter(|d| d.takeover) else {
             return Vec::new();
@@ -586,8 +586,10 @@ impl<H> Displays<H> {
             .is_some();
         let woken = if help {
             Woken::of(Some(Kind::Help), Resolution::TookOver)
-        } else if let Some(unheard) = d.requests.unheard.take() {
-            unheard
+        } else if d.requests.unheard.take().is_some() {
+            // The user answered, then took over: the Takeover supersedes
+            // the answer, and things may have changed since.
+            Woken::of(Some(Kind::Help), Resolution::TookOver)
         } else {
             Woken::of(control.then_some(Kind::Control), Resolution::HandedBack)
         };
@@ -1014,11 +1016,11 @@ mod tests {
         let asked = d.request_help(7, "Sign in".into(), Vec::new(), true);
         assert!(matches!(asked, Some(HelpAsked::Opened(_))));
         d.withdraw_help(7);
-        // The hand-back brings the answer.
+        // The hand-back answers it: the user took over after Continue.
         d.end_takeover(7);
         assert_eq!(
             heard(&mut rx),
-            Woken::of(Some(Kind::Help), Resolution::Continue)
+            Woken::of(Some(Kind::Help), Resolution::TookOver)
         );
         assert_eq!(now(&mut d), Woken::of(None, Resolution::HandedBack));
     }
