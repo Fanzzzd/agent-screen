@@ -3771,8 +3771,19 @@ async fn transfer_window(
         })
         .map_err(ControlError::failed)?;
     let handed_over = moved.record.origin == Origin::HandedOver;
-    // The holder's drag in the window, held or queued, stops: it would
-    // act on the window on the asker's display.
+    if let Err(e) = place_and_hold(target, to, cx).await {
+        core.update(cx, |c, cx| {
+            c.displays.undo_transfer(moved);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "the user gave you the {app} window, but it could not move from {}: {e}",
+            held.label
+        )));
+    }
+    core.update(cx, |c, _| c.displays.finish_transfer(&moved));
+    // The window is the asker's now: the holder's drag in it, held or
+    // queued, stops, as it would act on the window on the asker's display.
     release_hold_on(from, target.window_id);
     let stopped = core.update(cx, |c, cx| {
         let stopped = c.input_queue.window_given(from, target.window_id);
@@ -3785,17 +3796,6 @@ async fn transfer_window(
             target.window_id
         );
     }
-    if let Err(e) = place_and_hold(target, to, cx).await {
-        core.update(cx, |c, cx| {
-            c.displays.undo_transfer(moved);
-            cx.notify();
-        });
-        return Err(ControlError::failed(format!(
-            "the user gave you the {app} window, but it could not move from {}: {e}",
-            held.label
-        )));
-    }
-    core.update(cx, |c, _| c.displays.finish_transfer(&moved));
     log::info!(
         "window {} ({app}) moved from display {from} ({}) to display {to}, another session's, on the user's word",
         target.window_id,

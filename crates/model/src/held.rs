@@ -287,10 +287,28 @@ impl<H> Displays<H> {
             disposition: None,
             home: handover.and_then(|r| r.home.clone()),
         };
+        // The asker's session has the window now: none of its displays
+        // counts it as given away any more, so they hold it again.
+        let mine: Vec<DisplayId> = self
+            .list
+            .iter()
+            .filter(|d| {
+                d.id == to
+                    || (asker.is_some()
+                        && d.owner.as_ref().map(|o| &o.session_key) == asker.as_ref())
+            })
+            .map(|d| d.id)
+            .collect();
+        for id in mine {
+            if let Some(d) = self.get_mut(id)
+                && let Some(before) = d.given.remove(&window)
+            {
+                given_before.push((id, Some(before)));
+            }
+        }
         let d = self.get_mut(to).expect("checked live");
         let before_to = d.records.insert(window, record.clone());
         let was_returned = d.returned.remove(&window);
-        d.given.remove(&window);
         d.handover_serial += 1;
         let serial = d.handover_serial;
         d.handing_over.insert(window, serial);
@@ -810,6 +828,28 @@ mod tests {
         assert!(!d.get(8).unwrap().records.contains_key(&1));
         // The asker asks again, naming the session that has it.
         assert_eq!(d.held_by(8, wechat(1), Some(7)).map(|h| h.display), Some(7));
+    }
+
+    #[test]
+    fn a_window_back_with_its_session_is_held_on_every_display_of_it() {
+        // B (7, 9) has it, A (8) takes it, B gets it back by card, then B
+        // moves it to its other display.
+        let mut d = holder_with_two_displays();
+        d.get_mut(7)
+            .unwrap()
+            .claim(wechat(1), Origin::Launched, None);
+        let away = d.transfer(7, 8, wechat(1), "WeChat").unwrap();
+        d.finish_transfer(&away);
+        assert!(d.get(9).unwrap().given.contains_key(&1));
+        let back = d.transfer(8, 7, wechat(1), "WeChat").unwrap();
+        d.finish_transfer(&back);
+        assert!(d.get(7).unwrap().given.is_empty());
+        assert!(d.get(9).unwrap().given.is_empty(), "the whole session");
+        d.move_between(7, 9, wechat(1), true).unwrap();
+        let other = d.get(9).unwrap();
+        assert!(other.holds(wechat(1)) && other.given.is_empty());
+        // Another session's grant can't take it from the user's screen.
+        assert!(d.owned_elsewhere(8, wechat(1)));
     }
 
     #[test]

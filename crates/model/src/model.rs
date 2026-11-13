@@ -1223,6 +1223,8 @@ impl<H> Displays<H> {
         if let Some(d) = self.get_mut(to) {
             d.records
                 .insert(target.window_id, Record { target, ..moved });
+            // Its own window again on this display (ADR 0017).
+            d.given.remove(&target.window_id);
         }
         Ok(Moved {
             from,
