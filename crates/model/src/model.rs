@@ -671,7 +671,11 @@ impl<H> Displays<H> {
         // A spare display comes back under its old id.
         self.retired.remove(&id);
         self.closed_by_user.remove(&id);
-        if let Some(owner) = &owner {
+        let mut owner = owner;
+        if let Some(owner) = &mut owner {
+            // Numbered as it joins, so parallel create_display calls of
+            // one session never get the same Display Label.
+            owner.title = self.distinct_title(&owner.session_key, &owner.title);
             self.sessions.join(&owner.session_key, id);
         }
         self.list.push(Display {
@@ -723,6 +727,24 @@ impl<H> Displays<H> {
         self.list.iter_mut().find(|d| d.id == id)
     }
 
+    /// A task title none of the session's live displays has: "Book
+    /// flights 2" beside "Book flights", so their Display Labels differ.
+    pub fn distinct_title(&self, session_key: &str, title: &str) -> String {
+        let taken: Vec<&str> = self
+            .of_session(session_key)
+            .into_iter()
+            .filter_map(|id| self.get(id)?.owner.as_ref())
+            .map(|o| o.title.as_str())
+            .collect();
+        if !taken.contains(&title) {
+            return title.to_string();
+        }
+        (2..)
+            .map(|n| format!("{title} {n}"))
+            .find(|t| !taken.contains(&t.as_str()))
+            .unwrap_or_else(|| title.to_string())
+    }
+
     /// An Agent Session's live displays, oldest first.
     pub fn of_session(&self, session_key: &str) -> Vec<DisplayId> {
         self.sessions.live(session_key).to_vec()
@@ -771,10 +793,44 @@ impl<H> Displays<H> {
         display.pointer = None;
         if let Some(key) = key {
             self.sessions.leave(&key, id);
+            self.hand_on_apps(id, &key);
         }
         // Every request ends, and every wait hears it.
         self.end_requests(id);
         true
+    }
+
+    /// Display `id` of session `key` ended while the session goes on: the
+    /// apps it started become its latest live display's, with what the
+    /// user said of their windows, so their next windows are the session's
+    /// strays there and no display holds them against it (ADR 0016). The
+    /// windows on `id` keep their records for review.
+    fn hand_on_apps(&mut self, id: DisplayId, key: &str) {
+        let Some(to) = self.sessions.get(key).and_then(|s| s.current()) else {
+            return;
+        };
+        let Some(from) = self.get_mut(id) else {
+            return;
+        };
+        let started = std::mem::take(&mut from.started);
+        let returned = from.returned.clone();
+        let user_made = from.user_made.clone();
+        let released = from.released.clone();
+        if let Some(to) = self.get_mut(to) {
+            to.started.extend(started);
+            to.returned.extend(returned);
+            to.user_made.extend(user_made);
+            to.released.extend(released);
+        }
+    }
+
+    /// The live display of the session that started app `pid`, as after
+    /// its launch display ended and handed the app on.
+    pub fn starter_of(&self, pid: i32) -> Option<DisplayId> {
+        self.list
+            .iter()
+            .find(|d| d.is_live() && d.started.contains(&pid))
+            .map(|d| d.id)
     }
 
     /// The Handovers of ended display `id` to send home now, when its end
@@ -1038,13 +1094,18 @@ impl<H> Displays<H> {
     /// it leaves the records for good, and its app becomes the user's on
     /// every display of the session. No Window Access of the session covers
     /// the window again until the user says so for it.
+    /// A Review Display counts too: its session's grant and live displays
+    /// still hear of it while the session goes on (ADR 0016).
     pub fn give_back(&mut self, id: DisplayId, target: WindowTarget) -> Option<GivenBack> {
-        if let Some(access) = self.access_mut(id) {
-            access.excluded.insert(target.window_id);
-        }
-        let key = self.get(id)?.session().map(str::to_string);
+        let key = self.get(id)?.owner.as_ref().map(|o| o.session_key.clone());
         if let Some(key) = key {
-            for other in self.of_session(&key) {
+            let live = self.of_session(&key);
+            if !live.is_empty()
+                && let Some(session) = self.sessions.get_mut(&key)
+            {
+                session.access.excluded.insert(target.window_id);
+            }
+            for other in live {
                 if other != id
                     && let Some(d) = self.get_mut(other)
                     && d.started.remove(&target.pid)
@@ -1093,11 +1154,15 @@ impl<H> Displays<H> {
     /// stays a Handover and still goes home. A window `from` never recorded
     /// becomes `to`'s as launched when `from`'s session started its app,
     /// placed otherwise. Returns what `undo_move` needs if the move fails.
+    /// `on_from`: the window sits on `from`, so a Takeover there holds it.
+    /// A stray `from` recorded sits on the user's screen instead. A window
+    /// the user took back or made stays theirs either way.
     pub fn move_between(
         &mut self,
         from: DisplayId,
         to: DisplayId,
         target: WindowTarget,
+        on_from: bool,
     ) -> Result<Moved, String> {
         if from == to || !self.same_session(from, to) {
             return Err(format!(
@@ -1105,7 +1170,16 @@ impl<H> Displays<H> {
             ));
         }
         let source = self.get(from).ok_or("the display has ended")?;
-        if source.takeover {
+        let window = target.window_id;
+        if [from, to].iter().any(|&d| {
+            self.get(d)
+                .is_some_and(|d| d.returned.contains(&window) || d.user_made.contains(&window))
+        }) {
+            return Err(format!(
+                "window {window} is the user's: they took it back or opened it themselves. Ask them to hand it over"
+            ));
+        }
+        if on_from && source.takeover {
             return Err(format!(
                 "the user is operating display {from}, where the window is. Call wait_for_control on it, or ask the user to hand it back"
             ));
@@ -2396,7 +2470,7 @@ mod tests {
         display.handing_over.clear();
         display.started.insert(5);
         // A Handover stays a Handover, with its home.
-        let moved = d.move_between(7, 8, users(1)).unwrap();
+        let moved = d.move_between(7, 8, users(1), true).unwrap();
         assert!(!d.get(7).unwrap().records.contains_key(&1));
         let record = &d.get(8).unwrap().records[&1];
         assert_eq!(
@@ -2409,13 +2483,13 @@ mod tests {
         assert_eq!(d.get(7).unwrap().records[&1].home, Some(home));
         assert!(!d.get(8).unwrap().records.contains_key(&1));
         // A window display 7 never recorded, of an app it started.
-        d.move_between(7, 8, launched(2)).unwrap();
+        d.move_between(7, 8, launched(2), true).unwrap();
         assert_eq!(d.get(8).unwrap().records[&2].origin, Origin::Launched);
         // Never onto another session's display, and never from a display
         // the user is operating.
-        assert!(d.move_between(8, 9, launched(2)).is_err());
+        assert!(d.move_between(8, 9, launched(2), true).is_err());
         d.begin_takeover(8);
-        let refused = d.move_between(8, 7, launched(2)).unwrap_err();
+        let refused = d.move_between(8, 7, launched(2), true).unwrap_err();
         assert!(refused.contains("operating display 8"), "{refused}");
     }
 
@@ -2423,7 +2497,7 @@ mod tests {
     fn taking_a_window_back_releases_its_app_on_every_session_display() {
         let mut d = two_of_one_session();
         d.get_mut(7).unwrap().started.insert(5);
-        d.move_between(7, 8, launched(1)).unwrap();
+        d.move_between(7, 8, launched(1), true).unwrap();
         d.give_back(8, launched(1)).unwrap();
         let first = d.get(7).unwrap();
         assert!(!first.started.contains(&5) && first.released.contains(&5));
@@ -2456,5 +2530,117 @@ mod tests {
         assert_eq!(access.revokes, revokes + 1, "cleared once");
         assert!(d.of_session("s").is_empty());
         assert!(d.get(9).unwrap().is_live(), "another session's display");
+    }
+
+    #[test]
+    fn a_take_back_on_a_review_display_reaches_the_session() {
+        let mut d = two_of_one_session();
+        d.access_mut(7).unwrap().grant_all();
+        assert_eq!(over(&mut d, 7, users(1), &Authority::Once), Ok(()));
+        d.get_mut(7)
+            .unwrap()
+            .claim(launched(2), Origin::Launched, None);
+        d.get_mut(8).unwrap().started.insert(5);
+        assert!(d.end(7, EndReason::Finished));
+        // The user takes both back from the Review Display.
+        d.give_back(7, users(1)).unwrap();
+        d.give_back(7, launched(2)).unwrap();
+        assert_eq!(over(&mut d, 8, users(1), &safari()), Err(Refusal::Excluded));
+        let live = d.get(8).unwrap();
+        assert!(!live.started.contains(&5) && live.released.contains(&5));
+        // Once the session has no live display, nothing carries over.
+        assert!(d.end(8, EndReason::Finished));
+        d.give_back(8, users(3)).unwrap();
+        assert!(d.sessions.get("s").unwrap().access.excluded.is_empty());
+    }
+
+    #[test]
+    fn ending_the_launch_display_hands_its_apps_to_the_session() {
+        let mut d = two_of_one_session();
+        let first = d.get_mut(7).unwrap();
+        first.started.insert(5);
+        first.user_made.insert(3);
+        first.claim(launched(4), Origin::Launched, None);
+        d.move_between(7, 8, launched(1), true).unwrap();
+        assert!(d.end(7, EndReason::Finished));
+        assert_eq!(d.starter_of(5), Some(8));
+        // The app's next window is display 8's stray, and no display holds
+        // it against the session.
+        assert!(!d.owned_elsewhere(8, launched(2)));
+        assert!(d.is_session_stray(8, launched(2), false, DisplayRole::User, false));
+        assert!(!d.is_session_stray(8, launched(3), false, DisplayRole::User, false));
+        assert!(d.owned_elsewhere(9, launched(2)), "another session");
+        // The window left on display 7 stays there for review.
+        assert!(d.get(7).unwrap().records.contains_key(&4));
+        // A session with no live display left keeps its apps where they were.
+        assert!(d.end(8, EndReason::Finished));
+        assert!(d.get(8).unwrap().started.contains(&5));
+        assert_eq!(d.starter_of(5), None);
+    }
+
+    #[test]
+    fn a_window_the_user_took_back_or_made_does_not_move_between_displays() {
+        let mut d = two_of_one_session();
+        let first = d.get_mut(7).unwrap();
+        first.started.insert(5);
+        first.claim(launched(1), Origin::Launched, None);
+        first.user_made.insert(2);
+        // Take Back gives the window back before it moves home.
+        d.give_back(7, launched(1)).unwrap();
+        for window in [1, 2] {
+            let refused = d.move_between(7, 8, launched(window), true).unwrap_err();
+            assert!(refused.contains("the user's"), "{refused}");
+        }
+        assert!(!d.get(8).unwrap().records.contains_key(&1));
+    }
+
+    #[test]
+    fn a_takeover_holds_only_a_window_on_its_display() {
+        let mut d = two_of_one_session();
+        d.get_mut(7).unwrap().started.insert(5);
+        d.begin_takeover(7);
+        assert!(d.move_between(7, 8, launched(1), true).is_err());
+        // A stray display 7 recorded sits on the user's screen.
+        assert!(d.move_between(7, 8, launched(1), false).is_ok());
+    }
+
+    #[test]
+    fn the_grant_lasts_until_the_session_last_connection_closes() {
+        let mut d = two_of_one_session();
+        // The session's MCP server restarted: a second connection.
+        d.add(
+            10,
+            "Agent Screen 4".into(),
+            DEFAULT_SIZE,
+            session_owner("s", 3, "订机票"),
+            (),
+        );
+        d.access_mut(7).unwrap().grant_all();
+        assert_eq!(d.connection_closed(1), vec![7, 8]);
+        assert!(d.access(10).unwrap().scope.is_some());
+        assert_eq!(d.connection_closed(3), vec![10]);
+        assert_eq!(d.sessions.get("s").unwrap().access.scope, None);
+    }
+
+    #[test]
+    fn displays_of_one_session_get_distinct_titles_as_they_join() {
+        let mut d = displays();
+        for id in [8, 9] {
+            d.add(id, "Agent Screen".into(), DEFAULT_SIZE, owner(1), ());
+        }
+        let titles: Vec<String> = [7, 8, 9]
+            .iter()
+            .map(|&id| d.get(id).unwrap().owner.as_ref().unwrap().title.clone())
+            .collect();
+        assert_eq!(titles, ["订机票", "订机票 2", "订机票 3"]);
+        // Another session keeps its own title.
+        d.add(
+            10,
+            "Agent Screen".into(),
+            DEFAULT_SIZE,
+            session_owner("t", 2, "订机票"),
+            (),
+        );
+        assert_eq!(d.get(10).unwrap().owner.as_ref().unwrap().title, "订机票");
     }
 }

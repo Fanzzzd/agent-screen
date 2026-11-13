@@ -26,7 +26,7 @@ use agent_screen_model::session::Orphans;
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
 use futures::FutureExt;
-use gpui::{AsyncApp, Entity};
+use gpui::{App, AsyncApp, Entity};
 use objc2::MainThreadMarker;
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
@@ -195,7 +195,7 @@ async fn handle_one(
         && !method.starts_with("debug")
         && let Some(id) = p.int("displayId")
     {
-        usable(&core, connection, id as DisplayId, method, cx)?;
+        usable(&core, connection, &p, id as DisplayId, method, cx)?;
     }
     // A window an app makes right after the agent drives the display is
     // the agent's; the kept catches go by this.
@@ -1049,6 +1049,15 @@ async fn handle_one(
                     let matcher = matcher.clone();
                     move || {
                         let mut ids = AppIds::default();
+                        // The app has a window here already: that one is
+                        // what the agent means, as before ADR 0016.
+                        if wanted.is_none()
+                            && windows::on_display(id).iter().any(|w| {
+                                w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
+                            })
+                        {
+                            return None;
+                        }
                         others.into_iter().find_map(|o| {
                             windows::on_display(o)
                                 .into_iter()
@@ -1174,7 +1183,7 @@ async fn handle_one(
                 Some(from) => Some(
                     core.update(cx, |c, cx| {
                         cx.notify();
-                        c.displays.move_between(from, id, window.target)
+                        c.displays.move_between(from, id, window.target, false)
                     })
                     .map_err(ControlError::failed)?,
                 ),
@@ -2004,7 +2013,7 @@ async fn handle_one(
         #[cfg(debug_assertions)]
         "debugUserWindow" if debug_methods() => {
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
-            usable(&core, connection, id, "debugUserWindow", cx)?;
+            usable(&core, connection, &p, id, "debugUserWindow", cx)?;
             if !cg::window_display_role(id).accepts_window_request() {
                 return Err(ControlError::invalid(
                     "debugUserWindow needs this session's user stand-in stage (debugShow userStage)",
@@ -2201,7 +2210,7 @@ async fn handle_one(
             let id = p.int("displayId").unwrap_or(0) as DisplayId;
             #[cfg(debug_assertions)]
             if surface == "userStage" {
-                usable(&core, connection, id, "debugShow", cx)?;
+                usable(&core, connection, &p, id, "debugShow", cx)?;
                 let shell =
                     crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
                 let selected = shell
@@ -2233,7 +2242,7 @@ async fn handle_one(
                         "input queue previews require the isolated e2e instance",
                     ));
                 }
-                usable(&core, connection, id, "debugShow", cx)?;
+                usable(&core, connection, &p, id, "debugShow", cx)?;
                 // A new preview's steps replace an earlier preview's.
                 if !matches!(
                     surface.as_str(),
@@ -2517,21 +2526,26 @@ async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
     })
 }
 
-/// A display this connection may use for `method`: one its Agent Session
-/// owns, and still live unless the method is about ending.
+/// A display the request's Agent Session may use for `method`: one it
+/// owns, and still live unless the method is about ending. The request
+/// names its session with `sessionKey`, so one connection serves several
+/// sessions (ADR 0016). An MCP server built before that names none; then
+/// it is the last session that called createDisplay on the connection.
 fn usable(
     core: &Entity<Core>,
     connection: u64,
+    p: &Args<'_>,
     id: DisplayId,
     method: &str,
     cx: &mut AsyncApp,
 ) -> Result<(), ControlError> {
+    let named = p.string("sessionKey").filter(|k| !k.is_empty());
     core.read_with(cx, |c, _| {
         let Some(d) = c.displays.get(id) else {
             // Gone or never there: the method's own lookup says which.
             return Ok(());
         };
-        let mine = c.sessions.get(&connection);
+        let mine = named.as_ref().or_else(|| c.sessions.get(&connection));
         let owner = d.owner.as_ref().map(|o| &o.session_key);
         if mine.is_none() || owner != mine {
             return Err(ControlError::not_found(format!(
@@ -2575,31 +2589,8 @@ async fn create_display(
     // Another display for the session, beside the ones it has (ADR 0016).
     let new = p.0.get("new") == Some(&Value::Bool(true));
     let orphans = orphans_param(p);
-    if !new
-        && let Some(mut existing) = core.update(cx, |c, cx| {
-            let id = c.displays.for_session(&session_key)?.id;
-            adopt_orphans(c, &session_key, id, &orphans);
-            cx.notify();
-            let d = c.displays.get(id)?;
-            Some((describe(d, true), (d.width, d.height)))
-        })
-    {
-        let (w, h) = existing.1;
-        let mut notes = Vec::new();
-        if asked.0.is_some_and(|a| a.round() != w) || asked.1.is_some_and(|a| a.round() != h) {
-            notes.push(format!(
-                "this session already has a {w}×{h} display, reused as is; end_display first for another size, or pass new: true for another display"
-            ));
-        }
-        let id = existing.0["displayId"].as_u64().unwrap_or_default() as DisplayId;
-        if let Some(several) = core.read_with(cx, |c, _| session_displays(c, &session_key, id)) {
-            existing.0["displays"] = several.0;
-            notes.push(several.1);
-        }
-        if !notes.is_empty() {
-            existing.0["note"] = json!(notes.join(". "));
-        }
-        return Ok(existing.0);
+    if !new && let Some(existing) = reuse(core, &session_key, &orphans, asked, cx) {
+        return Ok(existing);
     }
     if new && let Err(cap) = core.read_with(cx, |c, _| c.displays.sessions.may_add(&session_key)) {
         return Err(ControlError::failed(cap.message()));
@@ -2616,20 +2607,8 @@ async fn create_display(
         .round();
     let clamped =
         asked.0.is_some_and(|a| a.round() != width) || asked.1.is_some_and(|a| a.round() != height);
-    // Two displays of one session tell apart by their titles.
-    let title = core.read_with(cx, |c, _| {
-        let taken: Vec<String> = c
-            .displays
-            .of_session(&session_key)
-            .into_iter()
-            .filter_map(|id| c.displays.get(id))
-            .filter_map(|d| d.owner.as_ref().map(|o| o.title.clone()))
-            .collect();
-        distinct_title(
-            p.string("title").unwrap_or_else(|| "Untitled".into()),
-            &taken,
-        )
-    });
+    // The model numbers a second display's title as it joins.
+    let title = p.string("title").unwrap_or_else(|| "Untitled".into());
     let owner = Owner {
         session_key,
         client: p.string("client").unwrap_or_else(|| "Agent".into()),
@@ -2708,12 +2687,18 @@ async fn create_display(
                 .err()
                 .map(|cap| Err(ControlError::failed(cap.message())))
         } else {
-            c.displays.for_session(&key).map(|d| Ok(describe(d, true)))
+            None
         }
     });
     if let Some(answer) = raced {
         drop(made);
         return answer;
+    }
+    // A parallel call made the session's display meanwhile: reuse it as a
+    // call after it would, orphans and all.
+    if !new && let Some(existing) = reuse(core, &key, &orphans, asked, cx) {
+        drop(made);
+        return Ok(existing);
     }
     let reply = core
         .update(cx, |c, cx| {
@@ -2804,10 +2789,10 @@ async fn create_display(
     Ok(reply)
 }
 
-/// createDisplay's `adopt`: the apps the session started on displays that
-/// ended when the app quit, by the display they were on. An MCP server
-/// built before ADR 0016 sends bare pids, which go to the display this
-/// call makes or reuses.
+/// createDisplay's `adoptGroups`: the apps the session started on displays
+/// that ended when the app quit, by the display they were on. An MCP
+/// server built before ADR 0016 sends only `adopt`, bare pids, which go to
+/// the display this call makes or reuses.
 fn orphans_param(p: &Args) -> Vec<Orphans> {
     let pids = |v: &Value| -> Vec<i32> {
         v.as_array()
@@ -2819,29 +2804,30 @@ fn orphans_param(p: &Args) -> Vec<Orphans> {
             })
             .unwrap_or_default()
     };
-    let Some(list) = p.0.get("adopt").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let bare = pids(&Value::Array(list.clone()));
-    let mut out: Vec<Orphans> = list
-        .iter()
-        .filter_map(Value::as_object)
-        .map(|group| Orphans {
-            display: group
-                .get("display")
-                .and_then(Value::as_u64)
-                .and_then(|d| DisplayId::try_from(d).ok())
-                .unwrap_or_default(),
-            pids: group.get("pids").map(pids).unwrap_or_default(),
-        })
-        .collect();
-    if !bare.is_empty() {
-        out.push(Orphans {
-            display: 0,
-            pids: bare,
-        });
+    // `adoptGroups` names the display each group was on; `adopt` is the
+    // same pids flat, for an app older than ADR 0016 (ADR 0005).
+    if let Some(groups) = p.0.get("adoptGroups").and_then(Value::as_array) {
+        return groups
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|group| Orphans {
+                display: group
+                    .get("display")
+                    .and_then(Value::as_u64)
+                    .and_then(|d| DisplayId::try_from(d).ok())
+                    .unwrap_or_default(),
+                pids: group.get("pids").map(pids).unwrap_or_default(),
+            })
+            .collect();
     }
-    out
+    let bare = p.0.get("adopt").map(pids).unwrap_or_default();
+    if bare.is_empty() {
+        return Vec::new();
+    }
+    vec![Orphans {
+        display: 0,
+        pids: bare,
+    }]
 }
 
 /// Give the session's orphaned apps to its displays (`session::adoption`):
@@ -2869,16 +2855,38 @@ fn adopt_orphans(c: &mut Core, key: &str, id: DisplayId, orphans: &[Orphans]) {
     }
 }
 
-/// A task title no other live display of the session has: "Book flights
-/// 2" beside "Book flights", so their Display Labels differ.
-fn distinct_title(title: String, taken: &[String]) -> String {
-    if !taken.contains(&title) {
-        return title;
+/// createDisplay without `new` for a session with a live display: its
+/// latest, which adopts the session's orphans, with a note naming the
+/// session's displays when it has several. None when it has none.
+fn reuse(
+    core: &Entity<Core>,
+    key: &str,
+    orphans: &[Orphans],
+    asked: (Option<f64>, Option<f64>),
+    cx: &mut AsyncApp,
+) -> Option<Value> {
+    let (mut existing, (w, h)) = core.update(cx, |c, cx| {
+        let id = c.displays.for_session(key)?.id;
+        adopt_orphans(c, key, id, orphans);
+        cx.notify();
+        let d = c.displays.get(id)?;
+        Some((describe(d, true), (d.width, d.height)))
+    })?;
+    let mut notes = Vec::new();
+    if asked.0.is_some_and(|a| a.round() != w) || asked.1.is_some_and(|a| a.round() != h) {
+        notes.push(format!(
+            "this session already has a {w}×{h} display, reused as is; end_display first for another size, or pass new: true for another display"
+        ));
     }
-    (2..)
-        .map(|n| format!("{title} {n}"))
-        .find(|t| !taken.contains(t))
-        .unwrap_or(title)
+    let id = existing["displayId"].as_u64().unwrap_or_default() as DisplayId;
+    if let Some(several) = core.read_with(cx, |c, _| session_displays(c, key, id)) {
+        existing["displays"] = several.0;
+        notes.push(several.1);
+    }
+    if !notes.is_empty() {
+        existing["note"] = json!(notes.join(". "));
+    }
+    Some(existing)
 }
 
 /// The session's live displays and a note naming them, when it has more
@@ -2915,7 +2923,10 @@ fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
         "height": d.height as i64,
         "scale": shot_scale((d.width, d.height)),
         "label": d.label(),
-        "reused": reused
+        "reused": reused,
+        // This app takes `new` and `adoptGroups` (ADR 0016). An MCP server
+        // refuses `new` against an app whose reply lacks it.
+        "multiDisplay": true
     })
 }
 
@@ -3031,6 +3042,19 @@ fn still_agents(
                 .get(id)
                 .is_some_and(|d| d.is_stray(target, false))
     })
+}
+
+/// Catch on display `to` the later windows of apps `pids`, which an ended
+/// display of the session started and handed to `to` (ADR 0016).
+pub fn catch_again(core: Entity<Core>, to: DisplayId, pids: Vec<i32>, cx: &mut App) {
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(to, mtm));
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for pid in pids {
+            let catch = crate::mac::catch::Catch::start(pid, to, screen.clone(), None).await;
+            keep_catch(&core, to, catch, cx);
+        }
+    })
+    .detach();
 }
 
 /// Keep the catch on an app this display's session started, for as long
@@ -3937,7 +3961,7 @@ async fn move_between_own(
     let moved = core
         .update(cx, |c, cx| {
             cx.notify();
-            c.displays.move_between(from, to, target)
+            c.displays.move_between(from, to, target, true)
         })
         .map_err(ControlError::failed)?;
     if let Err(e) = place_and_hold(target, to, cx).await {

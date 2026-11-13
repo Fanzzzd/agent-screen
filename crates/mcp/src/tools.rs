@@ -386,12 +386,14 @@ pub fn definitions() -> Vec<Value> {
                 "Act on what the user told you in this chat about their windows. Agent Screen trusts you to relay their",
                 "words and can't check them: use it only for an explicit instruction, quoted in user_instruction.",
                 "grant lets this session take the user's windows of the named apps, or all: true for every app, with",
-                "place_window and no request card. It lasts until revoke, end_display or the end of this session; it covers",
-                "no window on another agent's display, and pauses while the user is in control. A window the user took",
-                "back stays out of it until they tell you to take that window again (place_window with user_instruction).",
-                "revoke takes the grant back, or some of its apps; windows already here stay. return gives Handovers back",
-                "to where they came from, by window_id or all: true; your own windows never go this way. status says",
-                "what the grant covers. Every action returns the status.",
+                "place_window and no request card, onto any of its displays. It lasts until revoke, or until this session",
+                "has no display left; it covers no window on another agent's display, and pauses on a display while the",
+                "user is in control of it. A window the user took back stays out of it until they tell you to take that",
+                "window again (place_window with user_instruction). revoke takes the grant back, or some of its apps;",
+                "windows already here stay. return gives Handovers back to where they came from, by window_id or all:",
+                "true; your own windows never go this way. return and status cover the Handovers of display_id only:",
+                "with Handovers on several displays, call return for each. status says what the grant covers. Every",
+                "action returns the status.",
             ],
             object(
                 json!({
@@ -718,6 +720,20 @@ fn require_text(value: Option<String>, action: &str) -> Result<String, ControlEr
 
 /// create_display's note after the app quit and took the session's
 /// display with it.
+/// `new: true` answered by an app older than ADR 0016, which ignores it
+/// and reuses the session's display: say so, rather than hand the agent
+/// the display it already has as if it were another.
+fn needs_newer_app(new: bool, reply: &Object) -> Option<ControlError> {
+    let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
+    let able = reply.get("multiDisplay").and_then(Value::as_bool) == Some(true);
+    (new && reused && !able).then(|| {
+        ControlError::new("failed", format!(
+            "the running Agent Screen app is older than this MCP server and can't give a session a second display. Ask the user to update Agent Screen. Until then, keep using display {}",
+            reply.get("displayId").and_then(Value::as_u64).unwrap_or_default()
+        ))
+    })
+}
+
 const RESTARTED: &str = "Agent Screen quit since your last call and restarted; your earlier display ended with it, and macOS moved its windows to the user's screen. Windows of apps you launched there are strays now: list_windows with strays: true, then place_window.";
 
 /// What a call naming a display that ended when the app quit gets back.
@@ -759,10 +775,18 @@ pub async fn run(
             // their windows, now on the user's screen, are strays here.
             // Only this session's, by the display they were on.
             let orphans = control.orphans(&session.key);
-            let adopt = orphans.as_ref().map(|groups| {
+            let groups = orphans.as_ref().map(|groups| {
                 groups
                     .iter()
                     .map(|(display, pids)| json!({ "display": display, "pids": pids }))
+                    .collect::<Vec<_>>()
+            });
+            // The same pids flat, for an app older than ADR 0016, which
+            // reads only `adopt` (ADR 0005).
+            let adopt = orphans.as_ref().map(|groups| {
+                groups
+                    .iter()
+                    .flat_map(|(_, pids)| pids.clone())
                     .collect::<Vec<_>>()
             });
             let reply = control
@@ -775,12 +799,17 @@ pub async fn run(
                         "width": a.int("width")?,
                         "height": a.int("height")?,
                         "new": new,
-                        "adopt": adopt
+                        "adopt": adopt,
+                        "adoptGroups": groups
                     }),
                 )
                 .await?;
+            let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
             if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
-                control.made_display(id, &session.key);
+                control.made_display(id, &session.key, reused);
+            }
+            if let Some(error) = needs_newer_app(new, &reply) {
+                return Err(error);
             }
             let mut out = json!({
                 "display_id": reply.get("displayId"),
@@ -2770,10 +2799,8 @@ mod tests {
         );
         let text = access["description"].as_str().unwrap();
         assert!(text.contains("can't check them"), "{text}");
-        assert!(
-            text.contains("pauses while the user is in control"),
-            "{text}"
-        );
+        assert!(text.contains("pauses on a display while the"), "{text}");
+        assert!(text.contains("display_id only"), "{text}");
     }
 
     #[test]
@@ -2789,5 +2816,27 @@ mod tests {
             a.require_int("window_id").unwrap_err().message,
             "window_id is required"
         );
+    }
+
+    #[test]
+    fn new_against_an_app_without_multi_display_is_an_error() {
+        let reply = |reused: bool, able: bool| -> Object {
+            let mut reply = json!({ "displayId": 7, "reused": reused });
+            if able {
+                reply["multiDisplay"] = json!(true);
+            }
+            reply.as_object().unwrap().clone()
+        };
+        let error = needs_newer_app(true, &reply(true, false)).unwrap();
+        assert!(
+            error.message.contains("update Agent Screen"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("display 7"), "{}", error.message);
+        // The old app made a first display: that is what new asked for.
+        assert!(needs_newer_app(true, &reply(false, false)).is_none());
+        assert!(needs_newer_app(true, &reply(true, true)).is_none());
+        assert!(needs_newer_app(false, &reply(true, false)).is_none());
     }
 }

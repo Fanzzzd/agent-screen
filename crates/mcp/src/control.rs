@@ -81,6 +81,24 @@ pub struct Control {
 /// A window's tree in one read scope: display, window and scope.
 type TreeKey = (i64, i64, agent_screen_model::tree::Scope);
 
+tokio::task_local! {
+    /// The Agent Session whose tool call is running. Every request to the
+    /// app names it, so one connection serves several sessions, as Codex
+    /// runs them (ADR 0016).
+    pub static SESSION_KEY: String;
+}
+
+/// `params` with the running tool call's session key, unless it names one.
+fn with_session(mut params: Value) -> Value {
+    if let Value::Object(map) = &mut params
+        && !map.contains_key("sessionKey")
+        && let Ok(key) = SESSION_KEY.try_with(Clone::clone)
+    {
+        map.insert("sessionKey".into(), Value::String(key));
+    }
+    params
+}
+
 #[derive(Default)]
 struct Made {
     session: String,
@@ -122,16 +140,20 @@ impl Control {
             .cloned()
     }
 
-    /// Note a display session `session` made or reused on the current
-    /// connection.
-    pub fn made_display(&self, id: u64, session: &str) {
+    /// Note a display session `session` made, or reused when `reused`, on
+    /// the current connection. A display made anew, or one the app handed
+    /// to another session under an old id, starts with no apps: its old
+    /// apps were another display's, maybe another session's (ADR 0016).
+    pub fn made_display(&self, id: u64, session: &str, reused: bool) {
         let connection = self.connections.load(Ordering::Relaxed);
-        self.made
-            .lock()
-            .unwrap()
-            .entry((id, connection))
-            .or_default()
-            .session = session.into();
+        let mut made = self.made.lock().unwrap();
+        let entry = made.entry((id, connection)).or_default();
+        if !reused || entry.session != session {
+            *entry = Made {
+                session: session.into(),
+                ..Made::default()
+            };
+        }
     }
 
     /// Note an app launch_app started for a display.
@@ -203,6 +225,7 @@ impl Control {
         method: &str,
         params: Value,
     ) -> Result<Object, ControlError> {
+        let params = with_session(params);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         connection.pending.lock().unwrap().insert(id, tx);
@@ -452,14 +475,14 @@ mod tests {
     fn a_display_ends_with_the_connection_it_was_made_on() {
         let control = Control::default();
         reconnect(&control);
-        control.made_display(7, "a");
+        control.made_display(7, "a", false);
         assert!(!control.ended_with_app(7));
         reconnect(&control);
         assert!(control.ended_with_app(7));
         // Not this session's: the app's own answer stands.
         assert!(!control.ended_with_app(8));
         // The restarted app gave the id to a new display.
-        control.made_display(7, "a");
+        control.made_display(7, "a", false);
         assert!(!control.ended_with_app(7));
     }
 
@@ -468,7 +491,7 @@ mod tests {
         let control = Control::default();
         reconnect(&control);
         assert_eq!(control.orphans("a"), None);
-        control.made_display(7, "a");
+        control.made_display(7, "a", false);
         control.started_app(7, 100);
         control.started_app(7, 101);
         // An app for a display this process didn't make isn't kept.
@@ -478,7 +501,7 @@ mod tests {
         assert_eq!(control.orphans("a"), Some(vec![(7, vec![100, 101])]));
         assert_eq!(control.orphans("a"), None);
         // A display with no apps still says the app quit.
-        control.made_display(8, "a");
+        control.made_display(8, "a", false);
         reconnect(&control);
         assert_eq!(control.orphans("a"), Some(vec![(8, vec![])]));
     }
@@ -487,20 +510,55 @@ mod tests {
     fn a_session_adopts_only_its_own_apps_by_the_display_they_were_on() {
         let control = Control::default();
         reconnect(&control);
-        control.made_display(7, "a");
+        control.made_display(7, "a", false);
         control.started_app(7, 100);
-        control.made_display(8, "a");
+        control.made_display(8, "a", false);
         control.started_app(8, 101);
-        control.made_display(9, "b");
+        control.made_display(9, "b", false);
         control.started_app(9, 200);
         reconnect(&control);
         // The app gave id 9 to session a's new display: b's apps stay b's.
-        control.made_display(9, "a");
+        control.made_display(9, "a", false);
         assert_eq!(
             control.orphans("a"),
             Some(vec![(7, vec![100]), (8, vec![101])])
         );
         assert_eq!(control.orphans("b"), Some(vec![(9, vec![200])]));
         assert_eq!(control.orphans("c"), None);
+    }
+
+    #[test]
+    fn a_display_id_made_again_forgets_the_apps_of_the_display_before() {
+        let control = Control::default();
+        reconnect(&control);
+        control.made_display(7, "a", false);
+        control.started_app(7, 100);
+        // Reused by its own session: the apps stay.
+        control.made_display(7, "a", true);
+        control.started_app(7, 101);
+        // Session a ended it; the app handed the spare back to b as 7.
+        control.made_display(7, "b", false);
+        control.started_app(7, 200);
+        reconnect(&control);
+        assert_eq!(control.orphans("a"), None);
+        assert_eq!(control.orphans("b"), Some(vec![(7, vec![200])]));
+    }
+
+    #[tokio::test]
+    async fn every_request_names_the_session_of_its_tool_call() {
+        let named = SESSION_KEY
+            .scope("a".into(), async {
+                with_session(json!({ "displayId": 7 }))
+            })
+            .await;
+        assert_eq!(named, json!({ "displayId": 7, "sessionKey": "a" }));
+        // createDisplay names its own; outside a tool call, nothing is added.
+        let own = SESSION_KEY
+            .scope("a".into(), async {
+                with_session(json!({ "sessionKey": "b" }))
+            })
+            .await;
+        assert_eq!(own, json!({ "sessionKey": "b" }));
+        assert_eq!(with_session(json!({})), json!({}));
     }
 }

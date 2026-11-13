@@ -549,7 +549,20 @@ impl Core {
             }
             crate::control::agent::release_hold(id);
             // An ended display takes no more windows, from catches either.
+            // An app it handed to a live display of the session is caught
+            // there instead.
+            let mut handed: std::collections::BTreeMap<DisplayId, Vec<i32>> = Default::default();
+            for (display, catch) in &self.kept_catches {
+                if *display == id
+                    && let Some(to) = self.displays.starter_of(catch.pid())
+                {
+                    handed.entry(to).or_default().push(catch.pid());
+                }
+            }
             self.kept_catches.retain(|(display, _)| *display != id);
+            for (to, pids) in handed {
+                crate::control::agent::catch_again(cx.entity(), to, pids, cx);
+            }
             stop_recording(id, cx);
             self.return_handovers(id, cx);
         }

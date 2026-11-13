@@ -106,7 +106,9 @@ impl ServerHandler for AgentScreen {
 
         let ct = context.ct.clone();
         let cancelled: tools::Cancelled = Box::pin(async move { ct.cancelled().await });
-        let outcome = tools::run(&request.name, &args, &session, &self.control, cancelled)
+        let run = tools::run(&request.name, &args, &session, &self.control, cancelled);
+        let outcome = control::SESSION_KEY
+            .scope(session.key.clone(), run)
             .await
             .map_err(|error| {
                 // The restarted app doesn't know the display: whatever it
