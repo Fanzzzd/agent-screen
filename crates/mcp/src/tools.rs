@@ -439,6 +439,9 @@ pub fn definitions() -> Vec<Value> {
                 "over as a Handover at once, without asking again. Under window_access granted for its app, it does too.",
                 "Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
                 "A window on another of this session's displays moves to this one at once, never asking the user, and keeps what it was there.",
+                "A window another agent session is using, or one on a display waiting for review, is never yours to take: Agent Screen asks the user,",
+                "naming that session, and Hand Over moves it here while that session is told. window_access never covers it, and user_instruction",
+                "moves it without asking only when the user's words name that window or app.",
                 "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
                 "One the app opens later by itself moves there too while none of its other windows is on the user's screen.",
@@ -451,7 +454,7 @@ pub fn definitions() -> Vec<Value> {
             object(
                 json!({
                     "display_id": display_id(),
-                    "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, one on another of your displays, or one already on this display." },
+                    "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, one on another of your displays, one another agent session is using (the user decides), or one already on this display." },
                     "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name or bundle id, e.g. \"UTM\" or \"com.utmapp.UTM\". A window in another AeroSpace workspace counts as the user's." },
                     "x": { "type": "number", "description": "Left edge in screenshot pixels from the display's left edge." },
                     "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
@@ -1316,6 +1319,13 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
     if let Some(from) = reply.get("movedFrom") {
         out["moved_from"] = from.clone();
     }
+    // From another agent session's display, on the user's word (ADR 0017).
+    if let Some(from) = reply.get("takenFrom").and_then(Value::as_str) {
+        out["taken_from"] = json!(from);
+        out["note"] = json!(format!(
+            "The user gave you this window, which {from} was using; that session is told. It is yours to work in now."
+        ));
+    }
     let Some(window) = reply.get("window") else {
         return out;
     };
@@ -1570,7 +1580,23 @@ fn wait_outcome(reply: &Object, resolution: &str, request: Option<&str>) -> Valu
             })
         }
         ("tookOver", _) => {
-            json!({ "control": "agent", "answer": "tookOver", "note": "The user took over and handed the display back. Take a screenshot before you continue: they may have changed things." })
+            let mut out = json!({ "control": "agent", "answer": "tookOver", "note": "The user took over and handed the display back. Take a screenshot before you continue: they may have changed things." });
+            // An answer the agent hadn't heard when the user took over:
+            // their words or window still count.
+            if let Some(text) = reply.get("text").and_then(Value::as_str) {
+                out["user_reply"] = json!(text);
+                out["note"] = json!(format!(
+                    "The user replied, then took over and handed the display back. Their words, exactly as typed: \"{text}\". Follow them as the user's instruction, and take a screenshot before you continue: they may have changed things."
+                ));
+            } else if let Some(window) = reply.get("window") {
+                let app = window.get("app").and_then(Value::as_str).unwrap_or("a");
+                let id = window.get("windowId").cloned().unwrap_or(Value::Null);
+                out["window"] = json!({ "window_id": id, "app": app, "title": window.get("title").cloned().unwrap_or(Value::Null) });
+                out["note"] = json!(format!(
+                    "The user handed over their {app} window, window {id}, then took over and handed the display back. Take a screenshot before you continue: they may have changed things."
+                ));
+            }
+            out
         }
         ("handedBack", _) => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
@@ -1617,6 +1643,20 @@ fn strayed_note(result: &serde_json::Map<String, Value>) -> String {
         };
         note.push_str(&format!(
             " A new {app} window, {id}, opened on the user's screen and stayed there: the user was using the app too, or it opened long after your last action. {next}"
+        ));
+    }
+    // Windows the user gave from this display to another agent session
+    // since the agent last heard (ADR 0017).
+    for w in result
+        .get("given")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let app = w.get("app").and_then(Value::as_str).unwrap_or("app");
+        let id = w.get("windowId").cloned().unwrap_or(Value::Null);
+        note.push_str(&format!(
+            " The user gave {app} to another agent session: window {id} is no longer on this display."
         ));
     }
     note
@@ -2420,6 +2460,22 @@ mod tests {
             note(&took).contains("took over and handed the display back"),
             "{took}"
         );
+        // A Reply or Give the Takeover superseded still reaches the agent.
+        let took_words = wait(json!({
+            "resolution": "tookOver", "request": "help",
+            "superseded": "instructions", "text": words
+        }));
+        assert_eq!(took_words["user_reply"], words);
+        assert!(note(&took_words).contains("then took over"), "{took_words}");
+        let took_window = wait(json!({
+            "resolution": "tookOver", "request": "help", "superseded": "handedOver",
+            "window": { "windowId": 31, "app": "Safari", "title": "United" }
+        }));
+        assert_eq!(took_window["window"]["window_id"], 31);
+        assert!(
+            note(&took_window).contains("Safari window"),
+            "{took_window}"
+        );
 
         // The agent's own withdrawal is never the user's hand-back.
         let withdrawn = wait(json!({ "resolution": "withdrawn", "request": "help" }));
@@ -2542,6 +2598,20 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("reserved menu bar strip")
+        );
+        // Another session's window the user gave.
+        let taken = place_output(
+            json!({ "takenFrom": "Claude Code · task B" })
+                .as_object()
+                .unwrap(),
+            &[("x", None), ("y", None), ("width", None), ("height", None)],
+        );
+        assert_eq!(taken["taken_from"], "Claude Code · task B");
+        assert!(
+            taken["note"]
+                .as_str()
+                .unwrap()
+                .contains("Claude Code · task B was using")
         );
         // A plain place has no frame to compare.
         assert_eq!(

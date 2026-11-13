@@ -299,55 +299,80 @@ impl Render for HelpCard {
                 request.title.clone()
             };
             let (give, keep) = (self.shell.clone(), self.shell.clone());
-            return card(
-                tf!(
-                    "{agent} asks for your {app} window",
-                    "{agent} 想要你的 {app} 窗口"
-                ),
-                tf!(
-                    "“{window}” goes to its display. You can take it back from the Windows menu.",
-                    "“{window}”会挪到它的显示器上，之后可以从“窗口”菜单收回。"
-                ),
-                &theme,
-            )
-            .child(
-                div()
-                    .h(px(LABEL))
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(theme.secondary)
-                    .child(display.label()),
-            )
-            .child(
-                div()
-                    .h(px(BUTTONS))
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        card_button(
-                            "window-give",
-                            t("Hand Over", "交给它"),
-                            Tone::Orange,
-                            &theme,
+            // Another session's window, or one waiting for review: the card
+            // names who has it (ADR 0017).
+            let (title, body) = match display.requests.window_held() {
+                Some(held) => {
+                    let holder = held.label.clone();
+                    let where_it_is = if held.review {
+                        tf!(
+                            "It waits for your review on {holder}.",
+                            "它在待查看的 {holder} 上。"
                         )
-                        .flex_1()
-                        .on_click(move |_, _, cx| {
-                            tell(&give, cx, move |shell, cx| {
-                                shell.answer_window(id, true, cx);
-                            })
-                        }),
+                    } else {
+                        tf!("{holder} is using it.", "{holder} 正在使用。")
+                    };
+                    (
+                        tf!("{agent} asks for {app}", "{agent} 想要 {app}"),
+                        format!(
+                            "{where_it_is}{}",
+                            tf!(
+                                " Hand Over moves “{window}” to {agent}'s display.",
+                                "交给它后，“{window}”会挪到 {agent} 的显示器上。"
+                            )
+                        ),
                     )
-                    .child(
-                        card_button("window-keep", t("Keep", "留着"), Tone::Plain, &theme)
-                            .px(px(16.))
+                }
+                None => (
+                    tf!(
+                        "{agent} asks for your {app} window",
+                        "{agent} 想要你的 {app} 窗口"
+                    ),
+                    tf!(
+                        "“{window}” goes to its display. You can take it back from the Windows menu.",
+                        "“{window}”会挪到它的显示器上，之后可以从“窗口”菜单收回。"
+                    ),
+                ),
+            };
+            return card(title, body, &theme)
+                .child(
+                    div()
+                        .h(px(LABEL))
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(theme.secondary)
+                        .child(display.label()),
+                )
+                .child(
+                    div()
+                        .h(px(BUTTONS))
+                        .flex()
+                        .gap(px(8.))
+                        .child(
+                            card_button(
+                                "window-give",
+                                t("Hand Over", "交给它"),
+                                Tone::Orange,
+                                &theme,
+                            )
+                            .flex_1()
                             .on_click(move |_, _, cx| {
-                                tell(&keep, cx, move |shell, cx| {
-                                    shell.answer_window(id, false, cx);
+                                tell(&give, cx, move |shell, cx| {
+                                    shell.answer_window(id, true, cx);
                                 })
                             }),
-                    ),
-            )
-            .into_any_element();
+                        )
+                        .child(
+                            card_button("window-keep", t("Keep", "留着"), Tone::Plain, &theme)
+                                .px(px(16.))
+                                .on_click(move |_, _, cx| {
+                                    tell(&keep, cx, move |shell, cx| {
+                                        shell.answer_window(id, false, cx);
+                                    })
+                                }),
+                        ),
+                )
+                .into_any_element();
         }
         if let Some(reason) = display.requests.control_reason().map(String::from) {
             let (give, keep) = (self.shell.clone(), self.shell.clone());

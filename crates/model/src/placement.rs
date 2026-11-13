@@ -115,9 +115,9 @@ pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
         WindowSighting::OnAgentDisplay(Holder::Mine) => format!(
             "window {id} is on another of your Agent Displays, and it moved or closed while place_window looked for it. Call list_windows on your displays, then place_window again"
         ),
-        WindowSighting::OnAgentDisplay(Holder::OtherSession) => {
-            format!("window {id} is on another Agent Display, which another agent session holds")
-        }
+        WindowSighting::OnAgentDisplay(Holder::OtherSession) => format!(
+            "window {id} is on another Agent Display, which another agent session holds, and it moved or closed while place_window looked for it, or it is a panel or dialog. Call list_windows with strays: true, then place_window again: for another session's window it asks the user"
+        ),
         WindowSighting::OnAgentDisplay(Holder::Review) => format!(
             "window {id} is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
         ),
@@ -170,7 +170,7 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
                 .into()
         }
         AppSighting::OnAgentDisplay(Holder::OtherSession) => {
-            "its windows on screen are on other Agent Displays, which other agent sessions hold"
+            "its windows on screen are on other Agent Displays, which other agent sessions hold, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
                 .into()
         }
         AppSighting::OnAgentDisplay(Holder::Review) => {

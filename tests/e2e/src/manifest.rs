@@ -248,6 +248,7 @@ pub const SCRIPTS: &[Script] = &[
     script("compactstate", &[Elements], Core, Agent, 1),
     script("control", &[Takeover], Full, Hook, 1).no_app().manual(NEEDS_APP),
     script("conversation", &[Takeover, WindowAccess], Full, Hook, 1),
+    script("crosswindow", &[WindowAccess, Windows], Full, Hook, 2).hands_off(),
     script("cursormenu", &[Elements], Full, Agent, 1),
     script("demo", &[], Full, Hook, 3)
         .manual("it records the README's demo and writes docs/media/demo.gif"),

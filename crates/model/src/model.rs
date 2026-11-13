@@ -308,7 +308,10 @@ pub struct Display<H> {
     /// failure may put the window's record back.
     given_back: BTreeMap<WindowId, u64>,
     give_back_serial: u64,
-    handing_over: BTreeMap<WindowId, u64>,
+    pub(crate) handing_over: BTreeMap<WindowId, u64>,
+    /// Windows the user gave from this display to another Agent Session
+    /// (ADR 0017): no longer its own, and its session hears of them.
+    pub given: BTreeMap<WindowId, crate::held::Given>,
     /// The platform display. Only held: dropping it removes the display.
     #[allow(dead_code)]
     pub handle: H,
@@ -372,6 +375,8 @@ impl<H> Display<H> {
     /// Record a window Agent Screen put here. A Handover stays a Handover even
     /// if the agent places the same window again.
     pub fn claim(&mut self, target: WindowTarget, origin: Origin, home: Option<Home>) {
+        // Back on this display: no longer given away.
+        self.given.remove(&target.window_id);
         if self
             .records
             .get(&target.window_id)
@@ -452,6 +457,7 @@ impl<H> Display<H> {
             && !recorded_elsewhere
             && !self.returned.contains(&target.window_id)
             && !self.user_made.contains(&target.window_id)
+            && !self.given.contains_key(&target.window_id)
     }
 
     /// A stray must also be outside every Agent Display. The platform
@@ -698,6 +704,7 @@ impl<H> Displays<H> {
             given_back: BTreeMap::new(),
             give_back_serial: 0,
             handing_over: BTreeMap::new(),
+            given: BTreeMap::new(),
             handle,
         });
     }
@@ -866,7 +873,8 @@ impl<H> Displays<H> {
 
     /// Whether another session's display, or a display no session uses,
     /// holds this window: in its records, or as a window of an app its
-    /// session started that the user didn't make or take back. Window
+    /// session started that the user didn't make, take back or give to
+    /// another session (ADR 0017). Window
     /// Access never reaches such a window. The session's own other
     /// displays don't count: moving a window between them is a Placement
     /// (ADR 0016).
@@ -874,12 +882,7 @@ impl<H> Displays<H> {
         self.list
             .iter()
             .filter(|d| d.id != id && !self.same_session(id, d.id))
-            .any(|d| {
-                d.records.contains_key(&target.window_id)
-                    || (d.started.contains(&target.pid)
-                        && !d.user_made.contains(&target.window_id)
-                        && !d.returned.contains(&target.window_id))
-            })
+            .any(|d| d.holds(target))
     }
 
     /// Whether `authority` lets one of the user's windows go onto display
