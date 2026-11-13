@@ -19,7 +19,9 @@ use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refus
 use agent_screen_model::input_queue::Action;
 use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, WindowSighting};
 use agent_screen_model::real_click;
-use agent_screen_model::request::{Answer, Kind, NamedWindow, Resolution, Woken};
+use agent_screen_model::request::{
+    Answer, HelpAsked, Kind, NamedWindow, RequestId, Resolution, Woken,
+};
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
 use futures::FutureExt;
@@ -1498,12 +1500,19 @@ async fn handle_one(
             };
             let steps =
                 agent_screen_model::model::help_steps(steps).map_err(ControlError::invalid)?;
-            let request = core.update(cx, |c, cx| {
-                let request = c.displays.request_help(id, reason, steps);
+            // The asker's MCP server understands answers other than a
+            // Takeover (ADR 0015). One built earlier doesn't say so.
+            let answers = p.0.get("answers") == Some(&Value::Bool(true));
+            let asked = core.update(cx, |c, cx| {
+                let asked = c.displays.request_help(id, reason, steps, answers);
                 cx.notify();
-                request
+                asked
             });
-            Ok(json!({ "requestId": request }))
+            Ok(match asked {
+                Some(HelpAsked::Answered(woken)) => json!({ "answered": woken.to_json(false) }),
+                Some(HelpAsked::Opened(request)) => json!({ "requestId": request }),
+                None => json!({ "requestId": null }),
+            })
         }
         "withdrawHelp" => {
             let id = display(&core, &p, false, cx)?;
@@ -1526,7 +1535,7 @@ async fn handle_one(
                 .filter(|w| !w.trim().is_empty())
                 .ok_or_else(|| ControlError::invalid("userInstruction is required"))?;
             core.update(cx, |c, cx| {
-                c.answer(id, Kind::Help, Answer::Continue, cx)
+                c.answer(id, Kind::Help, None, Answer::Continue, cx)
                     .map_err(|why| ControlError::failed(why.message()))?;
                 // The agent relayed it: its next wait needn't hear it.
                 c.displays.forget_unheard(id);
@@ -1869,6 +1878,8 @@ async fn handle_one(
         // Test hook: the user hands a window over from the Windows menu.
         "debugHandOver" if debug_methods() => {
             let id = display(&core, &p, false, cx)?;
+            // As the Give menu does, unless `gave` is false: a drag.
+            let gave = p.0.get("gave") != Some(&Value::Bool(false));
             let window = p
                 .int("windowId")
                 .and_then(|w| windows::find(w as u32))
@@ -1876,7 +1887,7 @@ async fn handle_one(
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
                 .update(cx, |shell, cx| {
-                    shell.hand_over(window.target, Some(window.bounds), id, cx)
+                    shell.hand_over(window.target, Some(window.bounds), id, gave, cx)
                 })
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({}))
@@ -1908,12 +1919,14 @@ async fn handle_one(
         // Test hook: the user answers the display's Help Request, as the
         // card's buttons or the notification's actions do. `answer` is
         // continue, reply (with `text`), later or takeOver; `via`
-        // notification takes the notification's path.
+        // notification takes the notification's path, for the request
+        // `requestId` when given, as a notification posted for it carries.
         "debugAnswerHelp" if debug_methods() => {
             let id = display(&core, &p, false, cx)?;
             let answer = p.string("answer").unwrap_or_default();
             let text = p.string("text").unwrap_or_default();
             let via_notification = p.string("via").as_deref() == Some("notification");
+            let request = p.int("requestId").map(|r| r as RequestId);
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             // Typed into the card's field, then Send: the card tells the
             // Shell, as a click does, so the Shell isn't updating here.
@@ -1931,7 +1944,7 @@ async fn handle_one(
             }
             let answered = shell
                 .update(cx, |shell, cx| {
-                    shell.debug_answer_help(id, &answer, text, via_notification, cx)
+                    shell.debug_answer_help(id, &answer, text, via_notification, request, cx)
                 })
                 .map_err(|e| ControlError::failed(e.to_string()))?
                 .map_err(ControlError::invalid)?;
@@ -2127,10 +2140,23 @@ async fn handle_one(
                 .into_iter()
                 .map(|(id, r)| (id.to_string(), json!(r)))
                 .collect();
+            // The reply field, and whether the card has the keyboard.
+            let state = match crate::ui::shell::current()
+                .and_then(|shell| shell.read_with(cx, |shell, _| shell.card_window()).ok())
+                .flatten()
+            {
+                Some(card) => card
+                    .update(cx, |card, window, cx| card.debug_state(window, cx))
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            };
             Ok(json!({
                 "width": width,
                 "buttons": buttons,
                 "queueHeight": crate::ui::help_card::queue_height(),
+                "key": state.get("key"),
+                "cardKeys": state.get("cardKeys"),
+                "reply": state.get("reply"),
             }))
         }
         // Which picture the menu bar icon shows: idle, working, asking or setup.

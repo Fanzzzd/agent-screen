@@ -280,9 +280,10 @@ fn a_help_request_outranks_an_open_grant_card() {
         card::select(d, None, input.card_display(d), false)
     };
     assert_eq!(pick(&d, &input), Some(Card::Input(2)));
-    d.request_help(1, "Sign in".into(), Vec::new()).unwrap();
+    d.request_help(1, "Sign in".into(), Vec::new(), true)
+        .unwrap();
     assert_eq!(pick(&d, &input), Some(Card::Help(1)));
-    d.request_help(2, "Code".into(), Vec::new()).unwrap();
+    d.request_help(2, "Code".into(), Vec::new(), true).unwrap();
     d.withdraw_help(1);
     assert_eq!(pick(&d, &input), Some(Card::Help(2)));
     d.withdraw_help(2);

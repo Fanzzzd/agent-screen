@@ -9,7 +9,7 @@ use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
 use agent_screen_model::budget::{Budget, ColorState, MadeLimit};
-use agent_screen_model::request::{Answer, Effect, Kind, Unanswered};
+use agent_screen_model::request::{Answer, Effect, Kind, RequestId, Unanswered};
 use gpui::{App, AsyncApp, Context, Entity};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -618,6 +618,7 @@ impl Core {
         &mut self,
         id: DisplayId,
         kind: Kind,
+        request: Option<RequestId>,
         answer: Answer,
         cx: &mut Context<Self>,
     ) -> Result<(), Unanswered> {
@@ -627,7 +628,7 @@ impl Core {
             Answer::Give => "give",
             Answer::Keep => "keep",
         };
-        let effects = self.displays.answer(id, kind, answer)?;
+        let effects = self.displays.answer(id, kind, request, answer)?;
         log::info!(
             "display {id}: the user answered its {} request: {what}",
             kind.as_str()
@@ -650,8 +651,9 @@ impl Core {
                 Effect::HandOver { display, target } => {
                     if let Some(shell) = crate::ui::shell::current() {
                         cx.defer(move |cx| {
-                            let _ = shell
-                                .update(cx, |shell, cx| shell.hand_over(target, None, display, cx));
+                            let _ = shell.update(cx, |shell, cx| {
+                                shell.hand_over(target, None, display, false, cx)
+                            });
                         });
                     }
                 }

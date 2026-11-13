@@ -83,9 +83,10 @@ pub enum Native {
         x: f64,
     },
     /// The user clicked a notification about a display, or one of its
-    /// actions.
+    /// actions. `request`: the Help Request it was posted for.
     NotificationClicked {
         display: u32,
+        request: Option<u64>,
         action: super::notify::Action,
     },
     /// What macOS says about notifying, after `notify::check`.
@@ -1128,6 +1129,26 @@ pub fn set_keyable_while_typing(window: &NSWindow) {
 /// The Help Card's reply field opened (true) or closed.
 pub fn card_keys(on: bool) {
     CARD_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the Help Card may take the keyboard now.
+pub fn card_keys_on() -> bool {
+    CARD_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Give the keyboard back to the user's app if `window` has it. A panel
+/// that took the keyboard without activating Agent Screen gives it back
+/// only by leaving the screen, so it leaves and comes straight back, in
+/// one turn of the run loop, without taking the keyboard again.
+pub fn give_up_keys(window: &NSWindow) {
+    if window.isKeyWindow() {
+        window.orderOut(None);
+        window.orderFrontRegardless();
+    }
+}
+
+pub fn is_key(window: &NSWindow) -> bool {
+    window.isKeyWindow()
 }
 
 thread_local! {

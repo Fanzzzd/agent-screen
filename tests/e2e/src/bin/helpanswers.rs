@@ -7,10 +7,16 @@
 //! agent's own withdrawal never reads as the user's hand-back, an answer
 //! that came after the call timed out reaches the next wait_for_control,
 //! Later puts off one request and a new one with the same reason shows the
-//! card again, and the user's answer in chat closes the request. Captures
-//! the card and its reply field under target/e2e. The card shows on the
-//! user's screen. The hooks open the reply field without taking the
-//! keyboard, so the user's typing stays in their app.
+//! card again, and the user's answer in chat closes the request. Also the
+//! review's rules: an older agent's card offers Take Over and Later only, a
+//! reply goes exactly as typed and one too long for the notification opens
+//! on the card, the field goes and the card never keeps the keyboard when
+//! it closes or the card hides, an answer to a replaced request goes
+//! nowhere, a Handover without Give answers nothing, the icon stays orange
+//! in a Takeover, a Takeover wins over an unheard answer, and asking again
+//! hears it. Captures the card and its reply field under target/e2e. The
+//! card shows on the user's screen. The hooks open the reply field without
+//! taking the keyboard, so the user's typing stays in their app.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e helpanswers
 //!
@@ -80,7 +86,7 @@ fn test(
             .find(|w| w.width == 320.0 && w.layer > 0)
     };
     let wait_card = |visible: bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
         loop {
             let frame = card();
             if frame.is_some() == visible || std::time::Instant::now() >= deadline {
@@ -97,6 +103,34 @@ fn test(
         })
     };
     let lang = std::env::var("AGENTSCREEN_LANG").unwrap_or_else(|_| "system".into());
+    let keyboard_free = |painted: &Value| painted["key"] == false && painted["cardKeys"] == false;
+
+    // An agent whose MCP server predates the answers, as a raw requestHelp
+    // without `answers` on the stage: Take Over and Later only.
+    stage.call(
+        "requestHelp",
+        json!({ "displayId": stage_id, "reason": "Sign in to United." }),
+    )?;
+    wait_card(true);
+    sleep_ms(300);
+    let painted = stage.call("debugCard", json!({}))?;
+    let has = |id: &str| painted["buttons"].get(id).is_some();
+    check(
+        "an older agent's card offers Take Over and Later only",
+        has("help-take-over") && has("help-later") && !has("help-continue") && !has("help-reply"),
+        painted["buttons"].to_string(),
+    );
+    let refused = stage.call(
+        "debugAnswerHelp",
+        json!({ "displayId": stage_id, "answer": "continue" }),
+    )?;
+    check(
+        "an older agent's request takes no Continue",
+        refused["answered"] == false,
+        refused.to_string(),
+    );
+    stage.call("withdrawHelp", json!({ "displayId": stage_id }))?;
+    wait_card(false);
 
     // Continue, from the card.
     let waiting = client.begin("request_help", ask(30))?;
@@ -206,6 +240,69 @@ fn test(
         r.get("answer") == "instructions" && r.get("user_reply") == chinese,
         r.text(),
     );
+    let spaced = "  Use the work account,\nthen seat 12A.  ";
+    let waiting = client.begin("request_help", ask(30))?;
+    wait_card(true);
+    answer("reply", spaced, "notification")?;
+    let r = waiting.wait()?;
+    check(
+        "a reply keeps its spaces and line breaks",
+        r.get("user_reply") == spaced,
+        r.text(),
+    );
+
+    // Too long for the notification: the card opens the field with it.
+    let waiting = client.begin("request_help", ask(30))?;
+    wait_card(true);
+    let stale = stage.call(
+        "debugAnswerHelp",
+        json!({ "displayId": display_id, "answer": "continue", "via": "notification", "requestId": 1 }),
+    )?;
+    sleep_ms(300);
+    check(
+        "an answer to a request the agent replaced since goes nowhere",
+        stale["answered"] == false && card().is_some(),
+        stale.to_string(),
+    );
+    let long = "Use the work account. ".repeat(100);
+    let sent = answer("reply", &long, "notification")?;
+    sleep_ms(400);
+    let painted = stage.call("debugCard", json!({}))?;
+    check(
+        "a reply too long to send opens on the card with the draft",
+        sent["answered"] == false
+            && painted["reply"]["chars"] == long.chars().count()
+            && keyboard_free(&painted),
+        painted.to_string(),
+    );
+    if let Some(s) = card() {
+        let file = capture(
+            &format!("helpanswers-{lang}-reply-long"),
+            [s.x, s.y, s.width, s.height],
+        )?;
+        println!("     long reply: {}", file.display());
+    }
+    show("card-reply-cancel")?;
+    let painted = stage.call("debugCard", json!({}))?;
+    check(
+        "Cancel puts the field away and the card has no keyboard",
+        painted["reply"].is_null() && keyboard_free(&painted),
+        painted.to_string(),
+    );
+    // The field is open when the request ends from the notification.
+    show("card-reply")?;
+    answer("continue", "", "notification")?;
+    let r = waiting.wait()?;
+    let gone = wait_card(false).is_none();
+    let painted = stage.call("debugCard", json!({}))?;
+    check(
+        "the card hiding takes the field and gives up the keyboard",
+        r.get("answer") == "continue"
+            && gone
+            && painted["reply"].is_null()
+            && keyboard_free(&painted),
+        painted.to_string(),
+    );
 
     // Give a Window: the user's own Handover of their Field window.
     let field = stage.call(
@@ -227,6 +324,26 @@ fn test(
     )?;
     let waiting = client.begin("request_help", ask(30))?;
     wait_card(true);
+    // A Handover without Give, as a drag, answers nothing.
+    stage.call(
+        "debugHandOver",
+        json!({ "displayId": display_id, "windowId": window, "gave": false }),
+    )?;
+    sleep_ms(1500);
+    check(
+        "a Handover without Give leaves the request open",
+        card().is_some(),
+        "",
+    );
+    stage.call(
+        "debugTakeBack",
+        json!({ "displayId": display_id, "windowId": window }),
+    )?;
+    sleep_ms(1500);
+    stage.call(
+        "debugUserWindow",
+        json!({ "displayId": stage_id, "windowId": window }),
+    )?;
     stage.call(
         "debugHandOver",
         json!({ "displayId": display_id, "windowId": window }),
@@ -266,6 +383,12 @@ fn test(
         "a Takeover puts the card away",
         wait_card(false).is_none(),
         "",
+    );
+    let icon = stage.call("debugIcon", json!({}))?;
+    check(
+        "the menu bar icon still asks during the Takeover",
+        icon["state"] == "asking",
+        icon.to_string(),
     );
     let refused = answer("continue", "", "")?;
     check(
@@ -318,6 +441,55 @@ fn test(
     check(
         "the next wait_for_control hears the late reply",
         r.get("answer") == "instructions" && r.get("user_reply") == "Back now. Go ahead.",
+        r.text(),
+    );
+
+    // A Takeover wins over an answer the agent hasn't heard.
+    client.call("request_help", ask(1))?;
+    answer("continue", "", "")?;
+    stage.call(
+        "debugTakeover",
+        json!({ "displayId": display_id, "active": true }),
+    )?;
+    let r = client.call(
+        "wait_for_control",
+        json!({ "display_id": display_id, "timeout_seconds": 1 }),
+    )?;
+    // The note says the user still operates the display, or, when they
+    // have been idle a while, that they still have control.
+    check(
+        "in a Takeover the agent doesn't hear an earlier Continue, the user still operates",
+        r.get("control") == "user"
+            && r.get("answer").is_null()
+            && (r.text().contains("still operating") || r.text().contains("still has control"))
+            && !r.text().contains("Help Request"),
+        r.text(),
+    );
+    stage.call(
+        "debugTakeover",
+        json!({ "displayId": display_id, "active": false }),
+    )?;
+    let r = client.call(
+        "wait_for_control",
+        json!({ "display_id": display_id, "timeout_seconds": 5 }),
+    )?;
+    check(
+        "the hand-back brings the earlier answer",
+        r.get("answer") == "continue",
+        r.text(),
+    );
+
+    // Asking again hears an answer the user already gave.
+    client.call("request_help", ask(1))?;
+    answer("reply", "Pick the window seat.", "")?;
+    wait_card(false);
+    let r = client.call("request_help", ask(30))?;
+    sleep_ms(500);
+    check(
+        "asking again returns the answer and doesn't ask the user twice",
+        r.get("answeredEarlier") == true
+            && r.get("user_reply") == "Pick the window seat."
+            && card().is_none(),
         r.text(),
     );
 

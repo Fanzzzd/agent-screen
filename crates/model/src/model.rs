@@ -892,15 +892,17 @@ impl<H> Displays<H> {
     }
 
     /// The window is on the display: the user's own Hand Over, or their
-    /// word for it, brings it back under Window Access. The user's own
-    /// Hand Over of `window` also answers the display's open Help Request
-    /// (ADR 0015). False when a Take Back or another hand-over came first;
-    /// that one stands.
+    /// word for it, brings it back under Window Access. `gave` names the
+    /// window when the user gave it with Give, from the Viewer or the Help
+    /// Card: that Handover also answers the display's open Help Request
+    /// (ADR 0015). A Window Request's Hand Over, a drag or a window opened
+    /// from a launcher (ADR 0007) passes None. False when a Take Back or
+    /// another hand-over came first; that one stands.
     pub fn commit_hand_over(
         &mut self,
         id: DisplayId,
         ticket: &Ticket,
-        window: Option<NamedWindow>,
+        gave: Option<NamedWindow>,
     ) -> bool {
         if !self.still_ours(id, ticket) {
             return false;
@@ -911,13 +913,8 @@ impl<H> Displays<H> {
                 d.access.excluded.remove(&ticket.target.window_id);
             }
         }
-        if ticket.authority == Authority::User {
-            let window = window.unwrap_or(NamedWindow {
-                target: ticket.target,
-                app: String::new(),
-                title: String::new(),
-            });
-            self.user_handed_over(id, window);
+        if let Some(window) = gave.filter(|_| ticket.authority == Authority::User) {
+            self.user_gave(id, window);
         }
         true
     }
@@ -1776,7 +1773,7 @@ mod tests {
     fn withdrawing_help_frees_waiters() {
         let mut d = displays();
         assert!(!d.withdraw_help(7), "nothing to withdraw");
-        assert!(d.request_help(7, "登录".into(), Vec::new()).is_some());
+        assert!(d.request_help(7, "登录".into(), Vec::new(), true).is_some());
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
         };

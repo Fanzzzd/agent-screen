@@ -37,15 +37,15 @@ A state of an Agent Display in which the user operates it and the owning Agent S
 _Avoid_: pause, lock, manual mode
 
 **Help Request**:
-An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha) and up to five steps. The user answers it in one of four ways: a Takeover, which answers it when they hand control back; Continue, which lets the session go on without a Takeover; a Handover of one of their windows to that display; or a Reply. During a Takeover only the hand-back answers it. It also ends when the session withdraws it or the display ends (ADR 0015).
+An Agent Session asking the user to step in on its Agent Display, with a reason (a login, a captcha) and up to five steps. The user answers it in one of four ways: a Takeover, which answers it when they hand control back; Continue, which lets the session go on without a Takeover; a Handover of one of their windows to that display with Give; or a Reply. Only a session whose MCP server says it understands these answers is offered the last three. During a Takeover only the hand-back answers it. It also ends when the session withdraws it or the display ends (ADR 0015).
 _Avoid_: escalation, alert, ping
 
 **Reply** (回复):
-The user's own words for an Agent Session, typed on the Help Card or the notification to answer a Help Request. Agent Screen relays them unchanged and marks them as the user's; it does not read or check them.
+The user's own words for an Agent Session, typed on the Help Card or the notification to answer a Help Request. Agent Screen relays them exactly as typed, up to 2000 characters, and marks them as the user's; it does not read or check them.
 _Avoid_: message, chat
 
 **Help Card** (求助卡片):
-The card that drops from the menu bar icon while a Help Request is open: the display's picture, the agent's reason, and its answers: Take Over, Continue, Reply, Give a Window and Later, which puts it off. It stays until the Help Request ends or the user puts it off. A new Help Request brings it back, even with the same reason.
+The card that drops from the menu bar icon while a Help Request is open: the display's picture, the agent's reason, and its answers: Take Over, Continue, Reply, Give a Window and Later, which puts it off. It stays until the Help Request ends or the user puts it off, and steps aside during a Takeover. A new Help Request brings it back, even with the same reason.
 _Avoid_: alert, popup, banner
 
 **Recording** (录制):
@@ -81,7 +81,7 @@ Moving an app window onto or off an Agent Display. Either the Agent Session or t
 _Avoid_: pull, move, send back
 
 **Handover**:
-The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. The user's own Handover to a display with an open Help Request answers it.
+The user giving one of their own windows to an Agent Display so the Agent Session can work in it, through the interface or a conversation instruction. A Window Authorization can allow the Agent Session to do the Placement without asking again. A handed-over window keeps its return location and always returns to the user: when the Agent Session stops using its display, or when the display is dismissed. A Handover the user makes with Give, from the Viewer or the Help Card, to a display with an open Help Request answers it.
 _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
 **Window Request**:

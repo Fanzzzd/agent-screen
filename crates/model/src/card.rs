@@ -54,9 +54,14 @@ pub fn select<H>(
 }
 
 /// Whether any display asks the user something: the menu bar icon turns
-/// orange for it. The same request as the card's, put off or not.
+/// orange for it. Every open request counts, put off or not, and a Help
+/// Request in a Takeover too, where the card steps aside: the user may
+/// have collapsed the Viewer.
 pub fn asking<H>(displays: &Displays<H>) -> bool {
-    displays.list.iter().any(|d| d.asking().is_some())
+    displays
+        .list
+        .iter()
+        .any(|d| d.is_live() && d.requests.any_open())
 }
 
 #[cfg(test)]
@@ -79,7 +84,8 @@ mod tests {
     }
 
     fn help(d: &mut Displays<()>, id: DisplayId) {
-        d.request_help(id, "Sign in".into(), Vec::new()).unwrap();
+        d.request_help(id, "Sign in".into(), Vec::new(), true)
+            .unwrap();
     }
 
     fn control(d: &mut Displays<()>, id: DisplayId) {
@@ -128,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_asks_for_what_the_card_would_show() {
+    fn the_icon_asks_for_every_open_request() {
         let mut d = displays(&[1]);
         assert!(!asking(&d));
         help(&mut d, 1);
@@ -136,9 +142,10 @@ mod tests {
         // Put off: no card, but the icon still asks.
         assert_eq!(select(&d, None, None, false), None);
         assert!(asking(&d));
-        // In a Takeover the hand-back answers it: neither asks.
+        // In a Takeover only the card steps aside.
         d.begin_takeover(1);
-        assert!(!asking(&d));
+        assert!(asking(&d));
+        assert_eq!(select(&d, None, None, false), None);
         control(&mut d, 1);
         assert!(asking(&d));
         assert_eq!(select(&d, None, None, false), Some(Card::Request(1)));

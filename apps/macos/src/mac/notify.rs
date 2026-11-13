@@ -1,8 +1,11 @@
 //! System notifications: one while a display's Help, Window or Control
 //! Request is open, withdrawn when it ends, and one when an agent leaves
 //! windows on its display. Clicking one opens that display in the Viewer. A
-//! Help Request's Take Over also starts a Takeover; its Continue and Reply
-//! answer it without opening anything.
+//! Help Request's Take Over also starts a Takeover; its Continue and Reply,
+//! offered only to an agent that understands them (ADR 0015), answer it
+//! without opening anything. A Help Request's notification carries the
+//! request's id, so an answer to a request the agent has replaced since
+//! changes nothing.
 //!
 //! Agent Screen asks for permission from the setup window, or once at launch
 //! for people who set up before notifications existed; never while posting,
@@ -14,7 +17,7 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, define_class, msg_send};
-use objc2_foundation::{NSArray, NSError, NSSet, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSSet, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
@@ -55,8 +58,13 @@ pub enum Action {
 /// What a notification tells the user about a display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Note {
-    /// The agent asks for help, with its reason.
-    Help(String),
+    /// The agent asks for help, with its reason. `answers`: its agent
+    /// understands Continue and Reply.
+    Help {
+        reason: String,
+        request: u64,
+        answers: bool,
+    },
     /// An operation is waiting for approval in the shared input queue.
     Input(String),
     /// The agent asks for a window of this app.
@@ -76,7 +84,7 @@ pub enum Note {
 impl Note {
     fn prefix(&self) -> &'static str {
         match self {
-            Note::Help(_) => "help",
+            Note::Help { .. } => "help",
             Note::Input(_) => "input",
             Note::Window(_) => "window",
             Note::Elsewhere { .. } => "where",
@@ -129,11 +137,23 @@ define_class!(
                 }
                 _ => Action::Open,
             };
+            let request = response
+                .notification()
+                .request()
+                .content()
+                .userInfo()
+                .objectForKey(&NSString::from_str(REQUEST_KEY))
+                .and_then(|n| n.downcast::<NSNumber>().ok())
+                .map(|n| n.as_u64());
             if id.starts_with("input-") {
                 native::main_async(|| native::send(Native::InputQueueOpened));
             } else if let Some(display) = display {
                 native::main_async(move || {
-                    native::send(Native::NotificationClicked { display, action })
+                    native::send(Native::NotificationClicked {
+                        display,
+                        request,
+                        action,
+                    })
                 });
             }
             handler.call(());
@@ -165,7 +185,12 @@ fn withdraw_id(id: &str) {
 const TAKE_OVER: &str = "take-over";
 const CONTINUE: &str = "continue";
 const REPLY: &str = "reply";
+/// Take Over only, for an agent that understands nothing else.
 const HELP_CATEGORY: &str = "help";
+/// Take Over, Continue and Reply.
+const ANSWERS_CATEGORY: &str = "help-answers";
+/// The user info key of a Help Request notification's request id.
+const REQUEST_KEY: &str = "request";
 
 pub fn install() {
     let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
@@ -190,11 +215,17 @@ pub fn install() {
     );
     let help = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(HELP_CATEGORY),
+        &NSArray::from_retained_slice(std::slice::from_ref(&take_over)),
+        &NSArray::new(),
+        UNNotificationCategoryOptions::empty(),
+    );
+    let answers = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+        &NSString::from_str(ANSWERS_CATEGORY),
         &NSArray::from_retained_slice(&[take_over, go_on, Retained::into_super(reply)]),
         &NSArray::new(),
         UNNotificationCategoryOptions::empty(),
     );
-    center().setNotificationCategories(&NSSet::from_retained_slice(&[help]));
+    center().setNotificationCategories(&NSSet::from_retained_slice(&[help, answers]));
     DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
 }
 
@@ -242,10 +273,17 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
         return;
     };
     let id = identifier(note.prefix(), display);
-    if POSTED.with(|p| p.borrow().get(&id) == Some(&note)) {
+    let before = POSTED.with(|p| p.borrow().get(&id).cloned());
+    if before.as_ref() == Some(&note) {
         return;
     }
     POSTED.with(|p| p.borrow_mut().insert(id.clone(), note.clone()));
+    // The agent asked again with the same words: post it for the new
+    // request, quietly.
+    let same_words = matches!(
+        (&before, &note),
+        (Some(Note::Help { reason: old, .. }), Note::Help { reason, .. }) if old == reason
+    );
 
     let (title, body) = match &note {
         Note::Input(reason) => (
@@ -255,7 +293,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
                 "{reason} 在菜单栏图标下查看共享队列。本构建无法执行真实输入。"
             ),
         ),
-        Note::Help(reason) => (
+        Note::Help { reason, .. } => (
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason.clone(),
         ),
@@ -316,9 +354,28 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     if matches!(note, Note::Window(_) | Note::Control(_)) {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
     }
-    if matches!(note, Note::Help(_)) {
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
-        content.setCategoryIdentifier(&NSString::from_str(HELP_CATEGORY));
+    if let Note::Help {
+        request, answers, ..
+    } = &note
+    {
+        if !same_words {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
+        content.setCategoryIdentifier(&NSString::from_str(if *answers {
+            ANSWERS_CATEGORY
+        } else {
+            HELP_CATEGORY
+        }));
+        let key = NSString::from_str(REQUEST_KEY);
+        let value = NSNumber::new_u64(*request);
+        let info = NSDictionary::<NSString, NSNumber>::from_slices(&[&*key], &[&*value]);
+        // SAFETY: the dictionary's generic types only narrow its keys and
+        // values, and a string to a number is a property list, as user
+        // info must be.
+        unsafe {
+            let info: Retained<NSDictionary> = Retained::cast_unchecked(info);
+            content.setUserInfo(&info);
+        }
     }
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
         &NSString::from_str(&id),

@@ -1,6 +1,8 @@
 //! The Help Card's one-line reply field: what the user types goes to the
 //! agent as their words (ADR 0015). Text and input-method composition come
-//! through the field's input handler; Return sends, Escape cancels.
+//! through the field's input handler; Return sends, Escape cancels. The
+//! words go exactly as typed: a pasted line break stays in the reply and
+//! shows as a space in the one line.
 
 use gpui::{
     App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
@@ -14,6 +16,8 @@ use std::ops::Range;
 pub enum ReplyEvent {
     Send(String),
     Cancel,
+    /// The user clicked the field: the card takes the keyboard for it.
+    Focus,
 }
 
 pub struct ReplyField {
@@ -27,6 +31,8 @@ pub struct ReplyField {
     colors: (Hsla, Hsla, Hsla),
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// How far the line last moved left to keep the caret in view.
+    last_scroll: Pixels,
 }
 
 impl EventEmitter<ReplyEvent> for ReplyField {}
@@ -47,6 +53,7 @@ impl ReplyField {
             colors,
             last_layout: None,
             last_bounds: None,
+            last_scroll: px(0.),
         }
     }
 
@@ -111,7 +118,6 @@ impl ReplyField {
             }
             "v" if command => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let text = text.replace(['\n', '\r'], " ");
                     self.content.insert_str(self.caret, &text);
                     self.caret += text.len();
                 }
@@ -153,8 +159,7 @@ impl ReplyField {
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked.clone())
             .unwrap_or(self.caret..self.caret);
-        let text = text.replace(['\n', '\r'], " ");
-        self.content.replace_range(range.clone(), &text);
+        self.content.replace_range(range.clone(), text);
         range.start..range.start + text.len()
     }
 }
@@ -245,9 +250,10 @@ impl EntityInputHandler for ReplyField {
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range);
+        let left = bounds.left() - self.last_scroll;
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(left + line.x_for_index(range.start), bounds.top()),
+            point(left + line.x_for_index(range.end), bounds.bottom()),
         ))
     }
 
@@ -259,7 +265,7 @@ impl EntityInputHandler for ReplyField {
     ) -> Option<usize> {
         let bounds = self.last_bounds?;
         let line = self.last_layout.as_ref()?;
-        let index = line.closest_index_for_x(at.x - bounds.left());
+        let index = line.closest_index_for_x(at.x - bounds.left() + self.last_scroll);
         Some(self.utf16_of(index))
     }
 }
@@ -272,6 +278,10 @@ impl Render for ReplyField {
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(ReplyEvent::Focus)),
+            )
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -335,10 +345,15 @@ impl Element for Line {
     ) -> Painted {
         let field = self.field.read(cx);
         let style = window.text_style();
+        // A line break shows as a space, a byte for a byte, so offsets
+        // into the content hold for the line.
         let (text, color): (SharedString, Hsla) = if field.content.is_empty() {
             (field.placeholder.clone(), field.colors.1)
         } else {
-            (field.content.clone().into(), field.colors.0)
+            (
+                field.content.replace(['\n', '\r'], " ").into(),
+                field.colors.0,
+            )
         };
         let run = TextRun {
             len: text.len(),
@@ -428,9 +443,11 @@ impl Element for Line {
             window.paint_quad(caret);
         }
         let line = painted.line.clone();
+        let scroll = painted.scroll;
         self.field.update(cx, |field, _| {
             field.last_layout = Some(line);
             field.last_bounds = Some(bounds);
+            field.last_scroll = scroll;
         });
     }
 }

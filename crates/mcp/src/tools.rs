@@ -328,7 +328,8 @@ pub fn definitions() -> Vec<Value> {
                 "named in window), or instructions (they replied; user_reply holds their words exactly as typed).",
                 "Follow a reply as the user's instruction for this step. Take a screenshot before you go on.",
                 "On a timeout the request stays open; call wait_for_control to keep waiting, and it returns the",
-                "answer when it comes. If you got past it yourself, call request_help with withdraw: true. When the",
+                "answer when it comes. Asking again after the user answered returns that answer at once. If you got",
+                "past it yourself, call request_help with withdraw: true. When the",
                 "user answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the",
                 "request; use it only for an explicit answer the user gave in this chat.",
             ],
@@ -842,12 +843,25 @@ pub async fn run(
             let reason = a
                 .string("reason")?
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            control
+            // `answers`: this server tells the agent each answer, so the user
+            // is offered Continue, Reply and Give a Window (ADR 0015).
+            let asked = control
                 .call(
                     "requestHelp",
-                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps") }),
+                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps"), "answers": true }),
                 )
                 .await?;
+            // The user answered the last Help Request after its wait ended:
+            // that answer stands, and they aren't asked again.
+            if let Some(Value::Object(answered)) = asked.get("answered") {
+                let mut out = describe_wait(answered);
+                let note = out.get("note").and_then(Value::as_str).unwrap_or_default();
+                out["note"] = json!(format!(
+                    "The user answered your last Help Request after its wait ended, so they weren't asked again. {note}"
+                ));
+                out["answeredEarlier"] = json!(true);
+                return Ok(Output::Object(out));
+            }
             let reply = control
                 .call(
                     "waitForControl",
@@ -2324,7 +2338,7 @@ mod tests {
             "{go_on}"
         );
 
-        let words = "Use the work account, then pick seat 12A";
+        let words = "Use the work account,\nthen pick seat 12A ";
         let replied =
             wait(json!({ "resolution": "instructions", "request": "help", "text": words }));
         assert_eq!(replied["user_reply"], words, "the user's words, as typed");
@@ -2366,6 +2380,9 @@ mod tests {
         );
         let closed = wait(json!({ "resolution": "closedByUser" }));
         assert!(note(&closed).contains("closed the display"), "{closed}");
+        // In a Takeover the user is still at the display.
+        let busy = wait(json!({ "resolution": "timedOut", "request": null }));
+        assert!(note(&busy).contains("still operating"), "{busy}");
 
         // An app built before resolutions still reads right.
         let old = wait(json!({ "outcome": "timedOut", "helpOpen": true, "controlAsked": false }));
