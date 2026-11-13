@@ -66,9 +66,12 @@ pub struct Control {
     /// Connections opened so far. The app ends its displays when it quits,
     /// so one made on an earlier connection is gone.
     connections: AtomicU64,
-    /// Displays this session made, by id: the connection each was made on,
-    /// and the apps launch_app started there.
-    made: std::sync::Mutex<HashMap<u64, Made>>,
+    /// Displays this process made, by id and the connection each was made
+    /// on: the session each was made for, and the apps launch_app started
+    /// there. One process can serve several sessions (Codex names its
+    /// session per call), so each display keeps its session key, and an id
+    /// the app gives again after a restart is another display.
+    made: std::sync::Mutex<HashMap<(u64, u64), Made>>,
     /// The last element tree each window sent, by display, window and read scope, for
     /// act_on_element's changes and wait_for_change, and whether its read
     /// stopped at the element budget.
@@ -80,7 +83,7 @@ type TreeKey = (i64, i64, agent_screen_model::tree::Scope);
 
 #[derive(Default)]
 struct Made {
-    connection: u64,
+    session: String,
     started: Vec<i64>,
     /// Its apps were handed to a later display.
     adopted: bool,
@@ -119,44 +122,61 @@ impl Control {
             .cloned()
     }
 
-    /// Note a display this session made on the current connection.
-    pub fn made_display(&self, id: u64) {
-        let connection = self.connections.load(Ordering::Relaxed);
-        self.made.lock().unwrap().entry(id).or_default().connection = connection;
-    }
-
-    /// Note an app launch_app started for a display.
-    pub fn started_app(&self, display: u64, pid: i64) {
-        if let Some(made) = self.made.lock().unwrap().get_mut(&display) {
-            made.started.push(pid);
-        }
-    }
-
-    /// Whether a display this session made ended when the app quit.
-    pub fn ended_with_app(&self, id: u64) -> bool {
+    /// Note a display session `session` made or reused on the current
+    /// connection.
+    pub fn made_display(&self, id: u64, session: &str) {
         let connection = self.connections.load(Ordering::Relaxed);
         self.made
             .lock()
             .unwrap()
-            .get(&id)
-            .is_some_and(|m| m.connection < connection)
+            .entry((id, connection))
+            .or_default()
+            .session = session.into();
     }
 
-    /// The apps started for displays that ended when the app quit, taken
-    /// once, for the next display to adopt.
-    pub fn orphans(&self) -> Option<Vec<i64>> {
+    /// Note an app launch_app started for a display.
+    pub fn started_app(&self, display: u64, pid: i64) {
+        let connection = self.connections.load(Ordering::Relaxed);
+        if let Some(made) = self.made.lock().unwrap().get_mut(&(display, connection)) {
+            made.started.push(pid);
+        }
+    }
+
+    /// Whether a display this process made ended when the app quit: made
+    /// on an earlier connection, and not made again under its id since.
+    pub fn ended_with_app(&self, id: u64) -> bool {
+        let connection = self.connections.load(Ordering::Relaxed);
+        let made = self.made.lock().unwrap();
+        !made.contains_key(&(id, connection))
+            && made.keys().any(|&(d, c)| d == id && c < connection)
+    }
+
+    /// The apps session `session` started on displays that ended when the
+    /// app quit, by the display they were on, taken once, for its next
+    /// create_display to adopt. Never another session's: an app one agent
+    /// launched once went onto another agent's display (ADR 0016).
+    pub fn orphans(&self, session: &str) -> Option<Vec<(u64, Vec<i64>)>> {
         let connection = self.connections.load(Ordering::Relaxed);
         let mut made = self.made.lock().unwrap();
         let mut any = false;
-        let mut pids = Vec::new();
-        for m in made.values_mut() {
-            if m.connection < connection && !m.adopted {
+        let mut groups = Vec::new();
+        let mut keys: Vec<(u64, u64)> = made
+            .keys()
+            .filter(|&&(_, c)| c < connection)
+            .copied()
+            .collect();
+        keys.sort();
+        for key in keys {
+            let Some(m) = made.get_mut(&key) else {
+                continue;
+            };
+            if m.session == session && !m.adopted {
                 m.adopted = true;
                 any = true;
-                pids.append(&mut m.started);
+                groups.push((key.0, std::mem::take(&mut m.started)));
             }
         }
-        any.then_some(pids)
+        any.then_some(groups)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Object, ControlError> {
@@ -432,31 +452,55 @@ mod tests {
     fn a_display_ends_with_the_connection_it_was_made_on() {
         let control = Control::default();
         reconnect(&control);
-        control.made_display(7);
+        control.made_display(7, "a");
         assert!(!control.ended_with_app(7));
         reconnect(&control);
         assert!(control.ended_with_app(7));
         // Not this session's: the app's own answer stands.
         assert!(!control.ended_with_app(8));
+        // The restarted app gave the id to a new display.
+        control.made_display(7, "a");
+        assert!(!control.ended_with_app(7));
     }
 
     #[test]
     fn the_next_display_adopts_the_apps_started_on_ended_ones_once() {
         let control = Control::default();
         reconnect(&control);
-        assert_eq!(control.orphans(), None);
-        control.made_display(7);
+        assert_eq!(control.orphans("a"), None);
+        control.made_display(7, "a");
         control.started_app(7, 100);
         control.started_app(7, 101);
-        // An app for a display this session didn't make isn't kept.
+        // An app for a display this process didn't make isn't kept.
         control.started_app(9, 102);
-        assert_eq!(control.orphans(), None);
+        assert_eq!(control.orphans("a"), None);
         reconnect(&control);
-        assert_eq!(control.orphans(), Some(vec![100, 101]));
-        assert_eq!(control.orphans(), None);
+        assert_eq!(control.orphans("a"), Some(vec![(7, vec![100, 101])]));
+        assert_eq!(control.orphans("a"), None);
         // A display with no apps still says the app quit.
-        control.made_display(8);
+        control.made_display(8, "a");
         reconnect(&control);
-        assert_eq!(control.orphans(), Some(vec![]));
+        assert_eq!(control.orphans("a"), Some(vec![(8, vec![])]));
+    }
+
+    #[test]
+    fn a_session_adopts_only_its_own_apps_by_the_display_they_were_on() {
+        let control = Control::default();
+        reconnect(&control);
+        control.made_display(7, "a");
+        control.started_app(7, 100);
+        control.made_display(8, "a");
+        control.started_app(8, 101);
+        control.made_display(9, "b");
+        control.started_app(9, 200);
+        reconnect(&control);
+        // The app gave id 9 to session a's new display: b's apps stay b's.
+        control.made_display(9, "a");
+        assert_eq!(
+            control.orphans("a"),
+            Some(vec![(7, vec![100]), (8, vec![101])])
+        );
+        assert_eq!(control.orphans("b"), Some(vec![(9, vec![200])]));
+        assert_eq!(control.orphans("c"), None);
     }
 }

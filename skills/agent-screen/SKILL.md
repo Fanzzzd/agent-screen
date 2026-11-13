@@ -13,7 +13,7 @@ If your client lists the `agent-screen` tools by name only, load them before the
 
 ## Before any GUI work
 
-1. `create_display` with a short task title. It returns a `display_id`; calling it again returns the same one, also from your subagents. Leave the GUI work to one of them.
+1. `create_display` with a short task title. It returns a `display_id`; calling it again returns the same one, also from your subagents. Leave the GUI work to one of them. Only when the task needs two screens at once, pass `new: true` for another display, with its own title; a session may have four. Pass each tool the `display_id` of the display it acts on, and `end_display` each one you finish with.
 2. Open every app you will operate with `launch_app`, never `open -a`. Its window opens on your display. For a user's window, or an app you already opened another way, call `place_window` with the app's name. It asks the user unless they already authorized the Placement. If they explicitly told you to take that window in this conversation, pass their words as `user_instruction`; this hands over that window without another confirmation.
 
 The step is done when `list_windows` shows each window you will touch.

@@ -4,6 +4,7 @@
 use super::theme::Theme;
 use crate::i18n::{Lang, t};
 use crate::model::{Display, EndReason};
+use agent_screen_model::access::Access;
 use gpui::{Hsla, IntoElement, ParentElement, Styled, div, px, svg};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -150,12 +151,14 @@ pub struct AccessLine {
 }
 
 impl AccessLine {
-    pub fn of<H>(display: &Display<H>) -> Option<AccessLine> {
-        if !display.is_live() || display.access.scope.is_none() {
+    /// `access` is the session's, which covers all its displays.
+    pub fn of<H>(display: &Display<H>, access: Option<&Access>) -> Option<AccessLine> {
+        let access = access.filter(|a| a.scope.is_some())?;
+        if !display.is_live() {
             return None;
         }
         let agent = display.agent_name();
-        let apps = match display.access.app_names() {
+        let apps = match access.app_names() {
             None => t("all apps", "所有应用").to_string(),
             Some(names) => names.join(t(", ", "、")),
         };
@@ -247,8 +250,12 @@ mod tests {
         use agent_screen_model::access::AppId;
         crate::i18n::set_for_test(Lang::ZhHans);
         let mut d = display(true);
-        assert_eq!(AccessLine::of(d.get(7).unwrap()), None, "no grant");
-        let access = &mut d.get_mut(7).unwrap().access;
+        assert_eq!(
+            AccessLine::of(d.get(7).unwrap(), d.access(7)),
+            None,
+            "no grant"
+        );
+        let access = d.access_mut(7).unwrap();
         access.grant_apps([
             AppId {
                 bundle_id: "com.apple.Safari".into(),
@@ -259,23 +266,23 @@ mod tests {
                 name: "UTM".into(),
             },
         ]);
-        let line = AccessLine::of(d.get(7).unwrap()).unwrap();
+        let line = AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap();
         assert_eq!(line.long, "Codex 可以直接拿你的窗口：Safari、UTM");
         assert!(!line.paused);
         d.begin_takeover(7);
-        let line = AccessLine::of(d.get(7).unwrap()).unwrap();
+        let line = AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap();
         assert!(line.paused);
         assert_eq!(line.short, "窗口授权已暂停");
         crate::i18n::set_for_test(Lang::En);
         d.end_takeover(7);
-        d.get_mut(7).unwrap().access.grant_all();
+        d.access_mut(7).unwrap().grant_all();
         assert_eq!(
-            AccessLine::of(d.get(7).unwrap()).unwrap().long,
+            AccessLine::of(d.get(7).unwrap(), d.access(7)).unwrap().long,
             "Codex may take your windows of all apps without asking."
         );
         d.end(7, EndReason::Finished);
         assert_eq!(
-            AccessLine::of(d.get(7).unwrap()),
+            AccessLine::of(d.get(7).unwrap(), d.access(7)),
             None,
             "ends with the display"
         );

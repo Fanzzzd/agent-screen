@@ -140,6 +140,8 @@ pub fn definitions() -> Vec<Value> {
                 "cursor or keyboard. Call it when a task needs a screen: to open, operate, test or screenshot a Mac app or a",
                 "web page, in place of open -a, AppleScript, System Events or screencapture. Calling it again returns the same display, and so",
                 "does a call from a subagent of this session: let one subagent do all the GUI work.",
+                "Pass new: true only when the task needs a second screen at once, such as two apps side by side that each need",
+                "a full display; a session may use up to 4. Every tool takes the display_id of the display it acts on.",
                 "The returned display_id stays valid until end_display or until this session ends.",
                 "The result's width and height are the display in points; scale is screenshot pixels per point",
                 "(1 on the default 1280×800, less when the screenshot is scaled down).",
@@ -148,7 +150,8 @@ pub fn definitions() -> Vec<Value> {
             ],
             object(
                 json!({
-                    "title": { "type": "string", "description": "Short task title shown to the user, e.g. \"Book flights\"." },
+                    "title": { "type": "string", "description": "Short task title shown to the user, e.g. \"Book flights\". Give each of the session's displays its own." },
+                    "new": { "type": "boolean", "description": "Make another display for this session beside the ones it has, instead of returning its latest. Each new display costs the whole Mac a screen reconfiguration: use one display unless the task needs two at once. At most 4 per session; end_display one you no longer need first." },
                     "width": { "type": "integer", "description": "Width in points. Default 1280. Screenshots of wider displays are scaled down to fit the model's image limit." },
                     "height": { "type": "integer", "description": "Height in points. Default 800." }
                 }),
@@ -162,7 +165,7 @@ pub fn definitions() -> Vec<Value> {
             &[
                 "Finish with the display. It accepts no more input and its display_id stops working. Windows the user",
                 "handed over go back to them now. If other windows remain, it waits for the user to review them; give",
-                "each a set_disposition first. An empty display closes.",
+                "each a set_disposition first. An empty display closes. Your other displays, if any, go on.",
             ],
             object(json!({ "display_id": display_id() }), &["display_id"]),
             Hints {
@@ -433,6 +436,7 @@ pub fn definitions() -> Vec<Value> {
                 "theirs. When the user told you in this chat to take that window, pass their words as user_instruction: it goes",
                 "over as a Handover at once, without asking again. Under window_access granted for its app, it does too.",
                 "Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
+                "A window on another of this session's displays moves to this one at once, never asking the user, and keeps what it was there.",
                 "A new window of an app you started moves to the display by itself within 3 s of your input, element action or",
                 "launch there, unless the user meanwhile clicked or typed in the app, Finder, the Dock or a launcher such as Spotlight.",
                 "One the app opens later by itself moves there too while none of its other windows is on the user's screen.",
@@ -445,7 +449,7 @@ pub fn definitions() -> Vec<Value> {
             object(
                 json!({
                     "display_id": display_id(),
-                    "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, or one already on the display." },
+                    "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, one on another of your displays, or one already on this display." },
                     "app": { "type": "string", "description": "Instead of window_id: the app whose front window to move, by name or bundle id, e.g. \"UTM\" or \"com.utmapp.UTM\". A window in another AeroSpace workspace counts as the user's." },
                     "x": { "type": "number", "description": "Left edge in screenshot pixels from the display's left edge." },
                     "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
@@ -750,9 +754,17 @@ pub async fn run(
         )),
         "create_display" => {
             let title = a.string("title")?.unwrap_or_else(|| session.folder.clone());
+            let new = a.0.get("new").and_then(Value::as_bool).unwrap_or(false);
             // A display ended by the app quitting hands its apps on, so
             // their windows, now on the user's screen, are strays here.
-            let orphans = control.orphans();
+            // Only this session's, by the display they were on.
+            let orphans = control.orphans(&session.key);
+            let adopt = orphans.as_ref().map(|groups| {
+                groups
+                    .iter()
+                    .map(|(display, pids)| json!({ "display": display, "pids": pids }))
+                    .collect::<Vec<_>>()
+            });
             let reply = control
                 .call(
                     "createDisplay",
@@ -762,12 +774,13 @@ pub async fn run(
                         "title": title,
                         "width": a.int("width")?,
                         "height": a.int("height")?,
-                        "adopt": orphans
+                        "new": new,
+                        "adopt": adopt
                     }),
                 )
                 .await?;
             if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
-                control.made_display(id);
+                control.made_display(id, &session.key);
             }
             let mut out = json!({
                 "display_id": reply.get("displayId"),
@@ -776,6 +789,16 @@ pub async fn run(
                 "scale": reply.get("scale"),
                 "reused": reply.get("reused")
             });
+            if let Some(displays) = reply.get("displays").and_then(Value::as_array) {
+                out["displays"] = json!(
+                    displays
+                        .iter()
+                        .map(
+                            |d| json!({ "display_id": d.get("displayId"), "label": d.get("label") })
+                        )
+                        .collect::<Vec<_>>()
+                );
+            }
             if let Some(note) = reply.get("note") {
                 out["note"] = note.clone();
             } else if orphans.is_some() {
@@ -1259,6 +1282,10 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
     let mut out = json!({ "placed": true });
     if reply.get("handedOver") == Some(&Value::Bool(true)) {
         out["handedOver"] = json!(true);
+    }
+    // From another of the session's displays (ADR 0016).
+    if let Some(from) = reply.get("movedFrom") {
+        out["moved_from"] = from.clone();
     }
     let Some(window) = reply.get("window") else {
         return out;

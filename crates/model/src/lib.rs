@@ -26,6 +26,7 @@ pub mod request;
 pub mod returns;
 pub mod screen_edge;
 pub mod selection;
+pub mod session;
 pub mod shared_app;
 pub mod substitute;
 pub mod tree;

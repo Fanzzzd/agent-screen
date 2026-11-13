@@ -307,6 +307,7 @@ pub const SCRIPTS: &[Script] = &[
         "it needs SPARKLE_ED_KEY_FILE and builds the release bundle, which takes minutes",
     ),
     script("serials", &[Displays], Full, Agent, 6),
+    script("sessiondisplays", &[Displays, Windows, WindowAccess], Full, Agent, 2),
     script("settings", &[Settings], Core, Hook, 0).hands_off().env(&[("E2E_NOW", "1")]),
     script("shared", &[AgentInput], Full, Hook, 1).hands_off(),
     script("sharedbrowser", &[AgentInput, Browser, Elements], Full, Hook, 1).hands_off(),

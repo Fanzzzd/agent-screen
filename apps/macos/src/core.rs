@@ -524,10 +524,25 @@ impl Core {
             .detach();
     }
 
+    /// The Agent Session stops using display `id`: by end_display, or the
+    /// user closing it. Its other displays go on.
     pub fn end(&mut self, id: DisplayId, reason: EndReason, cx: &mut Context<Self>) {
-        #[cfg(debug_assertions)]
-        crate::mac::cg::clear_user_stage(id);
         if self.displays.end(id, reason) {
+            self.finished(&[id], cx);
+        }
+    }
+
+    /// What the platform does once for each display the model just ended,
+    /// whichever way it ended: end_display, the user closing it, or the
+    /// session's connection closing, which ends all of its displays
+    /// (ADR 0004, ADR 0016).
+    fn finished(&mut self, ended: &[DisplayId], cx: &mut Context<Self>) {
+        if ended.is_empty() {
+            return;
+        }
+        for &id in ended {
+            #[cfg(debug_assertions)]
+            crate::mac::cg::clear_user_stage(id);
             self.input_queue.end_display(id);
             if let Some(forwarder) = self.forwarders.get(&id) {
                 forwarder.stop_agent(true);
@@ -537,9 +552,9 @@ impl Core {
             self.kept_catches.retain(|(display, _)| *display != id);
             stop_recording(id, cx);
             self.return_handovers(id, cx);
-            cx.notify();
-            schedule_sweep(cx);
         }
+        cx.notify();
+        schedule_sweep(cx);
     }
 
     /// The user's windows go home as the agent stops using display `id`
@@ -566,9 +581,10 @@ impl Core {
                 // would race their move.
                 let Ok(given) = this.update(cx, |core, _| {
                     core.displays
-                        .get_mut(id)
-                        .filter(|d| d.handovers().contains(&target))
-                        .map(|d| d.give_back(target))
+                        .get(id)
+                        .is_some_and(|d| d.handovers().contains(&target))
+                        .then(|| core.displays.give_back(id, target))
+                        .flatten()
                 }) else {
                     return;
                 };
@@ -684,24 +700,14 @@ impl Core {
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage_connection(connection);
         self.closed.insert(connection);
+        // First, so the queue's requests stop as disconnected, not as
+        // their displays ending.
         self.input_queue.disconnect(connection);
         self.sessions.remove(&connection);
+        // Every display of the session ends, and its Window Access with
+        // the last one.
         let ended = self.displays.connection_closed(connection);
-        if !ended.is_empty() {
-            // As in `end`: an ended display takes no more windows.
-            self.kept_catches
-                .retain(|(display, _)| !ended.contains(display));
-            for &id in &ended {
-                if let Some(forwarder) = self.forwarders.get(&id) {
-                    forwarder.stop_agent(true);
-                }
-                crate::control::agent::release_hold(id);
-                stop_recording(id, cx);
-                self.return_handovers(id, cx);
-            }
-            cx.notify();
-            schedule_sweep(cx);
-        }
+        self.finished(&ended, cx);
     }
 
     /// Drop a display. An empty one stays connected as a spare while there

@@ -243,8 +243,13 @@ impl InputQueue {
         }) {
             self.queue.forget(id);
         }
-        if !self.queue.waiting().any(|r| &r.owner == owner)
-            && !self.queue.active().is_some_and(|r| &r.owner == owner)
+        // Done once nothing of the session's waits or runs, on any of its
+        // displays.
+        if !self.queue.waiting().any(|r| r.owner.same_session(owner))
+            && !self
+                .queue
+                .active()
+                .is_some_and(|r| r.owner.same_session(owner))
         {
             let now = self.now();
             self.queue.done(owner, now);
@@ -354,18 +359,19 @@ impl InputQueue {
         Ok(changed)
     }
 
+    /// The session is done with real input, on every display it has.
     pub fn done(&mut self, owner: &Owner) {
         let pending: Vec<_> = self
             .queue
             .waiting()
-            .filter(|r| &r.owner == owner)
-            .map(|r| r.id)
+            .filter(|r| r.owner.same_session(owner))
+            .map(|r| (r.id, r.owner.clone()))
             .collect();
-        for id in pending {
-            self.queue.withdraw(id, owner, self.now());
+        for (id, request_owner) in pending {
+            self.queue.withdraw(id, &request_owner, self.now());
         }
         self.queue.done(owner, self.now());
-        self.forget_terminal(|request_owner| request_owner == owner);
+        self.forget_terminal(|request_owner| request_owner.same_session(owner));
         self.tick();
     }
 

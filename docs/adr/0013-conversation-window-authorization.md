@@ -8,7 +8,7 @@ Agent Screen does not read the conversation. It trusts the Agent Session to rela
 
 A one-time instruction authorizes one Placement of the selected user window. It is carried with that operation, not stored as a general permission that a later call could reuse for another window.
 
-A continuing Window Authorization belongs to the current Agent Session and its Agent Display. It covers all apps or a specified set of apps, identified by bundle identifier rather than process id or localized display name. An unresolved app cannot broaden the scope. It ends when revoked, when the display ends, or when the connection closes. Reconnecting, restarting the app or creating another display does not restore it. Another Agent Session cannot inherit it.
+A continuing Window Authorization belongs to the current Agent Session and covers each of its live Agent Displays (ADR 0016). It covers all apps or a specified set of apps, identified by bundle identifier rather than process id or localized display name. An unresolved app cannot broaden the scope. It ends when revoked, when the session's last live display ends, or when the connection closes. Reconnecting, restarting the app or creating another display does not restore it. Another Agent Session cannot inherit it.
 
 Authorization permits taking windows from the user's displays, never from another Agent Display or a Review Display. It does not authorize input on the user's displays. It does not bypass Keyboard Borrow restrictions or approve sending messages, making purchases or deleting content. The session must still follow the user's task instructions.
 
