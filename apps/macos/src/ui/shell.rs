@@ -1808,8 +1808,8 @@ impl Shell {
     /// more of their windows without asking. Nothing moves.
     pub fn revoke_access(&mut self, id: DisplayId, cx: &mut Context<Self>) {
         self.core.update(cx, |core, cx| {
-            if let Some(d) = core.displays.get_mut(id)
-                && d.access.revoke(None).unwrap_or(false)
+            if let Some(access) = core.displays.access_mut(id)
+                && access.revoke(None).unwrap_or(false)
             {
                 log::info!("display {id}: the user revoked window access");
                 crate::mac::recording::note(
@@ -3343,9 +3343,9 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let given = self.core.update(cx, |core, _| {
-            core.displays.get_mut(id).map(|d| d.give_back(target))
-        });
+        let given = self
+            .core
+            .update(cx, |core, _| core.displays.give_back(id, target));
         self.send_home(target, id, given, cx)
     }
 

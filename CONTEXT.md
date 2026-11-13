@@ -5,7 +5,7 @@ Agent Screen gives each AI agent session its own virtual display on the user's M
 ## Language
 
 **Agent Display**:
-A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen. When the session stops using it, it closes by itself if no window is left on it, and otherwise becomes a Review Display. The user can also create one from Peek; it then has no Agent Session.
+A virtual display owned by exactly one Agent Session. It is created the first time the session needs a screen; a session that needs another screen at once can ask for up to four (ADR 0016). When the session stops using it, it closes by itself if no window is left on it, and otherwise becomes a Review Display. The user can also create one from Peek; it then has no Agent Session.
 _Avoid_: Agent Screen (the app's name), virtual screen, screen, bay
 
 **Spare**:
@@ -21,7 +21,7 @@ An Agent Display whose Agent Session stopped using it, by `end_display` or a clo
 _Avoid_: Ended Display, finished display, orphaned display, dead display
 
 **Agent Session**:
-One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. It has at most one Agent Display, and many sessions never get one.
+One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. Most sessions have one Agent Display or none; one that asks gets up to four at once, and calls its displays by their handles. Its Window Authorization covers all of them, and a window on one of its displays is its own on the others (ADR 0016).
 _Avoid_: agent, client, worker
 
 **Viewer**:
@@ -33,7 +33,7 @@ The strip of live thumbnails of every Agent Display that appears when the user h
 _Avoid_: preview, hover panel
 
 **Takeover**:
-A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It pauses any Window Authorization. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
+A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
 _Avoid_: pause, lock, manual mode
 
 **Help Request**:
@@ -93,7 +93,7 @@ During a Takeover, the Agent Session asking the user to hand its display back, w
 _Avoid_: resume request, reclaim
 
 **Window Authorization**:
-The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. Ending the display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
+The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
 _Avoid_: full access, unattended mode, blanket permission
 
 **Disposition**:

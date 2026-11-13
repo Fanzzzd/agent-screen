@@ -203,8 +203,11 @@ impl Render for Viewer {
         } else {
             Vec::new()
         };
-        let access = AccessLine::of(display);
-        let instruction = display.access.last.as_ref().map(|i| i.text.clone());
+        let session_access = core.displays.access(id);
+        let access = AccessLine::of(display, session_access);
+        let instruction = session_access
+            .and_then(|a| a.last.as_ref())
+            .map(|i| i.text.clone());
         let size = (display.width, display.height);
         let pointer = (!display.takeover && !display.is_ended())
             .then_some(display.pointer)

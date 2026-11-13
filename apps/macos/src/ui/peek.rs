@@ -297,7 +297,7 @@ impl Render for Peek {
                 *id,
                 display.label(),
                 crate::mac::recording::is_recording(*id),
-                AccessLine::of(display),
+                AccessLine::of(display, core.displays.access(*id)),
                 status,
                 frame,
                 pointer,

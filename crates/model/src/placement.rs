@@ -68,6 +68,8 @@ pub enum WindowSighting {
 /// own ended display, with no other session running (#161).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
+    /// The asking Agent Session uses it: one of its own other displays.
+    Mine,
     /// Another Agent Session uses it.
     OtherSession,
     /// A Review Display: its Agent Session stopped using it, and it waits
@@ -80,11 +82,15 @@ pub enum Holder {
 
 impl Holder {
     /// The holder to name for an app's windows on displays with these
-    /// holders: a Review Display first, since the user can take a window
-    /// back from it, and another session only when every display is one.
+    /// holders: the session's own display first, since place_window moves
+    /// a window from there, then a Review Display, since the user can take
+    /// a window back from it, and another session only when every display
+    /// is one.
     pub fn of_all(holders: impl IntoIterator<Item = Holder>) -> Holder {
         let holders: Vec<Holder> = holders.into_iter().collect();
-        if holders.contains(&Holder::Review) {
+        if holders.contains(&Holder::Mine) {
+            Holder::Mine
+        } else if holders.contains(&Holder::Review) {
             Holder::Review
         } else if !holders.is_empty() && holders.iter().all(|h| *h == Holder::OtherSession) {
             Holder::OtherSession
@@ -105,6 +111,9 @@ pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
         ),
         WindowSighting::NotDocument { app } => format!(
             "window {id} ({app}) is a panel or dialog; place_window moves document windows. Place the {app} window it belongs to"
+        ),
+        WindowSighting::OnAgentDisplay(Holder::Mine) => format!(
+            "window {id} is on another of your Agent Displays, and it moved or closed while place_window looked for it. Call list_windows on your displays, then place_window again"
         ),
         WindowSighting::OnAgentDisplay(Holder::OtherSession) => {
             format!("window {id} is on another Agent Display, which another agent session holds")
@@ -156,6 +165,10 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
         AppSighting::OnThisDisplay { window_id } => format!(
             "its window {window_id} is on your display already; pass that window_id to set its frame"
         ),
+        AppSighting::OnAgentDisplay(Holder::Mine) => {
+            "its windows on your other Agent Displays are panels or dialogs, windows the user took back or opened, or on a display the user is operating, so none can move. Call list_windows on those displays, and ask the user for a window of theirs"
+                .into()
+        }
         AppSighting::OnAgentDisplay(Holder::OtherSession) => {
             "its windows on screen are on other Agent Displays, which other agent sessions hold"
                 .into()
@@ -328,6 +341,18 @@ mod tests {
         assert_eq!(Holder::of_all([OtherSession, Review]), Review);
         assert_eq!(Holder::of_all([OtherSession, Other]), Other);
         assert_eq!(Holder::of_all([]), Other);
+        assert_eq!(Holder::of_all([OtherSession, Review, Mine]), Mine);
+        for text in [
+            no_app_window("Field", &AppSighting::OnAgentDisplay(Mine)),
+            no_window(7, &WindowSighting::OnAgentDisplay(Mine)),
+        ] {
+            assert!(
+                text.contains("of your") || text.contains("your other"),
+                "{text}"
+            );
+            assert!(!text.contains("session holds"), "{text}");
+        }
+        assert!(!no_window(7, &WindowSighting::OnAgentDisplay(Mine)).contains("operating"));
         for holder in [Review, Other] {
             let app = no_app_window("WeCom", &AppSighting::OnAgentDisplay(holder));
             let window = no_window(7, &WindowSighting::OnAgentDisplay(holder));

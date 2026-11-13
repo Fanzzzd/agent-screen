@@ -21,6 +21,15 @@ pub struct Owner {
     generation: u64,
 }
 
+impl Owner {
+    /// Whether `other` is a display of the same Agent Session, on the same
+    /// connection. A session with several displays has one owner per
+    /// display, and declares itself done for all of them at once.
+    pub fn same_session(&self, other: &Owner) -> bool {
+        self.session == other.session && self.connection == other.connection
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
     User,
@@ -503,11 +512,17 @@ impl Queue {
         }
     }
 
+    /// The session declares itself done, for every display it has: a
+    /// session with two displays is done with both (ADR 0016).
     pub fn done(&mut self, owner: &Owner, now: u64) {
-        if let Some(grant) = self.grant.as_mut()
-            && grant.participants.contains(owner)
-        {
-            grant.done.insert(owner.clone());
+        if let Some(grant) = self.grant.as_mut() {
+            let mine: Vec<Owner> = grant
+                .participants
+                .iter()
+                .filter(|p| p.same_session(owner))
+                .cloned()
+                .collect();
+            grant.done.extend(mine);
         }
         self.tick(now);
     }
@@ -1018,6 +1033,28 @@ mod tests {
             assert!(q.forget(id));
         }
         assert!(add(&mut q, "a", 1, "after", 1) > last);
+    }
+
+    #[test]
+    fn a_session_with_two_displays_is_done_with_both_at_once() {
+        let mut q = queue();
+        assert_eq!(
+            q.register("a".into(), owner("a", 4).connection, 4),
+            Some(owner("a", 4))
+        );
+        let x = add(&mut q, "a", 1, "drag", 0);
+        let y = add(&mut q, "a", 4, "click", 0);
+        let z = add(&mut q, "b", 2, "drag", 0);
+        assert!(q.allow(q.approval(), 1));
+        for (id, now) in [(x, 2), (y, 4), (z, 6)] {
+            assert_eq!(q.start(now), Some(id));
+            assert!(q.finish(id, now + 1));
+        }
+        // Session a says done once, on display 1: that covers display 4.
+        q.done(&owner("a", 1), 10);
+        assert!(q.grant().is_some(), "b hasn't said done");
+        q.done(&owner("b", 2), 11);
+        assert!(q.grant().is_none() && q.pending_end().is_some());
     }
 
     #[test]
