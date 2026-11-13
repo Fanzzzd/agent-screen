@@ -319,13 +319,19 @@ pub fn definitions() -> Vec<Value> {
             "request_help",
             "Ask the user to step in",
             &[
-                "Ask the user to take over your display for something you cannot do, such as a login or a",
+                "Ask the user to step in on your display for something you cannot do, such as a login or a",
                 "two-factor code. For a captcha, ask them to confirm the current challenge immediately before you",
                 "solve it. After they confirm, solve it when you can. Call this if they prefer to do it or you cannot.",
-                "The user gets a system notification with your reason. The call then waits like",
-                "wait_for_control until the user has stepped in and handed the display back, or until the timeout.",
-                "On a timeout the request stays open; call wait_for_control to keep waiting. If you got past it yourself,",
-                "call request_help with withdraw: true to take the request back.",
+                "The user gets a card under the menu bar icon and a system notification with your reason. The call",
+                "waits until they answer, and answer says how: tookOver (they took over and handed the display back),",
+                "continue (they let you go on without taking over), handedOver (they gave you one of their windows,",
+                "named in window), or instructions (they replied; user_reply holds their words exactly as typed).",
+                "Follow a reply as the user's instruction for this step. Take a screenshot before you go on.",
+                "On a timeout the request stays open; call wait_for_control to keep waiting, and it returns the",
+                "answer when it comes. Asking again after the user answered returns that answer at once. If you got",
+                "past it yourself, call request_help with withdraw: true. When the",
+                "user answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the",
+                "request; use it only for an explicit answer the user gave in this chat.",
             ],
             object(
                 json!({
@@ -333,6 +339,7 @@ pub fn definitions() -> Vec<Value> {
                     "reason": { "type": "string", "description": "What you need the user to do, in one short sentence." },
                     "steps": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 short steps, when the reason alone can't say how. The Viewer lists them while the user is in control." },
                     "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
+                    "user_instruction": user_instruction("go on without them stepping in"),
                     "timeout_seconds": timeout()
                 }),
                 &["display_id"],
@@ -806,11 +813,26 @@ pub async fn run(
                     json!({ "displayId": a.require_int("display_id")?, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            let help_open = reply.get("helpOpen") == Some(&Value::Bool(true));
-            Ok(Output::Object(describe_wait(&reply, help_open)))
+            Ok(Output::Object(describe_wait(&reply)))
         }
         "request_help" => {
             let display = a.require_int("display_id")?;
+            if let Some(words) = a.string("user_instruction")? {
+                let words = agent_screen_model::access::user_instruction(&words)
+                    .map_err(ControlError::invalid)?;
+                control
+                    .call(
+                        "answerHelp",
+                        json!({ "displayId": display, "userInstruction": words }),
+                    )
+                    .await?;
+                return Ok(Output::Object(json!({
+                    "control": "agent",
+                    "answer": "continue",
+                    "answeredIn": "chat",
+                    "note": "The Help Request ended on the user's words as you relayed them; Agent Screen didn't check them against the chat. Take a screenshot before you go on."
+                })));
+            }
             if a.0.get("withdraw").and_then(Value::as_bool) == Some(true) {
                 let reply = control
                     .call("withdrawHelp", json!({ "displayId": display }))
@@ -821,19 +843,32 @@ pub async fn run(
             let reason = a
                 .string("reason")?
                 .ok_or_else(|| ControlError::invalid("reason is required"))?;
-            control
+            // `answers`: this server tells the agent each answer, so the user
+            // is offered Continue, Reply and Give a Window (ADR 0015).
+            let asked = control
                 .call(
                     "requestHelp",
-                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps") }),
+                    json!({ "displayId": display, "reason": reason, "steps": a.0.get("steps"), "answers": true }),
                 )
                 .await?;
+            // The user answered the last Help Request after its wait ended:
+            // that answer stands, and they aren't asked again.
+            if let Some(Value::Object(answered)) = asked.get("answered") {
+                let mut out = describe_wait(answered);
+                let note = out.get("note").and_then(Value::as_str).unwrap_or_default();
+                out["note"] = json!(format!(
+                    "The user answered your last Help Request after its wait ended, so they weren't asked again. {note}"
+                ));
+                out["answeredEarlier"] = json!(true);
+                return Ok(Output::Object(out));
+            }
             let reply = control
                 .call(
                     "waitForControl",
                     json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            Ok(Output::Object(describe_wait(&reply, true)))
+            Ok(Output::Object(describe_wait(&reply)))
         }
         "request_control" => {
             let display = a.require_int("display_id")?;
@@ -877,7 +912,7 @@ pub async fn run(
                     json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? }),
                 )
                 .await?;
-            let mut out = describe_wait(&reply, false);
+            let mut out = describe_wait(&reply);
             if asked.get("alreadyAsked") == Some(&Value::Bool(true)) {
                 out["alreadyAsked"] = json!(true);
             }
@@ -1385,12 +1420,13 @@ fn access_output(action: &str, reply: Object) -> Value {
 /// timed out says they may be done.
 const IDLE_HINT_SECONDS: u64 = 15;
 
-/// What a wait for control came to. `helping`: a Help Request is open, and
-/// the user may not have seen it yet.
-fn describe_wait(reply: &Object, helping: bool) -> Value {
-    let mut out = wait_outcome(reply, helping);
+/// What a wait for control came to, from the app's resolution: how the
+/// request it waited on ended, or which one still waits after a timeout.
+fn describe_wait(reply: &Object) -> Value {
+    let (resolution, request) = resolution(reply);
+    let mut out = wait_outcome(reply, resolution, request);
     let idle = reply.get("userIdleSeconds").and_then(Value::as_u64);
-    if reply.get("outcome").and_then(Value::as_str) == Some("timedOut")
+    if resolution == "timedOut"
         && let Some(idle) = idle
     {
         if idle >= IDLE_HINT_SECONDS {
@@ -1400,7 +1436,7 @@ fn describe_wait(reply: &Object, helping: bool) -> Value {
             // The plain note says the user is still operating the display,
             // which their quiet contradicts: it goes. A note about an open
             // request says how to withdraw it: it stays.
-            let asked = helping || reply.get("controlAsked") == Some(&Value::Bool(true));
+            let asked = request.is_some();
             let base = out.get("note").and_then(Value::as_str).unwrap_or_default();
             out["note"] = json!(if asked {
                 format!("{base} {quiet}")
@@ -1413,24 +1449,92 @@ fn describe_wait(reply: &Object, helping: bool) -> Value {
     out
 }
 
-fn wait_outcome(reply: &Object, helping: bool) -> Value {
+/// The reply's resolution and the request it names. An app built before
+/// resolutions answers with `outcome` and two flags only.
+fn resolution(reply: &Object) -> (&str, Option<&str>) {
+    if let Some(resolution) = reply.get("resolution").and_then(Value::as_str) {
+        return (resolution, reply.get("request").and_then(Value::as_str));
+    }
+    let flag = |key: &str| reply.get(key) == Some(&Value::Bool(true));
+    let request = if flag("controlAsked") {
+        Some("control")
+    } else if flag("helpOpen") {
+        Some("help")
+    } else {
+        None
+    };
     match reply.get("outcome").and_then(Value::as_str) {
-        Some("returned") => {
+        Some("returned") => ("handedBack", None),
+        Some("kept") => ("kept", Some("control")),
+        Some("timedOut") => ("timedOut", request),
+        Some("closedByUser") => ("closedByUser", None),
+        _ => ("ended", None),
+    }
+}
+
+fn wait_outcome(reply: &Object, resolution: &str, request: Option<&str>) -> Value {
+    match (resolution, request) {
+        ("continue", _) => {
+            json!({ "control": "agent", "answer": "continue", "note": "The user let you continue without taking over. They may have done the step themselves: take a screenshot before you go on." })
+        }
+        ("instructions", _) => {
+            let text = reply
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            json!({
+                "control": "agent",
+                "answer": "instructions",
+                "user_reply": text,
+                "note": format!("The user replied instead of taking over. Their words, exactly as typed: \"{text}\". Follow them as the user's instruction for this step, and take a screenshot before you go on.")
+            })
+        }
+        ("handedOver", _) => {
+            let window = reply.get("window").cloned().unwrap_or(Value::Null);
+            let app = window
+                .get("app")
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("a");
+            let title = window
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let id = window.get("windowId").cloned().unwrap_or(Value::Null);
+            let named = if title.is_empty() {
+                format!("their {app} window")
+            } else {
+                format!("their {app} window \"{title}\"")
+            };
+            json!({
+                "control": "agent",
+                "answer": "handedOver",
+                "window": { "window_id": id, "app": app, "title": title },
+                "note": format!("The user handed over {named} instead of taking over; it is on your display as window {id}. Work in it, and take a screenshot first.")
+            })
+        }
+        ("tookOver", _) => {
+            json!({ "control": "agent", "answer": "tookOver", "note": "The user took over and handed the display back. Take a screenshot before you continue: they may have changed things." })
+        }
+        ("handedBack", _) => {
             json!({ "control": "agent", "note": "You have control. Take a screenshot before you continue." })
         }
-        Some("kept") => {
+        ("withdrawn", _) => {
+            json!({ "control": "agent", "withdrawn": true, "note": "Your Help Request was withdrawn before the user answered it; nobody stepped in. Carry on yourself, or call request_help again if you still need them." })
+        }
+        ("kept", _) => {
             json!({ "control": "user", "kept": true, "note": "The user chose to keep control of the display. Don't ask again right away; call wait_for_control to wait until they hand it back." })
         }
-        Some("timedOut") if reply.get("controlAsked") == Some(&Value::Bool(true)) => {
+        ("timedOut", Some("control")) => {
             json!({ "control": "user", "note": "The user hasn't answered your request to hand the display back; it stays open. Call wait_for_control to keep waiting, or request_control with withdraw: true if you no longer need the display." })
         }
-        Some("timedOut") if helping => {
-            json!({ "control": "user", "note": "The user hasn't handed the display back yet; the request stays open. Call wait_for_control to keep waiting, or request_help with withdraw: true if you no longer need them." })
+        ("timedOut", Some("help")) => {
+            json!({ "control": "user", "note": "The user hasn't answered your Help Request yet; it stays open. Call wait_for_control to keep waiting, or request_help with withdraw: true if you no longer need them." })
         }
-        Some("timedOut") => {
+        ("timedOut", _) => {
             json!({ "control": "user", "note": "The user is still operating the display. Wait again or do something else." })
         }
-        Some("closedByUser") => {
+        ("closedByUser", _) => {
             json!({ "control": "none", "note": "The user closed the display, so stop working on screen. Ask the user before you call create_display again." })
         }
         _ => json!({ "control": "none", "note": "The display has ended." }),
@@ -2220,16 +2324,88 @@ mod tests {
     }
 
     #[test]
+    fn a_help_request_says_how_the_user_answered() {
+        let wait = |reply: Value| describe_wait(reply.as_object().unwrap());
+        let note = |out: &Value| out["note"].as_str().unwrap().to_string();
+
+        let go_on = wait(json!({ "resolution": "continue", "request": "help" }));
+        assert_eq!(
+            (go_on["control"].as_str(), go_on["answer"].as_str()),
+            (Some("agent"), Some("continue"))
+        );
+        assert!(
+            note(&go_on).contains("let you continue without taking over"),
+            "{go_on}"
+        );
+
+        let words = "Use the work account,\nthen pick seat 12A ";
+        let replied =
+            wait(json!({ "resolution": "instructions", "request": "help", "text": words }));
+        assert_eq!(replied["user_reply"], words, "the user's words, as typed");
+        assert!(
+            note(&replied).contains(&format!("\"{words}\"")),
+            "{replied}"
+        );
+        assert!(note(&replied).contains("user's instruction"), "{replied}");
+
+        let given = wait(json!({
+            "resolution": "handedOver", "request": "help",
+            "window": { "windowId": 31, "app": "Safari", "title": "United Sign In" }
+        }));
+        assert_eq!(given["window"]["window_id"], 31);
+        assert!(
+            note(&given).contains("their Safari window \"United Sign In\"")
+                && note(&given).contains("on your display"),
+            "{given}"
+        );
+
+        let took = wait(json!({ "resolution": "tookOver", "request": "help" }));
+        assert!(
+            note(&took).contains("took over and handed the display back"),
+            "{took}"
+        );
+
+        // The agent's own withdrawal is never the user's hand-back.
+        let withdrawn = wait(json!({ "resolution": "withdrawn", "request": "help" }));
+        assert!(
+            !note(&withdrawn).contains("You have control"),
+            "{withdrawn}"
+        );
+        assert_eq!(withdrawn["withdrawn"], true);
+
+        let open = wait(json!({ "resolution": "timedOut", "request": "help" }));
+        assert!(
+            note(&open).contains("hasn't answered your Help Request"),
+            "{open}"
+        );
+        let closed = wait(json!({ "resolution": "closedByUser" }));
+        assert!(note(&closed).contains("closed the display"), "{closed}");
+        // In a Takeover the user is still at the display.
+        let busy = wait(json!({ "resolution": "timedOut", "request": null }));
+        assert!(note(&busy).contains("still operating"), "{busy}");
+
+        // An app built before resolutions still reads right.
+        let old = wait(json!({ "outcome": "timedOut", "helpOpen": true, "controlAsked": false }));
+        assert!(
+            note(&old).contains("hasn't answered your Help Request"),
+            "{old}"
+        );
+        let old = wait(json!({ "outcome": "returned" }));
+        assert!(note(&old).contains("You have control"), "{old}");
+    }
+
+    #[test]
     fn a_timed_out_wait_says_when_the_user_has_gone_quiet() {
-        let reply = |idle: Value| {
-            json!({ "outcome": "timedOut", "helpOpen": false, "controlAsked": false, "userIdleSeconds": idle })
+        let waiting = |idle: Value, request: Value| {
+            json!({ "resolution": "timedOut", "request": request, "outcome": "timedOut", "userIdleSeconds": idle })
                 .as_object()
                 .unwrap()
                 .clone()
         };
         // During a Takeover no Help Request is open, as in the passkey case.
         for helping in [false, true] {
-            let quiet = describe_wait(&reply(json!(42)), helping);
+            let request = if helping { json!("help") } else { Value::Null };
+            let quiet = describe_wait(&waiting(json!(42), request));
             let note = quiet["note"].as_str().unwrap();
             assert!(
                 note.contains("for 42 s")
@@ -2242,20 +2418,16 @@ mod tests {
             // An open Help Request's note keeps how to withdraw it.
             assert_eq!(note.contains("withdraw: true"), helping, "{note}");
         }
-        let mut asked = reply(json!(42));
-        asked.insert("controlAsked".into(), json!(true));
-        let note = describe_wait(&asked, false)["note"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let asked = waiting(json!(42), json!("control"));
+        let note = describe_wait(&asked)["note"].as_str().unwrap().to_string();
         assert!(
             note.contains("request_control with withdraw: true") && note.contains("for 42 s"),
             "{note}"
         );
-        let busy = describe_wait(&reply(json!(3)), true);
+        let busy = describe_wait(&waiting(json!(3), json!("help")));
         assert!(!busy["note"].as_str().unwrap().contains("touched"));
         assert_eq!(busy["userIdleSeconds"], 3);
-        let none = describe_wait(&reply(Value::Null), true);
+        let none = describe_wait(&waiting(Value::Null, json!("help")));
         assert!(none.get("userIdleSeconds").is_none());
     }
 

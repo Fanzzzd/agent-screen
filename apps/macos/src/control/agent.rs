@@ -19,6 +19,9 @@ use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refus
 use agent_screen_model::input_queue::Action;
 use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, WindowSighting};
 use agent_screen_model::real_click;
+use agent_screen_model::request::{
+    Answer, HelpAsked, Kind, NamedWindow, RequestId, Resolution, Woken,
+};
 use agent_screen_model::shared_app::Front;
 use base64::Engine;
 use futures::FutureExt;
@@ -1497,12 +1500,19 @@ async fn handle_one(
             };
             let steps =
                 agent_screen_model::model::help_steps(steps).map_err(ControlError::invalid)?;
-            core.update(cx, |c, cx| {
-                if c.displays.request_help(id, reason, steps) {
-                    cx.notify();
-                }
+            // The asker's MCP server understands answers other than a
+            // Takeover (ADR 0015). One built earlier doesn't say so.
+            let answers = p.0.get("answers") == Some(&Value::Bool(true));
+            let asked = core.update(cx, |c, cx| {
+                let asked = c.displays.request_help(id, reason, steps, answers);
+                cx.notify();
+                asked
             });
-            Ok(json!({}))
+            Ok(match asked {
+                Some(HelpAsked::Answered(woken)) => json!({ "answered": woken.to_json(false) }),
+                Some(HelpAsked::Opened(request)) => json!({ "requestId": request }),
+                None => json!({ "requestId": null }),
+            })
         }
         "withdrawHelp" => {
             let id = display(&core, &p, false, cx)?;
@@ -1514,6 +1524,29 @@ async fn handle_one(
                 withdrawn
             });
             Ok(json!({ "withdrawn": withdrawn }))
+        }
+        // The user answered the Help Request in the conversation, and the
+        // agent relays their words: the request ends as Continue, as the
+        // card's button ends it (ADR 0013, ADR 0015).
+        "answerHelp" => {
+            let id = display(&core, &p, true, cx)?;
+            let words = p
+                .string("userInstruction")
+                .filter(|w| !w.trim().is_empty())
+                .ok_or_else(|| ControlError::invalid("userInstruction is required"))?;
+            core.update(cx, |c, cx| {
+                c.answer(id, Kind::Help, None, Answer::Continue, cx)
+                    .map_err(|why| ControlError::failed(why.message()))?;
+                // The agent relayed it: its next wait needn't hear it.
+                c.displays.forget_unheard(id);
+                log::info!("display {id}: Help Request answered in the conversation");
+                crate::mac::recording::note(
+                    id,
+                    json!({ "action": "helpAnswered", "by": "chat", "instruction": words }),
+                );
+                Ok::<_, ControlError>(())
+            })?;
+            Ok(json!({ "answered": true }))
         }
         // During a Takeover, ask the user to hand the display back. The
         // agent then waits with waitForControl.
@@ -1559,42 +1592,38 @@ async fn handle_one(
                 .unwrap_or(100.0)
                 .clamp(1.0, 600.0);
             let wait = core.update(cx, |c, _| c.displays.wait_for_control(id));
-            let outcome = match wait {
-                Wait::Now(outcome) => outcome,
+            let woken = match wait {
+                Wait::Now(woken) => woken,
                 Wait::Later(rx) => {
                     let timer = cx
                         .background_executor()
                         .timer(Duration::from_secs_f64(seconds));
                     futures::select! {
-                        outcome = rx.fuse() => outcome.unwrap_or(crate::model::ControlWait::Ended),
-                        _ = FutureExt::fuse(timer) => crate::model::ControlWait::TimedOut,
+                        woken = rx.fuse() => woken.unwrap_or(Woken::of(None, Resolution::Ended)),
+                        _ = FutureExt::fuse(timer) => {
+                            // What still waits for the user.
+                            let open = core.read_with(cx, |c, _| c.displays.waiting_on(id));
+                            Woken::of(open, Resolution::TimedOut)
+                        }
                     }
                 }
             };
             // Ended because the user closed it: the agent should stop.
-            let closed = outcome == crate::model::ControlWait::Ended
+            let closed = woken.resolution == Resolution::Ended
                 && core.read_with(cx, |c, _| {
                     c.displays.closed_by_user.contains(&id)
                         || c.displays
                             .get(id)
                             .is_some_and(|d| d.ended == Some(EndReason::ClosedByUser))
                 });
-            // Timed out with the Help Request unanswered: the user may not
-            // have come at all.
-            let help_open = core.read_with(cx, |c, _| {
-                c.displays
-                    .get(id)
-                    .is_some_and(|d| d.help_request.is_some() && !d.takeover)
-            });
-            let outcome = if closed {
-                "closedByUser"
-            } else {
-                outcome.as_str()
-            };
-            let control_asked = core.read_with(cx, |c, _| {
-                c.displays
-                    .get(id)
-                    .is_some_and(|d| d.control_request.is_some())
+            // An MCP server built before resolutions reads these flags.
+            let (help_open, control_asked) = core.read_with(cx, |c, _| {
+                c.displays.get(id).map_or((false, false), |d| {
+                    (
+                        d.requests.is_open(Kind::Help) && !d.takeover,
+                        d.requests.is_open(Kind::Control),
+                    )
+                })
             });
             // How long the user has left the mouse and keyboard alone while
             // they hold the display: done, they may only have missed the
@@ -1602,12 +1631,11 @@ async fn handle_one(
             let idle = core
                 .read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
                 .then(|| crate::mac::ime::user_idle().floor() as u64);
-            Ok(json!({
-                "outcome": outcome,
-                "helpOpen": help_open,
-                "controlAsked": control_asked,
-                "userIdleSeconds": idle,
-            }))
+            let mut out = woken.to_json(closed);
+            out["helpOpen"] = json!(help_open);
+            out["controlAsked"] = json!(control_asked);
+            out["userIdleSeconds"] = json!(idle);
+            Ok(out)
         }
         // Test hook: stands in for the user's input in the Viewer.
         "debugTakeover" if debug_methods() => {
@@ -1850,6 +1878,8 @@ async fn handle_one(
         // Test hook: the user hands a window over from the Windows menu.
         "debugHandOver" if debug_methods() => {
             let id = display(&core, &p, false, cx)?;
+            // As the Give menu does, unless `gave` is false: a drag.
+            let gave = p.0.get("gave") != Some(&Value::Bool(false));
             let window = p
                 .int("windowId")
                 .and_then(|w| windows::find(w as u32))
@@ -1857,7 +1887,7 @@ async fn handle_one(
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             shell
                 .update(cx, |shell, cx| {
-                    shell.hand_over(window.target, Some(window.bounds), id, cx)
+                    shell.hand_over(window.target, Some(window.bounds), id, gave, cx)
                 })
                 .map_err(|e| ControlError::failed(e.to_string()))?;
             Ok(json!({}))
@@ -1871,7 +1901,7 @@ async fn handle_one(
                 let open = core.read_with(cx, |c, _| {
                     c.displays
                         .get(id)
-                        .is_some_and(|d| d.window_request.is_some())
+                        .is_some_and(|d| d.requests.is_open(Kind::Window))
                 });
                 if open {
                     break;
@@ -1884,6 +1914,40 @@ async fn handle_one(
             let answered = shell
                 .update(cx, |shell, cx| shell.answer_window(id, give, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "answered": answered }))
+        }
+        // Test hook: the user answers the display's Help Request, as the
+        // card's buttons or the notification's actions do. `answer` is
+        // continue, reply (with `text`), later or takeOver; `via`
+        // notification takes the notification's path, for the request
+        // `requestId` when given, as a notification posted for it carries.
+        "debugAnswerHelp" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let answer = p.string("answer").unwrap_or_default();
+            let text = p.string("text").unwrap_or_default();
+            let via_notification = p.string("via").as_deref() == Some("notification");
+            let request = p.int("requestId").map(|r| r as RequestId);
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            // Typed into the card's field, then Send: the card tells the
+            // Shell, as a click does, so the Shell isn't updating here.
+            if answer == "reply" && !via_notification {
+                let card = shell
+                    .read_with(cx, |shell, _| shell.card_window())
+                    .map_err(|e| ControlError::failed(e.to_string()))?
+                    .ok_or_else(|| ControlError::failed("no Help Card"))?;
+                let sent = card
+                    .update(cx, |card, window, cx| {
+                        card.debug_reply(id, &text, window, cx)
+                    })
+                    .map_err(|e| ControlError::failed(e.to_string()))?;
+                return reply(json!({ "answered": sent }));
+            }
+            let answered = shell
+                .update(cx, |shell, cx| {
+                    shell.debug_answer_help(id, &answer, text, via_notification, request, cx)
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .map_err(ControlError::invalid)?;
             Ok(json!({ "answered": answered }))
         }
         // Test hook: the user takes a window back from the Windows menu.
@@ -2076,10 +2140,23 @@ async fn handle_one(
                 .into_iter()
                 .map(|(id, r)| (id.to_string(), json!(r)))
                 .collect();
+            // The reply field, and whether the card has the keyboard.
+            let state = match crate::ui::shell::current()
+                .and_then(|shell| shell.read_with(cx, |shell, _| shell.card_window()).ok())
+                .flatten()
+            {
+                Some(card) => card
+                    .update(cx, |card, window, cx| card.debug_state(window, cx))
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            };
             Ok(json!({
                 "width": width,
                 "buttons": buttons,
                 "queueHeight": crate::ui::help_card::queue_height(),
+                "key": state.get("key"),
+                "cardKeys": state.get("cardKeys"),
+                "reply": state.get("reply"),
             }))
         }
         // Which picture the menu bar icon shows: idle, working, asking or setup.
@@ -2296,7 +2373,9 @@ async fn handle_one(
                 };
                 let _answer = core
                     .update(cx, |c, cx| {
-                        let rx = c.displays.request_window(id, target, app, title);
+                        let rx = c
+                            .displays
+                            .request_window(id, NamedWindow { target, app, title });
                         cx.notify();
                         rx
                     })
@@ -3054,45 +3133,61 @@ async fn request_window(
 ) -> Result<Map<String, Value>, ControlError> {
     let target = window.target;
     let app = window.app.clone();
-    let answer = core
+    let named = NamedWindow {
+        target,
+        app: window.app,
+        title: window.title,
+    };
+    let (request, answer) = core
         .update(cx, |c, cx| {
-            let rx = c
-                .displays
-                .request_window(id, target, window.app, window.title);
+            let asked = c.displays.request_window(id, named);
             cx.notify();
-            rx
+            asked
         })
         .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
     let seconds = timeout.unwrap_or(120.0).clamp(1.0, 600.0);
     let timer = cx
         .background_executor()
         .timer(Duration::from_secs_f64(seconds));
-    let given = futures::select! {
-        given = answer.fuse() => given.ok(),
+    let mut answer = answer.fuse();
+    let resolution = futures::select! {
+        resolution = answer => resolution.unwrap_or(Resolution::Ended),
         _ = FutureExt::fuse(timer) => {
-            core.update(cx, |c, cx| {
-                if let Some(d) = c.displays.get_mut(id)
-                    && d.window_request.as_ref().is_some_and(|r| r.target == target)
-                {
-                    d.window_request = None;
+            let timed_out = core.update(cx, |c, cx| {
+                let timed_out = c.displays.time_out_window(id, request);
+                if timed_out {
                     cx.notify();
                 }
+                timed_out
             });
-            return Err(ControlError::failed(format!(
-                "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
-            )));
+            // An answer that came with the timer stands.
+            if timed_out {
+                Resolution::TimedOut
+            } else {
+                answer.await.unwrap_or(Resolution::Ended)
+            }
         }
     };
-    match given {
-        Some(true) => {}
-        Some(false) => {
+    match resolution {
+        Resolution::HandedOver(_) => {}
+        Resolution::Declined => {
             return Err(ControlError::failed(format!(
                 "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
             )));
         }
-        None => {
+        Resolution::TimedOut => {
             return Err(ControlError::failed(format!(
-                "your request for the {app} window was withdrawn: the display ended or you asked for another window"
+                "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+            )));
+        }
+        Resolution::Replaced => {
+            return Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: you asked for another window"
+            )));
+        }
+        _ => {
+            return Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: the display ended"
             )));
         }
     }
@@ -3185,7 +3280,7 @@ async fn hand_over(
         )));
     }
     let landed = core.update(cx, |c, cx| {
-        let landed = c.displays.commit_hand_over(id, &ticket);
+        let landed = c.displays.commit_hand_over(id, &ticket, None);
         if landed {
             // The app's late windows are the agent's to have, not to send
             // back, as after the user's own Hand Over.

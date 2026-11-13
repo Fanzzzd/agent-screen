@@ -22,6 +22,9 @@ use crate::model::{DEFAULT_SIZE, DisplayId, EndReason, GivenBack, Rect, WindowTa
 use agent_screen_model::access::Authority;
 use agent_screen_model::card;
 use agent_screen_model::peek as peek_intent;
+use agent_screen_model::request::{
+    Answer, Ask, Kind, NamedWindow, REPLY_CHARS, RequestId, Unanswered,
+};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
@@ -178,17 +181,19 @@ pub struct Shell {
     peek: Option<(WindowHandle<Peek>, Retained<NSWindow>)>,
     viewer: Option<(WindowHandle<Viewer>, Retained<NSWindow>)>,
     card: Option<(WindowHandle<HelpCard>, Retained<NSWindow>)>,
-    /// The display the Help Card shows, and whether for a Window or
-    /// Control Request, which have no picture.
-    card_shown: Option<(DisplayId, bool)>,
+    /// The display the Help Card shows, whether for a Window or Control
+    /// Request, which have no picture, and whether a Help Request's agent
+    /// understands Continue, Reply and Give a Window: each sets its height.
+    card_shown: Option<(DisplayId, bool, bool)>,
+    /// A reply too long to send from a notification: the card opens its
+    /// field with it once it shows that Help Request.
+    reply_draft: Option<(DisplayId, RequestId, String)>,
     card_input: bool,
     /// Where the card's window goes, last time it was placed or fitted.
     card_frame: Option<NSRect>,
     /// The Input Bar, and whether it shows.
     bar: Option<(WindowHandle<InputBar>, Retained<NSWindow>)>,
     bar_shown: bool,
-    /// Help Requests the user put off with Later, by display.
-    card_later: HashMap<DisplayId, String>,
     /// When the user was last told where an app's windows are, by pid.
     reminded: HashMap<i32, Instant>,
     /// A downloaded update waits for no Agent Display to be open.
@@ -422,13 +427,13 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             viewer: None,
             card: None,
             card_shown: None,
+            reply_draft: None,
             card_input: false,
             card_frame: None,
             bar: None,
             bar_shown: false,
             reminded: HashMap::new(),
             watching_updates: false,
-            card_later: HashMap::new(),
             peek_shown: false,
             working: false,
             creating: 0,
@@ -516,7 +521,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         .update(cx, |_, window, _| native::ns_window(window))?
         .expect("Help Card window");
     native::style_panel(&card_ns, native::LEVEL_POP_UP_MENU);
-    native::set_keyable(&card_ns, false);
+    native::set_keyable_while_typing(&card_ns);
     let bar = {
         let (weak, core) = (weak.clone(), core.clone());
         cx.open_window(panel_options(), move |window, cx| {
@@ -785,21 +790,11 @@ impl Shell {
             }
             Native::Menu(action) => self.menu(action, cx),
             Native::UserTookInput => self.user_took_input(cx),
-            // A notification only opens the display; the user's first
-            // input there, or its Take Over button, starts a Takeover.
-            Native::NotificationClicked { display, take_over } => {
-                let asking = self
-                    .core
-                    .read(cx)
-                    .displays
-                    .get(display)
-                    .map(|d| d.help_request.is_some() && d.is_live());
-                match asking {
-                    Some(true) if take_over => self.open_for_help(display, cx),
-                    Some(_) => self.card_open(display, cx),
-                    None => {}
-                }
-            }
+            Native::NotificationClicked {
+                display,
+                request,
+                action,
+            } => self.notification_action(display, request, action, cx),
             Native::InputQueueOpened => {
                 self.hide_peek(cx);
                 self.sync_card(cx);
@@ -862,13 +857,7 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core.input_queue.approval_needed()
-            || core.displays.list.iter().any(|d| {
-                (d.help_request.is_some()
-                    || d.window_request.is_some()
-                    || d.control_request.is_some())
-                    && !d.is_ended()
-            });
+        let asking = core.input_queue.approval_needed() || card::asking(&core.displays);
         if asking != self.asking {
             self.asking = asking;
             self.icon.set_asking(asking);
@@ -899,44 +888,45 @@ impl Shell {
             } else {
                 notify::withdraw_input(display.id);
             }
-            match display
-                .help_request
-                .as_deref()
-                .filter(|_| display.is_live())
-            {
-                Some(reason) => notify::update(
+            // One for each open request, put off or not, and a Help
+            // Request's in a Takeover too, where only the card steps aside.
+            let open = |kind| display.open_request(kind).map(|r| (r.id, &r.ask));
+            match open(Kind::Help) {
+                Some((
+                    request,
+                    Ask::Help {
+                        reason, answers, ..
+                    },
+                )) => notify::update(
                     display.id,
                     display.agent_name(),
                     task,
-                    Some(Note::Help(reason.to_string())),
+                    Some(Note::Help {
+                        reason: reason.clone(),
+                        request,
+                        // In a Takeover only the hand-back answers it.
+                        answers: *answers && !display.takeover,
+                    }),
                 ),
-                None => notify::withdraw_help(display.id),
+                _ => notify::withdraw_help(display.id),
             }
-            match display
-                .window_request
-                .as_ref()
-                .filter(|_| display.is_live())
-            {
-                Some(request) => notify::update(
+            match open(Kind::Window) {
+                Some((_, Ask::Window(window))) => notify::update(
                     display.id,
                     display.agent_name(),
                     task,
-                    Some(Note::Window(request.app.clone())),
+                    Some(Note::Window(window.app.clone())),
                 ),
-                None => notify::withdraw_window(display.id),
+                _ => notify::withdraw_window(display.id),
             }
-            match display
-                .control_request
-                .as_deref()
-                .filter(|_| display.is_live())
-            {
-                Some(reason) => notify::update(
+            match open(Kind::Control) {
+                Some((_, Ask::Control { reason })) => notify::update(
                     display.id,
                     display.agent_name(),
                     task,
-                    Some(Note::Control(reason.to_string())),
+                    Some(Note::Control(reason.clone())),
                 ),
-                None => notify::withdraw_control(display.id),
+                _ => notify::withdraw_control(display.id),
             }
             // An agent left windows on its display: tell the user once.
             if display.owner.is_some() && display.is_ended() && !self.ended.contains(&display.id) {
@@ -1023,18 +1013,10 @@ impl Shell {
         };
         let core = self.core.clone();
         let core = core.read(cx);
-        self.card_later.retain(|id, reason| {
-            core.displays.get(*id).and_then(|d| d.help_request.as_ref()) == Some(reason)
-        });
         let viewing = self.viewer_open.then_some(self.viewer_display).flatten();
         let selected = card::select(
             &core.displays,
             viewing,
-            |id, reason| {
-                self.card_later
-                    .get(&id)
-                    .is_some_and(|later| later == reason)
-            },
             core.input_queue.card_display(&core.displays),
             self.peek_shown,
         );
@@ -1043,18 +1025,24 @@ impl Shell {
         let want = selected.and_then(|selected| {
             let id = selected.display();
             let request = matches!(selected, card::Card::Request(_));
-            core.displays
-                .get(id)
-                .map(|d| (id, request, (d.width, d.height)))
+            core.displays.get(id).map(|d| {
+                let answers = d.requests.help_answers();
+                (id, request, answers, (d.width, d.height))
+            })
         });
-        if want.map(|w| (w.0, w.1)) == self.card_shown && self.card_input == input {
+        if want.map(|w| (w.0, w.1, w.2)) == self.card_shown && self.card_input == input {
+            self.open_reply_draft(cx);
             return;
         }
-        if let Some((old, _)) = self.card_shown.take() {
+        if let Some((old, _, _)) = self.card_shown.take() {
             self.streams
                 .update(cx, |s, cx| s.want(old, "card", 0, (0, 0), cx));
         }
-        let Some((id, request, size)) = want else {
+        // The card hides or shows something else: a reply being typed goes,
+        // and the keyboard goes back to the user's app, before the window
+        // leaves the screen.
+        let _ = card.update(cx, |card, window, cx| card.close_reply(window, cx));
+        let Some((id, request, answers, size)) = want else {
             native::order_out(&window);
             return;
         };
@@ -1083,7 +1071,7 @@ impl Shell {
                 f64::from(if request {
                     help_card::REQUEST_HEIGHT
                 } else {
-                    help_card::height(size)
+                    help_card::height(size, answers)
                 }),
             )
         };
@@ -1103,9 +1091,42 @@ impl Shell {
             native::order_front(&shown);
             native::animate(&shown, frame, 1.0, 0.24);
         });
-        self.card_shown = Some((id, request));
+        self.card_shown = Some((id, request, answers));
         self.card_input = input;
         self.card_frame = Some(frame);
+        self.open_reply_draft(cx);
+    }
+
+    /// The card shows the Help Request a too long reply from a
+    /// notification was for: open its field with the draft, leaving the
+    /// keyboard with the user's app until they click the field. A request
+    /// the agent replaced since drops the draft.
+    fn open_reply_draft(&mut self, cx: &mut Context<Self>) {
+        let Some((id, request, _)) = &self.reply_draft else {
+            return;
+        };
+        let (id, request) = (*id, *request);
+        let open = self
+            .core
+            .read(cx)
+            .displays
+            .get(id)
+            .and_then(|d| d.open_request(Kind::Help))
+            .map(|r| r.id);
+        if open != Some(request) {
+            self.reply_draft = None;
+            return;
+        }
+        if self.card_input || self.card_shown.map(|s| (s.0, s.1)) != Some((id, false)) {
+            return;
+        }
+        let Some((card, _)) = self.card.clone() else {
+            return;
+        };
+        let draft = self.reply_draft.take().map(|d| d.2);
+        let _ = card.update(cx, |card, window, cx| {
+            card.open_reply(id, draft, false, window, cx)
+        });
     }
 
     /// The queue card painted at a new height: its window follows, its top
@@ -1606,46 +1627,181 @@ impl Shell {
     /// The user answers a Window Request from the card: a window given
     /// goes over as a Handover. False when there was no request.
     pub fn answer_window(&mut self, id: DisplayId, give: bool, cx: &mut Context<Self>) -> bool {
-        let answered = self.core.update(cx, |core, cx| {
-            let open = core
-                .displays
-                .get(id)
-                .is_some_and(|d| d.window_request.is_some());
-            let target = core.displays.answer_window(id, give);
-            cx.notify();
-            open.then_some(target)
-        });
-        let Some(target) = answered else {
-            return false;
-        };
-        if let Some(target) = target {
-            self.hand_over(target, None, id, cx);
-        }
-        true
+        let answer = if give { Answer::Give } else { Answer::Keep };
+        self.core
+            .update(cx, |core, cx| {
+                core.answer(id, Kind::Window, None, answer, cx)
+            })
+            .is_ok()
     }
 
     /// The user answers a Control Request from the card: Continue hands
     /// the display back as the Viewer's button does, Keep Control leaves
     /// the Takeover. False when there was no request.
     pub fn answer_control(&mut self, id: DisplayId, give: bool, cx: &mut Context<Self>) -> bool {
-        self.core.update(cx, |core, cx| {
-            let open = core
+        let answer = if give { Answer::Continue } else { Answer::Keep };
+        self.core
+            .update(cx, |core, cx| {
+                core.answer(id, Kind::Control, None, answer, cx)
+            })
+            .is_ok()
+    }
+
+    /// The user answers a Help Request without taking over: Continue, or
+    /// Reply with their words, from the card or the notification, for the
+    /// `request` they saw.
+    pub fn answer_help(
+        &mut self,
+        id: DisplayId,
+        request: Option<RequestId>,
+        answer: Answer,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Unanswered> {
+        let answered = self.core.update(cx, |core, cx| {
+            core.answer(id, Kind::Help, request, answer, cx)
+        });
+        self.sync_card(cx);
+        answered
+    }
+
+    /// Give a Window, on the Help Card: the Viewer's Give menu, for the
+    /// display that asked, dropping from the card's button at `button`.
+    /// The window the user picks goes over as a Handover, which answers
+    /// the Help Request (ADR 0015).
+    pub fn card_give(
+        &mut self,
+        id: DisplayId,
+        button: Option<gpui::Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = button.zip(self.card.as_ref()).map(|(b, (_, window))| {
+            let frame = native::frame(window);
+            (
+                frame.origin.x + f64::from(f32::from(b.origin.x)),
+                frame.origin.y + frame.size.height
+                    - f64::from(f32::from(b.origin.y + b.size.height))
+                    - 4.0,
+            )
+        });
+        self.pop_window_menu(id, WindowMenu::Give, at, cx);
+    }
+
+    /// A notification's click or action. Clicking only opens the display;
+    /// the user's first input there, or Take Over, starts a Takeover.
+    /// Continue and Reply answer the Help Request `request` the
+    /// notification was posted for, if it still stands.
+    fn notification_action(
+        &mut self,
+        display: DisplayId,
+        request: Option<RequestId>,
+        action: notify::Action,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self
+            .core
+            .read(cx)
+            .displays
+            .get(display)
+            .map(|d| d.open_request(Kind::Help).map(|r| r.id))
+        else {
+            return;
+        };
+        let helping = open.is_some();
+        if helping && request.is_some() && request != open {
+            // Posted for a request the agent replaced since: the new one's
+            // notification and card stand, and this answer goes nowhere.
+            log::info!("display {display}: notification answer for a replaced Help Request");
+            return;
+        }
+        let (answered, draft) = match action {
+            notify::Action::TakeOver if helping => {
+                self.open_for_help(display, cx);
+                return;
+            }
+            notify::Action::Continue if helping => (
+                self.answer_help(display, request, Answer::Continue, cx),
+                None,
+            ),
+            notify::Action::Reply(text) if helping => (
+                self.answer_help(display, request, Answer::Reply(text.clone()), cx),
+                Some(text),
+            ),
+            _ => {
+                self.card_open(display, cx);
+                return;
+            }
+        };
+        let Err(why) = answered else {
+            return;
+        };
+        log::info!(
+            "display {display}: notification answer not taken: {}",
+            why.message()
+        );
+        // Too long to send: the card opens the field with what they typed,
+        // for them to shorten.
+        if let (Unanswered::Unfit, Some(text), Some(open)) = (why, draft, open)
+            && !text.trim().is_empty()
+        {
+            self.core
+                .update(cx, |core, _| core.displays.recall_help(display));
+            self.reply_draft = Some((display, open, text));
+            self.sync_card(cx);
+            return;
+        }
+        // A Takeover began, or an older agent's request: open the display,
+        // where the card or the Viewer shows what stands.
+        self.card_open(display, cx);
+    }
+
+    /// The Help Card's window, for a test hook that types into it.
+    pub fn card_window(&self) -> Option<WindowHandle<HelpCard>> {
+        self.card.as_ref().map(|(card, _)| *card)
+    }
+
+    /// Test hook: answer the display's Help Request as a click on the card
+    /// or a notification's action would. True when it was answered.
+    pub fn debug_answer_help(
+        &mut self,
+        id: DisplayId,
+        answer: &str,
+        text: String,
+        via_notification: bool,
+        request: Option<RequestId>,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, String> {
+        let open = |shell: &Self, cx: &mut Context<Self>| {
+            shell
+                .core
+                .read(cx)
                 .displays
                 .get(id)
-                .is_some_and(|d| d.control_request.is_some());
-            if !open {
-                return false;
+                .is_some_and(|d| d.requests.is_open(Kind::Help))
+        };
+        let was_open = open(self, cx);
+        if via_notification {
+            let action = match answer {
+                "continue" => notify::Action::Continue,
+                "reply" => notify::Action::Reply(text),
+                "takeOver" => notify::Action::TakeOver,
+                "open" => notify::Action::Open,
+                other => return Err(format!("no notification action {other:?}")),
+            };
+            self.notification_action(id, request, action, cx);
+            return Ok(was_open && !open(self, cx));
+        }
+        match answer {
+            "continue" => Ok(self.answer_help(id, request, Answer::Continue, cx).is_ok()),
+            "later" => {
+                self.card_later(id, cx);
+                Ok(false)
             }
-            if give {
-                // The same hand-back as the Viewer's button and chat; it
-                // clears the request and tells its waiter.
-                core.hand_back(id, cx);
-            } else {
-                core.displays.answer_control(id, false);
-                cx.notify();
+            "takeOver" => {
+                self.open_for_help(id, cx);
+                Ok(was_open)
             }
-            true
-        })
+            other => Err(format!("no Help Card answer {other:?}")),
+        }
     }
 
     /// The user's own revoke, from the Viewer or Peek: the agent takes no
@@ -1675,15 +1831,8 @@ impl Shell {
     /// Later: put this Help Request off. The orange icon and Peek still
     /// show it; a new request from the display brings the card back.
     pub fn card_later(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        if let Some(reason) = self
-            .core
-            .read(cx)
-            .displays
-            .get(id)
-            .and_then(|d| d.help_request.clone())
-        {
-            self.card_later.insert(id, reason);
-        }
+        self.core
+            .update(cx, |core, _| core.displays.put_off_help(id));
         self.sync_card(cx);
     }
 
@@ -2610,6 +2759,35 @@ impl Shell {
             "card-keep-control" => {
                 self.answer_control(id, false, cx);
             }
+            // The Help Card's Continue, Reply and Give a Window, as a click
+            // presses them. Reply opens the card's field, without taking
+            // the keyboard from the user's app; Give a Window opens the
+            // Give menu from the card.
+            "card-help-continue" => {
+                let _ = self.answer_help(id, None, Answer::Continue, cx);
+            }
+            // `card-reply-long` opens it with a draft past the limit, which
+            // shows its length.
+            "card-reply" | "card-reply-long" => {
+                let draft = (surface == "card-reply-long").then(|| {
+                    let words = t("Use the work account. ", "用工作账号。");
+                    words.repeat(REPLY_CHARS / words.chars().count() + 2)
+                });
+                if let Some((card, _)) = self.card.clone() {
+                    let _ = card.update(cx, |card, window, cx| {
+                        card.open_reply(id, draft, false, window, cx)
+                    });
+                }
+            }
+            "card-reply-cancel" => {
+                if let Some((card, _)) = self.card.clone() {
+                    let _ = card.update(cx, |card, window, cx| card.close_reply(window, cx));
+                }
+            }
+            "card-give-window" => {
+                let button = help_card::painted_button("help-give");
+                self.card_give(id, button, cx);
+            }
             // The Viewer's and Peek's Revoke, as a click presses it.
             "access-revoke" => self.revoke_access(id, cx),
             // The Viewer on a display, showing its Window Access line.
@@ -2777,6 +2955,27 @@ impl Shell {
         button: Option<gpui::Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
+            let frame = native::frame(window);
+            (
+                frame.origin.x + f64::from(f32::from(b.origin.x)),
+                frame.origin.y + frame.size.height
+                    - f64::from(f32::from(b.origin.y + b.size.height))
+                    - 4.0,
+            )
+        });
+        self.pop_window_menu(id, which, at, cx);
+    }
+
+    /// Open a Give or Take Back menu for display `id` at `at`, in Cocoa
+    /// screen points: under a button, or at the pointer without one.
+    fn pop_window_menu(
+        &mut self,
+        id: DisplayId,
+        which: WindowMenu,
+        at: Option<(f64, f64)>,
+        cx: &mut Context<Self>,
+    ) {
         let core = self.core.read(cx);
         if core.displays.get(id).is_none() {
             return;
@@ -2825,15 +3024,6 @@ impl Shell {
                 }
             }
         }
-        let at = button.zip(self.viewer.as_ref()).map(|(b, (_, window))| {
-            let frame = native::frame(window);
-            (
-                frame.origin.x + f64::from(f32::from(b.origin.x)),
-                frame.origin.y + frame.size.height
-                    - f64::from(f32::from(b.origin.y + b.size.height))
-                    - 4.0,
-            )
-        });
         let debug_at = self
             .debug_menu_at
             .take()
@@ -2964,6 +3154,7 @@ impl Shell {
                 },
                 None,
                 display,
+                true,
                 cx,
             ),
             MenuAction::TakeBack {
@@ -4367,7 +4558,7 @@ impl Shell {
                         })
                         .await;
                     let _ = this.update(cx, |shell, cx| {
-                        shell.hand_over(window.target, Some(window.bounds), display, cx)
+                        shell.hand_over(window.target, Some(window.bounds), display, false, cx)
                     });
                 }
             }
@@ -4383,20 +4574,35 @@ impl Shell {
     }
 
     /// Place one of the user's windows onto a display, remembering where
-    /// it was so Dismissal can put it back.
+    /// it was so Dismissal can put it back. `gave`: the user picked it with
+    /// Give, in the Viewer or on the Help Card, which also answers the
+    /// display's Help Request (ADR 0015). A Window Request's Hand Over, a
+    /// drag and the launcher rule don't.
     pub fn hand_over(
         &mut self,
         target: WindowTarget,
         frame: Option<Rect>,
         id: DisplayId,
+        gave: bool,
         cx: &mut Context<Self>,
     ) {
         let mtm = MainThreadMarker::new().expect("main thread");
         let screen = app::screen_name(id, mtm);
         cx.spawn(async move |this, cx| {
-            let home = cx
+            // Its names, for the agent whose Help Request it answers.
+            let (home, named) = cx
                 .background_executor()
-                .spawn(async move { dismissal::home_of(target, frame) })
+                .spawn(async move {
+                    let named = gave.then(|| {
+                        let found = windows::find(target.window_id);
+                        NamedWindow {
+                            target,
+                            app: found.as_ref().map(|w| w.app.clone()).unwrap_or_default(),
+                            title: found.map(|w| w.title).unwrap_or_default(),
+                        }
+                    });
+                    (dismissal::home_of(target, frame), named)
+                })
                 .await;
             let claimed = this
                 .update(cx, |shell, cx| {
@@ -4430,7 +4636,7 @@ impl Shell {
                         core.displays.abandon_hand_over(id, &ticket);
                         return false;
                     }
-                    let landed = core.displays.commit_hand_over(id, &ticket);
+                    let landed = core.displays.commit_hand_over(id, &ticket, named);
                     if landed {
                         // Handed over again: the app's late windows are the
                         // agent's to have, not to send back.
@@ -4587,7 +4793,7 @@ impl Shell {
                 .timer(Duration::from_millis(150))
                 .await;
             let _ = shell.update(cx, |shell, cx| {
-                shell.hand_over(drag.target, Some(drag.frame), id, cx)
+                shell.hand_over(drag.target, Some(drag.frame), id, false, cx)
             });
         })
         .detach();

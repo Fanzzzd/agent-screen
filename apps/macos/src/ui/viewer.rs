@@ -195,7 +195,11 @@ impl Render for Viewer {
         let agent = display.agent_name().to_string();
         // The Help Request's steps, for the user to follow while in control.
         let steps = if display.takeover {
-            display.help_steps.clone()
+            display
+                .requests
+                .help()
+                .map(|(_, steps)| steps.to_vec())
+                .unwrap_or_default()
         } else {
             Vec::new()
         };

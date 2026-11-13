@@ -277,15 +277,16 @@ fn a_help_request_outranks_an_open_grant_card() {
     input.submit(b, "b".into(), "Drag".into(), None).unwrap();
     assert!(input.approve(input.queue.approval()));
     let pick = |d: &model::Displays<()>, input: &InputQueue| {
-        card::select(d, None, |_, _| false, input.card_display(d), false)
+        card::select(d, None, input.card_display(d), false)
     };
     assert_eq!(pick(&d, &input), Some(Card::Input(2)));
-    d.get_mut(1).unwrap().help_request = Some("Sign in".into());
+    d.request_help(1, "Sign in".into(), Vec::new(), true)
+        .unwrap();
     assert_eq!(pick(&d, &input), Some(Card::Help(1)));
-    d.get_mut(2).unwrap().help_request = Some("Code".into());
-    d.get_mut(1).unwrap().help_request = None;
+    d.request_help(2, "Code".into(), Vec::new(), true).unwrap();
+    d.withdraw_help(1);
     assert_eq!(pick(&d, &input), Some(Card::Help(2)));
-    d.get_mut(2).unwrap().help_request = None;
+    d.withdraw_help(2);
     assert_eq!(pick(&d, &input), Some(Card::Input(2)));
 }
 

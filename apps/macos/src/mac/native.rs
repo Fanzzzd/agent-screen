@@ -82,11 +82,12 @@ pub enum Native {
         display: u32,
         x: f64,
     },
-    /// The user clicked a notification about a display, or its Take Over
-    /// button.
+    /// The user clicked a notification about a display, or one of its
+    /// actions. `request`: the Help Request it was posted for.
     NotificationClicked {
         display: u32,
-        take_over: bool,
+        request: Option<u64>,
+        action: super::notify::Action,
     },
     /// What macOS says about notifying, after `notify::check`.
     InputQueueOpened,
@@ -1045,7 +1046,9 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
     use objc2::ffi::object_setClass;
     use objc2::runtime::{AnyClass, Bool, ClassBuilder, Sel};
     extern "C-unwind" fn yes(_: &AnyObject, _: Sel) -> Bool {
-        Bool::YES
+        // Not while the Help Card gives the keyboard back: AppKit must not
+        // hand it to the Viewer instead of the user's app.
+        Bool::new(!GIVING_BACK.load(std::sync::atomic::Ordering::Relaxed))
     }
     extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
         Bool::NO
@@ -1079,6 +1082,85 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
             )
         };
     }
+}
+
+/// Whether the Help Card may take the keyboard: only while its reply field
+/// is open.
+static CARD_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make `window` keyable only while `card_keys(true)`, as `set_keyable`
+/// does for good: the Help Card takes the keyboard for its reply field and
+/// at no other time, so a click on its buttons leaves the user's app the
+/// keyboard. Never main.
+pub fn set_keyable_while_typing(window: &NSWindow) {
+    use objc2::ffi::object_setClass;
+    use objc2::runtime::{AnyClass, Bool, ClassBuilder, Sel};
+    extern "C-unwind" fn typing(_: &AnyObject, _: Sel) -> Bool {
+        Bool::new(CARD_KEYS.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    let base = window.class();
+    let name = format!("AgentScreenTyping{}", base.name().to_string_lossy());
+    let name = std::ffi::CString::new(name).expect("class name");
+    let class = AnyClass::get(&name).or_else(|| {
+        let mut builder = ClassBuilder::new(&name, base)?;
+        unsafe {
+            builder.add_method(
+                sel!(canBecomeKeyWindow),
+                typing as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(canBecomeMainWindow),
+                no as extern "C-unwind" fn(_, _) -> _,
+            );
+        }
+        Some(builder.register())
+    });
+    if let Some(class) = class {
+        unsafe {
+            object_setClass(
+                (window as *const NSWindow).cast_mut().cast(),
+                (class as *const AnyClass).cast(),
+            )
+        };
+    }
+}
+
+/// The Help Card's reply field opened (true) or closed.
+pub fn card_keys(on: bool) {
+    CARD_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the Help Card may take the keyboard now.
+pub fn card_keys_on() -> bool {
+    CARD_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set while the Help Card gives the keyboard back, until the next turn of
+/// the run loop: no Agent Screen window may become key meanwhile.
+static GIVING_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Give the keyboard back to the user's app if `window` has it. The card is
+/// a non-activating panel: the user's app stayed active while it typed, and
+/// a panel like that gives the keyboard back only by leaving the screen. So
+/// it leaves and comes straight back, in one turn of the run loop, without
+/// taking the keyboard again, and while it is away no other Agent Screen
+/// window, such as the Viewer, may take it.
+pub fn give_up_keys(window: &NSWindow) {
+    if !window.isKeyWindow() {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    GIVING_BACK.store(true, Ordering::Relaxed);
+    window.orderOut(None);
+    window.orderFrontRegardless();
+    later(|| GIVING_BACK.store(false, Ordering::Relaxed));
+}
+
+pub fn is_key(window: &NSWindow) -> bool {
+    window.isKeyWindow()
 }
 
 thread_local! {

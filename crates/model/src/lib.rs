@@ -22,6 +22,7 @@ pub mod placement;
 pub mod real_click;
 pub mod real_drag;
 pub mod recording_playback;
+pub mod request;
 pub mod returns;
 pub mod screen_edge;
 pub mod selection;

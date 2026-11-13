@@ -9,6 +9,7 @@ use crate::mac::windows;
 use crate::model::{DisplayId, Displays, EndReason, Owner, WindowId};
 use crate::numbers::Numbers;
 use agent_screen_model::budget::{Budget, ColorState, MadeLimit};
+use agent_screen_model::request::{Answer, Effect, Kind, RequestId, Unanswered};
 use gpui::{App, AsyncApp, Context, Entity};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -594,12 +595,9 @@ impl Core {
     /// Viewer, Take Over, or by telling the agent in chat. The agent's
     /// input stops and Window Access pauses. False when nothing changed.
     pub fn take_over(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
-        let changed = self.displays.begin_takeover(id);
-        self.input_queue.takeover(id, true);
-        if changed {
-            self.stop_agent_input(id, true);
-            cx.notify();
-        }
+        let effects = self.displays.begin_takeover(id);
+        let changed = !effects.is_empty();
+        self.apply(effects, cx);
         changed
     }
 
@@ -607,13 +605,61 @@ impl Core {
     /// on the card, or by telling the agent in chat. One action for all of
     /// them. False when the user wasn't in control.
     pub fn hand_back(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool {
-        let changed = self.displays.end_takeover(id);
-        self.input_queue.takeover(id, false);
-        if changed {
-            self.stop_agent_input(id, false);
+        let effects = self.displays.end_takeover(id);
+        let changed = !effects.is_empty();
+        self.apply(effects, cx);
+        changed
+    }
+
+    /// The user answers display `id`'s request of `kind`, from the card, a
+    /// notification or the conversation. The model decides what ends; this
+    /// applies what it needs from the platform.
+    pub fn answer(
+        &mut self,
+        id: DisplayId,
+        kind: Kind,
+        request: Option<RequestId>,
+        answer: Answer,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Unanswered> {
+        let what = match &answer {
+            Answer::Continue => "continue",
+            Answer::Reply(_) => "reply",
+            Answer::Give => "give",
+            Answer::Keep => "keep",
+        };
+        let effects = self.displays.answer(id, kind, request, answer)?;
+        log::info!(
+            "display {id}: the user answered its {} request: {what}",
+            kind.as_str()
+        );
+        self.apply(effects, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// What a request or Takeover transition needs from the platform, once.
+    fn apply(&mut self, effects: Vec<Effect>, cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                Effect::Takeover { display, on } => {
+                    self.input_queue.takeover(display, on);
+                    self.stop_agent_input(display, on);
+                }
+                // The Shell moves windows; it may be the caller, so after
+                // this update.
+                Effect::HandOver { display, target } => {
+                    if let Some(shell) = crate::ui::shell::current() {
+                        cx.defer(move |cx| {
+                            let _ = shell.update(cx, |shell, cx| {
+                                shell.hand_over(target, None, display, false, cx)
+                            });
+                        });
+                    }
+                }
+            }
             cx.notify();
         }
-        changed
     }
 
     /// The user took the display over, or handed it back: an agent's

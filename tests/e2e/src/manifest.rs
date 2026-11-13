@@ -258,6 +258,8 @@ pub const SCRIPTS: &[Script] = &[
     script("firstclick", &[Browser, AgentInput], Full, Agent, 1),
     script("flash", &[Performance, Windows], Full, Agent, 1).hands_off().manual(MEASURES),
     script("handoverfront", &[WindowAccess, AgentInput], Full, Hook, 2),
+    script("helpanswers", &[Takeover, WindowAccess], Full, Hook, 2).hands_off(),
+    script("replykeys", &[Takeover], Full, Real, 2).hands_off(),
     script("helpcard", &[Takeover], Full, Hook, 1).hands_off(),
     script("holdmode", &[Displays], Full, Agent, 1),
     script("ime", &[InputMethod, AgentInput], Core, Real, 1).hands_off(),
