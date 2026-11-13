@@ -166,7 +166,7 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
             "its window {window_id} is on your display already; pass that window_id to set its frame"
         ),
         AppSighting::OnAgentDisplay(Holder::Mine) => {
-            "its only windows on your other Agent Displays are panels or dialogs, or they moved while place_window looked. Call list_windows on those displays and pass the window_id you want"
+            "its windows on your other Agent Displays are panels or dialogs, windows the user took back or opened, or on a display the user is operating, so none can move. Call list_windows on those displays, and ask the user for a window of theirs"
                 .into()
         }
         AppSighting::OnAgentDisplay(Holder::OtherSession) => {
@@ -350,9 +350,9 @@ mod tests {
                 text.contains("of your") || text.contains("your other"),
                 "{text}"
             );
-            assert!(!text.contains("operating"), "{text}");
             assert!(!text.contains("session holds"), "{text}");
         }
+        assert!(!no_window(7, &WindowSighting::OnAgentDisplay(Mine)).contains("operating"));
         for holder in [Review, Other] {
             let app = no_app_window("WeCom", &AppSighting::OnAgentDisplay(holder));
             let window = no_window(7, &WindowSighting::OnAgentDisplay(holder));

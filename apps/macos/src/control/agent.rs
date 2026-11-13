@@ -1056,21 +1056,36 @@ async fn handle_one(
                                 w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
                             })
                         {
-                            return None;
+                            return Vec::new();
                         }
-                        others.into_iter().find_map(|o| {
-                            windows::on_display(o)
-                                .into_iter()
-                                .find(|w| {
-                                    (wanted.is_some() || w.layer == 0)
-                                        && is_named(w, wanted, matcher.as_ref(), &mut ids)
-                                })
-                                .map(|w| (o, w.target))
-                        })
+                        let mut found = Vec::new();
+                        for o in others {
+                            for w in windows::on_display(o) {
+                                if (wanted.is_some() || w.layer == 0)
+                                    && is_named(&w, wanted, matcher.as_ref(), &mut ids)
+                                {
+                                    found.push((o, w.target));
+                                }
+                            }
+                        }
+                        found
                     }
                 })
                 .await;
-                if let Some((from, target)) = found {
+                // A window_id names one window: move_between_own says why
+                // it can't move. By app name, a window the user took back
+                // or made, or one on a display they operate, is skipped for
+                // the next (ADR 0016).
+                let pick = match (wanted, found.first()) {
+                    (Some(_), first) => first.copied(),
+                    (None, _) => core.update(cx, |c, _| {
+                        for &(from, _) in &found {
+                            sync_user_made(c, from);
+                        }
+                        c.displays.first_movable(id, &found)
+                    }),
+                };
+                if let Some((from, target)) = pick {
                     return move_between_own(&core, from, id, target, asked, cx).await;
                 }
             }

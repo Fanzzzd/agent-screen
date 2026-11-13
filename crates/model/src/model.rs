@@ -793,14 +793,18 @@ impl<H> Displays<H> {
         display.pointer = None;
         if let Some(key) = key {
             self.sessions.leave(&key, id);
-            self.hand_on_apps(id, &key);
+            // Only the agent's own end_display hands its apps on. A display
+            // the user closed keeps them, as their word on that work.
+            if reason == EndReason::Finished {
+                self.hand_on_apps(id, &key);
+            }
         }
         // Every request ends, and every wait hears it.
         self.end_requests(id);
         true
     }
 
-    /// Display `id` of session `key` ended while the session goes on: the
+    /// Display `id` of session `key` ended by end_display while the session goes on: the
     /// apps it started become its latest live display's, with what the
     /// user said of their windows, so their next windows are the session's
     /// strays there and no display holds them against it (ADR 0016). The
@@ -1171,10 +1175,7 @@ impl<H> Displays<H> {
         }
         let source = self.get(from).ok_or("the display has ended")?;
         let window = target.window_id;
-        if [from, to].iter().any(|&d| {
-            self.get(d)
-                .is_some_and(|d| d.returned.contains(&window) || d.user_made.contains(&window))
-        }) {
+        if self.users_window(from, to, window) {
             return Err(format!(
                 "window {window} is the user's: they took it back or opened it themselves. Ask them to hand it over"
             ));
@@ -1219,6 +1220,34 @@ impl<H> Displays<H> {
             record,
             before_to,
         })
+    }
+
+    /// Whether the user took window `window` back or made it, as display
+    /// `from` or `to` knows: then it is theirs, and no Placement moves it.
+    fn users_window(&self, from: DisplayId, to: DisplayId, window: WindowId) -> bool {
+        [from, to].iter().any(|&d| {
+            self.get(d)
+                .is_some_and(|d| d.returned.contains(&window) || d.user_made.contains(&window))
+        })
+    }
+
+    /// Of an app's windows on the session's other displays, in the order
+    /// found, the first place_window may move onto display `to`: not one
+    /// the user took back or made, nor one on a display the user is
+    /// operating. None when every one is refused.
+    pub fn first_movable(
+        &self,
+        to: DisplayId,
+        found: &[(DisplayId, WindowTarget)],
+    ) -> Option<(DisplayId, WindowTarget)> {
+        found
+            .iter()
+            .find(|&&(from, target)| {
+                self.same_session(from, to)
+                    && !self.users_window(from, to, target.window_id)
+                    && self.get(from).is_some_and(|d| !d.takeover)
+            })
+            .copied()
     }
 
     /// The window didn't reach display `to`: put both records back as they
@@ -2642,5 +2671,39 @@ mod tests {
             (),
         );
         assert_eq!(d.get(10).unwrap().owner.as_ref().unwrap().title, "订机票");
+    }
+
+    #[test]
+    fn place_window_by_app_skips_the_user_windows_on_other_displays() {
+        let mut d = two_of_one_session();
+        d.add(
+            10,
+            "Agent Screen 4".into(),
+            DEFAULT_SIZE,
+            session_owner("s", 1, "第三"),
+            (),
+        );
+        let first = d.get_mut(7).unwrap();
+        first.started.insert(5);
+        first.user_made.insert(1);
+        first.returned.insert(2);
+        let found = [(7, launched(1)), (7, launched(2)), (10, launched(3))];
+        assert_eq!(d.first_movable(8, &found), Some((10, launched(3))));
+        d.begin_takeover(10);
+        assert_eq!(d.first_movable(8, &found), None, "every one refused");
+        // Another session's display is never a source.
+        assert_eq!(d.first_movable(8, &[(9, launched(4))]), None);
+    }
+
+    #[test]
+    fn only_end_display_hands_the_apps_on() {
+        for reason in [EndReason::ClosedByUser, EndReason::Disconnected] {
+            let mut d = two_of_one_session();
+            d.get_mut(7).unwrap().started.insert(5);
+            assert!(d.end(7, reason));
+            assert!(d.get(7).unwrap().started.contains(&5), "{reason:?}");
+            assert!(!d.get(8).unwrap().started.contains(&5), "{reason:?}");
+            assert_eq!(d.starter_of(5), None);
+        }
     }
 }
