@@ -67,8 +67,13 @@ pub enum Note {
     },
     /// An operation is waiting for approval in the shared input queue.
     Input(String),
-    /// The agent asks for a window of this app.
-    Window(String),
+    /// The agent asks for a window of this app. `holder`: another Agent
+    /// Session's Display Label, and whether it is a Review Display, when
+    /// one holds the window (ADR 0017).
+    Window {
+        app: String,
+        holder: Option<(String, agent_screen_model::held::Place)>,
+    },
     /// The user brought an app to the front whose windows are all on Agent
     /// Displays: its name, and those displays' labels.
     Elsewhere { app: String, places: Vec<String> },
@@ -86,7 +91,7 @@ impl Note {
         match self {
             Note::Help { .. } => "help",
             Note::Input(_) => "input",
-            Note::Window(_) => "window",
+            Note::Window { .. } => "window",
             Note::Elsewhere { .. } => "where",
             Note::Control(_) => "control",
             Note::Review { .. } | Note::Disconnected { .. } => "review",
@@ -325,17 +330,47 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason.clone(),
         ),
-        Note::Window(app) => (
+        Note::Window { app, holder: None } => (
             tf!(
                 "{agent} asks for your {app} window",
                 "{agent} 想要你的 {app} 窗口"
             ),
             t(
-                "Hand it over or keep it from the card under the menu bar icon.",
-                "在菜单栏图标下的卡片里交给它，或者留着。",
+                "Choose Hand Over or Keep on the card under the menu bar icon.",
+                "在菜单栏图标下的卡片中选择交给它或保留。",
             )
             .to_string(),
         ),
+        Note::Window {
+            app,
+            holder: Some((holder, place)),
+        } => {
+            use agent_screen_model::held::Place;
+            let choose = t(
+                "Choose Hand Over or Keep on the card under the menu bar icon.",
+                "在菜单栏图标下的卡片中选择交给它或保留。",
+            );
+            let where_it_is = match place {
+                Place::Review => tf!(
+                    "It waits for your review on {holder}.",
+                    "它在待查看的 {holder} 上。"
+                ),
+                Place::Display => tf!("{holder} is using it.", "{holder} 正在使用。"),
+                Place::UserScreen => tf!(
+                    "It is on your screen, and {holder} started it.",
+                    "它在你的屏幕上，由 {holder} 打开。"
+                ),
+            };
+            let space = if crate::i18n::lang() == crate::i18n::Lang::En {
+                " "
+            } else {
+                ""
+            };
+            (
+                tf!("{agent} asks for {app}", "{agent} 想要 {app}"),
+                format!("{where_it_is}{space}{choose}"),
+            )
+        }
         Note::Elsewhere { app, places } => {
             let quoted = |open: &str, close: &str, join: &str| {
                 places
@@ -379,7 +414,7 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     content.setTitle(&NSString::from_str(&title));
     content.setSubtitle(&NSString::from_str(task));
     content.setBody(&NSString::from_str(&body));
-    if matches!(note, Note::Window(_) | Note::Control(_)) {
+    if matches!(note, Note::Window { .. } | Note::Control(_)) {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
     }
     if let Note::Help {

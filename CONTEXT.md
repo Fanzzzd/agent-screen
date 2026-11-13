@@ -85,7 +85,7 @@ The user giving one of their own windows to an Agent Display so the Agent Sessio
 _Avoid_: share, assign. The Viewer's button for it is labelled Give; the concept is still Handover.
 
 **Window Request**:
-The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs.
+The Agent Session asking the user for one of their windows, by app or window. The user answers Hand Over, which makes it a Handover, or Keep, and the window stays theirs. A window another Agent Session holds, on its display or a Review Display, takes the same request, and the card names the holder. Hand Over then moves it as a Placement, and the holding session is told on its next call; a Handover the holder had from the user stays one and still returns to the user (ADR 0017).
 _Avoid_: window permission, borrow
 
 **Control Request**:
@@ -93,7 +93,7 @@ During a Takeover, the Agent Session asking the user to hand its display back, w
 _Avoid_: resume request, reclaim
 
 **Window Authorization**:
-The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
+The user's explicit instruction allowing an Agent Session to take a user window without another confirmation. It can cover one Placement or persist for that Agent Session, on each of its displays, for all apps or named apps. A Takeover pauses a continuing authorization; handing control back resumes it. Revoking it prevents future Placements without moving windows already handed over. It never covers a window another Agent Session holds: only the user's answer, or their words naming that window or app, move one (ADR 0017). Ending the session's last display or disconnecting the session clears it. A window the user takes back stays excluded until they explicitly authorize that window again.
 _Avoid_: full access, unattended mode, blanket permission
 
 **Disposition**:

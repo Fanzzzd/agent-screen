@@ -911,11 +911,14 @@ impl Shell {
                 _ => notify::withdraw_help(display.id),
             }
             match open(Kind::Window) {
-                Some((_, Ask::Window(window))) => notify::update(
+                Some((_, Ask::Window { window, held })) => notify::update(
                     display.id,
                     display.agent_name(),
                     task,
-                    Some(Note::Window(window.app.clone())),
+                    Some(Note::Window {
+                        app: window.app.clone(),
+                        holder: held.as_ref().map(|h| (h.label.clone(), h.place)),
+                    }),
                 ),
                 _ => notify::withdraw_window(display.id),
             }

@@ -16,6 +16,7 @@ use crate::model::{
 };
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::held::{self, Held, Place};
 use agent_screen_model::input_queue::Action;
 use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, WindowSighting};
 use agent_screen_model::real_click;
@@ -57,7 +58,27 @@ pub async fn handle(
     {
         menu_still_open(id, method, cx).await?;
     }
+    let named = Args(&p)
+        .int("displayId")
+        .zip(Args(&p).int("windowId"))
+        .filter(|_| method != "placeWindow");
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    // A window the user gave to another session: say so, rather than that
+    // there is no such window (ADR 0017).
+    let reply = match (reply, named) {
+        (Err(error), Some((id, window))) if error.code == "not_found" => {
+            let given = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id as DisplayId)
+                    .and_then(|d| d.given_away(window as u32).map(String::from))
+            });
+            Err(match given {
+                Some(app) => ControlError::not_found(held::given_message(window as u32, &app)),
+                None => error,
+            })
+        }
+        (reply, _) => reply,
+    };
     // The menus the agent's next input may be meant for.
     if let Some(id) = shown
         && matches!(
@@ -962,7 +983,12 @@ async fn handle_one(
                     json
                 })
                 .collect();
-            Ok(json!({ "windows": list, "scale": scale }))
+            let mut reply = json!({ "windows": list, "scale": scale });
+            // list_windows shows the reply as it is: the note says it.
+            if let Some(given) = add_given(&core, id, &mut reply, cx) {
+                reply["note"] = json!(held::given_note(&given));
+            }
+            Ok(reply)
         }
         "setDisposition" => {
             let id = display(&core, &p, true, cx)?;
@@ -1089,6 +1115,12 @@ async fn handle_one(
                     return move_between_own(&core, from, id, target, asked, cx).await;
                 }
             }
+            let words = p
+                .string("userInstruction")
+                .map(|w| access::user_instruction(&w))
+                .transpose()
+                .map_err(ControlError::invalid)?;
+            let timeout = p.number("timeoutSeconds");
             // A window of an app the agent started is its own to place.
             let mut ids = AppIds::default();
             let stray = strays(&core, id, cx)
@@ -1118,6 +1150,13 @@ async fn handle_one(
                 })
                 .await;
                 if candidates.is_empty() {
+                    // Another session's window, or one on a Review Display:
+                    // only the user gives it (ADR 0017).
+                    if let Some((theirs, held)) =
+                        held_window(&core, id, wanted, matcher.clone(), cx).await
+                    {
+                        return take_held(&core, id, theirs, held, words, timeout, asked, cx).await;
+                    }
                     let text = app.clone().unwrap_or_default();
                     let holders = core.read_with(cx, |c, _| Holders::of(c, id));
                     let message = off(cx, move || match (wanted, named) {
@@ -1130,11 +1169,6 @@ async fn handle_one(
                     .await;
                     return Err(ControlError::not_found(message));
                 }
-                let words = p
-                    .string("userInstruction")
-                    .map(|w| access::user_instruction(&w))
-                    .transpose()
-                    .map_err(ControlError::invalid)?;
                 // The user's word names its window: the front one. A grant
                 // takes the first window it covers, past one the user just
                 // took back; with none, the user is asked for the front one.
@@ -1160,7 +1194,20 @@ async fn handle_one(
                     Ok(()) => hand_over(&core, id, theirs, authority, words, cx).await?,
                     // Not covered by the grant: the user answers on a card.
                     Err(Refusal::NotGranted | Refusal::Excluded) if words.is_none() => {
-                        request_window(&core, id, theirs, p.number("timeoutSeconds"), cx).await?
+                        request_window(&core, id, theirs, None, timeout, cx).await?
+                    }
+                    // A stray another session's display records, on the
+                    // user's screen: the user decides (ADR 0017).
+                    Err(Refusal::Elsewhere) => {
+                        let held = core.read_with(cx, |c, _| c.displays.held_by(id, target, None));
+                        return match held {
+                            Some(held) => {
+                                take_held(&core, id, theirs, held, words, timeout, asked, cx).await
+                            }
+                            None => Err(ControlError::failed(
+                                Refusal::Elsewhere.message(&theirs.app),
+                            )),
+                        };
                     }
                     Err(Refusal::Takeover) => {
                         return Err(ControlError::takeover(
@@ -2417,6 +2464,9 @@ async fn handle_one(
             }
             // A Window Request for no real window, so scripts can look at
             // the card with any `app` and `title`. Keep answers it.
+            // `holder`, a Display Label, shows the card for a window another
+            // session holds; `place` review or screen says it is on a Review
+            // Display or the user's screen.
             if surface == "window-request" {
                 let app = p.string("app").unwrap_or_else(|| "TextEdit".into());
                 let title = p.string("title").unwrap_or_default();
@@ -2424,11 +2474,21 @@ async fn handle_one(
                     pid: 0,
                     window_id: 0,
                 };
+                let held = p.string("holder").map(|label| Held {
+                    display: 0,
+                    agent: label.split(" · ").next().unwrap_or_default().to_string(),
+                    label,
+                    place: match p.string("place").as_deref() {
+                        Some("review") => Place::Review,
+                        Some("screen") => Place::UserScreen,
+                        _ => Place::Display,
+                    },
+                });
                 let _answer = core
                     .update(cx, |c, cx| {
-                        let rx = c
-                            .displays
-                            .request_window(id, NamedWindow { target, app, title });
+                        let rx =
+                            c.displays
+                                .request_window(id, NamedWindow { target, app, title }, held);
                         cx.notify();
                         rx
                     })
@@ -3031,6 +3091,28 @@ fn add_strayed(core: &Entity<Core>, id: DisplayId, result: &mut Value, cx: &mut 
     if !strayed.is_empty() {
         result["strayed"] = json!(strayed);
     }
+    add_given(core, id, result, cx);
+}
+
+/// Name in `given`, once, the windows the user gave from this display to
+/// another Agent Session since its session last heard (ADR 0017).
+fn add_given(
+    core: &Entity<Core>,
+    id: DisplayId,
+    result: &mut Value,
+    cx: &mut AsyncApp,
+) -> Option<Vec<(u32, String)>> {
+    let given = core.update(cx, |c, _| c.displays.given_news(id));
+    if given.is_empty() {
+        return None;
+    }
+    result["given"] = json!(
+        given
+            .iter()
+            .map(|(window, app)| json!({ "windowId": window, "app": app }))
+            .collect::<Vec<_>>()
+    );
+    Some(given)
 }
 
 /// Whether a kept catch on the display left this window alone as nobody's
@@ -3324,14 +3406,141 @@ fn no_app_window(
 }
 
 /// Ask the user for one of their windows with a Window Request, and wait
-/// for the answer. Granted, the window goes over as a Handover.
+/// for the answer. Granted, the window goes over as a Handover. `held`:
+/// another Agent Session or a Review Display holds it, the card names the
+/// holder, and Hand Over moves it from there as a Placement (ADR 0017).
 async fn request_window(
     core: &Entity<Core>,
     id: DisplayId,
     window: windows::Window,
+    held: Option<Held>,
     timeout: Option<f64>,
     cx: &mut AsyncApp,
 ) -> Result<Map<String, Value>, ControlError> {
+    let app = window.app.clone();
+    let mut held = held;
+    // The user consents to the holder the card names. When the window has
+    // moved to another holder by the time they answer, a new card names
+    // that one (ADR 0017).
+    for _ in 0..3 {
+        match ask_window(core, id, window.clone(), held.clone(), timeout, cx).await? {
+            Asked::Done(reply) => return Ok(reply),
+            Asked::Again(now) => {
+                log::info!(
+                    "display {id}: window {} ({app}) is with {} now; asking the user again",
+                    window.target.window_id,
+                    now.label
+                );
+                held = Some(now);
+            }
+        }
+    }
+    Err(ControlError::failed(format!(
+        "the {app} window kept moving between agent sessions while the user decided, so nothing moved. Call place_window again"
+    )))
+}
+
+/// How one Window Request ended for the asker.
+enum Asked {
+    Done(Map<String, Value>),
+    /// The user said Hand Over, but another holder has the window now: ask
+    /// again, naming it.
+    Again(Held),
+}
+
+/// Where a window place_window asked for is when the user answers.
+enum Now {
+    Gone,
+    /// On the asking display already.
+    Here,
+    Held(Held),
+    /// On the user's screen, and no other session holds it.
+    Users(windows::Window),
+    /// On one of the asker's own other displays, or a display no session
+    /// uses.
+    Unheld,
+}
+
+/// Where window `target` is now, as the session of display `id` sees it.
+async fn where_now(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> Now {
+    let known: Vec<DisplayId> =
+        core.read_with(cx, |c, _| c.displays.list.iter().map(|d| d.id).collect());
+    let window = target.window_id;
+    let (on, found) = off(cx, move || {
+        for o in known {
+            if let Some(w) = windows::on_display(o)
+                .into_iter()
+                .find(|w| w.target.window_id == window)
+            {
+                return (Some(o), Some(w));
+            }
+        }
+        let w = windows::all()
+            .into_iter()
+            .find(|w| w.target.window_id == window)
+            .filter(|w| windows::display_role(w).accepts_window_request());
+        (None, w)
+    })
+    .await;
+    match (on, found) {
+        (Some(o), _) if o == id => Now::Here,
+        (Some(o), Some(_)) => core
+            .read_with(cx, |c, _| c.displays.held_by(id, target, Some(o)))
+            .map_or(Now::Unheld, Now::Held),
+        (None, Some(w)) => core
+            .read_with(cx, |c, _| c.displays.held_by(id, target, None))
+            .map_or(Now::Users(w), Now::Held),
+        _ => Now::Gone,
+    }
+}
+
+/// After the user's Hand Over: move the window from where it is now. The
+/// holder the card named still has it: a Placement from there. The holder
+/// let it go, as when its display ended and sent a Handover home: it is the
+/// user's again, and goes over as their Handover, keeping its return
+/// location. Another holder has it: ask again.
+async fn after_hand_over(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    app: &str,
+    named: Option<&Held>,
+    cx: &mut AsyncApp,
+) -> Result<Asked, ControlError> {
+    match where_now(core, id, target, cx).await {
+        Now::Here => Ok(Asked::Done(Map::new())),
+        Now::Held(now) if named.is_some_and(|n| n.display == now.display) => {
+            transfer_window(core, &now, id, target, app, cx)
+                .await
+                .map(Asked::Done)
+        }
+        Now::Held(now) => Ok(Asked::Again(now)),
+        Now::Users(window) => hand_over(core, id, window, Authority::User, None, cx)
+            .await
+            .map(Asked::Done),
+        Now::Unheld => Err(ControlError::failed(format!(
+            "the {app} window moved to another display while the user decided, so nothing moved. Call list_windows on your displays, then place_window again"
+        ))),
+        Now::Gone => Err(ControlError::failed(format!(
+            "the {app} window closed while the user decided"
+        ))),
+    }
+}
+
+/// One Window Request, and what came of the user's answer.
+async fn ask_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    held: Option<Held>,
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<Asked, ControlError> {
     let target = window.target;
     let app = window.app.clone();
     let named = NamedWindow {
@@ -3341,7 +3550,7 @@ async fn request_window(
     };
     let (request, answer) = core
         .update(cx, |c, cx| {
-            let asked = c.displays.request_window(id, named);
+            let asked = c.displays.request_window(id, named, held.clone());
             cx.notify();
             asked
         })
@@ -3369,19 +3578,29 @@ async fn request_window(
             }
         }
     };
-    match resolution {
-        Resolution::HandedOver(_) => {}
-        Resolution::Declined => {
+    match (resolution, &held) {
+        (Resolution::HandedOver(_), Some(held)) => {
+            return after_hand_over(core, id, target, &app, Some(held), cx).await;
+        }
+        // The user's window, which another session took while they decided.
+        (Resolution::Claimed, _) => {
+            return after_hand_over(core, id, target, &app, None, cx).await;
+        }
+        (Resolution::HandedOver(_), None) => {}
+        (Resolution::Declined, Some(held)) => {
+            return Err(ControlError::failed(held_declined(&app, held)));
+        }
+        (Resolution::Declined, None) => {
             return Err(ControlError::failed(format!(
                 "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
             )));
         }
-        Resolution::TimedOut => {
+        (Resolution::TimedOut, _) => {
             return Err(ControlError::failed(format!(
                 "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
             )));
         }
-        Resolution::Replaced => {
+        (Resolution::Replaced, _) => {
             return Err(ControlError::failed(format!(
                 "your request for the {app} window was withdrawn: you asked for another window"
             )));
@@ -3399,7 +3618,10 @@ async fn request_window(
         })
         .await;
         if there {
-            return Ok(Map::from_iter([("handedOver".into(), Value::Bool(true))]));
+            return Ok(Asked::Done(Map::from_iter([(
+                "handedOver".into(),
+                Value::Bool(true),
+            )])));
         }
         cx.background_executor()
             .timer(Duration::from_millis(100))
@@ -3408,6 +3630,183 @@ async fn request_window(
     Err(ControlError::failed(format!(
         "the user handed over the {app} window, but it didn't reach the display"
     )))
+}
+
+/// What place_window says when the user keeps a window another session
+/// holds: who still has it.
+fn held_declined(app: &str, held: &Held) -> String {
+    let label = &held.label;
+    match held.place {
+        Place::Review => format!(
+            "the user kept the {app} window on {label}, a display waiting for their review; it stays there. Work without it, or ask the user"
+        ),
+        Place::Display => format!(
+            "the user kept the {app} window with {label}, the agent session using it; it stays there. Work without it, or ask again later"
+        ),
+        Place::UserScreen => format!(
+            "the user kept the {app} window for {label}, the agent session that started it; it stays on their screen. Work without it, or ask again later"
+        ),
+    }
+}
+
+/// The window place_window names that another Agent Session holds on its
+/// display, or that waits on a Review Display, with its holder: the first
+/// match, display by display.
+async fn held_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    wanted: Option<i64>,
+    matcher: Option<NamedApp>,
+    cx: &mut AsyncApp,
+) -> Option<(windows::Window, Held)> {
+    let holders: Vec<DisplayId> = core.read_with(cx, |c, _| {
+        let probe = WindowTarget {
+            pid: 0,
+            window_id: 0,
+        };
+        c.displays
+            .list
+            .iter()
+            .filter(|d| c.displays.held_by(id, probe, Some(d.id)).is_some())
+            .map(|d| d.id)
+            .collect()
+    });
+    if holders.is_empty() {
+        return None;
+    }
+    let found = off(cx, move || {
+        let mut ids = AppIds::default();
+        let mut found = Vec::new();
+        for o in holders {
+            for w in windows::on_display(o) {
+                if (wanted.is_some() || w.layer == 0)
+                    && is_named(&w, wanted, matcher.as_ref(), &mut ids)
+                {
+                    found.push((o, w));
+                }
+            }
+        }
+        found
+    })
+    .await;
+    core.read_with(cx, |c, _| {
+        found.into_iter().find_map(|(on, w)| {
+            let held = c.displays.held_by(id, w.target, Some(on))?;
+            Some((w, held))
+        })
+    })
+}
+
+/// place_window for a window another session holds (ADR 0017). The user's
+/// words relayed from the conversation move it at once only when they name
+/// the window or its app; otherwise a Window Request naming the holder asks
+/// the user. A Window Authorization never covers it.
+#[allow(clippy::too_many_arguments)]
+async fn take_held(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    held: Held,
+    words: Option<String>,
+    timeout: Option<f64>,
+    asked: FrameRequest,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let target = window.target;
+    let app = window.app.clone();
+    let named = match words.clone() {
+        Some(text) => {
+            let owner = window.app.clone();
+            off(cx, move || {
+                let name = app::name(target.pid).unwrap_or_default();
+                let bundle = app::bundle_id(target.pid).unwrap_or_default();
+                held::names_window(&text, &[&owner, &name, &bundle])
+            })
+            .await
+        }
+        None => false,
+    };
+    let mut reply = match words {
+        Some(text) if named => {
+            core.update(cx, |c, _| {
+                if let Some(access) = c.displays.access_mut(id) {
+                    access.last = Some(Instruction {
+                        action: ChatAction::Place,
+                        text: text.clone(),
+                    });
+                }
+            });
+            log::info!(
+                "display {id}: window {} ({app}) taken from {} on the user's words {text:?}",
+                target.window_id,
+                held.label
+            );
+            let mut reply = transfer_window(core, &held, id, target, &app, cx).await?;
+            reply.insert("by".into(), json!("chat"));
+            reply
+        }
+        _ => request_window(core, id, window, Some(held), timeout, cx).await?,
+    };
+    reply.extend(frame_window(core, id, target, asked, cx).await?);
+    Ok(reply)
+}
+
+/// Move a window another session holds onto display `to`, on the user's
+/// answer or their words: the holder's records let it go and its session
+/// hears it on its next call; a Handover the user gave the holder still
+/// returns to the user (ADR 0017).
+async fn transfer_window(
+    core: &Entity<Core>,
+    held: &Held,
+    to: DisplayId,
+    target: WindowTarget,
+    app: &str,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let from = held.display;
+    let moved = core
+        .update(cx, |c, cx| {
+            cx.notify();
+            c.displays.transfer(from, to, target, app)
+        })
+        .map_err(ControlError::failed)?;
+    let handed_over = moved.record.origin == Origin::HandedOver;
+    if let Err(e) = place_and_hold(target, to, cx).await {
+        core.update(cx, |c, cx| {
+            c.displays.undo_transfer(moved);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "the user gave you the {app} window, but it could not move from {}: {e}",
+            held.label
+        )));
+    }
+    core.update(cx, |c, _| c.displays.finish_transfer(&moved));
+    // The window is the asker's now: the holder's drag in it, held or
+    // queued, stops, as it would act on the window on the asker's display.
+    release_hold_on(from, target.window_id);
+    let stopped = core.update(cx, |c, cx| {
+        let stopped = c.input_queue.window_given(from, target.window_id);
+        cx.notify();
+        stopped
+    });
+    if stopped > 0 {
+        log::info!(
+            "display {from}: {stopped} input request(s) on window {} stopped, the window given away",
+            target.window_id
+        );
+    }
+    log::info!(
+        "window {} ({app}) moved from display {from} ({}) to display {to}, another session's, on the user's word",
+        target.window_id,
+        held.label
+    );
+    guard_placed(core, target, to, cx);
+    let mut reply = Map::from_iter([("takenFrom".into(), json!(held.label))]);
+    if handed_over {
+        reply.insert("handedOver".into(), Value::Bool(true));
+    }
+    Ok(reply)
 }
 
 /// Hand one of the user's windows over on their word or under the
@@ -3424,7 +3823,11 @@ async fn hand_over(
 ) -> Result<Map<String, Value>, ControlError> {
     let target = window.target;
     let app_name = window.app.clone();
-    let by = if words.is_some() { "chat" } else { "grant" };
+    let by = match (&authority, &words) {
+        (Authority::User, _) => "user",
+        (_, Some(_)) => "chat",
+        _ => "grant",
+    };
     let home = off(cx, move || crate::dismissal::home_of(target, None)).await;
     let ticket = core
         .update(cx, |c, cx| {
@@ -6691,6 +7094,28 @@ pub fn release_hold(id: DisplayId) {
     if let Some(Hold::Pipe(drag)) = HOLDS.with(|h| h.borrow_mut().remove(&id)) {
         std::thread::spawn(move || drag.cancel());
     }
+}
+
+/// The user gave window `window` from display `id` to another session: a
+/// drag the agent holds in it lets go, and a title-bar grab of it ends.
+fn release_hold_on(id: DisplayId, window: u32) {
+    let in_window = HOLDS.with(|h| {
+        h.borrow()
+            .get(&id)
+            .is_some_and(|Hold::Pipe(drag)| drag.window() == window)
+    });
+    if in_window {
+        release_hold(id);
+    }
+    GRAB.with(|g| {
+        let mut grabs = g.borrow_mut();
+        if grabs
+            .get(&id)
+            .is_some_and(|grab| grab.target.window_id == window)
+        {
+            grabs.remove(&id);
+        }
+    });
 }
 
 /// How a drag starting at a global point goes out (ADR 0010).

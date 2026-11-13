@@ -11,6 +11,7 @@
 //! platform return [`Effect`]s, which the app applies once (ADR 0004,
 //! ADR 0015).
 
+use crate::held::Held;
 use crate::model::{Display, DisplayId, Displays, WindowTarget};
 use futures::channel::oneshot;
 use serde_json::{Value, json};
@@ -59,8 +60,12 @@ pub enum Ask {
     },
     /// During a Takeover, hand the display back.
     Control { reason: String },
-    /// One of the user's windows, one the agent didn't start (ADR 0007).
-    Window(NamedWindow),
+    /// One of the user's windows, one the agent didn't start (ADR 0007),
+    /// or one another Agent Session holds, which `held` names (ADR 0017).
+    Window {
+        window: NamedWindow,
+        held: Option<Held>,
+    },
 }
 
 impl Ask {
@@ -68,7 +73,7 @@ impl Ask {
         match self {
             Ask::Help { .. } => Kind::Help,
             Ask::Control { .. } => Kind::Control,
-            Ask::Window(_) => Kind::Window,
+            Ask::Window { .. } => Kind::Window,
         }
     }
 }
@@ -110,6 +115,10 @@ pub enum Resolution {
     Kept,
     /// Window: Keep; the window stays the user's.
     Declined,
+    /// Window: the user's Hand Over for a window of theirs that another
+    /// Agent Session took while the card was open. Nothing moved; the
+    /// asker asks again, naming that session (ADR 0017).
+    Claimed,
     /// The agent took it back.
     Withdrawn,
     /// The agent asked again, and the new request stands in for it.
@@ -130,6 +139,7 @@ impl Resolution {
             Resolution::Instructions(_) => "instructions",
             Resolution::Kept => "kept",
             Resolution::Declined => "declined",
+            Resolution::Claimed => "claimed",
             Resolution::Withdrawn => "withdrawn",
             Resolution::Replaced => "replaced",
             Resolution::TimedOut => "timedOut",
@@ -144,6 +154,10 @@ impl Resolution {
 pub struct Woken {
     pub request: Option<Kind>,
     pub resolution: Resolution,
+    /// TookOver only: the user's Reply or Give that the agent hadn't heard
+    /// when the Takeover superseded it. Their words or window still reach
+    /// the agent with the hand-back.
+    pub superseded: Option<Resolution>,
 }
 
 impl Woken {
@@ -151,6 +165,20 @@ impl Woken {
         Self {
             request,
             resolution,
+            superseded: None,
+        }
+    }
+
+    /// The hand-back after a Takeover that superseded an answer nobody
+    /// heard: a Reply's words or a Give's window go along, as the agent
+    /// would otherwise never get them. A Continue carries nothing.
+    fn took_over(unheard: Option<Woken>) -> Self {
+        let superseded = unheard
+            .map(|w| w.resolution)
+            .filter(|r| matches!(r, Resolution::Instructions(_) | Resolution::HandedOver(_)));
+        Self {
+            superseded,
+            ..Self::of(Some(Kind::Help), Resolution::TookOver)
         }
     }
 
@@ -177,7 +205,10 @@ impl Woken {
             "request": self.request.map(Kind::as_str),
             "outcome": outcome,
         });
-        match &self.resolution {
+        if let Some(superseded) = &self.superseded {
+            out["superseded"] = json!(superseded.as_str());
+        }
+        match self.superseded.as_ref().unwrap_or(&self.resolution) {
             Resolution::Instructions(text) => out["text"] = json!(text),
             Resolution::HandedOver(window) => {
                 out["window"] = json!({
@@ -326,7 +357,16 @@ impl Requests {
 
     pub fn window(&self) -> Option<&NamedWindow> {
         match &self.get(Kind::Window)?.ask {
-            Ask::Window(window) => Some(window),
+            Ask::Window { window, .. } => Some(window),
+            _ => None,
+        }
+    }
+
+    /// Who holds the window the open Window Request asks for, when another
+    /// Agent Session or a Review Display does (ADR 0017).
+    pub fn window_held(&self) -> Option<&Held> {
+        match &self.get(Kind::Window)?.ask {
+            Ask::Window { held, .. } => held.as_ref(),
             _ => None,
         }
     }
@@ -498,14 +538,17 @@ impl<H> Displays<H> {
 
     /// Ask the user for a window, replacing an earlier Window Request,
     /// whose waiter hears Replaced. The receiver gets this one's end.
+    /// `held`: another Agent Session or a Review Display holds the window,
+    /// and the card names it (ADR 0017).
     pub fn request_window(
         &mut self,
         id: DisplayId,
         window: NamedWindow,
+        held: Option<Held>,
     ) -> Option<(RequestId, oneshot::Receiver<Resolution>)> {
         let d = self.live_mut(id)?;
         let (tx, rx) = oneshot::channel();
-        Some((d.requests.open(Ask::Window(window), Some(tx)), rx))
+        Some((d.requests.open(Ask::Window { window, held }, Some(tx)), rx))
     }
 
     /// The Window Request `request` went unanswered for too long. False
@@ -584,12 +627,12 @@ impl<H> Displays<H> {
             .requests
             .resolve(Kind::Help, Resolution::TookOver)
             .is_some();
-        let woken = if help {
-            Woken::of(Some(Kind::Help), Resolution::TookOver)
-        } else if d.requests.unheard.take().is_some() {
-            // The user answered, then took over: the Takeover supersedes
-            // the answer, and things may have changed since.
-            Woken::of(Some(Kind::Help), Resolution::TookOver)
+        // The user answered, then took over: the Takeover supersedes the
+        // answer, and things may have changed since. A Reply's words or a
+        // Give's window still go to the agent with it.
+        let unheard = d.requests.unheard.take();
+        let woken = if help || unheard.is_some() {
+            Woken::took_over(unheard)
         } else {
             Woken::of(control.then_some(Kind::Control), Resolution::HandedBack)
         };
@@ -617,6 +660,12 @@ impl<H> Displays<H> {
         request: Option<RequestId>,
         answer: Answer,
     ) -> Result<Vec<Effect>, Unanswered> {
+        // Another session took the user's window while the card was open.
+        let claimed = kind == Kind::Window
+            && self
+                .get(id)
+                .and_then(|d| d.requests.window())
+                .is_some_and(|w| self.owned_elsewhere(id, w.target));
         let d = self
             .live_mut(id)
             .filter(|d| {
@@ -637,6 +686,21 @@ impl<H> Displays<H> {
             (Kind::Window, Answer::Keep) => Resolution::Declined,
             (Kind::Window, Answer::Give) => {
                 let window = d.requests.window().cloned().ok_or(Unanswered::NotOpen)?;
+                let held = d.requests.window_held().is_some();
+                // Another session's window: the waiting place_window looks
+                // for its holder again and moves it from there, as a
+                // Placement (ADR 0017).
+                if held {
+                    d.requests
+                        .resolve(kind, Resolution::HandedOver(window.clone()));
+                    return Ok(Vec::new());
+                }
+                // The user's window, but another session holds it now:
+                // nothing moves, and the asker asks again, naming it.
+                if claimed {
+                    d.requests.resolve(kind, Resolution::Claimed);
+                    return Ok(Vec::new());
+                }
                 d.requests
                     .resolve(kind, Resolution::HandedOver(window.clone()));
                 return Ok(vec![Effect::HandOver {
@@ -1026,6 +1090,48 @@ mod tests {
     }
 
     #[test]
+    fn a_takeover_keeps_the_words_or_window_of_an_answer_nobody_heard() {
+        let words = "Use the work account";
+        for (answer, superseded) in [
+            (
+                Answer::Reply(words.into()),
+                Resolution::Instructions(words.into()),
+            ),
+            (Answer::Give, Resolution::HandedOver(window(9))),
+        ] {
+            let mut d = displays();
+            help(&mut d);
+            drop(wait(&mut d));
+            match answer {
+                Answer::Give => {
+                    let ticket = d
+                        .hand_over(7, window(9).target, &Authority::User, None)
+                        .unwrap();
+                    assert!(d.commit_hand_over(7, &ticket, Some(window(9))));
+                }
+                answer => {
+                    d.answer(7, Kind::Help, None, answer).unwrap();
+                }
+            }
+            d.begin_takeover(7);
+            let mut rx = wait(&mut d);
+            d.end_takeover(7);
+            let woken = heard(&mut rx);
+            assert_eq!(woken.resolution, Resolution::TookOver);
+            assert_eq!(woken.superseded, Some(superseded.clone()));
+            let reply = woken.to_json(false);
+            assert_eq!(reply["resolution"], "tookOver");
+            assert_eq!(reply["superseded"], superseded.as_str());
+            match superseded {
+                Resolution::Instructions(_) => assert_eq!(reply["text"], words),
+                _ => assert_eq!(reply["window"]["windowId"], 9),
+            }
+            // Heard once: the next wait has nothing left.
+            assert_eq!(now(&mut d), Woken::of(None, Resolution::HandedBack));
+        }
+    }
+
+    #[test]
     fn an_answer_to_a_replaced_request_changes_nothing() {
         let mut d = displays();
         let first = help(&mut d);
@@ -1161,14 +1267,14 @@ mod tests {
     #[test]
     fn a_window_request_hears_the_users_answer() {
         let mut d = displays();
-        let (_, mut no) = d.request_window(7, window(9)).unwrap();
+        let (_, mut no) = d.request_window(7, window(9), None).unwrap();
         assert_eq!(
             d.answer(7, Kind::Window, None, Answer::Keep),
             Ok(Vec::new())
         );
         assert_eq!(no.try_recv(), Ok(Some(Resolution::Declined)));
 
-        let (_, mut yes) = d.request_window(7, window(9)).unwrap();
+        let (_, mut yes) = d.request_window(7, window(9), None).unwrap();
         assert_eq!(
             d.answer(7, Kind::Window, None, Answer::Give),
             Ok(vec![Effect::HandOver {
@@ -1186,8 +1292,8 @@ mod tests {
     #[test]
     fn a_window_request_times_out_or_gives_way_on_its_own() {
         let mut d = displays();
-        let (first, mut old) = d.request_window(7, window(9)).unwrap();
-        let (second, mut new) = d.request_window(7, window(10)).unwrap();
+        let (first, mut old) = d.request_window(7, window(9), None).unwrap();
+        let (second, mut new) = d.request_window(7, window(10), None).unwrap();
         assert_eq!(old.try_recv(), Ok(Some(Resolution::Replaced)));
         assert!(!d.time_out_window(7, first), "the old one ended already");
         assert!(d.time_out_window(7, second));
@@ -1199,7 +1305,7 @@ mod tests {
     fn every_request_ends_with_its_display() {
         let mut d = displays();
         help(&mut d);
-        let (_, mut window_rx) = d.request_window(7, window(9)).unwrap();
+        let (_, mut window_rx) = d.request_window(7, window(9), None).unwrap();
         let mut rx = wait(&mut d);
         d.end(7, EndReason::Finished);
         assert_eq!(window_rx.try_recv(), Ok(Some(Resolution::Ended)));
@@ -1209,7 +1315,7 @@ mod tests {
         assert_eq!(woken.to_json(true)["outcome"], "closedByUser");
         let display = d.get(7).unwrap();
         assert!(!display.requests.any_open() && display.asking().is_none());
-        assert!(d.request_window(7, window(9)).is_none());
+        assert!(d.request_window(7, window(9), None).is_none());
         assert!(
             d.request_help(7, "Sign in".into(), Vec::new(), true)
                 .is_none()
@@ -1223,7 +1329,7 @@ mod tests {
         assert!(d.get(7).unwrap().asking().is_none());
         help(&mut d);
         assert_eq!(d.get(7).unwrap().asking().unwrap().kind(), Kind::Help);
-        let _asked = d.request_window(7, window(9)).unwrap();
+        let _asked = d.request_window(7, window(9), None).unwrap();
         assert_eq!(d.get(7).unwrap().asking().unwrap().kind(), Kind::Window);
         d.answer(7, Kind::Window, None, Answer::Keep).unwrap();
         // In a Takeover the card leaves the Help Request to the hand-back,

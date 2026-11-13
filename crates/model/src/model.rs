@@ -303,12 +303,15 @@ pub struct Display<H> {
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
     pub pointer: Option<AgentPointer>,
-    handover_serial: u64,
+    pub(crate) handover_serial: u64,
     /// The latest give-back of each window, by serial: only that one's
     /// failure may put the window's record back.
     given_back: BTreeMap<WindowId, u64>,
     give_back_serial: u64,
-    handing_over: BTreeMap<WindowId, u64>,
+    pub(crate) handing_over: BTreeMap<WindowId, u64>,
+    /// Windows the user gave from this display to another Agent Session
+    /// (ADR 0017): no longer its own, and its session hears of them.
+    pub given: BTreeMap<WindowId, crate::held::Given>,
     /// The platform display. Only held: dropping it removes the display.
     #[allow(dead_code)]
     pub handle: H,
@@ -372,6 +375,8 @@ impl<H> Display<H> {
     /// Record a window Agent Screen put here. A Handover stays a Handover even
     /// if the agent places the same window again.
     pub fn claim(&mut self, target: WindowTarget, origin: Origin, home: Option<Home>) {
+        // Back on this display: no longer given away.
+        self.given.remove(&target.window_id);
         if self
             .records
             .get(&target.window_id)
@@ -452,6 +457,7 @@ impl<H> Display<H> {
             && !recorded_elsewhere
             && !self.returned.contains(&target.window_id)
             && !self.user_made.contains(&target.window_id)
+            && !self.given.contains_key(&target.window_id)
     }
 
     /// A stray must also be outside every Agent Display. The platform
@@ -698,6 +704,7 @@ impl<H> Displays<H> {
             given_back: BTreeMap::new(),
             give_back_serial: 0,
             handing_over: BTreeMap::new(),
+            given: BTreeMap::new(),
             handle,
         });
     }
@@ -808,7 +815,8 @@ impl<H> Displays<H> {
     /// apps it started become its latest live display's, with what the
     /// user said of their windows, so their next windows are the session's
     /// strays there and no display holds them against it (ADR 0016). The
-    /// windows on `id` keep their records for review.
+    /// windows on `id` keep their records for review; the ones the user
+    /// gave to another session stay given (ADR 0017).
     fn hand_on_apps(&mut self, id: DisplayId, key: &str) {
         let Some(to) = self.sessions.get(key).and_then(|s| s.current()) else {
             return;
@@ -820,11 +828,18 @@ impl<H> Displays<H> {
         let returned = from.returned.clone();
         let user_made = from.user_made.clone();
         let released = from.released.clone();
+        // What the user gave away goes too, unheard news included, so the
+        // app's window stays out of the session's hands there (ADR 0017).
+        let given = from.given.clone();
         if let Some(to) = self.get_mut(to) {
             to.started.extend(started);
             to.returned.extend(returned);
             to.user_made.extend(user_made);
             to.released.extend(released);
+            for (window, g) in given {
+                let mark = to.given.entry(window).or_insert_with(|| g.clone());
+                mark.told &= g.told;
+            }
         }
     }
 
@@ -866,7 +881,8 @@ impl<H> Displays<H> {
 
     /// Whether another session's display, or a display no session uses,
     /// holds this window: in its records, or as a window of an app its
-    /// session started that the user didn't make or take back. Window
+    /// session started that the user didn't make, take back or give to
+    /// another session (ADR 0017). Window
     /// Access never reaches such a window. The session's own other
     /// displays don't count: moving a window between them is a Placement
     /// (ADR 0016).
@@ -874,12 +890,7 @@ impl<H> Displays<H> {
         self.list
             .iter()
             .filter(|d| d.id != id && !self.same_session(id, d.id))
-            .any(|d| {
-                d.records.contains_key(&target.window_id)
-                    || (d.started.contains(&target.pid)
-                        && !d.user_made.contains(&target.window_id)
-                        && !d.returned.contains(&target.window_id))
-            })
+            .any(|d| d.holds(target))
     }
 
     /// Whether `authority` lets one of the user's windows go onto display
@@ -1212,6 +1223,8 @@ impl<H> Displays<H> {
         if let Some(d) = self.get_mut(to) {
             d.records
                 .insert(target.window_id, Record { target, ..moved });
+            // Its own window again on this display (ADR 0017).
+            d.given.remove(&target.window_id);
         }
         Ok(Moved {
             from,

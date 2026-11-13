@@ -123,6 +123,18 @@ pub struct Click {
     pub asked_ms: u64,
 }
 
+impl Plan {
+    /// Whether the loan acts on window `window`: a drag's start or drop,
+    /// a menu item's window, a click's window.
+    pub fn touches(&self, window: u32) -> bool {
+        match self {
+            Plan::Drag(d) => d.target.window_id == window || d.drop.window_id == window,
+            Plan::MenuItem(m) => m.target.window_id == window,
+            Plan::Click(c) => c.target.window_id == window,
+        }
+    }
+}
+
 impl MenuItem {
     pub fn titles(&self) -> Vec<String> {
         self.path.iter().map(|(_, title)| title.clone()).collect()
@@ -373,6 +385,33 @@ impl InputQueue {
         self.queue.done(owner, self.now());
         self.forget_terminal(|request_owner| request_owner.same_session(owner));
         self.tick();
+    }
+
+    /// The user gave `window` from `display` to another Agent Session
+    /// (ADR 0017): that display's requests aimed at it stop, a queued one
+    /// at once and a running one once its loan lets go. Returns how many.
+    pub fn window_given(&mut self, display: DisplayId, window: u32) -> usize {
+        let aimed: Vec<(RequestId, Owner)> = self
+            .queue
+            .waiting()
+            .chain(self.queue.active())
+            .filter(|r| r.owner.display == display)
+            .filter(|r| self.plans.get(&r.id).is_some_and(|p| p.touches(window)))
+            .map(|r| (r.id, r.owner.clone()))
+            .collect();
+        let now = self.now();
+        let mut stopped = 0;
+        for (id, owner) in aimed {
+            if self.queue.withdraw(id, &owner, now) {
+                self.failures.insert(
+                    id,
+                    "the user gave this window to another agent session".into(),
+                );
+                stopped += 1;
+            }
+        }
+        self.tick();
+        stopped
     }
 
     pub fn end_display(&mut self, display: DisplayId) {
@@ -739,6 +778,31 @@ mod tests {
             to: (x + 50.0, 200.0),
             flags: 0,
         })
+    }
+
+    #[test]
+    fn giving_a_window_away_stops_the_requests_aimed_at_it() {
+        let mut input = InputQueue::default();
+        input.register(1, &display_owner(1));
+        let owner = input.owner(1, 1).unwrap();
+        let on_it = input
+            .submit(owner, "a".into(), "Drag".into(), Some(drag(10.0)))
+            .unwrap();
+        // Another window, or the same window id on another display, is
+        // left alone.
+        assert_eq!(input.window_given(1, 2), 0);
+        assert_eq!(input.window_given(2, 1), 0);
+        assert_eq!(
+            input.queue.request(on_it).map(|r| r.status),
+            Some(Status::Queued)
+        );
+        assert_eq!(input.window_given(1, 1), 1);
+        assert_eq!(
+            input.queue.request(on_it).map(|r| r.status),
+            Some(Status::Stopped(
+                agent_screen_model::input_queue::Stop::Withdrawn
+            ))
+        );
     }
 
     #[test]
