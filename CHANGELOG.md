@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.35 (2026-11-13)
+
+### Features
+
+- An agent that needs a window another agent is using, such as WeChat on another agent's display, now asks you for it instead of failing. A card drops from the menu bar icon, with a notification, naming the asking agent, the app and the agent that has it. Hand Over moves the window to the asking agent's display, and the other agent is told on its next call. Keep leaves it where it is. A window on a display waiting for your review is asked for the same way. A window you had given the first agent still comes back to you when the second one finishes. Window access you granted never covers another agent's window; only your answer, or your instruction naming that window or app, moves it. When you reply to a Help Request or give a window and then take over before the agent hears it, the agent now still gets your words or the window when you hand the display back.
+- You can answer an agent's Help Request without taking over its display. The Help Card and its notification now offer Continue, which lets the agent go on, for a step you did yourself, and Reply, which sends the agent what you type, word for word, up to 2000 characters. Give a Window on the card opens the Give menu for that display, and the window you pick answers the request. Take Over works as before: the agent goes on when you hand the display back. The agent is told how you answered, and an agent that withdraws its own request no longer reads that you handed control back. Later now puts off only that request: the agent's next one brings the card back, even with the same reason. An agent session that started before this update keeps Take Over and Later only until its client restarts.
+- An agent session can now use more than one display at once, up to four, when its task needs two screens side by side. An agent asks for another display only when it needs one; calling `create_display` again still returns the display it has, so agents don't pile up displays. Each display has its own label in Peek and the menu, and a repeated task title gets a number. The agent can move a window between its own displays without asking you, and a window you gave it stays yours wherever it moves. Window access you grant covers all of the session's displays. Ending one display leaves the others running; when the agent disconnects, all of them end. After Agent Screen restarts, an agent gets back only the apps it started itself, never another agent's. Several Codex conversations that share one connection to Agent Screen no longer lock each other out of their displays. If the Agent Screen app is older than its MCP server, asking for a second display says the app needs updating.
+
 ## 0.1.34 (2026-11-12)
 
 ### Fixes
