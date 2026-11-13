@@ -39,8 +39,11 @@ if [[ -n "${NOTARY_KEY_ID:-}" ]]; then
 else
   notary=(--keychain-profile "$profile")
 fi
-if [[ "${NOTARIZE:-1}" != 0 ]] && ! xcrun notarytool history "${notary[@]}" >/dev/null 2>&1; then
-  echo "error: no notarytool credentials; see the top of $0" >&2
+if [[ "${NOTARIZE:-1}" != 0 ]] && ! check="$(xcrun notarytool history "${notary[@]}" 2>&1 >/dev/null)"; then
+  echo "error: notarytool refused the credentials; see the top of $0" >&2
+  # notarytool's own message says why: a revoked key, an expired
+  # membership, or an agreement waiting in App Store Connect.
+  echo "$check" >&2
   exit 1
 fi
 
