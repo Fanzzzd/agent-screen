@@ -75,14 +75,15 @@ fn rect(v: &serde_json::Value) -> Option<[f64; 4]> {
 }
 
 fn test(stage: &Control, pid: u32, field_path: &std::path::Path) -> Result<()> {
-    let stage_id = open_user_stage(stage)?;
-    // The agent's display, from a connection of its own.
+    // The agent's display first, from a connection of its own: a stage
+    // made first was once parked over another display.
     let agent_conn = Control::connect()?;
     let agent = agent_conn.call(
         "createDisplay",
         json!({ "sessionKey": "replykeys", "title": "Reply keys", "width": 1280, "height": 800 }),
     )?;
     let agent_id = agent["displayId"].as_u64().context("display id")?;
+    let stage_id = open_user_stage(stage)?;
     let saved = out().join("replykeys-field.txt");
     let _ = std::fs::remove_file(&saved);
     let field = stage.call(
