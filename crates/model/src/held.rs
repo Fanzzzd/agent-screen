@@ -22,8 +22,22 @@ pub struct Held {
     pub display: DisplayId,
     /// That display's Display Label: "Claude Code · Book flights".
     pub label: String,
-    /// A Review Display: its session stopped using it.
-    pub review: bool,
+    /// Its client's name, for the card's Keep: "Claude Code".
+    pub agent: String,
+    /// Where the window is, so the card says it as it is.
+    pub place: Place,
+}
+
+/// Where a held window is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// On the holder's live Agent Display.
+    Display,
+    /// On a Review Display: its session stopped using it.
+    Review,
+    /// On the user's screen, while the holder's display records it or
+    /// started its app.
+    UserScreen,
 }
 
 /// A window the user gave from this display to another Agent Session, by
@@ -52,19 +66,53 @@ pub struct Transfer {
     before_to: Option<Record>,
     /// `to` had the window as one the user took back.
     was_returned: bool,
+    /// The mark that keeps a second move of the window out until this one
+    /// finishes or is undone.
+    serial: u64,
 }
 
-/// Whether the user's words, as the agent relayed them, name the window or
-/// its app: one of `names` (the app's name, its owner name, its bundle id,
-/// the window's title), ignoring case. Only then does a conversation
-/// instruction move a window another session holds without the card.
+/// Whether the user's words, as the agent relayed them, name the app: one
+/// of `names` (the app's name, its owner name, its bundle id), ignoring
+/// case. Only then does a conversation instruction move a window another
+/// session holds without the card; anything vaguer opens the card. A name
+/// counts only as whole words in the same order: "check my email" doesn't
+/// name Mail, nor "search" Arc. A name written in Chinese or Japanese,
+/// which put no spaces between words, counts where it appears. Window
+/// titles don't count: "open a new tab" would name a window titled New Tab.
 /// Names shorter than two characters count for nothing.
 pub fn names_window(words: &str, names: &[&str]) -> bool {
     let words = words.to_lowercase();
+    let spoken = tokens(&words);
     names.iter().any(|name| {
         let name = name.trim().to_lowercase();
-        name.chars().count() >= 2 && words.contains(&name)
+        if name.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+            return false;
+        }
+        if name.chars().any(unspaced) {
+            return words.contains(&name);
+        }
+        let wanted = tokens(&name);
+        !wanted.is_empty()
+            && spoken
+                .windows(wanted.len())
+                .any(|run| run == wanted.as_slice())
     })
+}
+
+/// The words of a text: its runs of letters and digits.
+fn tokens(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// A character of a script written without spaces between words.
+fn unspaced(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF // kana
+        | 0x3400..=0x4DBF // CJK extension A
+        | 0x4E00..=0x9FFF // CJK unified ideographs
+        | 0xF900..=0xFAFF) // CJK compatibility ideographs
 }
 
 impl<H> Display<H> {
@@ -101,23 +149,31 @@ impl<H> Displays<H> {
         on: Option<DisplayId>,
     ) -> Option<Held> {
         let asker = self.get(asking).filter(|d| d.is_live())?;
-        let held = |d: &Display<H>| Held {
+        let held = |d: &Display<H>, place: Place| Held {
             display: d.id,
             label: d.label(),
-            review: d.is_ended(),
+            agent: d.agent_name().to_string(),
+            place,
         };
         if let Some(on) = on {
             let d = self.get(on)?;
             let theirs = d.owner.is_some()
                 && d.id != asker.id
                 && (d.is_ended() || !self.same_session(asking, on));
-            return theirs.then(|| held(d));
+            let place = if d.is_ended() {
+                Place::Review
+            } else {
+                Place::Display
+            };
+            return theirs.then(|| held(d, place));
         }
+        // On the user's screen, only a session still at work holds it: a
+        // Review Display's records keep nothing off its own screen.
         self.list
             .iter()
-            .filter(|d| d.owner.is_some() && d.id != asking && !self.same_session(asking, d.id))
+            .filter(|d| d.is_live() && !self.same_session(asking, d.id))
             .find(|d| d.holds(target))
-            .map(held)
+            .map(|d| held(d, Place::UserScreen))
     }
 
     /// Move window `target` of app `app` from display `from`, which holds
@@ -143,7 +199,10 @@ impl<H> Displays<H> {
             return Err("the display has ended".into());
         }
         if self.get(from).is_none() {
-            return Err(format!("display {from} is gone"));
+            return Err(
+                "the display that had the window closed while the user decided. Call place_window again"
+                    .into(),
+            );
         }
         if self
             .list
@@ -169,7 +228,36 @@ impl<H> Displays<H> {
             })
             .map(|d| d.id)
             .collect();
-        for id in ids {
+        // The holder's session started its app on one display and may
+        // have moved it to another (ADR 0016): every display of that
+        // session marks it, so none takes it back as its own. Only the
+        // displays that had it tell their session.
+        let asker = self
+            .get(to)
+            .and_then(|d| d.owner.as_ref())
+            .map(|o| o.session_key.clone());
+        let keys: Vec<String> = ids
+            .iter()
+            .filter_map(|&id| self.get(id)?.owner.as_ref())
+            .map(|o| o.session_key.clone())
+            .filter(|k| Some(k) != asker.as_ref())
+            .collect();
+        let quiet: Vec<DisplayId> = self
+            .list
+            .iter()
+            .filter(|d| !ids.contains(&d.id) && d.id != to)
+            .filter(|d| {
+                d.owner
+                    .as_ref()
+                    .is_some_and(|o| keys.contains(&o.session_key))
+            })
+            .map(|d| d.id)
+            .collect();
+        for (id, told) in ids
+            .iter()
+            .map(|&id| (id, false))
+            .chain(quiet.into_iter().map(|id| (id, true)))
+        {
             let Some(d) = self.get_mut(id) else { continue };
             if let Some(record) = d.records.remove(&window) {
                 removed.push((id, record));
@@ -178,7 +266,7 @@ impl<H> Displays<H> {
                 window,
                 Given {
                     app: app.to_string(),
-                    told: false,
+                    told,
                 },
             );
             given_before.push((id, before));
@@ -203,6 +291,9 @@ impl<H> Displays<H> {
         let before_to = d.records.insert(window, record.clone());
         let was_returned = d.returned.remove(&window);
         d.given.remove(&window);
+        d.handover_serial += 1;
+        let serial = d.handover_serial;
+        d.handing_over.insert(window, serial);
         if let Some(access) = self.access_mut(to) {
             access.excluded.remove(&window);
         }
@@ -215,13 +306,25 @@ impl<H> Displays<H> {
             given_before,
             before_to,
             was_returned,
+            serial,
         })
+    }
+
+    /// The window is on display `to`: a later move of it may go ahead.
+    pub fn finish_transfer(&mut self, transfer: &Transfer) {
+        let window = transfer.target.window_id;
+        if let Some(d) = self.get_mut(transfer.to)
+            && d.handing_over.get(&window) == Some(&transfer.serial)
+        {
+            d.handing_over.remove(&window);
+        }
     }
 
     /// The window didn't reach display `to`: put the records back, unless
     /// the user took the window back or it was placed again since.
     pub fn undo_transfer(&mut self, transfer: Transfer) {
         let window = transfer.target.window_id;
+        self.finish_transfer(&transfer);
         if let Some(d) = self.get_mut(transfer.to)
             && d.records.get(&window) == Some(&transfer.record)
             && !d.returned.contains(&window)
@@ -364,18 +467,38 @@ mod tests {
             Held {
                 display: 7,
                 label: "Claude Code · task B".into(),
-                review: false
+                agent: "Claude Code".into(),
+                place: Place::Display,
             }
         );
         // Not on the asker's own display, nor on one no session uses.
         assert_eq!(d.held_by(8, wechat(1), Some(8)), None);
         d.add(9, "peek".into(), (800.0, 600.0), None, ());
         assert_eq!(d.held_by(8, wechat(1), Some(9)), None);
-        // A stray it recorded, on the user's screen, is held too.
-        assert_eq!(d.held_by(8, wechat(1), None).map(|h| h.display), Some(7));
-        // A Review Display holds it, the asker's own too.
+        // A stray it recorded, on the user's screen, is held too, and the
+        // card says it is on the user's screen.
+        let stray = d.held_by(8, wechat(1), None).unwrap();
+        assert_eq!((stray.display, stray.place), (7, Place::UserScreen));
+        // A Review Display holds what is on it, the asker's own too.
         d.end(7, EndReason::Finished);
-        assert!(d.held_by(8, wechat(1), Some(7)).unwrap().review);
+        assert_eq!(
+            d.held_by(8, wechat(1), Some(7)).unwrap().place,
+            Place::Review
+        );
+    }
+
+    #[test]
+    fn a_review_displays_records_hold_nothing_on_the_users_screen() {
+        let mut d = two_sessions();
+        d.get_mut(7).unwrap().started.insert(30);
+        d.get_mut(7)
+            .unwrap()
+            .claim(wechat(1), Origin::Launched, None);
+        d.end(7, EndReason::Finished);
+        // The window sits on the user's screen: it is theirs, not waiting
+        // for review on display 7.
+        assert_eq!(d.held_by(8, wechat(1), None), None);
+        assert_eq!(d.held_by(8, wechat(2), None), None);
     }
 
     #[test]
@@ -470,20 +593,41 @@ mod tests {
             .claim(wechat(1), Origin::Launched, None);
         d.end(7, EndReason::Finished);
         let held = d.held_by(8, wechat(1), Some(7)).unwrap();
-        assert!(held.review);
+        assert_eq!(held.place, Place::Review);
         d.transfer(held.display, 8, wechat(1), "WeChat").unwrap();
         assert!(d.get(7).unwrap().records.is_empty());
         assert!(d.get(8).unwrap().records.contains_key(&1));
     }
 
     #[test]
-    fn an_instruction_moves_it_only_when_it_names_the_window_or_app() {
-        let names = ["WeChat", "微信", "com.tencent.xinWeChat", "Chats"];
+    fn an_instruction_moves_it_only_when_it_names_the_app() {
+        let names = ["WeChat", "微信", "com.tencent.xinWeChat"];
         assert!(names_window("give the WeChat window to Codex", &names));
+        assert!(names_window("Take wechat.", &names));
         assert!(names_window("把微信给它", &names));
-        assert!(names_window("take chats", &names));
+        assert!(names_window("use com.tencent.xinWeChat", &names));
         assert!(!names_window("go ahead", &names));
         assert!(!names_window("take my browser", &names));
+        assert!(!names_window("wechatty", &names));
+        // Whole words only: a name inside another word names nothing.
+        assert!(!names_window("check my email", &["Mail", "com.apple.mail"]));
+        assert!(names_window("check my mail", &["Mail"]));
+        assert!(!names_window("search for flights", &["Arc"]));
+        assert!(!names_window(
+            "show the error messages",
+            &["Message", "Messenger"]
+        ));
+        // A name of several words counts only whole and in order.
+        assert!(names_window(
+            "open visual studio code",
+            &["Visual Studio Code"]
+        ));
+        assert!(!names_window("open the studio", &["Visual Studio Code"]));
+        // Titles aren't names: the window titled New Tab isn't named.
+        assert!(!names_window(
+            "open a new tab",
+            &["Safari", "com.apple.Safari"]
+        ));
         // A one-letter name matches nothing.
         assert!(!names_window("a window", &["A", " "]));
     }
@@ -541,6 +685,131 @@ mod tests {
         assert_eq!(d.get(7).unwrap().records.get(&1), Some(&before));
         assert!(d.get(7).unwrap().given.is_empty());
         assert!(!d.get(8).unwrap().records.contains_key(&1));
+    }
+
+    /// Holder session "holder" with displays 7 and 9; asker 8.
+    fn holder_with_two_displays() -> Displays<()> {
+        let mut d = two_sessions();
+        d.add(
+            9,
+            "d9".into(),
+            (800.0, 600.0),
+            Some(owner("holder", "Claude Code", "task B 2", 1)),
+            (),
+        );
+        d
+    }
+
+    #[test]
+    fn no_display_of_the_holders_session_takes_a_given_window_back() {
+        // The holder started the app on display 9 and moved its window to
+        // display 7 (ADR 0016): 9 still has the app's pid.
+        let mut d = holder_with_two_displays();
+        d.get_mut(9).unwrap().started.insert(30);
+        d.get_mut(9)
+            .unwrap()
+            .claim(wechat(1), Origin::Launched, None);
+        d.move_between(9, 7, wechat(1), true).unwrap();
+        d.transfer(7, 8, wechat(1), "WeChat").unwrap();
+        let other = d.get(9).unwrap();
+        assert!(!other.is_stray(wechat(1), false), "not 9's stray");
+        assert!(!other.holds(wechat(1)));
+        // 7, which had it, tells its session; 9 doesn't tell it twice.
+        assert_eq!(d.given_news(7), vec![(1, "WeChat".to_string())]);
+        assert!(d.given_news(9).is_empty());
+        assert!(!d.owned_elsewhere(8, wechat(1)));
+        // Once the window reaches the user's screen, no holder is named.
+        d.get_mut(8).unwrap().forget(1);
+        assert_eq!(d.held_by(8, wechat(1), None), None);
+    }
+
+    #[test]
+    fn a_given_window_stays_given_when_the_holder_ends_its_display() {
+        let mut d = holder_with_two_displays();
+        d.get_mut(7).unwrap().started.insert(30);
+        d.get_mut(7)
+            .unwrap()
+            .claim(wechat(1), Origin::Launched, None);
+        d.transfer(7, 8, wechat(1), "WeChat").unwrap();
+        // The holder ends display 7 with end_display: its apps go to 9.
+        assert!(d.end(7, EndReason::Finished));
+        let next = d.get(9).unwrap();
+        assert!(next.started.contains(&30));
+        assert!(!next.is_stray(wechat(1), false));
+        assert!(!next.holds(wechat(1)));
+        // The news 7 hadn't told goes with it.
+        assert_eq!(d.given_news(9), vec![(1, "WeChat".to_string())]);
+    }
+
+    #[test]
+    fn hand_over_after_the_holder_sent_a_handover_home_is_the_users() {
+        let mut d = two_sessions();
+        let ticket = d
+            .hand_over(7, wechat(1), &Authority::User, Some(home()))
+            .unwrap();
+        assert!(d.commit_hand_over(7, &ticket, None));
+        assert!(d.held_by(8, wechat(1), Some(7)).is_some());
+        // The holder ends while the card is open: its Handover goes home
+        // as Take Back sends it.
+        assert!(d.end(7, EndReason::Finished));
+        for target in d.handovers_at_end(7) {
+            d.give_back(7, target).unwrap();
+        }
+        // On the user's screen it is theirs: no holder, and the user's Hand
+        // Over makes it a Handover with its return location again.
+        assert_eq!(d.held_by(8, wechat(1), None), None);
+        let ticket = d
+            .hand_over(8, wechat(1), &Authority::User, Some(home()))
+            .unwrap();
+        assert!(d.commit_hand_over(8, &ticket, None));
+        let record = &d.get(8).unwrap().records[&1];
+        assert_eq!(
+            (record.origin, record.home.clone()),
+            (Origin::HandedOver, Some(home()))
+        );
+        // A display swept away since says so plainly.
+        d.remove(7);
+        let gone = d.transfer(7, 8, wechat(2), "WeChat").unwrap_err();
+        assert!(gone.contains("closed while the user decided"), "{gone}");
+    }
+
+    #[test]
+    fn a_second_asker_hears_the_current_holder() {
+        let mut d = two_sessions();
+        d.add(
+            10,
+            "d10".into(),
+            (800.0, 600.0),
+            Some(owner("third", "Gemini", "task C", 3)),
+            (),
+        );
+        d.get_mut(7)
+            .unwrap()
+            .claim(wechat(1), Origin::Launched, None);
+        let first = d.held_by(10, wechat(1), Some(7)).unwrap();
+        assert_eq!(first.display, 7);
+        let moved = d.transfer(7, 8, wechat(1), "WeChat").unwrap();
+        // While the window moves, a second move waits.
+        assert!(d.transfer(8, 10, wechat(1), "WeChat").is_err());
+        d.finish_transfer(&moved);
+        // On answer, C's card looks again: Codex has it now, not task B.
+        let now = d.held_by(10, wechat(1), Some(8)).unwrap();
+        assert_eq!((now.display, now.label.as_str()), (8, "Codex · task A"));
+        assert_ne!(now.display, first.display);
+        assert!(d.transfer(8, 10, wechat(1), "WeChat").is_ok());
+    }
+
+    #[test]
+    fn hand_over_of_a_users_window_another_session_took_meanwhile_moves_nothing() {
+        let mut d = two_sessions();
+        let (_, mut rx) = d.request_window(8, named(1), None).unwrap();
+        // While the card is open, display 7's session places the window.
+        d.get_mut(7).unwrap().claim(wechat(1), Origin::Placed, None);
+        assert_eq!(d.answer(8, Kind::Window, None, Answer::Give), Ok(vec![]));
+        assert_eq!(rx.try_recv().unwrap(), Some(Resolution::Claimed));
+        assert!(!d.get(8).unwrap().records.contains_key(&1));
+        // The asker asks again, naming the session that has it.
+        assert_eq!(d.held_by(8, wechat(1), Some(7)).map(|h| h.display), Some(7));
     }
 
     #[test]

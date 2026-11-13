@@ -21,6 +21,7 @@ use crate::i18n::t;
 use crate::input_queue::Plan;
 use crate::mac::native;
 use crate::model::DisplayId;
+use agent_screen_model::held::Place;
 use agent_screen_model::request::{
     Answer, Kind as RequestKind, REPLY_CHARS, RequestId, Unanswered,
 };
@@ -301,16 +302,29 @@ impl Render for HelpCard {
             let (give, keep) = (self.shell.clone(), self.shell.clone());
             // Another session's window, or one waiting for review: the card
             // names who has it (ADR 0017).
-            let (title, body) = match display.requests.window_held() {
+            let (title, body, keep_label) = match display.requests.window_held() {
                 Some(held) => {
                     let holder = held.label.clone();
-                    let where_it_is = if held.review {
-                        tf!(
-                            "It waits for your review on {holder}.",
-                            "它在待查看的 {holder} 上。"
-                        )
-                    } else {
-                        tf!("{holder} is using it.", "{holder} 正在使用。")
+                    let holder_agent = held.agent.clone();
+                    let (where_it_is, keep_label) = match held.place {
+                        Place::Review => (
+                            tf!(
+                                "It waits for your review on {holder}.",
+                                "它在待查看的 {holder} 上。"
+                            ),
+                            t("Leave It", "保留原处").to_string(),
+                        ),
+                        Place::Display => (
+                            tf!("{holder} is using it.", "{holder} 正在使用。"),
+                            tf!("Keep with {holder_agent}", "留给 {holder_agent}"),
+                        ),
+                        Place::UserScreen => (
+                            tf!(
+                                "It is on your screen, and {holder} started it.",
+                                "它在你的屏幕上，由 {holder} 打开。"
+                            ),
+                            tf!("Keep with {holder_agent}", "留给 {holder_agent}"),
+                        ),
                     };
                     (
                         tf!("{agent} asks for {app}", "{agent} 想要 {app}"),
@@ -321,6 +335,7 @@ impl Render for HelpCard {
                                 "交给它后，“{window}”会挪到 {agent} 的显示器上。"
                             )
                         ),
+                        keep_label,
                     )
                 }
                 None => (
@@ -332,6 +347,7 @@ impl Render for HelpCard {
                         "“{window}” goes to its display. You can take it back from the Windows menu.",
                         "“{window}”会挪到它的显示器上，之后可以从“窗口”菜单收回。"
                     ),
+                    t("Keep", "保留").to_string(),
                 ),
             };
             return card(title, body, &theme)
@@ -363,8 +379,12 @@ impl Render for HelpCard {
                             }),
                         )
                         .child(
-                            card_button("window-keep", t("Keep", "留着"), Tone::Plain, &theme)
+                            card_button("window-keep", keep_label, Tone::Plain, &theme)
                                 .px(px(16.))
+                                // One line, however long the holder's name.
+                                .max_w(px(180.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .on_click(move |_, _, cx| {
                                     tell(&keep, cx, move |shell, cx| {
                                         shell.answer_window(id, false, cx);

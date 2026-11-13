@@ -72,7 +72,7 @@ pub enum Note {
     /// one holds the window (ADR 0017).
     Window {
         app: String,
-        holder: Option<(String, bool)>,
+        holder: Option<(String, agent_screen_model::held::Place)>,
     },
     /// The user brought an app to the front whose windows are all on Agent
     /// Displays: its name, and those displays' labels.
@@ -336,28 +336,41 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
                 "{agent} 想要你的 {app} 窗口"
             ),
             t(
-                "Hand it over or keep it from the card under the menu bar icon.",
-                "在菜单栏图标下的卡片里交给它，或者留着。",
+                "Choose Hand Over or Keep on the card under the menu bar icon.",
+                "在菜单栏图标下的卡片中选择交给它或保留。",
             )
             .to_string(),
         ),
         Note::Window {
             app,
-            holder: Some((holder, review)),
-        } => (
-            tf!("{agent} asks for {app}", "{agent} 想要 {app}"),
-            if *review {
-                tf!(
-                    "It waits for your review on {holder}. Hand it over or keep it from the card under the menu bar icon.",
-                    "它在待查看的 {holder} 上。在菜单栏图标下的卡片里交给它，或者留着。"
-                )
+            holder: Some((holder, place)),
+        } => {
+            use agent_screen_model::held::Place;
+            let choose = t(
+                "Choose Hand Over or Keep on the card under the menu bar icon.",
+                "在菜单栏图标下的卡片中选择交给它或保留。",
+            );
+            let where_it_is = match place {
+                Place::Review => tf!(
+                    "It waits for your review on {holder}.",
+                    "它在待查看的 {holder} 上。"
+                ),
+                Place::Display => tf!("{holder} is using it.", "{holder} 正在使用。"),
+                Place::UserScreen => tf!(
+                    "It is on your screen, and {holder} started it.",
+                    "它在你的屏幕上，由 {holder} 打开。"
+                ),
+            };
+            let space = if crate::i18n::lang() == crate::i18n::Lang::En {
+                " "
             } else {
-                tf!(
-                    "{holder} is using it. Hand it over or keep it from the card under the menu bar icon.",
-                    "{holder} 正在使用。在菜单栏图标下的卡片里交给它，或者留着。"
-                )
-            },
-        ),
+                ""
+            };
+            (
+                tf!("{agent} asks for {app}", "{agent} 想要 {app}"),
+                format!("{where_it_is}{space}{choose}"),
+            )
+        }
         Note::Elsewhere { app, places } => {
             let quoted = |open: &str, close: &str, join: &str| {
                 places

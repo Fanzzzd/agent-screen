@@ -303,7 +303,7 @@ pub struct Display<H> {
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
     pub pointer: Option<AgentPointer>,
-    handover_serial: u64,
+    pub(crate) handover_serial: u64,
     /// The latest give-back of each window, by serial: only that one's
     /// failure may put the window's record back.
     given_back: BTreeMap<WindowId, u64>,
@@ -815,7 +815,8 @@ impl<H> Displays<H> {
     /// apps it started become its latest live display's, with what the
     /// user said of their windows, so their next windows are the session's
     /// strays there and no display holds them against it (ADR 0016). The
-    /// windows on `id` keep their records for review.
+    /// windows on `id` keep their records for review; the ones the user
+    /// gave to another session stay given (ADR 0017).
     fn hand_on_apps(&mut self, id: DisplayId, key: &str) {
         let Some(to) = self.sessions.get(key).and_then(|s| s.current()) else {
             return;
@@ -827,11 +828,18 @@ impl<H> Displays<H> {
         let returned = from.returned.clone();
         let user_made = from.user_made.clone();
         let released = from.released.clone();
+        // What the user gave away goes too, unheard news included, so the
+        // app's window stays out of the session's hands there (ADR 0017).
+        let given = from.given.clone();
         if let Some(to) = self.get_mut(to) {
             to.started.extend(started);
             to.returned.extend(returned);
             to.user_made.extend(user_made);
             to.released.extend(released);
+            for (window, g) in given {
+                let mark = to.given.entry(window).or_insert_with(|| g.clone());
+                mark.told &= g.told;
+            }
         }
     }
 

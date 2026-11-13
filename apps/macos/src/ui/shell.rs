@@ -917,7 +917,7 @@ impl Shell {
                     task,
                     Some(Note::Window {
                         app: window.app.clone(),
-                        holder: held.as_ref().map(|h| (h.label.clone(), h.review)),
+                        holder: held.as_ref().map(|h| (h.label.clone(), h.place)),
                     }),
                 ),
                 _ => notify::withdraw_window(display.id),

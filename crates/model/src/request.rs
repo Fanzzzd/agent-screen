@@ -115,6 +115,10 @@ pub enum Resolution {
     Kept,
     /// Window: Keep; the window stays the user's.
     Declined,
+    /// Window: the user's Hand Over for a window of theirs that another
+    /// Agent Session took while the card was open. Nothing moved; the
+    /// asker asks again, naming that session (ADR 0017).
+    Claimed,
     /// The agent took it back.
     Withdrawn,
     /// The agent asked again, and the new request stands in for it.
@@ -135,6 +139,7 @@ impl Resolution {
             Resolution::Instructions(_) => "instructions",
             Resolution::Kept => "kept",
             Resolution::Declined => "declined",
+            Resolution::Claimed => "claimed",
             Resolution::Withdrawn => "withdrawn",
             Resolution::Replaced => "replaced",
             Resolution::TimedOut => "timedOut",
@@ -655,6 +660,12 @@ impl<H> Displays<H> {
         request: Option<RequestId>,
         answer: Answer,
     ) -> Result<Vec<Effect>, Unanswered> {
+        // Another session took the user's window while the card was open.
+        let claimed = kind == Kind::Window
+            && self
+                .get(id)
+                .and_then(|d| d.requests.window())
+                .is_some_and(|w| self.owned_elsewhere(id, w.target));
         let d = self
             .live_mut(id)
             .filter(|d| {
@@ -676,13 +687,22 @@ impl<H> Displays<H> {
             (Kind::Window, Answer::Give) => {
                 let window = d.requests.window().cloned().ok_or(Unanswered::NotOpen)?;
                 let held = d.requests.window_held().is_some();
-                d.requests
-                    .resolve(kind, Resolution::HandedOver(window.clone()));
-                // Another session's window: the waiting place_window moves
-                // it from its holder, as a Placement (ADR 0017).
+                // Another session's window: the waiting place_window looks
+                // for its holder again and moves it from there, as a
+                // Placement (ADR 0017).
                 if held {
+                    d.requests
+                        .resolve(kind, Resolution::HandedOver(window.clone()));
                     return Ok(Vec::new());
                 }
+                // The user's window, but another session holds it now:
+                // nothing moves, and the asker asks again, naming it.
+                if claimed {
+                    d.requests.resolve(kind, Resolution::Claimed);
+                    return Ok(Vec::new());
+                }
+                d.requests
+                    .resolve(kind, Resolution::HandedOver(window.clone()));
                 return Ok(vec![Effect::HandOver {
                     display: id,
                     target: window.target,

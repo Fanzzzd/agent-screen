@@ -1277,8 +1277,12 @@ pub async fn run(
                     ))]))
                 }
                 // OK, Save or Close took its own window away: that is the
-                // action working, so show what is on the display now.
-                Err(error) if error.code == "not_found" => {
+                // action working, so show what is on the display now. A
+                // window the user gave to another session says so itself.
+                Err(error)
+                    if error.code == "not_found"
+                        && !error.message.contains("to another agent session") =>
+                {
                     let list = control
                         .call("listWindows", json!({ "displayId": display }))
                         .await?;
@@ -1287,11 +1291,7 @@ pub async fn run(
                         .await?;
                     let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
                     Ok(Output::Content(vec![
-                        text(format!(
-                            "Done; the action closed window {window}. Windows on the display now: {}{}",
-                            list.get("windows").cloned().unwrap_or(Value::Null),
-                            strayed_note(&shot)
-                        )),
+                        text(closed_window_text(window, &list, &shot)),
                         image(&get("data"), &get("mimeType")),
                     ]))
                 }
@@ -1621,6 +1621,18 @@ fn wait_outcome(reply: &Object, resolution: &str, request: Option<&str>) -> Valu
         }
         _ => json!({ "control": "none", "note": "The display has ended." }),
     }
+}
+
+/// act_on_element's answer when the action took its own window away: the
+/// windows left, and the notes of both replies. The list reply carries a
+/// window the user gave to another session (ADR 0017), and only once.
+fn closed_window_text(window: i64, list: &Object, shot: &Object) -> String {
+    format!(
+        "Done; the action closed window {window}. Windows on the display now: {}{}{}",
+        list.get("windows").cloned().unwrap_or(Value::Null),
+        strayed_note(list),
+        strayed_note(shot)
+    )
 }
 
 /// What a result's `strayed` windows are: new windows of the agent's apps
@@ -2417,6 +2429,17 @@ mod tests {
             &reply(json!({ "outcome": "displayEnded", "closedByUser": true })),
         );
         assert!(closed.contains("the user closed display 3"), "{closed}");
+    }
+
+    #[test]
+    fn a_closed_window_answer_keeps_the_given_note() {
+        let list = json!({ "windows": [], "given": [{ "windowId": 12, "app": "WeChat" }] });
+        let text = closed_window_text(5, list.as_object().unwrap(), json!({}).as_object().unwrap());
+        assert!(text.contains("closed window 5"), "{text}");
+        assert!(
+            text.contains("The user gave WeChat to another agent session: window 12"),
+            "{text}"
+        );
     }
 
     #[test]
