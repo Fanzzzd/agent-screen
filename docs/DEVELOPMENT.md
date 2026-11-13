@@ -288,6 +288,7 @@ cargo e2e control             # Takeover and Help Request, needs a debug build r
 AGENTSCREEN_INSTANCE=e2e cargo e2e takeover    # Takeover through the Viewer
 AGENTSCREEN_INSTANCE=e2e cargo e2e requestcontrol # request_control during a Takeover, from an agent with a long name: the card shows with both buttons inside it (debugCard), Keep Control tells the waiting agent and leaves the Takeover, Let … Continue hands the display back, a withdrawal leaves the Takeover, and without a Takeover it answers at once
 AGENTSCREEN_INSTANCE=e2e cargo e2e conversation # chat pause and hand-back, session window authorization, Takeover suspension, revocation and cross-session rejection through MCP; one empty display, no app launches or user-window movement
+AGENTSCREEN_INSTANCE=e2e cargo e2e helpanswers # each answer to a Help Request, as the agent's request_help hears it: Continue and Reply from the card and the notification, the user's Handover of a Field window from a user stand-in stage, Take Over and its hand-back, a withdrawal, an answer after the call timed out, and Later then a new request with the same reason; captures the card and its reply field per AGENTSCREEN_LANG; 2 displays, nothing on your screen but the card
 AGENTSCREEN_INSTANCE=e2e cargo e2e helpcard    # the Help Card: shows, Later, comes back, steps aside for the Viewer and Takeover; the Viewer lists the request's steps; captures a Window Request's card for a short and a long app name, per AGENTSCREEN_LANG
 
 # peek: Peek and the menu bar icon
@@ -572,6 +573,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Windows menu. |
 | `debugUserWindow` | Debug builds only. On this session's user stand-in stage (`userStage`), makes `windowId`, a window it launched there, the user's own: the stage forgets it, and the claim keeps AeroSpace off it. |
 | `debugAnswerWindow` | Answers the display's Window Request with `give` true or false once it opens. Returns `answered`. |
+| `debugAnswerHelp` | Answers the display's Help Request as the Help Card does: `answer` `continue`, `reply` with `text` (typed into the card's field, then Send), `later` or `takeOver`. With `via` `notification`, takes the notification's action path instead: `continue`, `reply`, `takeOver` or `open`. Returns `answered`. |
 | `debugLoanFocus` | Runs only an Input Loan's focus step on `windowId`: the window becomes main and its app frontmost, then the app that was in front comes back. Watches the window for `watchMs` (2000) and returns `before` and `after` frames, `came` (why the step failed, or null), `readyAtMs`, `movedAtMs` and `trips` (when and how often the window left its frame), `movedAfterReadyMs`, and `othersChanged`, the ids of other windows whose frames changed. Takes the front app. |
 | `debugFront` | Records that macOS last named `pid` the front app. It does not activate the app. |
 | `debugUserKey` | Records a user key press to `pid`, as the global key monitor does. |
@@ -599,6 +601,9 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `card-open`, `card-later`, `card-take-over` | Open the Help Card's display, put the card off, or take over its display. |
 | `card-give`, `card-keep` | Answer a Window Request with Hand Over or Keep. |
 | `card-continue`, `card-keep-control` | Answer a Control Request with Let It Continue or Keep Control. |
+| `card-help-continue` | Answer the display's Help Request with the card's Continue. |
+| `card-reply`, `card-reply-cancel` | Open the Help Card's reply field or close it. Unlike the user's click on Reply, it leaves the keyboard with the user's app. `debugAnswerHelp` types and sends a reply. |
+| `card-give-window` | Open the Give menu from the Help Card's Give a Window button. A window picked there answers the Help Request. |
 | `access`, `access-revoke` | Open the display's Viewer to inspect its window authorization, or revoke it through the user's action. Supply `displayId`. |
 | `window-request` | Open a Window Request for no real window, with `app` and `title` for its card. `card-keep` ends it. |
 | `input-queue`, `input-queue-approved` | On this connection's live `displayId`, enqueue a preview intent, which only asks, and show the queue card, optionally approved as Allow approves it. Only available with `AGENTSCREEN_INSTANCE=e2e`. Approval includes the shared test queue, so run only under the display lock. |

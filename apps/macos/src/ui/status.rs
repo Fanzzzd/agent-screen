@@ -71,7 +71,7 @@ impl Status {
                 kind: Kind::Takeover,
                 short: t("You’re in control", "你在操作").into(),
                 // The reason stays up while the user answers it.
-                long: match &display.help_request {
+                long: match display.requests.help().map(|(reason, _)| reason) {
                     Some(reason) => tf!(
                         "You’re in control. {agent} asked: {reason}",
                         "你在操作。{agent} 请你：{reason}"
@@ -84,7 +84,10 @@ impl Status {
                 icon: None,
                 color: theme.accent,
             },
-            None => match (&display.help_request, &display.owner) {
+            None => match (
+                display.requests.help().map(|(reason, _)| reason),
+                &display.owner,
+            ) {
                 (Some(reason), _) => Status {
                     kind: Kind::Help,
                     short: tf!("Needs help: {reason}", "需要帮助：{reason}"),
@@ -216,7 +219,7 @@ mod tests {
         let mut d = display(true);
         assert_eq!(status(&d, 0).long, "由 Codex 控制");
 
-        d.request_help(7, "输入验证码".into(), Vec::new());
+        d.request_help(7, "输入验证码".into(), Vec::new()).unwrap();
         let help = status(&d, 0);
         assert_eq!(
             (help.kind, help.short.as_str()),

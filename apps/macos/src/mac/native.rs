@@ -82,11 +82,11 @@ pub enum Native {
         display: u32,
         x: f64,
     },
-    /// The user clicked a notification about a display, or its Take Over
-    /// button.
+    /// The user clicked a notification about a display, or one of its
+    /// actions.
     NotificationClicked {
         display: u32,
-        take_over: bool,
+        action: super::notify::Action,
     },
     /// What macOS says about notifying, after `notify::check`.
     InputQueueOpened,
@@ -1079,6 +1079,55 @@ pub fn set_keyable(window: &NSWindow, keyable: bool) {
             )
         };
     }
+}
+
+/// Whether the Help Card may take the keyboard: only while its reply field
+/// is open.
+static CARD_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make `window` keyable only while `card_keys(true)`, as `set_keyable`
+/// does for good: the Help Card takes the keyboard for its reply field and
+/// at no other time, so a click on its buttons leaves the user's app the
+/// keyboard. Never main.
+pub fn set_keyable_while_typing(window: &NSWindow) {
+    use objc2::ffi::object_setClass;
+    use objc2::runtime::{AnyClass, Bool, ClassBuilder, Sel};
+    extern "C-unwind" fn typing(_: &AnyObject, _: Sel) -> Bool {
+        Bool::new(CARD_KEYS.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    let base = window.class();
+    let name = format!("AgentScreenTyping{}", base.name().to_string_lossy());
+    let name = std::ffi::CString::new(name).expect("class name");
+    let class = AnyClass::get(&name).or_else(|| {
+        let mut builder = ClassBuilder::new(&name, base)?;
+        unsafe {
+            builder.add_method(
+                sel!(canBecomeKeyWindow),
+                typing as extern "C-unwind" fn(_, _) -> _,
+            );
+            builder.add_method(
+                sel!(canBecomeMainWindow),
+                no as extern "C-unwind" fn(_, _) -> _,
+            );
+        }
+        Some(builder.register())
+    });
+    if let Some(class) = class {
+        unsafe {
+            object_setClass(
+                (window as *const NSWindow).cast_mut().cast(),
+                (class as *const AnyClass).cast(),
+            )
+        };
+    }
+}
+
+/// The Help Card's reply field opened (true) or closed.
+pub fn card_keys(on: bool) {
+    CARD_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 thread_local! {

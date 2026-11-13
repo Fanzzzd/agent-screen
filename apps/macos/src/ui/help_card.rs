@@ -1,6 +1,8 @@
 //! The Help Card: drops from the menu bar icon while a Help Request is
-//! open, with the display's picture, the agent's reason, and Take Over or
-//! Later. For a Window Request it names the window the agent asks for,
+//! open, with the display's picture, the agent's reason, and its answers:
+//! Take Over, Continue, Reply, Give a Window, or Later (ADR 0015). Reply
+//! opens a one-line field in the card, the only time the card takes the
+//! keyboard. For a Window Request it names the window the agent asks for,
 //! with Hand Over or Keep. For a Control Request, during a Takeover, it
 //! gives the agent's reason, with Let … Continue or Keep Control. For the
 //! Input Queue (ADR 0013) it asks to use the user's mouse, with the path
@@ -9,20 +11,23 @@
 //! runs, or the idle grant, with Stop.
 
 use super::pointer;
+use super::reply_field::{ReplyEvent, ReplyField};
 use super::shell::{Shell, tell};
 use super::stream::{NewFrame, Streams};
 use super::theme::{self, Theme};
 use crate::core::Core;
 use crate::i18n::t;
 use crate::input_queue::Plan;
+use crate::mac::native;
 use crate::model::DisplayId;
+use agent_screen_model::request::{Answer, Kind as RequestKind, Unanswered};
 use core_video::pixel_buffer::CVPixelBuffer;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpui::{
-    Bounds, Context, Entity, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
-    ObjectFit, ParentElement, PathBuilder, Pixels, Render, Role, SharedString,
+    AppContext, Bounds, Context, Entity, HighlightStyle, InteractiveElement, IntoElement,
+    MouseButton, ObjectFit, ParentElement, PathBuilder, Pixels, Render, Role, SharedString,
     StatefulInteractiveElement, Styled, StyledText, WeakEntity, Window, canvas, div, point,
     prelude::FluentBuilder, px, surface, svg,
 };
@@ -42,9 +47,10 @@ const RADIUS: f32 = 18.;
 pub const REQUEST_HEIGHT: f32 = PADDING * 2. + TITLE + REASON + LABEL + BUTTONS + GAP * 3.;
 
 /// The card's height for a display of `size`: everything but the picture is
-/// fixed, so the panel can be placed before it paints.
+/// fixed, so the panel can be placed before it paints. A Help Request's
+/// answers take two rows of buttons.
 pub fn height(size: (f64, f64)) -> f32 {
-    PADDING * 2. + TITLE + REASON + LABEL + BUTTONS + GAP * 4. + picture(size).1
+    PADDING * 2. + TITLE + REASON + LABEL + BUTTONS * 2. + GAP * 5. + picture(size).1
 }
 
 /// The picture's size inside the card, aspect-fit.
@@ -61,6 +67,8 @@ pub struct HelpCard {
     /// The display whose Help Request the card shows.
     pub display: Option<DisplayId>,
     pub input_queue: bool,
+    /// The reply field, while the user types an answer for this display.
+    reply: Option<(DisplayId, Entity<ReplyField>)>,
 }
 
 impl HelpCard {
@@ -86,7 +94,101 @@ impl HelpCard {
             streams,
             display: None,
             input_queue: false,
+            reply: None,
         }
+    }
+
+    /// Reply: open the field for display `id`. With `keys` the card takes
+    /// the keyboard, as the user's click on Reply does; test hooks leave
+    /// it with the user's app, so a script never takes their typing.
+    pub fn open_reply(
+        &mut self,
+        id: DisplayId,
+        keys: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = match &self.reply {
+            Some((shown, field)) if *shown == id => field.clone(),
+            _ => {
+                let theme = theme::theme(window);
+                let field = cx.new(|cx| {
+                    ReplyField::new(
+                        t("Tell it what to do", "告诉它怎么做").into(),
+                        (theme.label, theme.secondary, theme.accent),
+                        cx,
+                    )
+                });
+                cx.subscribe_in(&field, window, move |card, _, event, window, cx| {
+                    match event {
+                        ReplyEvent::Send(text) => {
+                            let text = text.clone();
+                            // Empty or too long: the field stays for
+                            // another try.
+                            if card.send_reply(id, text, window, cx).is_err() {
+                                window.play_system_bell();
+                            }
+                        }
+                        ReplyEvent::Cancel => card.close_reply(window, cx),
+                    }
+                })
+                .detach();
+                self.reply = Some((id, field.clone()));
+                field
+            }
+        };
+        if keys {
+            native::card_keys(true);
+            if let Some(ns) = native::ns_window(window) {
+                native::make_key(&ns);
+            }
+            window.focus(&field.read(cx).focus.clone(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Put the field away; the card gives up the keyboard.
+    pub fn close_reply(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.reply.take().is_some() {
+            native::card_keys(false);
+            cx.notify();
+        }
+    }
+
+    /// Send what the user typed as their reply to display `id`'s agent.
+    fn send_reply(
+        &mut self,
+        id: DisplayId,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Unanswered> {
+        let shell = self.shell.clone();
+        let answered = shell
+            .update(cx, |shell, cx| {
+                shell.answer_help(id, Answer::Reply(text), cx)
+            })
+            .unwrap_or(Err(Unanswered::NotOpen));
+        if answered.is_ok() {
+            self.close_reply(window, cx);
+        }
+        answered
+    }
+
+    /// Test hook: open the field, type `text` into it and press Send.
+    pub fn debug_reply(
+        &mut self,
+        id: DisplayId,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.open_reply(id, false, window, cx);
+        let Some((_, field)) = self.reply.clone() else {
+            return false;
+        };
+        field.update(cx, |field, cx| field.set_text(text, cx));
+        self.send_reply(id, text.to_string(), window, cx).is_ok()
     }
 }
 
@@ -99,13 +201,29 @@ impl Render for HelpCard {
         if self.input_queue {
             return self.render_queue(&theme, cx);
         }
+        // The field goes with the Help Request it answers.
+        let helping = |id: DisplayId| {
+            self.core
+                .read(cx)
+                .displays
+                .get(id)
+                .is_some_and(|d| d.asking().is_some_and(|r| r.kind() == RequestKind::Help))
+        };
+        if self
+            .reply
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) != self.display || self.input_queue || !helping(*id))
+        {
+            self.close_reply(window, cx);
+        }
+        let reply = self.reply.as_ref().map(|(_, field)| field.clone());
         let core = self.core.read(cx);
         let Some(display) = self.display.and_then(|id| core.displays.get(id)) else {
             return div().into_any_element();
         };
         let id = display.id;
         let agent = display.agent_name().to_string();
-        if let Some(request) = &display.window_request {
+        if let Some(request) = display.requests.window() {
             let app = request.app.clone();
             let window = if request.title.is_empty() {
                 app.clone()
@@ -163,7 +281,7 @@ impl Render for HelpCard {
             )
             .into_any_element();
         }
-        if let Some(reason) = display.control_request.clone() {
+        if let Some(reason) = display.requests.control_reason().map(String::from) {
             let (give, keep) = (self.shell.clone(), self.shell.clone());
             return card(
                 tf!("{agent} asks to continue", "{agent} 想继续操作"),
@@ -216,7 +334,11 @@ impl Render for HelpCard {
             )
             .into_any_element();
         }
-        let reason = display.help_request.clone().unwrap_or_default();
+        let reason = display
+            .requests
+            .help()
+            .map(|(reason, _)| reason.to_string())
+            .unwrap_or_default();
         let label = display.label();
         let size = (display.width, display.height);
         let fit = picture(size);
@@ -229,6 +351,8 @@ impl Render for HelpCard {
             None => super::peek::waiting(id, 10.5).into_any_element(),
         };
         let (open, take_over, later) = (self.shell.clone(), self.shell.clone(), self.shell.clone());
+        let (go_on, give) = (self.shell.clone(), self.shell.clone());
+        let card_entity = cx.entity().downgrade();
         card(
             tf!("{agent} needs your help", "{agent} 需要你帮忙"),
             reason,
@@ -291,15 +415,116 @@ impl Render for HelpCard {
                     }),
                 )
                 .child(
-                    card_button("help-later", t("Later", "稍后"), Tone::Plain, &theme)
+                    card_button("help-continue", t("Continue", "继续"), Tone::Plain, &theme)
                         .px(px(16.))
                         .on_click(move |_, _, cx| {
-                            tell(&later, cx, move |shell, cx| shell.card_later(id, cx))
+                            tell(&go_on, cx, move |shell, cx| {
+                                let _ = shell.answer_help(id, Answer::Continue, cx);
+                            })
                         }),
                 ),
         )
+        .child(match reply {
+            Some(field) => reply_row(field, card_entity, id, &theme),
+            None => answer_row(card_entity, give, later, id, &theme),
+        })
         .into_any_element()
     }
+}
+
+/// The second row of a Help Request's answers: Reply, Give a Window, Later.
+fn answer_row(
+    card: WeakEntity<HelpCard>,
+    give: WeakEntity<Shell>,
+    later: WeakEntity<Shell>,
+    id: DisplayId,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    div()
+        .h(px(BUTTONS))
+        .flex()
+        .gap(px(8.))
+        .child(
+            card_button("help-reply", t("Reply", "回复"), Tone::Plain, theme)
+                .flex_1()
+                .on_click(move |_, window, cx| {
+                    let _ = card.update(cx, |card, cx| card.open_reply(id, true, window, cx));
+                }),
+        )
+        .child(
+            card_button(
+                "help-give",
+                t("Give a Window", "给它窗口"),
+                Tone::Plain,
+                theme,
+            )
+            .flex_1()
+            .on_click(move |_, _, cx| {
+                let button = painted_button("help-give");
+                tell(&give, cx, move |shell, cx| shell.card_give(id, button, cx))
+            }),
+        )
+        .child(
+            card_button("help-later", t("Later", "稍后"), Tone::Plain, theme)
+                .px(px(16.))
+                .on_click(move |_, _, cx| {
+                    tell(&later, cx, move |shell, cx| shell.card_later(id, cx))
+                }),
+        )
+        .into_any_element()
+}
+
+/// Reply's row: the field, Send and Cancel. Return sends, Escape cancels.
+fn reply_row(
+    field: Entity<ReplyField>,
+    card: WeakEntity<HelpCard>,
+    id: DisplayId,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let (send, cancel) = (card.clone(), card);
+    let typed = field.clone();
+    div()
+        .h(px(BUTTONS))
+        .flex()
+        .gap(px(8.))
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h(px(BUTTONS))
+                .flex()
+                .items_center()
+                .px(px(12.))
+                .rounded_full()
+                .bg(theme.control)
+                .border_1()
+                .border_color(theme.accent.opacity(0.6))
+                .text_size(px(13.))
+                .text_color(theme.label)
+                .child(field)
+                .child(painted("reply-field")),
+        )
+        .child(
+            card_button("reply-send", t("Send", "发送"), Tone::Plain, theme)
+                .px(px(14.))
+                .on_click(move |_, window, cx| {
+                    let text = typed.read(cx).content.clone();
+                    let _ = send.update(cx, |card, cx| {
+                        if card.send_reply(id, text, window, cx).is_err() {
+                            window.play_system_bell();
+                        }
+                    });
+                }),
+        )
+        .child(
+            card_button("reply-cancel", t("Cancel", "取消"), Tone::Plain, theme)
+                .px(px(14.))
+                .on_click(move |_, window, cx| {
+                    let _ = cancel.update(cx, |card, cx| card.close_reply(window, cx));
+                }),
+        )
+        .into_any_element()
 }
 
 impl HelpCard {
@@ -1514,6 +1739,12 @@ thread_local! {
         RefCell::new(HashMap::new());
     /// The width of the card last rendered.
     static CARD_WIDTH: Cell<f32> = const { Cell::new(WIDTH) };
+}
+
+/// Where button `id` was last painted on the card, in points from its
+/// corner.
+pub fn painted_button(id: &str) -> Option<Bounds<Pixels>> {
+    BUTTONS_PAINTED.with(|b| b.borrow().get(id).copied())
 }
 
 /// The card's width and its buttons as last painted, with the queue card's

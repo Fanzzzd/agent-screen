@@ -71,6 +71,12 @@ fn test(pid: &mut Option<u64>) -> Result<()> {
         .as_u64()
         .context("Field's window")?;
     sleep_ms(3500);
+    // The stage session launched it; it gives it to the user, as a window
+    // of theirs would be.
+    stage.call(
+        "debugUserWindow",
+        json!({ "displayId": stage_id, "windowId": window }),
+    )?;
     let client = McpClient::start(&[])?;
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;

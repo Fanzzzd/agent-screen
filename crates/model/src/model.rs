@@ -4,7 +4,8 @@
 //! `H` is the platform's handle that keeps a display alive. Tests use `()`.
 
 use crate::access::{Access, Authority, Refusal};
-use futures::channel::oneshot;
+pub use crate::request::{ControlAsk, Wait};
+use crate::request::{NamedWindow, Requests};
 use std::collections::{BTreeMap, HashSet};
 
 pub type DisplayId = u32;
@@ -126,16 +127,6 @@ pub struct Owner {
     pub connection: u64,
 }
 
-/// The agent asks for one of the user's windows, one it didn't start
-/// (ADR 0007). The user hands it over or turns the request down.
-#[derive(Debug)]
-pub struct WindowRequest {
-    pub target: WindowTarget,
-    pub app: String,
-    pub title: String,
-    answer: Option<oneshot::Sender<bool>>,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndReason {
     /// The agent called end_display.
@@ -252,26 +243,6 @@ pub struct AgentPointer {
     pub seq: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ControlWait {
-    Returned,
-    TimedOut,
-    Ended,
-    /// The user answered a Control Request with Keep Control.
-    Kept,
-}
-
-impl ControlWait {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ControlWait::Returned => "returned",
-            ControlWait::TimedOut => "timedOut",
-            ControlWait::Ended => "ended",
-            ControlWait::Kept => "kept",
-        }
-    }
-}
-
 /// A hand-over claimed and not yet moved: what authorized it, and the
 /// grant's revoke count then.
 #[derive(Clone, PartialEq, Debug)]
@@ -284,23 +255,6 @@ pub struct Ticket {
     pub before: Option<Record>,
     /// The user had taken the window back before.
     pub was_returned: bool,
-}
-
-/// What asking for control did.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ControlAsk {
-    /// A new Control Request is open.
-    Asked,
-    /// One was open already; it stands as it was.
-    AlreadyAsked,
-    /// The agent has control, or the display isn't live.
-    NotNeeded,
-}
-
-/// What `wait_for_control` gets right away, or a receiver to await.
-pub enum Wait {
-    Now(ControlWait),
-    Later(oneshot::Receiver<ControlWait>),
 }
 
 pub struct Display<H> {
@@ -328,15 +282,9 @@ pub struct Display<H> {
     pub released: std::collections::BTreeSet<i32>,
     /// The user is operating the display in the Viewer; agent input is refused.
     pub takeover: bool,
-    /// The reason of an open Help Request.
-    pub help_request: Option<String>,
-    /// Its steps, shown in the Viewer while the user is in control.
-    pub help_steps: Vec<String>,
-    /// An open Window Request: the agent asks for a window it didn't start.
-    pub window_request: Option<WindowRequest>,
-    /// The reason of an open Control Request: during a Takeover, the agent
-    /// asks the user to hand the display back.
-    pub control_request: Option<String>,
+    /// The open Help, Control and Window Requests, and the agent's waits
+    /// for the user.
+    pub requests: Requests,
     /// The agent is typing through the user's input method, which takes
     /// the user's keyboard for that time (ADR 0008).
     pub keyboard_borrowed: bool,
@@ -350,7 +298,6 @@ pub struct Display<H> {
     given_back: BTreeMap<WindowId, u64>,
     give_back_serial: u64,
     handing_over: BTreeMap<WindowId, u64>,
-    waiters: Vec<oneshot::Sender<ControlWait>>,
     /// The platform display. Only held: dropping it removes the display.
     #[allow(dead_code)]
     pub handle: H,
@@ -379,7 +326,7 @@ impl<H> Display<H> {
 
     /// The agent has to wait for the user before it carries on.
     pub fn awaits_user(&self) -> bool {
-        self.takeover || self.help_request.is_some()
+        self.takeover || self.requests.is_open(crate::request::Kind::Help)
     }
 
     /// A live Agent Display: an Agent Session still uses it.
@@ -524,12 +471,6 @@ impl<H> Display<H> {
                 home: None,
             })
             .disposition = Some(disposition);
-    }
-
-    fn resume_waiters(&mut self, outcome: ControlWait) {
-        for waiter in self.waiters.drain(..) {
-            let _ = waiter.send(outcome);
-        }
     }
 }
 
@@ -716,10 +657,7 @@ impl<H> Displays<H> {
             user_made: Default::default(),
             released: Default::default(),
             takeover: false,
-            help_request: None,
-            help_steps: Vec::new(),
-            window_request: None,
-            control_request: None,
+            requests: Requests::default(),
             keyboard_borrowed: false,
             pointer: None,
             access: Access::default(),
@@ -727,7 +665,6 @@ impl<H> Displays<H> {
             given_back: BTreeMap::new(),
             give_back_serial: 0,
             handing_over: BTreeMap::new(),
-            waiters: Vec::new(),
             handle,
         });
     }
@@ -742,7 +679,7 @@ impl<H> Displays<H> {
         if display.ended == Some(EndReason::ClosedByUser) {
             self.closed_by_user.insert(id);
         }
-        display.resume_waiters(ControlWait::Ended);
+        display.requests.end();
         Some(display)
     }
 
@@ -775,15 +712,11 @@ impl<H> Displays<H> {
         }
         display.ended = Some(reason);
         display.takeover = false;
-        display.help_request = None;
-        display.help_steps.clear();
-        // Its waiter hears the request went unanswered.
-        display.window_request = None;
-        display.control_request = None;
         display.pointer = None;
         // Window Access is the session's, and the session is done here.
         display.access.clear();
-        display.resume_waiters(ControlWait::Ended);
+        // Every request ends, and every wait hears it.
+        self.end_requests(id);
         true
     }
 
@@ -811,95 +744,6 @@ impl<H> Displays<H> {
         ids.into_iter()
             .filter(|&id| self.end(id, EndReason::Disconnected))
             .collect()
-    }
-
-    /// Only a live Agent Display has an Agent Session to refuse.
-    pub fn begin_takeover(&mut self, id: DisplayId) -> bool {
-        match self.get_mut(id) {
-            Some(d) if d.is_live() && !d.takeover => {
-                d.takeover = true;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Hand the display back. This also ends a Help Request.
-    pub fn end_takeover(&mut self, id: DisplayId) -> bool {
-        match self.get_mut(id) {
-            Some(d) if d.takeover => {
-                d.takeover = false;
-                d.control_request = None;
-                d.help_request = None;
-                d.help_steps.clear();
-                d.resume_waiters(ControlWait::Returned);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn request_help(&mut self, id: DisplayId, reason: String, steps: Vec<String>) -> bool {
-        match self.get_mut(id) {
-            Some(d) if d.is_live() => {
-                d.help_request = Some(reason);
-                d.help_steps = steps;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// The agent no longer needs the user: clear its Help Request.
-    /// Waiters for control go on unless the user is in control.
-    pub fn withdraw_help(&mut self, id: DisplayId) -> bool {
-        let Some(d) = self.get_mut(id) else {
-            return false;
-        };
-        let withdrawn = d.help_request.take().is_some();
-        d.help_steps.clear();
-        if withdrawn && !d.takeover {
-            d.resume_waiters(ControlWait::Returned);
-        }
-        withdrawn
-    }
-
-    /// Ask the user for a window, replacing an earlier request, whose
-    /// waiter then hears nothing. The receiver gets the user's answer:
-    /// true to hand the window over.
-    pub fn request_window(
-        &mut self,
-        id: DisplayId,
-        target: WindowTarget,
-        app: String,
-        title: String,
-    ) -> Option<oneshot::Receiver<bool>> {
-        let d = self.get_mut(id).filter(|d| d.is_live())?;
-        let (tx, rx) = oneshot::channel();
-        d.window_request = Some(WindowRequest {
-            target,
-            app,
-            title,
-            answer: Some(tx),
-        });
-        Some(rx)
-    }
-
-    /// During a Takeover, ask the user to hand the display back. One
-    /// request per display: asking again while one is open changes
-    /// nothing, so the user isn't notified twice, and the agent waits on.
-    pub fn request_control(&mut self, id: DisplayId, reason: String) -> ControlAsk {
-        match self.get_mut(id) {
-            Some(d) if d.is_live() && d.takeover => {
-                if d.control_request.is_some() {
-                    ControlAsk::AlreadyAsked
-                } else {
-                    d.control_request = Some(reason);
-                    ControlAsk::Asked
-                }
-            }
-            _ => ControlAsk::NotNeeded,
-        }
     }
 
     /// Whether another display holds this window: in its records, or as a
@@ -1048,9 +892,16 @@ impl<H> Displays<H> {
     }
 
     /// The window is on the display: the user's own Hand Over, or their
-    /// word for it, brings it back under Window Access. False when a Take
-    /// Back or another hand-over came first; that one stands.
-    pub fn commit_hand_over(&mut self, id: DisplayId, ticket: &Ticket) -> bool {
+    /// word for it, brings it back under Window Access. The user's own
+    /// Hand Over of `window` also answers the display's open Help Request
+    /// (ADR 0015). False when a Take Back or another hand-over came first;
+    /// that one stands.
+    pub fn commit_hand_over(
+        &mut self,
+        id: DisplayId,
+        ticket: &Ticket,
+        window: Option<NamedWindow>,
+    ) -> bool {
         if !self.still_ours(id, ticket) {
             return false;
         }
@@ -1059,6 +910,14 @@ impl<H> Displays<H> {
             if matches!(ticket.authority, Authority::User | Authority::Once) {
                 d.access.excluded.remove(&ticket.target.window_id);
             }
+        }
+        if ticket.authority == Authority::User {
+            let window = window.unwrap_or(NamedWindow {
+                target: ticket.target,
+                app: String::new(),
+                title: String::new(),
+            });
+            self.user_handed_over(id, window);
         }
         true
     }
@@ -1107,64 +966,11 @@ impl<H> Displays<H> {
         Ok(d.give_back(record.target))
     }
 
-    /// The agent no longer needs the display back. The Takeover goes on.
-    pub fn withdraw_control_request(&mut self, id: DisplayId) -> bool {
-        self.get_mut(id)
-            .is_some_and(|d| d.control_request.take().is_some())
-    }
-
-    /// The user answered the display's Control Request: `give` hands the
-    /// display back, as the Viewer's button does; otherwise the Takeover
-    /// goes on and waiters hear the user kept control. False when there
-    /// was no request.
-    pub fn answer_control(&mut self, id: DisplayId, give: bool) -> bool {
-        let Some(d) = self.get_mut(id) else {
-            return false;
-        };
-        if d.control_request.take().is_none() {
-            return false;
-        }
-        if give {
-            self.end_takeover(id);
-        } else {
-            d.resume_waiters(ControlWait::Kept);
-        }
-        true
-    }
-
-    /// The user answered the display's Window Request. Returns the window
-    /// to hand over when they gave it.
-    pub fn answer_window(&mut self, id: DisplayId, give: bool) -> Option<WindowTarget> {
-        let mut request = self.get_mut(id)?.window_request.take()?;
-        if let Some(answer) = request.answer.take() {
-            let _ = answer.send(give);
-        }
-        give.then_some(request.target)
-    }
-
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {
         if let Some(d) = self.get_mut(id) {
             let seq = d.pointer.map_or(0, |p| p.seq) + 1;
             d.pointer = Some(AgentPointer { x, y, click, seq });
         }
-    }
-
-    /// Wait until the user hands the display back or the display ends. The
-    /// caller adds the timeout.
-    pub fn wait_for_control(&mut self, id: DisplayId) -> Wait {
-        let Some(d) = self.get_mut(id) else {
-            return Wait::Now(ControlWait::Ended);
-        };
-        if d.is_ended() {
-            return Wait::Now(ControlWait::Ended);
-        }
-        if !d.awaits_user() {
-            return Wait::Now(ControlWait::Returned);
-        }
-        d.waiters.retain(|w| !w.is_canceled());
-        let (tx, rx) = oneshot::channel();
-        d.waiters.push(tx);
-        Wait::Later(rx)
     }
 }
 
@@ -1302,56 +1108,6 @@ mod tests {
         assert!(steps(&[&"x".repeat(HELP_STEP_CHARS + 1)]).is_err());
     }
 
-    #[test]
-    fn steps_go_with_the_help_request() {
-        let mut d = displays();
-        assert!(d.request_help(7, "登录".into(), vec!["点终端".into()]));
-        assert!(d.begin_takeover(7));
-        assert_eq!(d.get(7).unwrap().help_steps, ["点终端"]);
-        assert!(d.end_takeover(7));
-        assert!(d.get(7).unwrap().help_steps.is_empty());
-    }
-
-    #[test]
-    fn a_window_request_hears_the_users_answer() {
-        let mut d = displays();
-        let target = WindowTarget {
-            pid: 40,
-            window_id: 9,
-        };
-        let mut no = d
-            .request_window(7, target, "UTM".into(), "Ubuntu".into())
-            .unwrap();
-        assert_eq!(d.answer_window(7, false), None);
-        assert_eq!(no.try_recv(), Ok(Some(false)));
-        assert!(d.get(7).unwrap().window_request.is_none());
-
-        let mut yes = d
-            .request_window(7, target, "UTM".into(), "Ubuntu".into())
-            .unwrap();
-        assert_eq!(d.answer_window(7, true), Some(target));
-        assert_eq!(yes.try_recv(), Ok(Some(true)));
-        assert_eq!(d.answer_window(7, true), None);
-    }
-
-    #[test]
-    fn a_window_request_ends_with_its_display() {
-        let mut d = displays();
-        let target = WindowTarget {
-            pid: 40,
-            window_id: 9,
-        };
-        let mut rx = d
-            .request_window(7, target, "UTM".into(), "".into())
-            .unwrap();
-        d.end(7, EndReason::Finished);
-        assert!(rx.try_recv().is_err());
-        assert!(
-            d.request_window(7, target, "UTM".into(), "".into())
-                .is_none()
-        );
-    }
-
     fn owner(connection: u64) -> Option<Owner> {
         Some(Owner {
             session_key: "s".into(),
@@ -1375,23 +1131,6 @@ mod tests {
     }
 
     #[test]
-    fn takeover_resumes_waiters_and_clears_help() {
-        let mut d = displays();
-        assert!(d.request_help(7, "登录".into(), Vec::new()));
-        let Wait::Later(mut rx) = d.wait_for_control(7) else {
-            panic!("should wait")
-        };
-        assert!(d.begin_takeover(7));
-        assert!(d.end_takeover(7));
-        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Returned));
-        assert!(d.get(7).unwrap().help_request.is_none());
-        assert!(matches!(
-            d.wait_for_control(7),
-            Wait::Now(ControlWait::Returned)
-        ));
-    }
-
-    #[test]
     fn an_app_whose_windows_are_all_on_agent_displays_points_there() {
         assert_eq!(only_on_agent_displays(&[Some(7)]), vec![7]);
         assert_eq!(
@@ -1412,44 +1151,9 @@ mod tests {
     }
 
     #[test]
-    fn a_control_request_needs_a_takeover() {
-        let mut d = displays();
-        assert_eq!(
-            d.request_control(7, "继续订票".into()),
-            ControlAsk::NotNeeded,
-            "the agent has control already"
-        );
-        assert!(d.get(7).unwrap().control_request.is_none());
-    }
-
-    #[test]
-    fn continue_hands_the_display_back() {
-        let mut d = displays();
-        assert!(d.begin_takeover(7));
-        assert_eq!(d.request_control(7, "继续订票".into()), ControlAsk::Asked);
-        assert_eq!(
-            d.request_control(7, "继续订票，已登录".into()),
-            ControlAsk::AlreadyAsked,
-            "one request per display"
-        );
-        assert_eq!(
-            d.get(7).unwrap().control_request.as_deref(),
-            Some("继续订票"),
-            "the open request stands as it was, so nothing is posted again"
-        );
-        let Wait::Later(mut rx) = d.wait_for_control(7) else {
-            panic!("should wait")
-        };
-        assert!(d.answer_control(7, true));
-        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Returned));
-        let display = d.get(7).unwrap();
-        assert!(!display.takeover && display.control_request.is_none());
-    }
-
-    #[test]
     fn a_repeated_request_keeps_waiting_for_the_answer() {
         let mut d = displays();
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         let Wait::Later(mut first) = d.wait_for_control(7) else {
             panic!("should wait")
@@ -1462,30 +1166,30 @@ mod tests {
             panic!("still waits")
         };
         assert_eq!(first.try_recv(), Ok(None), "no answer yet");
-        assert!(d.end_takeover(7), "the Viewer's button, or chat");
-        assert_eq!(first.try_recv().unwrap(), Some(ControlWait::Returned));
-        assert_eq!(second.try_recv().unwrap(), Some(ControlWait::Returned));
-    }
-
-    #[test]
-    fn keep_control_leaves_the_takeover_and_tells_the_waiter() {
-        let mut d = displays();
-        assert!(d.begin_takeover(7));
-        assert_eq!(d.request_control(7, "继续订票".into()), ControlAsk::Asked);
-        let Wait::Later(mut rx) = d.wait_for_control(7) else {
-            panic!("should wait")
-        };
-        assert!(d.answer_control(7, false));
-        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Kept));
-        assert!(d.get(7).unwrap().takeover, "only the user ends a Takeover");
-        assert!(!d.answer_control(7, true), "the request is gone");
-        assert!(d.get(7).unwrap().takeover);
+        assert!(
+            !d.end_takeover(7).is_empty(),
+            "the Viewer's button, or chat"
+        );
+        assert_eq!(
+            first.try_recv().unwrap(),
+            Some(crate::request::Woken::of(
+                Some(crate::request::Kind::Control),
+                crate::request::Resolution::HandedBack
+            ))
+        );
+        assert_eq!(
+            second.try_recv().unwrap(),
+            Some(crate::request::Woken::of(
+                Some(crate::request::Kind::Control),
+                crate::request::Resolution::HandedBack
+            ))
+        );
     }
 
     #[test]
     fn a_control_request_ends_with_the_takeover_or_its_withdrawal() {
         let mut d = displays();
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         assert!(d.withdraw_control_request(7));
         assert!(
@@ -1493,12 +1197,22 @@ mod tests {
             "withdrawing doesn't end the Takeover"
         );
         assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
-        assert!(d.end_takeover(7));
-        assert!(d.get(7).unwrap().control_request.is_none());
-        assert!(d.begin_takeover(7));
+        assert!(!d.end_takeover(7).is_empty());
+        assert!(
+            !d.get(7)
+                .unwrap()
+                .requests
+                .is_open(crate::request::Kind::Control)
+        );
+        assert!(!d.begin_takeover(7).is_empty());
         assert_eq!(d.request_control(7, "继续".into()), ControlAsk::Asked);
         d.end(7, EndReason::Finished);
-        assert!(d.get(7).unwrap().control_request.is_none());
+        assert!(
+            !d.get(7)
+                .unwrap()
+                .requests
+                .is_open(crate::request::Kind::Control)
+        );
     }
 
     /// Claim and confirm, as place_window does around the move.
@@ -1510,7 +1224,7 @@ mod tests {
     ) -> Result<(), Refusal> {
         let ticket = d.hand_over(id, target, authority, None)?;
         d.confirm_hand_over(id, target, &ticket)?;
-        assert!(d.commit_hand_over(id, &ticket));
+        assert!(d.commit_hand_over(id, &ticket, None));
         Ok(())
     }
 
@@ -1530,13 +1244,13 @@ mod tests {
         assert!(d.get(7).unwrap().records.is_empty(), "no record left");
         // A Takeover.
         let ticket = d.hand_over(7, users(1), &safari(), None).unwrap();
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert_eq!(
             d.confirm_hand_over(7, users(1), &ticket),
             Err(Refusal::Takeover)
         );
         d.abandon_hand_over(7, &ticket);
-        assert!(d.end_takeover(7));
+        assert!(!d.end_takeover(7).is_empty());
         // The user taking it back.
         let ticket = d.hand_over(7, users(2), &Authority::Once, None).unwrap();
         d.get_mut(7).unwrap().give_back(users(2));
@@ -1563,7 +1277,7 @@ mod tests {
         d.get_mut(7).unwrap().give_back(users(1));
         let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
         assert!(d.get(7).unwrap().access.excluded.contains(&1));
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert!(d.confirm_hand_over(7, users(1), &ticket).is_err());
         d.abandon_hand_over(7, &ticket);
         assert!(d.get(7).unwrap().access.excluded.contains(&1));
@@ -1617,7 +1331,7 @@ mod tests {
     fn a_takeover_pauses_window_access_until_handed_back() {
         let mut d = displays();
         grant_safari(&mut d);
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert!(d.get(7).unwrap().access_paused());
         for authority in [safari(), Authority::Once] {
             assert_eq!(
@@ -1626,7 +1340,7 @@ mod tests {
             );
         }
         assert!(d.get(7).unwrap().records.is_empty());
-        assert!(d.end_takeover(7));
+        assert!(!d.end_takeover(7).is_empty());
         assert_eq!(over(&mut d, 7, users(1), &safari()), Ok(()));
     }
 
@@ -1954,7 +1668,7 @@ mod tests {
         d.get_mut(7)
             .unwrap()
             .set_disposition(users(1), Disposition::Keep);
-        assert!(d.commit_hand_over(7, &ticket));
+        assert!(d.commit_hand_over(7, &ticket, None));
         assert_eq!(
             d.get(7).unwrap().records[&1].disposition,
             Some(Disposition::Keep)
@@ -1965,9 +1679,9 @@ mod tests {
     fn an_old_failure_does_not_remove_a_new_identical_handover() {
         let mut d = displays();
         let old = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
-        assert!(d.commit_hand_over(7, &old));
+        assert!(d.commit_hand_over(7, &old, None));
         let new = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
-        assert!(d.commit_hand_over(7, &new));
+        assert!(d.commit_hand_over(7, &new, None));
         d.abandon_hand_over(7, &old);
         assert!(d.get(7).unwrap().records.contains_key(&1));
     }
@@ -2028,7 +1742,7 @@ mod tests {
         );
         assert_eq!(d.grantable(7, &candidates(&[1])), None, "ask instead");
         assert_eq!(d.grantable(7, &[]), None);
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert_eq!(d.grantable(7, &candidates(&[1, 2])), None, "paused");
     }
 
@@ -2039,22 +1753,22 @@ mod tests {
         // A Takeover after the claim: no commit, so the caller keeps the
         // app's returning catch and the exclusion stays.
         let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
-        assert!(d.begin_takeover(7));
+        assert!(!d.begin_takeover(7).is_empty());
         assert!(d.confirm_hand_over(7, users(1), &ticket).is_err());
         d.abandon_hand_over(7, &ticket);
-        assert!(!d.commit_hand_over(7, &ticket));
+        assert!(!d.commit_hand_over(7, &ticket, None));
         assert!(d.get(7).unwrap().access.excluded.contains(&1));
-        assert!(d.end_takeover(7));
+        assert!(!d.end_takeover(7).is_empty());
         // Taken back after the move: the Take Back stands.
         let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
         assert!(d.confirm_hand_over(7, users(1), &ticket).is_ok());
         d.get_mut(7).unwrap().give_back(users(1));
-        assert!(!d.commit_hand_over(7, &ticket));
+        assert!(!d.commit_hand_over(7, &ticket, None));
         assert!(d.get(7).unwrap().access.excluded.contains(&1));
         // Landed: their word for it lifts the exclusion.
         let ticket = d.hand_over(7, users(1), &Authority::Once, None).unwrap();
         assert!(d.confirm_hand_over(7, users(1), &ticket).is_ok());
-        assert!(d.commit_hand_over(7, &ticket));
+        assert!(d.commit_hand_over(7, &ticket, None));
         assert!(!d.get(7).unwrap().access.excluded.contains(&1));
     }
 
@@ -2062,12 +1776,15 @@ mod tests {
     fn withdrawing_help_frees_waiters() {
         let mut d = displays();
         assert!(!d.withdraw_help(7), "nothing to withdraw");
-        assert!(d.request_help(7, "登录".into(), Vec::new()));
+        assert!(d.request_help(7, "登录".into(), Vec::new()).is_some());
         let Wait::Later(mut rx) = d.wait_for_control(7) else {
             panic!("should wait")
         };
         assert!(d.withdraw_help(7));
-        assert_eq!(rx.try_recv().unwrap(), Some(ControlWait::Returned));
+        assert_eq!(
+            rx.try_recv().unwrap().map(|w| w.resolution),
+            Some(crate::request::Resolution::Withdrawn)
+        );
     }
 
     #[test]
@@ -2076,12 +1793,12 @@ mod tests {
         assert_eq!(d.connection_closed(1), vec![7]);
         assert!(d.for_session("s").is_none());
         assert!(
-            !d.begin_takeover(7),
+            d.begin_takeover(7).is_empty(),
             "an ended display has no session to refuse"
         );
         assert!(matches!(
             d.wait_for_control(7),
-            Wait::Now(ControlWait::Ended)
+            Wait::Now(w) if w.resolution == crate::request::Resolution::Ended
         ));
         d.remove(7);
         assert!(d.retired.contains(&7));

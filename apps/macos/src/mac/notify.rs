@@ -1,7 +1,8 @@
 //! System notifications: one while a display's Help, Window or Control
 //! Request is open, withdrawn when it ends, and one when an agent leaves
-//! windows on its display. Clicking one opens that display in the Viewer; a Help Request's
-//! Take Over button also starts a Takeover.
+//! windows on its display. Clicking one opens that display in the Viewer. A
+//! Help Request's Take Over also starts a Takeover; its Continue and Reply
+//! answer it without opening anything.
 //!
 //! Agent Screen asks for permission from the setup window, or once at launch
 //! for people who set up before notifications existed; never while posting,
@@ -18,7 +19,8 @@ use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
     UNNotificationCategoryOptions, UNNotificationPresentationOptions, UNNotificationRequest,
-    UNNotificationResponse, UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+    UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
+    UNTextInputNotificationAction, UNTextInputNotificationResponse, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
 use std::cell::RefCell;
@@ -35,6 +37,19 @@ pub enum Auth {
     /// The user said no, or turned them off in System Settings.
     Denied,
     Allowed,
+}
+
+/// What the user did with a notification about a display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Clicked it: open the display.
+    Open,
+    /// A Help Request's Take Over.
+    TakeOver,
+    /// A Help Request's Continue: the agent goes on without a Takeover.
+    Continue,
+    /// A Help Request's Reply, with what the user typed.
+    Reply(String),
 }
 
 /// What a notification tells the user about a display.
@@ -102,12 +117,23 @@ define_class!(
         ) {
             let id = response.notification().request().identifier().to_string();
             let display = id.split_once('-').and_then(|(_, d)| d.parse::<u32>().ok());
-            let take_over = response.actionIdentifier().to_string() == TAKE_OVER;
+            let action = match response.actionIdentifier().to_string().as_str() {
+                TAKE_OVER => Action::TakeOver,
+                CONTINUE => Action::Continue,
+                REPLY => {
+                    let text = response
+                        .downcast_ref::<UNTextInputNotificationResponse>()
+                        .map(|r| r.userText().to_string())
+                        .unwrap_or_default();
+                    Action::Reply(text)
+                }
+                _ => Action::Open,
+            };
             if id.starts_with("input-") {
                 native::main_async(|| native::send(Native::InputQueueOpened));
             } else if let Some(display) = display {
                 native::main_async(move || {
-                    native::send(Native::NotificationClicked { display, take_over })
+                    native::send(Native::NotificationClicked { display, action })
                 });
             }
             handler.call(());
@@ -135,8 +161,10 @@ fn withdraw_id(id: &str) {
     center().removeDeliveredNotificationsWithIdentifiers(&ids);
 }
 
-/// The Help Request notification's button.
+/// The Help Request notification's buttons.
 const TAKE_OVER: &str = "take-over";
+const CONTINUE: &str = "continue";
+const REPLY: &str = "reply";
 const HELP_CATEGORY: &str = "help";
 
 pub fn install() {
@@ -147,9 +175,22 @@ pub fn install() {
         &NSString::from_str(t("Take Over", "接手操作")),
         UNNotificationActionOptions::Foreground,
     );
+    // Continue and Reply answer without opening anything.
+    let go_on = UNNotificationAction::actionWithIdentifier_title_options(
+        &NSString::from_str(CONTINUE),
+        &NSString::from_str(t("Continue", "继续")),
+        UNNotificationActionOptions::empty(),
+    );
+    let reply = UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
+        &NSString::from_str(REPLY),
+        &NSString::from_str(t("Reply", "回复")),
+        UNNotificationActionOptions::empty(),
+        &NSString::from_str(t("Send", "发送")),
+        &NSString::from_str(t("Tell the agent what to do", "告诉它怎么做")),
+    );
     let help = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(HELP_CATEGORY),
-        &NSArray::from_retained_slice(&[take_over]),
+        &NSArray::from_retained_slice(&[take_over, go_on, Retained::into_super(reply)]),
         &NSArray::new(),
         UNNotificationCategoryOptions::empty(),
     );
