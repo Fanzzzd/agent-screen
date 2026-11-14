@@ -279,6 +279,9 @@ pub struct Display<H> {
     pub height: f64,
     /// None for displays the user created from Peek.
     pub owner: Option<Owner>,
+    /// Monotonic timestamp (ms) when `owner.connection` closed, while waiting
+    /// out the disconnect grace period before ending (#189).
+    pub disconnected_at_ms: Option<u64>,
     /// Set once the owning Agent Session stopped using the display.
     pub ended: Option<EndReason>,
     /// Windows Agent Screen put on this display, by id.
@@ -690,6 +693,7 @@ impl<H> Displays<H> {
             width: size.0,
             height: size.1,
             owner,
+            disconnected_at_ms: None,
             ended: None,
             records: BTreeMap::new(),
             started: Default::default(),
@@ -884,6 +888,7 @@ impl<H> Displays<H> {
             return false;
         }
         let key = display.owner.as_ref().map(|o| o.session_key.clone());
+        display.disconnected_at_ms = None;
         display.ended = Some(reason);
         display.takeover = false;
         display.pointer = None;
@@ -954,18 +959,137 @@ impl<H> Displays<H> {
             .unwrap_or_default()
     }
 
-    /// End every display a closed connection owned. Each session's
-    /// Window Access ends once, with its last display.
-    pub fn connection_closed(&mut self, connection: u64) -> Vec<DisplayId> {
+    /// Holder liveness for live display `id` at monotonic `now_ms`: session key,
+    /// idle / call-in-flight / disconnected duration, and connection state (#189).
+    pub fn holder_status_at(
+        &self,
+        id: DisplayId,
+        now_ms: u64,
+    ) -> Option<crate::session::HolderStatus> {
+        use crate::session::{HolderStatus, Liveness};
+        let d = self.get(id).filter(|d| d.is_live())?;
+        let owner = d.owner.as_ref()?;
+        let liveness = if let Some(at) = d.disconnected_at_ms {
+            Liveness::Disconnected {
+                disconnected_secs: now_ms.saturating_sub(at) / 1000,
+            }
+        } else if let Some(s) = self.sessions.get(&owner.session_key) {
+            if s.in_flight > 0 {
+                let busy_secs = s
+                    .in_flight_since_ms
+                    .map_or(0, |t| now_ms.saturating_sub(t) / 1000);
+                Liveness::InFlight { busy_secs }
+            } else {
+                let idle_secs = s
+                    .last_active_ms
+                    .map_or(0, |t| now_ms.saturating_sub(t) / 1000);
+                Liveness::Idle { idle_secs }
+            }
+        } else {
+            Liveness::Idle { idle_secs: 0 }
+        };
+        Some(HolderStatus {
+            session_key: owner.session_key.clone(),
+            liveness,
+        })
+    }
+
+    /// Display label formatted for agent error messages: includes session key,
+    /// activity duration, and connection liveness for live Agent Displays (#189).
+    pub fn holder_label_at(&self, id: DisplayId, now_ms: u64) -> Option<String> {
+        let d = self.get(id)?;
+        let base = d.label();
+        Some(match self.holder_status_at(id, now_ms) {
+            Some(status) => format!("{base} [{}]", status.summary()),
+            None => base,
+        })
+    }
+
+    /// Mark every live display owned by `connection` as disconnected at
+    /// `now_ms`, starting its grace period before expiry (#189).
+    pub fn connection_disconnected(&mut self, connection: u64, now_ms: u64) -> usize {
+        let mut touched_sessions = Vec::new();
+        let mut marked = 0;
+        for d in &mut self.list {
+            if d.is_live()
+                && d.disconnected_at_ms.is_none()
+                && let Some(owner) = &d.owner
+                && owner.connection == connection
+            {
+                d.disconnected_at_ms = Some(now_ms);
+                marked += 1;
+                if !touched_sessions.contains(&owner.session_key) {
+                    touched_sessions.push(owner.session_key.clone());
+                }
+            }
+        }
+        for key in touched_sessions {
+            let any_connected = self.list.iter().any(|d| {
+                d.is_live()
+                    && d.disconnected_at_ms.is_none()
+                    && d.owner.as_ref().is_some_and(|o| o.session_key == key)
+            });
+            if !any_connected && let Some(s) = self.sessions.get_mut(&key) {
+                s.in_flight = 0;
+                s.in_flight_since_ms = None;
+            }
+        }
+        marked
+    }
+
+    /// Rebind any live displays of `session_key` waiting in their disconnect
+    /// grace period onto `connection`, keeping them and their Handovers alive
+    /// across a brief MCP reconnect (#189).
+    pub fn rebind_disconnected(
+        &mut self,
+        session_key: &str,
+        connection: u64,
+        now_ms: u64,
+    ) -> Vec<DisplayId> {
+        let mut rebound = Vec::new();
+        for d in &mut self.list {
+            if d.is_live()
+                && d.disconnected_at_ms.is_some()
+                && let Some(owner) = &mut d.owner
+                && owner.session_key == session_key
+            {
+                owner.connection = connection;
+                d.disconnected_at_ms = None;
+                rebound.push(d.id);
+            }
+        }
+        if !rebound.is_empty()
+            && let Some(s) = self.sessions.get_mut(session_key)
+        {
+            s.last_active_ms = Some(now_ms);
+        }
+        rebound
+    }
+
+    /// End every disconnected display whose grace period `grace_ms` has elapsed
+    /// by `now_ms`. Ended displays use `EndReason::Disconnected`, returning
+    /// their Handovers to the user (#189).
+    pub fn expire_disconnected(&mut self, now_ms: u64, grace_ms: u64) -> Vec<DisplayId> {
         let ids: Vec<DisplayId> = self
             .list
             .iter()
-            .filter(|d| d.owner.as_ref().is_some_and(|o| o.connection == connection))
+            .filter(|d| {
+                d.is_live()
+                    && d.disconnected_at_ms
+                        .is_some_and(|at| now_ms.saturating_sub(at) >= grace_ms)
+            })
             .map(|d| d.id)
             .collect();
         ids.into_iter()
             .filter(|&id| self.end(id, EndReason::Disconnected))
             .collect()
+    }
+
+    /// End every display a closed connection owned immediately. Each session's
+    /// Window Access ends once, with its last display.
+    pub fn connection_closed(&mut self, connection: u64) -> Vec<DisplayId> {
+        self.connection_disconnected(connection, 0);
+        self.expire_disconnected(0, 0)
     }
 
     /// Whether another session's display, or a display no session uses,

@@ -26,6 +26,19 @@ pub struct Held {
     pub agent: String,
     /// Where the window is, so the card says it as it is.
     pub place: Place,
+    /// Holder session key, idle / call-in-flight / disconnected duration, and
+    /// connection state for agent error diagnostics (#189).
+    pub status: Option<crate::session::HolderStatus>,
+}
+
+impl Held {
+    /// Display label formatted for agent error diagnostics (#189).
+    pub fn agent_label(&self) -> String {
+        match &self.status {
+            Some(status) => format!("{} [{}]", self.label, status.summary()),
+            None => self.label.clone(),
+        }
+    }
 }
 
 /// Where a held window is.
@@ -148,12 +161,36 @@ impl<H> Displays<H> {
         target: WindowTarget,
         on: Option<DisplayId>,
     ) -> Option<Held> {
+        self.held_by_inner(asking, target, on, None)
+    }
+
+    /// Same as [`Displays::held_by`], populating [`Held::status`] with the
+    /// holder's session key, idle / in-flight / disconnected time, and
+    /// connection state at monotonic `now_ms` (#189).
+    pub fn held_by_at(
+        &self,
+        asking: DisplayId,
+        target: WindowTarget,
+        on: Option<DisplayId>,
+        now_ms: u64,
+    ) -> Option<Held> {
+        self.held_by_inner(asking, target, on, Some(now_ms))
+    }
+
+    fn held_by_inner(
+        &self,
+        asking: DisplayId,
+        target: WindowTarget,
+        on: Option<DisplayId>,
+        now_ms: Option<u64>,
+    ) -> Option<Held> {
         let asker = self.get(asking).filter(|d| d.is_live())?;
         let held = |d: &Display<H>, place: Place| Held {
             display: d.id,
             label: d.label(),
             agent: d.agent_name().to_string(),
             place,
+            status: now_ms.and_then(|now| self.holder_status_at(d.id, now)),
         };
         if let Some(on) = on {
             let d = self.get(on)?;
@@ -417,7 +454,7 @@ pub fn given_note(given: &[(WindowId, String)]) -> String {
 /// What place_window says when the user keeps a window another session holds:
 /// who still has it (#189, ADR 0017).
 pub fn declined_message(app: &str, held: &Held) -> String {
-    let label = &held.label;
+    let label = held.agent_label();
     match held.place {
         Place::Review => format!(
             "the user kept the {app} window on {label}, a display waiting for their review; it stays there. Work without it, or ask the user"
@@ -436,26 +473,32 @@ pub fn declined_message(app: &str, held: &Held) -> String {
 /// Display holds the window (#189).
 pub fn timed_out_message(app: &str, seconds: f64, held: Option<&Held>) -> String {
     match held {
-        Some(Held {
-            label,
-            place: Place::Review,
-            ..
-        }) => format!(
-            "the user didn't answer your request for the {app} window on {label} (waiting for their review) within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        Some(
+            h @ Held {
+                place: Place::Review,
+                ..
+            },
+        ) => format!(
+            "the user didn't answer your request for the {app} window on {} [waiting for their review] within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it",
+            h.agent_label()
         ),
-        Some(Held {
-            label,
-            place: Place::Display,
-            ..
-        }) => format!(
-            "the user didn't answer your request for the {app} window held by {label} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        Some(
+            h @ Held {
+                place: Place::Display,
+                ..
+            },
+        ) => format!(
+            "the user didn't answer your request for the {app} window held by {} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it",
+            h.agent_label()
         ),
-        Some(Held {
-            label,
-            place: Place::UserScreen,
-            ..
-        }) => format!(
-            "the user didn't answer your request for the {app} window started by {label} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        Some(
+            h @ Held {
+                place: Place::UserScreen,
+                ..
+            },
+        ) => format!(
+            "the user didn't answer your request for the {app} window started by {} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it",
+            h.agent_label()
         ),
         None => format!(
             "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
@@ -536,6 +579,7 @@ mod tests {
                 label: "Claude Code · task B".into(),
                 agent: "Claude Code".into(),
                 place: Place::Display,
+                status: None,
             }
         );
         // Not on the asker's own display, nor on one no session uses.
@@ -916,6 +960,7 @@ mod tests {
             label: "Claude Code · Book flights".into(),
             agent: "Claude Code".into(),
             place: Place::Display,
+            status: None,
         };
         let declined = declined_message("Chrome", &held);
         assert!(
@@ -935,6 +980,119 @@ mod tests {
             timed_out_message("Chrome", 60.0, Some(&review)).contains("waiting for their review")
         );
         assert!(!timed_out_message("Chrome", 60.0, None).contains("held by"));
+    }
+
+    #[test]
+    fn holder_status_distinguishes_idle_hung_and_dead_sessions_and_expires_after_grace() {
+        let mut d = two_sessions();
+        let target = wechat(1);
+        d.get_mut(7)
+            .unwrap()
+            .claim(target, Origin::HandedOver, Some(home()));
+
+        // 1. Idle session: call finished 40 minutes ago, connection still open.
+        d.sessions.note_call_start("holder", 1_000);
+        d.sessions.note_call_end("holder", 2_000);
+        let idle_held = d
+            .held_by_at(8, target, Some(7), 2_000 + 40 * 60_000)
+            .unwrap();
+        let idle_msg = declined_message("WeChat", &idle_held);
+        assert!(
+            idle_msg.contains("Claude Code · task B [session holder, idle 40m, connection open]"),
+            "{idle_msg}"
+        );
+
+        // 2. Hung / long-running call in flight: started 45s ago, connection open.
+        let t_call = 2_500_000;
+        d.sessions.note_call_start("holder", t_call);
+        let hung_held = d.held_by_at(8, target, Some(7), t_call + 45_000).unwrap();
+        let hung_msg = timed_out_message("WeChat", 30.0, Some(&hung_held));
+        assert!(
+            hung_msg.contains(
+                "Claude Code · task B [session holder, call in flight 45s, connection open]"
+            ),
+            "{hung_msg}"
+        );
+
+        // 3. Disconnected session within grace period: reports closed connection,
+        // allows reconnect within grace, and expires + returns Handovers after grace.
+        let t_disc = t_call + 50_000;
+        assert_eq!(d.connection_disconnected(1, t_disc), 1);
+        assert_eq!(
+            d.expire_disconnected(t_disc + 1_500, 2_000),
+            Vec::<DisplayId>::new()
+        );
+        let disc_held = d.held_by_at(8, target, Some(7), t_disc + 1_500).unwrap();
+        assert_eq!(
+            disc_held.agent_label(),
+            "Claude Code · task B [session holder, disconnected 1s ago, connection closed]"
+        );
+
+        // Reconnecting within the grace period rebinds the display and keeps its Handover.
+        assert_eq!(d.rebind_disconnected("holder", 9, t_disc + 1_800), vec![7]);
+        assert_eq!(
+            d.expire_disconnected(t_disc + 5_000, 2_000),
+            Vec::<DisplayId>::new()
+        );
+        assert!(d.get(7).unwrap().is_live());
+        assert_eq!(
+            d.holder_label_at(7, t_disc + 5_000).as_deref(),
+            Some("Claude Code · task B [session holder, idle 3s, connection open]")
+        );
+
+        // Disconnecting again without reconnecting expires after grace and returns Handovers.
+        let t_disc2 = t_disc + 6_000;
+        assert_eq!(d.connection_disconnected(9, t_disc2), 1);
+        assert_eq!(d.expire_disconnected(t_disc2 + 2_000, 2_000), vec![7]);
+        assert_eq!(d.get(7).unwrap().ended, Some(EndReason::Disconnected));
+        assert_eq!(d.handovers_at_end(7), vec![target]);
+    }
+
+    #[test]
+    fn two_sessions_asking_for_the_same_window_resolve_first_and_reprompt_second_with_holder() {
+        let mut d = Displays::default();
+        d.add(
+            7,
+            "d7".into(),
+            (800.0, 600.0),
+            Some(owner("s1", "Claude Code", "Draft reply", 1)),
+            (),
+        );
+        d.add(
+            8,
+            "d8".into(),
+            (800.0, 600.0),
+            Some(owner("s2", "Codex", "Summarize chat", 2)),
+            (),
+        );
+        d.sessions.note_call_start("s1", 1_000);
+        d.sessions.note_call_end("s1", 2_000);
+
+        let target = wechat(77);
+        let (req1, mut rx1) = d.request_window(7, named(77), None).unwrap();
+        let (req2, mut rx2) = d.request_window(8, named(77), None).unwrap();
+
+        // User approves s1 first; s1 receives HandOver and claims the window.
+        let effects1 = d.answer(7, Kind::Window, Some(req1), Answer::Give).unwrap();
+        assert_eq!(effects1.len(), 1);
+        assert!(matches!(
+            rx1.try_recv().unwrap(),
+            Some(Resolution::HandedOver(_))
+        ));
+        d.get_mut(7)
+            .unwrap()
+            .claim(target, Origin::HandedOver, Some(home()));
+
+        // User then clicks Give on s2's card: s2 gets Resolution::Claimed with no
+        // silent transfer, and held_by_at names s1 so s2 re-prompts naming s1.
+        let effects2 = d.answer(8, Kind::Window, Some(req2), Answer::Give).unwrap();
+        assert!(effects2.is_empty());
+        assert_eq!(rx2.try_recv().unwrap(), Some(Resolution::Claimed));
+        let now_held = d.held_by_at(8, target, Some(7), 12_000).unwrap();
+        assert_eq!(
+            now_held.agent_label(),
+            "Claude Code · Draft reply [session s1, idle 10s, connection open]"
+        );
     }
 
     #[test]

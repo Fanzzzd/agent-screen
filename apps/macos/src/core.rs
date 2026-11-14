@@ -37,6 +37,18 @@ const TIDY_EVERY: Duration = Duration::from_secs(15);
 const WARM: Duration = Duration::from_secs(60 * 60);
 const READY: usize = 2;
 const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const DISCONNECT_GRACE: Duration = Duration::from_millis(2000);
+
+fn disconnect_grace() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("AGENTSCREEN_DISCONNECT_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    DISCONNECT_GRACE
+}
 
 /// An ended display kept connected for the next one of its size. Nothing
 /// shows it: it isn't an Agent Display until it's taken.
@@ -95,6 +107,8 @@ pub struct Core {
     spares: Vec<Spare>,
     /// Ended displays to release once the user is idle.
     retiring: Vec<VirtualDisplay>,
+    /// Monotonic origin for session activity and disconnect grace timestamps.
+    started_at: Instant,
     /// When a display was last taken on, new or spare.
     last_used: Option<Instant>,
     /// A spare is being made while the user is idle.
@@ -142,11 +156,16 @@ impl Core {
             left_alone: Vec::new(),
             spares: Vec::new(),
             retiring: Vec::new(),
+            started_at: Instant::now(),
             last_used: None,
             warming: false,
             made: MadeLimit::new(MADE, MADE_WINDOW),
             reclaim: Reclaim::default(),
         }
+    }
+
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
     }
 
     /// Run the ColorSync helper soon. Without it, count the records.
@@ -889,10 +908,28 @@ impl Core {
         // their displays ending.
         self.input_queue.disconnect(connection);
         self.sessions.remove(&connection);
-        // Every display of the session ends, and its Window Access with
-        // the last one.
-        let ended = self.displays.connection_closed(connection);
-        self.finished(&ended, cx);
+        let grace = disconnect_grace();
+        if grace.is_zero() {
+            let ended = self.displays.connection_closed(connection);
+            self.finished(&ended, cx);
+            return;
+        }
+        let now_ms = self.elapsed_ms();
+        let marked = self.displays.connection_disconnected(connection, now_ms);
+        if marked > 0 {
+            cx.notify();
+            let grace_ms = grace.as_millis() as u64;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(grace).await;
+                let _ = this.update(cx, |core, cx| {
+                    let ended = core
+                        .displays
+                        .expire_disconnected(core.elapsed_ms(), grace_ms);
+                    core.finished(&ended, cx);
+                });
+            })
+            .detach();
+        }
     }
 
     /// Drop a display. An empty one stays connected as a spare while there

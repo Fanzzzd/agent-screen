@@ -173,13 +173,32 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
     no_app_window_named(app, sighting, None)
 }
 
+/// Deduplicates holding display labels in order and joins them for `not_found`
+/// diagnostics (#189).
+pub fn join_holder_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut unique: Vec<&'a str> = Vec::new();
+    for label in labels {
+        let trimmed = label.trim();
+        if !trimmed.is_empty() && !unique.contains(&trimmed) {
+            unique.push(trimmed);
+        }
+    }
+    match unique.as_slice() {
+        [] => None,
+        [only] => Some((*only).to_owned()),
+        [first, second] => Some(format!("{first} and {second}")),
+        [head @ .., last] => Some(format!("{}, and {last}", head.join(", "))),
+    }
+}
+
 /// The `not_found` message for an app the agent named, naming `holder_label`
-/// when all matching windows sit on a single display (#189).
+/// when holding displays are known (#189).
 pub fn no_app_window_named(
     app: &str,
     sighting: &AppSighting,
     holder_label: Option<&str>,
 ) -> String {
+    let plural = holder_label.is_some_and(|l| l.contains(" and "));
     match sighting {
         AppSighting::Unknown => format!(
             "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no installed app macOS knows by that name, and none with that bundle id. Check the name, or pass a window_id"
@@ -201,6 +220,9 @@ pub fn no_app_window_named(
                 .into()
         }
         AppSighting::OnAgentDisplay(Holder::OtherSession) => match holder_label {
+            Some(label) if plural => format!(
+                "its windows on screen are on {label}, which other agent sessions hold, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
+            ),
             Some(label) => format!(
                 "its windows on screen are on {label}, which another agent session holds, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
             ),
@@ -210,6 +232,9 @@ pub fn no_app_window_named(
             }
         },
         AppSighting::OnAgentDisplay(Holder::Review) => match holder_label {
+            Some(label) if plural => format!(
+                "its windows on screen are on {label}, Agent Displays whose sessions ended, waiting for the user to review them. Ask the user to take one back, then call place_window again"
+            ),
             Some(label) => format!(
                 "its window is on {label}, an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
             ),
@@ -219,6 +244,9 @@ pub fn no_app_window_named(
             }
         },
         AppSighting::OnAgentDisplay(Holder::Other) => match holder_label {
+            Some(label) if plural => format!(
+                "its windows on screen are on {label}, which aren't yours. Ask the user to bring one to their screen, then call place_window again"
+            ),
             Some(label) => format!(
                 "its windows on screen are on {label}, which isn't yours. Ask the user to bring one to their screen, then call place_window again"
             ),
@@ -429,5 +457,24 @@ mod tests {
             Some("Claude Code · Docs"),
         );
         assert!(named_app.contains("Claude Code · Docs"), "{named_app}");
+        let joined = join_holder_labels([
+            "Codex · Check logs",
+            "Claude Code · Docs",
+            "Codex · Check logs",
+        ]);
+        assert_eq!(
+            joined.as_deref(),
+            Some("Codex · Check logs and Claude Code · Docs")
+        );
+        let multi = no_app_window_named(
+            "Chrome",
+            &AppSighting::OnAgentDisplay(OtherSession),
+            joined.as_deref(),
+        );
+        assert!(
+            multi.contains("Codex · Check logs and Claude Code · Docs"),
+            "{multi}"
+        );
+        assert!(multi.contains("other agent sessions hold"), "{multi}");
     }
 }

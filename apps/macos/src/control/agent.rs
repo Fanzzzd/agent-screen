@@ -62,7 +62,28 @@ pub async fn handle(
         .int("displayId")
         .zip(Args(&p).int("windowId"))
         .filter(|_| method != "placeWindow");
+    let tracked_session = (!method.starts_with("debug"))
+        .then(|| {
+            let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
+            core.update(cx, |c, _| {
+                let key = named_key
+                    .or_else(|| {
+                        shown.and_then(|id| c.displays.get(id)?.session().map(String::from))
+                    })
+                    .or_else(|| c.sessions.get(&connection).cloned())?;
+                let now_ms = c.elapsed_ms();
+                c.displays.sessions.note_call_start(&key, now_ms);
+                Some(key)
+            })
+        })
+        .flatten();
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    if let Some(key) = tracked_session {
+        core.update(cx, |c, _| {
+            let now_ms = c.elapsed_ms();
+            c.displays.sessions.note_call_end(&key, now_ms);
+        });
+    }
     // A window the user gave to another session: say so, rather than that
     // there is no such window (ADR 0017).
     let reply = match (reply, named) {
@@ -1209,7 +1230,9 @@ async fn handle_one(
                     // A stray another session's display records, on the
                     // user's screen: the user decides (ADR 0017).
                     Err(Refusal::Elsewhere) => {
-                        let held = core.read_with(cx, |c, _| c.displays.held_by(id, target, None));
+                        let held = core.read_with(cx, |c, _| {
+                            c.displays.held_by_at(id, target, None, c.elapsed_ms())
+                        });
                         return match held {
                             Some(held) => {
                                 take_held(&core, id, theirs, held, words, timeout, asked, cx).await
@@ -2502,6 +2525,7 @@ async fn handle_one(
                         Some("screen") => Place::UserScreen,
                         _ => Place::Display,
                     },
+                    status: None,
                 });
                 let _answer = core
                     .update(cx, |c, cx| {
@@ -2683,7 +2707,7 @@ async fn create_display(
     // Another display for the session, beside the ones it has (ADR 0016).
     let new = p.0.get("new") == Some(&Value::Bool(true));
     let orphans = orphans_param(p);
-    if !new && let Some(existing) = reuse(core, &session_key, &orphans, asked, cx) {
+    if !new && let Some(existing) = reuse(core, connection, &session_key, &orphans, asked, cx) {
         return Ok(existing);
     }
     if new && let Err(cap) = core.read_with(cx, |c, _| c.displays.sessions.may_add(&session_key)) {
@@ -2790,7 +2814,7 @@ async fn create_display(
     }
     // A parallel call made the session's display meanwhile: reuse it as a
     // call after it would, orphans and all.
-    if !new && let Some(existing) = reuse(core, &key, &orphans, asked, cx) {
+    if !new && let Some(existing) = reuse(core, connection, &key, &orphans, asked, cx) {
         drop(made);
         return Ok(existing);
     }
@@ -2971,6 +2995,7 @@ fn adopt_orphans(c: &mut Core, key: &str, id: DisplayId, orphans: &[Orphans]) {
 /// session's displays when it has several. None when it has none.
 fn reuse(
     core: &Entity<Core>,
+    connection: u64,
     key: &str,
     orphans: &[Orphans],
     asked: (Option<f64>, Option<f64>),
@@ -2978,6 +3003,8 @@ fn reuse(
 ) -> Option<Value> {
     let (mut existing, (w, h)) = core.update(cx, |c, cx| {
         let id = c.displays.for_session(key)?.id;
+        let now_ms = c.elapsed_ms();
+        c.displays.rebind_disconnected(key, connection, now_ms);
         adopt_orphans(c, key, id, orphans);
         cx.notify();
         let d = c.displays.get(id)?;
@@ -3323,26 +3350,47 @@ struct Holders(std::collections::HashMap<DisplayId, (Holder, String)>);
 
 impl Holders {
     fn of(core: &Core, asking: DisplayId) -> Holders {
+        let now_ms = core.elapsed_ms();
         let session = core.displays.get(asking).and_then(|d| d.session());
         Holders(
             core.displays
                 .list
                 .iter()
-                .map(|d| (d.id, (d.holder(session), d.label())))
+                .map(|d| {
+                    let label = core
+                        .displays
+                        .holder_label_at(d.id, now_ms)
+                        .unwrap_or_else(|| d.label());
+                    (d.id, (d.holder(session), label))
+                })
                 .collect(),
         )
     }
 
     /// Who has the Agent Display under the center of `bounds`, and its label
-    /// when this instance knows it. Blocking.
-    fn at_named(&self, bounds: &Rect) -> (Holder, Option<&str>) {
+    /// when known or derivable from a cross-instance `0x5353` serial (#189).
+    /// Blocking.
+    fn at_named(&self, bounds: &Rect) -> (Holder, Option<String>) {
         let mid = bounds.mid();
-        cg::active_displays()
+        let Some(id) = cg::active_displays()
             .into_iter()
             .find(|&id| cg::display_bounds(id).contains(mid))
-            .and_then(|id| self.0.get(&id))
-            .map(|(h, label)| (*h, Some(label.as_str())))
-            .unwrap_or((Holder::Other, None))
+        else {
+            return (Holder::Other, None);
+        };
+        if let Some((h, label)) = self.0.get(&id) {
+            return (*h, Some(label.clone()));
+        }
+        if cg::is_agent_screen(id) {
+            let serial = cg::serial(id);
+            let label = if serial > 0 {
+                format!("Agent Screen {serial} [another Agent Screen instance]")
+            } else {
+                format!("display {id} [another Agent Screen instance]")
+            };
+            return (Holder::Other, Some(label));
+        }
+        (Holder::Other, None)
     }
 }
 
@@ -3394,7 +3442,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
             None => WindowSighting::Gone,
         },
     };
-    placement::no_window_named(id, &sighting, label)
+    placement::no_window_named(id, &sighting, label.as_deref())
 }
 
 /// place_window's `not_found` for an app no stray and no window of the
@@ -3419,7 +3467,7 @@ fn no_app_window(
         .iter()
         .filter(|w| w.layer == 0 && !windows::display_role(w).accepts_window_request())
         .collect();
-    let mut holder_label: Option<&str> = None;
+    let mut holder_label: Option<String> = None;
     let sighting = if let Some(here) = documents.iter().find(|w| area.contains(w.bounds.mid())) {
         AppSighting::OnThisDisplay {
             window_id: here.target.window_id,
@@ -3432,12 +3480,10 @@ fn no_app_window(
             name: w.app.clone(),
         }
     } else if !mine.is_empty() {
-        let resolved: Vec<(Holder, Option<&str>)> =
+        let resolved: Vec<(Holder, Option<String>)> =
             mine.iter().map(|w| holders.at_named(&w.bounds)).collect();
-        let first_label = resolved.first().and_then(|(_, l)| *l);
-        if first_label.is_some() && resolved.iter().all(|(_, l)| *l == first_label) {
-            holder_label = first_label;
-        }
+        holder_label =
+            placement::join_holder_labels(resolved.iter().filter_map(|(_, l)| l.as_deref()));
         AppSighting::OnAgentDisplay(Holder::of_all(resolved.into_iter().map(|(h, _)| h)))
     } else {
         // A window anywhere, hidden or on another Space, names its app by
@@ -3458,7 +3504,7 @@ fn no_app_window(
             (None, None) => AppSighting::Unknown,
         }
     };
-    placement::no_app_window_named(text, &sighting, holder_label)
+    placement::no_app_window_named(text, &sighting, holder_label.as_deref())
 }
 
 /// Ask the user for one of their windows with a Window Request, and wait
@@ -3558,10 +3604,14 @@ async fn where_now(
     match (on, found) {
         (Some(o), _) if o == id => Now::Here,
         (Some(o), Some(_)) => core
-            .read_with(cx, |c, _| c.displays.held_by(id, target, Some(o)))
+            .read_with(cx, |c, _| {
+                c.displays.held_by_at(id, target, Some(o), c.elapsed_ms())
+            })
             .map_or(Now::Unheld, Now::Held),
         (None, Some(w)) => core
-            .read_with(cx, |c, _| c.displays.held_by(id, target, None))
+            .read_with(cx, |c, _| {
+                c.displays.held_by_at(id, target, None, c.elapsed_ms())
+            })
             .map_or(Now::Users(w), Now::Held),
         _ => Now::Gone,
     }
@@ -3745,8 +3795,9 @@ async fn held_window(
     })
     .await;
     core.read_with(cx, |c, _| {
+        let now_ms = c.elapsed_ms();
         found.into_iter().find_map(|(on, w)| {
-            let held = c.displays.held_by(id, w.target, Some(on))?;
+            let held = c.displays.held_by_at(id, w.target, Some(on), now_ms)?;
             Some((w, held))
         })
     })

@@ -192,8 +192,50 @@ fn test(tag: &str) -> Result<()> {
         still.text(),
     );
 
-    // A second client of the same session joins by reusing B, so it may
-    // address B after the first client's connection closes.
+    // Another session reuses A's parked spare (making no virtual display) and
+    // gets a holder-aware error when asking for a missing Field window (#189).
+    let other_session = format!("{session}-other");
+    let other = McpClient::start(&[("CLAUDE_CODE_SESSION_ID", other_session.as_str())])?;
+    let c = other
+        .call("create_display", json!({ "title": "Other session" }))?
+        .display_id()
+        .context("other session create_display gave no display_id")?;
+    let held_err = other.tool(
+        "place_window",
+        json!({ "display_id": c, "app": "Field", "title": "NoSuchWindowTitle" }),
+    )?;
+    check(
+        "missing window error names the live holder session and connection state",
+        held_err.is_error
+            && held_err.text().contains("Two screens")
+            && held_err.text().contains("[session ")
+            && held_err.text().contains("connection open]"),
+        held_err.text(),
+    );
+    other.call("end_display", json!({ "display_id": c }))?;
+    other.close();
+
+    // Closing the connection starts the disconnect grace period (#189); a
+    // reconnecting client of the same session rebinds B before grace expires.
+    client.close();
+    sleep_ms(300);
+    let reconnected = McpClient::start(&env)?;
+    let rebound = reconnected.call("create_display", json!({ "title": "Two screens" }))?;
+    check(
+        "a reconnecting client within grace rebinds B instead of creating a new display",
+        rebound.display_id() == Some(b) && rebound.get("reused") == &json!(true),
+        rebound.text(),
+    );
+    sleep_ms(2300);
+    let kept = reconnected.tool("list_windows", json!({ "display_id": b }))?;
+    check(
+        "rebound display B stays live past the disconnect grace window",
+        !kept.is_error && on(pid, window, b),
+        kept.text(),
+    );
+
+    // A second client of the same session joins by reusing B while connected,
+    // so it may observe B ending after reconnected closes and grace expires.
     let watcher = McpClient::start(&env)?;
     let joined = watcher.call("create_display", json!({ "title": "Two screens" }))?;
     check(
@@ -201,9 +243,9 @@ fn test(tag: &str) -> Result<()> {
         joined.display_id() == Some(b) && joined.get("reused") == &json!(true),
         joined.text(),
     );
-    client.close();
+    reconnected.close();
     let mut ended = None;
-    for _ in 0..20 {
+    for _ in 0..24 {
         sleep_ms(250);
         let r = watcher.tool("list_windows", json!({ "display_id": b }))?;
         if r.is_error {
@@ -212,7 +254,7 @@ fn test(tag: &str) -> Result<()> {
         }
     }
     check(
-        "closing the connection ends the session's other display",
+        "closing the connection ends the session's display after the grace period",
         ended.as_ref().is_some_and(|r| r.text().contains("ended")),
         ended.as_ref().map(|r| r.text()).unwrap_or("still live"),
     );
