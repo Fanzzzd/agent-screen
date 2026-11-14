@@ -9,19 +9,19 @@
 
 下表汇总全部 11 个调研对象的验证结论与推荐处置。文中代码行号默认指向基线 `origin/main` 提交 `dab5e39`，涉及分支 `PR #208` 提交 `e239e65` 审阅问题时单独注明。每项事实与推断均标注 `[已验证]` 或 `[未验证]`。
 
-| 编号或主题 | 核心根因归类 | 根因验证状态 | 推荐处置 |
+| 编号或主题 | 核心根因归类 | 根因验证状态 | 落地与验证结论 |
 | --- | --- | --- | --- |
-| `#204` 新显示器抢占原点导致窗口串会话 | 视口重排与几何归属错配 | `[已验证]` | 固定已停靠显示器，增加连通性校验与跨显示器窗口同步平移 |
-| Viewer 标题栏拖拽偶发落回主屏幕 | `WindowServer` 指针吸附、高窗口中点过滤与异步越界 | `[已验证]` | 放宽抓取几何条件，补齐松开鼠标后异步越界巡检，按拖拽增量夹紧回原显示器 |
-| `#189` 另一会话占用窗口无法收回且缺标签 | `#204` 视口平移、空闲会话长连接与错误文案缺标签 | `[部分已验证]` | 补全持有者标签，清理带窗口备用显示器，新增空闲断连或会话释放机制 |
-| `#190` Peek 画出窗口边框但无画面内容 | `0.1.31` 缺串流自愈，外加 `replayd` 空闲停流 | `[部分已验证]` | 仅在流已停止或无缓存帧时按退避上限重启，不阻塞悬停路径，暂不关闭议题 |
-| `#205` Sheet 与系统设置弹出菜单四连环失败 | `AXSheet`、`.appex` 进程与 `layer == 101` 菜单未建模 | `[已验证]` | 识别 `.appex` 与 `AXSheet`，隔离 Sheet 焦点查询，放行同显示器弹出菜单 |
-| `#207` Takeover 下 Viewer 点击菜单卡死 | `NSMenu` 子节点命中偏移与外部点击不关菜单 | `[已验证]` | 限制 `AXParent` 向上查找层级，异步化跨进程查询，点击菜单外部执行 `AXCancel` |
-| `#206` 等待审批时全屏红框与红色遮罩 | 与 ADR 0013 指针接管红框语义冲突 | `[已验证]` | 不改全屏红框，改用菜单栏徽标、通知音效或卡片高亮提示等待审批 |
-| `#110` Dia 浏览器按键短期失效与链接无响应 | 同进程多窗口焦点守卫与 Chromium 无障碍语义 | `[部分已验证]` | 保持 `focused_window_id` 原语义，留待用户在真实 Dia 实例人工验收 |
-| `unit twin` 虚拟显示器双生创建 | `WindowServer` 按在线数量分配单元号，遇空洞撞号 | `[已验证]` | 按最小单元号复用并避免主动淘汰低单元号备用显示器，保留 `create` 填洞兜底 |
-| `misroute` 采集流画面错位日志 | 自发 `repark` 重排与物理显示器拓扑切换混合触发 | `[已验证]` | 固定已停靠显示器消除自发错位，保留 `stream.rs` 错位自愈应对拓扑切换 |
-| `800x500` 分辨率回退 | `e2e` 实例复用序列号触发模式回退，备用池未巡检 | `[已验证]` | 将 `Core::hold_modes` 扩展到备用池显示器 |
+| `#204` 新显示器抢占原点导致窗口串会话 | 视口重排与几何归属错配 | `[已验证]` | 已落地连通性守卫、`parked_rects` 批量窗口平移与登记归属，`sessiondisplays` 实测通过 |
+| Viewer 标题栏拖拽偶发落回主屏幕 | `WindowServer` 指针吸附、高窗口中点过滤与异步越界 | `[已验证]` | 已落地四点修复，模型单测与 `viewerdrag` 原生窗口、高窗口、Sheet 拖拽实测通过 |
+| `#189` 另一会话占用窗口无法收回且缺标签 | `#204` 视口平移、断连残留与错误文案缺标签 | `[已验证]` | 已补全会话、空闲与连接标签及 `2 s` 断连宽限期归还，`sessiondisplays` 与 `windowaccess` 实测通过 |
+| `#190` Peek 画出窗口边框但无画面内容 | `0.1.31` 缺串流自愈，外加 `replayd` 空闲停流 | `[部分已验证]` | 已落地 `retry_at` 退避守卫与温热帧保留并通过单测，保持议题开启 |
+| `#205` Sheet 与系统设置弹出菜单四连环失败 | `AXSheet`、`.appex` 进程与 `layer == 101` 菜单未建模 | `[已验证]` | 已识别 `.appex` 与 `AXSheet` 并放行同屏关联弹出菜单，`menuchoice` 实测红转绿 |
+| `#207` Takeover 下 Viewer 点击菜单卡死 | `NSMenu` 子节点命中偏移与外部点击不关菜单 | `[已验证]` | 已限制 `AXParent` 查找层级并支持外部点击 `AXCancel`，Takeover `viewerdrag` 实测通过 |
+| `#206` 等待审批时增强提醒可见性 | 全屏红框与 ADR 0013 指针接管红框语义冲突 | `[已验证]` | 已落地菜单栏待办计数徽标、琥珀色高亮审批卡片与通知提示音，`windowaccess` 实测通过 |
+| `#110` Dia 浏览器按键短期失效与链接无响应 | 同进程多窗口焦点守卫与 Chromium 无障碍语义 | `[部分已验证]` | 已保持 `focused_window_id` 原语义不变，留待用户在真实 Dia 实例人工验收 |
+| `unit twin` 虚拟显示器双生创建 | `WindowServer` 按在线数量分配单元号，遇空洞撞号 | `[已验证]` | 已落地最小单元号优先复用与高单元号优先淘汰，`spares.rs` 单测通过 |
+| `misroute` 采集流画面错位日志 | 自发 `repark` 重排与物理显示器拓扑切换混合触发 | `[已验证]` | 已固定已停靠显示器消除自发错位，保留 `stream.rs` 错位自愈应对拓扑切换 |
+| `800x500` 分辨率回退 | `e2e` 实例复用序列号触发模式回退，备用池未巡检 | `[已验证]` | 已将 `Core::hold_modes` 扩展到备用池显示器，`holdmode` 实测通过 |
 
 ---
 
@@ -75,8 +75,8 @@
 
 ### 真实路径测试方案
 
-1. 模型层单元测试：在 `crates/model/src/arrangement.rs` 测试新显示器持 `serial=1` 加入时不移动 `serial=5, 6` 的在用显示器。测试首槽位释放后的规划结果始终满足 `connected(&planned) == true`。测试 `window_shifts` 对多台同时位移的显示器按各自旧原点矩形准确计算窗口新坐标 `[原型单元测试已验证]`。
-2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下新建脚本，创建显示器 A 与显示器 B，在 B 上放置真实测试窗口，结束 A 使 `serial` 释放，再创建显示器 C 拿到低 `serial`。断言 B 的 `list_windows` 仍返回该窗口、窗口全局坐标落在 B 的视口内、用户主屏幕零窗口残留 `[待代码确认后执行]`。
+1. 模型层单元测试：在 `crates/model/src/arrangement.rs` 测试新显示器持低 `serial` 加入时不移动高 `serial` 在用显示器，测试角落桥接显示器释放与连续多台创建或释放后的规划结果始终满足 `connected(&planned) == true`，测试跨实例 `OtherInstance` 固定显示器共存、模拟物理显示器热插拔宽度位移、应用重启登记对齐 `reconcile_registered_windows` 以及 `window_shifts` 批量窗口坐标计算 `[已验证]`。
+2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下运行 `sessiondisplays` 脚本，验证同一会话创建多台显示器并放置真实窗口后，各显示器窗口坐标与归属稳定且用户主屏幕零窗口残留 `[已验证]`。
 
 ---
 
@@ -117,8 +117,8 @@
 
 ### 真实路径测试方案
 
-1. 模型层单元测试：在 `crates/model/src/viewer_press.rs` 测试 `clamp_grabbed_window` 对左越界、右越界、上越界及高 `1300 pt` 超高窗口的夹紧结果，确认高度不被截断 `[原型测试已验证]`。
-2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下通过 `debugViewerInput` 发送 `"drag"`，不触碰用户真实鼠标指针，依次覆盖三类真实窗口：系统 `Calculator` 原生标题栏拖拽、`CustomDrag` 在 `mouseUp` 后 `80 ms` 异步跳往主屏 `(80, 80)` 的拦截恢复、`TallDrag` 高 `1300 pt` 窗口在 `900x600` 显示器上的工具栏拖拽夹紧 `[已在 origin/main 验证失败，在原型修复上验证通过且用户主屏 0 窗口泄漏]`。
+1. 模型层单元测试：在 `crates/model/src/viewer_press.rs` 测试 `map_viewer_point` 零矩形拒绝、`normalize_viewer_point` 画布外松手夹紧、`can_grab_window` 对超高超宽与半出界窗口放行且排除最小化、全屏与附着 Sheet、`dragged_window_origin` 无弹跳夹紧、`rebase_grab_for_display` 拖拽中途显示器重排坐标换算以及 `should_watch_after_release` 松手后异步越界巡检触发条件 `[已验证]`。
+2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下通过 `debugViewerInput` 发送 `"drag"`，不触碰用户真实鼠标指针，在 `origin/main` 复现红灯后在分支实测通过系统 `Calculator` 原生标题栏拖拽、`TallDrag` 高 `1300 pt` 窗口超出画布右边界 `toX = 1.2` 夹紧且保持原高度、`SheetDrag` 附着模态 Sheet 宿主窗口拖拽，全程用户主屏幕零窗口泄漏 `[已验证]`。`CustomDrag` 后台非激活自绘视图因缺少 `acceptsFirstMouse` 覆写在预算内第 `20` 台显示器运行中未触发模拟跳变，已在 `menuchoice.swift` 补齐覆写，受 `20` 台虚拟显示器硬上限约束未追加第 `21` 台显示器重跑该单子项 `[未验证]`。
 
 ---
 
@@ -159,12 +159,12 @@
 
 - 方案 A：仅靠 `PR #202` 现有的跨会话 `Window Request` 卡片加上固定显示器坐标，声称彻底修复 `#189`。否决该方案：如审阅 `M1` 所述，这没有补齐多显示器冲突时的持有者标签列表，没有清理落入备用池的残留窗口，也没有提供菜单栏侧识别哪个会话持有哪个窗口的直观视图 `[已验证]`。
 - 方案 B：对超过固定空闲时长如 15 分钟未发起工具调用的会话自动销毁显示器并把窗口弹回用户主屏幕。否决该方案：违反 ADR 0004"显示器以待审态结束且不打断用户当前屏幕"的约束，长任务等待用户回复期间被强行拆屏会破坏现场 `[已验证]`。
-- 方案 C：推荐分两层落地。第一层立即修补根因漏洞：修复 `#204` 消除视口串位。修正 `H3`，在显示器转入备用池及 `tidy` 巡检时一旦发现备用显示器上有窗口，立即调用 `reclaim_soon` 将窗口迁回用户主屏，且 `take_spare` 传入真实的 `has_windows` 严禁复用非空备用显示器。补全 `placement.rs` 与 `held.rs` 所有拒绝、超时及多窗口冲突文案，逐一列出每个窗口所在的显示器标签与代理名称。在菜单栏每张显示器卡片下增加当前持有窗口的应用图标或标题摘要，让用户一眼定位窗口在哪个会话手里。第二层在提交中将 `#189` 标为 `Refs #189` 而非直接关闭，单独与用户确认是否需要菜单栏"一键收回全部闲置会话窗口"按钮或跨实例 `0x5353` 收回机制。
+- 方案 C：已落地根因修复并保持 `Refs #189` 不直接关闭议题 `[已验证]`。第一，修复 `#204` 消除视口串位，修正 `H3` 在备用池巡检中跳过并释放带残留窗口的备用显示器且严禁跨会话复用。第二，在 `held.rs` 与 `placement.rs` 所有拒绝、超时及多窗口冲突错误文案中逐一列出持有客户端、显示器标题、`session` 键、空闲或断连秒数及 `connection open/closed` 状态，并识别跨实例 `0x5353` 显示器标明 `another Agent Screen instance`。第三，在 `core.rs` 实现 `2 s` 控制连接断连宽限期 `DISCONNECT_GRACE`：MCP 短暂重连可在宽限期内无缝续绑原会话与显示器，而真正死亡退出的会话在 `2 s` 到期后自动释放名下显示器并将 `Handover` 窗口按原位迁回用户屏幕。菜单栏独立多会话释放列表属于后续产品特性，暂不关闭 `#189`。
 
 ### 真实路径测试方案
 
-1. 模型层单元测试：在 `crates/model/src/spares.rs` 测试 `pick_spare` 跳过 `has_windows == true` 的备用显示器，测试带窗口备用显示器不会无限滞留。在 `crates/model/src/placement.rs` 测试跨两台不同会话显示器同名窗口冲突时错误文本完整列出两个显示器标签 `[部分原型单测已验证]`。
-2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下创建两个独立 MCP 连接模拟双会话，验证连接 1 放置窗口后连接 2 调用 `place_window` 弹出带准确持有者标签的 `Window Request` 卡片。验证点击拒绝时返回含持有者标签的错误。验证连接 1 直接关闭套接字后窗口按规则归还或可被收回 `[待代码确认后执行]`。
+1. 模型层单元测试：在 `crates/model/src/spares.rs` 测试 `pick_spare` 跳过 `has_windows == true` 的备用显示器且 `keep_spares` 释放带残留窗口的备用显示器，在 `crates/model/src/held.rs` 与 `placement.rs` 测试死亡会话、空闲会话、挂起连接、跨实例 `0x5353` 及多显示器冲突文案完整输出会话与连接状态 `[已验证]`。
+2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下运行 `sessiondisplays` 与 `windowaccess` 全部通过，实测验证跨会话请求同一窗口返回 `[session ..., idle 0s, connection open]` 持有者信息、断连 `2 s` 内重连成功续用原显示器、断连超过 `2 s` 后自动结束死亡会话显示器并将 `Handover` 窗口精确归还至用户源屏幕原矩形 `[已验证]`。
 
 ---
 
@@ -204,8 +204,8 @@
 
 ### 真实路径测试方案
 
-1. 单元测试：在 `apps/macos/src/ui/stream.rs` 测试两项不变量：第一，连续 `startCapture` 失败时重复调用 `want("agent", 30, ...)` 不会重置 `failures` 退避时间。第二，已有缓存帧的 `1 fps` 运行流在 `"peek"` 订阅 `12 fps` 时只更新配置而不触发流重建 `[原型逻辑清晰，可单测验证]`。
-2. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下运行现有 `peekmisroute` 并扩展空闲停流恢复检查，通过 `debugStreams` 确认打开 Peek 不会导致正常温热流的代数 `generation` 递增，而在模拟 `stream-stopped` 后打开 Peek 能立即拉起新流并拿到帧 `[待代码确认后执行]`。
+1. 单元测试：在 `apps/macos/src/ui/stream.rs` 测试三项不变量：第一，连续 `startCapture` 失败时重复调用 `want("agent", 30, ...)` 遵守 `retry_at` 指数退避窗口而不触发风暴重试 `[已验证]`。第二，已有缓存帧的 `1 fps` 运行流在 `"peek"` 订阅 `12 fps` 时只更新配置而不重建采集流 `[已验证]`。第三，`replayd` 因空闲停止流时保留最后一帧给 Peek 使用，而连续启动失败超限时清空陈旧缓存帧 `[已验证]`。
+2. 真实 `e2e` 路径说明：受本轮 `20` 台虚拟显示器创建硬预算限制，流退避与温热帧状态机由 `stream.rs` 单元测试完整覆盖，未额外消耗虚拟显示器重跑 `peekmisroute` `[未验证]`。
 
 ---
 
@@ -255,8 +255,8 @@
 
 ### 真实路径测试方案
 
-1. 单元测试：在 `crates/model/src/real_drag.rs` 与 `apps/macos/src/control/agent.rs` 测试 `resolve_drag_under`、`resolve_real_click` 对同显示器关联菜单放行、对跨显示器或无关进程菜单拦截，测试 `popup_window` 不会产出跨进程错配的 `WindowTarget` `[原型单测已验证]`。
-2. 真实 `e2e` 路径测试：构建内嵌真实 `MenuPane.appex` 插件的宿主夹具 `PaneHost.app`，在 `origin/main` 上运行先确认 `.appex` 弹出菜单交互失败退出 `exit=1`，再在修复代码上运行 `AGENTSCREEN_INSTANCE=e2e` 验证：Sheet 内 `NSPopUpButton` 的 `act_on_element(set_value)` 选择成功、跨 `PaneHost -> MenuPane.appex` 的菜单选择成功、全程用户主屏幕 `0` 窗口污染 `[已在 origin/main 验证红灯，在原型修复上验证绿灯]`。对于 `real_input` 路径，在用户允许移动真实指针时补充 `cargo e2e run` 下的菜单拖拽与点击验证。
+1. 单元测试：在 `crates/model/src/real_drag.rs` 与 `apps/macos/src/mac/input.rs` 测试 `resolve_drag_under`、`resolve_real_click` 与 `menu_owner_belongs_to_display` 对同显示器关联菜单放行、对跨显示器或无关进程菜单拦截，测试 `popup_window` 不会产出跨进程错配的 `WindowTarget` `[已验证]`。
+2. 真实 `e2e` 路径测试：构建内嵌真实 `MenuPane.appex` 插件的宿主夹具 `PaneHost.app`，先在 `origin/main` 上运行 `menuchoice` 确认 `.appex` 弹出菜单与外部点击关闭失败退出 `exit=1`，再在分支代码上运行 `AGENTSCREEN_INSTANCE=e2e` 验证通过：Sheet 内 `NSPopUpButton` 的 `act_on_element` 选择成功、跨 `PaneHost -> MenuPane.appex` 的菜单点击选择成功、菜单外部点击 `AXCancel` 关闭成功、全程用户主屏幕零窗口污染 `[已验证]`。对于移动真实硬件指针的 `real_input` 路径，留待用户允许移动真实指针时运行 `[未验证]`。
 
 ---
 
@@ -296,7 +296,7 @@
 
 ### 真实路径测试方案
 
-1. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下启动 `PaneHost.app` 与内嵌 `MenuPane.appex`，先打开弹出菜单，调用 `debugTakeover: true` 进入真实的 Takeover 状态，再通过 `debugViewerInput` 发送 `"click"` 模拟用户在 Viewer 画布上的真实点击：第一步验证点击 `.appex` 菜单项能成功更新选中值并收起菜单。第二步再次点开菜单，验证在 Viewer 内点击菜单外空白区域能通过 `AXCancel` 立即关闭菜单且 `layer == 101` 窗口消失 `[已在原型修复上实测绿灯通过]`。
+1. 真实 `e2e` 路径测试：在 `AGENTSCREEN_INSTANCE=e2e` 下启动 `PaneHost.app` 与内嵌 `MenuPane.appex`，先打开弹出菜单，调用 `debugTakeover: true` 进入真实的 Takeover 状态，再通过 `debugViewerInput` 发送 `"click"` 模拟用户在 Viewer 画布上的真实点击：第一步验证点击 `.appex` 菜单项能成功更新选中值并收起菜单。第二步再次点开菜单，验证在 Viewer 内点击菜单外空白区域能通过 `AXCancel` 立即关闭菜单且 `layer == 101` 窗口消失 `[已在 viewerdrag 实测绿灯通过]`。
 
 ---
 
@@ -325,11 +325,11 @@
 
 - 方案 A：按议题原样实现等待期间全屏呼吸红框加 `8%-12%` 红色全屏遮罩。否决该方案：直接破坏 ADR 0013 的安全信号唯一性，且全屏染色严重干扰用户正常阅读与创作，多会话并发请求时还会造成主屏幕频繁变红闪烁 `[已验证]`。
 - 方案 B：使用琥珀色或蓝色边缘窄光晕提示等待审批，不加全屏染色遮罩，保留红色专用于 `Input Grant` 指针接管期。该方案避免了与 ADR 0013 红框混淆，但仍需覆盖用户物理屏幕边缘 `[设计可行，需产品拍板]`。
-- 方案 C：推荐优先采用非侵入式强提醒，不占用全屏画布。具体做法：当存在未决审批卡片时，将菜单栏图标切换为高对比度高亮徽标并显示待办计数，弹出持久顶部横幅卡片支持快捷键一键处理，并提供可选的轻提示音。将红色屏幕边框严格保留给 ADR 0013 的真实指针接管期。建议在议题 `#206` 下向用户说明 ADR 0013 冲突并在方案 B 与方案 C 之间确认交互设计后再编码。
+- 方案 C：已按拍板决策落地非侵入式强提醒，不占用全屏画布 `[已验证]`。当存在未决审批请求如 `Window Authorization`、`Window Request`、`Input Request` 或 `Help Request` 时，菜单栏图标切为醒目橙色并展示实时待办计数徽标，审批面板卡片渲染琥珀色高亮外框与顶部状态徽章，同时为 `Note::Input` 补齐系统通知音效并在新待办请求到达时播放轻提示音，测试命名实例下自动静音计数。红色屏幕边框严格保留给 ADR 0013 的真实指针接管期。
 
 ### 真实路径测试方案
 
-待交互方案拍板后，新增对应的 `debugShow` 调试入口，在 `AGENTSCREEN_INSTANCE=e2e` 下验证待审状态切换时提示组件的显隐与多空间可见性，同时验证未处于 `Input Grant` 执行期时红框绝不亮起 `[待设计确认]`。
+1. 模型层与调试接口验证：在 `crates/model/src/card.rs` 单测全部四类待审卡片的高亮判定，在 `AGENTSCREEN_INSTANCE=e2e` 下运行 `windowaccess`，通过 `debugIcon` 与 `debugCard` 实测验证发起审批时 `state == "asking"`、`askingCount == 1`、`chimes` 递增且 `highlighted == true`，审批完成后计数归零且按钮命中几何保持原位不变 `[已验证]`。
 
 ---
 
@@ -407,7 +407,7 @@
 ### 真实路径测试方案
 
 1. 模型层单元测试：在 `crates/model/src/spares.rs` 测试 `pick_spare` 优先选取最小 `unit` 的无窗口备用显示器，测试 `keep_spares` 从高 `unit` 端向低 `unit` 端回收无窗口过期显示器 `[已验证]`。
-2. 运行期观测验证：在 `AGENTSCREEN_INSTANCE=e2e` 复用备用显示器场景下检查 `displays-e2e.log`，确认连续创建、结束、再创建同尺寸显示器直接命中 `reused` 而不触发额外 `CGVirtualDisplay` 创建 `[已在原型测试中验证]`。
+2. 运行期观测验证：在 `AGENTSCREEN_INSTANCE=e2e` 复用备用显示器场景下检查 `displays-e2e.log`，确认连续创建、结束、再创建同尺寸显示器直接命中 `reused` 而不触发额外 `CGVirtualDisplay` 创建 `[已在 sessiondisplays 实测通过]`。
 
 ---
 
@@ -443,7 +443,7 @@
 
 ### 真实路径测试方案
 
-在 `AGENTSCREEN_INSTANCE=e2e` 下运行现有 `peekmisroute` 脚本验证真实模式切换与 `AGENTSCREEN_TEST_MISROUTE` 注入下的流重建自愈，并验证新建第二台虚拟显示器时第一台已停靠显示器不再产生自发 `misroute` 日志 `[待代码确认后执行]`。
+在 `AGENTSCREEN_INSTANCE=e2e` 下运行 `sessiondisplays` 与 `viewerdrag` 时检查 `displays-e2e.log`，确认新建第二台虚拟显示器时第一台已停靠显示器保持原坐标不动且零条 `misroute` 日志产生 `[已验证]`。`AGENTSCREEN_TEST_MISROUTE` 注入下的流重建自愈已在既有套件中验证，本轮受 `20` 台虚拟显示器硬预算限制未额外消耗显示器复跑 `peekmisroute` `[未验证]`。
 
 ---
 
@@ -474,8 +474,8 @@
 
 ### 根因修复方案对比与推荐决策
 
-推荐决策：扩展 `Core::hold_modes`，对 `self.spares` 中的每台备用显示器读取其 `wanted_mode()`，采用与在用显示器完全一致的模式校验与 `CGDisplaySetDisplayMode` 恢复逻辑，使备用显示器在空闲期间也始终保持目标 `2x` 分辨率 `[已在原型代码实测验证]`。
+推荐决策：扩展 `Core::hold_modes`，对 `self.spares` 中的每台备用显示器读取其 `wanted_mode()`，采用与在用显示器完全一致的模式校验与 `CGDisplaySetDisplayMode` 恢复逻辑，使备用显示器在空闲期间也始终保持目标 `2x` 分辨率 `[已验证]`。
 
 ### 真实路径测试方案
 
-在 `AGENTSCREEN_INSTANCE=e2e` 下扩展现有 `tests/e2e/src/bin/holdmode.rs`。第一步验证在用显示器被手动切到 `800x600` 后自动恢复 `1600x1000` `2x`。第二步调用 `endDisplay` 让该显示器转入空闲备用池，再次将其模式强制切到 `800x600`，断言 `Core::hold_modes` 自动将这台备用显示器切回 `1600x1000` `2x` `[已在原型修复上实测通过，displays-e2e.log 输出 ran at 800x600, wants 1600x1000, back: true]`。
+在 `AGENTSCREEN_INSTANCE=e2e` 下扩展现有 `tests/e2e/src/bin/holdmode.rs`。第一步验证在用显示器被手动切到 `800x600` 后自动恢复 `1600x1000` `2x`。第二步调用 `endDisplay` 让该显示器转入空闲备用池，再次将其模式强制切到 `800x600`，断言 `Core::hold_modes` 自动将这台备用显示器切回 `1600x1000` `2x` `[已在 holdmode 实测通过，displays-e2e.log 输出 ran at 800x600, wants 1600x1000, back: true]`。

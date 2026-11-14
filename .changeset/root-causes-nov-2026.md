@@ -2,7 +2,9 @@
 default: patch
 ---
 
-- Creating a new Agent Display no longer shifts an existing Agent Display's position or hands its windows over to the new session or to an idle spare display. Spare displays now reuse the lowest display unit numbers first and keep their full resolution while idle, preventing duplicate virtual displays and false stream restarts.
-- When an agent asks for a window that another agent holds, or when a request for that window times out or is declined, the error now names the display holding the window.
-- Opening Peek on a display whose screen has been still now shows its picture right away instead of an empty tile with a window outline.
-- Pop-up buttons, sheets and System Settings panes on an Agent Display now accept closed-menu selection, background menu item clicks, click-outside dismissal of stuck pop-up menus, and user-approved clicks and drags.
+- Creating or ending an Agent Display keeps existing Agent Displays connected in place and shifts windows with any display that must move, so windows stay with the session that placed them and never linger on a hidden spare display.
+- Dragging a window in the Viewer keeps tall, wide, sheet-attached, and custom-title-bar windows on the Agent Display instead of letting them jump to your main screen.
+- Pop-up menus inside sheets and System Settings panes now support element value selection, background clicks, outside-click menu dismissal, Takeover clicks in the Viewer, and approved foreground input.
+- Window-access errors now name the holding client, display, session, idle time, and connection state. When an agent disconnects without closing its displays, Agent Screen waits two seconds for a reconnect and then ends its displays and returns handed-over windows to your screen.
+- Pending window, input, and help requests now highlight the approval card, show a pending count on the menu bar icon, and play a notification chime.
+- Spare displays reuse the lowest unit numbers first and hold their HiDPI resolution while idle, reducing duplicate virtual display retries and keeping Peek streams warm while preserving capture failure backoff.
