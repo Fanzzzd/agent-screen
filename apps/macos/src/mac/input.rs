@@ -598,6 +598,7 @@ impl Forwarder {
                     let target = w.mouse_down(at, button, clicks, flags);
                     w.user_press = false;
                     w.pressed_moved = false;
+                    w.last_escape_check = None;
                     w.pressed = target.and_then(|t| held(t, at));
                 }
             })
@@ -617,16 +618,22 @@ impl Forwarder {
                     w.pressed_moved |= press.moved(to);
                 }
                 w.mouse_dragged(to, button, flags);
-                if let Some(press) = w.pressed
-                    && press.left_display()
+                if w.pressed_moved
+                    && let Some(press) = w.pressed
+                    && w.last_escape_check
+                        .is_none_or(|t| t.elapsed() >= Duration::from_millis(50))
                 {
-                    w.mouse_up(to, button, 1, flags);
-                    press.restore_to(to);
-                    w.pressed = None;
-                    w.pressed_moved = false;
-                    w.grab = Some(press);
-                    w.grab_moved = true;
-                    w.grab_watch = true;
+                    w.last_escape_check = Some(Instant::now());
+                    if press.left_display() {
+                        w.mouse_up(to, button, 1, flags);
+                        press.restore_to(to);
+                        w.pressed = None;
+                        w.pressed_moved = false;
+                        w.last_escape_check = None;
+                        w.grab = Some(press);
+                        w.grab_moved = true;
+                        w.grab_watch = true;
+                    }
                 }
             }
         });
@@ -1448,6 +1455,7 @@ struct Worker {
     /// The window the user's press in the Viewer went to, as it was then.
     pressed: Option<Grab>,
     pressed_moved: bool,
+    last_escape_check: Option<Instant>,
     cache: Option<(Vec<Hit>, Instant)>,
     /// Whether the press being handled is the user's, in the Viewer.
     user_press: bool,
@@ -1491,6 +1499,7 @@ impl Worker {
             grab_watch: false,
             pressed: None,
             pressed_moved: false,
+            last_escape_check: None,
             cache: None,
             user_press: false,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -2182,12 +2191,17 @@ impl Worker {
     /// macOS takes a press there as the start of a resize.
     fn edge_hit(&mut self, at: (f64, f64)) -> Option<Hit> {
         const MARGIN: f64 = 4.0;
+        let at_agent = agent_display_containing(at);
         let hit = self
             .cache
             .as_ref()?
             .0
             .iter()
-            .find(|h| h.layer == 0 && h.bounds.inset(-MARGIN, -MARGIN).contains(at))
+            .find(|h| {
+                h.layer == 0
+                    && h.bounds.inset(-MARGIN, -MARGIN).contains(at)
+                    && hit_allowed_on_agent_display(h, at_agent)
+            })
             .copied()?;
         super::ax::window_element(hit.target)
             .is_some_and(|w| super::ax::settable(&w, "AXSize"))
@@ -2195,7 +2209,9 @@ impl Worker {
     }
 
     /// Topmost window at a global point. Moves and scrolls reuse a list up to
-    /// 100 ms old; clicks always query WindowServer.
+    /// 100 ms old; clicks always query WindowServer. On virtual Agent Displays,
+    /// document/panel windows recorded on a different display are skipped so
+    /// input never lands in an unshifted window of another session (M4).
     fn hit(&mut self, at: (f64, f64), fresh: bool) -> Option<Hit> {
         let now = Instant::now();
         let reuse = !fresh
@@ -2206,11 +2222,12 @@ impl Worker {
         if !reuse {
             self.cache = Some((hits(), now));
         }
+        let at_agent = agent_display_containing(at);
         self.cache
             .as_ref()?
             .0
             .iter()
-            .find(|h| h.bounds.contains(at))
+            .find(|h| h.bounds.contains(at) && hit_allowed_on_agent_display(h, at_agent))
             .copied()
     }
 }
@@ -2465,10 +2482,27 @@ fn resolve_drag_under(
     }
 }
 
+fn agent_display_containing(at: (f64, f64)) -> Option<crate::model::DisplayId> {
+    cg::active_displays().into_iter().find(|&id| {
+        cg::window_display_role(id) == crate::model::DisplayRole::Agent
+            && cg::display_bounds(id).contains(at)
+    })
+}
+
+fn hit_allowed_on_agent_display(h: &Hit, at_agent: Option<crate::model::DisplayId>) -> bool {
+    let Some(disp) = at_agent else {
+        return true;
+    };
+    if !(0..=8).contains(&h.layer) {
+        return true;
+    }
+    super::windows::recorded_owner(h.host.window_id).is_none_or(|owner| owner == disp)
+}
+
 /// Candidate Accessibility owner PIDs for an open `NSMenu` (`layer == 101`):
-/// only the menu's own target/host PIDs plus, when drawn by an out-of-process
-/// `.xpc`/`.appex` view service, any document/sheet host window on the same
-/// display (#207).
+/// the menu's own target/host PIDs plus, when drawn by an out-of-process
+/// `.xpc`/`.appex` view service, only the matching remote-panel host PID or
+/// the single frontmost host window under/adjacent to `menu.bounds` (L7, #207).
 fn menu_pids_for(menu: &Hit, windows: &[Hit]) -> Vec<i32> {
     let on_display = cg::active_displays()
         .into_iter()
@@ -2486,14 +2520,33 @@ fn resolve_menu_pids(
     let mut pids = vec![menu.target.pid];
     if menu.host.pid != menu.target.pid {
         pids.push(menu.host.pid);
+        return pids;
     }
-    if is_remote(menu.target.pid) || is_remote(menu.host.pid) {
+    if is_remote(menu.target.pid) {
+        // First prefer an explicit remote-panel window backed by this `.appex`.
+        for w in windows {
+            if (0..=8).contains(&w.layer)
+                && w.target.pid == menu.target.pid
+                && w.host.pid != menu.target.pid
+                && on_display.is_none_or(|d| w.bounds.intersects(&d))
+            {
+                if !pids.contains(&w.host.pid) {
+                    pids.push(w.host.pid);
+                }
+                return pids;
+            }
+        }
+        // Otherwise pick only the frontmost host window on that display whose
+        // frame intersects or sits within 48 pt of the open menu (`windows` is
+        // in front-to-back Z-order), never unrelated apps on the display (L7).
         for w in windows {
             if (0..=8).contains(&w.layer)
                 && on_display.is_none_or(|d| w.bounds.intersects(&d))
+                && w.bounds.inset(-48.0, -48.0).intersects(&menu.bounds)
                 && !pids.contains(&w.host.pid)
             {
                 pids.push(w.host.pid);
+                break;
             }
         }
     }
@@ -3396,9 +3449,22 @@ mod popup_tests {
             None
         );
 
-        // #207: native menus only probe their own PIDs (never unrelated apps on
-        // the display), while `.appex` remote-service menus add same-display
-        // host window PIDs.
+        // #207 + L7: native menus only probe their own PIDs, and `.appex`
+        // remote-service menus add only the frontmost adjacent host window PID,
+        // skipping unrelated side windows (`999`) and background windows (`888`)
+        // behind the host window.
+        let behind_host = Hit {
+            host: WindowTarget {
+                pid: 888,
+                window_id: 888,
+            },
+            target: WindowTarget {
+                pid: 888,
+                window_id: 888,
+            },
+            bounds: sheet_rect,
+            layer: 0,
+        };
         let bystander = Hit {
             host: WindowTarget {
                 pid: 999,
@@ -3417,14 +3483,14 @@ mod popup_tests {
             bounds: menu_rect,
             layer: 101,
         };
-        let all_windows = vec![hits[0], hits[1], bystander];
+        let all_windows = vec![hits[0], bystander, hits[1], behind_host];
         assert_eq!(
             resolve_menu_pids(&native_menu, &all_windows, Some(area), |_| false),
             vec![100]
         );
         assert_eq!(
             resolve_menu_pids(&hits[0], &all_windows, Some(area), |p| p == 300),
-            vec![300, 100, 999]
+            vec![300, 100]
         );
     }
 }

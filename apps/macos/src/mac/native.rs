@@ -246,38 +246,6 @@ pub struct StatusIcon {
     working: Cell<bool>,
 }
 
-static APPROVAL_CHIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub fn approval_chimes() -> u64 {
-    APPROVAL_CHIMES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Play a subtle macOS alert sound when a new pending approval arrives, so
-/// the user hears it even when Notification Center banners are off (#206).
-/// Named test instances (`AGENTSCREEN_INSTANCE=e2e`) stay silent unless
-/// `AGENTSCREEN_TEST_SOUND=1` is set.
-pub fn chime_approval() {
-    APPROVAL_CHIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let muted = agent_screen_mcp::endpoint::instance().is_some()
-        && std::env::var_os("AGENTSCREEN_TEST_SOUND").as_deref() != Some(std::ffi::OsStr::new("1"));
-    if muted {
-        return;
-    }
-    main_async(|| unsafe {
-        let Some(cls) = objc2::runtime::AnyClass::get(c"NSSound") else {
-            return;
-        };
-        for name in ["Glass", "Tink"] {
-            let name = NSString::from_str(name);
-            let sound: *mut AnyObject = msg_send![cls, soundNamed: &*name];
-            if !sound.is_null() {
-                let _: bool = msg_send![sound, play];
-                break;
-            }
-        }
-    });
-}
-
 /// The icon's pictures, made by assets/status/make.py.
 const ICON_IDLE: &str = include_str!("../../assets/status/idle.svg");
 const ICON_WORKING: &str = include_str!("../../assets/status/working.svg");
@@ -442,7 +410,7 @@ impl StatusIcon {
                 ICON_ASKING,
                 tf!(
                     "Agent Screen: {asking_count} waiting for your approval",
-                    "Agent Screen：{asking_count} 项等你批准"
+                    "Agent Screen：{asking_count} 项待你批准"
                 ),
             )
         } else if asking_count == 1 {
@@ -450,7 +418,7 @@ impl StatusIcon {
                 ICON_ASKING,
                 t(
                     "Agent Screen: waiting for your approval",
-                    "Agent Screen：等你批准",
+                    "Agent Screen：待你批准",
                 )
                 .to_string(),
             )

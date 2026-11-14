@@ -545,11 +545,6 @@ impl InputQueue {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn approval_needed(&self) -> bool {
-        self.approval_count() > 0
-    }
-
     pub fn approval_count(&self) -> usize {
         self.queue.waiting().filter(|r| self.asks(r.id)).count()
     }

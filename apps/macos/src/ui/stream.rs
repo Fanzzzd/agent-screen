@@ -33,10 +33,92 @@ struct Stream {
     repairs: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WantPlan {
+    NoOp,
+    Start,
+    Stop,
+    RestartFresh { start_now: bool },
+    Reconfigure,
+}
+
 impl Stream {
+    fn new() -> Self {
+        Self {
+            capture: None,
+            starting: false,
+            failures: 0,
+            retry_at: None,
+            target: Default::default(),
+            latest: Arc::new(Latest::default()),
+            running: (0, (0, 0)),
+            wants: HashMap::new(),
+            breaks: 0,
+            repairs: 0,
+        }
+    }
+
     /// The stream should run, yet no capture runs or is starting.
     fn idle(&self) -> bool {
         self.running.0 > 0 && self.capture.is_none() && !self.starting
+    }
+
+    /// Update subscriber desires and return the platform capture transition
+    /// needed now (M7).
+    fn apply_want(
+        &mut self,
+        who: &'static str,
+        fps: i32,
+        pixels: (u32, u32),
+        has_capture: bool,
+        has_frame: bool,
+        now: std::time::Instant,
+    ) -> WantPlan {
+        let newly_wanted = fps > 0 && !self.wants.contains_key(who);
+        if fps > 0 {
+            self.wants.insert(who, (fps, pixels));
+        } else {
+            self.wants.remove(who);
+        }
+        if who == "agent" {
+            self.latest.count_changes(fps > 0);
+        }
+        let wanted = self
+            .wants
+            .values()
+            .fold((0, (0, 0)), |(f, (w, h)), &(fps, (pw, ph))| {
+                (f.max(fps), (w.max(pw), h.max(ph)))
+            });
+        if wanted == self.running {
+            let is_idle = self.running.0 > 0 && !has_capture && !self.starting;
+            if is_idle && should_wake_idle_stream(newly_wanted, self.retry_at, now) {
+                self.breaks = 0;
+                return WantPlan::Start;
+            }
+            return WantPlan::NoOp;
+        }
+        let before = self.running;
+        self.running = wanted;
+        *self.target.lock().unwrap() = wanted;
+        if wanted.0 == 0 {
+            if has_capture {
+                WantPlan::Stop
+            } else {
+                WantPlan::NoOp
+            }
+        } else if needs_fresh_stream(before, wanted, has_frame) && has_capture {
+            self.breaks = 0;
+            WantPlan::RestartFresh {
+                start_now: !self.starting,
+            }
+        } else if has_capture {
+            WantPlan::Reconfigure
+        } else if !self.starting && should_wake_idle_stream(true, self.retry_at, now) {
+            self.breaks = 0;
+            WantPlan::Start
+        } else {
+            WantPlan::NoOp
+        }
     }
 }
 
@@ -173,77 +255,51 @@ impl Streams {
         cx: &mut Context<Self>,
     ) {
         let has_frame = self.frames.contains_key(&id);
-        let stream = self.streams.entry(id).or_insert_with(|| Stream {
-            capture: None,
-            starting: false,
-            failures: 0,
-            retry_at: None,
-            target: Default::default(),
-            latest: Arc::new(Latest::default()),
-            running: (0, (0, 0)),
-            wants: HashMap::new(),
-            breaks: 0,
-            repairs: 0,
-        });
-        let newly_wanted = fps > 0 && !stream.wants.contains_key(who);
-        if fps > 0 {
-            stream.wants.insert(who, (fps, pixels));
-        } else {
-            stream.wants.remove(who);
-        }
-        if who == "agent" {
-            stream.latest.count_changes(fps > 0);
-        }
-        let wanted = stream
-            .wants
-            .values()
-            .fold((0, (0, 0)), |(f, (w, h)), &(fps, (pw, ph))| {
-                (f.max(fps), (w.max(pw), h.max(ph)))
-            });
-        if wanted == stream.running {
-            if stream.idle()
-                && should_wake_idle_stream(newly_wanted, stream.retry_at, std::time::Instant::now())
-            {
-                stream.breaks = 0;
-                self.start(id, cx);
-            }
-            return;
-        }
-        let before = stream.running;
-        stream.running = wanted;
-        *stream.target.lock().unwrap() = wanted;
-        let fps = wanted.0;
+        let stream = self.streams.entry(id).or_insert_with(Stream::new);
+        let has_capture = stream.capture.is_some();
+        let plan = stream.apply_want(
+            who,
+            fps,
+            pixels,
+            has_capture,
+            has_frame,
+            std::time::Instant::now(),
+        );
         // Starting, stopping and reconfiguring a stream each block for
         // 100 ms or more, so they run off the main thread.
-        if fps == 0 {
-            if let Some(capture) = stream.capture.take() {
-                cx.background_spawn(async move { drop(capture) }).detach();
-            }
-        } else if needs_fresh_stream(before, wanted, has_frame)
-            && let Some(capture) = stream.capture.take()
-        {
-            // ScreenCaptureKit sends a frame only when the picture changes:
-            // resized in place, or running with no cached frame yet, a still
-            // display would keep showing the small or missing picture. A new
-            // stream sends one at once.
-            stream.breaks = 0;
-            cx.background_spawn(async move { drop(capture) }).detach();
-            if !stream.starting {
-                self.start(id, cx);
-            }
-        } else if let Some(capture) = stream.capture.clone() {
-            let target = stream.target.clone();
-            cx.background_spawn(async move {
-                if let Err(error) = capture.reconfigure(&target) {
-                    log::warn!("capture for display {id} kept its old rate: {error}");
+        match plan {
+            WantPlan::NoOp => {}
+            WantPlan::Start => self.start(id, cx),
+            WantPlan::Stop => {
+                if let Some(capture) = self.streams.get_mut(&id).and_then(|s| s.capture.take()) {
+                    cx.background_spawn(async move { drop(capture) }).detach();
                 }
-            })
-            .detach();
-        } else if !stream.starting
-            && should_wake_idle_stream(true, stream.retry_at, std::time::Instant::now())
-        {
-            stream.breaks = 0;
-            self.start(id, cx);
+            }
+            WantPlan::RestartFresh { start_now } => {
+                // ScreenCaptureKit sends a frame only when the picture changes:
+                // resized in place, or running with no cached frame yet, a still
+                // display would keep showing the small or missing picture. A new
+                // stream sends one at once.
+                if let Some(capture) = self.streams.get_mut(&id).and_then(|s| s.capture.take()) {
+                    cx.background_spawn(async move { drop(capture) }).detach();
+                }
+                if start_now {
+                    self.start(id, cx);
+                }
+            }
+            WantPlan::Reconfigure => {
+                if let Some(stream) = self.streams.get(&id)
+                    && let Some(capture) = stream.capture.clone()
+                {
+                    let target = stream.target.clone();
+                    cx.background_spawn(async move {
+                        if let Err(error) = capture.reconfigure(&target) {
+                            log::warn!("capture for display {id} kept its old rate: {error}");
+                        }
+                    })
+                    .detach();
+                }
+            }
         }
     }
 
@@ -517,5 +573,69 @@ mod tests {
         // A failing capture honors its backoff even for a new subscriber.
         assert!(!should_wake_idle_stream(true, Some(future), now));
         assert!(should_wake_idle_stream(true, Some(now), now));
+    }
+
+    #[test]
+    fn stream_apply_want_wires_backoff_warm_reconfigure_and_pixel_growth() {
+        let now = std::time::Instant::now();
+        let future = now + std::time::Duration::from_secs(5);
+        let thumb = (800, 500);
+        let full = (2560, 1600);
+        let mut s = Stream::new();
+
+        // Warm 1 fps subscriber starts an idle stream immediately.
+        assert_eq!(
+            s.apply_want("warm", 1, thumb, false, false, now),
+            WantPlan::Start
+        );
+        assert_eq!(s.running, (1, thumb));
+
+        // Simulate failed start entering backoff: repeated wants and rate raises
+        // update desired rate without bypassing `retry_at`.
+        s.failures = 2;
+        s.retry_at = Some(future);
+        assert_eq!(
+            s.apply_want("warm", 1, thumb, false, false, now),
+            WantPlan::NoOp
+        );
+        assert_eq!(
+            s.apply_want("agent", 1, thumb, false, false, now),
+            WantPlan::NoOp
+        );
+        assert_eq!(
+            s.apply_want("peek", 12, thumb, false, false, now),
+            WantPlan::NoOp
+        );
+        assert_eq!(s.running, (12, thumb));
+
+        // Once backoff elapses, a new subscriber wakes the idle stream.
+        assert_eq!(
+            s.apply_want("viewer_probe", 12, thumb, false, false, future),
+            WantPlan::Start
+        );
+
+        // With a live capture and cached frame, dropping back to 1 fps and
+        // hovering Peek (12 fps) reconfigures in place instead of rebuilding.
+        s.retry_at = None;
+        let _ = s.apply_want("peek", 0, (0, 0), true, true, future);
+        let _ = s.apply_want("viewer_probe", 0, (0, 0), true, true, future);
+        assert_eq!(s.running, (1, thumb));
+        assert_eq!(
+            s.apply_want("peek", 12, thumb, true, true, future),
+            WantPlan::Reconfigure
+        );
+        // Opening Viewer at full pixels rebuilds the stream for higher resolution.
+        assert_eq!(
+            s.apply_want("viewer", 60, full, true, true, future),
+            WantPlan::RestartFresh { start_now: true }
+        );
+        // Dropping every subscriber stops the running capture.
+        let _ = s.apply_want("warm", 0, (0, 0), true, true, future);
+        let _ = s.apply_want("agent", 0, (0, 0), true, true, future);
+        let _ = s.apply_want("peek", 0, (0, 0), true, true, future);
+        assert_eq!(
+            s.apply_want("viewer", 0, (0, 0), true, true, future),
+            WantPlan::Stop
+        );
     }
 }

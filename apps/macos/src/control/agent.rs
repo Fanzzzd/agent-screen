@@ -34,6 +34,39 @@ use std::time::{Duration, Instant};
 
 type Params = Map<String, Value>;
 
+struct CallGuard {
+    dropped: std::sync::Arc<std::sync::Mutex<Vec<(String, u64)>>>,
+    started_at: Instant,
+    key: String,
+    finished: bool,
+}
+
+impl CallGuard {
+    fn finish(mut self, core: &Entity<Core>, cx: &mut AsyncApp) {
+        self.finished = true;
+        let key = std::mem::take(&mut self.key);
+        core.update(cx, |c, _| {
+            c.drain_dropped_calls();
+            let now_ms = c.elapsed_ms();
+            c.displays.sessions.note_call_end(&key, now_ms);
+        });
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if !self.finished
+            && !self.key.is_empty()
+            && let Ok(mut g) = self.dropped.lock()
+        {
+            g.push((
+                std::mem::take(&mut self.key),
+                self.started_at.elapsed().as_millis() as u64,
+            ));
+        }
+    }
+}
+
 pub async fn handle(
     core: Entity<Core>,
     connection: u64,
@@ -53,6 +86,37 @@ pub async fn handle(
     .map(|id| id as DisplayId);
     let timeline = recorded(method, &p);
     let shown = Args(&p).int("displayId").map(|id| id as DisplayId);
+    let call_guard = (!method.starts_with("debug"))
+        .then(|| {
+            let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
+            core.update(cx, |c, cx| {
+                c.drain_dropped_calls();
+                let now_ms = c.elapsed_ms();
+                if let Some(ref k) = named_key {
+                    c.sessions.insert(connection, k.clone());
+                    if !c
+                        .displays
+                        .rebind_disconnected(k, connection, now_ms)
+                        .is_empty()
+                    {
+                        cx.notify();
+                    }
+                }
+                let key = named_key
+                    .or_else(|| {
+                        shown.and_then(|id| c.displays.get(id)?.session().map(String::from))
+                    })
+                    .or_else(|| c.sessions.get(&connection).cloned())?;
+                c.displays.sessions.note_call_start(&key, now_ms);
+                Some(CallGuard {
+                    dropped: c.dropped_calls.clone(),
+                    started_at: c.started_at_instant(),
+                    key,
+                    finished: false,
+                })
+            })
+        })
+        .flatten();
     if matches!(method, "click" | "mouseDown" | "key" | "type")
         && let Some(id) = shown
     {
@@ -62,27 +126,9 @@ pub async fn handle(
         .int("displayId")
         .zip(Args(&p).int("windowId"))
         .filter(|_| method != "placeWindow");
-    let tracked_session = (!method.starts_with("debug"))
-        .then(|| {
-            let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
-            core.update(cx, |c, _| {
-                let key = named_key
-                    .or_else(|| {
-                        shown.and_then(|id| c.displays.get(id)?.session().map(String::from))
-                    })
-                    .or_else(|| c.sessions.get(&connection).cloned())?;
-                let now_ms = c.elapsed_ms();
-                c.displays.sessions.note_call_start(&key, now_ms);
-                Some(key)
-            })
-        })
-        .flatten();
     let reply = handle_one(core.clone(), connection, method, p, cx).await;
-    if let Some(key) = tracked_session {
-        core.update(cx, |c, _| {
-            let now_ms = c.elapsed_ms();
-            c.displays.sessions.note_call_end(&key, now_ms);
-        });
+    if let Some(guard) = call_guard {
+        guard.finish(&core, cx);
     }
     // A window the user gave to another session: say so, rather than that
     // there is no such window (ADR 0017).
@@ -978,35 +1024,32 @@ async fn handle_one(
         }
         "listWindows" => {
             let id = display(&core, &p, false, cx)?;
-            let (records, started, recorded_owners) = core.read_with(cx, |c, _| {
-                let owners = c.displays.recorded_owners();
+            let (records, started) = core.read_with(cx, |c, _| {
                 c.displays
                     .get(id)
-                    .map(|d| (d.records.clone(), d.started.clone(), owners.clone()))
-                    .unwrap_or_else(|| (Default::default(), Default::default(), owners))
+                    .map(|d| (d.records.clone(), d.started.clone()))
+                    .unwrap_or_default()
             });
             let scale = display_scale(&core, id, cx);
-            let list: Vec<Value> = off(cx, move || {
-                windows::on_display_with_records(id, &recorded_owners)
-            })
-            .await
-            .iter()
-            .map(|w| {
-                let mut json = in_shot(w.json(), scale);
-                let record = records.get(&w.target.window_id);
-                // A further window of an app the agent started, which its
-                // catch moved here, is as launched as the first.
-                let unrecorded = if started.contains(&w.target.pid) {
-                    "launched"
-                } else {
-                    "unknown"
-                };
-                json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
-                json["disposition"] =
-                    json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
-                json
-            })
-            .collect();
+            let list: Vec<Value> = off(cx, move || windows::on_display(id))
+                .await
+                .iter()
+                .map(|w| {
+                    let mut json = in_shot(w.json(), scale);
+                    let record = records.get(&w.target.window_id);
+                    // A further window of an app the agent started, which its
+                    // catch moved here, is as launched as the first.
+                    let unrecorded = if started.contains(&w.target.pid) {
+                        "launched"
+                    } else {
+                        "unknown"
+                    };
+                    json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
+                    json["disposition"] =
+                        json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
+                    json
+                })
+                .collect();
             let mut reply = json!({ "windows": list, "scale": scale });
             // list_windows shows the reply as it is: the note says it.
             if let Some(given) = add_given(&core, id, &mut reply, cx) {
@@ -1055,12 +1098,10 @@ async fn handle_one(
             if asked.width.is_some_and(|w| w <= 0.0) || asked.height.is_some_and(|h| h <= 0.0) {
                 return Err(ControlError::invalid("width and height must be above 0"));
             }
-            let recorded_owners = core.read_with(cx, |c, _| c.displays.recorded_owners());
             // A window already on the display only takes its new frame.
             if let Some(wanted) = wanted {
-                let owners = recorded_owners.clone();
                 let here = off(cx, move || {
-                    windows::on_display_with_records(id, &owners)
+                    windows::on_display(id)
                         .into_iter()
                         .find(|w| w.target.window_id as i64 == wanted)
                 })
@@ -1097,7 +1138,6 @@ async fn handle_one(
                     .collect()
             });
             if !others.is_empty() {
-                let owners = recorded_owners.clone();
                 let found = off(cx, {
                     let matcher = matcher.clone();
                     move || {
@@ -1105,17 +1145,15 @@ async fn handle_one(
                         // The app has a window here already: that one is
                         // what the agent means, as before ADR 0016.
                         if wanted.is_none()
-                            && windows::on_display_with_records(id, &owners)
-                                .iter()
-                                .any(|w| {
-                                    w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
-                                })
+                            && windows::on_display(id).iter().any(|w| {
+                                w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
+                            })
                         {
                             return Vec::new();
                         }
                         let mut found = Vec::new();
                         for o in others {
-                            for w in windows::on_display_with_records(o, &owners) {
+                            for w in windows::on_display(o) {
                                 if (wanted.is_some() || w.layer == 0)
                                     && is_named(&w, wanted, matcher.as_ref(), &mut ids)
                                 {
@@ -1278,7 +1316,9 @@ async fn handle_one(
                 Some(from) => Some(
                     core.update(cx, |c, cx| {
                         cx.notify();
-                        c.displays.move_between(from, id, window.target, false)
+                        let out = c.displays.move_between(from, id, window.target, false);
+                        c.sync_recorded_owners();
+                        out
                     })
                     .map_err(ControlError::failed)?,
                 ),
@@ -1289,18 +1329,21 @@ async fn handle_one(
             };
             if let Err(e) = place_and_hold(window.target, id, cx).await {
                 // Still a stray, so the agent can try again.
-                core.update(cx, |c, _| match moved {
-                    Some(moved) => c.displays.undo_move(moved),
-                    None => {
-                        if let Some(d) = c.displays.get_mut(id) {
-                            match before {
-                                Some(record) => {
-                                    d.records.insert(window.target.window_id, record);
+                core.update(cx, |c, _| {
+                    match moved {
+                        Some(moved) => c.displays.undo_move(moved),
+                        None => {
+                            if let Some(d) = c.displays.get_mut(id) {
+                                match before {
+                                    Some(record) => {
+                                        d.records.insert(window.target.window_id, record);
+                                    }
+                                    None => d.forget(window.target.window_id),
                                 }
-                                None => d.forget(window.target.window_id),
                             }
                         }
                     }
+                    c.sync_recorded_owners();
                 });
                 return Err(ControlError::failed(format!(
                     "could not move the window: {e}"
@@ -2151,6 +2194,7 @@ async fn handle_one(
                     d.forget(window);
                     d.user_made.insert(window);
                 }
+                c.sync_recorded_owners();
             });
             Ok(json!({}))
         }
@@ -2311,7 +2355,6 @@ async fn handle_one(
             Ok(json!({
                 "state": state,
                 "askingCount": asking_count,
-                "chimes": crate::mac::native::approval_chimes(),
             }))
         }
         "debugShow" if debug_methods() => {
@@ -2757,7 +2800,9 @@ async fn create_display(
     // reconfiguration every app handles, so agents get only so many.
     // A spare of another size takes this one: a mode change, where a new
     // display would add one more for every later display change to cost.
-    let spare = match core.update(cx, |c, _| c.take_spare((width, height))) {
+    let spare_ids = core.read_with(cx, |c, _| c.spare_ids());
+    let spare_snap = off(cx, move || Core::probe_spares(&spare_ids)).await;
+    let spare = match core.update(cx, |c, _| c.take_spare_with((width, height), &spare_snap)) {
         Some((handle, name, resize)) => {
             let others = core.read_with(cx, |c, _| c.virtual_ids());
             crate::mac::display::reuse_parked(handle, width as u32, height as u32, resize, others)
@@ -2909,7 +2954,9 @@ async fn create_display(
     if !on_new.is_empty() {
         let targets: Vec<WindowTarget> = on_new.iter().map(|w| w.target).collect();
         let unowned = core.update(cx, |c, _| {
-            c.displays.reconcile_new_display_windows(id, &targets)
+            let out = c.displays.reconcile_new_display_windows(id, &targets);
+            c.sync_recorded_owners();
+            out
         });
         if !unowned.is_empty() {
             off(cx, move || {
@@ -3372,14 +3419,15 @@ impl Holders {
         )
     }
 
-    /// Who has the Agent Display under the center of `bounds`, and its label
-    /// when known or derivable from a cross-instance `0x5353` serial (#189).
-    /// Blocking.
-    fn at_named(&self, bounds: &Rect) -> (Holder, Option<String>) {
-        let mid = bounds.mid();
-        let Some(id) = cg::active_displays()
-            .into_iter()
-            .find(|&id| cg::display_bounds(id).contains(mid))
+    /// Who has the Agent Display owning `window_id` at `bounds` under the
+    /// centralized ownership rule (`effective_agent_display`, ADR 0018), and
+    /// its label when known or derivable from a cross-instance `0x5353` serial
+    /// (#189, L10). Blocking.
+    fn at_named(&self, window_id: u32, bounds: &Rect) -> (Holder, Option<String>) {
+        let online = windows::online_display_areas();
+        let recorded = windows::recorded_owner(window_id);
+        let Some((id, _)) =
+            agent_screen_model::arrangement::effective_agent_display(bounds, &online, recorded)
         else {
             return (Holder::Other, None);
         };
@@ -3389,7 +3437,7 @@ impl Holders {
         if cg::is_agent_screen(id) {
             let serial = cg::serial(id);
             let label = if serial > 0 {
-                format!("Agent Screen {serial} [another Agent Screen instance]")
+                format!("display {id} [serial {serial}, another Agent Screen instance]")
             } else {
                 format!("display {id} [another Agent Screen instance]")
             };
@@ -3412,7 +3460,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
             WindowSighting::NotDocument { app: w.app }
         }
         Some(w) if !windows::display_role(&w).accepts_window_request() => {
-            let (holder, name) = holders.at_named(&w.bounds);
+            let (holder, name) = holders.at_named(w.target.window_id, &w.bounds);
             label = name;
             WindowSighting::OnAgentDisplay(holder)
         }
@@ -3436,7 +3484,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
                 if windows::display_role(&window).accepts_window_request() {
                     WindowSighting::NotDocument { app: window.app }
                 } else {
-                    let (holder, name) = holders.at_named(&window.bounds);
+                    let (holder, name) = holders.at_named(window.target.window_id, &window.bounds);
                     label = name;
                     WindowSighting::OnAgentDisplay(holder)
                 }
@@ -3465,15 +3513,22 @@ fn no_app_window(
         .into_iter()
         .filter(|w| is_named(w, None, Some(named), &mut ids))
         .collect();
-    let area = cg::display_bounds(display);
+    let online = windows::online_display_areas();
     // A document window that matched yet wasn't offered is on an Agent
     // Display.
     let documents: Vec<&windows::Window> = mine
         .iter()
         .filter(|w| w.layer == 0 && !windows::display_role(w).accepts_window_request())
         .collect();
-    let mut holder_label: Option<String> = None;
-    let sighting = if let Some(here) = documents.iter().find(|w| area.contains(w.bounds.mid())) {
+    let mut holder_labels: Option<(String, usize)> = None;
+    let sighting = if let Some(here) = documents.iter().find(|w| {
+        agent_screen_model::arrangement::effective_agent_display(
+            &w.bounds,
+            &online,
+            windows::recorded_owner(w.target.window_id),
+        )
+        .is_some_and(|(owner, _)| owner == display)
+    }) {
         AppSighting::OnThisDisplay {
             window_id: here.target.window_id,
         }
@@ -3485,9 +3540,11 @@ fn no_app_window(
             name: w.app.clone(),
         }
     } else if !mine.is_empty() {
-        let resolved: Vec<(Holder, Option<String>)> =
-            mine.iter().map(|w| holders.at_named(&w.bounds)).collect();
-        holder_label =
+        let resolved: Vec<(Holder, Option<String>)> = mine
+            .iter()
+            .map(|w| holders.at_named(w.target.window_id, &w.bounds))
+            .collect();
+        holder_labels =
             placement::join_holder_labels(resolved.iter().filter_map(|(_, l)| l.as_deref()));
         AppSighting::OnAgentDisplay(Holder::of_all(resolved.into_iter().map(|(h, _)| h)))
     } else {
@@ -3509,7 +3566,11 @@ fn no_app_window(
             (None, None) => AppSighting::Unknown,
         }
     };
-    placement::no_app_window_named(text, &sighting, holder_label.as_deref())
+    placement::no_app_window_named(
+        text,
+        &sighting,
+        holder_labels.as_ref().map(|(s, n)| (s.as_str(), *n)),
+    )
 }
 
 /// Ask the user for one of their windows with a Window Request, and wait
@@ -3575,21 +3636,16 @@ async fn where_now(
     target: WindowTarget,
     cx: &mut AsyncApp,
 ) -> Now {
-    let (known, spares, recorded_owners): (
-        Vec<DisplayId>,
-        Vec<DisplayId>,
-        std::collections::BTreeMap<u32, DisplayId>,
-    ) = core.read_with(cx, |c, _| {
+    let (known, spares): (Vec<DisplayId>, Vec<DisplayId>) = core.read_with(cx, |c, _| {
         (
             c.displays.list.iter().map(|d| d.id).collect(),
             c.spare_ids(),
-            c.displays.recorded_owners(),
         )
     });
     let window = target.window_id;
     let (on, found) = off(cx, move || {
         for o in known {
-            if let Some(w) = windows::on_display_with_records(o, &recorded_owners)
+            if let Some(w) = windows::on_display(o)
                 .into_iter()
                 .find(|w| w.target.window_id == window)
             {
@@ -3767,19 +3823,17 @@ async fn held_window(
     matcher: Option<NamedApp>,
     cx: &mut AsyncApp,
 ) -> Option<(windows::Window, Held)> {
-    let (holders, recorded_owners) = core.read_with(cx, |c, _| {
+    let holders: Vec<DisplayId> = core.read_with(cx, |c, _| {
         let probe = WindowTarget {
             pid: 0,
             window_id: 0,
         };
-        let holders: Vec<DisplayId> = c
-            .displays
+        c.displays
             .list
             .iter()
             .filter(|d| c.displays.held_by(id, probe, Some(d.id)).is_some())
             .map(|d| d.id)
-            .collect();
-        (holders, c.displays.recorded_owners())
+            .collect()
     });
     if holders.is_empty() {
         return None;
@@ -3788,7 +3842,7 @@ async fn held_window(
         let mut ids = AppIds::default();
         let mut found = Vec::new();
         for o in holders {
-            for w in windows::on_display_with_records(o, &recorded_owners) {
+            for w in windows::on_display(o) {
                 if (wanted.is_some() || w.layer == 0)
                     && is_named(&w, wanted, matcher.as_ref(), &mut ids)
                 {
@@ -3878,13 +3932,16 @@ async fn transfer_window(
     let moved = core
         .update(cx, |c, cx| {
             cx.notify();
-            c.displays.transfer(from, to, target, app)
+            let out = c.displays.transfer(from, to, target, app);
+            c.sync_recorded_owners();
+            out
         })
         .map_err(ControlError::failed)?;
     let handed_over = moved.record.origin == Origin::HandedOver;
     if let Err(e) = place_and_hold(target, to, cx).await {
         core.update(cx, |c, cx| {
             c.displays.undo_transfer(moved);
+            c.sync_recorded_owners();
             cx.notify();
         });
         return Err(ControlError::failed(format!(
@@ -3997,6 +4054,7 @@ async fn hand_over(
     let landed = core.update(cx, |c, cx| {
         let landed = c.displays.commit_hand_over(id, &ticket, None);
         if landed {
+            c.sync_recorded_owners();
             // The app's late windows are the agent's to have, not to send
             // back, as after the user's own Hand Over.
             c.returning
@@ -4490,12 +4548,15 @@ async fn move_between_own(
     let moved = core
         .update(cx, |c, cx| {
             cx.notify();
-            c.displays.move_between(from, to, target, true)
+            let out = c.displays.move_between(from, to, target, true);
+            c.sync_recorded_owners();
+            out
         })
         .map_err(ControlError::failed)?;
     if let Err(e) = place_and_hold(target, to, cx).await {
         core.update(cx, |c, cx| {
             c.displays.undo_move(moved);
+            c.sync_recorded_owners();
             cx.notify();
         });
         return Err(ControlError::failed(format!(
@@ -4524,6 +4585,7 @@ fn claim(
     core.update(cx, |c, cx| {
         if let Some(d) = c.displays.get_mut(id) {
             d.claim(target, origin, None);
+            c.sync_recorded_owners();
             cx.notify();
         }
     });
@@ -6085,16 +6147,21 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
             }
             looks += 1;
             // Ended, taken back by the user, or closed: no longer ours to keep.
-            let recorded = core.read_with(cx, |c, _| {
-                c.displays
-                    .get(id)
-                    .is_some_and(|d| d.records.contains_key(&target.window_id))
+            // During Takeover, the Viewer's own `keep_on_display` watch restores
+            // dragged windows to their dragged position rather than centering.
+            let (recorded, takeover) = core.read_with(cx, |c, _| {
+                c.displays.get(id).map_or((false, false), |d| {
+                    (d.records.contains_key(&target.window_id), d.takeover)
+                })
             });
             if !recorded
                 || !takes_windows(&core, id, cx)
                 || off(cx, move || windows::find(target.window_id).is_none()).await
             {
                 return;
+            }
+            if takeover {
+                continue;
             }
             // Displays move as others come and go, and their windows a
             // moment apart, so a window may seem to sit on the display next

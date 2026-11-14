@@ -179,16 +179,24 @@ pub fn dragged_window_origin(
 ) -> (f64, f64) {
     let (min_x, max_x) = if initial_frame.width <= area.width {
         (area.x, area.max_x() - initial_frame.width)
+    } else if initial_frame.width <= 2.0 * area.width - 2.0 {
+        let min_x = (area.max_x() - initial_frame.width)
+            .max(area.x + 1.0 - initial_frame.width * 0.5)
+            .min(area.x);
+        let max_x = (area.max_x() - MIN_TITLE_STRIP)
+            .min(area.max_x() - 1.0 - initial_frame.width * 0.5)
+            .max(area.x);
+        (min_x.min(max_x), max_x)
     } else {
-        let safe_left = (area.x + 1.0 - initial_frame.width * 0.5).min(area.x);
-        let min_x = (area.max_x() - initial_frame.width).max(safe_left);
-        let max_x = (area.max_x() - MIN_TITLE_STRIP).max(area.x);
-        (min_x, max_x.max(min_x))
+        let centered = area.mid().0 - initial_frame.width * 0.5;
+        (centered, centered)
     };
     let max_y = if initial_frame.height <= area.height {
         area.max_y() - initial_frame.height
     } else {
-        (area.max_y() - MIN_TITLE_STRIP).max(area.y)
+        (area.max_y() - MIN_TITLE_STRIP)
+            .min(area.max_y() - 1.0 - initial_frame.height * 0.5)
+            .max(area.y)
     };
     let x = (initial_frame.x + to.0 - from.0).clamp(min_x, max_x.max(min_x));
     let y = (initial_frame.y + to.1 - from.1).clamp(area.y, max_y.max(area.y));
@@ -413,11 +421,12 @@ mod tests {
             dragged_window_origin(normal, (4500.0, -480.0), (5600.0, -420.0), area),
             (4288.0 + 900.0 - 300.0, -440.0)
         );
-        let tall = Rect::new(4700.0, -320.0, 320.0, 700.0);
+        let tall = Rect::new(4700.0, -500.0, 320.0, 700.0);
         assert_eq!(
-            dragged_window_origin(tall, (4800.0, -305.0), (4890.0, -245.0), area),
-            (4790.0, -260.0)
+            dragged_window_origin(tall, (4800.0, -485.0), (4890.0, -425.0), area),
+            (4790.0, -440.0)
         );
+        assert!(area.contains(Rect::new(4790.0, -440.0, 320.0, 700.0).mid()));
         // Wide window (1200 > 900) can slide left up to area.max_x() - 1200 (3988),
         // keeping its center (3988 + 600 = 4588) inside area.
         let wide = Rect::new(4288.0, -500.0, 1200.0, 400.0);
@@ -476,6 +485,45 @@ mod tests {
             (4500.0, -500.0),
             (4620.0, -440.0),
             false
+        ));
+    }
+
+    #[test]
+    fn oversized_drag_clamps_keep_center_on_display_out_of_neighbors() {
+        // H2 probe 1: 1300 pt wide window dragged right on a 1280 pt display
+        // with a neighbor display to its right (5568..6848).
+        let area = Rect::new(4288.0, -800.0, 1280.0, 800.0);
+        let right_neighbor = Rect::new(5568.0, -800.0, 1280.0, 800.0);
+        let wide = Rect::new(4288.0, -700.0, 1300.0, 500.0);
+        let (wx, wy) = dragged_window_origin(wide, (4500.0, -685.0), (6500.0, -685.0), area);
+        let moved_wide = Rect::new(wx, wy, wide.width, wide.height);
+        assert!(
+            !right_neighbor.contains(moved_wide.mid()),
+            "center {:?} entered right neighbor",
+            moved_wide.mid()
+        );
+        assert!(crate::arrangement::window_belongs_to_area(
+            &moved_wide,
+            &area,
+            &[right_neighbor]
+        ));
+
+        // H2 probe 2: 900 pt tall window on a second-row display (-1600..-800)
+        // dragged down toward the first-row display below (-800..0).
+        let row2 = Rect::new(4288.0, -1600.0, 1280.0, 800.0);
+        let row1_below = Rect::new(4288.0, -800.0, 1280.0, 800.0);
+        let tall = Rect::new(4400.0, -1560.0, 500.0, 900.0);
+        let (tx, ty) = dragged_window_origin(tall, (4500.0, -1545.0), (4500.0, -400.0), row2);
+        let moved_tall = Rect::new(tx, ty, tall.width, tall.height);
+        assert!(
+            !row1_below.contains(moved_tall.mid()),
+            "center {:?} entered display below",
+            moved_tall.mid()
+        );
+        assert!(crate::arrangement::window_belongs_to_area(
+            &moved_tall,
+            &row2,
+            &[row1_below]
         ));
     }
 }

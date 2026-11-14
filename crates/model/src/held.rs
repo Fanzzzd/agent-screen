@@ -177,6 +177,26 @@ impl<H> Displays<H> {
         self.held_by_inner(asking, target, on, Some(now_ms))
     }
 
+    /// Resolve which Agent Display owns `target` from `bounds` and `displays`
+    /// through the single model rule (`effective_agent_display`) and then
+    /// evaluate [`Displays::held_by_at`] (#204, M4).
+    pub fn held_by_bounds_at(
+        &self,
+        asking: DisplayId,
+        target: WindowTarget,
+        bounds: &crate::model::Rect,
+        displays: &[(DisplayId, crate::model::Rect, bool)],
+        now_ms: u64,
+    ) -> Option<Held> {
+        let on = crate::arrangement::effective_agent_display(
+            bounds,
+            displays,
+            self.recorded_display_of(target.window_id),
+        )
+        .map(|(id, _)| id);
+        self.held_by_at(asking, target, on, now_ms)
+    }
+
     fn held_by_inner(
         &self,
         asking: DisplayId,
@@ -1106,15 +1126,227 @@ mod tests {
         d.begin_takeover(7);
         assert!(d.get(7).unwrap().takeover);
 
-        let effective = d.effective_display_of(target.window_id, Some(8), true);
-        assert_eq!(effective, Some(7));
-        // Session A (display 7) still owns target, even if geometric lookup
-        // transiently reports display 8.
-        assert_eq!(d.held_by(7, target, effective), None);
-        // Session B (display 8) sees display 7 as the holder, not itself.
-        let held = d.held_by(8, target, effective).expect("still held by 7");
+        let displays = [
+            (1, Rect::new(0.0, 0.0, 2560.0, 1440.0), false),
+            (7, Rect::new(2560.0, -600.0, 800.0, 600.0), true),
+            (8, Rect::new(3360.0, -600.0, 800.0, 600.0), true),
+        ];
+        let bounds_on_8 = Rect::new(3420.0, -520.0, 400.0, 300.0);
+        // Even though `bounds_on_8` sits geometrically on display 8, the
+        // centralized `effective_agent_display` / `held_by_bounds_at` rule
+        // resolves ownership to display 7 everywhere (M4).
+        assert_eq!(
+            d.held_by_bounds_at(7, target, &bounds_on_8, &displays, 1_000),
+            None
+        );
+        d.add(
+            9,
+            "Agent Screen 3".into(),
+            (1280.0, 800.0),
+            Some(owner("s3", "Observer", "Peek", 3)),
+            (),
+        );
+        let held_raw = d
+            .held_by_bounds_at(9, target, &bounds_on_8, &displays, 1_000)
+            .expect("held by 7, not 8");
+        assert_eq!(held_raw.display, 7);
+
+        // `recorded_owners()` and `recorded_display_of()` share one tie-break (M4).
+        let dup = wechat(99);
+        d.get_mut(7).unwrap().claim(dup, Origin::Placed, None);
+        d.get_mut(8).unwrap().claim(dup, Origin::Placed, None);
+        assert_eq!(
+            d.recorded_owners().get(&dup.window_id).copied(),
+            d.recorded_display_of(dup.window_id)
+        );
+
+        let held = d
+            .held_by_bounds_at(8, target, &bounds_on_8, &displays, 1_000)
+            .expect("still held by 7");
         assert_eq!(held.display, 7);
         assert_eq!(held.place, Place::Display);
         assert!(d.get(7).unwrap().takeover);
+    }
+
+    #[test]
+    fn rebind_on_any_call_and_overlapping_connection_keep_session_displays_alive() {
+        let mut d = two_sessions();
+        let target = wechat(31);
+        d.get_mut(7)
+            .unwrap()
+            .claim(target, Origin::HandedOver, Some(home()));
+
+        // Case 1 (M1): connection 1 closes; reconnected client on connection 9
+        // calls a non-create_display tool (`rebind_disconnected`) within grace.
+        assert_eq!(d.connection_disconnected(1, 10_000), 1);
+        assert_eq!(d.rebind_disconnected("holder", 9, 10_800), vec![7]);
+        assert_eq!(
+            d.expire_disconnected(13_000, 2_000),
+            Vec::<DisplayId>::new()
+        );
+        assert!(d.get(7).unwrap().is_live());
+
+        // Case 2 (ADR 0016): new MCP connection 11 speaks for `holder` BEFORE old
+        // connection 9's close arrives (even if 9 speaks once more before closing).
+        // Closing 9 moves display 7 to 11 instead of starting a grace timer.
+        assert_eq!(
+            d.rebind_disconnected("holder", 11, 14_000),
+            Vec::<DisplayId>::new()
+        );
+        assert_eq!(
+            d.rebind_disconnected("holder", 9, 14_100),
+            Vec::<DisplayId>::new()
+        );
+        assert_eq!(d.connection_disconnected(9, 14_200), 0);
+        assert_eq!(d.get(7).unwrap().disconnected_at_ms, None);
+        assert_eq!(d.get(7).unwrap().owner.as_ref().unwrap().connection, 11);
+        assert_eq!(
+            d.expire_disconnected(20_000, 2_000),
+            Vec::<DisplayId>::new()
+        );
+        assert!(d.get(7).unwrap().is_live());
+    }
+
+    #[test]
+    fn two_sessions_asking_for_window_held_by_another_session() {
+        let mut d = two_sessions();
+        d.add(
+            9,
+            "Agent Screen 3".into(),
+            (1280.0, 800.0),
+            Some(owner("s3", "Cursor", "Triage", 3)),
+            (),
+        );
+        let target = wechat(88);
+        d.get_mut(7)
+            .unwrap()
+            .claim(target, Origin::HandedOver, Some(home()));
+        d.sessions.note_call_end("holder", 1_000);
+        d.sessions.note_call_end("asker", 1_500);
+        d.sessions.note_call_end("s3", 1_800);
+
+        // Both `asker` (display 8) and `s3` (display 9) ask for `holder`'s window on 7.
+        let held_for_b = d.held_by_at(8, target, Some(7), 2_000).unwrap();
+        let held_for_c = d.held_by_at(9, target, Some(7), 2_000).unwrap();
+        assert_eq!(held_for_b.display, 7);
+        assert_eq!(held_for_c.display, 7);
+
+        let (req_b, mut rx_b) = d
+            .request_window(8, named(88), Some(held_for_b.clone()))
+            .unwrap();
+        let (req_c, mut rx_c) = d
+            .request_window(9, named(88), Some(held_for_c.clone()))
+            .unwrap();
+
+        // User approves `asker` first; `asker` transfers the window from 7 to 8.
+        let _ = d
+            .answer(8, Kind::Window, Some(req_b), Answer::Give)
+            .unwrap();
+        assert!(matches!(
+            rx_b.try_recv().unwrap(),
+            Some(Resolution::HandedOver(_))
+        ));
+        assert!(d.transfer(7, 8, target, "WeChat").is_ok());
+
+        // User then clicks Give on `s3`'s card (which named `holder` on display 7).
+        // Re-checking `held_by_at` now reports display 8 (`asker`), NOT `7`,
+        // preventing `s3` from taking `asker`'s window under a stale card!
+        let _ = d
+            .answer(9, Kind::Window, Some(req_c), Answer::Give)
+            .unwrap();
+        assert!(matches!(
+            rx_c.try_recv().unwrap(),
+            Some(Resolution::HandedOver(_))
+        ));
+        let current_holder = d.held_by_at(9, target, Some(8), 3_000).unwrap();
+        assert_ne!(current_holder.display, held_for_c.display);
+        assert_eq!(current_holder.display, 8);
+        assert!(current_holder.agent_label().contains("session asker"));
+    }
+
+    #[test]
+    fn takeover_stays_active_and_shifts_windows_once_when_display_moves() {
+        use crate::arrangement::ReparkState;
+        use crate::viewer_press::{dragged_window_origin, rebase_grab_for_display};
+
+        let mut d = two_sessions();
+        d.sessions.get_mut("holder").unwrap().access.grant_all();
+        let rec_win = wechat(41);
+        let sheet_win = WindowTarget {
+            pid: 900,
+            window_id: 42,
+        };
+        d.get_mut(7).unwrap().claim(rec_win, Origin::Placed, None);
+
+        // User begins Takeover on display 7; Window Authorization pauses on 7.
+        d.begin_takeover(7);
+        assert!(d.get(7).unwrap().takeover);
+        assert!(d.get(7).unwrap().access_paused());
+
+        let user_rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let old_7 = Rect::new(2560.0, -800.0, 1280.0, 800.0);
+        let new_7 = Rect::new(3840.0, -800.0, 1280.0, 800.0);
+        let mut repark = ReparkState::default();
+        repark.note_adopted(7, old_7);
+
+        let rec_frame = Rect::new(2660.0, -700.0, 500.0, 400.0);
+        let sheet_frame = Rect::new(2740.0, -640.0, 320.0, 200.0);
+        let owners = d.recorded_owners();
+        let (gen1, _) = repark.begin(&[7]).unwrap();
+        // Concurrent notification during Takeover move coalesces cleanly.
+        assert_eq!(repark.begin(&[7]), None);
+
+        let (shifts, _) = repark.plan_shifts(
+            gen1,
+            &[7],
+            &[(7, new_7)],
+            &[user_rect],
+            &[
+                (rec_win, rec_frame, owners.get(&rec_win.window_id).copied()),
+                (
+                    sheet_win,
+                    sheet_frame,
+                    owners.get(&sheet_win.window_id).copied(),
+                ),
+            ],
+        );
+        assert_eq!(
+            shifts,
+            vec![
+                (rec_win, Rect::new(3940.0, -700.0, 500.0, 400.0)),
+                (sheet_win, Rect::new(4020.0, -640.0, 320.0, 200.0)),
+            ]
+        );
+        assert!(repark.finish(gen1));
+
+        // Coalesced rerun shifts nothing further; Takeover and paused access hold.
+        let (gen2, _) = repark.begin(&[7]).unwrap();
+        let (shifts2, _) = repark.plan_shifts(
+            gen2,
+            &[7],
+            &[(7, new_7)],
+            &[user_rect],
+            &[
+                (rec_win, Rect::new(3940.0, -700.0, 500.0, 400.0), Some(7)),
+                (sheet_win, Rect::new(4020.0, -640.0, 320.0, 200.0), None),
+            ],
+        );
+        assert!(shifts2.is_empty());
+        assert!(!repark.finish(gen2));
+        assert!(d.get(7).unwrap().takeover);
+        assert!(d.get(7).unwrap().access_paused());
+
+        // An active Viewer title-bar drag during the move rebases onto `new_7`.
+        let (rf, rfrom, rto, rarea) = rebase_grab_for_display(
+            rec_frame,
+            (2760.0, -685.0),
+            (3840.0 + 250.0, -800.0 + 145.0),
+            old_7,
+            new_7,
+        );
+        assert_eq!(
+            dragged_window_origin(rf, rfrom, rto, rarea),
+            (3840.0 + 150.0, -800.0 + 130.0)
+        );
     }
 }

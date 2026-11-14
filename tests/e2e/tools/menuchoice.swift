@@ -33,33 +33,37 @@ final class Unfocusable: NSPopUpButton {
   override var acceptsFirstResponder: Bool { false }
 }
 
-final class CustomDragBar: NSView {
-  weak var stageScreen: NSScreen?
+final class CustomDragWindow: NSWindow {
+  var stageOrigin: NSPoint?
   var dragged = false
-  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-  override func mouseDown(with event: NSEvent) {
-    dragged = false
-  }
-  override func mouseDragged(with event: NSEvent) {
-    dragged = true
-  }
-  override func mouseUp(with event: NSEvent) {
-    guard dragged, let win = window, let stage = stageScreen else { return }
-    dragged = false
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-      win.setFrameOrigin(NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120))
+  override func sendEvent(_ event: NSEvent) {
+    switch event.type {
+    case .leftMouseDown:
+      dragged = false
+    case .leftMouseDragged:
+      dragged = true
+    case .leftMouseUp where dragged:
+      dragged = false
+      if let target = stageOrigin {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+          self?.setFrameOrigin(target)
+        }
+      }
+    default:
+      break
     }
+    super.sendEvent(event)
   }
 }
 
 final class TallToolbarView: NSView {
-  weak var stageScreen: NSScreen?
+  var stageOrigin: NSPoint?
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
   override func isAccessibilityElement() -> Bool { true }
   override func accessibilityRole() -> NSAccessibility.Role? { .toolbar }
   override func mouseDragged(with event: NSEvent) {
-    guard let win = window, let stage = stageScreen else { return }
-    win.setFrameOrigin(NSPoint(x: stage.frame.minX + 400, y: stage.frame.minY + 80))
+    guard let win = window, let target = stageOrigin else { return }
+    win.setFrameOrigin(target)
   }
 }
 
@@ -194,7 +198,11 @@ final class PaneDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 final class DragDelegate: NSObject, NSApplicationDelegate {
-  var customWin: NSWindow!
+  let awake = ProcessInfo.processInfo.beginActivity(
+    options: [.userInitiated, .latencyCritical],
+    reason: "viewerdrag fixture"
+  )
+  var customWin: CustomDragWindow!
   var tallWin: NSWindow!
   var sheetHostWin: NSWindow!
   var attachedSheet: NSWindow!
@@ -224,7 +232,7 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     tallWin.title = "TallDrag"
     tallWin.setFrame(tallFrame, display: true)
     let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1248, width: 220, height: 52))
-    tallBar.stageScreen = stage
+    tallBar.stageOrigin = NSPoint(x: stage.frame.minX + 400, y: stage.frame.minY + 80)
     tallWin.contentView!.addSubview(tallBar)
     tallWin.orderFrontRegardless()
 
@@ -234,20 +242,20 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
       width: 220,
       height: 160
     )
-    customWin = NSWindow(
+    customWin = CustomDragWindow(
       contentRect: customFrame,
       styleMask: [.titled, .fullSizeContentView],
       backing: .buffered,
       defer: false,
       screen: screen
     )
+    customWin.isOpaque = true
+    customWin.backgroundColor = .windowBackgroundColor
     customWin.titlebarAppearsTransparent = true
     customWin.titleVisibility = .hidden
     customWin.title = "CustomDrag"
+    customWin.stageOrigin = NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120)
     customWin.setFrame(customFrame, display: true)
-    let bar = CustomDragBar(frame: NSRect(x: 0, y: 0, width: 220, height: 160))
-    bar.stageScreen = stage
-    customWin.contentView!.addSubview(bar)
     customWin.orderFrontRegardless()
 
     let sheetHostFrame = NSRect(
@@ -273,16 +281,14 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     )
     sheetHostWin.orderFrontRegardless()
 
-    for delay in [0.35, 0.95] {
-      DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-        self.tallWin.setFrame(tallFrame, display: true)
-        self.customWin.setFrame(customFrame, display: true)
-        self.sheetHostWin.setFrame(sheetHostFrame, display: true)
-        if self.attachedSheet.sheetParent == nil {
-          self.sheetHostWin.beginSheet(self.attachedSheet, completionHandler: nil)
-        }
-        self.customWin.orderFrontRegardless()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+      self.tallWin.setFrame(tallFrame, display: true)
+      self.customWin.setFrame(customFrame, display: true)
+      self.sheetHostWin.setFrame(sheetHostFrame, display: true)
+      if self.attachedSheet.sheetParent == nil {
+        self.sheetHostWin.beginSheet(self.attachedSheet, completionHandler: nil)
       }
+      self.customWin.orderFrontRegardless()
     }
 
     if let statePath = ProcessInfo.processInfo.environment["MENU_PANE_STATE"] {

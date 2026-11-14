@@ -1396,7 +1396,7 @@ fn title_row(icon: &'static str, color: gpui::Hsla, title: String, asking: bool)
                     .text_size(px(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .whitespace_nowrap()
-                    .child(t("Approval needed", "待你确认")),
+                    .child(t("Approval needed", "待你批准")),
             )
         })
 }

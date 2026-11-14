@@ -531,10 +531,9 @@ fn steps(
         format!("{} / {answered}", r.text()),
     );
     check(
-        "pending approval highlights the card, badges the menu bar icon and chimes",
+        "pending approval highlights the card and badges the menu bar icon",
         asking_icon["state"] == "asking"
             && asking_icon["askingCount"] == 1
-            && asking_icon["chimes"].as_u64().unwrap_or(0) >= 1
             && asking_card["highlighted"] == true,
         format!("icon={asking_icon}, card={asking_card}"),
     );

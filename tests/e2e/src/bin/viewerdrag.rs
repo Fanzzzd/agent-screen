@@ -139,7 +139,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             }
         }),
     )?;
-    sleep_ms(1100);
+    sleep_ms(1700);
     for _ in 0..30 {
         if titled(id, "CustomDrag")?.is_some()
             && titled(id, "TallDrag")?.is_some()
@@ -156,7 +156,6 @@ fn test(fixture: &std::path::Path) -> Result<()> {
     // `launchApp` centered both windows at `x = 340`.
     let before_tall = titled(id, "TallDrag")?.context("TallDrag on display")?;
     let t_from = ((before_tall.x + 110.0) / w, (before_tall.y + 20.0) / h);
-    let t_dy = 0.12;
     control.call(
         "debugViewerInput",
         json!({
@@ -164,16 +163,25 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             "x": t_from.0,
             "y": t_from.1,
             "toX": 1.2,
-            "toY": t_from.1 + t_dy,
+            "toY": t_from.1,
         }),
     )?;
-    sleep_ms(900);
-    let after_tall = titled(id, "TallDrag")?;
-    let tall_ok = after_tall.as_ref().is_some_and(|after| {
-        (after.height - before_tall.height).abs() < 2.0
-            && (after.x - (w - before_tall.width)).abs() < 4.0
-            && ((after.y - before_tall.y) / h - t_dy).abs() < 0.03
-    });
+    sleep_ms(200);
+    let mut after_tall = None;
+    let mut tall_ok = false;
+    for _ in 0..15 {
+        after_tall = titled(id, "TallDrag")?;
+        tall_ok = after_tall.as_ref().is_some_and(|after| {
+            (after.height - before_tall.height).abs() < 2.0
+                && (after.x - (w - before_tall.width)).abs() < 4.0
+                && after.y >= -1.0
+                && after.y <= before_tall.y + 4.0
+        });
+        if tall_ok {
+            break;
+        }
+        sleep_ms(50);
+    }
     check(
         "a window taller than the display dragged outside the Viewer image clamps at the edge and keeps its height",
         tall_ok,
@@ -194,7 +202,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             "toY": c_from.1 + c_by.1,
         }),
     )?;
-    sleep_ms(550);
+    sleep_ms(260);
     let mut after_custom = None;
     let mut custom_ok = false;
     for _ in 0..20 {

@@ -686,6 +686,8 @@ impl<H> Displays<H> {
             // one session never get the same Display Label.
             owner.title = self.distinct_title(&owner.session_key, &owner.title);
             self.sessions.join(&owner.session_key, id);
+            self.sessions
+                .note_connection(&owner.session_key, owner.connection);
         }
         self.list.push(Display {
             id,
@@ -810,11 +812,13 @@ impl<H> Displays<H> {
 
     /// Snapshot of active recorded window owners (`window_id -> DisplayId`) so
     /// off-thread window queries and repark shifts honor Placement and Handover
-    /// records while displays reconfigure (#204).
+    /// records while displays reconfigure (#204). Shares the exact tie-break of
+    /// [`Displays::recorded_display_of`]: first live display, then first Review
+    /// Display.
     pub fn recorded_owners(&self) -> BTreeMap<WindowId, DisplayId> {
         let mut out = BTreeMap::new();
         for d in &self.list {
-            if d.is_ended() {
+            if d.is_live() {
                 for &w in d.records.keys() {
                     if !d.returned.contains(&w) && !d.given.contains_key(&w) {
                         out.entry(w).or_insert(d.id);
@@ -823,10 +827,10 @@ impl<H> Displays<H> {
             }
         }
         for d in &self.list {
-            if d.is_live() {
+            if d.is_ended() {
                 for &w in d.records.keys() {
                     if !d.returned.contains(&w) && !d.given.contains_key(&w) {
-                        out.insert(w, d.id);
+                        out.entry(w).or_insert(d.id);
                     }
                 }
             }
@@ -1006,20 +1010,32 @@ impl<H> Displays<H> {
     }
 
     /// Mark every live display owned by `connection` as disconnected at
-    /// `now_ms`, starting its grace period before expiry (#189).
+    /// `now_ms`, starting its grace period before expiry (#189). If another
+    /// open connection has already spoken for the display's session (ADR 0016
+    /// overlapping MCP server restart), move the display to that connection
+    /// instead of starting a grace timer.
     pub fn connection_disconnected(&mut self, connection: u64, now_ms: u64) -> usize {
+        self.sessions.drop_connection(connection);
         let mut touched_sessions = Vec::new();
         let mut marked = 0;
         for d in &mut self.list {
             if d.is_live()
                 && d.disconnected_at_ms.is_none()
-                && let Some(owner) = &d.owner
+                && let Some(owner) = &mut d.owner
                 && owner.connection == connection
             {
-                d.disconnected_at_ms = Some(now_ms);
-                marked += 1;
-                if !touched_sessions.contains(&owner.session_key) {
-                    touched_sessions.push(owner.session_key.clone());
+                let fallback = self
+                    .sessions
+                    .get(&owner.session_key)
+                    .and_then(|s| s.open_connections.iter().next().copied());
+                if let Some(other_conn) = fallback {
+                    owner.connection = other_conn;
+                } else {
+                    d.disconnected_at_ms = Some(now_ms);
+                    marked += 1;
+                    if !touched_sessions.contains(&owner.session_key) {
+                        touched_sessions.push(owner.session_key.clone());
+                    }
                 }
             }
         }
@@ -1037,15 +1053,18 @@ impl<H> Displays<H> {
         marked
     }
 
-    /// Rebind any live displays of `session_key` waiting in their disconnect
-    /// grace period onto `connection`, keeping them and their Handovers alive
-    /// across a brief MCP reconnect (#189).
+    /// Record `connection` as open for `session_key` and rebind any live
+    /// displays of `session_key` waiting in their disconnect grace period to
+    /// `connection`. Called from `handle()` whenever a request names
+    /// `sessionKey`, so both post-close reconnects and overlapping reconnects
+    /// (ADR 0016) keep the session's displays alive.
     pub fn rebind_disconnected(
         &mut self,
         session_key: &str,
         connection: u64,
         now_ms: u64,
     ) -> Vec<DisplayId> {
+        self.sessions.note_connection(session_key, connection);
         let mut rebound = Vec::new();
         for d in &mut self.list {
             if d.is_live()
@@ -2871,9 +2890,11 @@ mod tests {
             (),
         );
         d.access_mut(7).unwrap().grant_all();
-        assert_eq!(d.connection_closed(1), vec![7, 8]);
+        assert_eq!(d.connection_closed(1), Vec::<DisplayId>::new());
+        assert!(d.get(7).unwrap().is_live());
+        assert!(d.get(8).unwrap().is_live());
         assert!(d.access(10).unwrap().scope.is_some());
-        assert_eq!(d.connection_closed(3), vec![10]);
+        assert_eq!(d.connection_closed(3), vec![7, 8, 10]);
         assert_eq!(d.sessions.get("s").unwrap().access.scope, None);
     }
 

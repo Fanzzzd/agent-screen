@@ -50,6 +50,14 @@ fn disconnect_grace() -> Duration {
     DISCONNECT_GRACE
 }
 
+/// Off-thread snapshot of online displays, window counts, and unit-twin status
+/// for `take_spare_with` and `remove_with` (L3).
+pub struct SpareSnapshot {
+    pub online: Vec<DisplayId>,
+    pub counts: HashMap<DisplayId, usize>,
+    pub untwinned: HashSet<DisplayId>,
+}
+
 /// An ended display kept connected for the next one of its size. Nothing
 /// shows it: it isn't an Agent Display until it's taken.
 pub struct Spare {
@@ -77,7 +85,10 @@ pub struct Core {
     pub tucked: HashSet<DisplayId>,
     /// Last verified global bounds of each adopted display, so windows left
     /// behind at an old viewport follow when a display moves (#204).
-    parked_rects: HashMap<DisplayId, crate::model::Rect>,
+    /// Serialized repark state and last verified global rect of each adopted
+    /// display, so overlapping `ScreensChanged` notifications never shift
+    /// unrecorded windows twice or overwrite newer baselines (H1).
+    repark_state: agent_screen_model::arrangement::ReparkState,
     /// Tries at parking a moved display again, since it was last in place.
     reparks: HashMap<DisplayId, u8>,
     /// Tries at giving a display its size back, since it last ran at it.
@@ -109,6 +120,8 @@ pub struct Core {
     retiring: Vec<VirtualDisplay>,
     /// Monotonic origin for session activity and disconnect grace timestamps.
     started_at: Instant,
+    /// In-flight calls whose `handle` future dropped mid-await (L8).
+    pub dropped_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, u64)>>>,
     /// When a display was last taken on, new or spare.
     last_used: Option<Instant>,
     /// A spare is being made while the user is idle.
@@ -144,7 +157,7 @@ impl Core {
             closed: HashSet::new(),
             sessions: HashMap::new(),
             tucked: HashSet::new(),
-            parked_rects: HashMap::new(),
+            repark_state: Default::default(),
             reparks: HashMap::new(),
             remodes: HashMap::new(),
             launching: HashSet::new(),
@@ -157,6 +170,7 @@ impl Core {
             spares: Vec::new(),
             retiring: Vec::new(),
             started_at: Instant::now(),
+            dropped_calls: Default::default(),
             last_used: None,
             warming: false,
             made: MadeLimit::new(MADE, MADE_WINDOW),
@@ -166,6 +180,25 @@ impl Core {
 
     pub fn elapsed_ms(&self) -> u64 {
         self.started_at.elapsed().as_millis() as u64
+    }
+
+    pub fn started_at_instant(&self) -> Instant {
+        self.started_at
+    }
+
+    pub fn drain_dropped_calls(&mut self) {
+        if let Ok(mut guard) = self.dropped_calls.lock() {
+            for (key, at_ms) in guard.drain(..) {
+                self.displays.sessions.note_call_end(&key, at_ms);
+            }
+        }
+    }
+
+    /// Publish the model's current recorded window-to-display ownership map so
+    /// `windows::on_display`, `counts`, input hit routing, and dismissal share
+    /// one ownership rule (`effective_agent_display`, ADR 0018).
+    pub fn sync_recorded_owners(&self) {
+        windows::set_recorded_owners(self.displays.recorded_owners());
     }
 
     /// Run the ColorSync helper soon. Without it, count the records.
@@ -296,37 +329,44 @@ impl Core {
             .collect()
     }
 
-    fn spare_infos(&self) -> Vec<agent_screen_model::spares::SpareInfo> {
-        let ids = self.spare_ids();
+    /// Gather online displays, window counts, and twin status off the UI
+    /// thread for `take_spare_with` and `remove_with` (L3).
+    pub fn probe_spares(ids: &[DisplayId]) -> SpareSnapshot {
         let online = crate::mac::cg::active_displays();
-        let counts = windows::counts(&ids);
-        let raw: Vec<_> = self
-            .spares
+        let counts = windows::counts(ids);
+        let untwinned = ids
             .iter()
-            .map(|s| (s.handle.id, s.size, s.since.elapsed() >= SPARE_LIFE))
+            .copied()
+            .filter(|&id| online.contains(&id) && crate::mac::cg::unit_twin(id).is_none())
             .collect();
-        Self::spare_infos_with(&raw, &online, &counts)
+        SpareSnapshot {
+            online,
+            counts,
+            untwinned,
+        }
     }
 
     /// A spare to use instead of a new display, with its name: one of
     /// `size` with the lowest unit number, or else the lowest-unit spare,
     /// which the caller resizes. Spares holding stray windows stay untouched
     /// so a new session never inherits another window; offline or twinned
-    /// spares are released instead.
-    pub fn take_spare(&mut self, size: (f64, f64)) -> Option<(VirtualDisplay, String, bool)> {
-        let online = crate::mac::cg::active_displays();
-        let counts = windows::counts(&self.spare_ids());
+    /// spares are released instead. Uses an off-thread `SpareSnapshot` (L3).
+    pub fn take_spare_with(
+        &mut self,
+        size: (f64, f64),
+        snap: &SpareSnapshot,
+    ) -> Option<(VirtualDisplay, String, bool)> {
         loop {
             let raw: Vec<_> = self
                 .spares
                 .iter()
                 .map(|s| (s.handle.id, s.size, false))
                 .collect();
-            let infos = Self::spare_infos_with(&raw, &online, &counts);
+            let infos = Self::spare_infos_with(&raw, &snap.online, &snap.counts);
             let index = agent_screen_model::spares::pick_spare(&infos, size)?;
             let spare = self.spares.remove(index);
             let id = spare.handle.id;
-            if online.contains(&id) && crate::mac::cg::unit_twin(id).is_none() {
+            if snap.untwinned.contains(&id) {
                 let resize = spare.size != size;
                 self.last_used = Some(Instant::now());
                 crate::lifecycle::note(
@@ -550,13 +590,14 @@ impl Core {
             self.input_queue.register(id, owner);
         }
         self.displays.add(id, name, size, owner, handle);
+        self.sync_recorded_owners();
         self.last_used = Some(Instant::now());
         // Its record is new and has all 39 names.
         self.reclaim_soon(cx);
         label_soon(id, cx);
         self.tucked.insert(id);
-        self.parked_rects
-            .insert(id, crate::mac::cg::display_bounds(id));
+        self.repark_state
+            .note_adopted(id, crate::mac::cg::display_bounds(id));
         cx.notify();
         Some(id)
     }
@@ -564,28 +605,28 @@ impl Core {
     /// The displays changed. Park again any display of ours that is no
     /// longer out of the way or whose arrangement lost connectivity, then
     /// translate windows whose adopted display moved from its last verified
-    /// origin (`parked_rects`). AX moves run off the serialized display
-    /// configuration lock so a slow app never stalls parking.
+    /// origin (`ReparkState`). Passes run one at a time; notifications that
+    /// arrive mid-pass coalesce into a single follow-up pass after AX moves
+    /// finish, so unrecorded windows never shift twice and stale runs cannot
+    /// overwrite newer baselines (H1).
     pub fn repark(&mut self, cx: &mut Context<Self>) {
+        let adopted: Vec<DisplayId> = self.displays.list.iter().map(|d| d.id).collect();
+        let Some((generation, recorded)) = self.repark_state.begin(&adopted) else {
+            return;
+        };
         let virtual_ids = self.virtual_ids();
-        let recorded_owners = self.displays.recorded_owners();
         let mut candidates = Vec::new();
-        let mut recorded = Vec::new();
-        for d in &self.displays.list {
-            let id = d.id;
-            if let Some(&old) = self.parked_rects.get(&id) {
-                recorded.push((id, old));
-            }
+        for &id in &adopted {
             if self.tucked.contains(&id) {
                 let tries = self.reparks.get(&id).copied().unwrap_or(0);
                 candidates.push((id, tries));
             }
         }
         cx.spawn(async move |this, cx| {
-            let settled = cx
+            let (tucked_ok, retried, settled_rects, stationary, raw_windows) = cx
                 .background_executor()
                 .spawn(async move {
-                    let (tucked_ok, retried, settled_rects, stationary) =
+                    let (tucked_ok, retried, settled_rects, stationary, any_moved) =
                         display::configure(move || {
                             park_fillers(&virtual_ids);
                             let mut connected = display::arrangement_connected(&virtual_ids);
@@ -607,13 +648,17 @@ impl Core {
                             }
                             let online = crate::mac::cg::active_displays();
                             let mut settled_rects = Vec::new();
+                            let mut any_moved = false;
                             for &(id, old) in &recorded {
                                 if display::is_tucked(id, &virtual_ids) {
-                                    settled_rects.push((
-                                        id,
-                                        old,
-                                        crate::mac::cg::display_bounds(id),
-                                    ));
+                                    let now = crate::mac::cg::display_bounds(id);
+                                    if now.width > 0.0
+                                        && ((now.x - old.x).abs() > 0.5
+                                            || (now.y - old.y).abs() > 0.5)
+                                    {
+                                        any_moved = true;
+                                    }
+                                    settled_rects.push((id, now));
                                 }
                             }
                             let stationary: Vec<crate::model::Rect> = online
@@ -621,44 +666,78 @@ impl Core {
                                 .filter(|d| !recorded.iter().any(|(rid, _)| rid == d))
                                 .map(crate::mac::cg::display_bounds)
                                 .collect();
-                            (tucked_ok, retried, settled_rects, stationary)
+                            (tucked_ok, retried, settled_rects, stationary, any_moved)
                         })
                         .await;
-                    let has_move = settled_rects.iter().any(|&(_, old, now)| {
-                        now.width > 0.0
-                            && ((now.x - old.x).abs() > 0.5 || (now.y - old.y).abs() > 0.5)
-                    });
-                    if has_move {
-                        let all_windows: Vec<_> = windows::all()
-                            .into_iter()
-                            .map(|w| {
-                                let owner = recorded_owners.get(&w.target.window_id).copied();
-                                (w.target, w.bounds, owner)
-                            })
-                            .collect();
-                        for (target, next) in agent_screen_model::arrangement::window_shifts(
-                            &settled_rects,
-                            &stationary,
-                            &all_windows,
-                        ) {
-                            let _ = ax::set_frame_asked(target, next);
-                        }
-                    }
-                    (tucked_ok, retried, settled_rects)
+                    let raw_windows = if any_moved {
+                        windows::all()
+                    } else {
+                        Vec::new()
+                    };
+                    (tucked_ok, retried, settled_rects, stationary, raw_windows)
                 })
                 .await;
-            let (tucked_ok, retried, settled_rects) = settled;
-            let _ = this.update(cx, |core, _| {
+            let Ok(shifts) = this.update(cx, |core, _| {
                 for id in tucked_ok {
                     core.reparks.remove(&id);
                 }
                 for id in retried {
                     *core.reparks.entry(id).or_default() += 1;
                 }
-                for (id, _, now) in settled_rects {
-                    if core.displays.get(id).is_some() && now.width > 0.0 && now.height > 0.0 {
-                        core.parked_rects.insert(id, now);
-                    }
+                let live_adopted: Vec<DisplayId> =
+                    core.displays.list.iter().map(|d| d.id).collect();
+                let owners = core.displays.recorded_owners();
+                let annotated: Vec<_> = raw_windows
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.target,
+                            w.bounds,
+                            owners.get(&w.target.window_id).copied(),
+                        )
+                    })
+                    .collect();
+                let (shifts, active_moves) = core.repark_state.plan_shifts(
+                    generation,
+                    &live_adopted,
+                    &settled_rects,
+                    &stationary,
+                    &annotated,
+                );
+                for (id, old, now) in active_moves {
+                    let on_old = raw_windows
+                        .iter()
+                        .filter(|w| old.contains(w.bounds.mid()))
+                        .count();
+                    let on_now = raw_windows
+                        .iter()
+                        .filter(|w| now.contains(w.bounds.mid()))
+                        .count();
+                    log::info!(
+                        "display {id}: parked origin moved ({:.0},{:.0}) -> ({:.0},{:.0}); windows centered on old={on_old}, new={on_now}, planned shifts={}",
+                        old.x,
+                        old.y,
+                        now.x,
+                        now.y,
+                        shifts.len()
+                    );
+                }
+                shifts
+            }) else {
+                return;
+            };
+            if !shifts.is_empty() {
+                cx.background_executor()
+                    .spawn(async move {
+                        for (target, next) in shifts {
+                            let _ = ax::set_frame_asked(target, next);
+                        }
+                    })
+                    .await;
+            }
+            let _ = this.update(cx, |core, cx| {
+                if core.repark_state.finish(generation) {
+                    core.repark(cx);
                 }
             });
         })
@@ -731,6 +810,7 @@ impl Core {
         if ended.is_empty() {
             return;
         }
+        self.sync_recorded_owners();
         for &id in ended {
             #[cfg(debug_assertions)]
             crate::mac::cg::clear_user_stage(id);
@@ -784,11 +864,16 @@ impl Core {
                 // back while an earlier window moved, and a second give-back
                 // would race their move.
                 let Ok(given) = this.update(cx, |core, _| {
-                    core.displays
+                    let out = core
+                        .displays
                         .get(id)
                         .is_some_and(|d| d.handovers().contains(&target))
                         .then(|| core.displays.give_back(id, target))
-                        .flatten()
+                        .flatten();
+                    if out.is_some() {
+                        core.sync_recorded_owners();
+                    }
+                    out
                 }) else {
                     return;
                 };
@@ -901,6 +986,7 @@ impl Core {
     }
 
     pub fn connection_closed(&mut self, connection: u64, cx: &mut Context<Self>) {
+        self.drain_dropped_calls();
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage_connection(connection);
         self.closed.insert(connection);
@@ -932,17 +1018,19 @@ impl Core {
         }
     }
 
-    /// Drop a display. An empty one stays connected as a spare while there
-    /// is room; otherwise macOS removes it with its handle.
-    pub fn remove(&mut self, id: DisplayId, cx: &mut Context<Self>) {
+    /// Drop a display using an off-thread `SpareSnapshot` (L3). An empty one
+    /// stays connected as a spare while there is room; otherwise macOS removes
+    /// it with its handle.
+    pub fn remove_with(&mut self, id: DisplayId, snap: &SpareSnapshot, cx: &mut Context<Self>) {
         self.input_queue.end_display(id);
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage(id);
         stop_recording(id, cx);
         if let Some(display) = self.displays.remove(id) {
+            self.sync_recorded_owners();
             let size = (display.width, display.height);
-            let empty_untwinned =
-                windows::on_display(id).is_empty() && crate::mac::cg::unit_twin(id).is_none();
+            let is_empty = snap.counts.get(&id).copied().unwrap_or(0) == 0;
+            let empty_untwinned = is_empty && snap.untwinned.contains(&id);
             if empty_untwinned && self.spares.len() < SPARES {
                 crate::lifecycle::note("kept", id, "spare");
                 self.spares.push(Spare {
@@ -953,11 +1041,16 @@ impl Core {
                 });
             } else if empty_untwinned
                 && let Some(evict) = {
-                    let online = crate::mac::cg::active_displays();
+                    let raw: Vec<_> = self
+                        .spares
+                        .iter()
+                        .map(|s| (s.handle.id, s.size, s.since.elapsed() >= SPARE_LIFE))
+                        .collect();
+                    let infos = Self::spare_infos_with(&raw, &snap.online, &snap.counts);
                     agent_screen_model::spares::retire_instead(
-                        &self.spare_infos(),
+                        &infos,
                         SPARES,
-                        Self::online_unit_in(id, &online),
+                        Self::online_unit_in(id, &snap.online),
                     )
                 }
             {
@@ -971,7 +1064,7 @@ impl Core {
                     size,
                     since: Instant::now(),
                 });
-            } else if windows::on_display(id).is_empty() {
+            } else if is_empty {
                 // Released once the user is idle, so the Mac doesn't stop
                 // drawing while they look.
                 crate::lifecycle::note("kept", id, "retiring");
@@ -984,7 +1077,7 @@ impl Core {
             self.forwarders.remove(&id);
             self.elements.retain(|(display, _), _| *display != id);
             self.tucked.remove(&id);
-            self.parked_rects.remove(&id);
+            self.repark_state.remove_display(id);
             self.reparks.remove(&id);
             self.remodes.remove(&id);
             self.kept_catches.retain(|(display, _)| *display != id);
@@ -997,7 +1090,7 @@ impl Core {
     }
 
     /// Ended displays with no window left close by themselves.
-    /// The window lists run off the UI thread.
+    /// Window and display probes run off the UI thread (L3).
     pub fn sweep_ended(&mut self, cx: &mut Context<Self>) {
         let ended: Vec<DisplayId> = self
             .displays
@@ -1009,21 +1102,24 @@ impl Core {
         if ended.is_empty() {
             return;
         }
+        let mut probe_ids = ended.clone();
+        for id in self.spare_ids() {
+            if !probe_ids.contains(&id) {
+                probe_ids.push(id);
+            }
+        }
         cx.spawn(async move |this, cx| {
-            let empty: Vec<DisplayId> = cx
+            let snap = cx
                 .background_executor()
-                .spawn(async move {
-                    ended
-                        .into_iter()
-                        .filter(|&id| windows::on_display(id).is_empty())
-                        .collect()
-                })
+                .spawn(async move { Self::probe_spares(&probe_ids) })
                 .await;
             let _ = this.update(cx, |core, cx| {
-                for id in empty {
+                for id in ended {
                     // Still ended: the user may have taken it back meanwhile.
-                    if core.displays.get(id).is_some_and(|d| d.is_ended()) {
-                        core.remove(id, cx);
+                    if snap.counts.get(&id).copied().unwrap_or(0) == 0
+                        && core.displays.get(id).is_some_and(|d| d.is_ended())
+                    {
+                        core.remove_with(id, &snap, cx);
                     }
                 }
             });
@@ -1095,13 +1191,13 @@ pub fn watch_idle(core: Entity<Core>, cx: &mut App) {
 
 /// Return an unowned window that strayed onto a spare or newly created virtual
 /// display back to the user's screen (or the user stand-in stage in debug e2e
-/// runs). Blocking.
+/// runs). Returns `true` when the window moved. Blocking.
 pub(crate) fn evacuate_window_to_user(
     target: crate::model::WindowTarget,
     app: &str,
     from: DisplayId,
     what: &str,
-) {
+) -> bool {
     #[cfg(debug_assertions)]
     if let Some(stage) = crate::mac::cg::user_stage() {
         if crate::mac::claims::claim_confirmed(target.window_id, stage)
@@ -1111,22 +1207,56 @@ pub(crate) fn evacuate_window_to_user(
                 "moved stray window {} ({app}) off {what} {from} to user stage {stage}",
                 target.window_id
             );
+            return true;
         }
-        return;
+        return false;
     }
     if crate::dismissal::give_back(target, None, None) {
         log::info!(
             "moved stray window {} ({app}) off {what} {from} to the user's screen",
             target.window_id
         );
+        return true;
     }
+    false
 }
 
 fn evacuate_spare_windows(spares: &[DisplayId]) {
+    static BACKOFF: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, (u32, Instant)>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    let mut present = HashSet::new();
     for &spare in spares {
         for window in windows::on_display(spare) {
-            evacuate_window_to_user(window.target, &window.app, spare, "spare");
+            let wid = window.target.window_id;
+            present.insert(wid);
+            let skip = BACKOFF
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&wid).copied())
+                .is_some_and(|(_, retry_at)| retry_at > now);
+            if skip {
+                continue;
+            }
+            if evacuate_window_to_user(window.target, &window.app, spare, "spare") {
+                if let Ok(mut g) = BACKOFF.lock() {
+                    g.remove(&wid);
+                }
+            } else if let Ok(mut g) = BACKOFF.lock() {
+                let failures = g.get(&wid).map_or(0, |(f, _)| *f).saturating_add(1);
+                let secs = 2u64.saturating_pow(failures.min(5)).min(60);
+                g.insert(wid, (failures, now + Duration::from_secs(secs)));
+                if failures == 1 {
+                    log::warn!(
+                        "spare {spare}: failed to return stray window {wid} ({}) to the user's screen; backing off {secs}s",
+                        window.app
+                    );
+                }
+            }
         }
+    }
+    if let Ok(mut g) = BACKOFF.lock() {
+        g.retain(|wid, _| present.contains(wid));
     }
 }
 

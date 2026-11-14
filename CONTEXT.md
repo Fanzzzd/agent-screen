@@ -17,11 +17,11 @@ How the user tells Agent Displays apart: the client's name plus a task title the
 _Avoid_: display name, title
 
 **Review Display** (待查看显示器):
-An Agent Display whose Agent Session stopped using it, by `end_display` or a closed connection, while windows remain on it. It accepts no agent input and waits for the user to decide where its windows go. It says nothing about whether the task succeeded.
+An Agent Display whose Agent Session stopped using it, by `end_display` or after its disconnect grace expired, while windows remain on it. It accepts no agent input and waits for the user to decide where its windows go. It says nothing about whether the task succeeded.
 _Avoid_: Ended Display, finished display, orphaned display, dead display
 
 **Agent Session**:
-One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. Most sessions have one Agent Display or none; one that asks gets up to four at once, and calls its displays by their handles. Its Window Authorization covers all of them, and a window on one of its displays is its own on the others (ADR 0016).
+One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. Most sessions have one Agent Display or none; one that asks gets up to four at once, and calls its displays by their handles. Its Window Authorization covers all of them, and a window on one of its displays is its own on the others (ADR 0016). When its last control connection closes without another open connection for the same session key, Agent Screen waits a 2-second Disconnect Grace for a reconnecting client to rebind its displays on any tool call before ending them.
 _Avoid_: agent, client, worker
 
 **Viewer**:
@@ -77,7 +77,7 @@ The marker the Viewer and Peek draw where the Agent Session last pointed or clic
 _Avoid_: agent cursor, ghost cursor
 
 **Placement**:
-Moving an app window onto or off an Agent Display. Either the Agent Session or the user can place a window.
+Moving an app window onto or off an Agent Display. Either the Agent Session or the user can place a window. While a window sits on any virtual Agent Display, its active Placement or Handover record decides which Agent Display owns it across arrangement shifts (ADR 0018).
 _Avoid_: pull, move, send back
 
 **Handover**:

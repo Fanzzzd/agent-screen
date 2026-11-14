@@ -174,8 +174,11 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
 }
 
 /// Deduplicates holding display labels in order and joins them for `not_found`
-/// diagnostics (#189).
-pub fn join_holder_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Option<String> {
+/// diagnostics, returning both the formatted text and the unique holder count
+/// so titles containing `" and "` stay singular (#189).
+pub fn join_holder_labels<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+) -> Option<(String, usize)> {
     let mut unique: Vec<&'a str> = Vec::new();
     for label in labels {
         let trimmed = label.trim();
@@ -183,22 +186,25 @@ pub fn join_holder_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Opti
             unique.push(trimmed);
         }
     }
-    match unique.as_slice() {
-        [] => None,
-        [only] => Some((*only).to_owned()),
-        [first, second] => Some(format!("{first} and {second}")),
-        [head @ .., last] => Some(format!("{}, and {last}", head.join(", "))),
-    }
+    let count = unique.len();
+    let text = match unique.as_slice() {
+        [] => return None,
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [head @ .., last] => format!("{}, and {last}", head.join(", ")),
+    };
+    Some((text, count))
 }
 
 /// The `not_found` message for an app the agent named, naming `holder_label`
-/// when holding displays are known (#189).
+/// and its unique `count` when holding displays are known (#189).
 pub fn no_app_window_named(
     app: &str,
     sighting: &AppSighting,
-    holder_label: Option<&str>,
+    holder_label: Option<(&str, usize)>,
 ) -> String {
-    let plural = holder_label.is_some_and(|l| l.contains(" and "));
+    let plural = holder_label.is_some_and(|(_, count)| count > 1);
+    let holder_label = holder_label.map(|(text, _)| text);
     match sighting {
         AppSighting::Unknown => format!(
             "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no installed app macOS knows by that name, and none with that bundle id. Check the name, or pass a window_id"
@@ -454,7 +460,7 @@ mod tests {
         let named_app = no_app_window_named(
             "Chrome",
             &AppSighting::OnAgentDisplay(Review),
-            Some("Claude Code · Docs"),
+            Some(("Claude Code · Docs", 1)),
         );
         assert!(named_app.contains("Claude Code · Docs"), "{named_app}");
         let joined = join_holder_labels([
@@ -463,18 +469,30 @@ mod tests {
             "Codex · Check logs",
         ]);
         assert_eq!(
-            joined.as_deref(),
-            Some("Codex · Check logs and Claude Code · Docs")
+            joined.as_ref().map(|(s, c)| (s.as_str(), *c)),
+            Some(("Codex · Check logs and Claude Code · Docs", 2))
         );
         let multi = no_app_window_named(
             "Chrome",
             &AppSighting::OnAgentDisplay(OtherSession),
-            joined.as_deref(),
+            joined.as_ref().map(|(s, c)| (s.as_str(), *c)),
         );
         assert!(
             multi.contains("Codex · Check logs and Claude Code · Docs"),
             "{multi}"
         );
         assert!(multi.contains("other agent sessions hold"), "{multi}");
+
+        // L4: a single holder whose task title contains " and " is still singular.
+        let single_with_and = join_holder_labels(["Claude Code · Search and replace"]);
+        let msg_and = no_app_window_named(
+            "Chrome",
+            &AppSighting::OnAgentDisplay(OtherSession),
+            single_with_and.as_ref().map(|(s, c)| (s.as_str(), *c)),
+        );
+        assert!(
+            msg_and.contains("which another agent session holds"),
+            "{msg_and}"
+        );
     }
 }

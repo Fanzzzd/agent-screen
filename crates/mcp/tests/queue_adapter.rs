@@ -29,7 +29,7 @@ fn approval_decline_withdraw_done_and_revoke_use_the_app_coordinator() {
     let a_id = input
         .submit(a.clone(), "a".into(), "Drag A".into(), None)
         .unwrap();
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     let old_card = input.queue.approval();
     input.decline(old_card);
     assert_eq!(
@@ -54,7 +54,7 @@ fn approval_decline_withdraw_done_and_revoke_use_the_app_coordinator() {
     assert!(input.approve(input.queue.approval()));
     input.done(&b);
     assert!(input.queue.grant().is_none());
-    assert!(!input.approval_needed());
+    assert!(input.approval_count() == 0);
     input.end_display(1);
     assert!(input.owner(1, 1).is_err());
     assert!(input.owner(2, 2).is_ok());
@@ -108,12 +108,12 @@ fn an_approved_batch_is_not_asked_again_when_its_unexecuted_grant_idles_out() {
     let a_id = input
         .submit(a.clone(), "a".into(), "Drag A".into(), None)
         .unwrap();
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     assert_eq!(input.card_display(&d), Some(1));
     assert!(input.approve(input.queue.approval()));
     expire(&mut input);
     assert!(
-        !input.approval_needed(),
+        input.approval_count() == 0,
         "the user already allowed this request; asking again repeats the card and notification"
     );
     assert_eq!(input.card_display(&d), None);
@@ -125,18 +125,18 @@ fn an_approved_batch_is_not_asked_again_when_its_unexecuted_grant_idles_out() {
     input
         .submit(b.clone(), "b".into(), "Drag B".into(), None)
         .unwrap();
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     assert_eq!(input.card_display(&d), Some(2));
     assert!(input.approve(input.queue.approval()));
     expire(&mut input);
-    assert!(!input.approval_needed());
+    assert!(input.approval_count() == 0);
     // A revocation takes the approval back.
     input
         .submit(a.clone(), "a2".into(), "Drag A again".into(), None)
         .unwrap();
     assert!(input.approve(input.queue.approval()));
     input.revoke();
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn a_request_from_a_takeover_display_is_still_asked_after_the_grant() {
     expire(&mut input);
     input.takeover(2, false);
     // The grant never covered display 2, which was in a Takeover.
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     assert_eq!(input.card_display(&displays(&[1, 2])), Some(2));
 }
 
@@ -189,7 +189,7 @@ fn a_lapsed_approval_is_its_own_state_and_ends_the_wait() {
         .unwrap();
     assert_eq!(retry, id);
     assert_eq!(state(&input, &a, id), "approval_lapsed");
-    assert!(!input.approval_needed());
+    assert!(input.approval_count() == 0);
     // A new token replaces it and is asked about.
     let other = input
         .submit(a.clone(), "other".into(), "Drag".into(), None)
@@ -197,7 +197,7 @@ fn a_lapsed_approval_is_its_own_state_and_ends_the_wait() {
     assert_ne!(other, id);
     assert_eq!(state(&input, &a, id), "stopped");
     assert_eq!(state(&input, &a, other), "queued");
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     assert!(input.approve(input.queue.approval()));
     expire(&mut input);
     assert_eq!(state(&input, &a, other), "approval_lapsed");
@@ -208,14 +208,14 @@ fn a_lapsed_approval_is_its_own_state_and_ends_the_wait() {
         .unwrap();
     assert_ne!(again, other);
     assert_eq!(state(&input, &a, again), "queued");
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     // A revocation takes the approval back: the card asks again.
     assert!(input.approve(input.queue.approval()));
     expire(&mut input);
     assert_eq!(state(&input, &a, again), "approval_lapsed");
     input.revoke();
     assert_eq!(state(&input, &a, again), "queued");
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn ended_or_withdrawn_approved_requests_leave_the_approved_set() {
         .submit(c.clone(), "a".into(), "Drag".into(), None)
         .unwrap();
     assert_eq!(state(&input, &c, c_id), "queued");
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn a_takeover_during_the_grant_keeps_the_request_allowed() {
     expire(&mut input);
     input.takeover(1, false);
     assert_eq!(state(&input, &a, id), "approval_lapsed");
-    assert!(!input.approval_needed());
+    assert!(input.approval_count() == 0);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn not_now_on_a_later_card_declines_a_lapsed_request_it_lists() {
     let b_id = input
         .submit(b.clone(), "b".into(), "Drag".into(), None)
         .unwrap();
-    assert!(input.approval_needed());
+    assert!(input.approval_count() > 0);
     let listed: Vec<_> = input.queue.waiting().map(|r| r.id).collect();
     assert_eq!(listed, vec![a_id, b_id]);
     input.decline(input.queue.approval());

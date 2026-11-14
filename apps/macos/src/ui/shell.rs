@@ -859,12 +859,8 @@ impl Shell {
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
         let asking_count = card::asking_count(&core.displays, core.input_queue.approval_count());
         if asking_count != self.asking_count {
-            let rose = asking_count > self.asking_count;
             self.asking_count = asking_count;
             self.icon.set_asking_count(asking_count);
-            if rose {
-                native::chime_approval();
-            }
         }
         let working = core.displays.list.iter().any(|d| !d.is_ended());
         if working != self.working {
@@ -2362,50 +2358,65 @@ impl Shell {
         }
         // A spare of the size, or a new display: macOS takes about half a
         // second for that, off the main thread, so Peek keeps drawing.
-        let spare = self
-            .core
-            .update(cx, |core, _| core.take_spare(DEFAULT_SIZE));
-        // A new display stops every window on the Mac from drawing for a
-        // moment: start it once the waiting tile has grown in.
+        let spare_ids = self.core.read(cx).spare_ids();
         let grown = peek::RESIZE + Duration::from_millis(40);
-        let (made, name) = match spare {
-            Some((handle, name, resize)) => (
-                cx.background_spawn({
-                    let executor = cx.background_executor().clone();
-                    let others = self.core.read(cx).virtual_ids();
-                    async move {
-                        if resize {
-                            executor.timer(grown).await;
-                        }
-                        let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
-                        crate::mac::display::reuse_parked(handle, w, h, resize, others).await
+        cx.spawn(async move |shell, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async move { crate::core::Core::probe_spares(&spare_ids) })
+                .await;
+            let Ok(choice) = shell.update(cx, |shell, cx| {
+                let spare = shell
+                    .core
+                    .update(cx, |core, _| core.take_spare_with(DEFAULT_SIZE, &snap));
+                match spare {
+                    Some((handle, name, resize)) => {
+                        let others = shell.core.read(cx).virtual_ids();
+                        (Ok((handle, resize, others)), name)
                     }
-                }),
-                name,
-            ),
-            None => {
-                let (serial, name) = self.core.update(cx, |core, _| core.next_name());
-                let others = self.core.read(cx).virtual_ids();
-                let executor = cx.background_executor().clone();
-                let made = cx.background_spawn({
+                    None => {
+                        let (serial, name) = shell.core.update(cx, |core, _| core.next_name());
+                        let others = shell.core.read(cx).virtual_ids();
+                        (Err((serial, others)), name)
+                    }
+                }
+            }) else {
+                return;
+            };
+            let (plan, name) = choice;
+            let executor = cx.background_executor().clone();
+            let made = cx
+                .background_executor()
+                .spawn({
                     let name = name.clone();
                     async move {
-                        executor.timer(grown).await;
-                        crate::mac::display::create_parked(
-                            name,
-                            DEFAULT_SIZE.0 as u32,
-                            DEFAULT_SIZE.1 as u32,
-                            serial,
-                            others,
-                        )
-                        .await
+                        match plan {
+                            Ok((handle, resize, others)) => {
+                                if resize {
+                                    executor.timer(grown).await;
+                                }
+                                let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
+                                crate::mac::display::reuse_parked(handle, w, h, resize, others)
+                                    .await
+                            }
+                            Err((serial, others)) => {
+                                // A new display stops every window on the Mac
+                                // from drawing for a moment: start it once the
+                                // waiting tile has grown in.
+                                executor.timer(grown).await;
+                                crate::mac::display::create_parked(
+                                    name,
+                                    DEFAULT_SIZE.0 as u32,
+                                    DEFAULT_SIZE.1 as u32,
+                                    serial,
+                                    others,
+                                )
+                                .await
+                            }
+                        }
                     }
-                });
-                (made, name)
-            }
-        };
-        cx.spawn(async move |shell, cx| {
-            let made = made.await;
+                })
+                .await;
             let _ = shell.update(cx, |shell, cx| {
                 shell.creating = shell.creating.saturating_sub(1);
                 let Some(handle) = made else {
@@ -3351,8 +3362,27 @@ impl Shell {
                     }
                 }
             }
+            let Ok(mut probe_ids) = this.update(cx, |shell, cx| {
+                let mut ids = shell.core.read(cx).spare_ids();
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            }) else {
+                return;
+            };
+            let snap = cx
+                .background_executor()
+                .spawn(async move {
+                    let snap = crate::core::Core::probe_spares(&probe_ids);
+                    probe_ids.clear();
+                    snap
+                })
+                .await;
             let _ = this.update(cx, |shell, cx| {
-                shell.core.update(cx, |core, cx| core.remove(id, cx))
+                shell
+                    .core
+                    .update(cx, |core, cx| core.remove_with(id, &snap, cx))
             });
         })
         .detach();
@@ -3368,9 +3398,11 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let given = self
-            .core
-            .update(cx, |core, _| core.displays.give_back(id, target));
+        let given = self.core.update(cx, |core, _| {
+            let out = core.displays.give_back(id, target);
+            core.sync_recorded_owners();
+            out
+        });
         self.send_home(target, id, given, cx)
     }
 
@@ -3542,6 +3574,7 @@ impl Shell {
                         {
                             d.give_back_failed(given);
                         }
+                        core.sync_recorded_owners();
                         cx.notify();
                     })
                 });
@@ -4663,6 +4696,7 @@ impl Shell {
                     }
                     let landed = core.displays.commit_hand_over(id, &ticket, named);
                     if landed {
+                        core.sync_recorded_owners();
                         // Handed over again: the app's late windows are the
                         // agent's to have, not to send back.
                         core.returning

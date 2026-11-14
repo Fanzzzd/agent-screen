@@ -128,12 +128,13 @@ impl Grab {
     }
 
     /// Whether the window has left its display, carried off by something
-    /// other than this grab. Blocking.
+    /// other than this grab. Uses single-window `cg::window_bounds` instead of
+    /// enumerating the global window list (M3). Blocking.
     pub fn left_display(&self) -> bool {
         let (_, _, _, area) = self.rebased(self.from);
         let others = other_displays(self.display);
-        find(self.target.window_id).is_some_and(|w| {
-            !agent_screen_model::arrangement::window_belongs_to_area(&w.bounds, &area, &others)
+        cg::window_bounds(self.target.window_id).is_some_and(|bounds| {
+            !agent_screen_model::arrangement::window_belongs_to_area(&bounds, &area, &others)
         })
     }
 
@@ -192,6 +193,91 @@ pub fn all() -> Vec<Window> {
         .collect()
 }
 
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, RwLock};
+
+/// Active window-to-display ownership snapshot synced from `Core::displays`
+/// (`Displays::recorded_owners()`), so every `windows::on_display`, `counts`,
+/// dismissal, spare, and input-routing check resolves ownership with the same
+/// single rule (`effective_agent_display`, ADR 0018).
+static RECORDED_OWNERS: LazyLock<RwLock<BTreeMap<u32, DisplayId>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+
+pub fn set_recorded_owners(owners: BTreeMap<u32, DisplayId>) {
+    if let Ok(mut guard) = RECORDED_OWNERS.write() {
+        *guard = owners;
+    }
+}
+
+pub fn recorded_owners_snapshot() -> BTreeMap<u32, DisplayId> {
+    RECORDED_OWNERS
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+pub fn recorded_owner(window_id: u32) -> Option<DisplayId> {
+    RECORDED_OWNERS
+        .read()
+        .ok()
+        .and_then(|g| g.get(&window_id).copied())
+}
+
+pub fn online_display_areas() -> Vec<(DisplayId, Rect, bool)> {
+    cg::active_displays()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                cg::display_bounds(id),
+                cg::window_display_role(id) == crate::model::DisplayRole::Agent,
+            )
+        })
+        .collect()
+}
+
+/// Pure ownership filter used by `on_display`, `counts`, and unit tests.
+pub fn filter_on_display(
+    display: DisplayId,
+    windows: &[Window],
+    online_displays: &[(DisplayId, Rect, bool)],
+    recorded_owners: &BTreeMap<u32, DisplayId>,
+) -> Vec<Window> {
+    let Some(&(_, area, is_agent)) = online_displays.iter().find(|&&(id, _, _)| id == display)
+    else {
+        return Vec::new();
+    };
+    if !is_agent {
+        let others: Vec<Rect> = online_displays
+            .iter()
+            .filter(|&&(id, _, _)| id != display)
+            .map(|&(_, r, _)| r)
+            .collect();
+        return windows
+            .iter()
+            .filter(|w| belongs(&w.bounds, &area, &others))
+            .map(|w| Window {
+                bounds: w.bounds.offset(-area.x, -area.y),
+                ..w.clone()
+            })
+            .collect();
+    }
+    windows
+        .iter()
+        .filter_map(|w| {
+            let (owner, base) = agent_screen_model::arrangement::effective_agent_display(
+                &w.bounds,
+                online_displays,
+                recorded_owners.get(&w.target.window_id).copied(),
+            )?;
+            (owner == display).then(|| Window {
+                bounds: w.bounds.offset(-base.x, -base.y),
+                ..w.clone()
+            })
+        })
+        .collect()
+}
+
 /// Whether a window with `bounds` is on the display covering `area`: it
 /// overlaps it, and no other display holds its center instead.
 fn belongs(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
@@ -206,91 +292,28 @@ fn other_displays(display: DisplayId) -> Vec<Rect> {
         .collect()
 }
 
-/// How many windows each display has, from one window list.
-pub fn counts(displays: &[DisplayId]) -> std::collections::HashMap<DisplayId, usize> {
+/// How many windows each display has, from one window list and one display
+/// layout snapshot, honoring `RECORDED_OWNERS` (ADR 0018).
+pub fn counts(displays: &[DisplayId]) -> HashMap<DisplayId, usize> {
+    if displays.is_empty() {
+        return HashMap::new();
+    }
     let windows = all();
+    let online = online_display_areas();
+    let owners = recorded_owners_snapshot();
     displays
         .iter()
-        .map(|&id| {
-            let (area, others) = (cg::display_bounds(id), other_displays(id));
-            let n = windows
-                .iter()
-                .filter(|w| belongs(&w.bounds, &area, &others))
-                .count();
-            (id, n)
-        })
+        .map(|&id| (id, filter_on_display(id, &windows, &online, &owners).len()))
         .collect()
 }
 
-/// Windows on a display, with display-relative bounds. A window counts if it
-/// touches the display and its center is on no other display. A window
-/// hanging off the bottom edge still counts, so dismissing the display does
-/// not strand it off-screen.
+/// Windows on a display, with display-relative bounds, resolved through
+/// `effective_agent_display` and `RECORDED_OWNERS` (ADR 0018).
 pub fn on_display(display: DisplayId) -> Vec<Window> {
-    let area = cg::display_bounds(display);
-    let others = other_displays(display);
-    all()
-        .into_iter()
-        .filter(|w| belongs(&w.bounds, &area, &others))
-        .map(|w| Window {
-            bounds: w.bounds.offset(-area.x, -area.y),
-            ..w
-        })
-        .collect()
-}
-
-/// Windows belonging to `display`, reconciling geometry with `recorded_owners`
-/// while windows remain on virtual displays (#204). A window recorded on
-/// another display is excluded during viewport shifts; a window recorded on
-/// `display` that still sits on a virtual display stays with `display` using
-/// its virtual-display-relative coordinates until AX finishes shifting it.
-pub fn on_display_with_records(
-    display: DisplayId,
-    recorded_owners: &std::collections::BTreeMap<u32, DisplayId>,
-) -> Vec<Window> {
-    if recorded_owners.is_empty() {
-        return on_display(display);
-    }
-    let area = cg::display_bounds(display);
-    let others = other_displays(display);
-    let virtual_areas: Vec<(DisplayId, Rect)> = cg::active_displays()
-        .into_iter()
-        .filter(|&d| cg::window_display_role(d) == crate::model::DisplayRole::Agent)
-        .map(|d| (d, cg::display_bounds(d)))
-        .collect();
-    all()
-        .into_iter()
-        .filter_map(|w| {
-            let geom_belongs = belongs(&w.bounds, &area, &others);
-            let center = w.bounds.mid();
-            let host_virtual = virtual_areas
-                .iter()
-                .find(|(_, va)| va.contains(center))
-                .or_else(|| {
-                    geom_belongs
-                        .then(|| virtual_areas.iter().find(|(id, _)| *id == display))
-                        .flatten()
-                });
-            let on_virtual = host_virtual.is_some();
-            let effective = agent_screen_model::arrangement::resolve_display_owner(
-                geom_belongs.then_some(display),
-                on_virtual,
-                recorded_owners.get(&w.target.window_id).copied(),
-            );
-            if effective != Some(display) {
-                return None;
-            }
-            let base = if geom_belongs {
-                area
-            } else {
-                host_virtual.map_or(area, |&(_, va)| va)
-            };
-            Some(Window {
-                bounds: w.bounds.offset(-base.x, -base.y),
-                ..w
-            })
-        })
-        .collect()
+    let windows = all();
+    let online = online_display_areas();
+    let owners = recorded_owners_snapshot();
+    filter_on_display(display, &windows, &online, &owners)
 }
 
 /// Menus open on a display: an app's pop-up menus, as a web page's select
@@ -722,5 +745,46 @@ mod tests {
         // Decided after the return, it writes.
         let now = times_returned(900_003);
         assert!(write_frame_unless_returned(900_003, now, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn filter_on_display_uses_recorded_owners_on_virtual_displays_and_geometry_on_user_screens() {
+        let online = [
+            (1, Rect::new(0.0, 0.0, 2560.0, 1440.0), false),
+            (7, Rect::new(2560.0, -800.0, 1280.0, 800.0), true),
+            (8, Rect::new(3840.0, -800.0, 1280.0, 800.0), true),
+        ];
+        let win = |window_id, x, y| Window {
+            target: WindowTarget { pid: 42, window_id },
+            app: "Test".into(),
+            title: format!("w{window_id}"),
+            bounds: Rect::new(x, y, 400.0, 300.0),
+            layer: 0,
+        };
+        let windows = vec![
+            // Recorded on 7, transiently sitting on 8 before AX shift finishes.
+            win(10, 3940.0, -700.0),
+            // Unrecorded sheet sitting on 8.
+            win(11, 4000.0, -650.0),
+            // Recorded on 7, returned to user screen 1.
+            win(12, 200.0, 200.0),
+        ];
+        let mut owners = BTreeMap::new();
+        owners.insert(10, 7);
+        owners.insert(12, 7);
+
+        let on_7 = filter_on_display(7, &windows, &online, &owners);
+        assert_eq!(on_7.len(), 1);
+        assert_eq!(on_7[0].target.window_id, 10);
+        // Preserves display-relative offset `(100, 100)` until AX shift finishes.
+        assert_eq!(on_7[0].bounds, Rect::new(100.0, 100.0, 400.0, 300.0));
+
+        let on_8 = filter_on_display(8, &windows, &online, &owners);
+        assert_eq!(on_8.len(), 1);
+        assert_eq!(on_8[0].target.window_id, 11);
+
+        let on_user = filter_on_display(1, &windows, &online, &owners);
+        assert_eq!(on_user.len(), 1);
+        assert_eq!(on_user[0].target.window_id, 12);
     }
 }

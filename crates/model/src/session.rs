@@ -13,7 +13,7 @@
 
 use crate::access::Access;
 use crate::model::DisplayId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most live Agent Displays one session may use at once. Every new
 /// display makes WindowServer reconfigure each screen, and dozens in a few
@@ -81,6 +81,8 @@ pub struct Session {
     pub in_flight: usize,
     /// Monotonic timestamp (ms) when `in_flight` moved above zero.
     pub in_flight_since_ms: Option<u64>,
+    /// Open control socket connections that have spoken for this session.
+    pub open_connections: BTreeSet<u64>,
 }
 
 impl Session {
@@ -184,6 +186,22 @@ impl Sessions {
                 session.in_flight_since_ms = None;
             }
             session.last_active_ms = Some(now_ms);
+        }
+    }
+
+    /// Record that `connection` is an open control socket speaking for `key`.
+    pub fn note_connection(&mut self, key: &str, connection: u64) {
+        self.map
+            .entry(key.to_string())
+            .or_default()
+            .open_connections
+            .insert(connection);
+    }
+
+    /// Remove `connection` from every session's open connection set.
+    pub fn drop_connection(&mut self, connection: u64) {
+        for session in self.map.values_mut() {
+            session.open_connections.remove(&connection);
         }
     }
 }

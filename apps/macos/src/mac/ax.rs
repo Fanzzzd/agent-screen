@@ -1335,7 +1335,7 @@ pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
         let Some(mut el) = element_at_in(&app, at) else {
             continue;
         };
-        for _ in 0..8 {
+        for _ in 0..4 {
             unsafe { el.set_messaging_timeout(0.15) };
             if string_attribute(&el, "AXRole").as_deref() == Some("AXMenu") {
                 if unsafe { el.perform_action(&CFString::from_static_str("AXCancel")) }
@@ -1357,9 +1357,10 @@ pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window: near its top, with no control,
 /// text or web content there. Toolkits name that background differently,
-/// such as the window itself, a toolbar, a tab strip background, or SwiftUI's
-/// hosting view. WindowServer moves a window for real mouse drags only, so
-/// drags made for an agent, or through the Viewer, move it through here.
+/// such as the window itself, a toolbar, a tab strip background inside a
+/// toolbar, or SwiftUI's hosting view. WindowServer moves a window for real
+/// mouse drags only, so drags made for an agent, or through the Viewer, move
+/// it through here.
 pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
     // Unified toolbars are up to 52 pt tall.
     if at.1 - bounds.y > 52.0 {
@@ -1370,16 +1371,24 @@ pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool 
     let Some(mut element) = element_at_in(&app, at) else {
         return false;
     };
-    for _ in 0..64 {
+    let mut saw_tab_group = false;
+    let mut saw_toolbar = false;
+    for _ in 0..12 {
         unsafe { element.set_messaging_timeout(0.15) };
         match string_attribute(&element, "AXRole").as_deref() {
-            Some("AXWindow") => return has_title_bar(&element),
-            // Empty tab-strip space (`AXTabGroup`) drags the window, while
-            // individual tabs (`AXRadioButton` / `AXButton`) fall into `_`.
-            Some(
-                "AXToolbar" | "AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup"
-                | "AXTabGroup",
-            ) => {}
+            Some("AXWindow") => {
+                return (!saw_tab_group || saw_toolbar) && has_title_bar(&element);
+            }
+            Some("AXToolbar") => {
+                saw_toolbar = true;
+            }
+            // Empty tab-strip space (`AXTabGroup`) drags the window only when
+            // inside `AXToolbar`, so a content `NSTabView` near the top of a
+            // window never drags the window (L9).
+            Some("AXTabGroup") => {
+                saw_tab_group = true;
+            }
+            Some("AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup") => {}
             // A control, text, a list, a web page, or anything unknown:
             // a drag there is the app's.
             _ => return false,

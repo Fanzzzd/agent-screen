@@ -20,6 +20,7 @@
 //! other workspaces and a display would show them to agents.
 
 use crate::model::{DisplayId, Rect, WindowTarget};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role {
@@ -275,6 +276,148 @@ pub fn resolve_display_owner(
 pub fn window_belongs_to_area(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
     let center = bounds.mid();
     bounds.intersects(area) && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
+}
+
+/// Single source of truth for which virtual Agent Display owns a window
+/// (#204, ADR 0018), plus the display rect its local coordinates are relative
+/// to. `displays` lists every online display as `(id, area, is_agent_virtual)`.
+///
+/// - A window whose geometry places it on a user screen (`!is_agent_virtual`)
+///   belongs to no Agent Display (`None`).
+/// - While a window sits geometrically on any virtual Agent Display
+///   (`is_agent_virtual`), an active `recorded_owner` wins over geometry across
+///   every caller.
+pub fn effective_agent_display(
+    bounds: &Rect,
+    displays: &[(DisplayId, Rect, bool)],
+    recorded_owner: Option<DisplayId>,
+) -> Option<(DisplayId, Rect)> {
+    let center = bounds.mid();
+    let mut geom = displays
+        .iter()
+        .copied()
+        .find(|&(_, area, _)| area.contains(center) && bounds.intersects(&area));
+    if geom.is_none() {
+        for &(id, area, is_agent) in displays {
+            let others: Vec<Rect> = displays
+                .iter()
+                .filter(|&&(oid, _, _)| oid != id)
+                .map(|&(_, r, _)| r)
+                .collect();
+            if window_belongs_to_area(bounds, &area, &others) {
+                geom = Some((id, area, is_agent));
+                break;
+            }
+        }
+    }
+    let (geom_id, geom_area, on_virtual) = geom?;
+    let owner = resolve_display_owner(on_virtual.then_some(geom_id), on_virtual, recorded_owner)?;
+    let base = if owner == geom_id {
+        geom_area
+    } else {
+        displays
+            .iter()
+            .find(|&&(id, area, _)| id == owner && bounds.intersects(&area))
+            .map_or(geom_area, |&(_, area, _)| area)
+    };
+    Some((owner, base))
+}
+
+pub type WindowShift = (WindowTarget, Rect);
+pub type DisplayMove = (DisplayId, Rect, Rect);
+
+/// Serializes `repark` passes and tracks each adopted display's verified
+/// `parked_rects` baseline with a monotonic generation counter (H1).
+/// Overlapping `ScreensChanged` notifications coalesce into a single follow-up
+/// pass (`rerun`) that starts only after in-flight AX moves finish, so
+/// unrecorded windows never shift twice and stale runs cannot overwrite newer
+/// baselines.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReparkState {
+    parked_rects: BTreeMap<DisplayId, Rect>,
+    in_flight: bool,
+    rerun: bool,
+    generation: u64,
+}
+
+impl ReparkState {
+    pub fn note_adopted(&mut self, id: DisplayId, rect: Rect) {
+        if rect.width > 0.0 && rect.height > 0.0 {
+            self.parked_rects.insert(id, rect);
+        }
+    }
+
+    pub fn remove_display(&mut self, id: DisplayId) {
+        self.parked_rects.remove(&id);
+    }
+
+    pub fn parked_rect(&self, id: DisplayId) -> Option<Rect> {
+        self.parked_rects.get(&id).copied()
+    }
+
+    /// Start a serialized repark pass for `adopted` displays. If a pass is
+    /// already running, marks `rerun` and returns `None`.
+    pub fn begin(&mut self, adopted: &[DisplayId]) -> Option<(u64, Vec<(DisplayId, Rect)>)> {
+        if self.in_flight {
+            self.rerun = true;
+            return None;
+        }
+        self.in_flight = true;
+        self.rerun = false;
+        self.generation += 1;
+        let snapshot = adopted
+            .iter()
+            .filter_map(|&id| self.parked_rects.get(&id).copied().map(|r| (id, r)))
+            .collect();
+        Some((self.generation, snapshot))
+    }
+
+    /// Compute window shifts for `generation` from the current `parked_rects`
+    /// baseline to `settled`, advancing `parked_rects` atomically so a later
+    /// pass sees the updated origins. Returns `(shifts, moved_displays)` or
+    /// empty vectors if `generation` is stale.
+    pub fn plan_shifts(
+        &mut self,
+        generation: u64,
+        adopted: &[DisplayId],
+        settled: &[(DisplayId, Rect)],
+        stationary: &[Rect],
+        windows: &[(WindowTarget, Rect, Option<DisplayId>)],
+    ) -> (Vec<WindowShift>, Vec<DisplayMove>) {
+        if !self.in_flight || generation != self.generation {
+            return (Vec::new(), Vec::new());
+        }
+        let mut moved = Vec::new();
+        for &(id, now) in settled {
+            if !adopted.contains(&id) || now.width <= 0.0 || now.height <= 0.0 {
+                continue;
+            }
+            if let Some(&old) = self.parked_rects.get(&id) {
+                moved.push((id, old, now));
+            }
+        }
+        let shifts = window_shifts(&moved, stationary, windows);
+        for &(id, now) in settled {
+            if adopted.contains(&id) && now.width > 0.0 && now.height > 0.0 {
+                self.parked_rects.insert(id, now);
+            }
+        }
+        let active_moves = moved
+            .into_iter()
+            .filter(|&(_, old, now)| (now.x - old.x).abs() > 0.5 || (now.y - old.y).abs() > 0.5)
+            .collect();
+        (shifts, active_moves)
+    }
+
+    /// Complete `generation` and report whether another pass was requested
+    /// while it ran.
+    pub fn finish(&mut self, generation: u64) -> bool {
+        if !self.in_flight || generation != self.generation {
+            return false;
+        }
+        self.in_flight = false;
+        std::mem::take(&mut self.rerun)
+    }
 }
 
 /// Target global frames for windows whose Agent Display moved from `old_rect`
@@ -922,5 +1065,128 @@ mod tests {
         let planned = plan(&s);
         assert!(planned.contains(&(379, (3840., -800.))), "{planned:?}");
         assert_plan_safe(&s);
+    }
+
+    #[test]
+    fn overlapping_reparks_serialize_and_never_shift_unrecorded_windows_twice() {
+        let user_rect = Rect::new(0., 0., 4288., 1440.);
+        let r1 = Rect::new(4288., -800., 1280., 800.);
+        let r2 = Rect::new(5568., -800., 1280., 800.);
+        let r3 = Rect::new(6848., -800., 1280., 800.);
+
+        let mut repark = ReparkState::default();
+        repark.note_adopted(10, r1);
+        repark.note_adopted(20, r2);
+
+        let unrecorded_a = WindowTarget {
+            pid: 1,
+            window_id: 101,
+        };
+        let recorded_a = WindowTarget {
+            pid: 1,
+            window_id: 102,
+        };
+        let mut frame_unrec = Rect::new(4388., -700., 500., 400.);
+        let mut frame_rec = Rect::new(4450., -650., 500., 400.);
+
+        let (gen1, _) = repark.begin(&[10, 20]).expect("first repark starts");
+        // Second ScreensChanged arrives while first is in flight: coalesces into rerun.
+        assert_eq!(repark.begin(&[10, 20]), None);
+
+        // Chain move: display 10 moves r1 -> r2, display 20 moves r2 -> r3.
+        let settled = [(10, r2), (20, r3)];
+        let windows1 = [
+            (unrecorded_a, frame_unrec, None),
+            (recorded_a, frame_rec, Some(10)),
+        ];
+        let (shifts1, moved1) =
+            repark.plan_shifts(gen1, &[10, 20], &settled, &[user_rect], &windows1);
+        assert_eq!(moved1.len(), 2);
+        for (target, next) in shifts1 {
+            if target == unrecorded_a {
+                frame_unrec = next;
+            } else if target == recorded_a {
+                frame_rec = next;
+            }
+        }
+        assert_eq!(frame_unrec.x, 5668.0);
+        assert_eq!(frame_rec.x, 5730.0);
+
+        // Stale generation cannot shift windows or overwrite parked_rects.
+        let (stale_shifts, _) = repark.plan_shifts(
+            gen1.wrapping_sub(1),
+            &[10, 20],
+            &[(10, r1), (20, r2)],
+            &[user_rect],
+            &windows1,
+        );
+        assert!(stale_shifts.is_empty());
+        assert_eq!(repark.parked_rect(10), Some(r2));
+
+        // Finish first pass: rerun was requested, so a second pass runs against
+        // the updated baseline and shifts unrecorded_a zero times (stays at 5668,
+        // never carried onto display 20 at 6948).
+        assert!(repark.finish(gen1));
+        let (gen2, _) = repark.begin(&[10, 20]).expect("coalesced rerun starts");
+        let windows2 = [
+            (unrecorded_a, frame_unrec, None),
+            (recorded_a, frame_rec, Some(10)),
+        ];
+        let (shifts2, moved2) =
+            repark.plan_shifts(gen2, &[10, 20], &settled, &[user_rect], &windows2);
+        assert!(moved2.is_empty());
+        assert!(shifts2.is_empty());
+        assert_eq!(frame_unrec.x, 5668.0);
+        assert!(!repark.finish(gen2));
+    }
+
+    #[test]
+    fn window_shifts_honors_recorded_owner_when_center_straddles_neighbor() {
+        // M7 revert-4 guard: window 501 is recorded on display 379 (4288..5568)
+        // while overhanging into neighbor 381 (5568..6848) so its center
+        // (5250 + 400 = 5650) lies inside 381's old rect. Display 379 moves by
+        // +400 in x; display 381 moves by +1280 in x. Without the `recorded_owner`
+        // branch, geometry attributes 501 to 381 (+1280) instead of 379 (+400).
+        let user_rect = Rect::new(0., 0., 4288., 1440.);
+        let old_a = Rect::new(4288., -800., 1280., 800.);
+        let new_a = Rect::new(4688., -800., 1280., 800.);
+        let old_b = Rect::new(5568., -800., 1280., 800.);
+        let new_b = Rect::new(6848., -800., 1280., 800.);
+        let w = WindowTarget {
+            pid: 9,
+            window_id: 501,
+        };
+        let bounds = Rect::new(5250., -700., 800., 500.);
+        assert!(old_b.contains(bounds.mid()));
+        let shifts = window_shifts(
+            &[(379, old_a, new_a), (381, old_b, new_b)],
+            &[user_rect],
+            &[(w, bounds, Some(379))],
+        );
+        assert_eq!(shifts, vec![(w, Rect::new(5650., -700., 800., 500.))]);
+    }
+
+    #[test]
+    fn effective_agent_display_centralizes_recorded_and_geometric_ownership() {
+        let displays = [
+            (1, Rect::new(0., 0., 2560., 1440.), false),
+            (7, Rect::new(2560., -800., 1280., 800.), true),
+            (8, Rect::new(3840., -800., 1280., 800.), true),
+        ];
+        // Window recorded on 7, transiently sitting on virtual display 8 -> owned by 7,
+        // with base rect of 8 until shifted.
+        let on_8 = Rect::new(3940., -700., 500., 400.);
+        assert_eq!(
+            effective_agent_display(&on_8, &displays, Some(7)),
+            Some((7, Rect::new(3840., -800., 1280., 800.)))
+        );
+        // Unrecorded window on virtual display 8 -> owned by 8.
+        assert_eq!(
+            effective_agent_display(&on_8, &displays, None),
+            Some((8, Rect::new(3840., -800., 1280., 800.)))
+        );
+        // Window back on user display 1 -> owned by no Agent Display even with record.
+        let on_user = Rect::new(200., 200., 500., 400.);
+        assert_eq!(effective_agent_display(&on_user, &displays, Some(7)), None);
     }
 }
