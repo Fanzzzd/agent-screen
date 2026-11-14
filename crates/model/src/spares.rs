@@ -20,19 +20,21 @@ fn unit_key(unit: Option<u32>, index: usize) -> (u32, usize) {
     (unit.unwrap_or(u32::MAX), index)
 }
 
-/// Index of the spare to reuse for `wanted`: a matching size with the lowest
-/// unit number, or when none matches `wanted`, the spare with the lowest unit
-/// number overall so the caller can resize it.
+/// Index of the windowless spare to reuse for `wanted`: a matching size with
+/// the lowest unit number, or when none matches `wanted`, the windowless spare
+/// with the lowest unit number overall so the caller can resize it. A spare
+/// holding a stray window is never handed to a new session.
 pub fn pick_spare(spares: &[SpareInfo], wanted: (f64, f64)) -> Option<usize> {
     spares
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.size == wanted)
+        .filter(|(_, s)| !s.has_windows && s.size == wanted)
         .min_by_key(|&(i, s)| unit_key(s.unit, i))
         .or_else(|| {
             spares
                 .iter()
                 .enumerate()
+                .filter(|(_, s)| !s.has_windows)
                 .min_by_key(|&(i, s)| unit_key(s.unit, i))
         })
         .map(|(i, _)| i)
@@ -60,11 +62,13 @@ pub fn retire_instead(
 }
 
 /// Which spares stay in the pool (`true`) vs release (`false`) during idle
-/// tidy.
+/// tidy, after the caller has attempted to move any stray windows off spares
+/// back to the user's screen.
 ///
-/// - Any spare that somehow has a window on it stays so windows are never
-///   evacuated unexpectedly by background expiry.
-/// - Unexpired spares stay.
+/// - Any spare that still holds a window (`has_windows`) releases so
+///   WindowServer moves the stuck window onto the user's screen instead of
+///   hiding it on an invisible spare forever.
+/// - Unexpired windowless spares stay.
 /// - While `warm`, up to `ready` spares stay, preferring the lowest unit
 ///   numbers so higher units release from the top down.
 /// - Within `max_spares`, an expired spare whose unit lies below an online
@@ -76,10 +80,15 @@ pub fn keep_spares(
     max_spares: usize,
     live_units: &[u32],
 ) -> Vec<bool> {
-    let mut keep: Vec<bool> = spares.iter().map(|s| !s.expired || s.has_windows).collect();
+    let mut keep: Vec<bool> = spares
+        .iter()
+        .map(|s| !s.has_windows && !s.expired)
+        .collect();
     let mut kept_count = keep.iter().filter(|&&k| k).count();
 
-    let mut expired_low_first: Vec<usize> = (0..spares.len()).filter(|&i| !keep[i]).collect();
+    let mut expired_low_first: Vec<usize> = (0..spares.len())
+        .filter(|&i| !keep[i] && !spares[i].has_windows)
+        .collect();
     expired_low_first.sort_by_key(|&i| unit_key(spares[i].unit, i));
 
     if warm {
@@ -203,26 +212,31 @@ mod tests {
     }
 
     #[test]
-    fn a_spare_with_windows_is_never_released_nor_retired() {
+    fn spares_holding_stray_windows_are_never_reused_and_release_if_stuck() {
         let spares = [
             SpareInfo {
                 size: DEFAULT,
-                unit: Some(10),
-                expired: true,
+                unit: Some(7),
+                expired: false,
                 has_windows: true,
             },
             SpareInfo {
-                size: DEFAULT,
+                size: WIDE,
                 unit: Some(9),
-                expired: true,
+                expired: false,
                 has_windows: false,
             },
         ];
-        // Unit 10 has a window, so it stays, which in turn keeps unit 9 below
-        // it within max_spares = 3.
-        assert_eq!(keep_spares(&spares, false, 0, 3, &[]), vec![true, true]);
-        // Only unit 9 (windowless) can be retired for incoming unit 8 when
-        // max_spares = 2.
+        // Unit 7 matches DEFAULT and has the lower unit, yet holds a window:
+        // pick_spare skips it and chooses unit 9 instead; when all spares hold
+        // windows, pick_spare returns None so no session inherits the window.
+        assert_eq!(pick_spare(&spares, DEFAULT), Some(1));
+        assert_eq!(pick_spare(&spares[..1], DEFAULT), None);
+
+        // If a window refused to move off a spare during stray return, tidy
+        // releases that spare (even unexpired or below a live unit) so macOS
+        // brings the window back onto the user's screen.
+        assert_eq!(keep_spares(&spares, true, 2, 3, &[10]), vec![false, true]);
         assert_eq!(retire_instead(&spares, 2, Some(8)), Some(1));
     }
 }

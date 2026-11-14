@@ -19,7 +19,7 @@
 //! them, and not in a bottom corner, where AeroSpace hides the windows of
 //! other workspaces and a display would show them to agents.
 
-use crate::model::Rect;
+use crate::model::{DisplayId, Rect, WindowTarget};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role {
@@ -69,12 +69,15 @@ fn corner(screens: &[Screen]) -> Option<(f64, f64)> {
 /// Where each of Agent Screen's displays goes, as origins. Empty when the
 /// user has no display of their own to arrange around.
 ///
-/// Displays of ours that are already `out_of_the_way` and overlap neither a
-/// fixed display nor an earlier display of ours keep their origins: moving a
-/// live display in CoreGraphics moves only its viewport while WindowServer
-/// leaves windows at their global coordinates, which would hand one display's
-/// windows to whichever display took its old slot (#204). Only unparked or
-/// overlapping displays of ours are placed into free slots of the grid.
+/// Displays of ours that are already `out_of_the_way`, overlap neither a fixed
+/// display nor an earlier display of ours, and stay attached to the user's
+/// screens keep their origins: moving a live display in CoreGraphics moves only
+/// its viewport while WindowServer leaves windows at their global coordinates,
+/// which would hand one display's windows to whichever display took its old
+/// slot (#204). If a vacated slot would leave a pinned display floating, macOS
+/// would refuse the layout and move displays itself, so `plan` unpins one
+/// disconnected display at a time from the far end until every display is
+/// connected to a user screen.
 pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
     let (Some(user), Some((right, top))) = (user_bounds(screens), corner(screens)) else {
         return Vec::new();
@@ -96,7 +99,6 @@ pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
         start = end;
     }
     let row_limit = start + user.width;
-    let mut obstacles = fixed;
     let mut ours: Vec<(u64, u32, Rect)> = screens
         .iter()
         .filter_map(|s| match s.role {
@@ -105,10 +107,55 @@ pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
         })
         .collect();
     ours.sort_by_key(|&(order, id, _)| (order, id));
+
+    let mut pinned_allowed: Vec<u32> = ours.iter().map(|&(_, id, _)| id).collect();
+    loop {
+        let placed = place_grid(
+            screens,
+            start,
+            top,
+            row_limit,
+            &fixed,
+            &ours,
+            &pinned_allowed,
+        );
+        let planned_screens = with_origins(screens, &placed);
+        let reached = reachable_from_user(&planned_screens);
+        let drop_pin = pinned_allowed
+            .iter()
+            .copied()
+            .filter(|id| !reached.contains(id))
+            .max_by(|&a, &b| {
+                let ra = ours.iter().find(|&&(_, id, _)| id == a).unwrap().2;
+                let rb = ours.iter().find(|&&(_, id, _)| id == b).unwrap().2;
+                (-ra.y, ra.x)
+                    .partial_cmp(&(-rb.y, rb.x))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        match drop_pin {
+            Some(id) => pinned_allowed.retain(|&p| p != id),
+            None => return placed,
+        }
+    }
+}
+
+fn place_grid(
+    screens: &[Screen],
+    start: f64,
+    top: f64,
+    row_limit: f64,
+    fixed: &[Rect],
+    ours: &[(u64, u32, Rect)],
+    pinned_allowed: &[u32],
+) -> Vec<(u32, (f64, f64))> {
+    let mut obstacles = fixed.to_vec();
     let mut placed: Vec<(u64, u32, (f64, f64))> = Vec::with_capacity(ours.len());
     let mut unparked: Vec<(u64, u32, Rect)> = Vec::new();
-    for (order, id, rect) in ours {
-        if out_of_the_way(&rect, screens) && obstacles.iter().all(|o| !rect.intersects(o)) {
+    for &(order, id, rect) in ours {
+        if pinned_allowed.contains(&id)
+            && out_of_the_way(&rect, screens)
+            && obstacles.iter().all(|o| !rect.intersects(o))
+        {
             obstacles.push(rect);
             placed.push((order, id, (rect.x, rect.y)));
         } else {
@@ -142,6 +189,150 @@ pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
     }
     placed.sort_by_key(|&(order, id, _)| (order, id));
     placed.into_iter().map(|(_, id, at)| (id, at)).collect()
+}
+
+fn with_origins(screens: &[Screen], origins: &[(u32, (f64, f64))]) -> Vec<Screen> {
+    screens
+        .iter()
+        .map(|&s| {
+            if let Some(&(_, (x, y))) = origins.iter().find(|&&(id, _)| id == s.id) {
+                Screen {
+                    rect: Rect::new(x, y, s.rect.width, s.rect.height),
+                    ..s
+                }
+            } else {
+                s
+            }
+        })
+        .collect()
+}
+
+/// Whether two display rectangles touch at least at a corner point.
+fn touches(a: &Rect, b: &Rect) -> bool {
+    a.x <= b.max_x() && b.x <= a.max_x() && a.y <= b.max_y() && b.y <= a.max_y()
+}
+
+fn reachable_from_user(screens: &[Screen]) -> Vec<u32> {
+    let mut visited = vec![false; screens.len()];
+    let mut stack = Vec::new();
+    for (i, s) in screens.iter().enumerate() {
+        if s.role == Role::User {
+            visited[i] = true;
+            stack.push(i);
+        }
+    }
+    while let Some(cur) = stack.pop() {
+        for (j, other) in screens.iter().enumerate() {
+            if !visited[j] && touches(&screens[cur].rect, &other.rect) {
+                visited[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    screens
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| visited[i])
+        .map(|(_, s)| s.id)
+        .collect()
+}
+
+/// Whether every `Role::Ours` display in `screens` reaches a `Role::User`
+/// display through displays that touch at an edge or corner. macOS refuses an
+/// arrangement with a floating display and moves displays itself without
+/// moving their windows.
+pub fn connected(screens: &[Screen]) -> bool {
+    let has_user = screens.iter().any(|s| s.role == Role::User);
+    if !has_user {
+        return true;
+    }
+    let reached = reachable_from_user(screens);
+    screens
+        .iter()
+        .filter(|s| matches!(s.role, Role::Ours { .. }))
+        .all(|s| reached.contains(&s.id))
+}
+
+/// Reconciles geometric display placement with explicit placement/handover
+/// records (#204). While a window sits on any virtual display (`on_virtual`),
+/// its active `recorded_owner` wins over transient viewport shifts; once the
+/// window returns to the user's physical screen (`!on_virtual`), geometry wins
+/// so strays and user-returned windows behave normally.
+pub fn resolve_display_owner(
+    geom_display: Option<DisplayId>,
+    on_virtual: bool,
+    recorded_owner: Option<DisplayId>,
+) -> Option<DisplayId> {
+    if !on_virtual {
+        return None;
+    }
+    recorded_owner.or(geom_display)
+}
+
+/// Whether a window with global `bounds` belongs to `area` when the other
+/// online displays cover `others`: it intersects `area`, and no other display
+/// contains its center instead.
+pub fn window_belongs_to_area(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
+    let center = bounds.mid();
+    bounds.intersects(area) && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
+}
+
+/// Target global frames for windows whose Agent Display moved from `old_rect`
+/// to `new_rect`. Membership is evaluated against both explicit placement or
+/// handover records (`recorded_owner`) and the pre-move snapshot of all
+/// displays (`moved`'s `old_rect`s plus `stationary_areas`), so a chain move
+/// (`A: R1 -> R2`, `B: R2 -> R3`) shifts `A`'s windows to `R2` and `B`'s
+/// windows to `R3` without mixing them up.
+pub fn window_shifts(
+    moved: &[(DisplayId, Rect, Rect)],
+    stationary_areas: &[Rect],
+    windows: &[(WindowTarget, Rect, Option<DisplayId>)],
+) -> Vec<(WindowTarget, Rect)> {
+    let active_moves: Vec<(DisplayId, Rect, Rect)> = moved
+        .iter()
+        .copied()
+        .filter(|&(_, old, new)| {
+            new.width > 0.0
+                && new.height > 0.0
+                && ((new.x - old.x).abs() > 0.5 || (new.y - old.y).abs() > 0.5)
+        })
+        .collect();
+    if active_moves.is_empty() {
+        return Vec::new();
+    }
+    let all_old: Vec<(Option<DisplayId>, Rect)> = moved
+        .iter()
+        .map(|&(id, old, _)| (Some(id), old))
+        .chain(stationary_areas.iter().map(|&r| (None, r)))
+        .collect();
+    let mut shifts = Vec::new();
+    for &(id, old, new) in &active_moves {
+        let others: Vec<Rect> = all_old
+            .iter()
+            .filter(|&&(oid, _)| oid != Some(id))
+            .map(|&(_, r)| r)
+            .collect();
+        let resized = (new.width - old.width).abs() > 0.5 || (new.height - old.height).abs() > 0.5;
+        for &(target, bounds, recorded_owner) in windows {
+            if shifts.iter().any(|&(t, _)| t == target) {
+                continue;
+            }
+            let belongs = match recorded_owner {
+                Some(owner) => owner == id && bounds.intersects(&old),
+                None => window_belongs_to_area(&bounds, &old, &others),
+            };
+            if belongs {
+                let shifted = bounds.offset(new.x - old.x, new.y - old.y);
+                let next = if resized {
+                    shifted.kept_inside(&new)
+                } else {
+                    shifted
+                };
+                shifts.push((target, next));
+            }
+        }
+    }
+    shifts
 }
 
 /// A parking attempt succeeds once display `id`, one of Agent Screen's,
@@ -319,10 +510,16 @@ mod tests {
             user(2, 2560., 190., 1728., 1117.),
         ]
     }
-    /// Every planned display is safe, and none overlaps another.
+    /// Every planned display is safe, connected to a user display, and
+    /// overlaps none of the others.
     fn assert_plan_safe(s: &[Screen]) {
-        let placed = rects(s, &plan(s));
+        let planned = plan(s);
+        let placed = rects(s, &planned);
         assert!(!placed.is_empty());
+        assert!(
+            connected(&with_origins(s, &planned)),
+            "disconnected plan {planned:?} for {s:?}"
+        );
         for (i, r) in placed.iter().enumerate() {
             assert!(out_of_the_way(r, s), "{r:?} is in the way of {s:?}");
             assert!(placed[i + 1..].iter().all(|o| !r.intersects(o)));
@@ -499,8 +696,9 @@ mod tests {
         assert!(planned.contains(&(638, (6848., -800.))), "{planned:?}");
         assert_plan_safe(&s);
 
-        // And when the first slot was vacated, the new display fills that gap
-        // while still leaving the parked displays untouched.
+        // When a new display arrives right as the corner slot was vacated, the
+        // new display fills 4288,-800 so all three end up connected without
+        // moving 379 or 381.
         s[2].rect = Rect::new(5568., -800., 1280., 800.);
         s[3].rect = Rect::new(6848., -800., 1280., 800.);
         let planned = plan(&s);
@@ -508,6 +706,167 @@ mod tests {
         assert!(planned.contains(&(379, (5568., -800.))), "{planned:?}");
         assert!(planned.contains(&(381, (6848., -800.))), "{planned:?}");
         assert_plan_safe(&s);
+    }
+
+    #[test]
+    fn vacating_the_corner_with_no_new_display_reconnects_floating_displays() {
+        let s = vec![
+            user(1, 0., 0., 2560., 1440.),
+            user(2, 2560., 0., 1728., 1117.),
+            Screen {
+                id: 379,
+                rect: Rect::new(5568., -800., 1280., 800.),
+                role: Role::Ours { order: 5 },
+            },
+            Screen {
+                id: 381,
+                rect: Rect::new(6848., -800., 1280., 800.),
+                role: Role::Ours { order: 6 },
+            },
+        ];
+        assert!(!connected(&s));
+        let planned = plan(&s);
+        assert!(planned.contains(&(381, (4288., -800.))), "{planned:?}");
+        assert!(planned.contains(&(379, (5568., -800.))), "{planned:?}");
+        assert_plan_safe(&s);
+
+        let single = vec![
+            user(1, 0., 0., 2560., 1440.),
+            Screen {
+                id: 379,
+                rect: Rect::new(3840., -800., 1280., 800.),
+                role: Role::Ours { order: 5 },
+            },
+        ];
+        assert!(!connected(&single));
+        assert_eq!(plan(&single), vec![(379, (2560., -800.))]);
+        assert_plan_safe(&single);
+    }
+
+    #[test]
+    fn sequential_creates_and_ends_stay_connected_and_preserve_live_origins() {
+        let mut s = vec![user(1, 0., 0., 2560., 1440.)];
+        // Create four displays in a row with serials 1..=4.
+        for (id, serial) in [(10, 1), (11, 2), (12, 3), (13, 4)] {
+            s.push(ours(id, serial, 1280., 800.));
+            let planned = plan(&s);
+            s = with_origins(&s, &planned);
+            assert_plan_safe(&s);
+        }
+        let d11_before = s.iter().find(|d| d.id == 11).unwrap().rect;
+        let d12_before = s.iter().find(|d| d.id == 12).unwrap().rect;
+
+        // End the two middle/far displays (13, then 10 at the corner), then
+        // create 14 with recycled serial 1.
+        s.retain(|d| d.id != 13);
+        let planned = plan(&s);
+        s = with_origins(&s, &planned);
+        assert_plan_safe(&s);
+        assert_eq!(s.iter().find(|d| d.id == 11).unwrap().rect, d11_before);
+        assert_eq!(s.iter().find(|d| d.id == 12).unwrap().rect, d12_before);
+
+        // Ending corner display 10 moves only the furthest display (12) into
+        // the corner bridge so 11 never moves.
+        s.retain(|d| d.id != 10);
+        let planned = plan(&s);
+        s = with_origins(&s, &planned);
+        assert_plan_safe(&s);
+        assert_eq!(s.iter().find(|d| d.id == 11).unwrap().rect, d11_before);
+
+        // Creating 14 and 15 with lower serials parks into free slots without
+        // disturbing 11 or 12.
+        let d12_bridged = s.iter().find(|d| d.id == 12).unwrap().rect;
+        for (id, serial) in [(14, 1), (15, 3)] {
+            s.push(ours(id, serial, 1280., 800.));
+            let planned = plan(&s);
+            s = with_origins(&s, &planned);
+            assert_plan_safe(&s);
+        }
+        assert_eq!(s.iter().find(|d| d.id == 11).unwrap().rect, d11_before);
+        assert_eq!(s.iter().find(|d| d.id == 12).unwrap().rect, d12_bridged);
+    }
+
+    #[test]
+    fn physical_display_layout_change_reanchors_displays_and_shifts_all_windows() {
+        // User opens MacBook lid (1728x1117 at 0,0) beside 2560x1440 monitor,
+        // shifting the rightmost user edge by +1728 pt (2560 -> 4288).
+        let old_d1 = Rect::new(2560., -800., 1280., 800.);
+        let old_d2 = Rect::new(3840., -800., 1280., 800.);
+        let after_hotplug = vec![
+            user(1, 0., 0., 1728., 1117.),
+            user(2, 1728., 0., 2560., 1440.),
+            Screen {
+                id: 379,
+                rect: old_d1,
+                role: Role::Ours { order: 5 },
+            },
+            Screen {
+                id: 381,
+                rect: old_d2,
+                role: Role::Ours { order: 6 },
+            },
+        ];
+        // Old origins now overlap/lie left of the new rightmost user edge 4288,
+        // so `plan` moves both into safe connected slots starting at 4288,-800.
+        let planned = plan(&after_hotplug);
+        assert_plan_safe(&after_hotplug);
+        let settled = with_origins(&after_hotplug, &planned);
+        let new_d1 = settled.iter().find(|s| s.id == 379).unwrap().rect;
+        let new_d2 = settled.iter().find(|s| s.id == 381).unwrap().rect;
+        assert_eq!(new_d1, Rect::new(4288., -800., 1280., 800.));
+        assert_eq!(new_d2, Rect::new(5568., -800., 1280., 800.));
+
+        let w1 = (
+            WindowTarget {
+                pid: 20,
+                window_id: 101,
+            },
+            Rect::new(2660., -700., 800., 600.),
+            Some(379),
+        );
+        let w2 = (
+            WindowTarget {
+                pid: 30,
+                window_id: 102,
+            },
+            Rect::new(3940., -650., 700., 950.),
+            None,
+        );
+        let user_win = (
+            WindowTarget {
+                pid: 40,
+                window_id: 103,
+            },
+            Rect::new(1900., 100., 900., 700.),
+            None,
+        );
+        let shifts = window_shifts(
+            &[(379, old_d1, new_d1), (381, old_d2, new_d2)],
+            &[
+                Rect::new(0., 0., 1728., 1117.),
+                Rect::new(1728., 0., 2560., 1440.),
+            ],
+            &[user_win, w1, w2],
+        );
+        assert_eq!(
+            shifts,
+            vec![
+                (w1.0, Rect::new(4388., -700., 800., 600.)),
+                (w2.0, Rect::new(5668., -650., 700., 950.)),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_backed_ownership_wins_over_transient_viewport_overlap() {
+        // While on a virtual display, an active placement/handover record on
+        // 379 keeps ownership with 379 even if 638 transiently occupies the
+        // window's coordinates.
+        assert_eq!(resolve_display_owner(Some(638), true, Some(379)), Some(379));
+        // Unrecorded dialogs fall back to geometric display.
+        assert_eq!(resolve_display_owner(Some(638), true, None), Some(638));
+        // Once returned to the user's physical screen, virtual ownership is None.
+        assert_eq!(resolve_display_owner(None, false, Some(379)), None);
     }
 
     #[test]
@@ -538,6 +897,30 @@ mod tests {
         // 6848 is taken by Fixed 900, and 8128 + 1280 > 4288 + 4288, so 638
         // stacks onto the second row at 4288,-1600.
         assert!(planned.contains(&(638, (4288., -1600.))), "{planned:?}");
+        assert_plan_safe(&s);
+    }
+
+    #[test]
+    fn another_instances_corner_display_bridges_our_displays_without_moving_them() {
+        // Another Agent Screen instance holds the corner slot (Role::Fixed at
+        // 2560,-800); our display 379 sits to its right at 3840,-800 and stays
+        // connected through the Fixed bridge when 380 is created at 5120,-800.
+        let s = vec![
+            user(1, 0., 0., 2560., 1440.),
+            Screen {
+                id: 900,
+                rect: Rect::new(2560., -800., 1280., 800.),
+                role: Role::Fixed,
+            },
+            Screen {
+                id: 379,
+                rect: Rect::new(3840., -800., 1280., 800.),
+                role: Role::Ours { order: 2 },
+            },
+            ours(380, 1, 1280., 800.),
+        ];
+        let planned = plan(&s);
+        assert!(planned.contains(&(379, (3840., -800.))), "{planned:?}");
         assert_plan_safe(&s);
     }
 }

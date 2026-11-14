@@ -772,6 +772,95 @@ impl<H> Displays<H> {
         key(a).is_some() && key(a) == key(b)
     }
 
+    /// The display with an active Placement, Handover, Launch or Found record
+    /// for `window` (not returned to the user and not given to another
+    /// session), preferring a live display over a Review Display (#204).
+    pub fn recorded_display_of(&self, window: WindowId) -> Option<DisplayId> {
+        let active = |d: &Display<H>| {
+            d.records.contains_key(&window)
+                && !d.returned.contains(&window)
+                && !d.given.contains_key(&window)
+        };
+        self.list
+            .iter()
+            .find(|d| d.is_live() && active(d))
+            .or_else(|| self.list.iter().find(|d| active(d)))
+            .map(|d| d.id)
+    }
+
+    /// Reconcile geometric display `geom_display` with any active Placement,
+    /// Handover, Launch or Found record while `window` sits on a virtual
+    /// display (`on_virtual`).
+    pub fn effective_display_of(
+        &self,
+        window: WindowId,
+        geom_display: Option<DisplayId>,
+        on_virtual: bool,
+    ) -> Option<DisplayId> {
+        crate::arrangement::resolve_display_owner(
+            geom_display,
+            on_virtual,
+            self.recorded_display_of(window),
+        )
+    }
+
+    /// Snapshot of active recorded window owners (`window_id -> DisplayId`) so
+    /// off-thread window queries and repark shifts honor Placement and Handover
+    /// records while displays reconfigure (#204).
+    pub fn recorded_owners(&self) -> BTreeMap<WindowId, DisplayId> {
+        let mut out = BTreeMap::new();
+        for d in &self.list {
+            if d.is_ended() {
+                for &w in d.records.keys() {
+                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
+                        out.entry(w).or_insert(d.id);
+                    }
+                }
+            }
+        }
+        for d in &self.list {
+            if d.is_live() {
+                for &w in d.records.keys() {
+                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
+                        out.insert(w, d.id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Reconcile windows macOS restored onto a newly created display `id`
+    /// (such as after an app restart or serial reuse). Windows of apps adopted
+    /// into `d.started` are recorded as `Origin::Launched` on `id`; windows no
+    /// display owns are returned so the caller can move them back to the user's
+    /// screen instead of hiding them on `id`.
+    pub fn reconcile_new_display_windows(
+        &mut self,
+        id: DisplayId,
+        on_display: &[WindowTarget],
+    ) -> Vec<WindowTarget> {
+        let recorded = self.recorded_owners();
+        let Some(d) = self.get_mut(id) else {
+            return Vec::new();
+        };
+        let mut unowned = Vec::new();
+        for &target in on_display {
+            if recorded.contains_key(&target.window_id) {
+                continue;
+            }
+            if d.started.contains(&target.pid)
+                && !d.returned.contains(&target.window_id)
+                && !d.user_made.contains(&target.window_id)
+            {
+                d.claim(target, Origin::Launched, None);
+            } else {
+                unowned.push(target);
+            }
+        }
+        unowned
+    }
+
     /// The Window Access of the session using display `id`, which covers
     /// all its displays. None for a Review Display or one the user made.
     pub fn access(&self, id: DisplayId) -> Option<&Access> {
@@ -2718,5 +2807,35 @@ mod tests {
             assert!(!d.get(8).unwrap().started.contains(&5), "{reason:?}");
             assert_eq!(d.starter_of(5), None);
         }
+    }
+
+    #[test]
+    fn restart_adoption_records_live_orphan_windows_and_flags_unowned_recalled_windows() {
+        let mut d: Displays<()> = Displays::default();
+        d.add(
+            11,
+            "Agent Screen 1".into(),
+            DEFAULT_SIZE,
+            session_owner("s", 1, "Work"),
+            (),
+        );
+        // Session reconnected after an app restart with pid 500 as an adopted orphan.
+        d.get_mut(11).unwrap().started.insert(500);
+        let agent_win = WindowTarget {
+            pid: 500,
+            window_id: 41,
+        };
+        let recalled_user_win = WindowTarget {
+            pid: 600,
+            window_id: 42,
+        };
+        let unowned = d.reconcile_new_display_windows(11, &[agent_win, recalled_user_win]);
+        assert_eq!(unowned, vec![recalled_user_win]);
+        assert_eq!(d.recorded_display_of(41), Some(11));
+        assert_eq!(
+            d.get(11).unwrap().records.get(&41).map(|r| r.origin),
+            Some(Origin::Launched)
+        );
+        assert_eq!(d.recorded_display_of(42), None);
     }
 }

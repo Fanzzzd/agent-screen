@@ -186,6 +186,60 @@ pub fn on_display(display: DisplayId) -> Vec<Window> {
         .collect()
 }
 
+/// Windows belonging to `display`, reconciling geometry with `recorded_owners`
+/// while windows remain on virtual displays (#204). A window recorded on
+/// another display is excluded during viewport shifts; a window recorded on
+/// `display` that still sits on a virtual display stays with `display` using
+/// its virtual-display-relative coordinates until AX finishes shifting it.
+pub fn on_display_with_records(
+    display: DisplayId,
+    recorded_owners: &std::collections::BTreeMap<u32, DisplayId>,
+) -> Vec<Window> {
+    if recorded_owners.is_empty() {
+        return on_display(display);
+    }
+    let area = cg::display_bounds(display);
+    let others = other_displays(display);
+    let virtual_areas: Vec<(DisplayId, Rect)> = cg::active_displays()
+        .into_iter()
+        .filter(|&d| cg::window_display_role(d) == crate::model::DisplayRole::Agent)
+        .map(|d| (d, cg::display_bounds(d)))
+        .collect();
+    all()
+        .into_iter()
+        .filter_map(|w| {
+            let geom_belongs = belongs(&w.bounds, &area, &others);
+            let center = w.bounds.mid();
+            let host_virtual = virtual_areas
+                .iter()
+                .find(|(_, va)| va.contains(center))
+                .or_else(|| {
+                    geom_belongs
+                        .then(|| virtual_areas.iter().find(|(id, _)| *id == display))
+                        .flatten()
+                });
+            let on_virtual = host_virtual.is_some();
+            let effective = agent_screen_model::arrangement::resolve_display_owner(
+                geom_belongs.then_some(display),
+                on_virtual,
+                recorded_owners.get(&w.target.window_id).copied(),
+            );
+            if effective != Some(display) {
+                return None;
+            }
+            let base = if geom_belongs {
+                area
+            } else {
+                host_virtual.map_or(area, |&(_, va)| va)
+            };
+            Some(Window {
+                bounds: w.bounds.offset(-base.x, -base.y),
+                ..w
+            })
+        })
+        .collect()
+}
+
 /// Menus open on a display: an app's pop-up menus, as a web page's select
 /// shows, at the pop-up menu level (kCGPopUpMenuWindowLevel).
 pub fn menus_on(display: DisplayId) -> Vec<u32> {

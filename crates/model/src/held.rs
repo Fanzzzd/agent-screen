@@ -936,4 +936,27 @@ mod tests {
         );
         assert!(!timed_out_message("Chrome", 60.0, None).contains("held by"));
     }
+
+    #[test]
+    fn record_backed_ownership_holds_across_display_moves_and_active_takeover() {
+        let mut d = two_sessions();
+        let target = wechat(1);
+        d.get_mut(7).unwrap().claim(target, Origin::Placed, None);
+        // Display 7 enters Takeover, then a display reconfiguration transiently
+        // places display 8's viewport over target's coordinates before AX
+        // finishes shifting target with display 7.
+        d.begin_takeover(7);
+        assert!(d.get(7).unwrap().takeover);
+
+        let effective = d.effective_display_of(target.window_id, Some(8), true);
+        assert_eq!(effective, Some(7));
+        // Session A (display 7) still owns target, even if geometric lookup
+        // transiently reports display 8.
+        assert_eq!(d.held_by(7, target, effective), None);
+        // Session B (display 8) sees display 7 as the holder, not itself.
+        let held = d.held_by(8, target, effective).expect("still held by 7");
+        assert_eq!(held.display, 7);
+        assert_eq!(held.place, Place::Display);
+        assert!(d.get(7).unwrap().takeover);
+    }
 }

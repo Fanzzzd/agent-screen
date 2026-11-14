@@ -646,6 +646,17 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
     arrangement::out_of_the_way(&cg::display_bounds(id), &screens(&online, virtual_ids, &[]))
 }
 
+/// Whether every online virtual display of ours in `virtual_ids` reaches a
+/// user display through touching displays. When a corner display is released,
+/// a sibling to its right may briefly float until `tuck_away` compacts it.
+pub fn arrangement_connected(virtual_ids: &[u32]) -> bool {
+    if knob("AGENTSCREEN_NO_PARK").is_some() {
+        return true;
+    }
+    let online = cg::active_displays();
+    arrangement::connected(&screens(&online, virtual_ids, &[]))
+}
+
 /// A setting a test build takes from the environment, to measure what a
 /// choice costs (`cargo e2e changecost`). None in a release build.
 fn knob(name: &str) -> Option<String> {

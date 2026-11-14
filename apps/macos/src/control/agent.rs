@@ -957,32 +957,35 @@ async fn handle_one(
         }
         "listWindows" => {
             let id = display(&core, &p, false, cx)?;
-            let (records, started) = core.read_with(cx, |c, _| {
+            let (records, started, recorded_owners) = core.read_with(cx, |c, _| {
+                let owners = c.displays.recorded_owners();
                 c.displays
                     .get(id)
-                    .map(|d| (d.records.clone(), d.started.clone()))
-                    .unwrap_or_default()
+                    .map(|d| (d.records.clone(), d.started.clone(), owners.clone()))
+                    .unwrap_or_else(|| (Default::default(), Default::default(), owners))
             });
             let scale = display_scale(&core, id, cx);
-            let list: Vec<Value> = off(cx, move || windows::on_display(id))
-                .await
-                .iter()
-                .map(|w| {
-                    let mut json = in_shot(w.json(), scale);
-                    let record = records.get(&w.target.window_id);
-                    // A further window of an app the agent started, which its
-                    // catch moved here, is as launched as the first.
-                    let unrecorded = if started.contains(&w.target.pid) {
-                        "launched"
-                    } else {
-                        "unknown"
-                    };
-                    json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
-                    json["disposition"] =
-                        json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
-                    json
-                })
-                .collect();
+            let list: Vec<Value> = off(cx, move || {
+                windows::on_display_with_records(id, &recorded_owners)
+            })
+            .await
+            .iter()
+            .map(|w| {
+                let mut json = in_shot(w.json(), scale);
+                let record = records.get(&w.target.window_id);
+                // A further window of an app the agent started, which its
+                // catch moved here, is as launched as the first.
+                let unrecorded = if started.contains(&w.target.pid) {
+                    "launched"
+                } else {
+                    "unknown"
+                };
+                json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
+                json["disposition"] =
+                    json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
+                json
+            })
+            .collect();
             let mut reply = json!({ "windows": list, "scale": scale });
             // list_windows shows the reply as it is: the note says it.
             if let Some(given) = add_given(&core, id, &mut reply, cx) {
@@ -1031,10 +1034,12 @@ async fn handle_one(
             if asked.width.is_some_and(|w| w <= 0.0) || asked.height.is_some_and(|h| h <= 0.0) {
                 return Err(ControlError::invalid("width and height must be above 0"));
             }
+            let recorded_owners = core.read_with(cx, |c, _| c.displays.recorded_owners());
             // A window already on the display only takes its new frame.
             if let Some(wanted) = wanted {
+                let owners = recorded_owners.clone();
                 let here = off(cx, move || {
-                    windows::on_display(id)
+                    windows::on_display_with_records(id, &owners)
                         .into_iter()
                         .find(|w| w.target.window_id as i64 == wanted)
                 })
@@ -1071,6 +1076,7 @@ async fn handle_one(
                     .collect()
             });
             if !others.is_empty() {
+                let owners = recorded_owners.clone();
                 let found = off(cx, {
                     let matcher = matcher.clone();
                     move || {
@@ -1078,15 +1084,17 @@ async fn handle_one(
                         // The app has a window here already: that one is
                         // what the agent means, as before ADR 0016.
                         if wanted.is_none()
-                            && windows::on_display(id).iter().any(|w| {
-                                w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
-                            })
+                            && windows::on_display_with_records(id, &owners)
+                                .iter()
+                                .any(|w| {
+                                    w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
+                                })
                         {
                             return Vec::new();
                         }
                         let mut found = Vec::new();
                         for o in others {
-                            for w in windows::on_display(o) {
+                            for w in windows::on_display_with_records(o, &owners) {
                                 if (wanted.is_some() || w.layer == 0)
                                     && is_named(&w, wanted, matcher.as_ref(), &mut ids)
                                 {
@@ -2868,6 +2876,23 @@ async fn create_display(
                 .await;
         }
     }
+    let on_new = off(cx, move || windows::on_display(id)).await;
+    if !on_new.is_empty() {
+        let targets: Vec<WindowTarget> = on_new.iter().map(|w| w.target).collect();
+        let unowned = core.update(cx, |c, _| {
+            c.displays.reconcile_new_display_windows(id, &targets)
+        });
+        if !unowned.is_empty() {
+            off(cx, move || {
+                for w in on_new {
+                    if unowned.contains(&w.target) {
+                        crate::core::evacuate_window_to_user(w.target, &w.app, id, "new display");
+                    }
+                }
+            })
+            .await;
+        }
+    }
     log::debug!(
         "createDisplay {id}: created {created} ms, parked {tucked} ms, clear of the user's workspaces {} ms",
         started.elapsed().as_millis()
@@ -3499,16 +3524,21 @@ async fn where_now(
     target: WindowTarget,
     cx: &mut AsyncApp,
 ) -> Now {
-    let (known, spares): (Vec<DisplayId>, Vec<DisplayId>) = core.read_with(cx, |c, _| {
+    let (known, spares, recorded_owners): (
+        Vec<DisplayId>,
+        Vec<DisplayId>,
+        std::collections::BTreeMap<u32, DisplayId>,
+    ) = core.read_with(cx, |c, _| {
         (
             c.displays.list.iter().map(|d| d.id).collect(),
             c.spare_ids(),
+            c.displays.recorded_owners(),
         )
     });
     let window = target.window_id;
     let (on, found) = off(cx, move || {
         for o in known {
-            if let Some(w) = windows::on_display(o)
+            if let Some(w) = windows::on_display_with_records(o, &recorded_owners)
                 .into_iter()
                 .find(|w| w.target.window_id == window)
             {
@@ -3682,17 +3712,19 @@ async fn held_window(
     matcher: Option<NamedApp>,
     cx: &mut AsyncApp,
 ) -> Option<(windows::Window, Held)> {
-    let holders: Vec<DisplayId> = core.read_with(cx, |c, _| {
+    let (holders, recorded_owners) = core.read_with(cx, |c, _| {
         let probe = WindowTarget {
             pid: 0,
             window_id: 0,
         };
-        c.displays
+        let holders: Vec<DisplayId> = c
+            .displays
             .list
             .iter()
             .filter(|d| c.displays.held_by(id, probe, Some(d.id)).is_some())
             .map(|d| d.id)
-            .collect()
+            .collect();
+        (holders, c.displays.recorded_owners())
     });
     if holders.is_empty() {
         return None;
@@ -3701,7 +3733,7 @@ async fn held_window(
         let mut ids = AppIds::default();
         let mut found = Vec::new();
         for o in holders {
-            for w in windows::on_display(o) {
+            for w in windows::on_display_with_records(o, &recorded_owners) {
                 if (wanted.is_some() || w.layer == 0)
                     && is_named(&w, wanted, matcher.as_ref(), &mut ids)
                 {
