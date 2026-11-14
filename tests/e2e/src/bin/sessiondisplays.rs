@@ -202,7 +202,7 @@ fn test(tag: &str) -> Result<()> {
         .context("other session create_display gave no display_id")?;
     let held_err = other.tool(
         "place_window",
-        json!({ "display_id": c, "app": "Field", "title": "NoSuchWindowTitle" }),
+        json!({ "display_id": c, "app": "Field", "window_title": "NoSuchWindowTitle" }),
     )?;
     check(
         "missing window error names the live holder session and connection state",

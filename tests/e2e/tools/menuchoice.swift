@@ -35,18 +35,13 @@ final class Unfocusable: NSPopUpButton {
 
 final class CustomDragBar: NSView {
   weak var stageScreen: NSScreen?
-  var downScreenPt: NSPoint?
   var dragged = false
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
   override func mouseDown(with event: NSEvent) {
-    downScreenPt = window?.convertPoint(toScreen: event.locationInWindow)
     dragged = false
   }
   override func mouseDragged(with event: NSEvent) {
-    guard let start = downScreenPt,
-          let cur = window?.convertPoint(toScreen: event.locationInWindow) else { return }
-    if hypot(cur.x - start.x, cur.y - start.y) > 3 {
-      dragged = true
-    }
+    dragged = true
   }
   override func mouseUp(with event: NSEvent) {
     guard dragged, let win = window, let stage = stageScreen else { return }
@@ -59,6 +54,7 @@ final class CustomDragBar: NSView {
 
 final class TallToolbarView: NSView {
   weak var stageScreen: NSScreen?
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
   override func isAccessibilityElement() -> Bool { true }
   override func accessibilityRole() -> NSAccessibility.Role? { .toolbar }
   override func mouseDragged(with event: NSEvent) {
@@ -217,7 +213,7 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     )
     tallWin = NSWindow(
       contentRect: tallFrame,
-      styleMask: [.titled, .fullSizeContentView],
+      styleMask: [.titled, .closable, .fullSizeContentView],
       backing: .buffered,
       defer: false,
       screen: screen
@@ -227,7 +223,7 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     tallWin.minSize = NSSize(width: 220, height: 1300)
     tallWin.title = "TallDrag"
     tallWin.setFrame(tallFrame, display: true)
-    let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1260, width: 220, height: 40))
+    let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1248, width: 220, height: 52))
     tallBar.stageScreen = stage
     tallWin.contentView!.addSubview(tallBar)
     tallWin.orderFrontRegardless()
@@ -277,14 +273,16 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     )
     sheetHostWin.orderFrontRegardless()
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-      self.tallWin.setFrame(tallFrame, display: true)
-      self.customWin.setFrame(customFrame, display: true)
-      self.sheetHostWin.setFrame(sheetHostFrame, display: true)
-      if self.attachedSheet.sheetParent == nil {
-        self.sheetHostWin.beginSheet(self.attachedSheet, completionHandler: nil)
+    for delay in [0.35, 0.95] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        self.tallWin.setFrame(tallFrame, display: true)
+        self.customWin.setFrame(customFrame, display: true)
+        self.sheetHostWin.setFrame(sheetHostFrame, display: true)
+        if self.attachedSheet.sheetParent == nil {
+          self.sheetHostWin.beginSheet(self.attachedSheet, completionHandler: nil)
+        }
+        self.customWin.orderFrontRegardless()
       }
-      self.customWin.orderFrontRegardless()
     }
 
     if let statePath = ProcessInfo.processInfo.environment["MENU_PANE_STATE"] {

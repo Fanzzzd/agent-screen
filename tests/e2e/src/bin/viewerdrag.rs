@@ -139,10 +139,11 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             }
         }),
     )?;
-    for _ in 0..40 {
-        if titled(id, "CustomDrag")?.is_some_and(|w| w.x < 100.0)
-            && titled(id, "TallDrag")?.is_some_and(|w| w.x > 250.0)
-            && titled(id, "SheetDrag")?.is_some_and(|w| w.x > 500.0)
+    sleep_ms(1100);
+    for _ in 0..30 {
+        if titled(id, "CustomDrag")?.is_some()
+            && titled(id, "TallDrag")?.is_some()
+            && titled(id, "SheetDrag")?.is_some()
             && pane_state.exists()
         {
             break;
@@ -150,36 +151,9 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         sleep_ms(50);
     }
 
-    // 1. Custom-title-bar window that yanks off the display 80 ms after mouseUp.
-    let before_custom = titled(id, "CustomDrag")?.context("CustomDrag on display")?;
-    let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 30.0) / h);
-    let c_by = (0.10, 0.14);
-    control.call(
-        "debugViewerInput",
-        json!({
-            "kind": "drag",
-            "x": c_from.0,
-            "y": c_from.1,
-            "toX": c_from.0 + c_by.0,
-            "toY": c_from.1 + c_by.1,
-        }),
-    )?;
-    sleep_ms(1000);
-    let after_custom = titled(id, "CustomDrag")?;
-    let custom_ok = after_custom.as_ref().is_some_and(|after| {
-        let moved = (
-            (after.x - before_custom.x) / w,
-            (after.y - before_custom.y) / h,
-        );
-        (moved.0 - c_by.0).abs() < 0.03 && (moved.1 - c_by.1).abs() < 0.03
-    });
-    check(
-        "a custom-title-bar window yanked off the display after mouseUp returns at its dragged position",
-        custom_ok,
-        format!("{} -> {}", json!(before_custom), json!(after_custom)),
-    );
-
-    // 2. Window taller than the display (`mid.y > h`), dragged past the Viewer image (`toX = 1.2`).
+    // 1. Window taller than the display (`mid.y > h`), dragged past the Viewer image (`toX = 1.2`).
+    // Run before `CustomDrag` so moving `TallDrag` to the right edge uncovers `CustomDrag` when
+    // `launchApp` centered both windows at `x = 340`.
     let before_tall = titled(id, "TallDrag")?.context("TallDrag on display")?;
     let t_from = ((before_tall.x + 110.0) / w, (before_tall.y + 20.0) / h);
     let t_dy = 0.12;
@@ -204,6 +178,43 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         "a window taller than the display dragged outside the Viewer image clamps at the edge and keeps its height",
         tall_ok,
         format!("{} -> {}", json!(before_tall), json!(after_tall)),
+    );
+
+    // 2. Custom-title-bar window that yanks off the display 80 ms after mouseUp.
+    let before_custom = titled(id, "CustomDrag")?.context("CustomDrag on display")?;
+    let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 30.0) / h);
+    let c_by = (0.10, 0.14);
+    control.call(
+        "debugViewerInput",
+        json!({
+            "kind": "drag",
+            "x": c_from.0,
+            "y": c_from.1,
+            "toX": c_from.0 + c_by.0,
+            "toY": c_from.1 + c_by.1,
+        }),
+    )?;
+    sleep_ms(550);
+    let mut after_custom = None;
+    let mut custom_ok = false;
+    for _ in 0..20 {
+        after_custom = titled(id, "CustomDrag")?;
+        custom_ok = after_custom.as_ref().is_some_and(|after| {
+            let moved = (
+                (after.x - before_custom.x) / w,
+                (after.y - before_custom.y) / h,
+            );
+            (moved.0 - c_by.0).abs() < 0.03 && (moved.1 - c_by.1).abs() < 0.03
+        });
+        if custom_ok {
+            break;
+        }
+        sleep_ms(60);
+    }
+    check(
+        "a custom-title-bar window yanked off the display after mouseUp returns at its dragged position",
+        custom_ok,
+        format!("{} -> {}", json!(before_custom), json!(after_custom)),
     );
 
     // 3. Window with an attached modal sheet dragged by its title bar stays on the display.
