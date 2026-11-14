@@ -244,16 +244,46 @@ impl Core {
             .collect()
     }
 
+    /// Ids of unused spare displays kept for reuse.
+    pub fn spare_ids(&self) -> Vec<DisplayId> {
+        self.spares.iter().map(|s| s.handle.id).collect()
+    }
+
+    fn online_unit(id: DisplayId) -> Option<u32> {
+        crate::mac::cg::active_displays()
+            .contains(&id)
+            .then(|| crate::mac::cg::unit_number(id))
+    }
+
+    fn spare_infos(&self) -> Vec<agent_screen_model::spares::SpareInfo> {
+        self.spares
+            .iter()
+            .map(|s| agent_screen_model::spares::SpareInfo {
+                size: s.size,
+                unit: Self::online_unit(s.handle.id),
+                expired: s.since.elapsed() >= SPARE_LIFE,
+                has_windows: !windows::on_display(s.handle.id).is_empty(),
+            })
+            .collect()
+    }
+
     /// A spare to use instead of a new display, with its name: one of
-    /// `size`, or else the newest, which the caller resizes. One that macOS
-    /// no longer shows, or that now shares its unit number, goes instead.
+    /// `size` with the lowest unit number, or else the lowest-unit spare,
+    /// which the caller resizes. One that macOS no longer shows, or that
+    /// now shares its unit number, goes instead.
     pub fn take_spare(&mut self, size: (f64, f64)) -> Option<(VirtualDisplay, String, bool)> {
         loop {
-            let index = self
+            let infos: Vec<_> = self
                 .spares
                 .iter()
-                .position(|s| s.size == size)
-                .or_else(|| self.spares.len().checked_sub(1))?;
+                .map(|s| agent_screen_model::spares::SpareInfo {
+                    size: s.size,
+                    unit: Self::online_unit(s.handle.id),
+                    expired: false,
+                    has_windows: false,
+                })
+                .collect();
+            let index = agent_screen_model::spares::pick_spare(&infos, size)?;
             let spare = self.spares.remove(index);
             let id = spare.handle.id;
             if crate::mac::cg::active_displays().contains(&id)
@@ -314,21 +344,25 @@ impl Core {
             released = true;
         }
         let warm = self.last_used.is_some_and(|t| t.elapsed() < WARM);
-        let (mut old, mut kept): (Vec<Spare>, Vec<Spare>) = std::mem::take(&mut self.spares)
-            .into_iter()
-            .partition(|s| s.since.elapsed() >= SPARE_LIFE);
-        // The newest stay as the ready ones.
-        while warm
-            && kept.len() < READY
-            && let Some(spare) = old.pop()
-        {
-            kept.push(spare);
+        let infos = self.spare_infos();
+        let live_units: Vec<u32> = self
+            .displays
+            .list
+            .iter()
+            .filter_map(|d| Self::online_unit(d.id))
+            .collect();
+        let keep =
+            agent_screen_model::spares::keep_spares(&infos, warm, READY, SPARES, &live_units);
+        let mut kept = Vec::new();
+        for (spare, stay) in std::mem::take(&mut self.spares).into_iter().zip(keep) {
+            if stay {
+                kept.push(spare);
+            } else {
+                crate::lifecycle::note("released", spare.handle.id, "spare unused");
+                released = true;
+            }
         }
         self.spares = kept;
-        for spare in old {
-            crate::lifecycle::note("released", spare.handle.id, "spare unused");
-            released = true;
-        }
         if !warm && self.displays.list.is_empty() && self.spares.is_empty() {
             released |= !display::filler_ids().is_empty();
             display::release_fillers();
@@ -476,32 +510,51 @@ impl Core {
             .spawn(display::configure(move || {
                 park_fillers(&virtual_ids);
                 for id in moving {
+                    let before = crate::mac::cg::display_bounds(id);
+                    let on_it = windows::on_display(id);
                     let parked = display::tuck_away(id, &virtual_ids);
+                    let after = crate::mac::cg::display_bounds(id);
+                    if after.width > 0.0
+                        && ((after.x - before.x).abs() > 0.5 || (after.y - before.y).abs() > 0.5)
+                    {
+                        for w in on_it {
+                            let _ = ax::set_frame(w.target, w.bounds.offset(after.x, after.y));
+                        }
+                    }
                     log::debug!("display {id} was moved; parked again: {parked}");
                 }
             }))
             .detach();
     }
 
-    /// Give each display its size back if it runs at another (issue #33).
-    /// WindowServer can switch a virtual display to another of the modes
-    /// macOS lists for it, such as 800×600, under load; the agent's
-    /// screenshots and the windows on it then no longer fit.
+    /// Give each display and spare its size back if it runs at another (issue
+    /// #33). WindowServer can switch a virtual display to another of the modes
+    /// macOS lists for it, or recall an old mode stored for its serial, such
+    /// as 800×500; screenshots and windows on it then no longer fit.
     pub fn hold_modes(&mut self, cx: &mut Context<Self>) {
         let mut wrong = Vec::new();
-        for d in &self.displays.list {
-            let (width, height) = (d.width as u32, d.height as u32);
-            let now = crate::mac::cg::display_bounds(d.id);
+        let wanted = self
+            .displays
+            .list
+            .iter()
+            .map(|d| (d.id, d.width as u32, d.height as u32))
+            .chain(
+                self.spares
+                    .iter()
+                    .map(|s| (s.handle.id, s.size.0 as u32, s.size.1 as u32)),
+            );
+        for (id, width, height) in wanted {
+            let now = crate::mac::cg::display_bounds(id);
             if (now.width as u32, now.height as u32) == (width, height) {
-                self.remodes.remove(&d.id);
+                self.remodes.remove(&id);
                 continue;
             }
-            let tries = self.remodes.entry(d.id).or_default();
+            let tries = self.remodes.entry(id).or_default();
             if *tries >= 3 {
                 continue;
             }
             *tries += 1;
-            wrong.push((d.id, width, height));
+            wrong.push((id, width, height));
         }
         if wrong.is_empty() {
             return;
@@ -732,10 +785,26 @@ impl Core {
         stop_recording(id, cx);
         if let Some(display) = self.displays.remove(id) {
             let size = (display.width, display.height);
-            let keep = self.spares.len() < SPARES
-                && windows::on_display(id).is_empty()
-                && crate::mac::cg::unit_twin(id).is_none();
-            if keep {
+            let empty_untwinned =
+                windows::on_display(id).is_empty() && crate::mac::cg::unit_twin(id).is_none();
+            if empty_untwinned && self.spares.len() < SPARES {
+                crate::lifecycle::note("kept", id, "spare");
+                self.spares.push(Spare {
+                    handle: display.handle,
+                    name: display.name,
+                    size,
+                    since: Instant::now(),
+                });
+            } else if empty_untwinned
+                && let Some(evict) = agent_screen_model::spares::retire_instead(
+                    &self.spare_infos(),
+                    SPARES,
+                    Self::online_unit(id),
+                )
+            {
+                let higher = self.spares.remove(evict);
+                crate::lifecycle::note("kept", higher.handle.id, "retiring");
+                self.retiring.push(higher.handle);
                 crate::lifecycle::note("kept", id, "spare");
                 self.spares.push(Spare {
                     handle: display.handle,

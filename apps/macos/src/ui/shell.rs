@@ -1390,9 +1390,15 @@ impl Shell {
                                 return Outcome::Refused("the window is no longer on the display");
                             };
                             let frame = window.bounds.offset(area.x, area.y);
+                            let hit_frame = click.menu.map_or(frame, |(_, mf)| mf);
+                            if let Some((menu_target, menu_frame)) = click.menu
+                                && cg::window_bounds(menu_target.window_id) != Some(menu_frame)
+                            {
+                                return Outcome::Refused("the menu closed before the click");
+                            }
                             if area != click.area
                                 || frame != click.frame
-                                || !real_click::contained(click.at, area, frame)
+                                || !real_click::contained(click.at, area, hit_frame)
                             {
                                 return Outcome::Refused(
                                     "the click is outside its authorized window or display",
@@ -1408,7 +1414,7 @@ impl Shell {
                                     return true;
                                 }
                                 let (element, _) = crate::mac::ax::target_at(
-                                    click.target.pid,
+                                    click.ax_pid,
                                     click.at,
                                     std::time::Duration::from_millis(300),
                                     false,
@@ -1451,6 +1457,8 @@ impl Shell {
                                     );
                                 }
                             }
+                            let menu_target = click.menu.map(|(m, _)| m);
+                            let menu_frame = click.menu.map(|(_, mf)| mf);
                             return real_input::click_at(
                                 click.target,
                                 click.at,
@@ -1469,9 +1477,15 @@ impl Shell {
                                         != Some(frame)
                                     {
                                         Some("the window geometry changed")
-                                    } else if !crate::mac::input::window_at(at)
-                                        .is_some_and(|(target, _)| target == click.target)
+                                    } else if let Some((mt, mf)) = menu_target.zip(menu_frame)
+                                        && cg::window_bounds(mt.window_id) != Some(mf)
                                     {
+                                        Some("the menu closed or moved")
+                                    } else if !crate::mac::input::real_click_still_under(
+                                        at,
+                                        click.target,
+                                        menu_target,
+                                    ) {
                                         Some("the window was covered or left the screen")
                                     } else {
                                         None
@@ -1572,7 +1586,7 @@ impl Shell {
                             // coordinates. One read of the on-screen
                             // windows gives both frames and what lies
                             // under every point the check looks at.
-                            let scene = sight.look(plan.target.pid);
+                            let scene = sight.look(plan.target, plan.drop, area);
                             let why = if !ok.load(Ordering::SeqCst) {
                                 Some("the loan was cancelled")
                             } else if cg::display_bounds(display) != area {

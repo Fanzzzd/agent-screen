@@ -105,6 +105,12 @@ pub struct MenuItem {
 pub struct Click {
     pub target: WindowTarget,
     pub frame: Rect,
+    /// When clicking an open pop-up menu (level 101) owned by an app on the
+    /// display, the menu window and its frame (#205).
+    pub menu: Option<(WindowTarget, Rect)>,
+    /// Process Accessibility hit-tests at `at` (differs from `target.pid` for
+    /// hosted `.xpc`/`.appex` views and menus).
+    pub ax_pid: i32,
     pub area: Rect,
     pub at: (f64, f64),
     pub click: agent_screen_model::real_click::Click,
@@ -130,7 +136,9 @@ impl Plan {
         match self {
             Plan::Drag(d) => d.target.window_id == window || d.drop.window_id == window,
             Plan::MenuItem(m) => m.target.window_id == window,
-            Plan::Click(c) => c.target.window_id == window,
+            Plan::Click(c) => {
+                c.target.window_id == window || c.menu.is_some_and(|(m, _)| m.window_id == window)
+            }
         }
     }
 }

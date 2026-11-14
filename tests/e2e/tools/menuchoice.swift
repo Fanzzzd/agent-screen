@@ -34,9 +34,15 @@ final class Unfocusable: NSPopUpButton {
 }
 final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var window: NSWindow!
+  var sheet: NSWindow!
   var opens = 0
+  var sheetOpens = 0
+  var sheetMenu = 0
   var acts = 0
-  let pop = NSPopUpButton(frame: NSRect(x: 30, y: 380, width: 220, height: 28), pullsDown: false)
+  let pop = NSPopUpButton(frame: NSRect(x: 30, y: 380, width: 210, height: 28), pullsDown: false)
+  let openSheetBtn = NSButton(frame: NSRect(x: 250, y: 380, width: 95, height: 28))
+  let sheetPop = NSPopUpButton(frame: NSRect(x: 20, y: 80, width: 200, height: 28), pullsDown: false)
+  let closeSheetBtn = NSButton(frame: NSRect(x: 20, y: 24, width: 80, height: 28))
   let combo = SlowCombo(frame: NSRect(x: 30, y: 320, width: 220, height: 28))
   let locked = Unfocusable(frame: NSRect(x: 30, y: 260, width: 220, height: 28), pullsDown: false)
   // `acts` counts its actions, so a script can tell when they ran.
@@ -52,6 +58,17 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     pop.addItems(withTitles: ["Apple", "Banana", "Cherry", "Dragon fruit", "Dragon", "1", "10", "11", "中文"])
     pop.setAccessibilityLabel("Fruit")
     pop.target = self; pop.action = #selector(changed); pop.menu?.delegate = self
+    openSheetBtn.title = "Open Sheet"; openSheetBtn.bezelStyle = .rounded
+    openSheetBtn.setAccessibilityLabel("Open Sheet")
+    openSheetBtn.target = self; openSheetBtn.action = #selector(openSheet)
+    sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 130), styleMask: [.titled], backing: .buffered, defer: true)
+    sheetPop.addItems(withTitles: ["Hourly", "Daily", "Weekly", "Manually"])
+    sheetPop.setAccessibilityLabel("Frequency")
+    sheetPop.target = self; sheetPop.action = #selector(changed); sheetPop.menu?.delegate = self
+    closeSheetBtn.title = "Done"; closeSheetBtn.bezelStyle = .rounded
+    closeSheetBtn.setAccessibilityLabel("Done")
+    closeSheetBtn.target = self; closeSheetBtn.action = #selector(closeSheet)
+    for view in [sheetPop, closeSheetBtn] as [NSView] { sheet.contentView!.addSubview(view) }
     combo.addItems(withObjectValues: ["Red", "Blue", "Green", "Reject", "Slow"])
     combo.setAccessibilityLabel("Color")
     combo.target = self; combo.action = #selector(changed)
@@ -66,19 +83,40 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     note.setAccessibilityLabel("Note")
     NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: note, queue: .main) { _ in self.changed() }
     web.loadHTMLString("<select aria-label='Web fruit'><option>Apple</option><option>Kiwi</option></select>", baseURL: nil)
-    for view in [pop, combo, locked, jump, note, web] as [NSView] { window.contentView!.addSubview(view) }
+    for view in [pop, openSheetBtn, combo, locked, jump, note, web] as [NSView] { window.contentView!.addSubview(view) }
     window.orderFrontRegardless(); changed()
     Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
       guard screen.frame.contains(self.window.frame), NSScreen.screens.contains(screen) else { exit(5) }
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 55) { exit(0) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 75) { exit(0) }
+  }
+  @objc func openSheet() {
+    guard sheet.sheetParent == nil else { return }
+    window.beginSheet(sheet, completionHandler: nil)
+    changed()
+  }
+  @objc func closeSheet() {
+    guard sheet.sheetParent != nil else { return }
+    window.endSheet(sheet)
+    changed()
   }
   @objc func changed() {
     if combo.stringValue == "Reject" { combo.stringValue = "Blue" }
-    window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) locked=\(locked.titleOfSelectedItem ?? "") jump=\(jump.titleOfSelectedItem ?? "") acts=\(acts) keys=\(jump.keys) note=\(note.stringValue) opens=\(opens)"
+    window.title = "fruit=\(pop.titleOfSelectedItem ?? "") color=\(combo.stringValue) locked=\(locked.titleOfSelectedItem ?? "") jump=\(jump.titleOfSelectedItem ?? "") acts=\(acts) keys=\(jump.keys) note=\(note.stringValue) opens=\(opens) sheet=\(sheetPop.titleOfSelectedItem ?? "") sheetOpens=\(sheetOpens) sheetMenu=\(sheetMenu)"
   }
   @objc func jumped() { acts += 1; changed() }
-  func menuWillOpen(_ menu: NSMenu) { opens += 1; changed(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { menu.cancelTrackingWithoutAnimation() } }
+  func menuWillOpen(_ menu: NSMenu) {
+    if menu === sheetPop.menu {
+      sheetOpens += 1; sheetMenu = 1; changed()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { menu.cancelTrackingWithoutAnimation() }
+    } else {
+      opens += 1; changed()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { menu.cancelTrackingWithoutAnimation() }
+    }
+  }
+  func menuDidClose(_ menu: NSMenu) {
+    if menu === sheetPop.menu { sheetMenu = 0; changed() }
+  }
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)

@@ -237,6 +237,14 @@ pub fn display_role(window: &Window) -> crate::model::DisplayRole {
         .unwrap_or(crate::model::DisplayRole::User)
 }
 
+/// Whether `bounds`'s center sits on one of `displays`. Blocking.
+pub fn on_any(bounds: &Rect, displays: &[DisplayId]) -> bool {
+    let mid = bounds.mid();
+    displays
+        .iter()
+        .any(|&id| cg::display_bounds(id).contains(mid))
+}
+
 /// Windows on any of `displays` that AeroSpace leaves there. With
 /// `ignored-monitors` it lets go of a window that lands on an Agent Display
 /// only once its own list of screens has the display, which comes late

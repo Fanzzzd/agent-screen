@@ -553,14 +553,18 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
         })
         .collect();
     let screens = screens(&online, virtual_ids, &restore);
-    let moves: Vec<(u32, (f64, f64))> = arrangement::plan(&screens)
+    let mut moves: Vec<(u32, (f64, f64))> = arrangement::plan(&screens)
         .into_iter()
         .filter(|&(d, (x, y))| {
             let now = cg::display_bounds(d);
             (now.x, now.y) != (x, y)
         })
-        .chain(restore.iter().copied())
         .collect();
+    for &(d, pos) in &restore {
+        if !moves.iter().any(|&(m, _)| m == d) {
+            moves.push((d, pos));
+        }
+    }
     if !restore.is_empty() {
         log::info!("display {id}: putting back displays macOS moved for it: {restore:?}");
     }

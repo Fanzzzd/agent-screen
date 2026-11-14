@@ -560,6 +560,8 @@ fn a_click_loan_runs_only_when_allowed_and_ends_its_grant() {
             window_id: 7,
         },
         frame: model::Rect::new(100.0, 100.0, 400.0, 300.0),
+        menu: None,
+        ax_pid: 1,
         area: model::Rect::new(0.0, 0.0, 800.0, 600.0),
         at: (300.0, 250.0),
         click: real_click::Click::of_action("double_click").unwrap(),

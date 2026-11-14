@@ -196,9 +196,15 @@ impl Streams {
                 (f.max(fps), (w.max(pw), h.max(ph)))
             });
         if wanted == stream.running {
+            if fps > 0 && stream.idle() {
+                stream.breaks = 0;
+                stream.failures = 0;
+                self.start(id, cx);
+            }
             return;
         }
         let before = stream.running;
+        let agent_watching = stream.wants.contains_key("agent");
         stream.running = wanted;
         *stream.target.lock().unwrap() = wanted;
         let fps = wanted.0;
@@ -208,13 +214,15 @@ impl Streams {
             if let Some(capture) = stream.capture.take() {
                 cx.background_spawn(async move { drop(capture) }).detach();
             }
-        } else if grows(before.1, wanted.1)
+        } else if needs_fresh_stream(before, wanted, agent_watching)
             && let Some(capture) = stream.capture.take()
         {
-            // ScreenCaptureKit sends a frame only when the picture changes:
-            // resized in place, a still display would keep showing the
-            // small frame, scaled up and blurry. A new stream sends one
-            // at once.
+            // ScreenCaptureKit sends a Complete frame only when the picture
+            // changes: resized or sped up in place from the 1 fps warm
+            // stream, a still display would keep showing a blurry or stale
+            // frame (#190). A new stream sends a fresh frame at once while
+            // the previous frame stays up until it arrives.
+            stream.breaks = 0;
             cx.background_spawn(async move { drop(capture) }).detach();
             if !stream.starting {
                 self.start(id, cx);
@@ -228,6 +236,7 @@ impl Streams {
             })
             .detach();
         } else if !stream.starting {
+            stream.breaks = 0;
             self.start(id, cx);
         }
     }
@@ -377,10 +386,12 @@ impl Streams {
         if stream.capture.as_ref().map(|c| c.serial()) != Some(serial) {
             return;
         }
+        let misrouted = stream.capture.as_ref().is_some_and(|c| c.misrouted());
         if let Some(capture) = stream.capture.take() {
             cx.background_spawn(async move { drop(capture) }).detach();
         }
-        if stream.breaks > 0 && self.frames.remove(&id).is_some() {
+        if drop_cached_frame_on_break(misrouted, stream.breaks) && self.frames.remove(&id).is_some()
+        {
             cx.notify();
         }
         let wait = match stream.breaks {
@@ -448,4 +459,51 @@ impl Streams {
 /// Whether `to` needs more pixels than `from` in either direction.
 fn grows(from: (u32, u32), to: (u32, u32)) -> bool {
     to.0 > from.0 || to.1 > from.1
+}
+
+/// Whether changing a running capture from `before` to `wanted` should start
+/// a fresh `SCStream` rather than reconfiguring in place. Reconfiguring a
+/// 1 fps warm stream up to Peek's 12 fps at the same thumbnail size emits no
+/// frame on a still display, leaving Peek showing an older frame until the
+/// Viewer grows the pixel size (#190). Leave an active `waitForChange`
+/// (`agent_watching`) stream unbroken so its change baseline stays continuous.
+fn needs_fresh_stream(
+    before: (i32, (u32, u32)),
+    wanted: (i32, (u32, u32)),
+    agent_watching: bool,
+) -> bool {
+    wanted.0 > 0
+        && (grows(before.1, wanted.1) || (before.0 <= 1 && wanted.0 > 1 && !agent_watching))
+}
+
+/// Only a stream that showed another screen (`misrouted`) clears the cached
+/// thumbnail after a repeated break; macOS routinely stops idle 1 fps warm
+/// streams on still displays, where the last good frame still shows this
+/// display (#190).
+fn drop_cached_frame_on_break(misrouted: bool, breaks_before: u32) -> bool {
+    misrouted && breaks_before > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raising_from_warm_to_peek_restarts_unless_agent_is_watching() {
+        let thumb = (800, 500);
+        let full = (2560, 1600);
+        assert!(needs_fresh_stream((1, thumb), (12, thumb), false));
+        assert!(!needs_fresh_stream((12, thumb), (1, thumb), false));
+        assert!(!needs_fresh_stream((10, thumb), (12, thumb), true));
+        assert!(!needs_fresh_stream((1, thumb), (12, thumb), true));
+        assert!(needs_fresh_stream((12, thumb), (60, full), true));
+    }
+
+    #[test]
+    fn only_repeated_misroutes_clear_the_cached_frame() {
+        assert!(!drop_cached_frame_on_break(false, 0));
+        assert!(!drop_cached_frame_on_break(false, 3));
+        assert!(!drop_cached_frame_on_break(true, 0));
+        assert!(drop_cached_frame_on_break(true, 1));
+    }
 }

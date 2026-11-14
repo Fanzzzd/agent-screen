@@ -151,10 +151,27 @@ pub fn arguments(pid: i32) -> Option<Vec<String>> {
     )
 }
 
-/// Where the app with this pid is installed.
+fn bundle_from_executable_path(path: &str) -> Option<PathBuf> {
+    let (bundle, _) = path.rsplit_once("/Contents/MacOS/")?;
+    (bundle.ends_with(".app") || bundle.ends_with(".appex") || bundle.ends_with(".xpc"))
+        .then(|| PathBuf::from(bundle))
+}
+
+/// Where the app or view service with this pid is installed. ExtensionKit
+/// (`.appex`) and XPC (`.xpc`) processes are not registered as running GUI
+/// apps in `NSRunningApplication`, so fall back to `proc_pidpath`.
 pub fn bundle_of(pid: i32) -> Option<PathBuf> {
-    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
-    Some(PathBuf::from(app.bundleURL()?.path()?.to_string()))
+    if let Some(url) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.bundleURL())
+        .and_then(|url| url.path())
+    {
+        return Some(PathBuf::from(url.to_string()));
+    }
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    (n > 0)
+        .then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned())
+        .and_then(|p| bundle_from_executable_path(&p))
 }
 
 /// Whether the app draws its controls with AppKit, so its pop-up buttons
@@ -554,5 +571,18 @@ mod tests {
             Some(PathBuf::from("/System/Applications/Calculator.app"))
         );
         assert_eq!(resolve("No Such App Anywhere"), None);
+    }
+
+    #[test]
+    fn bundle_path_extracts_app_appex_and_xpc_bundles() {
+        assert_eq!(
+            bundle_from_executable_path(
+                "/System/Library/ExtensionKit/Extensions/TimeMachineSettings.appex/Contents/MacOS/TimeMachineSettings"
+            ),
+            Some(PathBuf::from(
+                "/System/Library/ExtensionKit/Extensions/TimeMachineSettings.appex"
+            ))
+        );
+        assert_eq!(bundle_from_executable_path("/usr/bin/true"), None);
     }
 }
