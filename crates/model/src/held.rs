@@ -414,6 +414,55 @@ pub fn given_note(given: &[(WindowId, String)]) -> String {
         .join(" ")
 }
 
+/// What place_window says when the user keeps a window another session holds:
+/// who still has it (#189, ADR 0017).
+pub fn declined_message(app: &str, held: &Held) -> String {
+    let label = &held.label;
+    match held.place {
+        Place::Review => format!(
+            "the user kept the {app} window on {label}, a display waiting for their review; it stays there. Work without it, or ask the user"
+        ),
+        Place::Display => format!(
+            "the user kept the {app} window with {label}, the agent session using it; it stays there. Work without it, or ask again later"
+        ),
+        Place::UserScreen => format!(
+            "the user kept the {app} window for {label}, the agent session that started it; it stays on their screen. Work without it, or ask again later"
+        ),
+    }
+}
+
+/// What place_window says when a Window Request for a held window times out:
+/// names the holder so the agent can tell the user which session or Review
+/// Display holds the window (#189).
+pub fn timed_out_message(app: &str, seconds: f64, held: Option<&Held>) -> String {
+    match held {
+        Some(Held {
+            label,
+            place: Place::Review,
+            ..
+        }) => format!(
+            "the user didn't answer your request for the {app} window on {label} (waiting for their review) within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        ),
+        Some(Held {
+            label,
+            place: Place::Display,
+            ..
+        }) => format!(
+            "the user didn't answer your request for the {app} window held by {label} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        ),
+        Some(Held {
+            label,
+            place: Place::UserScreen,
+            ..
+        }) => format!(
+            "the user didn't answer your request for the {app} window started by {label} within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        ),
+        None => format!(
+            "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +907,33 @@ mod tests {
         assert!(d.transfer(8, 8, wechat(1), "WeChat").is_err());
         d.end(8, EndReason::Finished);
         assert!(d.transfer(7, 8, wechat(1), "WeChat").is_err());
+    }
+
+    #[test]
+    fn declined_and_timed_out_messages_name_the_holder() {
+        let held = Held {
+            display: 7,
+            label: "Claude Code · Book flights".into(),
+            agent: "Claude Code".into(),
+            place: Place::Display,
+        };
+        let declined = declined_message("Chrome", &held);
+        assert!(
+            declined.contains("Claude Code · Book flights"),
+            "{declined}"
+        );
+        let timed_out = timed_out_message("Chrome", 60.0, Some(&held));
+        assert!(
+            timed_out.contains("Claude Code · Book flights") && timed_out.contains("60 s"),
+            "{timed_out}"
+        );
+        let review = Held {
+            place: Place::Review,
+            ..held
+        };
+        assert!(
+            timed_out_message("Chrome", 60.0, Some(&review)).contains("waiting for their review")
+        );
+        assert!(!timed_out_message("Chrome", 60.0, None).contains("held by"));
     }
 }

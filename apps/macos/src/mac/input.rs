@@ -978,11 +978,27 @@ impl Forwarder {
             if !w.keys_reach(target) {
                 return PopupTyped::Refused;
             }
+            if !super::ax::is_window_or_sheet_focused(target) && !is_front(target.pid) {
+                let _ = super::ax::make_main(target);
+                w.send_focus(target);
+            }
             if is_stopped() {
                 return PopupTyped::Stopped(0);
             }
             // The keys go to the app's focused element, which must be the
-            // button: read it back.
+            // button: read it back. An ExtensionKit `.appex` button may report
+            // its own service pid while hosted inside `target.pid` (#205).
+            let element_pid = super::ax::pid_of(element.get()).unwrap_or(target.pid);
+            let key_pid = if element_pid != target.pid && cg::is_remote_view_service(element_pid) {
+                element_pid
+            } else {
+                target.pid
+            };
+            let focused_button = || {
+                super::ax::is_focused_element(target.pid, element.get())
+                    || (element_pid != target.pid
+                        && super::ax::is_focused_element(element_pid, element.get()))
+            };
             if !super::ax::set_attribute(
                 element.get(),
                 "AXFocused",
@@ -993,7 +1009,7 @@ impl Forwarder {
             // Chromium moves focus a moment after it answers: look for up
             // to 300 ms, and send nothing if it never arrives.
             let asked = Instant::now();
-            while !super::ax::is_focused_element(target.pid, element.get()) {
+            while !focused_button() {
                 if is_stopped() {
                     return PopupTyped::Stopped(0);
                 }
@@ -1019,8 +1035,10 @@ impl Forwarder {
                 // off the display.
                 if (!front_at_start && is_front(target.pid))
                     || !placed()
-                    || super::ax::focused_window_id(target.pid) != Some(target.window_id)
-                    || !super::ax::is_focused_element(target.pid, element.get())
+                    || !(super::ax::is_window_or_sheet_focused(target)
+                        || (key_pid != target.pid
+                            && super::ax::focused_window_id(target.pid).is_none()))
+                    || !focused_button()
                 {
                     return PopupTyped::Interrupted(typed);
                 }
@@ -1044,7 +1062,7 @@ impl Forwarder {
                     .collect();
                 // A real-input loan holds the gate: measure the gap once
                 // it is ours, just before the key goes out.
-                let gate = super::real_input::process_gate(target.pid);
+                let gate = super::real_input::process_gate(key_pid);
                 let input = gate.read().unwrap_or_else(|e| e.into_inner());
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
@@ -1053,7 +1071,7 @@ impl Forwarder {
                     return PopupTyped::Slow(typed);
                 }
                 for event in &events {
-                    post_now(event, target.pid, true);
+                    post_now(event, key_pid, true);
                 }
                 last = Some(Instant::now());
                 drop(input);
@@ -1574,31 +1592,109 @@ impl Worker {
         self.release_agent_button();
         let hit = self.hit(at, true).or_else(|| self.edge_hit(at));
         record_hit(hit);
+        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
         let Some(hit) = hit else {
+            // Clicking empty space on a display where an NSMenu (`layer == 101`)
+            // is stuck open should still cancel that menu (#207).
+            if matches!(button, Button::Left)
+                && let Some(within) = cg::active_displays()
+                    .into_iter()
+                    .map(cg::display_bounds)
+                    .find(|b| b.contains(at))
+            {
+                let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+                let mut cancelled = None;
+                for m in &windows {
+                    if m.layer == popup_menu
+                        && m.bounds.intersects(&within)
+                        && !m.bounds.contains(at)
+                    {
+                        let mut menu_pids = vec![m.target.pid];
+                        if m.host.pid != m.target.pid {
+                            menu_pids.push(m.host.pid);
+                        }
+                        for w in &windows {
+                            if (0..=8).contains(&w.layer) && within.contains(w.bounds.mid()) {
+                                if !menu_pids.contains(&w.target.pid) {
+                                    menu_pids.push(w.target.pid);
+                                }
+                                if !menu_pids.contains(&w.host.pid) {
+                                    menu_pids.push(w.host.pid);
+                                }
+                            }
+                        }
+                        if super::ax::cancel_menu_at(&menu_pids, m.bounds.mid()) {
+                            cancelled = Some(m.host);
+                        }
+                    }
+                }
+                if let Some(host) = cancelled {
+                    return Some(host);
+                }
+            }
             log::info!("input: no window at {at:?}");
             return None;
         };
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
-        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+        // The windows the press was hit-tested in, taken a moment ago.
+        let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+        let within_display = cg::active_displays()
+            .into_iter()
+            .map(cg::display_bounds)
+            .find(|b| b.contains(at))
+            .or_else(|| display_of(target.window_id));
+        let push_pid = |list: &mut Vec<i32>, pid: i32| {
+            if !list.contains(&pid) {
+                list.push(pid);
+            }
+        };
+        let mut display_pids = Vec::new();
+        push_pid(&mut display_pids, hit.target.pid);
+        push_pid(&mut display_pids, hit.host.pid);
+        if let Some(within) = within_display {
+            for w in &windows {
+                if (0..=8).contains(&w.layer) && within.contains(w.bounds.mid()) {
+                    push_pid(&mut display_pids, w.target.pid);
+                    push_pid(&mut display_pids, w.host.pid);
+                }
+            }
+        }
         if hit.layer == popup_menu
             && matches!(button, Button::Left)
-            && super::ax::press_menu_item_at(hit.host.pid, at)
+            && super::ax::press_menu_item_at(&display_pids, at)
         {
             // No gesture: the release that follows has nothing to send.
             log::debug!("input: pressed the menu item at {at:?}");
             return Some(target);
         }
+        // An open pop-up menu runs a modal tracking loop in AppKit / `.appex`
+        // that ignores posted clicks outside its window (#207). Cancel it
+        // first when a click on the same display lands outside the menu.
+        if hit.layer != popup_menu
+            && matches!(button, Button::Left)
+            && let Some(within) = within_display
+        {
+            for m in &windows {
+                if m.layer == popup_menu && m.bounds.intersects(&within) && !m.bounds.contains(at) {
+                    let mut menu_pids = Vec::new();
+                    push_pid(&mut menu_pids, m.target.pid);
+                    push_pid(&mut menu_pids, m.host.pid);
+                    for &pid in &display_pids {
+                        push_pid(&mut menu_pids, pid);
+                    }
+                    let _ = super::ax::cancel_menu_at(&menu_pids, m.bounds.mid());
+                }
+            }
+        }
         if hit.target != hit.host {
             self.pressed_panels.push(target.window_id);
         }
-        // The windows the press was hit-tested in, taken a moment ago. A
-        // list of the front app takes the user's press as it is: making it key
+        // A list of the front app takes the user's press as it is: making it key
         // would take key from the window it belongs to, and a list that
         // closes then closes before the press lands. An app in the
         // background drops a press on a window that isn't key, and a file
         // panel is another process's, so there the focus goes as before.
-        let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
         // Only for the user's press: an agent's click focuses as before, so
         // the user's key window is remembered and handed back.
         if self.user_press
@@ -2271,13 +2367,15 @@ type PanelKey = (WindowTarget, i64, Rect);
 pub struct DragScene {
     hits: Vec<Hit>,
     frames: Vec<(u32, Rect)>,
-    source: i32,
+    source: WindowTarget,
+    drop: WindowTarget,
+    area: Rect,
 }
 
 impl DragSight {
     /// The windows now, read once for every point a check looks at. `source`
-    /// is the pid of the app the drag starts in.
-    pub fn look(&self, source: i32) -> DragScene {
+    /// and `drop` are the windows the drag starts and ends in on `area`.
+    pub fn look(&self, source: WindowTarget, drop: WindowTarget, area: Rect) -> DragScene {
         let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
         let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
         let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
@@ -2293,7 +2391,7 @@ impl DragSight {
         let mut hits = reachable(on_screen, menu, status);
         let key: Vec<PanelKey> = hits
             .iter()
-            .filter(|h| !(h.layer == dragging && h.target.pid == source))
+            .filter(|h| !(h.layer == dragging && h.target.pid == source.pid))
             .map(|h| (h.target, h.layer, h.bounds))
             .collect();
         let mut cache = self.panels.borrow_mut();
@@ -2307,6 +2405,8 @@ impl DragSight {
             hits,
             frames,
             source,
+            drop,
+            area,
         }
     }
 }
@@ -2322,17 +2422,44 @@ impl DragScene {
     }
 
     /// The app window under a point of the drag: as `window_at`, but the
-    /// drag's own image, which the source app draws at the dragging level
-    /// under the pointer, doesn't cover it. Another app's window at that
-    /// level still does.
+    /// drag's own image doesn't cover it, sheets and panels (levels 0..=8)
+    /// count by their host window, and a pop-up menu the drag itself opened
+    /// on `area` counts as `drop` (#205).
     pub fn under(&self, at: (f64, f64)) -> Option<WindowTarget> {
         let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
-        self.hits
-            .iter()
-            .filter(|h| !(h.layer == dragging && h.target.pid == self.source))
-            .find(|h| h.bounds.contains(at))
-            .filter(|h| h.layer == 0 && h.target == h.host)
-            .map(|h| h.target)
+        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+        resolve_drag_under(
+            &self.hits,
+            (self.source, self.drop),
+            self.area,
+            (dragging, popup_menu),
+            cg::is_remote_view_service,
+            at,
+        )
+    }
+}
+
+fn resolve_drag_under(
+    hits: &[Hit],
+    (source, drop): (WindowTarget, WindowTarget),
+    area: Rect,
+    (dragging, popup_menu): (i64, i64),
+    is_remote: impl Fn(i32) -> bool,
+    at: (f64, f64),
+) -> Option<WindowTarget> {
+    let hit = hits
+        .iter()
+        .filter(|h| !(h.layer == dragging && h.target.pid == source.pid))
+        .find(|h| h.bounds.contains(at))?;
+    if (0..=8).contains(&hit.layer) {
+        Some(hit.host)
+    } else if hit.layer == popup_menu
+        && area.contains(at)
+        && (hit.host.pid == source.pid || is_remote(hit.host.pid))
+    {
+        Some(drop)
+    } else {
+        None
     }
 }
 
@@ -2407,6 +2534,87 @@ pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
         .find(|h| h.bounds.contains(at))
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| (h.target, h.bounds))
+}
+
+/// The window under a `real_input` drag's start or end: includes sheets and
+/// panels (levels 0..=8) by their host window (#205).
+pub fn real_drag_window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
+    hits()
+        .into_iter()
+        .find(|h| h.bounds.contains(at))
+        .filter(|h| (0..=8).contains(&h.layer))
+        .map(|h| (h.host, h.bounds))
+}
+
+/// What a `real_input` click hits on a display: either a display window
+/// directly (levels 0..=8, sheets and hosted panels included) or an open
+/// pop-up menu (level 101) owned by an app on that display (#205).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RealClickHit {
+    pub window: WindowTarget,
+    pub window_frame: Rect,
+    pub menu: Option<(WindowTarget, Rect)>,
+    pub ax_pid: i32,
+}
+
+pub fn real_click_at(at: (f64, f64), display_windows: &[WindowTarget]) -> Option<RealClickHit> {
+    let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+    resolve_real_click(
+        &hits(),
+        display_windows,
+        popup_menu,
+        cg::is_remote_view_service,
+        at,
+    )
+}
+
+/// Whether `at` is still directly over `expected` (`menu` when clicking an
+/// open pop-up menu, else `window`).
+pub fn real_click_still_under(
+    at: (f64, f64),
+    window: WindowTarget,
+    menu: Option<WindowTarget>,
+) -> bool {
+    let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+    let Some(hit) = hits().into_iter().find(|h| h.bounds.contains(at)) else {
+        return false;
+    };
+    match menu {
+        Some(menu) => hit.layer == popup_menu && hit.host == menu,
+        None => (0..=8).contains(&hit.layer) && hit.host == window,
+    }
+}
+
+fn resolve_real_click(
+    hits: &[Hit],
+    display_windows: &[WindowTarget],
+    popup_menu: i64,
+    is_remote: impl Fn(i32) -> bool,
+    at: (f64, f64),
+) -> Option<RealClickHit> {
+    let hit = hits.iter().find(|h| h.bounds.contains(at))?;
+    if (0..=8).contains(&hit.layer) && display_windows.contains(&hit.host) {
+        return Some(RealClickHit {
+            window: hit.host,
+            window_frame: hit.bounds,
+            menu: None,
+            ax_pid: hit.target.pid,
+        });
+    }
+    if hit.layer == popup_menu {
+        let owner = hits.iter().find(|w| {
+            (0..=8).contains(&w.layer)
+                && display_windows.contains(&w.host)
+                && (w.host.pid == hit.host.pid || is_remote(hit.host.pid))
+        })?;
+        return Some(RealClickHit {
+            window: owner.host,
+            window_frame: owner.bounds,
+            menu: Some((hit.host, hit.bounds)),
+            ax_pid: hit.target.pid,
+        });
+    }
+    None
 }
 
 /// Whether a press at a global point hits a list or panel, so Agent Screen
@@ -3057,5 +3265,98 @@ mod popup_tests {
         let start = Instant::now();
         assert!(wait_typeahead(&AtomicBool::new(false)));
         assert!(start.elapsed() >= Duration::from_millis(1200));
+    }
+
+    #[test]
+    fn drag_and_real_click_accept_session_popup_menus_and_sheets_only_on_the_display() {
+        let area = Rect::new(4288.0, -800.0, 1280.0, 800.0);
+        let sheet = WindowTarget {
+            pid: 100,
+            window_id: 201,
+        };
+        let appex_menu = WindowTarget {
+            pid: 300,
+            window_id: 401,
+        };
+        let stranger_menu = WindowTarget {
+            pid: 999,
+            window_id: 902,
+        };
+        let sheet_rect = Rect::new(4500.0, -700.0, 600.0, 400.0);
+        let menu_rect = Rect::new(4600.0, -600.0, 200.0, 180.0);
+        let hits = vec![
+            Hit {
+                host: appex_menu,
+                target: appex_menu,
+                bounds: menu_rect,
+                layer: 101,
+            },
+            Hit {
+                host: sheet,
+                target: WindowTarget {
+                    pid: 300,
+                    window_id: 301,
+                },
+                bounds: sheet_rect,
+                layer: 8,
+            },
+        ];
+        let at_menu = (4650.0, -520.0);
+        let at_sheet = (4900.0, -520.0);
+
+        // #205 Expected #3: drag opening a pop-up menu (same pid or `.appex`
+        // remote service) keeps seeing `drop` on the display.
+        assert_eq!(
+            resolve_drag_under(
+                &hits,
+                (sheet, sheet),
+                area,
+                (500, 101),
+                |p| p == 300,
+                at_menu
+            ),
+            Some(sheet)
+        );
+        assert_eq!(
+            resolve_drag_under(&hits, (sheet, sheet), area, (500, 101), |_| false, at_sheet),
+            Some(sheet)
+        );
+        // An unrelated non-remote app's menu does not pass.
+        let stranger_hits = vec![
+            Hit {
+                host: stranger_menu,
+                target: stranger_menu,
+                bounds: menu_rect,
+                layer: 101,
+            },
+            hits[1],
+        ];
+        assert_eq!(
+            resolve_drag_under(
+                &stranger_hits,
+                (sheet, sheet),
+                area,
+                (500, 101),
+                |_| false,
+                at_menu
+            ),
+            None
+        );
+
+        // #205 Expected #2: real_click on an open pop-up menu resolves to the
+        // owning display window + menu frame, and rejects unrelated menus.
+        assert_eq!(
+            resolve_real_click(&hits, &[sheet], 101, |p| p == 300, at_menu),
+            Some(RealClickHit {
+                window: sheet,
+                window_frame: sheet_rect,
+                menu: Some((appex_menu, menu_rect)),
+                ax_pid: 300,
+            })
+        );
+        assert_eq!(
+            resolve_real_click(&stranger_hits, &[sheet], 101, |_| false, at_menu),
+            None
+        );
     }
 }

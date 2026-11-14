@@ -259,20 +259,29 @@ pub fn remote_panels() -> Vec<WindowInfo> {
     // size sort out all but a few before anything else is read.
     window_list_where(CGWindowListOption::OptionAll, 0, |pid, layer, b| {
         // Normal windows, and modal panels at their own level, as Firefox's.
-        (0..1000).contains(&layer) && b.width > 100.0 && b.height > 100.0 && is_xpc_service(pid)
+        (0..1000).contains(&layer)
+            && b.width > 100.0
+            && b.height > 100.0
+            && is_remote_view_service(pid)
     })
 }
 
-/// Whether a process runs from an XPC service bundle. A process's path
-/// stays for its life, so each answer is kept while the pid lives on.
-fn is_xpc_service(pid: i32) -> bool {
+fn is_remote_service_path(path: &str) -> bool {
+    path.contains(".xpc/Contents/MacOS/") || path.contains(".appex/Contents/MacOS/")
+}
+
+/// Whether a process runs from an XPC or ExtensionKit (`.appex`) remote view
+/// bundle, such as `openAndSavePanelService.xpc` or System Settings panes like
+/// `TimeMachineSettings.appex` (#205, #207). A process's path stays for its
+/// life, so each answer is kept while the pid lives on.
+pub(crate) fn is_remote_view_service(pid: i32) -> bool {
     use std::collections::HashMap;
     use std::sync::Mutex;
     static KNOWN: Mutex<Option<HashMap<i32, bool>>> = Mutex::new(None);
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
     let known = known.get_or_insert_with(HashMap::new);
-    if let Some(&xpc) = known.get(&pid) {
-        return xpc;
+    if let Some(&remote) = known.get(&pid) {
+        return remote;
     }
     let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
@@ -280,13 +289,13 @@ fn is_xpc_service(pid: i32) -> bool {
         // Gone, or not ours to read: ask again next time.
         return false;
     }
-    let xpc = String::from_utf8_lossy(&path[..n as usize]).contains(".xpc/Contents/MacOS/");
+    let remote = is_remote_service_path(&String::from_utf8_lossy(&path[..n as usize]));
     // A reused pid is a new process: forget the lot now and then.
     if known.len() > 4096 {
         known.clear();
     }
-    known.insert(pid, xpc);
-    xpc
+    known.insert(pid, remote);
+    remote
 }
 
 /// A window's global bounds, while it exists.
@@ -541,5 +550,18 @@ mod stage_tests {
         debug_user_stage(7, 11);
         clear_user_stage_connection(11);
         assert_eq!(*DEBUG_USER_STAGE.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn remote_service_paths_cover_xpc_and_extensionkit_bundles() {
+        assert!(is_remote_service_path(
+            "/System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/openAndSavePanelService.xpc/Contents/MacOS/openAndSavePanelService"
+        ));
+        assert!(is_remote_service_path(
+            "/System/Library/ExtensionKit/Extensions/TimeMachineSettings.appex/Contents/MacOS/TimeMachineSettings"
+        ));
+        assert!(!is_remote_service_path(
+            "/System/Applications/System Settings.app/Contents/MacOS/System Settings"
+        ));
     }
 }

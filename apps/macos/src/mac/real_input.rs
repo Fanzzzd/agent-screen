@@ -363,21 +363,29 @@ const SETTLED: Duration = Duration::from_millis(300);
 /// How long a loan waits for all that before it gives up.
 const SETTLE_LIMIT: Duration = Duration::from_millis(1500);
 
-/// Whether `target`'s app is in front with `target` its main window.
+/// Whether `target`'s app is in front with `target` (or the host window of a
+/// modal sheet `target`) its main window.
 fn already_forward(target: WindowTarget) -> bool {
     if super::app::frontmost_pid() != Some(target.pid) {
         return false;
     }
     let app = super::ax::application(target.pid);
     unsafe { app.set_messaging_timeout(0.1) };
-    super::ax::element_attribute(&app, "AXMainWindow").and_then(|w| super::ax::window_id(&w))
-        == Some(target.window_id)
+    let Some(main_id) =
+        super::ax::element_attribute(&app, "AXMainWindow").and_then(|w| super::ax::window_id(&w))
+    else {
+        return false;
+    };
+    main_id == target.window_id
+        || super::ax::host_window_element(target)
+            .and_then(|w| super::ax::window_id(&w))
+            .is_some_and(|host_id| host_id == main_id)
 }
 
 fn write_main(target: WindowTarget) {
     let key = objc2_core_foundation::CFString::from_static_str("AXMain");
     let yes = objc2_core_foundation::CFBoolean::new(true);
-    if let Some(window) = super::ax::window_element(target) {
+    if let Some(window) = super::ax::host_window_element(target) {
         unsafe { window.set_attribute_value(&key, yes) };
     }
 }

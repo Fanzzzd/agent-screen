@@ -232,17 +232,74 @@ pub fn open_in_address_field(target: WindowTarget, url: &str) -> bool {
     false
 }
 
-pub fn make_main(target: WindowTarget) -> bool {
-    window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
+/// The top-level `AXWindow` for `target`: `window_element(target)` itself, or
+/// when `target` is a modal sheet (`NSWindow.beginSheet`), the parent
+/// `AXWindow` the sheet is attached to (#205).
+pub fn host_window_element(target: WindowTarget) -> Option<Element> {
+    let mut el = window_or_sheet(target)?;
+    for _ in 0..16 {
+        if pid_of(&el) == Some(target.pid)
+            && string_attribute(&el, "AXRole").as_deref() == Some("AXWindow")
+            && window_id(&el).is_some()
+        {
+            return Some(el);
+        }
+        el = element_attribute(&el, "AXParent")?;
+    }
+    None
 }
 
-/// The window an app sends keys to: its focused window. Asked before
-/// input, so a hung app gets 0.1 s, not the usual 1 s.
+pub fn make_main(target: WindowTarget) -> bool {
+    host_window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
+}
+
+pub fn enclosing_window_id(element: &AXUIElement) -> Option<u32> {
+    if let Some(id) = window_id(element) {
+        return Some(id);
+    }
+    let mut parent = element_attribute(element, "AXParent");
+    for _ in 0..16 {
+        let Some(p) = parent else { break };
+        if let Some(id) = window_id(&p) {
+            return Some(id);
+        }
+        parent = element_attribute(&p, "AXParent");
+    }
+    element_attribute(element, "AXWindow").and_then(|w| window_id(&w))
+}
+
+/// The window an app sends keys to: its focused window, or when an `AXSheet`
+/// has focus in an inactive app (where `AXFocusedWindow` can be empty while
+/// `AXFocusedUIElement` sits inside the sheet), the enclosing sheet or host
+/// window (#205). Asked before input, so a hung app gets 0.1 s, not the usual 1 s.
 pub fn focused_window_id(pid: i32) -> Option<u32> {
     let app = application(pid);
     unsafe { app.set_messaging_timeout(0.1) };
-    let window = element_attribute(&app, "AXFocusedWindow")?;
-    window_id(&window)
+    if let Some(window) =
+        element_attribute(&app, "AXFocusedWindow").and_then(|w| enclosing_window_id(&w))
+    {
+        return Some(window);
+    }
+    element_attribute(&app, "AXFocusedUIElement").and_then(|el| enclosing_window_id(&el))
+}
+
+fn main_window_id(pid: i32) -> Option<u32> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    let window = element_attribute(&app, "AXMainWindow")?;
+    enclosing_window_id(&window)
+}
+
+/// Whether `target` (or the parent `AXWindow` hosting `target` when `target`
+/// is a sheet) is currently `target.pid`'s focused window (#205). When an
+/// inactive AppKit app has a modal sheet open, `AXFocusedWindow` can be empty
+/// while `AXMainWindow` names the sheet's host window.
+pub fn is_window_or_sheet_focused(target: WindowTarget) -> bool {
+    let host_id = host_window_element(target).and_then(|w| window_id(&w));
+    if let Some(focused) = focused_window_id(target.pid) {
+        return focused == target.window_id || host_id == Some(focused);
+    }
+    host_id.is_some_and(|id| id != target.window_id && main_window_id(target.pid) == Some(id))
 }
 
 pub fn window_id(element: &AXUIElement) -> Option<u32> {
@@ -947,7 +1004,9 @@ pub fn in_window(element: &AXUIElement, target: WindowTarget, allow_menu: bool) 
 /// within the messaging timeout, as a busy app doesn't.
 pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> Option<bool> {
     let mut pid = 0;
-    if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success || pid != target.pid {
+    if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success
+        || (pid != target.pid && !super::cg::is_remote_view_service(pid))
+    {
         return Some(false);
     }
     let name = CFString::from_static_str("AXRole");
@@ -963,7 +1022,10 @@ pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) ->
     let Some(role) = value.downcast_ref::<CFString>().map(|r| r.to_string()) else {
         return Some(false);
     };
-    if allow_menu && matches!(role.as_str(), "AXMenuBarItem" | "AXMenuItem" | "AXMenu") {
+    if allow_menu
+        && pid == target.pid
+        && matches!(role.as_str(), "AXMenuBarItem" | "AXMenuItem" | "AXMenu")
+    {
         return Some(true);
     }
     let Some(window) = window_or_sheet(target) else {
@@ -1162,21 +1224,60 @@ pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)
 }
 
 /// Press the menu item at a global point of an open pop-up menu, as a
-/// web page's select shows. True if there was one to press. A menu
-/// tracks the real pointer, not the events posted to its app, so a click
-/// can't choose an item.
-pub fn press_menu_item_at(pid: i32, at: (f64, f64)) -> bool {
-    let mut raw: *const AXUIElement = std::ptr::null();
-    let error = unsafe {
-        application(pid).copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
-    };
-    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
-        return false;
-    };
-    let item = unsafe { CFRetained::from_raw(raw) };
-    error == AXError::Success
-        && string_attribute(&item, "AXRole").as_deref() == Some("AXMenuItem")
-        && unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
+/// web page's select or an AppKit / ExtensionKit pop-up button shows (#205,
+/// #207). True if there was one to press. A menu tracks the real pointer, not
+/// the events posted to its app, so a posted click can't choose an item.
+///
+/// Hit-testing a menu item's label or checkmark can return a child element
+/// rather than the `AXMenuItem` itself, and an ExtensionKit `.appex` pane's
+/// menu may answer through either the `.appex` pid or the host app's pid.
+pub fn press_menu_item_at(pids: &[i32], at: (f64, f64)) -> bool {
+    for &pid in pids {
+        let Some(mut el) = element_at(pid, at) else {
+            continue;
+        };
+        for _ in 0..8 {
+            if string_attribute(&el, "AXRole").as_deref() == Some("AXMenuItem") {
+                if unsafe { el.perform_action(&CFString::from_static_str("AXPress")) }
+                    == AXError::Success
+                {
+                    return true;
+                }
+                break;
+            }
+            let Some(parent) = element_attribute(&el, "AXParent") else {
+                break;
+            };
+            el = parent;
+        }
+    }
+    false
+}
+
+/// Dismiss an open pop-up menu (`AXMenu`) at `at` through `AXCancel` when a
+/// background or Viewer click lands outside the menu (#207). Modal `NSMenu`
+/// tracking ignores posted mouse clicks outside its window until cancelled.
+pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
+    for &pid in pids {
+        let Some(mut el) = element_at(pid, at) else {
+            continue;
+        };
+        for _ in 0..8 {
+            if string_attribute(&el, "AXRole").as_deref() == Some("AXMenu") {
+                if unsafe { el.perform_action(&CFString::from_static_str("AXCancel")) }
+                    == AXError::Success
+                {
+                    return true;
+                }
+                break;
+            }
+            let Some(parent) = element_attribute(&el, "AXParent") else {
+                break;
+            };
+            el = parent;
+        }
+    }
+    false
 }
 
 /// Whether a global point is on the title bar or toolbar background of a

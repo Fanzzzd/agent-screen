@@ -1131,6 +1131,7 @@ async fn handle_one(
                 // Any other window is the user's until they hand it over.
                 // The user's windows that match, front to back, with their
                 // apps' bundle ids, which Window Access goes by.
+                let spares = core.read_with(cx, |c, _| c.spare_ids());
                 let candidates: Vec<(windows::Window, Option<String>)> = off(cx, {
                     let matcher = matcher.clone();
                     move || {
@@ -1138,7 +1139,8 @@ async fn handle_one(
                         let mut candidates = Vec::new();
                         for w in windows::all() {
                             if w.layer == 0
-                                && windows::display_role(&w).accepts_window_request()
+                                && (windows::display_role(&w).accepts_window_request()
+                                    || windows::on_any(&w.bounds, &spares))
                                 && is_named(&w, wanted, matcher.as_ref(), &mut ids)
                             {
                                 let bundle = ids.of(w.target.pid).1.clone();
@@ -1533,7 +1535,16 @@ async fn handle_one(
                     .remember_user_window(window.target.pid)
                     .await;
             }
-            let action_note = act(&core, id, &action, &element, p.string("value"), cx).await?;
+            let action_note = act(
+                &core,
+                id,
+                window.target,
+                &action,
+                &element,
+                p.string("value"),
+                cx,
+            )
+            .await?;
             // Typing after focusing a field, or pressing in a window, goes
             // to that window, as it would after a click there.
             if matches!(action.as_str(), "focus" | "set_value" | "press") {
@@ -3181,8 +3192,11 @@ fn keep_catch(
 /// Agent Display and no display's records, such as one that opened on the
 /// user's screen before its catch was ready.
 async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
-    let displays = core.read_with(cx, |c, _| {
-        c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>()
+    let (displays, spares) = core.read_with(cx, |c, _| {
+        (
+            c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>(),
+            c.spare_ids(),
+        )
     });
     // AeroSpace may answer late: off the main thread.
     let off_displays: Vec<(windows::Window, bool, crate::model::DisplayRole)> =
@@ -3193,7 +3207,11 @@ async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<wi
                 .filter(|w| w.layer == 0)
                 .map(|w| {
                     let held = placed.contains(&w.target.window_id);
-                    let role = windows::display_role(&w);
+                    let role = if windows::on_any(&w.bounds, &spares) {
+                        crate::model::DisplayRole::User
+                    } else {
+                        windows::display_role(&w)
+                    };
                     (w, held, role)
                 })
                 .collect()
@@ -3273,10 +3291,10 @@ fn is_named(
     }
 }
 
-/// Who has each of this app's Agent Displays, as the session using
-/// display `asking` sees them, read on the main thread for a `not_found`
-/// worked out off it.
-struct Holders(std::collections::HashMap<DisplayId, Holder>);
+/// Who has each of this app's Agent Displays, and its Display Label, as the
+/// session using display `asking` sees them, read on the main thread for a
+/// `not_found` worked out off it.
+struct Holders(std::collections::HashMap<DisplayId, (Holder, String)>);
 
 impl Holders {
     fn of(core: &Core, asking: DisplayId) -> Holders {
@@ -3285,20 +3303,21 @@ impl Holders {
             core.displays
                 .list
                 .iter()
-                .map(|d| (d.id, d.holder(session)))
+                .map(|d| (d.id, (d.holder(session), d.label())))
                 .collect(),
         )
     }
 
-    /// Who has the Agent Display under the center of `bounds`. One this app doesn't
-    /// know, such as another instance's, has no session of its. Blocking.
-    fn at(&self, bounds: &Rect) -> Holder {
+    /// Who has the Agent Display under the center of `bounds`, and its label
+    /// when this instance knows it. Blocking.
+    fn at_named(&self, bounds: &Rect) -> (Holder, Option<&str>) {
         let mid = bounds.mid();
         cg::active_displays()
             .into_iter()
             .find(|&id| cg::display_bounds(id).contains(mid))
-            .and_then(|id| self.0.get(&id).copied())
-            .unwrap_or(Holder::Other)
+            .and_then(|id| self.0.get(&id))
+            .map(|(h, label)| (*h, Some(label.as_str())))
+            .unwrap_or((Holder::Other, None))
     }
 }
 
@@ -3309,12 +3328,15 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
     let on_screen = windows::all()
         .into_iter()
         .find(|w| w.target.window_id as i64 == id);
+    let mut label = None;
     let sighting = match on_screen {
         Some(w) if w.layer != 0 && windows::display_role(&w).accepts_window_request() => {
             WindowSighting::NotDocument { app: w.app }
         }
         Some(w) if !windows::display_role(&w).accepts_window_request() => {
-            WindowSighting::OnAgentDisplay(holders.at(&w.bounds))
+            let (holder, name) = holders.at_named(&w.bounds);
+            label = name;
+            WindowSighting::OnAgentDisplay(holder)
         }
         // It left the list between the two reads.
         Some(_) => WindowSighting::OffScreen,
@@ -3336,7 +3358,9 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
                 if windows::display_role(&window).accepts_window_request() {
                     WindowSighting::NotDocument { app: window.app }
                 } else {
-                    WindowSighting::OnAgentDisplay(holders.at(&window.bounds))
+                    let (holder, name) = holders.at_named(&window.bounds);
+                    label = name;
+                    WindowSighting::OnAgentDisplay(holder)
                 }
             }
             None if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
@@ -3345,7 +3369,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
             None => WindowSighting::Gone,
         },
     };
-    placement::no_window(id, &sighting)
+    placement::no_window_named(id, &sighting, label)
 }
 
 /// place_window's `not_found` for an app no stray and no window of the
@@ -3370,6 +3394,7 @@ fn no_app_window(
         .iter()
         .filter(|w| w.layer == 0 && !windows::display_role(w).accepts_window_request())
         .collect();
+    let mut holder_label: Option<&str> = None;
     let sighting = if let Some(here) = documents.iter().find(|w| area.contains(w.bounds.mid())) {
         AppSighting::OnThisDisplay {
             window_id: here.target.window_id,
@@ -3382,7 +3407,13 @@ fn no_app_window(
             name: w.app.clone(),
         }
     } else if !mine.is_empty() {
-        AppSighting::OnAgentDisplay(Holder::of_all(mine.iter().map(|w| holders.at(&w.bounds))))
+        let resolved: Vec<(Holder, Option<&str>)> =
+            mine.iter().map(|w| holders.at_named(&w.bounds)).collect();
+        let first_label = resolved.first().and_then(|(_, l)| *l);
+        if first_label.is_some() && resolved.iter().all(|(_, l)| *l == first_label) {
+            holder_label = first_label;
+        }
+        AppSighting::OnAgentDisplay(Holder::of_all(resolved.into_iter().map(|(h, _)| h)))
     } else {
         // A window anywhere, hidden or on another Space, names its app by
         // its owner name, which the app's own name may not be.
@@ -3402,7 +3433,7 @@ fn no_app_window(
             (None, None) => AppSighting::Unknown,
         }
     };
-    placement::no_app_window(text, &sighting)
+    placement::no_app_window_named(text, &sighting, holder_label)
 }
 
 /// Ask the user for one of their windows with a Window Request, and wait
@@ -3468,8 +3499,12 @@ async fn where_now(
     target: WindowTarget,
     cx: &mut AsyncApp,
 ) -> Now {
-    let known: Vec<DisplayId> =
-        core.read_with(cx, |c, _| c.displays.list.iter().map(|d| d.id).collect());
+    let (known, spares): (Vec<DisplayId>, Vec<DisplayId>) = core.read_with(cx, |c, _| {
+        (
+            c.displays.list.iter().map(|d| d.id).collect(),
+            c.spare_ids(),
+        )
+    });
     let window = target.window_id;
     let (on, found) = off(cx, move || {
         for o in known {
@@ -3483,7 +3518,10 @@ async fn where_now(
         let w = windows::all()
             .into_iter()
             .find(|w| w.target.window_id == window)
-            .filter(|w| windows::display_role(w).accepts_window_request());
+            .filter(|w| {
+                windows::display_role(w).accepts_window_request()
+                    || windows::on_any(&w.bounds, &spares)
+            });
         (None, w)
     })
     .await;
@@ -3588,7 +3626,7 @@ async fn ask_window(
         }
         (Resolution::HandedOver(_), None) => {}
         (Resolution::Declined, Some(held)) => {
-            return Err(ControlError::failed(held_declined(&app, held)));
+            return Err(ControlError::failed(held::declined_message(&app, held)));
         }
         (Resolution::Declined, None) => {
             return Err(ControlError::failed(format!(
@@ -3596,8 +3634,10 @@ async fn ask_window(
             )));
         }
         (Resolution::TimedOut, _) => {
-            return Err(ControlError::failed(format!(
-                "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+            return Err(ControlError::failed(held::timed_out_message(
+                &app,
+                seconds,
+                held.as_ref(),
             )));
         }
         (Resolution::Replaced, _) => {
@@ -3630,23 +3670,6 @@ async fn ask_window(
     Err(ControlError::failed(format!(
         "the user handed over the {app} window, but it didn't reach the display"
     )))
-}
-
-/// What place_window says when the user keeps a window another session
-/// holds: who still has it.
-fn held_declined(app: &str, held: &Held) -> String {
-    let label = &held.label;
-    match held.place {
-        Place::Review => format!(
-            "the user kept the {app} window on {label}, a display waiting for their review; it stays there. Work without it, or ask the user"
-        ),
-        Place::Display => format!(
-            "the user kept the {app} window with {label}, the agent session using it; it stays there. Work without it, or ask again later"
-        ),
-        Place::UserScreen => format!(
-            "the user kept the {app} window for {label}, the agent session that started it; it stays on their screen. Work without it, or ask again later"
-        ),
-    }
 }
 
 /// The window place_window names that another Agent Session holds on its
@@ -4441,6 +4464,7 @@ pub async fn place(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> Re
 async fn act(
     core: &Entity<Core>,
     id: DisplayId,
+    window: WindowTarget,
     action: &str,
     element: &ax::Element,
     value: Option<String>,
@@ -4511,6 +4535,7 @@ async fn act(
             let forwarder = core.update(cx, |c, _| c.forwarder(id));
             let mut access = AxValues {
                 element,
+                window,
                 forwarder,
                 bounds,
                 id,
@@ -4569,19 +4594,38 @@ async fn act(
     Ok(note)
 }
 
-/// The window an element is in, and its process.
-fn popup_window(element: &ax::Element) -> Option<WindowTarget> {
-    let window = ax::element_attribute(element, "AXWindow")?;
-    Some(WindowTarget {
-        pid: ax::pid_of(element)?,
-        window_id: ax::window_id(&window)?,
-    })
+/// The window an element is in, and its host process. Falls back to the
+/// inspected `fallback` window when the element sits inside an `AXSheet` or a
+/// hosted `.xpc`/`.appex` view whose `AXWindow` is unnumbered or off-screen
+/// (#205).
+fn popup_window(element: &ax::Element, fallback: WindowTarget) -> Option<WindowTarget> {
+    let window_id = ax::enclosing_window_id(element)
+        .or_else(|| ax::element_attribute(element, "AXWindow").and_then(|w| ax::window_id(&w)));
+    if let Some(window_id) = window_id
+        && cg::window_bounds(window_id).is_some()
+        && let Some(pid) = ax::pid_of(element)
+    {
+        let host_pid = if pid != fallback.pid && cg::is_remote_view_service(pid) {
+            fallback.pid
+        } else {
+            pid
+        };
+        return Some(WindowTarget {
+            pid: host_pid,
+            window_id,
+        });
+    }
+    if ax::belongs(element, fallback, false) == Some(true) {
+        return Some(fallback);
+    }
+    None
 }
 
 /// set_value's AX and input calls on one element, each off the main
 /// thread, as an app may take up to the 1 s timeout to answer.
 struct AxValues<'a> {
     element: &'a ax::Element,
+    window: WindowTarget,
     forwarder: crate::mac::input::Forwarder,
     bounds: Rect,
     id: DisplayId,
@@ -4600,10 +4644,18 @@ impl super::values::ValueAccess for AxValues<'_> {
 
     async fn popup_facts(&mut self) -> super::values::PopupFacts {
         let item = ax::Sendable(self.element.clone());
-        off(self.cx, move || super::values::PopupFacts {
-            in_web_page: ax::in_web_area(item.get()),
-            engine: ax::pid_of(item.get()).and_then(devtools::engine),
-            cocoa: ax::pid_of(item.get()).and_then(app::is_cocoa),
+        let win_pid = self.window.pid;
+        off(self.cx, move || {
+            let elem_pid = ax::pid_of(item.get());
+            super::values::PopupFacts {
+                in_web_page: ax::in_web_area(item.get()),
+                engine: elem_pid
+                    .and_then(devtools::engine)
+                    .or_else(|| devtools::engine(win_pid)),
+                cocoa: elem_pid
+                    .and_then(app::is_cocoa)
+                    .or_else(|| app::is_cocoa(win_pid)),
+            }
         })
         .await
     }
@@ -4612,12 +4664,13 @@ impl super::values::ValueAccess for AxValues<'_> {
         use super::values::PageChoice;
         use devtools::SelectChoice;
         let item = ax::Sendable(self.element.clone());
+        let fallback = self.window;
         let title = title.to_owned();
         let shown = shown.to_owned();
         let forwarder = self.forwarder.clone();
         let within = self.bounds;
         off(self.cx, move || {
-            let Some(target) = popup_window(item.get()) else {
+            let Some(target) = popup_window(item.get(), fallback) else {
                 return PageChoice::Unpiped;
             };
             let (Some(bounds), Some(frame)) =
@@ -4650,8 +4703,9 @@ impl super::values::ValueAccess for AxValues<'_> {
         use super::values::Typed;
         use crate::mac::input::PopupTyped;
         let id = self.id;
+        let fallback = self.window;
         let item = ax::Sendable(self.element.clone());
-        let Some(target) = off(self.cx, move || popup_window(item.get())).await else {
+        let Some(target) = off(self.cx, move || popup_window(item.get(), fallback)).await else {
             return Typed::NotSent(ControlError::failed(
                 "Accessibility names no window for the pop-up button, so nothing was typed. Refresh get_window_state and retry",
             ));
@@ -6633,14 +6687,14 @@ async fn queued_drag(
     cx: &mut AsyncApp,
 ) -> Reply {
     let (from, to) = path;
-    let (target, frame) = off(cx, move || crate::mac::input::window_at(from))
+    let (target, frame) = off(cx, move || crate::mac::input::real_drag_window_at(from))
         .await
         .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?;
     // The window under the end may be another window of the display, as
     // when a file goes from Finder onto a web page (ADR 0013, "Drags
     // between windows").
     let (drop, drop_frame) = match to {
-        Some(to) => off(cx, move || crate::mac::input::window_at(to))
+        Some(to) => off(cx, move || crate::mac::input::real_drag_window_at(to))
             .await
             .ok_or_else(|| ControlError::not_found("no window at the drag's end"))?,
         None => (target, frame),
@@ -6754,32 +6808,38 @@ async fn queued_click(
     let area = cg::display_bounds(id);
     let (x, y) = real_click::display_point(at, area);
     let hit = off(cx, move || {
-        let (target, frame) = crate::mac::input::window_at(at)?;
-        let window = windows::on_display(id)
-            .into_iter()
-            .find(|w| w.target == target)?;
-        Some((target, frame, window.app, window.title))
+        let on_disp = windows::on_display(id);
+        let targets: Vec<WindowTarget> = on_disp.iter().map(|w| w.target).collect();
+        let hit = crate::mac::input::real_click_at(at, &targets)?;
+        let window = on_disp.into_iter().find(|w| w.target == hit.window)?;
+        let frame = window.bounds.offset(area.x, area.y);
+        Some((hit, frame, window.app, window.title))
     })
     .await;
-    let Some((target, frame, app, title)) = hit else {
+    let Some((hit, frame, app, title)) = hit else {
         return Err(ControlError::not_found(format!(
             "no window of yours at ({x}, {y}) on display {id}, so no click was asked for"
         )));
     };
-    if !real_click::contained(at, area, frame) {
+    let target = hit.window;
+    let hit_frame = hit.menu.map_or(frame, |(_, mf)| mf);
+    if !real_click::contained(at, area, hit_frame) {
         return Err(ControlError::invalid(
             "the window under that point reaches past your Agent Display, so its click can't use the user's pointer",
         ));
     }
+    let ax_pid = hit.ax_pid;
     // What the agent aimed at, to compare just before the loan clicks: a
     // list can reorder while the user decides.
     let (region, look, element) = off(cx, move || {
         // Chromium and Electron publish their pages' elements only once
         // asked.
-        crate::mac::ax::ensure_web_tree(target);
+        if hit.menu.is_none() {
+            crate::mac::ax::ensure_web_tree(target);
+        }
         let (element, framed) =
-            crate::mac::ax::target_at(target.pid, at, std::time::Duration::from_secs(1), true);
-        let region = real_click::look_region(at, area, frame, framed);
+            crate::mac::ax::target_at(ax_pid, at, std::time::Duration::from_secs(1), true);
+        let region = real_click::look_region(at, area, hit_frame, framed);
         (region, crate::mac::screenshot::samples(id, region), element)
     })
     .await;
@@ -6809,6 +6869,8 @@ async fn queued_click(
     let plan = crate::input_queue::Click {
         target,
         frame,
+        menu: hit.menu,
+        ax_pid,
         area,
         at,
         click,
@@ -7763,6 +7825,8 @@ fn preview_click(
             window_id: 0,
         },
         frame: area,
+        menu: None,
+        ax_pid: 0,
         area,
         // A row of a sidebar, on a 1280 by 800 board.
         at: (

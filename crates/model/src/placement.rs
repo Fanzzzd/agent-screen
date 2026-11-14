@@ -102,6 +102,12 @@ impl Holder {
 
 /// The `not_found` message for window `id`.
 pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
+    no_window_named(id, sighting, None)
+}
+
+/// The `not_found` message for window `id`, naming `holder_label` when a
+/// single holding display is known (#189).
+pub fn no_window_named(id: i64, sighting: &WindowSighting, holder_label: Option<&str>) -> String {
     match sighting {
         WindowSighting::Gone => format!(
             "no window has id {id}: it closed, or the id is from another list. Call list_windows with strays: true, or place_window with the app's name"
@@ -115,15 +121,30 @@ pub fn no_window(id: i64, sighting: &WindowSighting) -> String {
         WindowSighting::OnAgentDisplay(Holder::Mine) => format!(
             "window {id} is on another of your Agent Displays, and it moved or closed while place_window looked for it. Call list_windows on your displays, then place_window again"
         ),
-        WindowSighting::OnAgentDisplay(Holder::OtherSession) => format!(
-            "window {id} is on another Agent Display, which another agent session holds, and it moved or closed while place_window looked for it, or it is a panel or dialog. Call list_windows with strays: true, then place_window again: for another session's window it asks the user"
-        ),
-        WindowSighting::OnAgentDisplay(Holder::Review) => format!(
-            "window {id} is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
-        ),
-        WindowSighting::OnAgentDisplay(Holder::Other) => format!(
-            "window {id} is on another Agent Display, which isn't yours. Ask the user to bring it to their screen, then call place_window again"
-        ),
+        WindowSighting::OnAgentDisplay(Holder::OtherSession) => match holder_label {
+            Some(label) => format!(
+                "window {id} is on {label}, which another agent session holds, and it moved or closed while place_window looked for it, or it is a panel or dialog. Call list_windows with strays: true, then place_window again: for another session's window it asks the user"
+            ),
+            None => format!(
+                "window {id} is on another Agent Display, which another agent session holds, and it moved or closed while place_window looked for it, or it is a panel or dialog. Call list_windows with strays: true, then place_window again: for another session's window it asks the user"
+            ),
+        },
+        WindowSighting::OnAgentDisplay(Holder::Review) => match holder_label {
+            Some(label) => format!(
+                "window {id} is on {label}, an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+            ),
+            None => format!(
+                "window {id} is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+            ),
+        },
+        WindowSighting::OnAgentDisplay(Holder::Other) => match holder_label {
+            Some(label) => format!(
+                "window {id} is on {label}, which isn't yours. Ask the user to bring it to their screen, then call place_window again"
+            ),
+            None => format!(
+                "window {id} is on another Agent Display, which isn't yours. Ask the user to bring it to their screen, then call place_window again"
+            ),
+        },
     }
 }
 
@@ -149,6 +170,16 @@ pub enum AppSighting {
 /// compared, so an agent can tell a name that matched nothing from an app
 /// with no window to offer.
 pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
+    no_app_window_named(app, sighting, None)
+}
+
+/// The `not_found` message for an app the agent named, naming `holder_label`
+/// when all matching windows sit on a single display (#189).
+pub fn no_app_window_named(
+    app: &str,
+    sighting: &AppSighting,
+    holder_label: Option<&str>,
+) -> String {
     match sighting {
         AppSighting::Unknown => format!(
             "nothing matched {app:?}, ignoring case: no window's owner name, no running app's name or bundle id, no installed app macOS knows by that name, and none with that bundle id. Check the name, or pass a window_id"
@@ -169,18 +200,33 @@ pub fn no_app_window(app: &str, sighting: &AppSighting) -> String {
             "its windows on your other Agent Displays are panels or dialogs, windows the user took back or opened, or on a display the user is operating, so none can move. Call list_windows on those displays, and ask the user for a window of theirs"
                 .into()
         }
-        AppSighting::OnAgentDisplay(Holder::OtherSession) => {
-            "its windows on screen are on other Agent Displays, which other agent sessions hold, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
-                .into()
-        }
-        AppSighting::OnAgentDisplay(Holder::Review) => {
-            "its window is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
-                .into()
-        }
-        AppSighting::OnAgentDisplay(Holder::Other) => {
-            "its windows on screen are on another Agent Display, which isn't yours. Ask the user to bring one to their screen, then call place_window again"
-                .into()
-        }
+        AppSighting::OnAgentDisplay(Holder::OtherSession) => match holder_label {
+            Some(label) => format!(
+                "its windows on screen are on {label}, which another agent session holds, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
+            ),
+            None => {
+                "its windows on screen are on other Agent Displays, which other agent sessions hold, and they are panels or dialogs, or they moved while place_window looked. Call place_window again: for another session's document window it asks the user"
+                    .into()
+            }
+        },
+        AppSighting::OnAgentDisplay(Holder::Review) => match holder_label {
+            Some(label) => format!(
+                "its window is on {label}, an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+            ),
+            None => {
+                "its window is on an Agent Display whose session ended, waiting for the user to review it. Ask the user to take it back, then call place_window again"
+                    .into()
+            }
+        },
+        AppSighting::OnAgentDisplay(Holder::Other) => match holder_label {
+            Some(label) => format!(
+                "its windows on screen are on {label}, which isn't yours. Ask the user to bring one to their screen, then call place_window again"
+            ),
+            None => {
+                "its windows on screen are on another Agent Display, which isn't yours. Ask the user to bring one to their screen, then call place_window again"
+                    .into()
+            }
+        },
     }
 }
 
@@ -371,5 +417,17 @@ mod tests {
             no_app_window("WeCom", &AppSighting::OnAgentDisplay(OtherSession))
                 .contains("other agent sessions hold")
         );
+        let named = no_window_named(
+            7,
+            &WindowSighting::OnAgentDisplay(OtherSession),
+            Some("Codex · Check logs"),
+        );
+        assert!(named.contains("Codex · Check logs"), "{named}");
+        let named_app = no_app_window_named(
+            "Chrome",
+            &AppSighting::OnAgentDisplay(Review),
+            Some("Claude Code · Docs"),
+        );
+        assert!(named_app.contains("Claude Code · Docs"), "{named_app}");
     }
 }

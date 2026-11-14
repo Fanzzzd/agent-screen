@@ -9,8 +9,8 @@
 //! their union, which is empty when the screens' tops don't line up (#155).
 //! A row is as wide as the user's displays, so the whole arrangement stays
 //! close to square and System Settings shows the user's displays at a
-//! usable size. Displays go in serial order, so the same set always lands
-//! in the same places.
+//! usable size. Unparked displays go in serial order; displays already
+//! parked safely stay put so windows on them keep their session (#204).
 //!
 //! An Agent Display is safe where it overlaps no user display and touches
 //! one at most at a single corner point, never along an edge, so the real
@@ -68,17 +68,35 @@ fn corner(screens: &[Screen]) -> Option<(f64, f64)> {
 
 /// Where each of Agent Screen's displays goes, as origins. Empty when the
 /// user has no display of their own to arrange around.
+///
+/// Displays of ours that are already `out_of_the_way` and overlap neither a
+/// fixed display nor an earlier display of ours keep their origins: moving a
+/// live display in CoreGraphics moves only its viewport while WindowServer
+/// leaves windows at their global coordinates, which would hand one display's
+/// windows to whichever display took its old slot (#204). Only unparked or
+/// overlapping displays of ours are placed into free slots of the grid.
 pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
     let (Some(user), Some((right, top))) = (user_bounds(screens), corner(screens)) else {
         return Vec::new();
     };
     // Keep clear of fixed displays above the corner: another instance's
     // grid. AeroSpace's closet hangs below, out of the way.
-    let start = screens
+    let fixed: Vec<Rect> = screens
         .iter()
-        .filter(|s| s.role == Role::Fixed && s.rect.max_y() <= top && s.rect.max_x() > right)
-        .map(|s| s.rect.max_x())
-        .fold(right, f64::max);
+        .filter(|s| s.role == Role::Fixed && s.rect.y < top && s.rect.max_x() > right)
+        .map(|s| s.rect)
+        .collect();
+    let mut start = right;
+    while let Some(end) = fixed
+        .iter()
+        .filter(|f| f.x <= start && f.max_x() > start)
+        .map(|f| f.max_x())
+        .reduce(f64::max)
+    {
+        start = end;
+    }
+    let row_limit = start + user.width;
+    let mut obstacles = fixed;
     let mut ours: Vec<(u64, u32, Rect)> = screens
         .iter()
         .filter_map(|s| match s.role {
@@ -87,19 +105,43 @@ pub fn plan(screens: &[Screen]) -> Vec<(u32, (f64, f64))> {
         })
         .collect();
     ours.sort_by_key(|&(order, id, _)| (order, id));
-    let mut placed = Vec::with_capacity(ours.len());
-    let (mut x, mut bottom, mut row_top) = (start, top, top);
-    for (_, id, rect) in ours {
-        if x > start && x + rect.width > start + user.width {
-            x = start;
-            bottom = row_top;
+    let mut placed: Vec<(u64, u32, (f64, f64))> = Vec::with_capacity(ours.len());
+    let mut unparked: Vec<(u64, u32, Rect)> = Vec::new();
+    for (order, id, rect) in ours {
+        if out_of_the_way(&rect, screens) && obstacles.iter().all(|o| !rect.intersects(o)) {
+            obstacles.push(rect);
+            placed.push((order, id, (rect.x, rect.y)));
+        } else {
+            unparked.push((order, id, rect));
         }
-        let y = bottom - rect.height;
-        placed.push((id, (x, y)));
-        x += rect.width;
-        row_top = row_top.min(y);
     }
-    placed
+    let (mut x, mut bottom, mut row_top) = (start, top, top);
+    for (order, id, rect) in unparked {
+        loop {
+            if x > start && x + rect.width > row_limit {
+                x = start;
+                bottom = row_top;
+            }
+            let y = bottom - rect.height;
+            let candidate = Rect::new(x, y, rect.width, rect.height);
+            if let Some(hit) = obstacles
+                .iter()
+                .filter(|o| candidate.intersects(o))
+                .max_by(|a, b| a.max_x().total_cmp(&b.max_x()))
+            {
+                row_top = row_top.min(hit.y);
+                x = hit.max_x();
+                continue;
+            }
+            obstacles.push(candidate);
+            placed.push((order, id, (x, y)));
+            x += rect.width;
+            row_top = row_top.min(y);
+            break;
+        }
+    }
+    placed.sort_by_key(|&(order, id, _)| (order, id));
+    placed.into_iter().map(|(_, id, at)| (id, at)).collect()
 }
 
 /// A parking attempt succeeds once display `id`, one of Agent Screen's,
@@ -426,5 +468,76 @@ mod tests {
         assert!(out_of_the_way(&Rect::new(2923., -1880., 1280., 800.), &s));
         assert!(!out_of_the_way(&Rect::new(1728., 0., 1280., 800.), &s));
         assert!(!out_of_the_way(&Rect::new(-1280., -800., 1280., 800.), &s));
+    }
+
+    #[test]
+    fn a_new_display_with_a_lower_serial_leaves_parked_displays_where_they_are() {
+        // Issue #204: displays 379 (serial 5) and 381 (serial 6) are already
+        // parked with windows on them; new display 638 leases freed serial 1.
+        let mut s = vec![
+            user(1, 0., 0., 2560., 1440.),
+            user(2, 2560., 0., 1728., 1117.),
+            Screen {
+                id: 379,
+                rect: Rect::new(4288., -800., 1280., 800.),
+                role: Role::Ours { order: 5 },
+            },
+            Screen {
+                id: 381,
+                rect: Rect::new(5568., -800., 1280., 800.),
+                role: Role::Ours { order: 6 },
+            },
+            Screen {
+                id: 638,
+                rect: Rect::new(-1280., 0., 1280., 800.),
+                role: Role::Ours { order: 1 },
+            },
+        ];
+        let planned = plan(&s);
+        assert!(planned.contains(&(379, (4288., -800.))), "{planned:?}");
+        assert!(planned.contains(&(381, (5568., -800.))), "{planned:?}");
+        assert!(planned.contains(&(638, (6848., -800.))), "{planned:?}");
+        assert_plan_safe(&s);
+
+        // And when the first slot was vacated, the new display fills that gap
+        // while still leaving the parked displays untouched.
+        s[2].rect = Rect::new(5568., -800., 1280., 800.);
+        s[3].rect = Rect::new(6848., -800., 1280., 800.);
+        let planned = plan(&s);
+        assert!(planned.contains(&(638, (4288., -800.))), "{planned:?}");
+        assert!(planned.contains(&(379, (5568., -800.))), "{planned:?}");
+        assert!(planned.contains(&(381, (6848., -800.))), "{planned:?}");
+        assert_plan_safe(&s);
+    }
+
+    #[test]
+    fn a_fixed_display_to_the_right_does_not_shove_parked_displays_past_it() {
+        let s = vec![
+            user(1, 0., 0., 2560., 1440.),
+            user(2, 2560., 0., 1728., 1117.),
+            Screen {
+                id: 379,
+                rect: Rect::new(4288., -800., 1280., 800.),
+                role: Role::Ours { order: 5 },
+            },
+            Screen {
+                id: 381,
+                rect: Rect::new(5568., -800., 1280., 800.),
+                role: Role::Ours { order: 6 },
+            },
+            Screen {
+                id: 900,
+                rect: Rect::new(6848., -800., 1280., 800.),
+                role: Role::Fixed,
+            },
+            ours(638, 1, 1280., 800.),
+        ];
+        let planned = plan(&s);
+        assert!(planned.contains(&(379, (4288., -800.))), "{planned:?}");
+        assert!(planned.contains(&(381, (5568., -800.))), "{planned:?}");
+        // 6848 is taken by Fixed 900, and 8128 + 1280 > 4288 + 4288, so 638
+        // stacks onto the second row at 4288,-1600.
+        assert!(planned.contains(&(638, (4288., -1600.))), "{planned:?}");
+        assert_plan_safe(&s);
     }
 }
