@@ -17,6 +17,8 @@ struct Stream {
     starting: bool,
     /// Failed starts in a row.
     failures: u32,
+    /// Earliest instant a failed start's backoff expires.
+    retry_at: Option<std::time::Instant>,
     /// What `running` says, for reconfigurations on other threads.
     target: Arc<std::sync::Mutex<(i32, (u32, u32))>>,
     latest: Arc<Latest>,
@@ -170,10 +172,12 @@ impl Streams {
         pixels: (u32, u32),
         cx: &mut Context<Self>,
     ) {
+        let has_frame = self.frames.contains_key(&id);
         let stream = self.streams.entry(id).or_insert_with(|| Stream {
             capture: None,
             starting: false,
             failures: 0,
+            retry_at: None,
             target: Default::default(),
             latest: Arc::new(Latest::default()),
             running: (0, (0, 0)),
@@ -181,6 +185,7 @@ impl Streams {
             breaks: 0,
             repairs: 0,
         });
+        let newly_wanted = fps > 0 && !stream.wants.contains_key(who);
         if fps > 0 {
             stream.wants.insert(who, (fps, pixels));
         } else {
@@ -196,15 +201,15 @@ impl Streams {
                 (f.max(fps), (w.max(pw), h.max(ph)))
             });
         if wanted == stream.running {
-            if fps > 0 && stream.idle() {
+            if stream.idle()
+                && should_wake_idle_stream(newly_wanted, stream.retry_at, std::time::Instant::now())
+            {
                 stream.breaks = 0;
-                stream.failures = 0;
                 self.start(id, cx);
             }
             return;
         }
         let before = stream.running;
-        let agent_watching = stream.wants.contains_key("agent");
         stream.running = wanted;
         *stream.target.lock().unwrap() = wanted;
         let fps = wanted.0;
@@ -214,14 +219,13 @@ impl Streams {
             if let Some(capture) = stream.capture.take() {
                 cx.background_spawn(async move { drop(capture) }).detach();
             }
-        } else if needs_fresh_stream(before, wanted, agent_watching)
+        } else if needs_fresh_stream(before, wanted, has_frame)
             && let Some(capture) = stream.capture.take()
         {
-            // ScreenCaptureKit sends a Complete frame only when the picture
-            // changes: resized or sped up in place from the 1 fps warm
-            // stream, a still display would keep showing a blurry or stale
-            // frame (#190). A new stream sends a fresh frame at once while
-            // the previous frame stays up until it arrives.
+            // ScreenCaptureKit sends a frame only when the picture changes:
+            // resized in place, or running with no cached frame yet, a still
+            // display would keep showing the small or missing picture. A new
+            // stream sends one at once.
             stream.breaks = 0;
             cx.background_spawn(async move { drop(capture) }).detach();
             if !stream.starting {
@@ -235,7 +239,9 @@ impl Streams {
                 }
             })
             .detach();
-        } else if !stream.starting {
+        } else if !stream.starting
+            && should_wake_idle_stream(true, stream.retry_at, std::time::Instant::now())
+        {
             stream.breaks = 0;
             self.start(id, cx);
         }
@@ -282,6 +288,7 @@ impl Streams {
                     (Some(stream), Ok(capture)) => {
                         stream.starting = false;
                         stream.failures = 0;
+                        stream.retry_at = None;
                         let capture = Arc::new(capture);
                         let running = stream.running;
                         if running.0 == 0 {
@@ -316,12 +323,13 @@ impl Streams {
                             log::debug!("capture for display {id} failed again: {error}");
                         }
                         stream.starting = false;
-                        // A display macOS mixes up with another isn't
-                        // captured: its last frame, maybe a thumbnail
-                        // scaled up, would pass for a live picture. The
-                        // surfaces say why instead (`peek::waiting`).
-                        if crate::mac::cg::unit_twin(id).is_some() {
-                            streams.frames.remove(&id);
+                        // A display macOS mixes up with another, or a stream
+                        // that keeps failing to start, drops any old cached
+                        // frame so the surfaces say they wait for a picture
+                        // (`peek::waiting`) instead of showing a stale image.
+                        if (stream.failures > 0 || crate::mac::cg::unit_twin(id).is_some())
+                            && streams.frames.remove(&id).is_some()
+                        {
                             cx.notify();
                         }
                         // A just-created display can take a moment to show
@@ -329,6 +337,7 @@ impl Streams {
                         // wait doubles up to 30 s.
                         let wait = backoff(stream.failures);
                         stream.failures += 1;
+                        stream.retry_at = Some(std::time::Instant::now() + wait);
                         Self::start_after(id, wait, cx);
                     }
                     // The display went away meanwhile.
@@ -386,12 +395,10 @@ impl Streams {
         if stream.capture.as_ref().map(|c| c.serial()) != Some(serial) {
             return;
         }
-        let misrouted = stream.capture.as_ref().is_some_and(|c| c.misrouted());
         if let Some(capture) = stream.capture.take() {
             cx.background_spawn(async move { drop(capture) }).detach();
         }
-        if drop_cached_frame_on_break(misrouted, stream.breaks) && self.frames.remove(&id).is_some()
-        {
+        if stream.breaks > 0 && self.frames.remove(&id).is_some() {
             cx.notify();
         }
         let wait = match stream.breaks {
@@ -462,26 +469,27 @@ fn grows(from: (u32, u32), to: (u32, u32)) -> bool {
 }
 
 /// Whether changing a running capture from `before` to `wanted` should start
-/// a fresh `SCStream` rather than reconfiguring in place. Reconfiguring a
-/// 1 fps warm stream up to Peek's 12 fps at the same thumbnail size emits no
-/// frame on a still display, leaving Peek showing an older frame until the
-/// Viewer grows the pixel size (#190). Leave an active `waitForChange`
-/// (`agent_watching`) stream unbroken so its change baseline stays continuous.
+/// a fresh `SCStream` rather than reconfiguring in place: only when a view
+/// asks for more pixels, or when no frame is cached yet. Raising 1 fps to
+/// Peek's 12 fps with a cached frame reconfigures in place without rebuilding
+/// every display's stream on hover.
 fn needs_fresh_stream(
     before: (i32, (u32, u32)),
     wanted: (i32, (u32, u32)),
-    agent_watching: bool,
+    has_frame: bool,
 ) -> bool {
-    wanted.0 > 0
-        && (grows(before.1, wanted.1) || (before.0 <= 1 && wanted.0 > 1 && !agent_watching))
+    wanted.0 > 0 && (grows(before.1, wanted.1) || !has_frame)
 }
 
-/// Only a stream that showed another screen (`misrouted`) clears the cached
-/// thumbnail after a repeated break; macOS routinely stops idle 1 fps warm
-/// streams on still displays, where the last good frame still shows this
-/// display (#190).
-fn drop_cached_frame_on_break(misrouted: bool, breaks_before: u32) -> bool {
-    misrouted && breaks_before > 0
+/// Whether `want` may start an idle stream immediately: only for a newly added
+/// subscriber, and never before a failed start's exponential backoff (`retry_at`)
+/// has elapsed.
+fn should_wake_idle_stream(
+    newly_wanted: bool,
+    retry_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    newly_wanted && retry_at.is_none_or(|deadline| now >= deadline)
 }
 
 #[cfg(test)]
@@ -489,21 +497,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raising_from_warm_to_peek_restarts_unless_agent_is_watching() {
+    fn peek_reconfigures_in_place_when_frame_exists_and_rebuilds_only_when_needed() {
         let thumb = (800, 500);
         let full = (2560, 1600);
-        assert!(needs_fresh_stream((1, thumb), (12, thumb), false));
-        assert!(!needs_fresh_stream((12, thumb), (1, thumb), false));
-        assert!(!needs_fresh_stream((10, thumb), (12, thumb), true));
         assert!(!needs_fresh_stream((1, thumb), (12, thumb), true));
+        assert!(needs_fresh_stream((1, thumb), (12, thumb), false));
         assert!(needs_fresh_stream((12, thumb), (60, full), true));
+        assert!(!needs_fresh_stream((60, full), (12, thumb), true));
     }
 
     #[test]
-    fn only_repeated_misroutes_clear_the_cached_frame() {
-        assert!(!drop_cached_frame_on_break(false, 0));
-        assert!(!drop_cached_frame_on_break(false, 3));
-        assert!(!drop_cached_frame_on_break(true, 0));
-        assert!(drop_cached_frame_on_break(true, 1));
+    fn idle_stream_wakes_only_for_new_subscriber_past_failure_backoff() {
+        let now = std::time::Instant::now();
+        let future = now + std::time::Duration::from_secs(5);
+        assert!(should_wake_idle_stream(true, None, now));
+        // Repeated waitForChange calls from the same subscriber do not restart
+        // an idle stream early.
+        assert!(!should_wake_idle_stream(false, None, now));
+        // A failing capture honors its backoff even for a new subscriber.
+        assert!(!should_wake_idle_stream(true, Some(future), now));
+        assert!(should_wake_idle_stream(true, Some(now), now));
     }
 }

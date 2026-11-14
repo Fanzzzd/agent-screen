@@ -283,49 +283,66 @@ pub fn make_main(target: WindowTarget) -> bool {
 }
 
 pub fn enclosing_window_id(element: &AXUIElement) -> Option<u32> {
+    enclosing_window_id_with_timeout(element, 0.1)
+}
+
+fn enclosing_window_id_with_timeout(element: &AXUIElement, timeout: f32) -> Option<u32> {
+    unsafe { element.set_messaging_timeout(timeout) };
     if let Some(id) = window_id(element) {
         return Some(id);
     }
     let mut parent = element_attribute(element, "AXParent");
     for _ in 0..16 {
         let Some(p) = parent else { break };
+        unsafe { p.set_messaging_timeout(timeout) };
         if let Some(id) = window_id(&p) {
             return Some(id);
         }
         parent = element_attribute(&p, "AXParent");
     }
-    element_attribute(element, "AXWindow").and_then(|w| window_id(&w))
+    if let Some(w) = element_attribute(element, "AXWindow") {
+        unsafe { w.set_messaging_timeout(timeout) };
+        return window_id(&w);
+    }
+    None
 }
 
-/// The window an app sends keys to: its focused window, or when an `AXSheet`
-/// has focus in an inactive app (where `AXFocusedWindow` can be empty while
-/// `AXFocusedUIElement` sits inside the sheet), the enclosing sheet or host
-/// window (#205). Asked before input, so a hung app gets 0.1 s, not the usual 1 s.
+/// The window an app sends keys to: its focused window. Asked before input,
+/// so a hung app gets 0.1 s, not the usual 1 s.
 pub fn focused_window_id(pid: i32) -> Option<u32> {
     let app = application(pid);
     unsafe { app.set_messaging_timeout(0.1) };
-    if let Some(window) =
-        element_attribute(&app, "AXFocusedWindow").and_then(|w| enclosing_window_id(&w))
+    let window = element_attribute(&app, "AXFocusedWindow")?;
+    window_id(&window)
+}
+
+fn focused_window_or_sheet_id(pid: i32) -> Option<u32> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    if let Some(window) = element_attribute(&app, "AXFocusedWindow")
+        .and_then(|w| enclosing_window_id_with_timeout(&w, 0.1))
     {
         return Some(window);
     }
-    element_attribute(&app, "AXFocusedUIElement").and_then(|el| enclosing_window_id(&el))
+    element_attribute(&app, "AXFocusedUIElement")
+        .and_then(|el| enclosing_window_id_with_timeout(&el, 0.1))
 }
 
 fn main_window_id(pid: i32) -> Option<u32> {
     let app = application(pid);
     unsafe { app.set_messaging_timeout(0.1) };
     let window = element_attribute(&app, "AXMainWindow")?;
-    enclosing_window_id(&window)
+    enclosing_window_id_with_timeout(&window, 0.1)
 }
 
 /// Whether `target` (or the parent `AXWindow` hosting `target` when `target`
 /// is a sheet) is currently `target.pid`'s focused window (#205). When an
 /// inactive AppKit app has a modal sheet open, `AXFocusedWindow` can be empty
-/// while `AXMainWindow` names the sheet's host window.
+/// while `AXFocusedUIElement` sits inside the sheet or `AXMainWindow` names
+/// the sheet's host window.
 pub fn is_window_or_sheet_focused(target: WindowTarget) -> bool {
     let host_id = host_window_element(target).and_then(|w| window_id(&w));
-    if let Some(focused) = focused_window_id(target.pid) {
+    if let Some(focused) = focused_window_or_sheet_id(target.pid) {
         return focused == target.window_id || host_id == Some(focused);
     }
     host_id.is_some_and(|id| id != target.window_id && main_window_id(target.pid) == Some(id))

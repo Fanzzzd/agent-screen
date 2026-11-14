@@ -253,7 +253,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alon
 # displays: an Agent Display's life, from creation and parking to spares and review
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
-AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # a display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # an active or spare display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change, and the display log records the app start and each display released at quit
 AGENTSCREEN_INSTANCE=e2e cargo e2e warmspare      # while you are idle the app makes two spares, and the next two displays take them with no display change; 3 displays
 AGENTSCREEN_INSTANCE=e2e cargo e2e serials        # a new display takes the serial a released one freed
