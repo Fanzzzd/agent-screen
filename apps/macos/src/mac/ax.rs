@@ -238,6 +238,7 @@ pub fn open_in_address_field(target: WindowTarget, url: &str) -> bool {
 pub fn host_window_element(target: WindowTarget) -> Option<Element> {
     let mut el = window_or_sheet(target)?;
     for _ in 0..16 {
+        unsafe { el.set_messaging_timeout(0.1) };
         if pid_of(&el) == Some(target.pid)
             && string_attribute(&el, "AXRole").as_deref() == Some("AXWindow")
             && window_id(&el).is_some()
@@ -247,6 +248,34 @@ pub fn host_window_element(target: WindowTarget) -> Option<Element> {
         el = element_attribute(&el, "AXParent")?;
     }
     None
+}
+
+/// Top-level `AXWindow` target for `target`, resolving an attached `AXSheet`
+/// to its parent host window and falling back to `target`.
+pub fn host_window_target(target: WindowTarget) -> WindowTarget {
+    host_window_element(target)
+        .and_then(|w| window_id(&w))
+        .map(|window_id| WindowTarget {
+            pid: target.pid,
+            window_id,
+        })
+        .unwrap_or(target)
+}
+
+/// Whether `target` is minimized or in native macOS full-screen mode.
+pub fn is_minimized_or_fullscreen(target: WindowTarget) -> bool {
+    let Some(w) = window_element(target) else {
+        return false;
+    };
+    unsafe { w.set_messaging_timeout(0.1) };
+    let flag = |name: &str| {
+        attribute(&w, name)
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            .unwrap_or(false)
+    };
+    flag("AXMinimized")
+        || flag("AXFullScreen")
+        || string_attribute(&w, "AXSubrole").as_deref() == Some("AXFullScreenWindow")
 }
 
 pub fn make_main(target: WindowTarget) -> bool {
@@ -1283,33 +1312,29 @@ pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
 /// Whether a global point is on the title bar or toolbar background of a
 /// window, where a drag moves the window: near its top, with no control,
 /// text or web content there. Toolkits name that background differently,
-/// such as the window itself, a toolbar, or SwiftUI's hosting view.
-/// WindowServer moves a window for real mouse drags only, so drags made
-/// for an agent, or through the Viewer, move it through here.
+/// such as the window itself, a toolbar, a tab strip background, or SwiftUI's
+/// hosting view. WindowServer moves a window for real mouse drags only, so
+/// drags made for an agent, or through the Viewer, move it through here.
 pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
     // Unified toolbars are up to 52 pt tall.
     if at.1 - bounds.y > 52.0 {
         return false;
     }
-    let mut raw: *const AXUIElement = std::ptr::null();
-    let error = unsafe {
-        application(target.pid).copy_element_at_position(
-            at.0 as f32,
-            at.1 as f32,
-            NonNull::from(&mut raw),
-        )
-    };
-    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    let Some(mut element) = element_at_in(&app, at) else {
         return false;
     };
-    if error != AXError::Success {
-        return false;
-    }
-    let mut element = unsafe { CFRetained::from_raw(raw) };
     for _ in 0..64 {
+        unsafe { element.set_messaging_timeout(0.15) };
         match string_attribute(&element, "AXRole").as_deref() {
             Some("AXWindow") => return has_title_bar(&element),
-            Some("AXToolbar" | "AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup") => {}
+            // Empty tab-strip space (`AXTabGroup`) drags the window, while
+            // individual tabs (`AXRadioButton` / `AXButton`) fall into `_`.
+            Some(
+                "AXToolbar" | "AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup"
+                | "AXTabGroup",
+            ) => {}
             // A control, text, a list, a web page, or anything unknown:
             // a drag there is the app's.
             _ => return false,
@@ -1419,6 +1444,18 @@ fn fit_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
         set_size(window, fitted.0, fitted.1);
     }
     Ok(())
+}
+
+/// Move a window's top-left origin without writing `AXSize`, as a title-bar
+/// drag does.
+pub fn set_window_position(target: WindowTarget, x: f64, y: f64) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    with_moves_direct(&window, || {
+        if !set_position(&window, x, y) {
+            return Err(MoveError::Rejected);
+        }
+        Ok(())
+    })
 }
 
 /// Put a window back at an exact global frame.

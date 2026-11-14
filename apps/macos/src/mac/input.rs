@@ -597,6 +597,7 @@ impl Forwarder {
                     w.user_press = true;
                     let target = w.mouse_down(at, button, clicks, flags);
                     w.user_press = false;
+                    w.pressed_moved = false;
                     w.pressed = target.and_then(|t| held(t, at));
                 }
             })
@@ -611,7 +612,23 @@ impl Forwarder {
                     grab.drag_to(to);
                 }
             }
-            None => w.mouse_dragged(to, button, flags),
+            None => {
+                if let Some(press) = w.pressed {
+                    w.pressed_moved |= press.moved(to);
+                }
+                w.mouse_dragged(to, button, flags);
+                if let Some(press) = w.pressed
+                    && press.left_display()
+                {
+                    w.mouse_up(to, button, 1, flags);
+                    press.restore_to(to);
+                    w.pressed = None;
+                    w.pressed_moved = false;
+                    w.grab = Some(press);
+                    w.grab_moved = true;
+                    w.grab_watch = true;
+                }
+            }
         });
     }
 
@@ -626,18 +643,25 @@ impl Forwarder {
         self.send(move |w| {
             diagnostics::within(trace, Phase::Up, || match w.grab.take() {
                 Some(grab) if std::mem::take(&mut w.grab_moved) => {
-                    grab.drag_to(at);
+                    if std::mem::take(&mut w.grab_watch) {
+                        grab.restore_to(at);
+                        keep_on_display(grab, at, true);
+                    } else {
+                        grab.drag_to(at);
+                    }
                 }
                 // Pressed and released in place: a click on the title bar,
                 // such as a double click that zooms the window.
                 Some(grab) => {
+                    w.grab_watch = false;
                     w.mouse_down(grab.from(), button, clicks, flags);
                     w.mouse_up(grab.from(), button, clicks, flags);
                 }
                 None => {
                     w.mouse_up(at, button, clicks, flags);
+                    let drag_moved = std::mem::take(&mut w.pressed_moved);
                     if let Some(press) = w.pressed.take() {
-                        keep_on_display(press, at);
+                        keep_on_display(press, at, drag_moved);
                     }
                 }
             })
@@ -1297,37 +1321,46 @@ fn display_of(id: u32) -> Option<Rect> {
         .find(|area| area.contains(window.bounds.mid()))
 }
 
-/// The window at a global point's display, held at that point.
+/// The window at a global point's display, held at that point. If `target` is
+/// an attached modal sheet, watches its parent host window instead.
 fn held(target: WindowTarget, at: (f64, f64)) -> Option<Grab> {
-    let window = super::windows::find(target.window_id)?;
-    let area = super::cg::active_displays()
+    let host = super::ax::host_window_target(target);
+    let watch = agent_screen_model::viewer_press::press_watch_target(target, host);
+    let window = super::windows::find(watch.window_id)?;
+    let display = super::cg::active_displays()
         .into_iter()
-        .map(super::cg::display_bounds)
-        .find(|area| area.contains(at))?;
-    Grab::held(target, window.bounds, at, area)
+        .find(|&id| super::cg::display_bounds(id).contains(at))?;
+    Grab::held(watch, window.bounds, at, display)
 }
 
 /// After the user's press and release in the Viewer: put the window back
 /// on its display if the drag carried it off. An app that draws its own
 /// title bar, as Electron apps do, has WindowServer move the window with
 /// the real pointer, onto the user's screen, where their window manager
-/// may then tile it. It lands where the drag would have taken it on the
-/// display. Checked again for a while, since the window manager may move
-/// it after the release.
-fn keep_on_display(press: Grab, at: (f64, f64)) {
-    // A click, or a drag inside the display: nothing to put back.
-    if !press.left_display() {
+/// may then tile it. Posted drag events are processed asynchronously, so
+/// any non-grabbed drag monitors `[0, 40, 150, 350, 700]` ms after release
+/// even when the window has not left at `t = 0` ms yet.
+fn keep_on_display(press: Grab, at: (f64, f64), drag_moved: bool) {
+    let left_now = press.left_display();
+    if !agent_screen_model::viewer_press::should_watch_after_release(
+        drag_moved,
+        press.from(),
+        at,
+        left_now,
+    ) {
         return;
     }
     thread::spawn(move || {
-        for wait in [0, 150, 350, 700] {
-            thread::sleep(Duration::from_millis(wait));
-            if wait == 0 || press.left_display() {
+        for wait in [0, 40, 150, 350, 700] {
+            if wait > 0 {
+                thread::sleep(Duration::from_millis(wait));
+            }
+            if press.left_display() {
                 log::info!(
                     "input: window {} left its display in a drag, put back",
                     press.target.window_id
                 );
-                press.drag_to(at);
+                press.restore_to(at);
             }
         }
     });
@@ -1411,8 +1444,10 @@ struct Worker {
     /// whether it has moved since the press.
     grab: Option<Grab>,
     grab_moved: bool,
+    grab_watch: bool,
     /// The window the user's press in the Viewer went to, as it was then.
     pressed: Option<Grab>,
+    pressed_moved: bool,
     cache: Option<(Vec<Hit>, Instant)>,
     /// Whether the press being handled is the user's, in the Viewer.
     user_press: bool,
@@ -1453,7 +1488,9 @@ impl Worker {
             gesture: None,
             grab: None,
             grab_moved: false,
+            grab_watch: false,
             pressed: None,
+            pressed_moved: false,
             cache: None,
             user_press: false,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -1736,6 +1773,7 @@ impl Worker {
     fn grab(&mut self, at: (f64, f64), button: Button) -> bool {
         self.grab = None;
         self.grab_moved = false;
+        self.grab_watch = false;
         if button != Button::Left {
             return false;
         }
@@ -1745,17 +1783,16 @@ impl Worker {
         let Some(hit) = hit else {
             return false;
         };
-        let Some(area) = cg::active_displays()
+        let Some(display) = cg::active_displays()
             .into_iter()
-            .map(cg::display_bounds)
-            .find(|area| area.contains(at))
+            .find(|&id| cg::display_bounds(id).contains(at))
         else {
             return false;
         };
         if hit.layer != 0 || hit.target != hit.host {
             return false;
         }
-        let Some(grab) = Grab::title_bar(hit.target, hit.bounds, at, area) else {
+        let Some(grab) = Grab::title_bar(hit.target, hit.bounds, at, display) else {
             return false;
         };
         {

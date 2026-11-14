@@ -49,6 +49,9 @@ struct State {
     blocked: bool,
     /// The button the user pressed on the image, until it comes up.
     pressed: Option<Button>,
+    /// Last valid global point mapped during the current press or drag, so a
+    /// release after the display goes offline still releases the gesture.
+    last_remote: Option<(f64, f64)>,
     click: Option<Click>,
     /// When the press went to a list or panel: Agent Screen takes the
     /// front only after its release, and keys wait until then.
@@ -1325,7 +1328,9 @@ fn remote_point(
 ) -> Option<(f64, f64)> {
     let normalized = normalized_point(at, height, content, clamp);
     let bounds = normalized.map(|_| bounds());
-    let global = normalized.zip(bounds).map(|(n, b)| mapped_point(n, b));
+    let global = normalized
+        .zip(bounds)
+        .and_then(|(n, b)| agent_screen_model::viewer_press::map_viewer_point(n, b));
     diagnostics::emit(|| metadata(bounds, global));
     global
 }
@@ -1336,24 +1341,7 @@ fn normalized_point(
     content: [f64; 4],
     clamp: bool,
 ) -> Option<(f64, f64)> {
-    let (x, y) = (at.0, height - at.1);
-    let [cx, cy, cw, ch] = content;
-    let mut nx = (x - cx) / cw;
-    let mut ny = (y - cy) / ch;
-    if clamp {
-        nx = nx.clamp(0.0, 1.0);
-        ny = ny.clamp(0.0, 1.0);
-    } else if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
-        return None;
-    }
-    Some((nx, ny))
-}
-
-fn mapped_point(normalized: (f64, f64), bounds: crate::model::Rect) -> (f64, f64) {
-    (
-        bounds.x + normalized.0 * (bounds.width - 1.0),
-        bounds.y + normalized.1 * (bounds.height - 1.0),
-    )
+    agent_screen_model::viewer_press::normalize_viewer_point(at, height, content, clamp)
 }
 
 /// Handle one event; false lets it go on to GPUI.
@@ -1575,6 +1563,7 @@ fn handle_in(
                 // The focus may move: a new wait may begin.
                 s.gave_up = false;
                 s.pressed = Some(button);
+                s.last_remote = Some(at);
                 s.click = click;
                 forwarder.mouse_down(at, button, event.clickCount() as i64, flags(event), click);
                 true
@@ -1586,6 +1575,7 @@ fn handle_in(
                     return false;
                 };
                 if let Some(at) = remote(event, &window, content, display, true, s.frame_pixels) {
+                    s.last_remote = Some(at);
                     forwarder.mouse_dragged(at, pressed, flags(event));
                 }
                 true
@@ -1596,10 +1586,13 @@ fn handle_in(
                 let Some(pressed) = s.pressed.take() else {
                     return false;
                 };
+                let last_remote = s.last_remote.take();
                 let click = s.click.take();
                 if let Some(at) = diagnostics::within(click, Phase::Up, || {
                     remote(event, &window, content, display, true, s.frame_pixels)
-                }) {
+                })
+                .or(last_remote)
+                {
                     forwarder.mouse_up(at, pressed, event.clickCount() as i64, flags(event), click);
                 }
                 if let Some(after) = s.front_after_release.take() {

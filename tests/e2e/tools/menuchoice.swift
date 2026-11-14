@@ -32,6 +32,144 @@ final class Jumpy: NSPopUpButton {
 final class Unfocusable: NSPopUpButton {
   override var acceptsFirstResponder: Bool { false }
 }
+
+final class CustomDragBar: NSView {
+  weak var stageScreen: NSScreen?
+  var downScreenPt: NSPoint?
+  var dragged = false
+  override func mouseDown(with event: NSEvent) {
+    downScreenPt = window?.convertPoint(toScreen: event.locationInWindow)
+    dragged = false
+  }
+  override func mouseDragged(with event: NSEvent) {
+    guard let start = downScreenPt,
+          let cur = window?.convertPoint(toScreen: event.locationInWindow) else { return }
+    if hypot(cur.x - start.x, cur.y - start.y) > 3 {
+      dragged = true
+    }
+  }
+  override func mouseUp(with event: NSEvent) {
+    guard dragged, let win = window, let stage = stageScreen else { return }
+    dragged = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+      win.setFrameOrigin(NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120))
+    }
+  }
+}
+
+final class TallToolbarView: NSView {
+  weak var stageScreen: NSScreen?
+  override func isAccessibilityElement() -> Bool { true }
+  override func accessibilityRole() -> NSAccessibility.Role? { .toolbar }
+  override func mouseDragged(with event: NSEvent) {
+    guard let win = window, let stage = stageScreen else { return }
+    win.setFrameOrigin(NSPoint(x: stage.frame.minX + 400, y: stage.frame.minY + 80))
+  }
+}
+
+func findScreen(_ envKey: String) -> NSScreen? {
+  guard let want = ProcessInfo.processInfo.environment[envKey] else { return nil }
+  return NSScreen.screens.first {
+    ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue == want
+  }
+}
+
+final class DragDelegate: NSObject, NSApplicationDelegate {
+  var customWin: NSWindow!
+  var tallWin: NSWindow!
+  var sheetHostWin: NSWindow!
+  var attachedSheet: NSWindow!
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    guard let screen = findScreen("MENU_DISPLAY_ID"),
+          let stage = findScreen("MENU_STAGE_ID") else { exit(3) }
+
+    let tallFrame = NSRect(
+      x: screen.frame.minX + 300,
+      y: screen.frame.maxY - 40 - 1300,
+      width: 220,
+      height: 1300
+    )
+    tallWin = NSWindow(
+      contentRect: tallFrame,
+      styleMask: [.titled, .fullSizeContentView],
+      backing: .buffered,
+      defer: false,
+      screen: screen
+    )
+    tallWin.titlebarAppearsTransparent = true
+    tallWin.titleVisibility = .hidden
+    tallWin.minSize = NSSize(width: 220, height: 1300)
+    tallWin.title = "TallDrag"
+    tallWin.setFrame(tallFrame, display: true)
+    let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1260, width: 220, height: 40))
+    tallBar.stageScreen = stage
+    tallWin.contentView!.addSubview(tallBar)
+    tallWin.orderFrontRegardless()
+
+    let customFrame = NSRect(
+      x: screen.frame.minX + 40,
+      y: screen.frame.maxY - 60 - 160,
+      width: 220,
+      height: 160
+    )
+    customWin = NSWindow(
+      contentRect: customFrame,
+      styleMask: [.titled, .fullSizeContentView],
+      backing: .buffered,
+      defer: false,
+      screen: screen
+    )
+    customWin.titlebarAppearsTransparent = true
+    customWin.titleVisibility = .hidden
+    customWin.title = "CustomDrag"
+    customWin.setFrame(customFrame, display: true)
+    let bar = CustomDragBar(frame: NSRect(x: 0, y: 0, width: 220, height: 160))
+    bar.stageScreen = stage
+    customWin.contentView!.addSubview(bar)
+    customWin.orderFrontRegardless()
+
+    let sheetHostFrame = NSRect(
+      x: screen.frame.minX + 550,
+      y: screen.frame.maxY - 260 - 190,
+      width: 230,
+      height: 190
+    )
+    sheetHostWin = NSWindow(
+      contentRect: sheetHostFrame,
+      styleMask: [.titled, .closable],
+      backing: .buffered,
+      defer: false,
+      screen: screen
+    )
+    sheetHostWin.title = "SheetDrag"
+    sheetHostWin.setFrame(sheetHostFrame, display: true)
+    attachedSheet = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 170, height: 80),
+      styleMask: [.titled],
+      backing: .buffered,
+      defer: true
+    )
+    sheetHostWin.orderFrontRegardless()
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+      self.tallWin.setFrame(tallFrame, display: true)
+      self.customWin.setFrame(customFrame, display: true)
+      self.sheetHostWin.setFrame(sheetHostFrame, display: true)
+      if self.attachedSheet.sheetParent == nil {
+        self.sheetHostWin.beginSheet(self.attachedSheet, completionHandler: nil)
+      }
+      self.customWin.orderFrontRegardless()
+    }
+
+    Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+      if !NSScreen.screens.contains(screen) {
+        exit(0)
+      }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 75) { exit(0) }
+  }
+}
 final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var window: NSWindow!
   var sheet: NSWindow!
@@ -120,4 +258,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
-let delegate = Delegate(); app.delegate = delegate; app.run()
+if ProcessInfo.processInfo.environment["MENU_CUSTOM_DRAG"] == "1" {
+  let delegate = DragDelegate()
+  app.delegate = delegate
+  app.run()
+} else {
+  let delegate = Delegate()
+  app.delegate = delegate
+  app.run()
+}

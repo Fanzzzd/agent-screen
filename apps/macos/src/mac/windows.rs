@@ -45,7 +45,9 @@ pub struct Grab {
     pub target: WindowTarget,
     frame: Rect,
     from: (f64, f64),
-    /// The display's global bounds: the window stays inside them.
+    display: DisplayId,
+    /// The display's global bounds at the press: refreshed from `display` if
+    /// the display moves mid-drag.
     area: Rect,
 }
 
@@ -62,56 +64,108 @@ impl Grab {
                 ..w
             })
             .find(|w| w.bounds.contains(at))?;
-        Grab::title_bar(window.target, window.bounds, at, area)
+        Grab::title_bar(window.target, window.bounds, at, id)
     }
 
-    /// `target`, at global `bounds` inside `area`, if `at` is on its title
+    /// `target`, at global `bounds` on `display`, if `at` is on its title
     /// bar.
     pub fn title_bar(
         target: WindowTarget,
         bounds: Rect,
         at: (f64, f64),
-        area: Rect,
+        display: DisplayId,
     ) -> Option<Grab> {
-        Grab::held(target, bounds, at, area).filter(|_| ax::on_title_bar(target, bounds, at))
+        let is_sheet = ax::host_window_target(target) != target;
+        let min_or_full = ax::is_minimized_or_fullscreen(target);
+        Grab::held_checked(target, bounds, at, display, min_or_full, false, is_sheet)
+            .filter(|_| ax::on_title_bar(target, bounds, at))
     }
 
-    /// `target`, at global `bounds` inside `area`, pressed at `at`
-    /// wherever that is on it.
-    pub fn held(target: WindowTarget, bounds: Rect, at: (f64, f64), area: Rect) -> Option<Grab> {
-        area.contains(bounds.mid()).then_some(Grab {
+    /// `target`, at global `bounds` belonging to `display`, pressed at `at`
+    /// inside `display` wherever that is on the window (including a tall or
+    /// wide window hanging past `display`'s edges).
+    pub fn held(
+        target: WindowTarget,
+        bounds: Rect,
+        at: (f64, f64),
+        display: DisplayId,
+    ) -> Option<Grab> {
+        let min_or_full = ax::is_minimized_or_fullscreen(target);
+        Grab::held_checked(target, bounds, at, display, min_or_full, false, false)
+    }
+
+    fn held_checked(
+        target: WindowTarget,
+        bounds: Rect,
+        at: (f64, f64),
+        display: DisplayId,
+        minimized: bool,
+        fullscreen: bool,
+        is_sheet: bool,
+    ) -> Option<Grab> {
+        let area = cg::display_bounds(display);
+        let others = other_displays(display);
+        agent_screen_model::viewer_press::can_grab_window(
+            bounds, at, area, &others, minimized, fullscreen, is_sheet,
+        )
+        .then_some(Grab {
             target,
             frame: bounds,
             from: at,
+            display,
             area,
         })
+    }
+
+    fn rebased(&self, to: (f64, f64)) -> (Rect, (f64, f64), (f64, f64), Rect) {
+        agent_screen_model::viewer_press::rebase_grab_for_display(
+            self.frame,
+            self.from,
+            to,
+            self.area,
+            cg::display_bounds(self.display),
+        )
     }
 
     /// Whether the window has left its display, carried off by something
     /// other than this grab. Blocking.
     pub fn left_display(&self) -> bool {
-        find(self.target.window_id).is_some_and(|w| !self.area.contains(w.bounds.mid()))
+        let (_, _, _, area) = self.rebased(self.from);
+        let others = other_displays(self.display);
+        find(self.target.window_id).is_some_and(|w| {
+            !agent_screen_model::arrangement::window_belongs_to_area(&w.bounds, &area, &others)
+        })
     }
 
     /// Where it was pressed.
     pub fn from(&self) -> (f64, f64) {
-        self.from
+        self.rebased(self.from).1
     }
 
     /// Whether the pointer has gone far enough from the press to count as
     /// a drag rather than a click.
     pub fn moved(&self, to: (f64, f64)) -> bool {
-        (to.0 - self.from.0).hypot(to.1 - self.from.1) >= 3.0
+        let (_, from, to, _) = self.rebased(to);
+        (to.0 - from.0).hypot(to.1 - from.1) >= 3.0
     }
 
-    /// Move the window as far as the pointer moved from the press.
-    /// Blocking.
+    /// Move the window's origin as far as the pointer moved from the press,
+    /// without mutating its size. Blocking.
     pub fn drag_to(&self, to: (f64, f64)) -> bool {
-        let frame = self
-            .frame
-            .offset(to.0 - self.from.0, to.1 - self.from.1)
-            .kept_inside(&self.area);
-        ax::set_frame(self.target, frame).is_ok()
+        let (frame, from, to, area) = self.rebased(to);
+        let (x, y) = agent_screen_model::viewer_press::dragged_window_origin(frame, from, to, area);
+        ax::set_window_position(self.target, x, y).is_ok()
+    }
+
+    /// Put a window that escaped onto the user's screen back at its dragged
+    /// frame on the display, restoring its size as well in case the user's
+    /// window manager tiled it (`set_frame_asked` also tolerates Chromium's
+    /// spurious AX error codes, #167). Blocking.
+    pub fn restore_to(&self, to: (f64, f64)) -> bool {
+        let (frame, from, to, area) = self.rebased(to);
+        let (x, y) = agent_screen_model::viewer_press::dragged_window_origin(frame, from, to, area);
+        let _ = ax::set_frame_asked(self.target, Rect::new(x, y, frame.width, frame.height));
+        !self.left_display()
     }
 }
 
@@ -141,8 +195,7 @@ pub fn all() -> Vec<Window> {
 /// Whether a window with `bounds` is on the display covering `area`: it
 /// overlaps it, and no other display holds its center instead.
 fn belongs(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
-    let center = bounds.mid();
-    bounds.intersects(area) && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
+    agent_screen_model::arrangement::window_belongs_to_area(bounds, area, others)
 }
 
 fn other_displays(display: DisplayId) -> Vec<Rect> {
