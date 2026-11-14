@@ -330,6 +330,10 @@ impl Requests {
         !self.open.is_empty()
     }
 
+    pub fn open_count(&self) -> usize {
+        self.open.len()
+    }
+
     /// The open Help Request's reason and steps.
     pub fn help(&self) -> Option<(&str, &[String])> {
         match &self.get(Kind::Help)?.ask {

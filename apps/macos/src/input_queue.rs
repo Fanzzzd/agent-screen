@@ -545,8 +545,13 @@ impl InputQueue {
         }
     }
 
+    #[allow(dead_code)]
     pub fn approval_needed(&self) -> bool {
-        self.queue.waiting().any(|r| self.asks(r.id))
+        self.approval_count() > 0
+    }
+
+    pub fn approval_count(&self) -> usize {
+        self.queue.waiting().filter(|r| self.asks(r.id)).count()
     }
 
     /// The display the queue's card shows, while it needs one: the first

@@ -58,10 +58,19 @@ pub fn select<H>(
 /// Request in a Takeover too, where the card steps aside: the user may
 /// have collapsed the Viewer.
 pub fn asking<H>(displays: &Displays<H>) -> bool {
+    asking_count(displays, 0) > 0
+}
+
+/// How many open display requests plus pending input approvals currently wait
+/// on the user (#206).
+pub fn asking_count<H>(displays: &Displays<H>, input_pending: usize) -> usize {
     displays
         .list
         .iter()
-        .any(|d| d.is_live() && d.requests.any_open())
+        .filter(|d| d.is_live())
+        .map(|d| d.requests.open_count())
+        .sum::<usize>()
+        .saturating_add(input_pending)
 }
 
 #[cfg(test)]
@@ -160,5 +169,19 @@ mod tests {
         help(&mut d, 1);
         control(&mut d, 2);
         assert_eq!(select(&d, None, Some(1), true), None);
+    }
+
+    #[test]
+    fn asking_count_sums_live_open_requests_and_pending_input() {
+        let mut d = displays(&[1, 2]);
+        assert_eq!(asking_count(&d, 0), 0);
+        assert_eq!(asking_count(&d, 2), 2);
+
+        help(&mut d, 1);
+        control(&mut d, 2);
+        assert_eq!(asking_count(&d, 1), 3);
+
+        d.end(2, crate::model::EndReason::Finished);
+        assert_eq!(asking_count(&d, 1), 2);
     }
 }

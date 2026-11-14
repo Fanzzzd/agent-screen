@@ -414,7 +414,9 @@ pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>) {
     content.setTitle(&NSString::from_str(&title));
     content.setSubtitle(&NSString::from_str(task));
     content.setBody(&NSString::from_str(&body));
-    if matches!(note, Note::Window { .. } | Note::Control(_)) {
+    if matches!(note, Note::Window { .. } | Note::Control(_))
+        || (matches!(note, Note::Input(_)) && !matches!(before, Some(Note::Input(_))))
+    {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
     }
     if let Note::Help {

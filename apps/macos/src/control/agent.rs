@@ -2298,16 +2298,21 @@ async fn handle_one(
                 "queueHeight": crate::ui::help_card::queue_height(),
                 "key": state.get("key"),
                 "cardKeys": state.get("cardKeys"),
+                "highlighted": state.get("highlighted"),
                 "reply": state.get("reply"),
             }))
         }
         // Which picture the menu bar icon shows: idle, working, asking or setup.
         "debugIcon" if debug_methods() => {
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let state = shell
-                .update(cx, |shell, _| shell.icon_state())
+            let (state, asking_count) = shell
+                .update(cx, |shell, _| (shell.icon_state(), shell.asking_count()))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            Ok(json!({ "state": state }))
+            Ok(json!({
+                "state": state,
+                "askingCount": asking_count,
+                "chimes": crate::mac::native::approval_chimes(),
+            }))
         }
         "debugShow" if debug_methods() => {
             let surface = p.string("surface").unwrap_or_else(|| "viewer".into());

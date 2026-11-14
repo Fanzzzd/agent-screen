@@ -253,7 +253,7 @@ pub struct Shell {
     /// Whether AeroSpace leaves Agent Displays alone; None without AeroSpace.
     aerospace: Option<aerospace::Ignoring>,
     guard_generation: u64,
-    asking: bool,
+    asking_count: usize,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
     /// Whether macOS lets Agent Screen notify.
@@ -465,7 +465,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             conflicts: Vec::new(),
             aerospace: None,
             guard_generation: 0,
-            asking: false,
+            asking_count: 0,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
             real_saved: None,
@@ -857,10 +857,14 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core.input_queue.approval_needed() || card::asking(&core.displays);
-        if asking != self.asking {
-            self.asking = asking;
-            self.icon.set_asking(asking);
+        let asking_count = card::asking_count(&core.displays, core.input_queue.approval_count());
+        if asking_count != self.asking_count {
+            let rose = asking_count > self.asking_count;
+            self.asking_count = asking_count;
+            self.icon.set_asking_count(asking_count);
+            if rose {
+                native::chime_approval();
+            }
         }
         let working = core.displays.list.iter().any(|d| !d.is_ended());
         if working != self.working {
@@ -2070,6 +2074,10 @@ impl Shell {
     /// Which picture the menu bar icon shows.
     pub fn icon_state(&self) -> &'static str {
         self.icon.state()
+    }
+
+    pub fn asking_count(&self) -> usize {
+        self.icon.asking_count()
     }
 
     fn icon_rect(&self) -> Option<NSRect> {
