@@ -4637,15 +4637,10 @@ fn popup_window(element: &ax::Element, fallback: WindowTarget) -> Option<WindowT
         && cg::window_bounds(window_id).is_some()
         && let Some(pid) = ax::pid_of(element)
     {
-        let host_pid = if pid != fallback.pid && cg::is_remote_view_service(pid) {
-            fallback.pid
-        } else {
-            pid
-        };
-        return Some(WindowTarget {
-            pid: host_pid,
-            window_id,
-        });
+        if pid != fallback.pid && cg::is_remote_view_service(pid) {
+            return Some(fallback);
+        }
+        return Some(WindowTarget { pid, window_id });
     }
     if ax::belongs(element, fallback, false) == Some(true) {
         return Some(fallback);

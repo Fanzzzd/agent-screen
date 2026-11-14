@@ -2,9 +2,11 @@
 //! on the Agent Display, as far as the drag went, and stays there for a
 //! native window, a custom-title-bar window that moves asynchronously after
 //! mouseUp, a window taller than the display dragged past the Viewer image
-//! edge, and a window with an attached modal sheet. The Viewer opens on a
-//! stage display and input goes through its own handler, so the user's pointer
-//! and screen are untouched.
+//! edge, and a window with an attached modal sheet. Also checks Takeover
+//! Viewer clicks through an empty host window into an `.appex` pop-up menu and
+//! click-outside menu dismissal (#205, #207). The Viewer opens on a stage
+//! display and input goes through its own handler, so the user's pointer and
+//! screen are untouched.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag
 
@@ -12,7 +14,7 @@ use std::process::ExitCode;
 
 use agent_screen_tests::{
     Control, Window, check, instance, json, kill_ours, menu_choice_app, open_stage, our_binary,
-    quit_app, run, running, skip, sleep_ms, start_test_app, stop_test_app,
+    out, quit_app, run, running, sh, skip, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -28,6 +30,9 @@ fn main() -> ExitCode {
         let fixture = menu_choice_app()?;
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let result = test(&fixture);
+        let _ = std::process::Command::new("/usr/bin/pkill")
+            .args(["-f", "MenuPane.appex/Contents/MacOS/MenuPane"])
+            .status();
         kill_ours(our_binary("MenuChoice"));
         quit_app("Calculator");
         stop_test_app();
@@ -118,6 +123,8 @@ fn test(fixture: &std::path::Path) -> Result<()> {
     );
     sleep_ms(300);
 
+    let pane_state = out().join("viewerdrag-pane-state");
+    let _ = std::fs::remove_file(&pane_state);
     control.call(
         "launchApp",
         json!({
@@ -128,6 +135,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 "MENU_CUSTOM_DRAG": "1",
                 "MENU_DISPLAY_ID": id.to_string(),
                 "MENU_STAGE_ID": stage_id.to_string(),
+                "MENU_PANE_STATE": pane_state,
             }
         }),
     )?;
@@ -135,6 +143,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         if titled(id, "CustomDrag")?.is_some_and(|w| w.x < 100.0)
             && titled(id, "TallDrag")?.is_some_and(|w| w.x > 250.0)
             && titled(id, "SheetDrag")?.is_some_and(|w| w.x > 500.0)
+            && pane_state.exists()
         {
             break;
         }
@@ -226,10 +235,119 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         format!("{} -> {}", json!(before_sheet), json!(after_sheet)),
     );
 
+    // 4. Real Takeover Viewer clicks on an `.appex` pop-up menu behind a host window (#205, #207).
+    control.call(
+        "debugTakeover",
+        json!({ "sessionKey": "viewerdrag", "displayId": id, "active": true }),
+    )?;
+    let pop_pt = ((610.0 + 115.0) / w, (60.0 + 74.0) / h);
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "click", "x": pop_pt.0, "y": pop_pt.1, "key": 1 }),
+    )?;
+    let mut state = String::new();
+    for _ in 0..25 {
+        state = std::fs::read_to_string(&pane_state).unwrap_or_default();
+        if state.contains("paneMenu=1") {
+            break;
+        }
+        sleep_ms(50);
+    }
+    let menu_bounds = || -> Option<(f64, f64, f64, f64)> {
+        for _ in 0..15 {
+            let out = sh(
+                "/usr/bin/swift",
+                &[
+                    "-e",
+                    &format!(
+                        "import CoreGraphics
+let disp = CGDisplayBounds({id})
+let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+for w in list {{
+  guard let layer = w[kCGWindowLayer as String] as? Int, layer == 101,
+        let b = w[kCGWindowBounds as String] as? [String: Double],
+        let x = b[\"X\"], let y = b[\"Y\"], let width = b[\"Width\"], let height = b[\"Height\"] else {{ continue }}
+  let r = CGRect(x: x, y: y, width: width, height: height)
+  if disp.intersects(r) {{ print(x - disp.origin.x, y - disp.origin.y, width, height); break }}
+}}"
+                    ),
+                ],
+            )
+            .ok()?;
+            let nums: Vec<f64> = out
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if let [mx, my, mw, mh] = nums[..] {
+                return Some((mx, my, mw, mh));
+            }
+            sleep_ms(50);
+        }
+        None
+    };
+
+    if let Some((mx, my, mw, mh)) = menu_bounds() {
+        control.call(
+            "debugViewerInput",
+            json!({
+                "kind": "click",
+                "x": (mx + mw * 0.5) / w,
+                "y": (my + mh * 0.82) / h,
+            }),
+        )?;
+        for _ in 0..25 {
+            state = std::fs::read_to_string(&pane_state).unwrap_or_default();
+            if state.contains("pane=Manually") && state.contains("paneMenu=0") {
+                break;
+            }
+            sleep_ms(50);
+        }
+    }
+    check(
+        "Takeover Viewer click through a host window into an .appex NSMenu item picks Manually (#205, #207)",
+        state.contains("pane=Manually") && state.contains("paneMenu=0"),
+        state.clone(),
+    );
+
+    // Reopen the `.appex` NSMenu and click empty space in the Viewer to dismiss it (#207).
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "click", "x": pop_pt.0, "y": pop_pt.1 }),
+    )?;
+    for _ in 0..25 {
+        state = std::fs::read_to_string(&pane_state).unwrap_or_default();
+        if state.contains("paneMenu=1") {
+            break;
+        }
+        sleep_ms(50);
+    }
+    let reopened = state.contains("paneMenu=1");
+    if reopened {
+        control.call(
+            "debugViewerInput",
+            json!({ "kind": "click", "x": 0.92, "y": 0.88 }),
+        )?;
+        for _ in 0..25 {
+            state = std::fs::read_to_string(&pane_state).unwrap_or_default();
+            if state.contains("paneMenu=0") {
+                break;
+            }
+            sleep_ms(50);
+        }
+    }
+    check(
+        "Takeover Viewer click on empty space dismisses an open .appex NSMenu (#207)",
+        reopened && state.contains("pane=Manually") && state.contains("paneMenu=0"),
+        state,
+    );
+
     let _ = control.call(
         "debugTakeover",
         json!({ "sessionKey": "viewerdrag", "displayId": id, "active": false }),
     );
+    let _ = std::process::Command::new("/usr/bin/pkill")
+        .args(["-f", "MenuPane.appex/Contents/MacOS/MenuPane"])
+        .status();
     kill_ours(our_binary("MenuChoice"));
     sleep_ms(300);
     let _ = control.call(

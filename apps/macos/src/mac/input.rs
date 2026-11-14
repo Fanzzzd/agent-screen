@@ -1646,21 +1646,8 @@ impl Worker {
                         && m.bounds.intersects(&within)
                         && !m.bounds.contains(at)
                     {
-                        let mut menu_pids = vec![m.target.pid];
-                        if m.host.pid != m.target.pid {
-                            menu_pids.push(m.host.pid);
-                        }
-                        for w in &windows {
-                            if (0..=8).contains(&w.layer) && within.contains(w.bounds.mid()) {
-                                if !menu_pids.contains(&w.target.pid) {
-                                    menu_pids.push(w.target.pid);
-                                }
-                                if !menu_pids.contains(&w.host.pid) {
-                                    menu_pids.push(w.host.pid);
-                                }
-                            }
-                        }
-                        if super::ax::cancel_menu_at(&menu_pids, m.bounds.mid()) {
+                        let pids = menu_pids_for(m, &windows);
+                        if super::ax::cancel_menu_at(&pids, m.bounds.mid()) {
                             cancelled = Some(m.host);
                         }
                     }
@@ -1681,25 +1668,9 @@ impl Worker {
             .map(cg::display_bounds)
             .find(|b| b.contains(at))
             .or_else(|| display_of(target.window_id));
-        let push_pid = |list: &mut Vec<i32>, pid: i32| {
-            if !list.contains(&pid) {
-                list.push(pid);
-            }
-        };
-        let mut display_pids = Vec::new();
-        push_pid(&mut display_pids, hit.target.pid);
-        push_pid(&mut display_pids, hit.host.pid);
-        if let Some(within) = within_display {
-            for w in &windows {
-                if (0..=8).contains(&w.layer) && within.contains(w.bounds.mid()) {
-                    push_pid(&mut display_pids, w.target.pid);
-                    push_pid(&mut display_pids, w.host.pid);
-                }
-            }
-        }
         if hit.layer == popup_menu
             && matches!(button, Button::Left)
-            && super::ax::press_menu_item_at(&display_pids, at)
+            && super::ax::press_menu_item_at(&menu_pids_for(&hit, &windows), at)
         {
             // No gesture: the release that follows has nothing to send.
             log::debug!("input: pressed the menu item at {at:?}");
@@ -1714,13 +1685,7 @@ impl Worker {
         {
             for m in &windows {
                 if m.layer == popup_menu && m.bounds.intersects(&within) && !m.bounds.contains(at) {
-                    let mut menu_pids = Vec::new();
-                    push_pid(&mut menu_pids, m.target.pid);
-                    push_pid(&mut menu_pids, m.host.pid);
-                    for &pid in &display_pids {
-                        push_pid(&mut menu_pids, pid);
-                    }
-                    let _ = super::ax::cancel_menu_at(&menu_pids, m.bounds.mid());
+                    let _ = super::ax::cancel_menu_at(&menu_pids_for(m, &windows), m.bounds.mid());
                 }
             }
         }
@@ -2498,6 +2463,41 @@ fn resolve_drag_under(
     } else {
         None
     }
+}
+
+/// Candidate Accessibility owner PIDs for an open `NSMenu` (`layer == 101`):
+/// only the menu's own target/host PIDs plus, when drawn by an out-of-process
+/// `.xpc`/`.appex` view service, any document/sheet host window on the same
+/// display (#207).
+fn menu_pids_for(menu: &Hit, windows: &[Hit]) -> Vec<i32> {
+    let on_display = cg::active_displays()
+        .into_iter()
+        .map(cg::display_bounds)
+        .find(|b| b.intersects(&menu.bounds));
+    resolve_menu_pids(menu, windows, on_display, cg::is_remote_view_service)
+}
+
+fn resolve_menu_pids(
+    menu: &Hit,
+    windows: &[Hit],
+    on_display: Option<Rect>,
+    is_remote: impl Fn(i32) -> bool,
+) -> Vec<i32> {
+    let mut pids = vec![menu.target.pid];
+    if menu.host.pid != menu.target.pid {
+        pids.push(menu.host.pid);
+    }
+    if is_remote(menu.target.pid) || is_remote(menu.host.pid) {
+        for w in windows {
+            if (0..=8).contains(&w.layer)
+                && on_display.is_none_or(|d| w.bounds.intersects(&d))
+                && !pids.contains(&w.host.pid)
+            {
+                pids.push(w.host.pid);
+            }
+        }
+    }
+    pids
 }
 
 /// Windows input can reach, front to back. The desktop is left out on
@@ -3394,6 +3394,37 @@ mod popup_tests {
         assert_eq!(
             resolve_real_click(&stranger_hits, &[sheet], 101, |_| false, at_menu),
             None
+        );
+
+        // #207: native menus only probe their own PIDs (never unrelated apps on
+        // the display), while `.appex` remote-service menus add same-display
+        // host window PIDs.
+        let bystander = Hit {
+            host: WindowTarget {
+                pid: 999,
+                window_id: 999,
+            },
+            target: WindowTarget {
+                pid: 999,
+                window_id: 999,
+            },
+            bounds: Rect::new(4700.0, -500.0, 200.0, 200.0),
+            layer: 0,
+        };
+        let native_menu = Hit {
+            host: sheet,
+            target: sheet,
+            bounds: menu_rect,
+            layer: 101,
+        };
+        let all_windows = vec![hits[0], hits[1], bystander];
+        assert_eq!(
+            resolve_menu_pids(&native_menu, &all_windows, Some(area), |_| false),
+            vec![100]
+        );
+        assert_eq!(
+            resolve_menu_pids(&hits[0], &all_windows, Some(area), |p| p == 300),
+            vec![300, 100, 999]
         );
     }
 }

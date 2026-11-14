@@ -1252,6 +1252,23 @@ pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)
         .is_some_and(|value| set_attribute(element, "AXSelectedTextRange", &value))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuWalkStep {
+    Press,
+    Stop,
+    Up,
+}
+
+fn menu_item_walk_step(role: Option<&str>) -> MenuWalkStep {
+    match role {
+        Some("AXMenuItem") => MenuWalkStep::Press,
+        // Stop at the enclosing menu container so a click on a submenu's
+        // padding never walks into the parent menu item.
+        Some("AXMenu" | "AXMenuBar") => MenuWalkStep::Stop,
+        _ => MenuWalkStep::Up,
+    }
+}
+
 /// Press the menu item at a global point of an open pop-up menu, as a
 /// web page's select or an AppKit / ExtensionKit pop-up button shows (#205,
 /// #207). True if there was one to press. A menu tracks the real pointer, not
@@ -1262,17 +1279,25 @@ pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)
 /// menu may answer through either the `.appex` pid or the host app's pid.
 pub fn press_menu_item_at(pids: &[i32], at: (f64, f64)) -> bool {
     for &pid in pids {
-        let Some(mut el) = element_at(pid, at) else {
+        let app = application(pid);
+        unsafe { app.set_messaging_timeout(0.15) };
+        let Some(mut el) = element_at_in(&app, at) else {
             continue;
         };
-        for _ in 0..8 {
-            if string_attribute(&el, "AXRole").as_deref() == Some("AXMenuItem") {
-                if unsafe { el.perform_action(&CFString::from_static_str("AXPress")) }
-                    == AXError::Success
-                {
-                    return true;
+        // At most 2 AXParent hops (`el`, parent, grandparent).
+        for _ in 0..3 {
+            unsafe { el.set_messaging_timeout(0.15) };
+            match menu_item_walk_step(string_attribute(&el, "AXRole").as_deref()) {
+                MenuWalkStep::Press => {
+                    if unsafe { el.perform_action(&CFString::from_static_str("AXPress")) }
+                        == AXError::Success
+                    {
+                        return true;
+                    }
+                    break;
                 }
-                break;
+                MenuWalkStep::Stop => break,
+                MenuWalkStep::Up => {}
             }
             let Some(parent) = element_attribute(&el, "AXParent") else {
                 break;
@@ -1288,10 +1313,13 @@ pub fn press_menu_item_at(pids: &[i32], at: (f64, f64)) -> bool {
 /// tracking ignores posted mouse clicks outside its window until cancelled.
 pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
     for &pid in pids {
-        let Some(mut el) = element_at(pid, at) else {
+        let app = application(pid);
+        unsafe { app.set_messaging_timeout(0.15) };
+        let Some(mut el) = element_at_in(&app, at) else {
             continue;
         };
         for _ in 0..8 {
+            unsafe { el.set_messaging_timeout(0.15) };
             if string_attribute(&el, "AXRole").as_deref() == Some("AXMenu") {
                 if unsafe { el.perform_action(&CFString::from_static_str("AXCancel")) }
                     == AXError::Success
@@ -2483,5 +2511,14 @@ mod tests {
         }
         // Calculator: nothing.
         assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
+    }
+
+    #[test]
+    fn menu_item_walk_stops_at_menu_container_and_presses_menu_item() {
+        assert_eq!(menu_item_walk_step(Some("AXMenuItem")), MenuWalkStep::Press);
+        assert_eq!(menu_item_walk_step(Some("AXStaticText")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXImage")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXMenu")), MenuWalkStep::Stop);
+        assert_eq!(menu_item_walk_step(Some("AXMenuBar")), MenuWalkStep::Stop);
     }
 }
