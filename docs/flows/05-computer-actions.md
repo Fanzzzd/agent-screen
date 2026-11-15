@@ -9,23 +9,23 @@ flowchart TD
     A["Agent 调用 computer / act_on_element / screenshot"] --> B{"目标 PID 是否为用户当前前台应用? (#110)"}
 
     B -- "是, 且用户窗口持有焦点或焦点未知 (shared_app.rs)" --> C{"动作类型"}
-    C -- "普通左键单击" --> C1["beside::hit -> AXPress 或选中 Picked 输入框"]
-    C -- "type / Return / Escape / BackSpace / Cmd+A" --> C2["直接读写 Picked AX 元素并核验 check_focus, 失焦则 ax::make_main(user) 恢复"]
+    C -- "普通左键单击" --> C1["beside : ：hit -> AXPress 或选中 Picked 输入框]
+    C -- "type / Return / Escape / BackSpace / Cmd+A" --> C2["直接读写 Picked AX 元素并核验 check_focus, 失焦则 ax : ：make_main(user) 恢复]
     C -- "菜单栏点击 / show_menu / 其他复杂手势" --> C3["拒绝后台合成或转交 InputQueue 借用真实输入"]
 
     B -- "否, 目标进程在后台或焦点已在代理窗" --> D{"动作类型"}
     D -- "click / double_click / move / scroll" --> E["SSFocusWithoutRaise (0xF8/0x0D 记录, 前台≠目标时) + SSPostEventToPid (authenticate=false)"]
     D -- "key / type (ASCII 与快捷键)" --> F["SSFocusWithoutRaise + SSPostEventToPid (authenticate=true, 附加 SLSEventAuthenticationMessage)"]
     D -- "type 含非 ASCII 文本且需系统输入法 (ADR 0008)" --> G["ime.rs 满足空闲>=2s且<=250键时临时借用 SessionEventTap + TIS 键盘源, 用户触碰立即中止并恢复前台"]
-    D -- "drag" --> H{"拖拽目标分流 (agent.rs:542-658)"}
-    H -- "标准标题栏" --> H1["Grab::drag_to 直接写 AXPosition"]
-    H -- "网页区域且具备 CDP 管道 (ADR 0010)" --> H2["devtools.rs: Input.setInterceptDrags + dispatchMouseEvent / dispatchDragEvent"]
-    H -- "AX 滑块" --> H3["ax::drag_slider 语义写入"]
+    D -- "drag" --> H{"拖拽目标分流 (agent.rs : 542-658)}
+    H -- "标准标题栏" --> H1["Grab : ：drag_to 直接写 AXPosition]
+    H -- "网页区域且具备 CDP 管道 (ADR 0010)" --> H2["devtools.rs : Input.setInterceptDrags + dispatchMouseEvent / dispatchDragEvent]
+    H -- "AX 滑块" --> H3["ax : ：drag_slider 语义写入]
     H -- "跨窗口拖拽 (#166) 或无管道网页或 realInput=true" --> H4["转入 InputQueue 借用真实光标 (ADR 0013)"]
-    H -- "普通原生视图内拖拽" --> H5["Forwarder::drag: 1..8pt 微步跨过 AppKit 拖拽阈值 + SkyLight 序列"]
+    H -- "普通原生视图内拖拽" --> H5["Forwarder : ：drag： 1..8pt 微步跨过 AppKit 拖拽阈值 + SkyLight 序列]
     D -- "act_on_element" --> I["AXUIElementPerformAction (AXPress / AXConfirm / AXShowMenu) 或写 AXValue"]
 
-    C1 & C2 & E & F & G & H1 & H2 & H3 & H5 & I --> J["ime::note_posted 记录投递时间戳 (抵消 _CGSTickleActivityMonitor 假活跃)"]
+    C1 & C2 & E & F & G & H1 & H2 & H3 & H5 & I --> J["ime : ：note_posted 记录投递时间戳 (抵消 _CGSTickleActivityMonitor 假活跃)]
     J --> K["capture.rs 等待 160x100 亮度网格静止 (settle <= 1.5s, 跳过顶部 40pt 菜单栏)"]
     K --> L["screenshot.rs 校验无 unit_twin -> SCScreenshotManager 截屏 -> 剔除菜单栏图层 -> JPEG/PNG 编码返回"]
 ```

@@ -6,23 +6,23 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Connecting : "AgentScreen mcp 启动并连接 Unix Socket"
-    Connecting --> Handshaking : "UnixStream 建立"
-    Handshaking --> ConnectedIdle : "发送 hello(new_token) 握手成功"
+    [*] --> Connecting : AgentScreen mcp 启动并连接 Unix Socket
+    Connecting --> Handshaking : UnixStream 建立
+    Handshaking --> ConnectedIdle : 发送 hello(new_token) 握手成功
 
-    ConnectedIdle --> ConnectedBusy : "收到 MCP 工具请求并转发 NDJSON"
-    ConnectedBusy --> ConnectedIdle : "主应用返回工具响应"
+    ConnectedIdle --> ConnectedBusy : 收到 MCP 工具请求并转发 NDJSON
+    ConnectedBusy --> ConnectedIdle : 主应用返回工具响应
 
-    ConnectedBusy --> DisconnectedGrace : "UnixStream EOF 或读写中断"
-    ConnectedIdle --> DisconnectedGrace : "UnixStream EOF 或读写中断"
+    ConnectedBusy --> DisconnectedGrace : UnixStream EOF 或读写中断
+    ConnectedIdle --> DisconnectedGrace : UnixStream EOF 或读写中断
 
-    DisconnectedGrace --> ConnectedIdle : "2000ms 内凭原 session_token 重连 hello (补发 unheard)"
-    DisconnectedGrace --> Expired : "超过 DISCONNECT_GRACE = 2000ms 未重连"
+    DisconnectedGrace --> ConnectedIdle : 2000ms 内凭原 session_token 重连 hello (补发 unheard)
+    DisconnectedGrace --> Expired : 超过 DISCONNECT_GRACE = 2000ms 未重连
 
-    ConnectedIdle --> ZombieAlive : "上游代理已死但父进程未关闭 mcp stdio 管道 (#189)"
-    ZombieAlive --> DisconnectedGrace : "父进程最终关闭管道或进程被终止"
+    ConnectedIdle --> ZombieAlive : 上游代理已死但父进程未关闭 mcp stdio 管道 (#189)
+    ZombieAlive --> DisconnectedGrace : 父进程最终关闭管道或进程被终止
 
-    Expired --> [*] : "撤回未决请求, 移交兄弟会话或将显示器转入 Review"
+    Expired --> [*] : 撤回未决请求, 移交兄弟会话或将显示器转入 Review
 ```
 
 ## 状态与转换明细表

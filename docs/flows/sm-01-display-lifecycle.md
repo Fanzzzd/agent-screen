@@ -6,27 +6,27 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SpareCreating : "预热或按需新建"
-    SpareCreating --> SpareIdle : "CGVirtualDisplay 就绪且停放成功"
-    SpareCreating --> Retired : "unit_twin 冲突或创建失败"
+    [*] --> SpareCreating : 预热或按需新建
+    SpareCreating --> SpareIdle : CGVirtualDisplay 就绪且停放成功
+    SpareCreating --> Retired : unit_twin 冲突或创建失败
 
-    SpareIdle --> Active : "create_display 命中 pick_spare"
-    SpareCreating --> Active : "无空闲 Spare 直接采用"
+    SpareIdle --> Active : create_display 命中 pick_spare
+    SpareCreating --> Active : 无空闲 Spare 直接采用
 
-    Active --> Takeover : "request_control 或用户点击 Takeover"
-    Takeover --> Active : "用户点击 Return Control"
+    Active --> Takeover : request_control 或用户点击 Takeover
+    Takeover --> Active : 用户点击 Return Control
 
-    Active --> Active : "end_display 但存在兄弟会话接管"
-    Takeover --> Review : "用户主动关闭或会话断连过期后交还"
-    Active --> Review : "end_display / 会话过期 / 用户关闭"
+    Active --> Active : end_display 但存在兄弟会话接管
+    Takeover --> Review : 用户主动关闭或会话断连过期后交还
+    Active --> Review : end_display / 会话过期 / 用户关闭
 
-    Active --> Quarantined : "ScreensChanged 检出 unit_twin"
-    SpareIdle --> Quarantined : "ScreensChanged 检出 unit_twin"
-    Quarantined --> Retired : "丢弃 VirtualDisplay 引用"
+    Active --> Quarantined : ScreensChanged 检出 unit_twin
+    SpareIdle --> Quarantined : ScreensChanged 检出 unit_twin
+    Quarantined --> Retired : 丢弃 VirtualDisplay 引用
 
-    Review --> SpareIdle : "无残留窗口 600ms 清扫且空闲池未满 FILLERS=2"
-    Review --> Retired : "清扫完成且空闲池已达 FILLERS=2"
-    Retired --> [*] : "ObjC release 注销 WindowServer 显示器"
+    Review --> SpareIdle : 无残留窗口 600ms 清扫且空闲池未满 FILLERS=2
+    Review --> Retired : 清扫完成且空闲池已达 FILLERS=2
+    Retired --> [*] : ObjC release 注销 WindowServer 显示器
 ```
 
 ## 状态与转换明细表

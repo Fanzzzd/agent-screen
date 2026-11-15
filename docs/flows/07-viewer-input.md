@@ -6,27 +6,27 @@
 
 ```mermaid
 flowchart TD
-    U["用户在 Viewer 画布按下鼠标或键盘"] --> TP["private-press 线程主动式 HIDEventTap (viewer_input.rs:1815)"]
+    U["用户在 Viewer 画布按下鼠标或键盘"] --> TP["private-press 线程主动式 HIDEventTap (viewer_input.rs : 1815)]
     TP --> TP1{"命中的是否为无遮挡且无展开菜单的 Viewer PICTURE 画布?"}
     TP1 -- "否" --> OS["原样放行给 WindowServer 与 GPUI 常规 UI"]
     TP1 -- "是" --> TP2["向 WindowServer 返回 NULL 吞掉全局广播 (ADR 0014), 期间按键暂存 KeyHold <= 100ms"]
 
     TP2 --> LM["主线程 NSEvent 本地监听器保留精确滚轮相位与修饰键"]
-    LM --> MAP["viewer_press::map_point 校验 CGDisplayBounds 非 (0,0,0,0) 并换算代理屏坐标"]
+    LM --> MAP["viewer_press : ：map_point 校验 CGDisplayBounds 非 (0,0,0,0) 并换算代理屏坐标]
     MAP --> HIT["命中代理屏顶层目标窗口, 计算覆盖率决定激活时序"]
 
     HIT --> FR{"目标窗覆盖同 PID 下层窗比例 <= 60%? (#41 临时浮层)"}
     FR -- "是: Front::AfterRelease" --> FA["先向目标 PID 发送按下与抬起, 释放后再 make_key + SSMakeSelfFront"]
     FR -- "否: Front::BeforePress" --> FB["先 make_key 再 SSMakeSelfFront(0x200) 激活自身 NSTextInputContext"]
 
-    FB --> TB{"左键是否落在标准标题栏可拖区? (ax::on_title_bar <= 52pt, 0.15s 超时)"}
-    TB -- "是" --> GRAB["Worker::grab 接管拖拽: dragged_window_origin 写 AXPosition, 限制超大窗中心留在屏内"]
+    FB --> TB{"左键是否落在标准标题栏可拖区? (ax : ：on_title_bar <= 52pt, 0.15s 超时)}
+    TB -- "是" --> GRAB["Worker : ：grab 接管拖拽： dragged_window_origin 写 AXPosition, 限制超大窗中心留在屏内]
     TB -- "否" --> SKY["SSFocusWithoutRaise + SSPostEventToPid 发送指针序列; 越出画布时 clamp 到 [0.0, 1.0]"]
     SKY --> GUARD["注册 10s ViewerDragGuard 暂停 guard_placed, 结束按 [0,40,150,350,700]ms 执行 keep_on_display"]
 
     U --> KEY["用户在 Viewer 敲击键盘"]
-    KEY --> IME{"当前输入源是否为 InputMethod 且焦点保密性 Secrecy::Unknown?"}
-    IME -- "是 (#117)" --> HOLD["暂存按键与 Shift/CapsLock <= 400ms, Probe 线程轮询 ax::text_focus"]
+    KEY --> IME{"当前输入源是否为 InputMethod 且焦点保密性 Secrecy : ：Unknown?}
+    IME -- "是 (#117)" --> HOLD["暂存按键与 Shift/CapsLock <= 400ms, Probe 线程轮询 ax : ：text_focus]
     HOLD --> SEC{"探测结果"}
     SEC -- "Secrecy::Secure (密码框)" --> RAW["丢弃已产生的预编辑串, 将 COMPOSED_KEYS 按原始键码重放至目标 PID"]
     SEC -- "Secrecy::Open (普通文本)" --> NST["送入 GPUI NSTextInputContext, IMP swizzle 捕获 doCommandBySelector:, 候选窗定位至 caret_in_window"]

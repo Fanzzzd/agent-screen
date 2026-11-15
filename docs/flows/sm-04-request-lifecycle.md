@@ -6,27 +6,27 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : "发起 Help / Takeover / WindowAccess / WindowRequest"
+    [*] --> Pending : 发起 Help / Takeover / WindowAccess / WindowRequest
 
-    Pending --> Notified : "刷新 UI 横幅、菜单栏角标与 UNUserNotificationCenter"
-    Notified --> ResolvedContinue : "Help: 用户点击 Continue 或 Takeover: 点击 Return Control"
-    Notified --> ResolvedReply : "Help: 用户提交文本 Reply"
-    Notified --> ResolvedGiveWindow : "Help (Give) / WindowAccess / WindowRequest: 批准移交窗口"
-    Notified --> Declined : "WindowAccess / WindowRequest: 用户点击拒绝"
-    Notified --> AutoTransferred : "WindowRequest: 原持有会话主动释放窗口或过期"
+    Pending --> Notified : 刷新 UI 横幅、菜单栏角标与 UNUserNotificationCenter
+    Notified --> ResolvedContinue : Help： 用户点击 Continue 或 Takeover： 点击 Return Control
+    Notified --> ResolvedReply : Help： 用户提交文本 Reply
+    Notified --> ResolvedGiveWindow : Help (Give) / WindowAccess / WindowRequest： 批准移交窗口
+    Notified --> Declined : WindowAccess / WindowRequest： 用户点击拒绝
+    Notified --> AutoTransferred : WindowRequest： 原持有会话主动释放窗口或过期
 
-    ResolvedReply --> UnheardBuffered : "答复生成时 MCP 连接正处于闪断期"
-    UnheardBuffered --> Delivered : "2000ms 内会话重连补发"
-    UnheardBuffered --> DroppedOnExpire : "会话超过宽限期彻底过期"
+    ResolvedReply --> UnheardBuffered : 答复生成时 MCP 连接正处于闪断期
+    UnheardBuffered --> Delivered : 2000ms 内会话重连补发
+    UnheardBuffered --> DroppedOnExpire : 会话超过宽限期彻底过期
 
-    ResolvedContinue --> Delivered : "连接在线直接写回 NDJSON 响应"
-    ResolvedReply --> Delivered : "连接在线直接写回 NDJSON 响应"
-    ResolvedGiveWindow --> Delivered : "完成 windows::settle 后写回窗口信息"
-    Declined --> Delivered : "返回结构化拒绝原因"
-    AutoTransferred --> Delivered : "原子迁移 Held 记录并返回"
+    ResolvedContinue --> Delivered : 连接在线直接写回 NDJSON 响应
+    ResolvedReply --> Delivered : 连接在线直接写回 NDJSON 响应
+    ResolvedGiveWindow --> Delivered : 完成 windows：：settle 后写回窗口信息
+    Declined --> Delivered : 返回结构化拒绝原因
+    AutoTransferred --> Delivered : 原子迁移 Held 记录并返回
 
-    Pending --> Withdrawn : "请求方会话断连过期或显示器被关闭"
-    Notified --> Withdrawn : "请求方会话断连过期或目标窗口已销毁"
+    Pending --> Withdrawn : 请求方会话断连过期或显示器被关闭
+    Notified --> Withdrawn : 请求方会话断连过期或目标窗口已销毁
 
     Delivered --> [*]
     DroppedOnExpire --> [*]

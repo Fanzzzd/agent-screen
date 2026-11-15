@@ -12,33 +12,33 @@ sequenceDiagram
     participant User as "User"
     participant AX as "HIServices AX / AeroSpace"
 
-    alt "代理发起结构化求助 (request_help, ADR 0015)"
-        MCP->>Ctrl: "requestHelp(display, message)"
-        Ctrl->>UI: "登记 Help 请求，展示求助横幅与系统通知"
-        alt "用户选择 Continue"
-            User->>UI: "在 Viewer 完成操作后点击 Continue"
-            UI->>Ctrl: "resolve(Answer::Continue)"
-            Ctrl-->>MCP: "返回 { status: 'continue' }"
-        else "用户选择 Reply 附言"
-            User->>UI: "输入文字说明并提交 Reply"
-            UI->>Ctrl: "resolve(Answer::Reply(text)) 并写入 unheard 防丢缓冲"
-            Ctrl-->>MCP: "返回 { status: 'reply', text }"
-        else "用户选择 Give a window 移交窗口"
-            User->>UI: "从窗口选择器挑选主屏窗口移交"
-            UI->>AX: "保存原屏几何 + 写入 AeroSpace claim + windows::settle 移入代理屏"
-            UI->>Ctrl: "建立 Held 记录并 resolve(Answer::Give(window_info))"
-            Ctrl-->>MCP: "返回 { status: 'window_given', window }"
+    alt 代理发起结构化求助 (request_help, ADR 0015)
+        MCP->>Ctrl : requestHelp(display, message)
+        Ctrl->>UI : 登记 Help 请求，展示求助横幅与系统通知
+        alt 用户选择 Continue
+            User->>UI : 在 Viewer 完成操作后点击 Continue
+            UI->>Ctrl : resolve(Answer：：Continue)
+            Ctrl-->>MCP : 返回 { status： 'continue' }
+        else 用户选择 Reply 附言
+            User->>UI : 输入文字说明并提交 Reply
+            UI->>Ctrl : resolve(Answer：：Reply(text)) 并写入 unheard 防丢缓冲
+            Ctrl-->>MCP : 返回 { status： 'reply', text }
+        else 用户选择 Give a window 移交窗口
+            User->>UI : 从窗口选择器挑选主屏窗口移交
+            UI->>AX : 保存原屏几何 + 写入 AeroSpace claim + windows：：settle 移入代理屏
+            UI->>Ctrl : 建立 Held 记录并 resolve(Answer：：Give(window_info))
+            Ctrl-->>MCP : 返回 { status： 'window_given', window }
         end
-    else "代理请求用户直接接管或用户在 UI 主动点击 Takeover (ADR 0004)"
-        MCP->>Ctrl: "requestControl(display, reason) / waitForControl(display)"
-        User->>UI: "进入 Takeover 态并打开 Viewer 直接键鼠操作"
-        Ctrl->>Ctrl: "置显示器为 Takeover, 拦截代理侧一切 computer / act_on_element 变更"
-        opt "wait_for_control 等待满 IDLE_HINT_SECONDS = 15s 用户仍未交互"
-            Ctrl->>UI: "提示用户当前显示器正在等待操作或归还控制权"
+    else 代理请求用户直接接管或用户在 UI 主动点击 Takeover (ADR 0004)
+        MCP->>Ctrl : requestControl(display, reason) / waitForControl(display)
+        User->>UI : 进入 Takeover 态并打开 Viewer 直接键鼠操作
+        Ctrl->>Ctrl : 置显示器为 Takeover, 拦截代理侧一切 computer / act_on_element 变更
+        opt wait_for_control 等待满 IDLE_HINT_SECONDS = 15s 用户仍未交互
+            Ctrl->>UI : 提示用户当前显示器正在等待操作或归还控制权
         end
-        User->>UI: "点击 Hand Back / Return Control 交还控制权"
-        UI->>Ctrl: "退出 Takeover 态，唤醒挂起的 waitForControl"
-        Ctrl-->>MCP: "返回接管结束及当前屏上窗口状态"
+        User->>UI : 点击 Hand Back / Return Control 交还控制权
+        UI->>Ctrl : 退出 Takeover 态，唤醒挂起的 waitForControl
+        Ctrl-->>MCP : 返回接管结束及当前屏上窗口状态
     end
 ```
 

@@ -14,27 +14,27 @@ sequenceDiagram
     participant AX as "HIServices AX / WindowServer"
     participant Aero as "AeroSpace Claims"
 
-    MCP->>Ctrl: "launchApp(display, app / bundle_id, url / args)"
-    Ctrl->>Ctrl: "launch::plan 区分冷启动与已运行实例"
-    Ctrl->>Catch: "预注册 pid 监听并标记代理近期活动 (agent=true)"
-    alt "Chromium 系应用冷启动 (ADR 0010)"
-        Ctrl->>Target: "直接拉起或带 --window-position=<x>,<y> 与 --remote-debugging-pipe (FD 3/4)"
-        Ctrl->>Target: "devtools.rs 建立 CDP 管道会话"
-    else "普通 macOS 应用"
-        Ctrl->>LS: "执行 /usr/bin/open -g -j -b <bundle_id>"
-        LS->>Target: "后台启动进程 (-g 不激活前台，-j 隐藏或后台打开)"
+    MCP->>Ctrl : launchApp(display, app / bundle_id, url / args)
+    Ctrl->>Ctrl : launch：：plan 区分冷启动与已运行实例
+    Ctrl->>Catch : 预注册 pid 监听并标记代理近期活动 (agent=true)
+    alt Chromium 系应用冷启动 (ADR 0010)
+        Ctrl->>Target : 直接拉起或带 --window-position=<x>,<y> 与 --remote-debugging-pipe (FD 3/4)
+        Ctrl->>Target : devtools.rs 建立 CDP 管道会话
+    else 普通 macOS 应用
+        Ctrl->>LS : 执行 /usr/bin/open -g -j -b <bundle_id>
+        LS->>Target : 后台启动进程 (-g 不激活前台，-j 隐藏或后台打开)
     end
-    Target->>AX: "创建 NSWindow 并注册 CGWindowID"
-    AX-->>Catch: "kAXWindowCreatedNotification (专用 CFRunLoop)"
-    Catch->>Ctrl: "上报新窗口 (pid, wid)"
-    Ctrl->>Ctrl: "new_window::owner_for_new_window(agent, user, only_here) 判定归属 (ADR 0007)"
-    alt "判定归属代理会话"
-        Ctrl->>Aero: "写入 claims/<pid>.json 声明窗口免受平铺接管"
-        Ctrl->>AX: "windows::settle (最多 12 次重试) 写入 AXPosition + AXSize 移入代理屏"
-        Ctrl->>Ctrl: "启动 guard_placed 守护窗口防止应用自发跳回主屏"
-        Ctrl-->>MCP: "返回 pid 与已安置窗口列表"
-    else "判定归属用户"
-        Ctrl-->>Ctrl: "保持窗口在用户屏幕不动"
+    Target->>AX : 创建 NSWindow 并注册 CGWindowID
+    AX-->>Catch : kAXWindowCreatedNotification (专用 CFRunLoop)
+    Catch->>Ctrl : 上报新窗口 (pid, wid)
+    Ctrl->>Ctrl : new_window：：owner_for_new_window(agent, user, only_here) 判定归属 (ADR 0007)
+    alt 判定归属代理会话
+        Ctrl->>Aero : 写入 claims/<pid>.json 声明窗口免受平铺接管
+        Ctrl->>AX : windows：：settle (最多 12 次重试) 写入 AXPosition + AXSize 移入代理屏
+        Ctrl->>Ctrl : 启动 guard_placed 守护窗口防止应用自发跳回主屏
+        Ctrl-->>MCP : 返回 pid 与已安置窗口列表
+    else 判定归属用户
+        Ctrl-->>Ctrl : 保持窗口在用户屏幕不动
     end
 ```
 
