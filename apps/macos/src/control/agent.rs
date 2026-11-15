@@ -5089,34 +5089,39 @@ async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
 /// key window: until the new window shows it, handing key focus back to
 /// the user's window could make the browser open it there (#110). False
 /// once the page has loaded another address than the one it showed first,
-/// as after a redirect.
-async fn shows_url(target: WindowTarget, url: &str, cx: &mut AsyncApp) -> bool {
+/// as after a redirect. Blocks: run it off the main thread.
+fn shows_url(target: WindowTarget, url: &str) -> bool {
     let started = Instant::now();
     // What the window showed first, as a new tab page: loaded, but not
     // yet what the browser was sent.
     let mut first = None;
     while started.elapsed() < Duration::from_secs(10) {
-        let (shown, page) = off(cx, move || (ax::web_url(target), ax::page(target))).await;
-        if let Some(shown) = &shown {
+        if let Some(shown) = ax::web_url(target) {
             let first = first.get_or_insert_with(|| shown.clone());
-            if agent_screen_model::launch::same_page(url, shown) {
+            if agent_screen_model::launch::same_page(url, &shown) {
                 log::debug!(
                     "launch: the new window shows the URL at {} ms",
                     started.elapsed().as_millis()
                 );
                 return true;
             }
-            if page == ax::Page::Loaded && *shown != *first {
+            if ax::page(target) == ax::Page::Loaded && shown != *first {
                 log::info!("launch: the new window loaded {shown:?}, not the URL");
                 return false;
             }
         }
-        cx.background_executor()
-            .timer(Duration::from_millis(100))
-            .await;
+        std::thread::sleep(Duration::from_millis(25));
     }
     log::info!("launch: the new window didn't show the URL within 10 s");
     false
+}
+
+/// The user's window of app `pid` that has its key focus, when it is off
+/// the Agent Displays: the one a new window of the agent's takes it from.
+fn user_key_window(pid: i32) -> Option<WindowTarget> {
+    let id = ax::focused_window_id(pid)?;
+    let window = windows::find(id)?;
+    (!crate::mac::input::on_agent_display_at(window.bounds)).then_some(window.target)
 }
 
 /// What `launch_app` did.
@@ -5381,10 +5386,12 @@ async fn launch_now(
     let requested_at = Instant::now();
     // The new window may take the app's key focus from the user's window
     // before Agent Screen sees it: note theirs now, to hand it back after.
+    let mut user_window = None;
     if let Some(pid) = running.filter(|_| !fresh) {
         core.update(cx, |c, _| c.forwarder(id))
             .remember_user_window(pid)
             .await;
+        user_window = off(cx, move || user_key_window(pid)).await;
     }
     // A Chromium or Electron app that starts here gets a private DevTools
     // pipe, so drags in its pages work (ADR 0010). `open` can't hand it
@@ -5763,6 +5770,69 @@ async fn launch_now(
         }
         if let Some(fresh) = cx.background_executor().spawn(find_ours(taken)).await {
             let found = started.elapsed().as_millis();
+            // A running app's new window is its key window from the start,
+            // where the user's typing goes until Agent Screen hands focus
+            // back (#110): send the URL now, before placing the window, so
+            // that comes sooner. The browser opens it in its key window.
+            let opened = match (was_running && is_url).then_some(target).flatten() {
+                Some(target) => {
+                    // Into the new window's address field where there is
+                    // one Agent Screen knows; else the system sends the URL.
+                    let (new_window, url) = (fresh.target, target.to_string());
+                    let in_field = cx
+                        .background_executor()
+                        .spawn(async move { ax::open_in_address_field(new_window, &url) })
+                        .await;
+                    log::debug!("launch: URL through the address field: {in_field}");
+                    Some(
+                        in_field
+                            || match open_in_background(
+                                path.clone(),
+                                Some(target.to_string()),
+                                false,
+                                &Start::default(),
+                                cx,
+                            )
+                            .await
+                            {
+                                Some(outcome) => {
+                                    cx.background_executor()
+                                        .spawn(async move {
+                                            outcome
+                                                .recv_timeout(Duration::from_secs(10))
+                                                .unwrap_or(false)
+                                        })
+                                        .await
+                                }
+                                None => false,
+                            },
+                    )
+                }
+                None => None,
+            };
+            // While the window is placed, watch for the URL, and give the
+            // user's window its key focus back the moment it shows: placing
+            // takes most of a second, all of it with the user typing into
+            // the new window (#110). The focus record is refused in the
+            // front app, so it goes through accessibility, as a click would.
+            let handback = match (opened, target) {
+                (Some(true), Some(url)) => {
+                    let (window, url) = (fresh.target, url.to_string());
+                    Some(cx.background_executor().spawn(async move {
+                        let shown = shows_url(window, &url);
+                        if shown
+                            && let Some(user) = user_window
+                            && crate::mac::input::is_front(user.pid)
+                            && ax::focused_window_id(user.pid) == Some(window.window_id)
+                        {
+                            let given = ax::make_main(user);
+                            log::debug!("launch: key focus back to the user's window: {given}");
+                        }
+                        shown
+                    }))
+                }
+                _ => None,
+            };
             let placed = settle(core, fresh.target, id, cx).await?;
             log::debug!(
                 "launch: {name} window at {found} ms, placed at {} ms",
@@ -5772,68 +5842,17 @@ async fn launch_now(
             // back to the user's window before the call ends: one asked for
             // with nothing to open, or one that shows the agent's URL.
             let mut settled = was_running && target.is_none();
-            // The new window is the app's front one now, where it opens the
-            // URL or file.
-            if was_running
-                && is_url
-                && let Some(target) = target
-            {
-                // The title before the URL, to tell when it has arrived.
-                let window_id = placed.target.window_id;
-                let before = off(cx, move || windows::find(window_id).map(|w| w.title)).await;
-                // Into the new window's address field where there is one
-                // Agent Screen knows; else the system sends the URL, and the
-                // browser opens it in its front window, the new one.
-                let (new_window, url) = (placed.target, target.to_string());
-                let in_field = cx
-                    .background_executor()
-                    .spawn(async move { ax::open_in_address_field(new_window, &url) })
-                    .await;
-                log::debug!("launch: URL through the address field: {in_field}");
-                let opened = in_field
-                    || match open_in_background(
-                        path.clone(),
-                        Some(target.to_string()),
-                        false,
-                        &Start::default(),
-                        cx,
-                    )
-                    .await
-                    {
-                        Some(outcome) => {
-                            cx.background_executor()
-                                .spawn(async move {
-                                    outcome
-                                        .recv_timeout(Duration::from_secs(10))
-                                        .unwrap_or(false)
-                                })
-                                .await
-                        }
-                        None => false,
-                    };
+            if let (Some(opened), Some(target)) = (opened, target) {
                 if !opened {
                     return Err(ControlError::failed(format!(
                         "{name} opened a window on the display but not {target}; open it there yourself"
                     )));
                 }
-                // `open` returns once the URL is sent, not handled: wait for
-                // the window to show it, at most 2 s, so focus handed back
-                // after doesn't make the app open it in the user's window.
-                let (window_id, title) = (placed.target.window_id, before);
-                for _ in 0..40 {
-                    let title = title.clone();
-                    if off(cx, move || {
-                        windows::find(window_id).is_none_or(|w| Some(w.title) != title)
-                    })
-                    .await
-                    {
-                        break;
-                    }
-                    cx.background_executor()
-                        .timer(Duration::from_millis(50))
-                        .await;
-                }
-                settled = shows_url(placed.target, target, cx).await;
+                // `open` returns once the URL is sent, not handled.
+                settled = match handback {
+                    Some(task) => task.await,
+                    None => false,
+                };
             }
             // The new window took the app's key focus from the user's
             // window, where they may be typing, as in a browser they use

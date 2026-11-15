@@ -262,8 +262,11 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
         return Hit::Unknown;
     }
     let first = role(&element);
-    let hit = element.clone();
     let mut first_actions = Vec::new();
+    // The nearest element up from the point drawn as something to press,
+    // as a link around its text: Dia lists AXPress on none of a page's
+    // elements, so a click on a link's text found nothing to press.
+    let mut press_role = None;
     for level in 0..8 {
         let role = role(&element);
         if matches!(role.as_str(), "AXWindow" | "AXWebArea" | "AXSheet") {
@@ -279,6 +282,9 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
             ElementUse::Menu => return Hit::Menu(element),
             ElementUse::Nothing => {}
         }
+        if press_role.is_none() && rules::press_anyway(&role) {
+            press_role = Some(element.clone());
+        }
         let Some(parent) = ax::element_attribute(&element, "AXParent") else {
             break;
         };
@@ -286,8 +292,8 @@ pub fn hit(target: WindowTarget, at: (f64, f64)) -> Hit {
     }
     // No press role opens a menu (`rules::press_anyway`), so this takes no
     // more reads.
-    if rules::press_anyway(&first) {
-        return Hit::Press(hit);
+    if let Some(element) = press_role {
+        return Hit::Press(element);
     }
     Hit::Nothing(first, first_actions)
 }

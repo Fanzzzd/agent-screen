@@ -16,7 +16,7 @@ use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
     ClickRoute, Effect, Focused, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
-    text_route,
+    text_route, unlisted_press_failed,
 };
 use gpui::AsyncApp;
 use serde_json::{Value, json};
@@ -551,7 +551,12 @@ async fn press_at(
         None => None,
     };
     let read = started.elapsed();
-    let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
+    let (pressed, listed) = off(cx, move || {
+        let e = element.get();
+        let listed = ax::actions(e).iter().any(|a| a == "AXPress");
+        (ax::action_result(e, "AXPress"), listed)
+    })
+    .await;
     if pressed == ax::Action::NotTaken {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press. To click it anyway, repeat the click with real_input: true, which asks the user for their pointer."
@@ -568,6 +573,12 @@ async fn press_at(
     );
     if let Some(b) = check {
         check_focus(b, &format!("The press on \"{label}\""), cx).await?;
+    }
+    if unlisted_press_failed(listed, seen) {
+        return Err(ControlError::failed(format!(
+            "{why}, so nothing was posted. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and the press Agent Screen tried changed nothing on the page within {wait} ms, so it didn't act. No background route clicks it beside the user's window. Repeat the click with real_input: true, which asks the user for their pointer, or wait until the user switches to another app.",
+            wait = EFFECT_WAIT.as_millis(),
+        )));
     }
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"

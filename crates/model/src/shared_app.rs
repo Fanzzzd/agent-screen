@@ -304,6 +304,16 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     }
 }
 
+/// Whether a press that ran counts as failed: the element listed no
+/// AXPress, so it was pressed only for its role (`press_anyway`), and
+/// nothing was seen to change. Dia lists no AXPress on a page's elements
+/// and ignores the press, so a click on its link or button had come back
+/// as a success that changed nothing. A press the element lists may act
+/// without showing it, as a download does, and stays a success.
+pub fn unlisted_press_failed(listed: bool, seen: Effect) -> bool {
+    !listed && seen == Effect::NoneSeen
+}
+
 /// Whether Tab stops at an element: one that is enabled and lets a client
 /// set its focus. The page itself and the scroll area around it take
 /// focus too, but Tab moves among what is in them. An element a page
@@ -706,5 +716,13 @@ mod tests {
         assert_eq!(delete_backward("abc", Some((0, 2))), ("c".into(), 0));
         assert_eq!(delete_backward("abc", Some((0, 0))), ("abc".into(), 0));
         assert_eq!(delete_backward("a😀", None), ("a".into(), 1));
+    }
+
+    #[test]
+    fn an_unlisted_press_that_changed_nothing_fails() {
+        assert!(unlisted_press_failed(false, Effect::NoneSeen));
+        assert!(!unlisted_press_failed(false, Effect::Seen));
+        assert!(!unlisted_press_failed(false, Effect::Unknown));
+        assert!(!unlisted_press_failed(true, Effect::NoneSeen));
     }
 }

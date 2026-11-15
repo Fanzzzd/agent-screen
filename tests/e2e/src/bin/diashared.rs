@@ -53,7 +53,7 @@ const TOKEN: &str = "dsq7v";
 const SLOW_SECS: u64 = 4;
 
 /// What the pages reported, in order: (page, event).
-type Log = Arc<Mutex<Vec<(String, String)>>>;
+type Log = Arc<Mutex<Vec<(String, String, Instant)>>>;
 
 fn main() -> ExitCode {
     if instance().is_none() {
@@ -237,9 +237,11 @@ fn answer(mut stream: TcpStream, log: &Log) -> Result<()> {
 }
 
 fn note(log: &Log, page: &str, event: &str) {
-    log.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((page.to_string(), event.to_string()));
+    log.lock().unwrap_or_else(|e| e.into_inner()).push((
+        page.to_string(),
+        event.to_string(),
+        Instant::now(),
+    ));
 }
 
 /// A query value, percent-decoded.
@@ -274,8 +276,8 @@ fn events(log: &Log, page: &str, from: usize) -> Vec<String> {
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .skip(from)
-        .filter(|(p, _)| p == page)
-        .map(|(_, e)| e.clone())
+        .filter(|(p, _, _)| p == page)
+        .map(|(_, e, _)| e.clone())
         .collect()
 }
 
@@ -387,6 +389,22 @@ fn said(reply: &Result<Value>) -> String {
     }
 }
 
+/// Failed, saying no background route clicks there and offering the
+/// user's pointer: what a press Dia ignores must answer.
+fn real_input_offered(reply: &Result<Value>) -> bool {
+    reply
+        .as_ref()
+        .is_err_and(|e| e.to_string().contains("real_input: true"))
+}
+
+fn note_refused(what: &str, reply: &Result<Value>) {
+    if real_input_offered(reply) {
+        println!(
+            "note: Dia ignored the accessibility press on {what}; beside your window only real_input clicks it"
+        );
+    }
+}
+
 fn through_accessibility(reply: &Result<Value>) -> bool {
     reply.as_ref().is_ok_and(|v| v["route"] == "accessibility")
 }
@@ -457,10 +475,12 @@ fn test(
 
     // A new Dia window on the display, opened to the agent's page.
     let launch_mark = mark(log);
+    let launch_started = Instant::now();
     let launched = control.call(
         "launchApp",
         json!({ "sessionKey": KEY, "displayId": id, "app": "Dia", "open": format!("http://127.0.0.1:{port}/agent") }),
     );
+    let replied = launch_started.elapsed().as_millis();
     let window = launched
         .as_ref()
         .ok()
@@ -489,7 +509,7 @@ fn test(
     // shows the agent's URL, before that page's slow image lets it finish
     // loading: every call hands focus back as it ends, so a hand-back only
     // after the call's own wait for the page would come after the image.
-    let launch_events: Vec<(String, String)> = {
+    let launch_events: Vec<(String, String, Instant)> = {
         let all = log.lock().unwrap_or_else(|e| e.into_inner());
         all.iter().skip(launch_mark).cloned().collect()
     };
@@ -497,7 +517,7 @@ fn test(
         launch_events
             .iter()
             .skip(after)
-            .position(|(p, e)| p == page && e == event)
+            .position(|(p, e, _)| p == page && e == event)
             .map(|i| i + after)
     };
     let lost = at("user", "hasfocus false", 0);
@@ -509,6 +529,18 @@ fn test(
         (Some(_), Some(r), Some(s)) => r < s,
         (Some(_), Some(_), None) => true,
         (Some(_), None, _) => false,
+    };
+    // When each page reported what, in ms from the launch_app call.
+    let ms = |t: &Instant| t.duration_since(launch_started).as_millis();
+    let timeline: Vec<String> = launch_events
+        .iter()
+        .filter(|(_, e, _)| e != "typing")
+        .map(|(p, e, t)| format!("{} {p} {e}", ms(t)))
+        .collect();
+    println!("launch_app answered at {replied} ms; pages: {timeline:?}");
+    let key_window_ms = match (lost, regained) {
+        (Some(l), Some(r)) => Some(ms(&launch_events[r].2) - ms(&launch_events[l].2)),
+        _ => None,
     };
     let launch_user = events(log, "user", launch_mark);
     check(
@@ -526,7 +558,9 @@ fn test(
     check(
         "none of your keys reached the agent's page during launch_app",
         leaked.is_empty(),
-        format!("{leaked:?}"),
+        format!(
+            "{leaked:?} | your window was not key for {key_window_ms:?} ms, launch_app answered at {replied} ms"
+        ),
     );
 
     // The premise of every check after: Dia in front, your window focused.
@@ -620,7 +654,8 @@ fn test(
         "a key with no route is refused and names your focused window",
         refused.is_err()
             && refusal.contains("their window")
-            && (refusal.contains("\"diashared user\"")
+            // Dia's titles start with the profile, as "Personal: ".
+            && (refusal.contains("diashared user\"")
                 || refusal.contains(&format!("window {user_window}"))),
         cut(&refusal, 400),
     );
@@ -641,12 +676,14 @@ fn test(
     );
     let send_mark = mark(log);
     let sent = click(send);
+    let submitted = seen_within(log, "agent", send_mark, "submit", 2000);
+    note_refused("the submit button", &sent);
     check(
-        "a click on the form's submit button submits it through accessibility",
-        through_accessibility(&sent) && seen_within(log, "agent", send_mark, "submit", 2000),
+        "a click on the form's submit button submits it, or fails naming real_input and submits nothing",
+        (through_accessibility(&sent) && submitted) || (real_input_offered(&sent) && !submitted),
         format!(
             "{} | page {:?}",
-            cut(&said(&sent), 300),
+            cut(&said(&sent), 1500),
             events(log, "agent", send_mark)
         ),
     );
@@ -654,12 +691,15 @@ fn test(
     // The issue's original report: a link click went nowhere.
     let link_mark = mark(log);
     let followed = click(next);
+    let arrived = seen_within(log, "agent", link_mark, "arrived", 5000);
+    note_refused("the link", &followed);
     check(
-        "a click on the agent's link navigates its window",
-        through_accessibility(&followed) && seen_within(log, "agent", link_mark, "arrived", 5000),
+        "a click on the agent's link navigates its window, or fails naming real_input and goes nowhere",
+        (through_accessibility(&followed) && arrived)
+            || (real_input_offered(&followed) && !arrived),
         format!(
             "{} | page {:?}",
-            cut(&said(&followed), 300),
+            cut(&said(&followed), 1500),
             events(log, "agent", link_mark)
         ),
     );
