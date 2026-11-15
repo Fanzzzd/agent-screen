@@ -337,6 +337,7 @@ pub const SCRIPTS: &[Script] = &[
     script("waitchange", &[Elements], Full, Agent, 1),
     script("warmspare", &[Displays], Full, Agent, 3),
     script("webdrag", &[Browser, AgentInput, InputQueue, Elements], Core, Hook, 1).hands_off(),
+    script("webpreview", &[Viewer, Screenshots, Displays], Full, Agent, 1),
     script("windowaccess", &[WindowAccess], Core, Hook, 2),
 ];
 

@@ -73,6 +73,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/ui/status.rs", &[Peek, Viewer]),
     ("apps/macos/src/ui/stream.rs", &[Viewer, Peek]),
     ("apps/macos/src/ui/viewer.rs", &[ViewerInput, Viewer]),
+    ("apps/macos/src/web/**", &[Viewer, Screenshots, Displays]),
     ("apps/macos/native/SkyLight.m", &[AgentInput, ViewerInput]),
     ("apps/macos/native/Playback.m", &[Recording]),
     ("apps/macos/native/AgentScreenPrivate.h", &[]),
@@ -121,6 +122,10 @@ pub const PATHS: &[(&str, &[Area])] = &[
         &[ViewerInput, InputMethod],
     ),
     ("crates/model/src/watch.rs", &[Elements]),
+    (
+        "crates/model/src/web_preview.rs",
+        &[Viewer, Screenshots, Displays],
+    ),
     ("crates/model/testdata/**", &[InputQueue]),
     // The MCP server carries every tool, and the helper keeps ColorSync's
     // registry short for new displays.

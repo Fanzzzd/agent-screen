@@ -540,6 +540,7 @@ fn tile(
     let fit = (width / size.0 as f32).min(thumb / size.1 as f32);
     let fit = (size.0 as f32 * fit, size.1 as f32 * fit);
     let select = shell.clone();
+    let menu_shell = shell.clone();
     let dismiss = shell.clone();
     let revoke = shell.clone();
     // Open in the Viewer: a full ring. Reached with the arrow keys: a
@@ -566,6 +567,12 @@ fn tile(
         .flex()
         .flex_col()
         .active(|s| s.opacity(0.7))
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            cx.stop_propagation();
+            tell(&menu_shell, cx, move |shell, cx| {
+                shell.display_menu(id, None, cx)
+            });
+        })
         .on_click(move |_, _, cx| tell(&select, cx, move |shell, cx| shell.select(id, cx)))
         .child(
             div()

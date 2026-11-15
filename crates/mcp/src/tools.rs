@@ -143,6 +143,7 @@ pub fn definitions() -> Vec<Value> {
                 "Pass new: true only when the task needs a second screen at once, such as two apps side by side that each need",
                 "a full display; a session may use up to 4. Every tool takes the display_id of the display it acts on.",
                 "The returned display_id stays valid until end_display or until this session ends.",
+                "The result includes preview_url, a local read-only web link showing the live display; give preview_url to the user so they can watch your screen in their browser.",
                 "The result's width and height are the display in points; scale is screenshot pixels per point",
                 "(1 on the default 1280×800, less when the screenshot is scaled down).",
                 "list_windows bounds, get_window_state centers and computer clicks use screenshot pixels.",
@@ -821,6 +822,9 @@ pub async fn run(
                 "scale": reply.get("scale"),
                 "reused": reply.get("reused")
             });
+            if let Some(preview_url) = reply.get("preview_url").filter(|v| !v.is_null()) {
+                out["preview_url"] = preview_url.clone();
+            }
             if let Some(displays) = reply.get("displays").and_then(Value::as_array) {
                 out["displays"] = json!(
                     displays
@@ -2931,5 +2935,20 @@ mod tests {
         assert!(needs_newer_app(true, &reply(false, false)).is_none());
         assert!(needs_newer_app(true, &reply(true, true)).is_none());
         assert!(needs_newer_app(false, &reply(true, false)).is_none());
+    }
+
+    #[test]
+    fn create_display_tells_agent_to_share_preview_url() {
+        let tools = definitions();
+        let create = tools
+            .iter()
+            .find(|t| t["name"] == "create_display")
+            .unwrap();
+        let description = create["description"].as_str().unwrap();
+        assert!(description.contains("preview_url"), "{description}");
+        assert!(
+            description.contains("give preview_url to the user"),
+            "{description}"
+        );
     }
 }

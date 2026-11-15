@@ -32,6 +32,10 @@ _Avoid_: control panel, popup, window
 The strip of live thumbnails of every Agent Display that appears when the user hovers the menu bar icon, and stays up after a click on it. Displays in use come first, Review Displays after them.
 _Avoid_: preview, hover panel
 
+**Web Preview** (网页预览):
+A read-only local browser page (`http://127.0.0.1:<port>/d/<token>`) that shows one live Agent Display over loopback without opening the Viewer. Each live Agent Display gets its own random token, which expires when the display ends; the page sends no input and never starts a Takeover (ADR 0019).
+_Avoid_: remote desktop, screen share, web viewer
+
 **Takeover**:
 A state of an Agent Display in which the user operates it and the owning Agent Session's input is refused. It begins with the user's first input in the Viewer, or 接手操作. It pauses any Window Authorization for that display. It ends only when the user hands control back, through the interface or an explicit instruction in the conversation that the Agent Session relays. Collapsing the Viewer, switching displays or waiting keeps it.
 _Avoid_: pause, lock, manual mode

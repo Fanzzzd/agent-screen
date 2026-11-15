@@ -225,6 +225,32 @@ case "tap":
   CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
   CGEvent.tapEnable(tap: tap, enable: true)
   CFRunLoopRunInMode(.defaultMode, Double(args[2])!, false)
+case "imagesize":
+  guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    exit(1)
+  }
+  print("\(image.width) \(image.height)")
+case "imagediff":
+  func cells(_ path: String) -> [UInt8] {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let ctx = CGContext(data: nil, width: 160, height: 100, bitsPerComponent: 8, bytesPerRow: 640, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+      exit(1)
+    }
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: 160, height: 100))
+    return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: 160 * 100 * 4))
+  }
+  let (a, b) = (cells(args[2]), cells(args[3]))
+  var changed = 0
+  for px in 0..<(160 * 100) {
+    let dr = abs(Int(a[px * 4]) - Int(b[px * 4]))
+    let dg = abs(Int(a[px * 4 + 1]) - Int(b[px * 4 + 1]))
+    let db = abs(Int(a[px * 4 + 2]) - Int(b[px * 4 + 2]))
+    if max(dr, max(dg, db)) > 20 { changed += 1 }
+  }
+  print(changed)
 default:
   print("unknown command \(args[1])"); exit(2)
 }

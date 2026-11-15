@@ -479,6 +479,100 @@ unsafe extern "C" {
     fn CFRelease(object: *const c_void);
 }
 
+#[link(name = "VideoToolbox", kind = "framework")]
+unsafe extern "C" {
+    fn VTCreateCGImageFromCVPixelBuffer(
+        pixel_buffer: *const c_void,
+        options: *const c_void,
+        image_out: *mut *mut c_void,
+    ) -> i32;
+}
+
+/// Convert a 420f `CVPixelBuffer` from `Capture` into a JPEG or PNG, scaling
+/// down proportionally when wider than `max_width`. Blocking: call off the
+/// main thread.
+pub fn encode_pixel_buffer(
+    buffer: &core_video::pixel_buffer::CVPixelBuffer,
+    max_width: usize,
+    format: Format,
+) -> Result<Shot, String> {
+    use core_foundation::base::TCFType;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+    };
+
+    struct CfImage(*mut c_void);
+    impl Drop for CfImage {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { CFRelease(self.0) };
+            }
+        }
+    }
+
+    let src_w = buffer.get_width();
+    let src_h = buffer.get_height();
+    if src_w == 0 || src_h == 0 {
+        return Err("empty pixel buffer".into());
+    }
+    let mut raw_image: *mut c_void = std::ptr::null_mut();
+    let status = unsafe {
+        VTCreateCGImageFromCVPixelBuffer(
+            buffer.as_concrete_TypeRef().cast(),
+            std::ptr::null(),
+            &mut raw_image,
+        )
+    };
+    if status != 0 || raw_image.is_null() {
+        return Err(format!("could not convert pixel buffer ({status})"));
+    }
+    let image = CfImage(raw_image);
+
+    let max_w = max_width.max(1);
+    if src_w <= max_w {
+        return encode_raw(image.0, src_w, src_h, format);
+    }
+    let dst_w = max_w;
+    let dst_h = ((src_h * dst_w + (src_w / 2)) / src_w).max(1);
+    unsafe {
+        let space = CGColorSpace::new_device_rgb().ok_or("no color space")?;
+        let context = CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            dst_w,
+            dst_h,
+            8,
+            0,
+            Some(&space),
+            CGImageAlphaInfo::NoneSkipLast.0,
+        )
+        .ok_or("could not draw scaled frame")?;
+        unsafe extern "C" {
+            fn CGContextDrawImage(context: *const c_void, rect: CGRect, image: *const c_void);
+        }
+        CGContextDrawImage(
+            objc2_core_foundation::CFRetained::as_ptr(&context)
+                .as_ptr()
+                .cast(),
+            CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(dst_w as f64, dst_h as f64),
+            ),
+            image.0,
+        );
+        let scaled =
+            CGBitmapContextCreateImage(Some(&context)).ok_or("could not draw scaled frame")?;
+        encode_raw(
+            objc2_core_foundation::CFRetained::as_ptr(&scaled)
+                .as_ptr()
+                .cast(),
+            dst_w,
+            dst_h,
+            format,
+        )
+    }
+}
+
 /// The empty desktop agents see: the background color, at the capture's
 /// size.
 fn plain(size: (f64, f64), format: Format) -> Result<Shot, String> {

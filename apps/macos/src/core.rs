@@ -592,6 +592,9 @@ impl Core {
             self.input_queue.register(id, owner);
         }
         self.displays.add(id, name, size, owner, handle);
+        if let Some(display) = self.displays.get(id) {
+            let _ = crate::web::register_display(id, display.label(), size);
+        }
         self.last_used = Some(Instant::now());
         // Its record is new and has all 39 names.
         self.reclaim_soon(cx);
@@ -966,6 +969,7 @@ impl Core {
         for &id in ended {
             #[cfg(debug_assertions)]
             crate::mac::cg::clear_user_stage(id);
+            crate::web::expire_display(id);
             self.input_queue.end_display(id);
             if let Some(forwarder) = self.forwarders.get(&id) {
                 forwarder.stop_agent(true);
@@ -1198,6 +1202,7 @@ impl Core {
     /// stays connected as a spare while there is room; otherwise macOS removes
     /// it with its handle.
     pub fn remove_with(&mut self, id: DisplayId, snap: &SpareSnapshot, cx: &mut Context<Self>) {
+        crate::web::expire_display(id);
         self.input_queue.end_display(id);
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage(id);

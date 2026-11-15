@@ -80,8 +80,9 @@ impl Stream {
         } else {
             self.wants.remove(who);
         }
-        if who == "agent" {
-            self.latest.count_changes(fps > 0);
+        let should_count = self.wants.contains_key("agent") || self.wants.contains_key("web");
+        if should_count != self.latest.counting() {
+            self.latest.count_changes(should_count);
         }
         let wanted = self
             .wants
@@ -511,9 +512,28 @@ impl Streams {
             .collect()
     }
 
+    /// Subscribe `"web"` to `id` at `fps` and `pixels`, returning the shared
+    /// `Latest` handle for off-thread JPEG encoding.
+    pub fn subscribe_web(
+        &mut self,
+        id: DisplayId,
+        fps: i32,
+        pixels: (u32, u32),
+        cx: &mut Context<Self>,
+    ) -> Arc<Latest> {
+        self.want(id, "web", fps, pixels, cx);
+        self.streams
+            .get(&id)
+            .map(|s| s.latest.clone())
+            .unwrap_or_default()
+    }
+
     pub fn drop_display(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        if let Some(capture) = self.streams.remove(&id).and_then(|s| s.capture) {
-            cx.background_spawn(async move { drop(capture) }).detach();
+        if let Some(stream) = self.streams.remove(&id) {
+            stream.latest.clear();
+            if let Some(capture) = stream.capture {
+                cx.background_spawn(async move { drop(capture) }).detach();
+            }
         }
         self.frames.remove(&id);
     }
@@ -637,5 +657,26 @@ mod tests {
             s.apply_want("viewer", 0, (0, 0), true, true, future),
             WantPlan::Stop
         );
+    }
+
+    #[test]
+    fn web_and_agent_share_change_counting_without_disabling_each_other() {
+        let now = std::time::Instant::now();
+        let mut s = Stream::new();
+        assert!(!s.latest.counting());
+
+        let _ = s.apply_want("web", 8, (1280, 800), false, false, now);
+        assert!(s.latest.counting());
+
+        let _ = s.apply_want("agent", 30, (416, 260), true, true, now);
+        assert!(s.latest.counting());
+
+        // Agent finishing its settle timer leaves counting on while web watches.
+        let _ = s.apply_want("agent", 0, (0, 0), true, true, now);
+        assert!(s.latest.counting());
+
+        // Disconnecting the last web client turns counting off.
+        let _ = s.apply_want("web", 0, (0, 0), true, true, now);
+        assert!(!s.latest.counting());
     }
 }
