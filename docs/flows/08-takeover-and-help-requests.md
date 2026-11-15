@@ -1,103 +1,116 @@
-# 08. 人工协助请求 (`request_help`)、用户接管 (`Takeover`) 与 `wait_for_control` 交接流水线
+# 08. 人工协助请求 (`request_help`)、接管交接 (`Takeover` / `request_control`) 与 `wait_for_control` 流水线
 
-当 Agent 遇到登录输入密码、双因素认证、人机验证码 (CAPTCHA)、支付确认或后台无法操作的特殊原生弹层 (`#205`) 时，调用 `request_help` 请用户介入；用户也可随时在 Peek 或 Viewer 主动点击“接管 (Take over)”暂停 Agent (`ADR 0004`, `ADR 0010`)。系统的核心铁律是：**一旦进入 `Takeover`，只有用户本人点击“交还控制权 (Hand back)”（或关闭屏幕）才能结束接管，Agent 没有任何工具可以自行夺回控制权**。在协助与接管等待期间，Agent 通过 `wait_for_control` 阻塞等待最终结论；`wait_for_control` 内置每屏幕单槽位抢占注册表与 `EARLY_CANCEL = 30s` 早期取消检测，确保即使客户端工具超时重调也不会漏接用户的交还信号。
+当 Agent 遇到登录密码、双因素认证、人机验证码 (CAPTCHA)、支付确认或无法在不打开菜单的前提下选择的原生下拉框 (`#205`) 时，调用 `request_help` 请用户介入；用户也可随时在 Peek、Viewer 或系统通知点击接管 (`Take Over`)，或直接在 Viewer 画面敲击点击自动进入 `Takeover` (`ADR 0004`, `ADR 0013`, `ADR 0015`)。系统的核心约束是：**一旦进入 `Takeover`，只有用户本人点击交还按钮（或在对话中明确指令交还并由 Agent 通过 `user_instruction` 传达，或关闭屏幕）才能结束接管**。在 MCP 工具层，`request_help` 与 `request_control` 均采用组合式同步等待：发出控制命令登记请求后，若无未听取的历史答复 (`unheard`)，**立即在同一次工具调用内串联调用 `"waitForControl"` 等待最多 `timeout_seconds`（默认 `100s`，范围 `1..=600s`）**；仅当单轮超时返回 `{"control": "user", ...}` 时，Agent 才继续调用 `wait_for_control` 续航等待。
 
 ## 线程与队列分工
 
-1. **GPUI 主线程 (`Core` / `Model` / `Shell`)**：管理纯状态机 `request::Requests` (`crates/model/src/request.rs`) 与 `Display` 生命周期迁移 (`Active <-> Takeover`)、执行 `Core::stop_agent_input` 冻结后台 `Forwarder`、渲染右上角 **Help Card** (`apps/macos/src/ui/help_card.rs`) 与 Viewer 顶部接管横幅 (`apps/macos/src/ui/viewer.rs`)。
-2. **系统通知代理 (`mac::notify`)**：通过 `UNUserNotificationCenter` (`MacOSX.sdk UNUserNotificationCenter.h`) 发送带快捷操作按钮的系统横幅通知，并在用户已从界面处理或请求撤回时调用 `removeDeliveredNotificationsWithIdentifiers:` 自动撤回通知 (`apps/macos/src/mac/notify.rs:34-260`)。
-3. **等待槽位协调器 (`WaitSlot` 静态互斥表 + `AsyncApp`)**：`register_wait` / `wait_for_change` / `waitForControl` (`apps/macos/src/control/agent.rs:1655-1835, 7713-7950`) 管理挂起 `oneshot` 通道与超时结算。
+1. **GPUI 主线程 (`Core` / `Displays` / `Shell`)**：运行纯模型 `request::Requests` (`crates/model/src/request.rs`) 与 `Takeover` 状态切换、通过 `Core::stop_agent_input` 冻结后台 `Forwarder`、驱动菜单栏下方非激活弹出面板 **Help Card** (`WindowKind::PopUp, focus: false` + `LEVEL_POP_UP_MENU = 101`, `apps/macos/src/ui/shell.rs:378-393, 476-483`, `apps/macos/src/ui/help_card.rs`) 及 Viewer 顶部接管控制栏 (`apps/macos/src/ui/viewer.rs`)。
+2. **系统通知中心代理 (`mac::notify`)**：通过 `UNUserNotificationCenter` (`UNUserNotificationCenter.h:39`) 运行 `notify::update` (`apps/macos/src/mac/notify.rs:294`) 推送带快捷按钮（`Take Over`、`Continue`、以及带文本输入框的 `Reply`）的系统横幅通知，并在结案或撤回时调用 `notify::withdraw_help` / `withdraw_control` (`notify.rs:468, 484`) 移除通知。
+3. **每屏幕多等待者唤醒表 (`Requests.waiters: Vec<oneshot::Sender<Woken>>`)**：`Displays::wait_for_control` (`crates/model/src/request.rs:312, 761-780`) 清理已取消的 `oneshot` 发送端后将新等待者压入 `waiters`，并在无等待者在线时将 Help 答复暂存于 `unheard: Option<Woken>` 防止两步调用空档丢信号。
 
 ---
 
-## 图 1：`request_help` 发起、双路通知展示与用户四类响应路径
+## 图 1：`request_help` 发起、Help Card 与系统通知四路应答 (`ADR 0015`) 及 `Takeover` 交接流程
 
 ```mermaid
 flowchart TD
-    H1["Agent 调用 request_help (displayId, instruction <=300字)"] --> H2["校验 instruction 非空未超长且屏幕存活未 Ended"]
-    H2 -->|"参数非法或屏幕已关"| HX1["返回 invalid_params 或 display_ended"]
-    H2 -->|"屏幕已在 Takeover 中"| H3["在现有 Takeover 横幅上更新协助说明文本并直接提示调 wait_for_control"]
-    H2 -->|"屏幕处于 Active"| H4{"该屏幕已有未决 Request (Help 或 TakeWindow)?"}
-    H4 -->|"是"| HX2["返回 failed (同一屏幕同时仅允许一个未决请求)"]
-    H4 -->|"否"| H5["后台截取当前屏幕缩略图，Model 登记 Request::Help"]
-    H5 --> H6["右上角弹出双语 Help Card (含缩略图 + Agent 说明 + 打开并接管 / 已完成 / 拒绝)"]
-    H6 --> H7["UNUserNotificationCenter 发送系统通知 (前台不重复打扰或按需横幅提醒)"]
-    H7 --> H8["立即向 Agent 返回 requestId 与提示: 请调用 wait_for_control 等待用户"]
-    H3 --> H8
-    H8 --> U0{"用户或客户端后续动作?"}
-    U0 -->|"1. 用户点 打开画面接管 (Open & Take Over)"| U1["Core::take_over: 屏幕迁入 Lifecycle::Takeover，冻结 Forwarder 与 InputQueue"]
-    U1 --> U2["自动打开 Viewer 聚焦该屏幕，viewer_input::takeover_changed(true) 放开人工键鼠"]
-    U2 --> U3["用户在 Viewer 内输入密码/完成验证 (注意 #207 Sheet 内展开菜单点击已知缺陷)"]
-    U3 --> U4["用户点击 Viewer 顶栏 交还控制权 (Hand back) 并可附带简短留言"]
-    U4 --> U5["Core::hand_back: 释放残留按键、迁回 Lifecycle::Active、恢复 Forwarder 许可"]
-    U5 --> R_DONE["唤醒 wait_for_control 返回 resolution: 'handed_back' / 'completed'"]
-    U0 -->|"2. 用户在 Help Card 直接点 已处理/继续"| U6["无需进入 Takeover，Core::answer(Completed) 收起卡片并撤回通知"]
-    U6 --> R_DONE
-    U0 -->|"3. 用户点 拒绝协助 (Decline)"| U7["Core::answer(Declined) 收起卡片并撤回通知"]
-    U7 --> R_DEC["唤醒 wait_for_control 返回 resolution: 'declined'"]
-    U0 -->|"4. Agent 调 withdrawHelp 或 用户直接关闭屏幕"| U8["撤回 Help Card 与系统通知 (若关闭屏幕则转入 02 结束流水线)"]
-    U8 --> R_END["唤醒 wait_for_control 返回 withdrawn 或 ended"]
+    H1["Agent 调用 MCP request_help (reason + steps<=5x160字，或 withdraw=true，或 user_instruction<=300字)"] --> H_SUB{"调用模式分支?"}
+    H_SUB -->|"withdraw: true"| H_WD["调 withdrawHelp：若未在 Takeover 则唤醒等待者返回 withdrawn"]
+    H_SUB -->|"user_instruction (传达对话答复)"| H_CHAT["access::user_instruction(<=300字) 校验后调 answerHelp 结案并记录屏日志"]
+    H_SUB -->|"发起新请求 (reason + steps)"| H2["校验屏幕存活未 Ended 且 help_steps 合法 (<=5 步，每步 <=160 字)"]
+    H2 -->|"参数非法或屏幕已结束"| HX1["返回 invalid / not_found / ended"]
+    H2 -->|"合法"| H3{"屏幕不在 Takeover 且存在未听取历史答复 unheard?"}
+    H3 -->|"是 (HelpAsked::Answered)"| H_EARLY["不重弹打扰用户，直接返回上次答复 (answeredEarlier: true)"]
+    H3 -->|"否 (HelpAsked::Opened)"| H4["Requests::open 登记 Ask::Help(answers=true)，自动替换同屏旧 Help 为 Replaced"]
+    H4 --> H5["菜单栏下弹出非激活 Help Card (WindowKind::PopUp, LEVEL_POP_UP_MENU=101, 实时流缩略图 MAX_PICTURE=184pt)"]
+    H5 --> H6["notify::update 推送 UNUserNotificationCenter 通知 (含接手操作 / 继续 / 直接打字回复动作)"]
+    H6 --> H7["tools.rs 立即串联调用 waitForControl (默认 100s，范围 1..600s) 阻塞等待"]
+    H7 --> U0{"用户响应方式?"}
+    U0 -->|"1. 点 Take Over 或直接在 Viewer 点击按键"| U1["Core::take_over: 置 takeover=true，冻结 Forwarder 并暂停 InputQueue"]
+    U1 --> U2["打开 Viewer (Help Card 退避 on_card)，用户在 Viewer 内完成密码/验证码"]
+    U2 --> U3["用户点击 Viewer 顶栏交还按钮 (或对话交还 request_control + user_instruction)"]
+    U3 --> U4["Core::hand_back: 丢弃未决组字、释放残留按键、恢复 Forwarder"]
+    U4 --> R_TOOK["唤醒等待者返回 control:'agent', answer:'tookOver' (保留此前未听取的留言或借窗)"]
+    U0 -->|"2. 在卡片或通知横幅点 Continue (继续)"| U5["Core::answer(Kind::Help, Answer::Continue) 撤回通知与卡片"]
+    U5 --> R_CONT["唤醒等待者返回 control:'agent', answer:'continue'"]
+    U0 -->|"3. 在卡片或通知横幅输入 Reply (<=2000字)"| U6["Core::answer(Kind::Help, Answer::Reply) 校验 reply_text 并撤回通知"]
+    U6 --> R_INST["唤醒等待者返回 control:'agent', answer:'instructions', user_reply"]
+    U0 -->|"4. 用户通过 Give a Window 移交窗口"| U7["Displays::user_gave 迁入窗口并撤回 Help 卡片与通知"]
+    U7 --> R_WIN["唤醒等待者返回 control:'agent', answer:'handedOver', window"]
+    U0 -->|"5. 用户点 Later (稍后)"| U8["put_off_help 隐藏浮动卡片但保留图标徽标与通知，等待继续挂起"]
 ```
 
 ### 图 1 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `H1` | `mcp` -> GPUI 主线程 | `tools::run("request_help")` (`crates/mcp/src/tools.rs:1060-1105`), `agent.rs:1655-1688` | 传入目标 `displayId` 与面向人类阅读的 `instruction` 说明文本；`needs_permissions` 豁免 `requestHelp` 使其在受阻时始终能呼救 (`agent.rs:2612`) | `instruction` 限制 `INSTRUCTION_CHARS = 300` 字符 (`access.rs:14-31`) | 进入校验 | 无变化 | [已验证: crates/mcp/src/tools.rs:1060-1105, apps/macos/src/control/agent.rs:1655-1688, crates/model/src/access.rs:14-31] |
-| `H2` | GPUI 主线程 | `access::user_instruction` + `usable` (`apps/macos/src/control/agent.rs:1658-1668, 2686-2713`) | 检查文本非空、字符数 `<= 300`，确认屏幕存在且未 `Ended` | 空说明或超长文本直接报 `invalid_params` | 非法走 `HX1`，已接管走 `H3`，活跃走 `H4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1658-1668] |
-| `HX1` | GPUI 主线程 | `ControlError::invalid` / `ended` (`apps/macos/src/control/agent.rs:1659, 2707-2710`) | 拒绝无效调用 | 无 | `invalid_params` 或 `display_ended` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1659, apps/macos/src/control/agent.rs:2707-2710] |
-| `H3` | GPUI 主线程 | `Model::request_help` 在 `Takeover` 态分支 (`crates/model/src/request.rs:290-345`) | 若用户早已主动接管了该屏幕，不重复弹新卡，而是把说明更新到 Viewer 接管横幅上 | 平滑衔接用户主动接管与 Agent 请求协助 | 进入 `H8` 正常返回 | Viewer 顶栏显示 Agent 补充的说明文字 | [已验证: crates/model/src/request.rs:290-345] |
-| `H4` | GPUI 主线程 | `Model::request_help` 互斥检查 (`crates/model/src/request.rs:295-320`) | 检查该 `displayId` 是否已挂有未决 `Help` 或 `TakeWindow` 请求 | 防止连续刷屏弹窗轰炸用户 | 冲突走 `HX2`，空闲走 `H5` | 无变化 | [已验证: crates/model/src/request.rs:295-320] |
-| `HX2` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:1675-1682`) | 告知已有挂起请求，引导直接调用 `wait_for_control` | 无 | 错误码 `failed` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1675-1682] |
-| `H5` | 后台 + GPUI 主线程 | `screenshot::display` + `Model::request_help` (`apps/macos/src/control/agent.rs:1665-1685`) | 截取当前虚拟屏缩略图供卡片预览，分配递增请求编号登记入 `Core.displays` | `request_help` 是非阻塞发起调用，真正等待在 `wait_for_control` 进行 (`ADR 0010`) | 生成请求单 | 无变化 | [已验证: apps/macos/src/control/agent.rs:1665-1685, ADR 0010] |
-| `H6` | GPUI 主线程 | `ui::help_card` (`apps/macos/src/ui/help_card.rs:47, 120-560`), `Core::apply` (`apps/macos/src/core.rs:1094-1117`) | 在物理主屏右上角弹出无焦点抢占 (`NSWindowStyleMaskNonActivatingPanel`) 的双语 Help Card，展示虚拟屏实时缩略图 (`MAX_PICTURE = 184pt`)、客户端名称与 Agent 请求说明 | 弹出面板绝不抢走用户正在打字窗口的键盘焦点 | 无 | 右上角浮现精致协助卡片 | [已验证: apps/macos/src/ui/help_card.rs:47, apps/macos/src/ui/help_card.rs:120-560, apps/macos/src/core.rs:1094-1117] |
-| `H7` | 后台 / 通知中心代理 | `notify::post` (`apps/macos/src/mac/notify.rs:60-182, 260-360`) | 若宿主拥有 Bundle 签名且获得通知授权，通过 `UNUserNotificationCenter` 投递带交互动作 (`Action`) 的系统通知；当用户在全屏其它应用中也能收到提醒 | 未授权通知时静默降级仅保留界面内 Help Card + 菜单栏徽标闪烁 | 无 | 系统通知横幅同步提醒 | [已验证: apps/macos/src/mac/notify.rs:60-182, MacOSX.sdk UNUserNotificationCenter.h] |
-| `H8` | 宿主 -> `mcp` 进程 | `requestHelp` 返回 (`apps/macos/src/control/agent.rs:1680-1687`, `crates/mcp/src/tools.rs:1085-1104`) | 立即返回请求已送达确认，明确指示下一步调用 `wait_for_control` 等待用户完成 | 两段式设计允许 Agent 先向对话输出一句向用户解释的话，再调 `wait_for_control` 挂起 (`ADR 0010`) | 返回请求状态 JSON | 等待用户响应 | [已验证: apps/macos/src/control/agent.rs:1680-1687, crates/mcp/src/tools.rs:1085-1104, ADR 0010] |
-| `U0` | 用户交互 / 控制端 | Help Card 按钮 / 系统通知 `did_receive` (`apps/macos/src/mac/notify.rs:125-181`) / `withdrawHelp` (`agent.rs:1689-1702`) | 四条分支汇集全部结束方式 | 任一入口响应后另一入口自动联动关闭 | 挂起中的 `wait_for_control` 等待唤醒 | 无变化 | [已验证: apps/macos/src/mac/notify.rs:125-181, apps/macos/src/control/agent.rs:1689-1724] |
-| `U1` | GPUI 主线程 | `Core::take_over` (`apps/macos/src/core.rs:1049-1057`), `Core::stop_agent_input` (`core.rs:1119-1133`), `InputQueue::takeover` (`crates/model/src/input_queue.rs:530-543`) | 屏幕状态切为 `Lifecycle::Takeover`；令 `Forwarder::stop_agent(true)` 立即掐断所有在途后台输入；取消 `InputQueue` 中该屏幕全部待执行真实输入并熄灭该屏红框 | 接管期间 Agent 调用除 `wait_for_control` / `end_display` 外的任何动作工具均立即报 `ControlError::takeover` (`user_takeover`) | 并发工具调用立即返回 `user_takeover` | Help Card 收起，切换至 Viewer | [已验证: apps/macos/src/core.rs:1049-1057, apps/macos/src/core.rs:1119-1133, crates/model/src/input_queue.rs:530-543] |
-| `U2` | GPUI 主线程 | `Shell::open_viewer` (`apps/macos/src/ui/shell.rs:2510-2590`), `viewer_input::takeover_changed` (`apps/macos/src/mac/viewer_input.rs:262-285`) | 打开或前置 Viewer 窗口聚焦该虚拟屏，将 `SCStream` 帧率提升至交互档 (`30/60 fps`)，激活本地键盘与 IME 转发 | 用户无需去虚拟屏找窗口，在物理屏的 Viewer 窗口内即可全权操作 | 无 | Viewer 窗口打开，顶栏显示醒目的接管条与“交还控制权”按钮 | [已验证: apps/macos/src/ui/shell.rs:2510-2590, apps/macos/src/mac/viewer_input.rs:262-285] |
-| `U3` | 用户在 Viewer 内操作 | 完整走文档 `07` (`viewer_input.rs`) 键鼠与密码安全路由 | 用户输入账号密码、拖动滑块或点击确认 | 关联缺陷 `#207`：若应用弹出模态 Sheet 且其中又展开了原生 `NSPopUpButton` 菜单，因菜单窗口层级归属过滤边界可能导致点击菜单项无反应，需按键盘上下键或回车选择 | Agent 在 `wait_for_control` 安静等待 | 用户完成人工步骤 | [已验证: apps/macos/src/mac/viewer_input.rs:1348-1727, Issue #207] |
-| `U4` | GPUI 主线程 | Viewer 顶栏交还按钮 (`apps/macos/src/ui/viewer.rs:510-590`) / `answerHelp` | 用户确认操作完毕，点击“交还控制权 (Hand back)” | 唯一合法退出 `Takeover` 回到 `Active` 的途径 (`ADR 0004`) | 即将唤醒等待方 | 接管横幅收起 | [已验证: apps/macos/src/ui/viewer.rs:510-590, ADR 0004] |
-| `U5` | GPUI 主线程 | `Core::hand_back` (`apps/macos/src/core.rs:1059-1067`), `release_after_takeover` (`apps/macos/src/mac/viewer_input.rs:296-314`) | 释放用户在接管结束瞬间可能尚未松开的按下键与 IME 预编辑串，调用 `Model::hand_back` 将屏幕恢复为 `Lifecycle::Active`，解除 `Forwarder::stop_agent(false)` | 干净清理人工输入尾态，防止卡住 `Shift`/`Command` 污染后续 Agent 按键 | 进入 `R_DONE` | Viewer 恢复常规观察模式（或按需收起） | [已验证: apps/macos/src/core.rs:1059-1067, apps/macos/src/mac/viewer_input.rs:296-314] |
-| `U6` | GPUI 主线程 | `Core::answer(..., Answer::Done)` (`apps/macos/src/core.rs:1069-1092`) | 针对仅需口头确认或已在外部处理完的场景，直接结案无需进出 `Takeover` | 自动调用 `notify::retract` 撤回通知中心残留通知 | 进入 `R_DONE` | 卡片与系统通知双双消失 | [已验证: apps/macos/src/core.rs:1069-1092, apps/macos/src/mac/notify.rs:220-258] |
-| `U7` | GPUI 主线程 | `Core::answer(..., Answer::Declined)` (`apps/macos/src/core.rs:1069-1092`) | 记录用户明确拒绝本次协助请求 | Agent 收到 `declined` 后不得原地死循环重发同一 `request_help` | 进入 `R_DEC` | 卡片与通知消失 | [已验证: apps/macos/src/core.rs:1069-1092] |
-| `U8` | GPUI 主线程 | `withdrawHelp` (`apps/macos/src/control/agent.rs:1689-1702`) / `Core::end` | Agent 发现页面已自行跳转无需人工时撤回请求，或用户直接关掉整块屏幕 | 无 | 进入 `R_END` | 卡片与通知撤回 | [已验证: apps/macos/src/control/agent.rs:1689-1702] |
-| `R_DONE` | GPUI 主线程 -> 图 2 | `Model` 唤醒事件广播 (`crates/model/src/request.rs:419-444, 621-658`) | 记录 `Resolution::HandedBack` 或 `Completed` 到 `unheard` 并唤醒挂起的 `wait_for_control` | 即使用户在 `request_help` 与 `wait_for_control` 间隙秒点完成，决议也会保存在 `unheard` 中不丢失 | 转入图 2 返回控制权已恢复 | 交接完成 | [已验证: crates/model/src/request.rs:419-444, crates/model/src/request.rs:621-658] |
-| `R_DEC` | GPUI 主线程 -> 图 2 | `Model::answer_help_with(..., Declined)` (`crates/model/src/request.rs:660-741`) | 记录 `Resolution::Declined` 到 `unheard` 并唤醒挂起的 `wait_for_control` | 明确区分用户拒绝协助与正常完成 | 转入图 2 返回 `resolution: "declined"` | 卡片关闭 | [已验证: crates/model/src/request.rs:660-741, crates/mcp/src/tools.rs:1520-1627] |
-| `R_END` | GPUI 主线程 -> 图 2 | `Model::withdraw_help` / `Model::end` (`crates/model/src/request.rs:503-519`, `crates/model/src/model.rs:1060-1125`) | 记录请求已撤回 (`withdrawn`) 或屏幕已结束 (`ended`) 并广播唤醒 | 防止屏幕关闭后 `wait_for_control` 死等 | 转入图 2 返回 `withdrawn` 或 `ended` | 界面清理完毕 | [已验证: crates/model/src/request.rs:503-519, crates/model/src/model.rs:1060-1125] |
+| `H1` | `mcp` -> GPUI 主线程 | `tools::run("request_help")` (`crates/mcp/src/tools.rs:873-926`), `"requestHelp"` / `"withdrawHelp"` / `"answerHelp"` (`apps/macos/src/control/agent.rs:1655-1722`) | 支持三种调用模式：传 `reason`（及可选 `steps`）发起协助并自动等待；传 `withdraw: true` 撤回；传 `user_instruction` 将用户在聊天窗口给出的答复同步回宿主结案；`needs_permissions` 豁免 `requestHelp` 使其在缺权限时仍可呼救 (`agent.rs:2612`) | 缺 `reason` 返回错误码 `invalid` | 按模式进入分支 | 无变化 | 已验证：`crates/mcp/src/tools.rs:873-925` `"request_help" => { ... "answerHelp" ... "withdrawHelp" ... "requestHelp" ... "waitForControl"` |
+| `H_WD` | GPUI 主线程 | `Displays::withdraw_help` (`crates/model/src/request.rs:503-518`), `agent.rs:1689-1699` | 将打开的 `Kind::Help` 结案为 `Resolution::Withdrawn` 并调 `notify::withdraw_help`；若当前用户已处于 `Takeover`，撤回 Help **绝不退出 `Takeover`** (`!d.takeover` 守卫) | Agent 无权通过撤回请求打断正在接管的用户 | 返回 `{"withdrawn": bool}` | 未接管时卡片与通知收起 | 已验证：`crates/model/src/request.rs:503,513-515` `pub fn withdraw_help(&mut self, id: DisplayId) -> bool` / `if !d.takeover { d.requests.wake(Woken::of(Some(Kind::Help), Resolution::Withdrawn)); }` |
+| `H_CHAT` | GPUI 主线程 | `access::user_instruction` (`INSTRUCTION_CHARS = 300`, `crates/model/src/access.rs:14-27`), `"answerHelp"` (`apps/macos/src/control/agent.rs:1703-1722`) | 校验引用的用户原话非空且 `<= 300` 字符，调 `Core::answer(..., Answer::Continue)` 关闭卡片、清空 `unheard`，并将原话写入日志与录屏事件 `helpAnswered` (`ADR 0013`, `ADR 0015`) | 超 `300` 字或空白报 `invalid` | 返回 `{"control": "agent", "answer": "continue", "answeredIn": "chat", ...}` | 卡片与通知自动收起 | 已验证：`crates/model/src/access.rs:14,18` `pub const INSTRUCTION_CHARS: usize = 300;` / `pub fn user_instruction(`；`agent.rs:1710-1717` `c.answer(id, Kind::Help, None, Answer::Continue, cx)` / `"action": "helpAnswered"` |
+| `H2` | GPUI 主线程 | `display` (`apps/macos/src/control/agent.rs:1656`), `model::help_steps` (`HELP_STEPS = 5`, `HELP_STEP_CHARS = 160`, `crates/model/src/model.rs:544-565`) | 核验屏幕存活未 `Ended`，校验 `reason` 非空且可选 `steps` 不超过 `5` 条、每条修剪后非空且 `<= 160` 字符 | 步骤超限或为空返回 `invalid` | 失败走 `HX1`，通过走 `H3` | 无变化 | 已验证：`crates/model/src/model.rs:544-548` `pub const HELP_STEPS: usize = 5; pub const HELP_STEP_CHARS: usize = 160; pub fn help_steps(` |
+| `HX1` | GPUI 主线程 | `ControlError::invalid` / `not_found` / `ended_error` (`apps/macos/src/control/agent.rs:1660, 1674, 7252-7260`) | 返回标准协议错误 | 无 | 错误码 `invalid` / `not_found` / `ended` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1660,1674` `ControlError::invalid("reason is required")` / `.map_err(ControlError::invalid)?` |
+| `H3` | GPUI 主线程 | `Displays::request_help` (`crates/model/src/request.rs:474-498`) | 若 `answers == true && !d.takeover` 且 `d.requests.unheard` 存有上次等待超时后用户才提交的答复，直接取出返回 `HelpAsked::Answered(woken)` | 避免用户刚回答完又被新弹窗打扰 | 命中走 `H_EARLY`，否则走 `H4` | 无重复弹窗 | 已验证：`crates/model/src/request.rs:482-487` `if answers && !d.takeover && let Some(woken) = d.requests.unheard.take() { return Some(HelpAsked::Answered(woken)); }` |
+| `H_EARLY` | `mcp` 进程 | `answeredEarlier` 分支 (`crates/mcp/src/tools.rs:909-918`) | 将先前未听取的用户答复格式化返回并标注 `"answeredEarlier": true` | 零延迟交付延迟到达的用户答复 | 返回上次答复详情 | 无变化 | 已验证：`crates/mcp/src/tools.rs:909,916` `if let Some(Value::Object(answered)) = asked.get("answered")` / `out["answeredEarlier"] = json!(true);` |
+| `H4` | GPUI 主线程 | `Requests::open` (`crates/model/src/request.rs:391-402, 492-497`) | `Help`、`Control`、`Window` 三种 `Kind` 各自独立占一槽；若同屏已有旧 `Kind::Help` 打开，自动调 `resolve(Kind::Help, Resolution::Replaced)` 原地替换（**不报错拒绝**），即使处于 `Takeover` 也可登记新 `Help` 说明显示在 Viewer 顶栏 | 同屏不堆叠多张同类型请求卡 | 进入 `H5` | 若已在 Viewer 接管则更新顶栏步骤说明 | 已验证：`crates/model/src/request.rs:391-395` `fn open(&mut self, ask: Ask, ...) -> RequestId { let kind = ask.kind(); self.resolve(kind, Resolution::Replaced);` |
+| `H5` | GPUI 主线程 | `panel_options` + `native::style_panel` (`apps/macos/src/ui/shell.rs:378-393, 476-483`, `apps/macos/src/mac/native.rs:1068, 1273`), `HelpCard` (`MAX_PICTURE = 184.0`, `apps/macos/src/ui/help_card.rs:47, 69`) | 通过 GPUI `WindowKind::PopUp, focus: false` 创建透明面板，由 `native::style_panel(&card_ns, LEVEL_POP_UP_MENU)` (`level = 101`, `CanJoinAllSpaces \| FullScreenAuxiliary \| IgnoresCycle`) 与 `set_keyable_while_typing` 样式化，展示 `Streams` 实时画面缩略图（非静态截图，`MAX_PICTURE = 184pt`）、原因、步骤及操作按钮（注：Help 请求**无拒绝 Decline 按钮**，提供接手操作、继续、回复、移交窗口与稍后） | 弹出时不抢夺用户当前前台窗口键盘焦点；仅当用户点开卡片回复框打字时才临时接键 | 无 | 菜单栏图标下浮现双语协助卡片 | 已验证：`apps/macos/src/ui/shell.rs:384-385,482-483` `kind: WindowKind::PopUp, focus: false,` / `native::style_panel(&card_ns, native::LEVEL_POP_UP_MENU); native::set_keyable_while_typing(&card_ns);`；`help_card.rs:47` `const MAX_PICTURE: f32 = 184.;` |
+| `H6` | 主线程 -> 通知中心 | `notify::update` / `install` (`apps/macos/src/mac/notify.rs:221-258, 294`), `UNUserNotificationCenter` (`UNUserNotificationCenter.h:39`) | 推送类别为 `ANSWERS_CATEGORY` 的系统横幅通知，附带 `Take Over`（前台激活）、`Continue`（后台免打开结案）与 `UNTextInputNotificationAction` `Reply`（直接在通知横幅内打字发送）三个原生按钮 | 未授权通知时静默降级为菜单栏徽标与 Help Card | 无 | 全屏其它空间中也可直接在系统通知横幅点继续或打字回复 | 已验证：`apps/macos/src/mac/notify.rs:221,234,294` `pub fn install()` / `UNTextInputNotificationAction::...` / `pub fn update(display: u32, agent: &str, task: &str, note: Option<Note>)`；`MacOSX.sdk UNUserNotificationCenter.h:39` |
+| `H7` | `mcp` -> GPUI 主线程 | `tools.rs:919-925` 串联 `"waitForControl"` (`apps/macos/src/control/agent.rs:1760-1811`) | `request_help` 在登记成功后立即在同一工具调用内调用 `"waitForControl"`（默认 `100.0s`，钳制 `1.0..=600.0s`）进入挂起等待 | 省去多余往返，在用户 100s 内处理完时一次工具调用直接拿回结果 | 阻塞等待用户响应或超时 | 等待用户处理 | 已验证：`crates/mcp/src/tools.rs:919-925` `let reply = control.call("waitForControl", json!({ "displayId": display, "timeoutSeconds": a.int("timeout_seconds")? })).await?;`；`agent.rs:1763-1765` `.unwrap_or(100.0).clamp(1.0, 600.0)` |
+| `U0` | 用户交互入口 | Help Card / Viewer / 系统通知 `Delegate::did_receive` (`apps/macos/src/mac/notify.rs:102-135`) | 汇聚五种用户动作路径 | 任一入口响应后同步刷新卡片与通知状态 | 等待唤醒 | 无变化 | 已验证：`apps/macos/src/mac/notify.rs:102` `fn did_receive(` |
+| `U1` | GPUI 主线程 | `Core::take_over` (`apps/macos/src/core.rs:1049-1054`), `Core::stop_agent_input` (`core.rs:1119-1133`), `Queue::takeover` (`crates/model/src/input_queue.rs:530-543`) | 将 `d.takeover` 置为 `true`；调 `Forwarder::stop_agent(true)` 停止后台事件并释放拖拽按压；调 `InputQueue::takeover(id, true)` 中止正在运行的真实输入并暂停该屏排队项 | 接管期间并发动作类工具统一在 `input_display` 被拦截返回错误码 `"takeover"` (`agent.rs:7273`) | 并发动作工具返回错误码 `takeover` | Help Card 对该屏退避 (`on_card`)，切入 Viewer | 已验证：`apps/macos/src/core.rs:1049-1053,1119` `pub fn take_over(&mut self, id: DisplayId, cx: &mut Context<Self>) -> bool` / `fn stop_agent_input(` |
+| `U2` | GPUI 主线程 | `Shell::open_viewer` (`apps/macos/src/ui/shell.rs:2458`), `viewer_input::takeover_changed` (`apps/macos/src/mac/viewer_input.rs:262-285`) | 打开并前置 Viewer 窗口聚焦该虚拟屏，更新输入代数，放开文档 `07` 全部本地鼠标、键盘与输入法组字路由（`#207` 原生弹出菜单点击已通过 `press_menu_item_at` / `cancel_menu_at` 修复，真实 `.appex` 人工回归见文档 `07`） | 用户无需寻找屏外虚拟屏，直接在 Viewer 内操作 | `waitForControl` 持续等待 | Viewer 顶栏显示接管状态、Agent 步骤与交还按钮 | 已验证：`apps/macos/src/ui/shell.rs:2458` `pub fn open_viewer(`；`viewer_input.rs:262` `pub fn takeover_changed(display: u32, active: bool)` |
+| `U3` | 用户交互 / 对话传达 | `Shell::primary` (`apps/macos/src/ui/shell.rs:2673-2690`) 或 `request_control(user_instruction)` (`crates/mcp/src/tools.rs:931-943`) | 用户点击 Viewer 顶栏交还按钮；或者用户在对话中明确告知已完成并让 Agent 继续，由 Agent 调 `request_control(user_instruction: ...)` 触发 `chat_control` 执行交还 (`ADR 0004`, `ADR 0013`) | Agent 不能无凭据自行退出 `Takeover` | 触发 `end_takeover` | 接管横幅收起 | 已验证：`apps/macos/src/ui/shell.rs:2685-2686` `else if takeover { self.core.update(cx, \|core, cx\| core.hand_back(id, cx)); }`；`tools.rs:931` `if let Some(words) = a.string("user_instruction")?` |
+| `U4` | GPUI 主线程 | `Core::hand_back` (`apps/macos/src/core.rs:1059-1064`), `Displays::end_takeover` (`crates/model/src/request.rs:621-648`), `viewer_input::takeover_changed(..., false)` (`viewer_input.rs:281-284, 296-314`) | 丢弃未上屏 IME 预编辑串 `drop_composition()`，调用 `release_after_takeover()` 补发尚未松开的按键释放，恢复 `Forwarder::stop_agent(false)`，同时一并结案打开的 `Control` 与 `Help` 请求并调 `notify::withdraw_help` / `withdraw_control` | 若用户在接管前曾提交过未听取的 `Reply` 或 `Give`，`Woken::took_over` 将其装入 `superseded` 随交还一并带给 Agent (`request.rs:175-183`) | 进入 `R_TOOK` | 干净交回控制权 | 已验证：`crates/model/src/request.rs:621,638-640` `pub fn end_takeover(&mut self, id: DisplayId) -> Vec<Effect>` / `let woken = if help \|\| unheard.is_some() { Woken::took_over(unheard) }` |
+| `R_TOOK` | `mcp` 进程 | `wait_outcome("tookOver")` (`crates/mcp/src/tools.rs:1582-1600`) | 返回 `{"control": "agent", "answer": "tookOver", ...}`（若含 `superseded` 留言或窗口则一并附上 `user_reply` / `window`），提示先截图查看用户改动后再继续 | 无 | 返回接管完成 JSON | 屏幕回到 Agent 控制 | 已验证：`crates/mcp/src/tools.rs:1582-1583` `("tookOver", _) => { let mut out = json!({ "control": "agent", "answer": "tookOver", ... });` |
+| `U5` | GPUI 主线程 | `Displays::answer(..., Answer::Continue)` (`crates/model/src/request.rs:685`), `notify::withdraw_help` (`notify.rs:468`) | 用户无需接管直接放行：结案为 `Resolution::Continue` 并撤回通知与卡片 | 无 | 进入 `R_CONT` | 卡片与通知立即收起 | 已验证：`crates/model/src/request.rs:685` `(Kind::Help, Answer::Continue) => Resolution::Continue,` |
+| `R_CONT` | `mcp` 进程 | `wait_outcome("continue")` (`crates/mcp/src/tools.rs:1543-1545`) | 返回 `{"control": "agent", "answer": "continue", ...}` | 无 | 返回继续执行 JSON | 无变化 | 已验证：`crates/mcp/src/tools.rs:1543-1544` `("continue", _) => { json!({ "control": "agent", "answer": "continue", ... }) }` |
+| `U6` | GPUI 主线程 | `Displays::answer(..., Answer::Reply(text))` (`REPLY_CHARS = 2000`, `crates/model/src/request.rs:22, 461-463, 686-688`) | 校验回复非空白且 `<= 2000` 字符，结案为 `Resolution::Instructions(text)` 并撤回通知 | 空白或超 `2000` 字返回 `Unanswered::Unfit` | 进入 `R_INST` | 卡片与通知收起 | 已验证：`crates/model/src/request.rs:22,461,687` `pub const REPLY_CHARS: usize = 2000;` / `pub fn reply_text(` / `Resolution::Instructions(reply_text(&text).ok_or(Unanswered::Unfit)?)` |
+| `R_INST` | `mcp` 进程 | `wait_outcome("instructions")` (`crates/mcp/src/tools.rs:1546-1557`) | 返回 `{"control": "agent", "answer": "instructions", "user_reply": text, ...}` 原样传达用户文字指令 | 无 | 返回用户文字回复 JSON | 无变化 | 已验证：`crates/mcp/src/tools.rs:1546,1552-1554` `("instructions", _) =>` / `"control": "agent", "answer": "instructions", "user_reply": text` |
+| `U7` | GPUI 主线程 | `Displays::user_gave` (`crates/model/src/request.rs:725-739`) | 用户在卡片选择移交某个自身窗口代替接管：迁入窗口并将 Help 结案为 `Resolution::HandedOver(window)` | 与文档 `04` 窗口归属 `Origin::HandedOver` 协同 | 进入 `R_WIN` | 目标窗口移入虚拟屏，卡片收起 | 已验证：`crates/model/src/request.rs:725-726` `pub(crate) fn user_gave(&mut self, id: DisplayId, window: NamedWindow) -> bool { self.answer_help_with(id, Resolution::HandedOver(window)) }` |
+| `R_WIN` | `mcp` 进程 | `wait_outcome("handedOver")` (`crates/mcp/src/tools.rs:1558-1581`) | 返回 `{"control": "agent", "answer": "handedOver", "window": {"window_id", "app", "title"}, ...}` | 无 | 返回获赠窗口元数据 JSON | 无变化 | 已验证：`crates/mcp/src/tools.rs:1558,1576-1578` `("handedOver", _) =>` / `"control": "agent", "answer": "handedOver", "window": ...` |
+| `U8` | GPUI 主线程 | `Displays::put_off_help` / `recall_help` (`crates/model/src/request.rs:521-541`) | 用户点 Later 将 `request.put_off` 置为 `true` 收起浮动卡片，但请求本身保持打开，菜单栏徽标与系统通知仍在；后续从通知回复或点击图标经 `recall_help` 重新展开 | 不打断用户当前手头工作，也不向 Agent 误报拒绝 | `waitForControl` 继续等待直至超时或用户回头处理 | 卡片暂退，菜单栏保留待办提示 | 已验证：`crates/model/src/request.rs:521,528,534` `pub fn put_off_help(&mut self, id: DisplayId) -> bool` / `request.put_off = true;` / `pub fn recall_help(` |
 
 ---
 
-## 图 2：`wait_for_control` 等待循环、超时续航与单槽抢占 (`WaitSlot`) 子流程
+## 图 2：`request_control` 请求交还与 `wait_for_control` 等待续航及空闲检测 (`IDLE_HINT_SECONDS = 15s`)
 
 ```mermaid
 flowchart TD
-    W1["Agent 调用 wait_for_control (displayId, 可选 timeout 默认 120s)"] --> W2{"屏幕是否存在于 Core.displays?"}
-    W2 -->|"否"| WX1["返回 not_found 错误"]
-    W2 -->|"是"| W3{"此刻屏幕是否已处于 Active 且无未决 Help 请求?"}
-    W3 -->|"是 (用户已提前点完交还或从未失去控制)"| WR1["立即读取最近一次决议 (handed_back / declined / active) 并附最新窗口快照返回"]
-    W3 -->|"否 (已 Ended)"| WR2["立即返回 resolution: 'ended' 告知屏幕已关闭"]
-    W3 -->|"否 (仍在 Takeover 或挂有未决 Help Card)"| W4["登记等待槽位 (新调用自动抢占同连接旧挂起调用)"]
-    W4 --> W5["异步 select 等待: 用户交还/答复事件 vs timeout 计时器 vs 连接断开"]
-    W5 -->|"连接断开 / 新调用抢占"| WX2["清理槽位退出 (屏幕仍保持原等待/Takeover 态不丢现场)"]
-    W5 -->|"timeout 到期用户尚未操作完"| WR3["describe_wait 返回 resolution: 'waiting' (提示继续调 wait_for_control 等待)"]
-    W5 -->|"用户交还 / 点击完成 / 拒绝 / 关闭屏幕"| W6{"结局是否为屏幕已关闭 (Ended)?"}
-    W6 -->|"是"| WR2
-    W6 -->|"否"| WR1
+    W1["Agent 调用 wait_for_control 或在 Takeover 期调用 request_control"] --> W_RC{"是否为 request_control?"}
+    W_RC -->|"是"| RC1["Displays::request_control 仅在 takeover==true 时打开单实例 Ask::Control (已开则返回 AlreadyAsked)"]
+    RC1 --> RC2["Help Card 与系统通知提醒用户 Let ... Continue 或 Keep Control，随后串联调 waitForControl"]
+    W_RC -->|"否 (直接 wait_for_control)"| W2["display(live=false) 核验会话归属 (允许 Ended 与 Takeover 状态调用)"]
+    RC2 --> W2
+    W2 -->|"非本会话或从未存在"| WX1["返回 not_found 错误"]
+    W2 -->|"合法"| W3{"Displays::wait_for_control 即刻判定"}
+    W3 -->|"屏幕已 Ended (或已从列表移除入 retired)"| WR_END["Wait::Now(Ended)：返回 control:'none' (用户关闭则 resolution='closedByUser')"]
+    W3 -->|"!takeover 且存在未听取 unheard 答复"| WR_UNHEARD["Wait::Now(unheard)：立即消费并返回上次 Help 答复"]
+    W3 -->|"!d.awaits_user() (已在 Agent 控制下且无未决 Help)"| WR_AGENT["Wait::Now(HandedBack)：立即返回 control:'agent'"]
+    W3 -->|"处于 Takeover 或挂有未决 Help"| W4["清理已取消通道后压入 Requests.waiters -> Wait::Later(rx)"]
+    W4 --> W5["select 等待: rx 唤醒信号 vs timeoutSeconds 计时器 (默认 100s，范围 1..600s)"]
+    W5 -->|"客户端断线取消"| WX2["丢弃 rx (下次清理自动回收)，保留屏幕上 Takeover / Help 现场"]
+    W5 -->|"用户点 Keep Control (拒绝交还)"| WR_KEPT["唤醒返回 control:'user', kept:true (Takeover 继续)"]
+    W5 -->|"timeoutSeconds 到期仍未交还/未答复"| W6["采样 Takeover 期用户物理键鼠空闲秒数 ime::user_idle()"]
+    W6 --> WR_TIME["describe_wait 返回 control:'user' (若空闲 >=15s 附加提示：用户可能已操作完忘点交还)"]
+    W5 -->|"用户交还 / 答复 Help / 撤回 / 关闭屏幕"| WR_WAKE["按 Woken 决议返回 control:'agent' 或 control:'none'"]
 ```
 
 ### 图 2 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `W1` | `mcp` -> GPUI 主线程 | `tools::run("wait_for_control")` (`crates/mcp/src/tools.rs:1106-1148`), `agent.rs:1760-1835` | 接收 `displayId` 与可选等待秒数；豁免权限检查与 `Ended`/`Takeover` 拦截 (`agent.rs:2615, 2707`) | 允许在 `Takeover` 和 `Ended` 状态下合法调用以查询结局 | 进入 `W2` | 无变化 | [已验证: crates/mcp/src/tools.rs:1106-1148, apps/macos/src/control/agent.rs:1760-1835, apps/macos/src/control/agent.rs:2707] |
-| `W2` | GPUI 主线程 | `Core.displays.get(id)` (`apps/macos/src/control/agent.rs:1763-1770`) | 检查屏幕句柄是否存在 | 仅当已被彻底 `remove_with` 销毁时才报 `not_found` | 不存在走 `WX1`，存在走 `W3` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1763-1770] |
-| `WX1` | GPUI 主线程 | `ControlError::not_found` (`apps/macos/src/control/agent.rs:2695`) | 未知 `displayId` | 无 | 错误码 `not_found` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2695] |
-| `W3` | GPUI 主线程 | `waitForControl` 状态即刻判定 (`apps/macos/src/control/agent.rs:1771-1798`) | 检查屏幕此刻是否仍有挂起协助或处于 `Takeover` | 解决两步调用 (`request_help` -> `wait_for_control`) 之间用户手快先点完按钮的竞态 | 已就绪走 `WR1`，已结束走 `WR2`，等待中走 `W4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1771-1798] |
-| `WR1` | 后台快照 + `mcp` | `wait_outcome` (`crates/mcp/src/tools.rs:1520-1627`) | 汇总 `resolution` (`"handed_back"` / `"completed"` / `"declined"` / `"active"`)、用户留言，并自动在 `tools.rs` 补拍当前屏幕窗口列表或状态摘要交给 Agent 接续工作 | 若 `resolution == "declined"`，明确告知用户拒绝了请求 | 返回富上下文状态 JSON | 控制权平稳回到 Agent | [已验证: crates/mcp/src/tools.rs:1520-1627] |
-| `WR2` | GPUI 主线程 -> `mcp` | `wait_outcome` `ended` 分支 (`crates/mcp/src/tools.rs:1541-1575`) | 告知等待期间屏幕已被关闭（区分用户主动关闭与其它原因） | 指导 Agent 结束任务而非盲目新建屏幕 | 返回 `resolution: "ended"` | 无变化 | [已验证: crates/mcp/src/tools.rs:1541-1575] |
-| `W4` | GPUI 主线程 | 等待通知订阅 (`apps/macos/src/control/agent.rs:1799-1818`) | 订阅该屏幕的状态变更通道（类似 `wait_for_change` 的 `WaitSlot` 单槽机制，`EARLY_CANCEL = 30s`，`agent.rs:7713-7774`） | 防止客户端重试堆积僵尸等待任务 | 进入异步等待 `W5` | Help Card 或 Viewer 接管横幅持续等待用户 | [已验证: apps/macos/src/control/agent.rs:1799-1818, apps/macos/src/control/agent.rs:7713-7774] |
-| `W5` | GPUI 异步任务 | 计时器与状态通道 `select` (`apps/macos/src/control/agent.rs:1810-1834`) | 非阻塞挂起直至状态变化或单轮 `timeout` 到达 | 人工输二次验证或手机扫码常超 1 分钟，单轮超时绝不自动取消用户的 Help Card 或中断用户的 `Takeover`！ | 三路分流 | 用户可以从容不迫完成手机验证，不会被超时踢出 | [已验证: apps/macos/src/control/agent.rs:1810-1834] |
-| `WX2` | Drop 清理守卫 | `CallGuard::drop` / `Waiting::drop` (`apps/macos/src/control/agent.rs:57-68, 7755-7774`) | 客户端取消单次 RPC 时仅释放本次等待协程，保留屏幕上的 Help Card / `Takeover` 现场供下次重调继续等 | 若整个 MCP 会话彻底断线超 `2000ms` 则由文档 `02` `connection_closed` 统一清理 | 连接已断无返回 | 短暂取消不闪退用户正在输入的 Viewer | [已验证: apps/macos/src/control/agent.rs:57-68, apps/macos/src/control/agent.rs:7755-7774] |
-| `WR3` | 宿主 -> `mcp` 进程 | `describe_wait` (`IDLE_HINT_SECONDS = 15`, `crates/mcp/src/tools.rs:1487-1518`) | 返回 `resolution: "waiting"`，准确报告当前是“卡片仍待用户点击”还是“用户已打开 Viewer 正在亲自操作（距上次按键 N 秒）”，提示继续调用 `wait_for_control` | 给 Agent 透明的实时进展而非报错失败 | 返回仍在等待状态说明 | 用户操作完全不受影响 | [已验证: crates/mcp/src/tools.rs:1487-1518] |
-| `W6` | GPUI 主线程 | 唤醒后终态复核 (`apps/macos/src/control/agent.rs:1825-1834`) | 判断唤醒原因是屏幕被关还是控制权交回/答复 | 无 | 被关走 `WR2`，其余走 `WR1` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1825-1834] |
+| `W1` | `mcp` -> GPUI 主线程 | `tools::run("wait_for_control")` / `"request_control"` (`crates/mcp/src/tools.rs:864-872, 928-975`) | `wait_for_control` 豁免权限检查 (`needs_permissions`, `agent.rs:2615`) 与 `Ended`/`Takeover` 拦截 (`usable`, `agent.rs:2707`)；`request_control` 用于在用户接管期间礼貌请求归还屏幕 | 支持在接管与审阅期合法查询状态 | 按工具分流 | 无变化 | 已验证：`crates/mcp/src/tools.rs:864,928` `"wait_for_control" =>` / `"request_control" =>`；`apps/macos/src/control/agent.rs:2707` `!matches!(method, "endDisplay" \| "waitForControl")` |
+| `RC1` | GPUI 主线程 | `Displays::request_control` (`crates/model/src/request.rs:575-587`), `"requestControl"` (`apps/macos/src/control/agent.rs:1725-1747`) | 仅当屏幕存活且 `d.takeover == true` 时登记 `Ask::Control { reason }` 返回 `ControlAsk::Asked`；若已有打开的 `Control` 请求则保持原状返回 `AlreadyAsked`，绝不重复发第二次通知打扰用户 | 非接管期调用返回 `ControlAsk::NotNeeded` | 进入 `RC2` | 首次请求弹出归还提示卡与通知 | 已验证：`crates/model/src/request.rs:575-586` `pub fn request_control(&mut self, id: DisplayId, reason: String) -> ControlAsk` |
+| `RC2` | `mcp` 进程 | `tools.rs:963-974` 串联 `"waitForControl"` | 发出归还请求后立即串联等待用户选择 `Let ... Continue` (`Answer::Continue` -> `end_takeover`) 或 `Keep Control` (`Answer::Keep` -> `Resolution::Kept`) | 同样支持 `withdraw: true` 调 `withdrawControlRequest` 取消催促而不打断接管 | 转入 `W2` | 等待用户决定归还或继续持有 | 已验证：`crates/mcp/src/tools.rs:964-974` `.call("waitForControl", ...)` / `if asked.get("alreadyAsked") == Some(&Value::Bool(true))` |
+| `W2` | GPUI 主线程 | `display(&core, &p, false, cx)` (`apps/macos/src/control/agent.rs:1761, 7246-7264`) | `live = false`：只要屏幕仍在 `Displays` 中（含 `Ended` 审阅态）即放行；注意若屏幕已无残留窗被 `remove_with` 彻底销毁记入 `retired`，`display()` 会在入口直接返回 `ended_error` | 非本会话屏幕在 `usable` 返回 `not_found` | 非法走 `WX1`，通过走 `W3` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1761,7252` `let id = display(&core, &p, false, cx)?;` / `None if c.displays.retired.contains(&id) => Err(ended_error(...))` |
+| `WX1` | GPUI 主线程 | `ControlError::not_found` (`apps/macos/src/control/agent.rs:2702, 7255`) | 未知或跨会话 `displayId` | 无 | 错误码 `not_found` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7255` `None => Err(ControlError::not_found(...))` |
+| `W3` | GPUI 主线程 | `Displays::wait_for_control` (`crates/model/src/request.rs:761-780`) | 按序检查：`d.is_ended()` -> `!d.takeover && unheard.take()` -> `!d.awaits_user()` -> 否则注册异步通道 `Wait::Later(rx)`（注：此处返回 `Wait::Now` / `Wait::Later`，而非 `WaitSlot`；`WaitSlot` 与 `EARLY_CANCEL` 仅属于文档 `10` 的 `waitForChange`） | 彻底消除发起请求与开始等待之间的竞态窗口 | 四路分流 | 无变化 | 已验证：`crates/model/src/request.rs:302-305,761-780` `pub enum Wait { Now(Woken), Later(oneshot::Receiver<Woken>) }` / `pub fn wait_for_control(&mut self, id: DisplayId) -> Wait` |
+| `WR_END` | GPUI 主线程 -> `mcp` | `closed` 判定 (`apps/macos/src/control/agent.rs:1784-1790`), `wait_outcome` (`crates/mcp/src/tools.rs:1619-1623`) | 若 `EndReason::ClosedByUser` 或在 `closed_by_user` 集合中，序列化为 `resolution: "closedByUser"`，MCP 层返回 `{"control": "none", "note": "The user closed the display, so stop working on screen..."}`；其余结束原因返回 `"The display has ended."` | 防止用户主动关屏后 Agent 自作主张重建屏幕 | 返回 `control: "none"` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1784-1790` `let closed = woken.resolution == Resolution::Ended && ...`；`tools.rs:1619-1622` `("closedByUser", _) => json!({ "control": "none", ... })` |
+| `WR_UNHEARD` | GPUI 主线程 -> `mcp` | `d.requests.unheard.take()` (`crates/model/src/request.rs:768-772`) | 零延迟取出无人接听期间到达的 Help 答复（用户还在 `Takeover` 时则暂不消费，留待交还时合并为 `TookOver`） | 接管优先级高于未听取答复 | 返回对应 `control: "agent"` 答复 | 无变化 | 已验证：`crates/model/src/request.rs:768-771` `if !d.takeover && let Some(woken) = d.requests.unheard.take() { return Wait::Now(woken); }` |
+| `WR_AGENT` | GPUI 主线程 -> `mcp` | `!d.awaits_user()` (`crates/model/src/request.rs:773-775`), `tools.rs:1601-1603` | 屏幕既不在 `Takeover` 也无未决 `Help`，立即返回 `Resolution::HandedBack` | 幂等安全，随时可调 | 返回 `{"control": "agent", "note": "You have control..."}` | 无变化 | 已验证：`crates/model/src/request.rs:773-775` `if !d.awaits_user() { return Wait::Now(Woken::of(None, Resolution::HandedBack)); }` |
+| `W4` | GPUI 主线程 | `d.requests.waiters` (`crates/model/src/request.rs:312, 776-779`) | 先调 `waiters.retain(\|w\| !w.is_canceled())` 清理过期的取消端，再压入新 `oneshot::Sender<Woken>` | 支持多路等待同时被 `Requests::wake` 广播唤醒 | 进入 `W5` | 界面保持原等待或接管状态 | 已验证：`crates/model/src/request.rs:776-779` `d.requests.waiters.retain(\|w\| !w.is_canceled()); let (tx, rx) = oneshot::channel(); d.requests.waiters.push(tx);` |
+| `W5` | GPUI 异步任务 | `futures::select!` (`apps/macos/src/control/agent.rs:1770-1781`) | 同时等待 `rx` 唤醒与 `timeoutSeconds` 定时器（默认 `100.0s`，范围 `1.0..=600.0s`）；单轮超时**绝不取消**用户的 Help Card，也**绝不中断**用户的 `Takeover` | 留给用户充裕时间做手机双因素认证或扫码 | 按唤醒原因分流 | 用户从容操作不被超时踢出 | 已验证：`apps/macos/src/control/agent.rs:1770-1780` `let timer = cx.background_executor().timer(Duration::from_secs_f64(seconds)); futures::select! {` |
+| `WX2` | 通道自动丢弃 | `rx` Drop (`apps/macos/src/control/agent.rs:1774`, `request.rs:776`) | 单次 RPC 取消仅丢弃本次 `rx`；若随后用户答复了 Help 而无其它活跃等待者，`Requests::wake` (`!heard`) 会自动将答复存入 `unheard` 留给下次重连调用！ | 取消重试绝不丢用户答复 | 连接取消无返回 | Viewer 与卡片现场完好保留 | 已验证：`crates/model/src/request.rs:420-431` `let mut heard = false; for waiter in self.waiters.drain(..) { heard \|= waiter.send(woken.clone()).is_ok(); } ... self.unheard = (!heard).then_some(woken);` |
+| `WR_KEPT` | GPUI 主线程 -> `mcp` | `(Kind::Control, Answer::Keep) => Resolution::Kept` (`crates/model/src/request.rs:689`), `tools.rs:1607-1609` | 用户点击 `Keep Control` 明确表示还没操作完：`Control` 请求结案但 `Takeover` 持续，返回 `{"control": "user", "kept": true, ...}` | 指导 Agent 不要立刻重复发 `request_control`，改调 `wait_for_control` 安静等待 | 返回 `control: "user", kept: true` | 用户继续持有 Viewer 控制权 | 已验证：`crates/model/src/request.rs:689` `(Kind::Control, Answer::Keep) => Resolution::Kept,`；`tools.rs:1607-1608` `("kept", _) => json!({ "control": "user", "kept": true, ... })` |
+| `W6` | GPUI 主线程 | `waiting_on` + `ime::user_idle()` (`apps/macos/src/control/agent.rs:1777-1778, 1803-1809`) | 超时生成 `Woken::of(open, Resolution::TimedOut)`（序列化为 `"resolution": "timedOut"`），若处于 `Takeover` 则附带 `userIdleSeconds`（物理键鼠已静置的整秒数） | 识别用户输完通行密钥后离开、未点击顶栏交还按钮的场景 (`agent.rs:1800-1802`) | 进入 `WR_TIME` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1777-1778,1803-1805` `Woken::of(open, Resolution::TimedOut)` / `.then(\|\| crate::mac::ime::user_idle().floor() as u64)` |
+| `WR_TIME` | `mcp` 进程 | `describe_wait` (`IDLE_HINT_SECONDS = 15`, `crates/mcp/src/tools.rs:1487-1516, 1610-1618`) | 返回 `{"control": "user", ...}`，区分仍在等 Help 答复、等 Control 归还还是用户正在接管操作；若处于 `Takeover` 且 `userIdleSeconds >= 15`，追加提示建议在聊天窗口询问用户是否已完成并用 `request_control(user_instruction)` 接回 | 不把超时当错误，提供可操作的下一步指引 | 返回 `control: "user"` 及可选 `userIdleSeconds` | 用户操作不受干扰 | 已验证：`crates/mcp/src/tools.rs:1487,1498-1501` `const IDLE_HINT_SECONDS: u64 = 15;` / `if idle >= IDLE_HINT_SECONDS { let quiet = format!("The user still has control, but hasn't touched the mouse or keyboard for {idle} s...");` |
+| `WR_WAKE` | `mcp` 进程 | `describe_wait` / `wait_outcome` (`crates/mcp/src/tools.rs:1491-1624`) | 将唤醒的 `Woken` JSON 转换为面向 Agent 的 `control` (`"agent"` 或 `"none"`)、`answer` 与操作提示（提示恢复控制后先拍一张 `screenshot` 观察界面变化，不自动后台抓快照） | 轻量返回，由 Agent 按需截图或读树 | 返回最新控制权状态 JSON | 交接完成 | 已验证：`crates/mcp/src/tools.rs:1491,1541` `fn describe_wait(reply: &Object) -> Value` / `fn wait_outcome(reply: &Object, resolution: &str, request: Option<&str>) -> Value` |

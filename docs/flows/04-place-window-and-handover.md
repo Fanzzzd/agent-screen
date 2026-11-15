@@ -1,130 +1,128 @@
-# 04. `place_window`、`window_access` 与跨屏窗口移交 (`handover`) 流水线
+# 04. `place_window`、`window_access` 与跨屏窗口移交 (`Handover`) 流水线
 
-当 Agent 需要操作用户桌面上已有的窗口（例如已登录的浏览器或聊天软件），或需要调整窗口几何尺寸、在同会话多块屏幕间调拨窗口、乃至将借用窗口提前归还用户时，均通过 `place_window` 与 `window_access` 完成 (`ADR 0004`, `ADR 0016`, `ADR 0017`)。系统严格区分四类窗口来源：本屏已持有窗口（直接调尺寸）、同会话兄弟屏窗口（直接跨屏调拨）、用户物理屏窗口（检查 `Access` 预授权或弹出 **Help Card** 借窗审批，迁入前记录 `Home`）、以及其它 Agent 会话持有的窗口（弹出带持有者身份与活跃状态的跨会话移交卡片 `Held` / `Transfer`，修复 `#189` 盲等困局）。
+当 Agent 需要操作用户物理屏上已有的窗口、调整虚拟屏内窗口尺寸、在同会话多台显示器之间调拨窗口、跨会话申请移交窗口，或在用户指令下批量开关窗口授权 (`Window Access`) 与提前归还借出窗口时，统一通过 `place_window` 与 `window_access` 完成 (`ADR 0004`, `ADR 0013`, `ADR 0016`, `ADR 0017`)。系统区分五类来源：本屏已有窗口（直接写帧）、同会话兄弟屏窗口（`move_between_own` 免审批调拨）、本会话冷启动遗留 `stray` 窗口（免弹窗领回）、用户物理屏窗口（凭 `user_instruction` 或 `Access` 授权直接迁入，否则弹出无预览图的窗口请求 Help Card 等待默认 `120s`）、以及另一会话或待查看显示器持有的窗口（`take_held` 凭点名该应用的 `user_instruction` 过户，或弹出标明原持有会话及活跃度 `HolderStatus` 的卡片请求移交，解决 `#189` 盲等困局）。
 
 ## 线程与队列分工
 
-1. **GPUI 主线程 (`Core` / `Shell`)**：查询 `Model` 与 `Holders` 归属表、核查 `Access` 授权范围 (`Scope::All` / `Scope::Apps`)、创建 `Request::TakeWindow` 审批单、弹出 Help Card 与发送 `UNUserNotificationCenter` 系统通知、维护 `Held::transfer` 跨会话过户账本 (`apps/macos/src/control/agent.rs:3384-4560`)。
-2. **GPUI `background_executor` 工作池**：通过 `CGWindowListCopyWindowInfo` + AX 枚举全局窗口、拍摄待借窗口预览图供审批卡片展示、在 `windows::Lanes` 每窗口串行通道内调用 `AXUIElementSetAttributeValue` 移动/缩放窗口并联动 AeroSpace (`apps/macos/src/mac/windows.rs:516-680`)。
+1. **GPUI 主线程 (`Core` / `Shell`)**：核查会话归属与 `Access` 范围 (`Scope::All` / `Scope::Apps`)、签发 `hand_over` 票据 (`Ticket`)、挂起窗口请求 (`Ask::Window`)、驱动 Help Card 与系统通知、维护跨会话过户账本 (`Displays::transfer` / `undo_transfer`) (`apps/macos/src/control/agent.rs:1081-1325, 3384-4560`)。
+2. **后台执行器 (`background_executor`)**：枚举窗口列表、采集归还坐标 `dismissal::home_of`、在 `windows::Lanes` 每窗口互斥通道内通过 `ax::set_frame_asked` 或 `windows::place_handed_over` 写坐标与尺寸，并调用 `aerospace move-node-to-workspace` 同步工作区 (`apps/macos/src/mac/windows.rs:579-640`, `ax.rs:1562-1591`, `aerospace.rs:28-44`)。
 
 ---
 
-## 图 1：`place_window` 目标定位、来源分流与借用/跨会话移交审批总览
+## 图 1：`place_window` 目标定位、五类来源分流与借窗/跨会话过户审批
 
 ```mermaid
 flowchart TD
-    P1["Agent 调用 place_window (displayId, windowId 或 app, 可选 x/y/width/height/reason)"] --> P2{"windowId 与 app 至少传一且坐标参数合法?"}
-    P2 -->|"否"| PX1["返回 invalid_params 错误"]
-    P2 -->|"是"| P3["display(id, active=true) 校验请求方屏幕活跃且非 Takeover"]
-    P3 -->|"失败"| PX2["返回 not_found / display_ended / user_takeover"]
-    P3 -->|"通过"| P4["后台枚举全局窗口并结合 Core::Holders 判定目标窗口当前位置"]
-    P4 --> P5{"找到匹配窗口?"}
-    P5 -->|"否"| PX3["no_such_window / no_app_window 诊断最小化/全屏/其它屏占用并返回 not_found"]
-    P5 -->|"是"| P6{"目标窗口当前归属哪一方?"}
-    P6 -->|"1. 已在本屏幕 (id)"| P7["直接进入图 2 frame_window 调整坐标与尺寸"]
-    P6 -->|"2. 在同 sessionKey 的另一块屏幕"| P8["move_between_own 同会话免审批跨屏调拨"]
+    P1["Agent 调用 place_window (display_id, window_id/app, 可选 x/y/width/height/timeout_seconds/user_instruction)"] --> P2["input_display 校验显示器存活且非 Takeover，校验宽高 > 0 与 user_instruction <= 300 字符"]
+    P2 -->|"校验失败"| PX1["返回 invalid / not_found / ended / takeover 错误"]
+    P2 -->|"通过"| P3{"按 window_id 命中本屏窗口?"}
+    P3 -->|"是"| P7["直接进入图 2 frame_window 写帧调整位置与尺寸"]
+    P3 -->|"否"| P4{"在同 sessionKey 另一活跃屏命中可移窗口?"}
+    P4 -->|"是"| P8["move_between_own 同会话跨屏调拨 (源屏若 Takeover 报 takeover)"]
     P8 --> P7
-    P6 -->|"3. 在用户物理屏 (Unheld / Stray)"| P9{"本会话 started 孤儿 或 Access 已预授权该应用?"}
-    P9 -->|"是"| P10["免弹窗直接记录 Home 并进入图 2 place_and_hold 迁入"]
-    P9 -->|"否"| P11["request_window(held=None) 截取窗口预览并弹出借窗 Help Card + 系统通知"]
-    P6 -->|"4. 被其它会话屏幕持有 (OtherSession)"| P12{"原持有屏幕已 Ended 且无活跃调用?"}
-    P12 -->|"是 (闲置遗留)"| P11
-    P12 -->|"否 (活跃或占用中, #189)"| P13["request_window(held=Some(Held)) 卡片展示原持有会话名与活跃状态"]
-    P11 --> P14["挂起等待用户点击允许/拒绝、手动拖入 Viewer、或 timeout 超时"]
-    P13 --> P14
-    P14 --> P15{"用户响应或超时结果?"}
-    P15 -->|"拒绝 (Declined)"| PX4["返回 failed (declined_message 含持有者说明)"]
-    P15 -->|"超时 (TimedOut)"| PX5["撤回卡片并返回 failed (timed_out_message 含秒数与持有者状态)"]
-    P15 -->|"屏幕结束 / 窗口关闭"| PX6["返回 display_ended 或 failed (窗口已关闭)"]
-    P15 -->|"允许 / 手动移交"| P16{"审批等待期间窗口状态复核 (after_hand_over)"}
-    P16 -->|"仍在用户屏"| P10
-    P16 -->|"仍在另一会话屏"| P17["transfer_window 执行 Held::transfer 记账过户并给原屏留 given_news 通知"]
+    P4 -->|"否"| P5{"命中本会话已启动应用的 stray 孤儿窗口?"}
+    P5 -->|"是"| P9["记 Origin.Placed (或保留兄弟屏记录) 调 place_and_hold 领回"]
+    P9 --> P7
+    P5 -->|"否"| P6{"在用户物理屏 (或备用屏) 找到候选标准窗口?"}
+    P6 -->|"是"| P10{"携带 user_instruction (Once) 或 Access.covers 已授权?"}
+    P10 -->|"是 (且非 Excluded / Elsewhere)"| P11["hand_over: 记 home_of -> Ticket 确认 -> place_handed_over (含 seen 屏障)"]
+    P11 --> P7
+    P10 -->|"否 (NotGranted 或无口令 Excluded)"| P12["request_window(held=None): 弹无预览图窗口请求 Help Card + 通知"]
+    P6 -->|"否"| P13{"held_window 在另一会话屏或待查看屏找到窗口?"}
+    P13 -->|"否"| PX2["no_such_window / no_app_window 诊断去向与持有者标签并返回 not_found"]
+    P13 -->|"是"| P14{"take_held: user_instruction 明确点名该窗口应用名?"}
+    P14 -->|"是"| P18["transfer_window 原子过户 + 停原屏拖拽/排队输入"]
+    P14 -->|"否"| P15["request_window(held=Some(Held)): 卡片展示持有会话名与 HolderStatus (#189)"]
+    P12 --> P16["ask_window 挂起等待用户点击 Hand Over / Keep 或超时 (默认 120s, 钳制 1..600s)"]
+    P15 --> P16
+    P16 -->|"Declined / TimedOut / Replaced / Ended"| PX3["返回 failed 错误 (含 declined_message 或 timed_out_message)"]
+    P16 -->|"HandedOver (held=None)"| P17["轮询 30x100ms 确认窗口已到达目标屏"]
     P17 --> P7
-    P16 -->|"已被关闭或移往未知处"| PX6
+    P16 -->|"HandedOver (held=Some) 或 Claimed"| P19{"after_hand_over 复核窗口实时位置 (最多追问 3 轮)"}
+    P19 -->|"仍在原命名持有屏"| P18
+    P19 -->|"已回到用户物理屏"| P11
+    P19 -->|"已被第三会话接走 (AskAgain)"| P15
+    P19 -->|"已关闭或移往未知处"| PX3
+    P18 --> P7
 ```
 
 ### 图 1 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `P1` | `mcp` -> GPUI 主线程 | `tools::run("place_window")` (`crates/mcp/src/tools.rs:942-995`), `agent.rs:1081-1108` | 接收 `displayId`、二选一或同时指定的 `windowId` / `app`、可选几何框 `x, y, width, height`、审批说明 `reason` 与 `timeout` | 坐标传入的是截图缩放系，入内核前按 `display_scale` 换算为点 (`pt`) | 进入校验 | 无变化 | [已验证: crates/mcp/src/tools.rs:942-995, apps/macos/src/control/agent.rs:1081-1108] |
-| `P2` | GPUI 主线程 | `placeWindow` 参数解析 (`apps/macos/src/control/agent.rs:1083-1096`) | 校验 `windowId` / `app` 非全空，校验 `width` / `height` 若提供必须 `> 0`，校验 `watch::timeout` (`<= 120s`, 默认 `30s`) | `reason` 超过 `INSTRUCTION_CHARS = 300` 时报错 | 非法走 `PX1`，合法走 `P3` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1083-1096, crates/model/src/watch.rs:13-38] |
-| `PX1` | GPUI 主线程 | `ControlError::invalid` (`apps/macos/src/control/agent.rs:1086, 1095`) | 纯参数层拒绝 | 无 | 错误码 `invalid_params` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1086, apps/macos/src/control/agent.rs:1095] |
-| `P3` | GPUI 主线程 | `input_display(&core, &p, cx)` (`apps/macos/src/control/agent.rs:1082, 7266-7287`) | 确认目标屏幕存活且不在 `Takeover` 中 | 无 | 失败走 `PX2`，通过走 `P4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1082, apps/macos/src/control/agent.rs:7266-7287] |
-| `PX2` | GPUI 主线程 | `usable` (`apps/macos/src/control/agent.rs:2695-2711`) | 返回屏幕不可用原因 | 无 | `not_found` / `display_ended` / `user_takeover` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2695-2711] |
-| `P4` | 后台执行器 + 主线程 | `windows::all` (`apps/macos/src/mac/windows.rs:209-238`), `Holders::of` (`apps/macos/src/control/agent.rs:3384-3434`) | 枚举全系统窗口，关联 `Core` 中所有屏幕的持有关系与会话存活状态 (`HolderStatus`：是否有在途调用、上次调用距今秒数、客户端名称，`session.rs:35-71`) | 忽略最小化窗口、原生全屏独立 Space 窗口与系统浮层，但在 `P5` 保留诊断线索 (`WindowSighting`) | 交 `P5` 匹配 | 无变化 | [已验证: apps/macos/src/mac/windows.rs:209-238, apps/macos/src/control/agent.rs:3384-3434, crates/model/src/session.rs:35-71] |
-| `P5` | GPUI 主线程 | `no_such_window` / `no_app_window` (`apps/macos/src/control/agent.rs:3436-3562`), `placement.rs:52-270` | 按 `windowId` 精确命中，或按 `NamedApp` 挑选目标应用最前端可放置标准窗口 | 原生 macOS 全屏窗口无法通过 AX 跨屏直接设坐标，会被识别为 `Fullscreen` 并拒绝 | 未找到走 `PX3`，命中走 `P6` | 无变化 | [已验证: apps/macos/src/control/agent.rs:3436-3562, crates/model/src/placement.rs:52-270] |
-| `PX3` | GPUI 主线程 | `ControlError::not_found` (`apps/macos/src/control/agent.rs:1145-1220, 3436-3562`) | 精确说明窗口不存在、已最小化、处于原生全屏、还是仅在另一会话屏上存在（含对方标签 `#189`） | 绝不返回笼统的“找不到窗口” | 错误码 `not_found`（附带窗口去向与恢复建议） | 无变化 | [已验证: apps/macos/src/control/agent.rs:3436-3562, crates/model/src/placement.rs:104-268] |
-| `P6` | GPUI 主线程 | `where_now` / `held_window` (`apps/macos/src/control/agent.rs:3617-3668, 3810-3859`) | 判定目标窗口属于当前屏、同会话兄弟屏、用户物理屏还是外会话屏幕 | 综合 `recorded_owners`、`claims.json` 与实时几何包含关系 (`window_belongs_to_area`) | 四路分流 | 无变化 | [已验证: apps/macos/src/control/agent.rs:3617-3668, apps/macos/src/control/agent.rs:3810-3859] |
-| `P7` | 后台执行器 + 主线程 | `frame_window` (`apps/macos/src/control/agent.rs:4368-4480`) | 已在本屏，进入图 2 几何调整与边界约束流程 | 无 | 转入图 2 | 窗口在本虚拟屏内移动/缩放 | [已验证: apps/macos/src/control/agent.rs:4368-4480] |
-| `P8` | 后台执行器 + 主线程 | `move_between_own` (`apps/macos/src/control/agent.rs:4521-4560`) | 同一 `sessionKey` 名下两块屏幕间转移窗口：保留原始 `Origin` 与 `Home`（若原本借自用户，将来结束时仍归还给用户的原始 `Home`），更新 `claims.json` 与 `Model` 归属后调 `place` | 无需打扰用户二次审批 (`ADR 0016`) | 转入 `P7` 返回放置结果 | 两块虚拟屏的 Peek 缩略图实时更新 | [已验证: apps/macos/src/control/agent.rs:4521-4560, ADR 0016] |
-| `P9` | GPUI 主线程 | `Access::covers` (`crates/model/src/access.rs:192-199`), `Display.started` 检查 (`apps/macos/src/control/agent.rs:3630-3665`) | 检查该窗口是否属于本会话重启前启动的 `stray` 孤儿进程，或用户已通过 `window_access` 授予了该应用/`all` 的拉窗权限 | 未授权的用户窗口严禁静默拉入虚拟屏 (`ADR 0004`) | 已授权走 `P10`，未授权走 `P11` | 无变化 | [已验证: crates/model/src/access.rs:192-199, apps/macos/src/control/agent.rs:3630-3665] |
-| `P10` | 后台执行器 + 主线程 | `dismissal::home_of` (`apps/macos/src/dismissal.rs:245-270`), `place_and_hold` (`apps/macos/src/control/agent.rs:4482-4519`) | 在移动前记录窗口在用户桌面的原始 `Rect`、物理显示器 ID 及 AeroSpace 工作区为 `Home`，随后进入图 2 迁入虚拟屏并标为 `Origin::HandedOver` | 确保会话结束或调用 `return_window` 时能分毫不差归还原位 | 转入图 2 | 被授权窗口平滑迁入虚拟屏，Peek 可见 | [已验证: apps/macos/src/dismissal.rs:245-270, apps/macos/src/control/agent.rs:4482-4519] |
-| `P11` | GPUI 主线程 + 后台 | `request_window` / `ask_window` (`apps/macos/src/control/agent.rs:3564-3594, 3706-3755`) | 后台用 `SCScreenshotManager` / `SLSHWCaptureWindowList` 拍下目标窗口缩略图 (`MAX_PICTURE = 184pt`, `help_card.rs:47`)，登记 `Request::TakeWindow`，弹出 Help Card 并发送系统通知 (`notify.rs`) | 同屏幕同一时刻仅允许一个挂起请求；重复挂起立即拒绝 | 挂起等待 `P14` | 屏幕右上角弹出双语借窗卡片（含窗口截图、Agent 理由、“移交窗口”与“拒绝”按钮） | [已验证: apps/macos/src/control/agent.rs:3706-3755, apps/macos/src/ui/help_card.rs:47] |
-| `P12` | GPUI 主线程 | `held_window` (`apps/macos/src/control/agent.rs:3810-3859`), `Held` (`crates/model/src/held.rs:19-44`) | 检查持有该窗口的另一块屏幕当前是 `Ended` 审阅态还是活跃会话态 | 区分无主审阅屏与活跃兄弟 Agent (`ADR 0017`, `#189`) | 已结束无调用走 `P11`，活跃走 `P13` | 无变化 | [已验证: apps/macos/src/control/agent.rs:3810-3859, crates/model/src/held.rs:19-44, ADR 0017] |
-| `P13` | GPUI 主线程 | `ask_window(..., Some(held))` (`apps/macos/src/control/agent.rs:3706-3755`), `HolderStatus::summary` (`crates/model/src/session.rs:51-71`) | 在 Help Card 上明确标出当前持有该窗口的会话标题与实时活跃度（例如“正在执行调用”或“空闲 45 秒”），由用户裁决是否夺回转交 | 彻底解决 `#189` 另一会话未关 stdin 占住窗口无法识别也无法收回的问题 | 挂起等待 `P14` | 卡片额外显示原持有 Agent 名称及活跃状态警告 | [已验证: apps/macos/src/control/agent.rs:3706-3755, crates/model/src/session.rs:51-71, Issue #189] |
-| `P14` | GPUI 异步挂起 | `ask_window` 选择器 (`apps/macos/src/control/agent.rs:3745-3805`) | 同时监听用户点击卡片按钮、通知操作、用户手动把窗口拖到目标屏、客户端取消、或 `timeout` 计时器（默认 `30s`，最大 `120s`） | 等待期间不阻塞主线程或其它屏幕的调用 | 阻塞当前 MCP 请求 | 卡片显示倒计时/等待用户点击 | [已验证: apps/macos/src/control/agent.rs:3745-3805] |
-| `P15` | GPUI 主线程 | `ask_window` 分支解析 (`apps/macos/src/control/agent.rs:3758-3805`) | 解析 `Answer` 结果 | 无 | 四路分流 | 卡片自动收起，系统通知撤回 | [已验证: apps/macos/src/control/agent.rs:3758-3805] |
-| `PX4` | GPUI 主线程 | `held::declined_message` (`crates/model/src/held.rs:478-494`), `agent.rs:3760-3766` | 生成用户拒绝借窗或拒绝跨会话夺窗的明确说明 | Agent 被告知尊重用户决定不要反复弹窗骚扰 | 错误码 `failed`：`The user declined to move <App> to this display...` | 窗口留在原处 | [已验证: crates/model/src/held.rs:478-494, apps/macos/src/control/agent.rs:3760-3766] |
-| `PX5` | GPUI 主线程 | `held::timed_out_message` (`crates/model/src/held.rs:496-532`), `agent.rs:3768-3774` | 超时撤回请求 (`Core::answer` 清理状态)，若系跨会话占用则在超时文本中完整附带持有者身份与空闲时长 | 给用户或上层编排器足够信息判断是否结束旧会话 (`#189`) | 错误码 `failed`：`Timed out after Ns waiting for the user to move <App>...` | 卡片与通知消失 | [已验证: crates/model/src/held.rs:496-532, apps/macos/src/control/agent.rs:3768-3774] |
-| `PX6` | GPUI 主线程 | `ask_window` / `after_hand_over` (`apps/macos/src/control/agent.rs:3696-3703, 3775-3804`) | 处理等待期间请求屏被关闭或目标窗口已被销毁/移走 | 防止对失效 `window_id` 强写坐标 | `display_ended` 或 `failed` (`<App> window closed while waiting`) | 无变化 | [已验证: apps/macos/src/control/agent.rs:3696-3703, apps/macos/src/control/agent.rs:3775-3804] |
-| `P16` | 后台 + 主线程 | `after_hand_over` / `held::decide_after_hand_over` (`apps/macos/src/control/agent.rs:3670-3704`, `crates/model/src/held.rs:534-572`) | 用户点“允许”瞬间重查窗口实时位置（防止等待期间原持有会话刚把窗口归还给用户或转给了第三块屏） | 纯状态机 `decide_after_hand_over` 覆盖所有并发移位组合 (`held.rs:848-960`) | 按实时位置转 `P10` / `P17` / `PX6` | 无变化 | [已验证: apps/macos/src/control/agent.rs:3670-3704, crates/model/src/held.rs:534-572] |
-| `P17` | GPUI 主线程 + 后台 | `transfer_window` (`apps/macos/src/control/agent.rs:3914-3970`), `Held::transfer` (`crates/model/src/held.rs:244-438`) | 原子过户：继承原屏保存的用户 `Home`（若最初来自用户），从原屏持有表移除并记入 `given_news` 队列；若后续物理移动失败则调 `undo_transfer` 回滚 (`held.rs:401-438`) | 原持有 Agent 下次在原屏调用任何工具时，返回值自动附带 `givenNote` 告知该窗口已由用户转交其它会话 (`agent.rs:3197-3216`) | 过户完成进入 `P7` | 窗口从旧虚拟屏迁至新虚拟屏 | [已验证: apps/macos/src/control/agent.rs:3197-3216, apps/macos/src/control/agent.rs:3914-3970, crates/model/src/held.rs:244-438] |
+| `P1` | `mcp` -> GPUI 主线程 | `tools::run("place_window")` (`crates/mcp/src/tools.rs:991-1019`), `agent.rs:1081-1096, 1181-1186` | 转发 `displayId`、`windowId`、`app`、`x, y, width, height`、`timeoutSeconds` 与可选 `userInstruction`（无 `reason` 参数） | 宽高在 `mcp` 与宿主双侧校验必须 `> 0.0` | 进入 `P2` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1003-1012` `let mut params = json!({ "displayId": ..., "windowId": ..., "app": ..., "timeoutSeconds": ..., "userInstruction": ... });` |
+| `P2` | GPUI 主线程 | `input_display` (`apps/macos/src/control/agent.rs:1082`), `access::user_instruction` (`crates/model/src/access.rs:14, 18-29`) | 校验显示器存活且非 `Takeover`；校验 `windowId` 与 `app` 至少传一；若传 `user_instruction` 校验非空且字符数 `<= INSTRUCTION_CHARS` (`300`) | 超长对话粘贴被拒绝，只接受精简用户原话 | 失败走 `PX1`，通过走 `P3` | 无变化 | 已验证：`crates/model/src/access.rs:14,23` `pub const INSTRUCTION_CHARS: usize = 300;` / `if text.chars().count() > INSTRUCTION_CHARS`；`agent.rs:1085-1086` `if wanted.is_none() && app.is_none() { return Err(ControlError::invalid("window_id or app is required")); }` |
+| `PX1` | GPUI 主线程 | `ControlError` (`apps/macos/src/control/server.rs:28-51`) | 参数或状态拒绝 | 无 | 错误码 `invalid`、`not_found`、`ended` 或 `takeover` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1094-1095` `if asked.width.is_some_and(\|w\| w <= 0.0) \|\| asked.height.is_some_and(\|h\| h <= 0.0) { return Err(ControlError::invalid("width and height must be above 0")); }` |
+| `P3` | 后台执行器 | `windows::on_display(id)` (`apps/macos/src/control/agent.rs:1098-1108`) | 若指定了 `windowId` 且该窗口当前已在本显示器上，直接转去调整几何框 | 按应用名调用时若本屏已有该应用窗口，也在 `1143-1149` 跳过兄弟屏查找留待后续处理 | 命中走 `P7`，否则走 `P4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1098-1106` `if let Some(wanted) = wanted { ... if let Some(window) = here { return frame_window(&core, id, window.target, asked, cx).await; } }` |
+| `P4` | 后台执行器 + 主线程 | `Displays::of_session` / `first_movable` (`apps/macos/src/control/agent.rs:1126-1180`) | 在同一 `sessionKey` 的其它活跃显示器上检索匹配窗口；按应用名查找时自动跳过用户刚取回、用户自建或正处于 `Takeover` 屏幕上的窗口 (`ADR 0016`) | 同会话多屏协作免打扰用户 | 命中走 `P8`，未命中走 `P5` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1174-1178` `c.displays.first_movable(id, &found) ... if let Some((from, target)) = pick { return move_between_own(&core, from, id, target, asked, cx).await; }` |
+| `P8` | 后台执行器 + 主线程 | `move_between_own` (`apps/macos/src/control/agent.rs:4521-4559`) | 若源屏处于 `Takeover` 返回错误码 `takeover`；否则调用 `Displays::move_between` 保留原 `Record`（借出窗仍保持 `HandedOver` 与原 `Home`），执行 `place_and_hold`（失败调 `undo_move` 回滚），并在响应写入 `"movedFrom": from` | 终端结束时借出窗仍归还用户原物理屏 `Home` | 转入 `P7` | 窗口在同会话两屏间转移 | 已验证：`apps/macos/src/control/agent.rs:4538,4543,4557` `c.displays.move_between(from, to, target, true)` / `c.displays.undo_move(moved);` / `reply.insert("movedFrom".into(), json!(from));` |
+| `P5` | 后台执行器 + 主线程 | `strays` (`apps/macos/src/control/agent.rs:1189-1193`) | 查找本会话启动进程 (`Display.started`) 遗留在用户物理屏上的孤儿/游离窗口 | 重启认领或归属未决窗口由此免审批收回 | 命中走 `P9`，未命中走 `P6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1189-1192` `let stray = strays(&core, id, cx).await.into_iter().find(\|w\| is_named(w, wanted, matcher.as_ref(), &mut ids));` |
+| `P9` | 后台执行器 + 主线程 | `placeWindow` 孤儿分支 (`apps/macos/src/control/agent.rs:1293-1340`) | 若同会话另一屏曾记录该窗口则调 `move_between` 继承记录，否则记 `Origin::Placed` 并调 `place_and_hold` 移入虚拟屏 | 移入失败保留 `stray` 状态供重试 | 转入 `P7` | 游离窗口迁入虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:1320,1324` `claim(&core, id, window.target, Origin::Placed, cx);` / `if let Err(e) = place_and_hold(window.target, id, cx).await` |
+| `P6` | 后台执行器 | 候选窗口枚举 (`apps/macos/src/control/agent.rs:1197-1217`) | 枚举全系统 `layer == 0` 且位于用户物理屏（`accepts_window_request()`）或误落在备用屏 (`spares`) 上的匹配窗口及各自 Bundle ID | 排除菜单、高浮层及 Agent Screen 自身窗口 | 非空走 `P10`，为空走 `P13` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1204-1207` `if w.layer == 0 && (windows::display_role(&w).accepts_window_request() \|\| windows::on_any(&w.bounds, &spares)) && is_named(...)` |
+| `P10` | GPUI 主线程 | `Displays::may_hand_over` (`apps/macos/src/control/agent.rs:1252-1287`), `Access::covers` (`crates/model/src/access.rs:78-92, 192-198`) | 若携带 `user_instruction` 则构造 `Authority::Once`（单次口令授权），否则构造 `Authority::Grant { bundle_id }` 核查会话 `Access`；若该窗口实为另一会话在用户屏登记的 `stray` (`Refusal::Elsewhere`) 则转交 `take_held` | 用户曾手动取回的窗口记入 `Access.excluded`，普通 `Grant` 不再覆盖，须传 `user_instruction` 或重新点卡片 (`access.rs:85-87, 128-130`) | 允许走 `P11`，未授权且无口令走 `P12`，`Elsewhere` 转 `P14` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1252-1263` `let authority = match &words { Some(_) => Authority::Once, None => Authority::Grant { bundle_id }, }; ... Ok(()) => hand_over(...) ... Err(Refusal::NotGranted \| Refusal::Excluded) if words.is_none() => request_window(&core, id, theirs, None, timeout, cx).await?` |
+| `P11` | 后台执行器 + 主线程 | `hand_over` (`apps/macos/src/control/agent.rs:3972-4064`), `dismissal::home_of` (`apps/macos/src/dismissal.rs:245-250`) | 后台调 `home_of` 记录用户屏原始 `Home { frame, workspace }`，主线程签发 `Ticket` (`displays.hand_over`) 并二次调用 `confirm_hand_over` 防并发撤销/接管，读取 `seen = windows::times_returned` 后后台调 `windows::place_handed_over` 迁入虚拟屏，最后 `commit_hand_over` 记为 `Origin::HandedOver` 并清除 `returning` 拦截 | 若迁入途中用户取回窗口，`commit_hand_over` 返回 `false` 并报错 (`agent.rs:4054-4058`) | 附带 `"handedOver": true` 转入 `P7` | 授权窗口迁入虚拟屏 | 已验证：`apps/macos/src/dismissal.rs:245-249` `pub fn home_of(target: WindowTarget, frame: Option<Rect>) -> Option<Home> { ... Some(Home { frame, workspace }) }`；`agent.rs:4013,4030` `let seen = windows::times_returned(target.window_id);` / `windows::place_handed_over(target, id, screen.as_deref(), seen)` |
+| `P12` | GPUI 主线程 | `request_window(..., None, ...)` / `ask_window` (`apps/macos/src/control/agent.rs:3564-3593, 3706-3727`), `help_card.rs:50-51` | 调用 `c.displays.request_window(id, named, None)` 挂起 `Ask::Window`，`cx.notify()` 驱动 `Shell` 弹出高度固定的无预览图窗口请求 Help Card (`REQUEST_HEIGHT`) 并发送系统通知 (`Note::Window`) | 窗口请求卡片**不含截图预览** (`help_card.rs:50`) | 进入 `P16` 等待 | 菜单栏下方弹出双语借窗卡片（Hand Over / Keep） | 已验证：`apps/macos/src/ui/help_card.rs:50-51` `/// The card's height for a Window Request, which has no picture.` / `pub const REQUEST_HEIGHT: f32 = ...;`；`agent.rs:3723` `let asked = c.displays.request_window(id, named, held.clone());` |
+| `P13` | 后台执行器 + 主线程 | `held_window` (`apps/macos/src/control/agent.rs:1220-1224, 3810-3854`), `Held` (`crates/model/src/held.rs:19-54`) | 扫描所有其它会话活跃显示器 (`Place::Display`) 与已结束待查看显示器 (`Place::Review`) 上的匹配窗口，连同 `HolderStatus`（会话键、空闲/在途调用/断线秒数）构造 `Held` | 待查看显示器上的窗口同样返回 `Some(Held { place: Place::Review, ... })`，绝不当作无主物理屏窗口处理 | 命中走 `P14`，未命中走 `PX2` | 无变化 | 已验证：`crates/model/src/held.rs:46-54` `pub enum Place { Display, Review, UserScreen }`；`agent.rs:3850` `let held = c.displays.held_by_at(id, w.target, Some(on), now_ms)?;` |
+| `PX2` | 后台执行器 | `no_such_window` / `no_app_window` (`apps/macos/src/control/agent.rs:1225-1235, 3436-3558`) | 区分窗口不存在 (`Gone`)、最小化或其它桌面空间 (`OffScreen`)、非文档浮层 (`NotDocument` / `OnlyPanels`)、应用未运行 (`NotRunning`) 或被其它显示器持有（附带 `HolderStatus` 摘要与跨实例 `0x5353` 序列号诊断，`#189`） | 给出精确未命中原因 | 错误码 `not_found` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:3423,3482,3553` `"display {id} [serial {serial}, another Agent Screen instance]"` / `placement::no_window_named(...)` / `placement::no_app_window_named(...)` |
+| `P14` | 后台执行器 + 主线程 | `take_held` (`apps/macos/src/control/agent.rs:3861-3908`), `held::names_window` | 检查是否传入了明确点名目标窗口应用名/Bundle ID 的 `user_instruction`（会话级 `Window Access` 绝不覆盖跨会话持有的窗口，`ADR 0017`） | 防止泛化口令静默夺走另一 Agent 正在操作的窗口 | 已点名走 `P18`，否则走 `P15` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:3879,3886,3904` `held::names_window(&text, &[&owner, &name, &bundle])` / `Some(text) if named => { ... transfer_window(...) }` / `_ => request_window(core, id, window, Some(held), timeout, cx).await?` |
+| `P15` | GPUI 主线程 | `request_window(..., Some(held), ...)` (`apps/macos/src/control/agent.rs:3564-3593, 3721-3727`), `shell.rs:914-922` | 弹出带 `Held` 持有者信息的窗口请求 Help Card 与通知，明确告知用户该窗口当前在哪个会话或待查看屏上 | 解决 `#189`：用户与 Agent 均可看清占用方会话状态并决定移交或保留 | 进入 `P16` 等待 | 卡片显示当前持有会话标签并供选择移交或保留 | 已验证：`apps/macos/src/ui/shell.rs:914-921` `Some((_, Ask::Window { window, held })) => notify::update(..., Some(Note::Window { app: window.app.clone(), holder: held.as_ref().map(\|h\| (h.label.clone(), h.place)) }))` |
+| `P16` | GPUI 异步挂起 | `ask_window` (`apps/macos/src/control/agent.rs:3728-3750`) | 启动超时计时器 `timeout.unwrap_or(120.0).clamp(1.0, 600.0)`（默认 `120s`，范围 `1..=600s`），通过 `futures::select!` 等待用户应答或超时 | 同屏新发起另一个窗口请求会令前一个请求收到 `Resolution::Replaced` | 按 `Resolution` 分流 | 等待用户点击卡片或通知 | 已验证：`apps/macos/src/control/agent.rs:3728,3733` `let seconds = timeout.unwrap_or(120.0).clamp(1.0, 600.0);` / `let resolution = futures::select! {` |
+| `PX3` | GPUI 主线程 | `ask_window` / `after_hand_over` (`apps/macos/src/control/agent.rs:3696-3702, 3760-3785`), `held::declined_message` / `timed_out_message` (`crates/model/src/held.rs:478-529`) | 处理用户拒绝 (`Declined`)、超时 (`TimedOut`，跨会话时附带持有者活跃度摘要 `#189`)、请求被顶替 (`Replaced`)、显示器结束 (`Ended`) 或窗口中途关闭 (`Closed`)，全部返回 `ControlError::failed` | 超时撤回卡片与通知 (`time_out_window`) | 错误码 `failed`（含具体原因与持有者状态） | 卡片与通知收起，窗口留原处 | 已验证：`apps/macos/src/control/agent.rs:3761,3769,3781` `Err(ControlError::failed(held::declined_message(&app, held)))` / `held::timed_out_message(...)` / `"your request for the {app} window was withdrawn: the display ended"` |
+| `P17` | 后台执行器 | `ask_window` (`apps/macos/src/control/agent.rs:3787-3804`) | 用户点击 Hand Over 后，`Shell::hand_over` 在后台移动窗口；此处轮询最多 `30 * 100ms` (`3s`) 确认窗口出现在目标屏上 | 若 `3s` 未到达报 `failed` | 返回 `"handedOver": true` 转入 `P7` | 用户窗口迁入虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:3787-3803` `for _ in 0..30 { ... .timer(Duration::from_millis(100)).await; } Err(ControlError::failed(format!("the user handed over the {app} window, but it didn't reach the display")))` |
+| `P19` | 后台执行器 + 主线程 | `after_hand_over` (`apps/macos/src/control/agent.rs:3670-3703`), `held::decide_after_hand_over` (`crates/model/src/held.rs:556-570`) | 用户同意移交瞬间由 `where_now` 复查窗口实时位置：仍原持有者持有走 `Transfer`，已退回用户屏走 `FromUser`，被第三会话抢先接走返回 `AskAgain`（外层 `request_window` 最多重问 `3` 轮，`agent.rs:3577`） | 保证用户审批的对象与实际被夺窗的会话严格一致 (`ADR 0017`) | 按实时位置分流 | 换手时重新弹出指明新持有者的卡片 | 已验证：`crates/model/src/held.rs:560-569` `match where_now { NowState::Here => HandOverAction::AlreadyHere, NowState::Held(now) if named_holder.is_some_and(\|n\| n.display == now.display) => HandOverAction::Transfer(now), NowState::Held(now) => HandOverAction::AskAgain(now), ... }` |
+| `P18` | GPUI 主线程 + 后台 | `transfer_window` (`apps/macos/src/control/agent.rs:3914-3966`) | 调用 `c.displays.transfer(from, to, target, app)` 原子过户（若原为借出窗则保留原始用户 `Home`，并在原屏写入 `Display.given`），执行 `place_and_hold`（失败调 `undo_transfer` 回滚），完成后调用 `release_hold_on` 与 `input_queue.window_given` 停止原屏在该窗口上的拖拽和排队真实输入 | 原会话下次在原屏截图/操作时由 `add_given` 在响应 `"given"` 字段收到被转交提醒 (`agent.rs:3197-3214`) | 附带 `"takenFrom"` 转入 `P7` | 窗口从原会话屏迁入目标会话屏 | 已验证：`apps/macos/src/control/agent.rs:3926,3932,3943-3945,3961` `c.displays.transfer(from, to, target, app)` / `c.displays.undo_transfer(moved)` / `release_hold_on(from, target.window_id); ... c.input_queue.window_given(from, target.window_id)` / `("takenFrom".into(), json!(held.label))` |
 
 ---
 
-## 图 2：`Lanes` 串行写帧、几何约束、`window_access` 批量授权与窗口归还子流程
+## 图 2：`place_and_hold` 驻留守护、`Lanes` 写帧、`window_access` 口令授权与归还子流程
 
 ```mermaid
 flowchart TD
-    F1["进入物理放置与写帧 (place_and_hold / frame_window)"] --> F2["计算目标框 Rect::kept_inside 将窗口限制在虚拟屏边界内"]
-    F2 --> F3["进入 windows::Lanes 每窗口互斥通道并校验 times_returned 世代号"]
-    F3 --> F4{"写帧前发现窗口刚被触发归还用户?"}
-    F4 -->|"是"| FX1["中止写帧并释放 claim，返回 failed 防止把归还中的窗口拉回虚拟屏"]
-    F4 -->|"否"| F5["写 claims.json 并调 ax::place_window 顺序写入 Position -> Size -> Position"]
-    F5 --> F6{"宿主运行 AeroSpace 且窗口受其管理?"}
-    F6 -->|"是"| F7["AeroSpace::move_to_monitor 将窗口绑定到目标虚拟屏监视器"]
-    F6 -->|"否"| F8["读取写后真实 AX 帧并用 placement::frame_write 分类 (SAME_FRAME = 1.0pt)"]
-    F7 --> F8
-    F8 --> F9{"窗口完全拒绝移动仍留在外部屏幕?"}
-    F9 -->|"是"| FX2["回滚归属/过户状态并返回 failed (无法移动该窗口)"]
-    F9 -->|"否"| F10["若窗口存在最小尺寸约束被放大/截断，生成 constrained 说明"]
-    F10 --> R1["返回 place_output JSON (window 局部坐标 + constrained 提示)"]
-    A1["Agent 调用 window_access (grant / revoke / status / return)"] --> A2{"action 分支类型?"}
-    A2 -->|"status"| AR1["返回当前屏幕授权范围 scope 与已授权 apps 列表"]
-    A2 -->|"revoke"| AR2["立即缩减或清空 Core 中该屏 Access 范围并返回"]
-    A2 -->|"grant (apps 或 all)"| A3["核验 apps 存在性后弹出 Help Card 请求用户一次性授权拉窗"]
-    A3 --> A4{"用户批准授权?"}
-    A4 -->|"是"| AR3["Access::grant_all 或 grant_apps 生效，后续 place_window 免弹窗"]
-    A4 -->|"否 / 超时"| AX1["返回 failed (用户拒绝或等待授权超时)"]
-    A2 -->|"return (归还单个窗口或 all)"| A5["签发 ReturnTicket 并在后台调 dismissal::give_back 迁回原 Home"]
-    A5 --> AR4["解除本屏持有与 claim，返回已归还窗口列表"]
+    F0["跨屏移入进入 place_and_hold (每 250ms 复查, 最多重移 4 次, 站稳 2 次且满 6 次检查)"] --> F1["进入 frame_window 调整本屏目标几何框"]
+    F1 --> F2{"窗口已被用户取回 (d.returned.contains) 且请求非空?"}
+    F2 -->|"是"| FX1["拒绝写帧并返回 failed (the user took the window back)"]
+    F2 -->|"否"| F3["读取 seen = times_returned 与 reserved_top = menubar_height"]
+    F3 --> F4{"asked 为空?"}
+    F4 -->|"是"| F9["直接换算当前帧为截图局部像素返回"]
+    F4 -->|"否"| F5["resolve_with_top_inset 避开菜单栏并夹紧在虚拟屏内"]
+    F5 --> F6["write_frame_unless_returned 核验 seen 代数后调 ax.set_frame_asked (Pos->Size->Pos)"]
+    F6 -->|"seen 已变 (并发归还抢占)"| FX1
+    F6 -->|"写入完成 (含 MoveError.Rejected)"| F7["每 50ms 读帧等连续两次一致 (正常最多 10 次=0.5s, Rejected 最多 30 次=1.5s)"]
+    F7 --> F8{"窗口中心仍在虚拟屏内 且 !(refused 且 FrameWrite.Unchanged)?"}
+    F8 -->|"否"| FX2["返回 failed 错误 (窗口移出屏幕或完全拒绝改帧)"]
+    F8 -->|"是 (FrameWrite.Took 或 Partly, #167)"| F9
+    F9 --> R1["place_output 返回 {placed: true, window, 可选 handedOver/moved_from/taken_from/note}"]
+    A1["Agent 调用 window_access (grant / revoke / return / status)"] --> A2{"action 分支?"}
+    A2 -->|"status"| AR1["access_status 返回 scope / apps / paused / excluded / handovers / lastInstruction"]
+    A2 -->|"grant (必传 user_instruction <= 300 字符)"| A3["后台 app.identify 校验应用存在后直接更新 Access (grant_all / grant_apps, 不弹卡片)"]
+    A3 --> AR1
+    A2 -->|"revoke"| A4["Access.revoke 递增 revokes 代数并缩减或清空授权 (从 All 拆单应用报 invalid)"]
+    A4 --> AR1
+    A2 -->|"return (必传 user_instruction + window_id 或 all:true)"| A5["逐窗调 return_handover + Shell.send_home (Lanes.home 递增归还代数迁回 Home)"]
+    A5 --> AR2["返回更新后 status + returned 列表 (未离屏窗口记入 stuck)"]
 ```
 
 ### 图 2 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `F1` | GPUI 主线程 -> 后台 | `place_and_hold` / `frame_window` (`apps/macos/src/control/agent.rs:4368-4519`) | 汇总请求方传入的可选 `x, y, width, height` 与虚拟屏全局 `bounds` | 未传 `x, y` 时默认保持相对位置或居中适配 | 进入几何规划 | 无变化 | [已验证: apps/macos/src/control/agent.rs:4368-4519] |
-| `F2` | 纯模型函数 | `apply_frame_request` (`apps/macos/src/control/agent.rs:4349-4366`), `Rect::kept_inside` (`crates/model/src/model.rs:87-95`) | 将目标矩形夹紧在目标虚拟屏 `Rect` 内，确保窗口不会跨出虚拟屏边缘漏到用户物理屏上 | 若窗口请求尺寸大于虚拟屏宽高，先按虚拟屏上限裁剪请求值 | 得到目标全局 `Rect` | 杜绝窗口半截露在用户物理屏边缘 | [已验证: apps/macos/src/control/agent.rs:4349-4366, crates/model/src/model.rs:87-95] |
-| `F3` | 后台执行器 | `Lanes::agent_move` / `unless_returned_since` (`apps/macos/src/mac/windows.rs:516-619`) | 按 `window_id` 加细粒度互斥锁串行化移动，读取进入时刻的 `times_returned(window_id)` 计数 | 解决并发归还 (`return_home`) 与在途 `place_window` 竞态覆盖的缺陷 (`windows.rs:781`) | 进入 `F4` 判定 | 无变化 | [已验证: apps/macos/src/mac/windows.rs:516-619, apps/macos/src/mac/windows.rs:781] |
-| `F4` | 后台执行器 | `Lanes::unless_returned_since` (`apps/macos/src/mac/windows.rs:597-619`) | 核对当前窗口归还代数是否已在排队期间递增 | 一旦递增说明用户或屏幕结束逻辑已发起归还，必须无条件让路 | 被归还抢占走 `FX1`，否则走 `F5` | 无变化 | [已验证: apps/macos/src/mac/windows.rs:597-619] |
-| `FX1` | 后台 -> 主线程 | `place_for_agent` / `frame_window` (`apps/macos/src/mac/windows.rs:621-664`, `agent.rs:4462`) | 检测到归还计数已递增，放弃写 AX 坐标并清理 `claims.json` | 保证用户或结束流程的归还动作不可逆 | 错误码 `failed` | 窗口安稳留在用户桌面 | [已验证: apps/macos/src/mac/windows.rs:621-664] |
-| `F5` | 后台执行器 | `ax::place_window` (`apps/macos/src/mac/ax.rs:1955-2035`) | 经典三步 AX 写帧：先设 `kAXPositionAttribute` 到目标屏，再设 `kAXSizeAttribute`（此时 `AppKit` 按目标屏边界而非旧屏边界裁剪尺寸），最后补写一次 `kAXPositionAttribute` 消除尺寸变化引起的原点偏移 | 单次 AX 调用受 `AXUIElementSetMessagingTimeout` 保护，目标进程卡死不挂死宿主 | AX 写帧完成 | 窗口跨屏到位 | [已验证: apps/macos/src/mac/ax.rs:1955-2035] |
-| `F6` | 后台执行器 | `AeroSpace::current()` (`apps/macos/src/mac/aerospace.rs:18-26`) | 检查平铺管理器是否在线 | 无 | 在线走 `F7`，离线走 `F8` | 无变化 | [已验证: apps/macos/src/mac/aerospace.rs:18-26] |
-| `F7` | 后台执行器 | `AeroSpace::move_to_monitor` (`apps/macos/src/mac/aerospace.rs:28-35`) | 调用 `aerospace move-node-to-monitor --window-id <wid>` 通知 AeroSpace 该窗口已迁至虚拟屏监视器 | 若未配 `ignored-monitors`，阻止 AeroSpace 下个周期把窗口硬拽回物理屏 | 平铺状态同步 | 用户物理屏平铺树自动重排填补空缺 | [已验证: apps/macos/src/mac/aerospace.rs:28-35] |
-| `F8` | 后台执行器 | `placement::frame_write` (`crates/model/src/placement.rs:273-325`, `SAME_FRAME = 1.0`) | 读回写后真实 `CGWindowBounds` / `AXFrame`，以 `1.0 pt` 容差判断是精确命中 (`Exact`)、尺寸受应用最小宽高限制 (`Constrained`) 还是完全未动 (`Unchanged`) | 固定尺寸对话框（如“关于”面板、系统授权窗）不允许改宽高，只允许移动位置 | 结果进入 `F9` | 无变化 | [已验证: crates/model/src/placement.rs:273-325] |
-| `F9` | 后台 + 主线程 | `place_and_hold` / `transfer_window` (`apps/macos/src/control/agent.rs:3945-3968, 4495-4515`) | 核验写后窗口中心/面积是否确实已落入目标虚拟屏 (`window_belongs_to_area`) | 拦截不可移动的特殊窗口或权限丢失 | 未入屏走 `FX2`，已入屏走 `F10` | 无变化 | [已验证: apps/macos/src/control/agent.rs:3945-3968, apps/macos/src/control/agent.rs:4495-4515] |
-| `FX2` | GPUI 主线程 | `Held::undo_transfer` (`crates/model/src/held.rs:401-438`), `claims::release` | 回滚账本与 `claims.json` 记录，报告窗口拒绝移动 | 不留脏状态 | 错误码 `failed`：`could not move <App> window <wid> to display <id>` | 窗口留在原位 | [已验证: crates/model/src/held.rs:401-438, apps/macos/src/control/agent.rs:3945-3968] |
-| `F10` | GPUI 主线程 | `frame_window` (`apps/macos/src/control/agent.rs:4462-4479`) | 当应用强制实施 `minSize` / `maxSize` 导致实际宽高与请求值偏差 `> 1.0 pt` 时，记录 `constrained: true` 与实际尺寸 | 不作错误处理，而是如实反馈真实尺寸让 Agent 基于真实坐标点击 | 进入 `R1` | Viewer 展示真实窗口大小 | [已验证: apps/macos/src/control/agent.rs:4462-4479, crates/mcp/src/tools.rs:1313-1354] |
-| `R1` | 宿主 -> `mcp` 进程 | `place_output` (`crates/mcp/src/tools.rs:1313-1354`) | 输出局部截图系下的窗口坐标与尺寸，若受限则附加说明文本 | 附带任何待通知的 `strayed` 或 `givenNote` | 返回窗口 JSON 描述 | Peek 与 Viewer 同步显示该窗口 | [已验证: crates/mcp/src/tools.rs:1313-1354] |
-| `A1` | `mcp` -> GPUI 主线程 | `window_access_params` (`crates/mcp/src/tools.rs:1379-1453`), `window_access` (`apps/macos/src/control/agent.rs:4143-4347`) | 处理权限预授 (`grant`)、撤销 (`revoke`)、查询 (`status`) 与主动归还借用窗口 (`return` / MCP `return_window`) | `instruction` 文本受 `INSTRUCTION_CHARS = 300` 校验 (`access.rs:14-31`) | 进入 `A2` 路由 | 无变化 | [已验证: crates/mcp/src/tools.rs:1379-1453, apps/macos/src/control/agent.rs:4143-4347, crates/model/src/access.rs:14-31] |
-| `A2` | GPUI 主线程 | `window_access` (`apps/macos/src/control/agent.rs:4165-4340`) | 匹配四类子操作名称，未知动作报 `invalid_params` (`agent.rs:4335`) | 无 | 四路分流 | 无变化 | [已验证: apps/macos/src/control/agent.rs:4165-4340] |
-| `AR1` | GPUI 主线程 | `access_status` (`apps/macos/src/control/agent.rs:4113-4141`) | 只读查询当前屏幕 `Access::scope_name()` (`"none"` / `"apps"` / `"all"`) 与应用清单 | 零副作用 | 返回授权状态 JSON | 无变化 | [已验证: apps/macos/src/control/agent.rs:4113-4141] |
-| `AR2` | GPUI 主线程 | `Access::revoke` (`crates/model/src/access.rs:162-190`), `agent.rs:4260-4278` | 无需用户确认，立即从本屏幕 `Access` 中移除指定应用或全部预授权 | 若撤销未曾授权的应用返回 `invalid_params` | 返回更新后授权范围 | Peek 授权徽标即时更新 | [已验证: crates/model/src/access.rs:162-190, apps/macos/src/control/agent.rs:4260-4278] |
-| `A3` | GPUI 主线程 + 后台 | `window_access("grant")` (`apps/macos/src/control/agent.rs:4180-4258`) | 解析每个应用名到真实 `AppId`（不存在报 `not_found`，`agent.rs:4195`），发起 `Request` 弹出双语授权 Help Card | 允许 Agent 一次申请多个常用应用的拉窗权，避免逐窗打扰用户 | 等待用户点击 | Help Card 展示请求授权的应用图标与理由 | [已验证: apps/macos/src/control/agent.rs:4180-4258] |
-| `A4` | GPUI 异步挂起 | 授权应答分支 (`apps/macos/src/control/agent.rs:4230-4258`) | 等待用户点击允许、拒绝或超时 | 无 | 允许走 `AR3`，拒绝/超时走 `AX1` | 卡片收起 | [已验证: apps/macos/src/control/agent.rs:4230-4258] |
-| `AR3` | GPUI 主线程 | `Access::grant_all` / `Access::grant_apps` (`crates/model/src/access.rs:140-160`) | 授权记入当前 `Display`（屏幕结束时自动随 `Access::clear` 作废） | 权限严格隔离在单块屏幕内，不跨会话泄漏 | 返回生效的 `scope` 与 `apps` | 无变化 | [已验证: crates/model/src/access.rs:140-160, crates/model/src/access.rs:209-217] |
-| `AX1` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:4240-4255`) | 返回拒绝或超时原因 | 无 | 错误码 `failed` | 无变化 | [已验证: apps/macos/src/control/agent.rs:4240-4255] |
-| `A5` | GPUI 主线程 + 后台 | `window_access("return")` (`apps/macos/src/control/agent.rs:4280-4332`), `hand_over` (`agent.rs:3972-4066`) | 签发 `ReturnTicket` 递增屏障，调用 `dismissal::give_back` 把指定借用窗口（或全部借用窗口）迁回原物理屏 `Home` 与原 AeroSpace 工作区（另支持聊天窗口控制权交接 `chat_control`，`agent.rs:4068-4111`） | 若指定窗口并非本屏持有且 `all=false` 报 `not_found` (`agent.rs:4301`) | 进入 `AR4` | 窗口立即回到用户原桌面位置 | [已验证: apps/macos/src/control/agent.rs:3972-4111, apps/macos/src/control/agent.rs:4280-4332] |
-| `AR4` | GPUI 主线程 -> `mcp` | `access_output` (`crates/mcp/src/tools.rs:1455-1485`) | 从 `Display` 持有表摘除已归还窗口并清理 `claims.json`，向 Agent 返回归还确认文本 | 归还后若 Agent 再次需要该窗口须重新走 `place_window` | 返回归还完成 JSON | Peek 缩略图不再含该窗口 | [已验证: crates/mcp/src/tools.rs:1455-1485, apps/macos/src/control/agent.rs:4318-4332] |
+| `F0` | 后台执行器 | `place_and_hold` (`apps/macos/src/control/agent.rs:4482-4515`), `AeroSpace::move_to_monitor` (`aerospace.rs:28-44`) | 调用 `place`（写 `claims.json`、AX 移入并执行 `aerospace move-node-to-workspace --window-id <wid> <workspace>`），随后每 `250ms` 检查一次：若被应用或 AeroSpace 拉走则重移（最多 `moves == 4` 次），直至满 `checks >= 6` (`1.5s`) 且最后连续 `stayed >= 2` (`0.5s`) 稳定在屏 (`#47`) | 4 次仍被拉回物理屏则报错回滚 | 成功进 `F1` | 窗口稳固停留在虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:4491-4500` `while outcome.is_ok() && !(checks >= 6 && stayed >= 2) { ... .timer(Duration::from_millis(250)).await; ... if moves == 4 { return Err(...) }`；`aerospace.rs:38` `"move-node-to-workspace"` |
+| `F1` | GPUI 主线程 | `frame_window` (`apps/macos/src/control/agent.rs:4368-4392`) | 读取截图缩放比 `display_scale`、`d.returned` 集合、`seen = windows::times_returned` 与顶部菜单栏预留高度 `menubar_height(id)` | 无 | 进入 `F2` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4389-4392` `let seen = windows::times_returned(target.window_id); let reserved_top = crate::mac::menubar_height(id);` |
+| `F2` | GPUI 主线程 | `frame_window` (`apps/macos/src/control/agent.rs:4379-4388`) | 检查目标窗口是否已被用户取回 (`d.returned.contains`) 且本次请求非空 | 禁止 Agent 追着已被用户取回物理屏的窗口改尺寸 | 已取回走 `FX1`，否则走 `F3` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4384-4387` `if taken_back && !asked.is_empty() { return Err(ControlError::failed("the user took the window back; it stays where they put it")); }` |
+| `FX1` | GPUI 主线程 / 后台 | `frame_window` / `unless_returned_since` (`apps/macos/src/control/agent.rs:4385`, `windows.rs:597-607`) | 主线程预检或 `Lanes` 通道内发现 `state.count[window] != seen`（排队期间发生了归还），立即中止 AX 写帧 | 根治并发 `place_window` 把刚归还用户的窗口拽回虚拟屏的竞态 | 错误码 `failed` | 用户取回的窗口安然留在原位 | 已验证：`apps/macos/src/mac/windows.rs:605-607` `if self.state().count.get(&window).copied().unwrap_or(0) != seen { return Err("the user took the window back meanwhile".into()); }` |
+| `F3` | 后台执行器 | `frame_window` (`apps/macos/src/control/agent.rs:4393-4398`) | 读取显示器全局 `area = cg::display_bounds(id)` 与窗口当前实时帧 `before` | 窗口已关则报 `the window closed` | 进入 `F4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4395-4397` `let now = \|\| windows::find(target.window_id).map(\|w\| w.bounds); let closed = \|\| "the window closed".to_string(); let mut bounds = now().ok_or_else(closed)?;` |
+| `F4` | 后台执行器 | `apply_frame_request` (`apps/macos/src/control/agent.rs:4349-4363`) | 检查 `asked.is_empty()`（未传任何 `x, y, width, height`） | 仅跨屏搬运不改尺寸时不触发多余 AX 写帧 | 为空走 `F9`，非空走 `F5` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4357-4359` `if asked.is_empty() { return Ok(false); }` |
+| `F5` | 纯模型计算 | `FrameRequest::resolve_with_top_inset` (`apps/macos/src/control/agent.rs:4360-4362`) | 按菜单栏预留条 `reserved_top` 与虚拟屏 `area` 夹紧目标矩形，并计算布尔标记 `constrained = frame != asked.resolve(...)` | 避免窗口标题栏钻进菜单栏下方或跨出虚拟屏边缘 | 进入 `F6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4360-4362` `let frame = asked.resolve_with_top_inset(current, area, scale, reserved_top); set(frame)?; Ok(frame != asked.resolve(current, area, scale))` |
+| `F6` | 后台执行器 | `windows::write_frame_unless_returned` + `ax::set_frame_asked` (`apps/macos/src/mac/ax.rs:1562-1591`, `agent.rs:4402-4409`) | 在该窗口专属 `Lane` 内核对 `seen` 无误后，无视前一步返回码依次执行三次写入：`AXPosition -> AXSize -> AXPosition`；若任一步非 `AXError::Success` 则记 `refused = Some(frame)` 但暂不报错 (`#167`) | Chromium 等应用对有效写帧也会返回 AX 错误码，须以最终落点帧为准 (`ax.rs:1558-1561`) | 代数不符走 `FX1`，写完走 `F7` | 窗口执行移动与缩放 | 已验证：`apps/macos/src/mac/ax.rs:1570-1577` `[ write("AXPosition", at()), write("AXSize", ...), write("AXPosition", at()) ]` |
+| `F7` | 后台执行器 | `frame_window` (`apps/macos/src/control/agent.rs:4411-4432`) | 每 `50ms` 重读窗口帧等待连续两次读数一致 (`steady`)：正常最多读 `10` 次 (`0.5s`)，若 `refused.is_some()` 最多读 `30` 次 (`1.5s`) 等待繁忙应用落地 | 适应 Electron 等异步响应尺寸变更的应用 | 进入 `F8` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4417-4420` `let reads = if refused.is_some() { 30 } else { 10 }; ... for _ in 0..reads { std::thread::sleep(Duration::from_millis(50));` |
+| `F8` | 后台执行器 + 纯模型 | `placement::frame_write` (`crates/model/src/placement.rs:273-306`, `SAME_FRAME = 1.0`), `agent.rs:4433-4458` | 校验写后窗口中心仍在 `area` 内；若 `refused.is_some()`，用 `frame_write(before, frame, bounds)`（`1.0 pt` 容差）分类为 `Took`、`Partly` 或 `Unchanged`：只要发生移动或部分缩放 (`Took` / `Partly`) 即视为成功 (`#167`)，仅 `Unchanged` 判定失败 | 解决 Dia 浏览器维持最小高度返回 AX 错误但实际已完成移位缩放的误报错问题 (`placement.rs:322-326`) | 越界或未动走 `FX2`，其余走 `F9` | 无变化 | 已验证：`crates/model/src/placement.rs:273-284` `pub enum FrameWrite { Took, Partly, Unchanged }` / `const SAME_FRAME: f64 = 1.0;`；`agent.rs:4451` `if write == agent_screen_model::placement::FrameWrite::Unchanged` |
+| `FX2` | 后台 -> 主线程 | `frame_window` (`apps/macos/src/control/agent.rs:4437-4441, 4451-4457`) | 报告应用在设帧后把窗口移出了虚拟屏，或彻底拒绝了帧修改并保留原坐标 | 无 | 错误码 `failed` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4438-4439,4454` `"the app moved the window off the display after the frame was set"` / `"could not set the window's frame: the app rejected the change..."` |
+| `F9` | 后台 -> 主线程 | `frame_in_shot` (`apps/macos/src/control/agent.rs:4459-4474`) | 将最终全局点坐标转换为当前显示器截图缩放像素系下的 `{x, y, width, height}` 并附带 `frameConstrained` | 无 | 进入 `R1` | Viewer 画面呈现真实窗口帧 | 已验证：`apps/macos/src/control/agent.rs:4463-4466` `Ok(Map::from_iter([ ("frameConstrained".into(), json!(constrained)), ("window".into(), json!({ ... })) ]))` |
+| `R1` | 宿主 -> `mcp` 进程 | `place_output` (`crates/mcp/src/tools.rs:1313-1352`) | 组装 `{"placed": true, "window": ...}`，按需附带 `"handedOver"`、`"moved_from"`、`"taken_from"`；若任一请求维度与实际值相差 `> 1.0` 或 `frameConstrained == true`，在 `"note"` 说明应用尺寸限制或菜单栏预留条调整 | 让 Agent 直接读取真实落点坐标继续操作 | 返回放置结果 JSON | 操作完成 | 已验证：`crates/mcp/src/tools.rs:1314,1338,1346` `let mut out = json!({ "placed": true });` / `((got - wanted).abs() > 1.0)` / `else if reply.get("frameConstrained") == Some(&Value::Bool(true))` |
+| `A1` | `mcp` -> GPUI 主线程 | `window_access_params` (`crates/mcp/src/tools.rs:1379-1452`), `window_access` (`apps/macos/src/control/agent.rs:4143-4175`) | 支持 `"grant"`、`"revoke"`、`"return"`、`"status"` 四种动作；`needs_permissions` 豁免 `windowAccess` 权限预检 (`agent.rs:2617`)，但要求目标显示器仍存活 (`live = true`) | `"grant"` 与 `"return"` 均强制要求传入非空且 `<= 300` 字符的 `user_instruction` | 进入 `A2` 分流 | 无变化 | 已验证：`crates/mcp/src/tools.rs:1381,1416,1430` `.one_of("action", &["grant", "revoke", "return", "status"])?` / `words.as_ref().ok_or_else(needs_words)?;` |
+| `A2` | GPUI 主线程 | `window_access` (`apps/macos/src/control/agent.rs:4175-4339`) | 路由四类动作，未知动作返回错误码 `invalid` | 无 | 四路分流 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4334-4337` `other => { return Err(ControlError::invalid(format!("action must be grant, revoke, return or status, not {other}"))); }` |
+| `AR1` | GPUI 主线程 -> `mcp` | `access_status` (`apps/macos/src/control/agent.rs:4113-4140, 4340-4344`), `access_output` (`tools.rs:1455-1483`) | 返回会话授权状态 `scope` (`"none"` / `"apps"` / `"all"`)、`apps`、`paused` (`d.access_paused()`)、`excluded`、`handovers`、`lastInstruction` 及 `note` | 接管期间 `paused == true`，暂停免弹窗拉窗 | 返回窗口授权状态 JSON | Viewer 展示最新授权说明 | 已验证：`apps/macos/src/control/agent.rs:4132-4139` `json!({ "scope": access.scope_name(), "apps": ..., "paused": d.access_paused(), "excluded": access.excluded, "handovers": handovers, "lastInstruction": ... })` |
+| `A3` | 后台执行器 + 主线程 | `window_access("grant")` (`apps/macos/src/control/agent.rs:4177-4226`) | 凭用户聊天原话 `user_instruction` 授权 (`ADR 0013`)：若传 `apps` 则后台调 `app::identify` 核验本机已安装（缺失报 `not_found`），随后主线程直接调用 `access.grant_all()` 或 `access.grant_apps(list)` 并记录 `ChatAction::Grant`（**不弹出 Help Card，也不等待审批**） | 系统信任 Agent 转述的用户原话并写入日志、录屏与 Viewer 供监督 (`access.rs:1-4`) | 转入 `AR1` 返回生效范围 | Viewer 更新授权范围展示 | 已验证：`apps/macos/src/control/agent.rs:4205-4210` `match resolved.clone() { None => access.grant_all(), Some(list) => access.grant_apps(list), } access.last = Some(Instruction { action: ChatAction::Grant, text: words.clone() });` |
+| `A4` | 后台执行器 + 主线程 | `window_access("revoke")` (`apps/macos/src/control/agent.rs:4227-4264`), `Access::revoke` (`crates/model/src/access.rs:162-190`) | 缩减指定应用或清空全部 `Access`，每次变更递增 `access.revokes` 代数使并发在途 `hand_over` 在 `confirm_hand_over` 时失效；对 `Scope::All` 单独撤销某个子应用返回错误码 `invalid` | 已在屏幕上的窗口不因 `revoke` 移动 | 转入 `AR1` | Viewer 授权状态即时收紧 | 已验证：`crates/model/src/access.rs:164-166,176-178` `if changed { self.revokes += 1; }` / `Some(Scope::All) => Err("window access covers all apps; revoke it all...")` |
+| `A5` | GPUI 主线程 + 后台 | `window_access("return")` (`apps/macos/src/control/agent.rs:4265-4333`) | 凭 `user_instruction` 将指定 `windowId` 或 `all: true` 全部借出窗口逐个调 `displays.return_handover`（同时加入 `Access.excluded`）与 `shell.send_home`（经 `Lanes.home` 递增归还代数迁回原物理屏 `Home`）；非本屏借出窗且 `!all` 报 `not_found` | 单个归还若未能离开虚拟屏报 `failed`；`all: true` 时记入 `stuck` 数组 | 转入 `AR2` | 借出窗口立即回到用户原物理屏与原工作区 | 已验证：`apps/macos/src/control/agent.rs:4287,4301,4306` `let given = c.displays.return_handover(id, window);` / `Err(e) if !all => return Err(ControlError::not_found(e))` / `shell.send_home(given.target, id, Some(given), cx)` |
+| `AR2` | GPUI 主线程 -> `mcp` | `window_access` (`apps/macos/src/control/agent.rs:4323-4344`), `access_output` (`crates/mcp/src/tools.rs:1455-1483`) | 输出 `status` 合并 `"returned"`（及可选 `"stuck"`）与 `note`，告知 Agent 该窗口已归还且不再受既有授权覆盖 | 若后续再次需要须用户重新许可 | 返回归还结果 JSON | Peek 不再显示已归还窗口 | 已验证：`crates/mcp/src/tools.rs:1460-1472` `"return" if stuck => Some("The windows in returned are back where they came from...")` / `"return" => Some("Those windows are back where they came from...")` |

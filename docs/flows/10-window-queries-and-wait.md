@@ -1,114 +1,117 @@
 # 10. 窗口枚举 (`list_windows`)、无障碍状态树 (`get_window_state`) 与条件等待 (`wait_for_change`)
 
-Agent 依靠三个只读/观测工具建立对虚拟屏界面的结构化感知，避免盲目高频截图消耗上下文：`list_windows` 列出当前屏幕上全部归属窗口（或通过 `strays: true` 检索散落在用户桌面的重启遗留孤儿与归属未决窗口）；`get_window_state` 遍历目标窗口的 macOS Accessibility (`AXUIElement`) 层级树，唤醒 Chromium 懒加载 Web AX 树，为可交互元素分配稳定短编号并支持只返回上次调用后的增量差异 (`changes_only`)；`wait_for_change` 则以自适应退避轮询 (`500ms -> 2000ms`) 在服务端阻塞等待指定文本/角色出现、消失或界面发生变化，消除客户端 `sleep` 轮询循环。
+Agent 依靠三个只读工具建立对虚拟屏界面的结构化感知：`list_windows` 列出当前虚拟屏上的归属窗口（或通过 `strays: true` 扫描用户物理屏上属于本会话已启动进程或归属未决的散落窗口）；`get_window_state` 对指定 `window_id` 唤醒 Chromium Web 无障碍树、遍历 `AXUIElement` 分配稳定元素编号 `[1..N]`，并同步返回单窗口截图；`wait_for_change` 基于上次状态树基准 (`baseline`) 在服务端以自适应退避轮询 (`poll_gap`: `max(3 * read_time, 500ms..2000ms)`) 等待元素出现 (`appears`)、消失 (`disappears`) 或任意变化 (`changed`)，消除客户端 `sleep` 轮询循环。三者均允许在 `Takeover` 期间只读执行。
 
 ## 线程与队列分工
 
-1. **`AgentScreen mcp` 进程 (`crates/mcp/src/tools.rs` / `control.rs`)**：维护每屏幕最近一次无障碍树快照缓存 `Control::swap_tree` (`control.rs:113-145`)，用于计算 `tree::changes` 增量 diff 并在 `window_state` 超长时按 `max_depth` 裁剪 (`tools.rs:1701-1949`)。
-2. **GPUI 主线程 (`AsyncApp`)**：校验屏幕状态、读取 `Core` 归属账本与 `undecided` 列表、管理每 `(connection, displayId)` 唯一下挂槽位 `WaitSlot` (`apps/macos/src/control/agent.rs:1021-1407, 7713-7945`)。
-3. **GPUI `background_executor` 工作池**：执行 `CGWindowListCopyWindowInfo` 遍历、Chromium `AXManualAccessibility` 树唤醒 (`publish_web_tree`, `REPUBLISH_TIMEOUT = 0.1s`)、`ax::snapshot` 深度受限遍历及 `wait_for_change` 周期采样。
+1. **`AgentScreen mcp` 进程 (`crates/mcp/src/tools.rs` / `control.rs`)**：按 `(displayId, windowId, scope)` 维护最近一次状态树缓存 `Control::swap_tree` / `last_tree` (`crates/mcp/src/control.rs:113-145`)，作为 `act_on_element(..., result: "changes")` 增量对比与 `wait_for_change` 零点基准；并在客户端取消 `wait_for_change` 时发送 `"cancelWaitForChange"` (`tools.rs:1127-1152`)。
+2. **GPUI 主线程 (`AsyncApp`)**：校验屏幕状态、维护 `Core.elements` 元素引用表、管理线程局部等待取消表 `WAITS: HashMap<(u64, u64), WaitSlot>`（按 `(connection, waitId)` 索引，并用 `EARLY_CANCEL = 30s` 清理早到取消令牌）(`apps/macos/src/control/agent.rs:1013-1055, 1343-1407, 7705-7944`)。
+3. **GPUI `background_executor` 工作池**：执行 `windows::on_display` 遍历、Chromium `publish_web_tree` (`REPUBLISH_TIMEOUT = 0.1s` / 首次 `1.0s`)、`ax::snapshot` 深度受限遍历、`screenshot::window` 单窗截图及 `wait_for_change` 周期采样。
 
 ---
 
-## 图 1：`list_windows`（含 `strays` 孤儿检索）与 `get_window_state` 无障碍树快照及增量 Diff
+## 图 1：`list_windows`（含 `strays` 散落窗检索）与 `get_window_state` 状态树及单窗截图
 
 ```mermaid
 flowchart TD
-    L1["Agent 调用 list_windows (displayId, 可选 strays: bool)"] --> L2["display(id, active=false) 校验屏幕存在且未 Ended"]
-    L2 -->|"失败"| LX1["返回 not_found 或 display_ended"]
-    L2 -->|"strays != true (默认查本屏窗口)"| L3["后台 windows::on_display 读取 CGWindowList 并按 recorded_owners / 几何面积过滤本屏窗口"]
-    L3 --> L4["换算局部截图系坐标 display_json(scale) 并附带 undecided / givenNote 提示返回"]
-    L2 -->|"strays == true (查散落孤儿与未决窗)"| L5["后台 strays() 扫描用户屏上属于本会话 started 进程或 undecided 的窗口"]
-    L5 --> L6["过滤掉其它活跃会话已持有的窗口，返回可调用 place_window 领回的候选列表"]
-    S1["Agent 调用 get_window_state (displayId, 可选 windowId / root / maxDepth / changesOnly)"] --> S2["校验屏幕存在未 Ended，解析 scope_arg (maxDepth >= 1, root >= 1)"]
-    S2 -->|"参数或屏幕非法"| SX1["返回 invalid_params / not_found / display_ended"]
-    S2 -->|"通过"| S3["window_on 定位目标窗口 (指定 windowId 或默认取本屏最前窗口)"]
-    S3 -->|"找不到窗口"| SX2["返回 not_found (若该窗刚关闭则在 MCP 层附带其余窗口与截图提示)"]
-    S3 -->|"找到目标窗口"| S4{"传入了子树根节点编号 root?"}
-    S4 -->|"是"| S5["read_root 从上次快照元素表取出 AXUIElementRef 并校验 ax::belongs 仍属该窗"]
-    S5 -->|"根元素已失效"| SX3["返回 invalid_params (提示去掉 root 重新拉取整窗状态)"]
-    S4 -->|"否"| S6["后台调用 ax::snapshot: 对 Chromium/Electron 写 AXEnhancedUserInterface 唤醒 Web 树"]
+    L1["Agent 调用 list_windows (display_id, 可选 strays: bool)"] --> L2["display(live=false) 校验会话归属且屏幕未 Ended (允许 Takeover 期调用)"]
+    L2 -->|"失败"| LX1["返回 not_found 或 ended"]
+    L2 -->|"strays == false (默认查本屏窗口)"| L3["后台 windows::on_display 遍历在屏窗口并筛出本屏归属窗口 (排除 AeroSpace 0x4145/1)"]
+    L3 --> L4["换算截图系坐标 display_json(scale)，标注 origin / disposition 并附 givenNote 返回"]
+    L2 -->|"strays == true (查物理屏散落窗)"| L5["后台 strays() 扫描用户屏上属本会话 started 进程或 Catch 未决的窗口"]
+    L5 --> L6["剔除其它活跃会话已持有的窗口，返回可调 place_window 领回的候选列表"]
+    S1["Agent 调用 get_window_state (必传 display_id 与 window_id，可选 root>=0, max_depth>=0)"] --> S2["校验参数非负且屏幕未 Ended (允许 Takeover 期只读调用)"]
+    S2 -->|"参数非法或屏幕不可用"| SX1["返回 invalid / not_found / ended"]
+    S2 -->|"合法"| S3["window_on 在本虚拟屏查找指定 windowId"]
+    S3 -->|"屏上无此 windowId"| SX2["返回 not_found (提示查阅 list_windows)"]
+    S3 -->|"找到目标窗口"| S4{"传入了子树根编号 root?"}
+    S4 -->|"是"| S5["read_root 从 Core.elements[(id, wid)] 取元素并在后台调 ax::belongs 校验归属"]
+    S5 -->|"根编号不存在或已脱离窗口"| SX3["返回 invalid (若 AX 超时无响应则返回 failed)"]
+    S4 -->|"否"| S6["后台调 ax::snapshot: 对 Chromium/Electron 调 publish_web_tree 唤醒 Web AX 树"]
     S5 -->|"有效"| S6
-    S6 --> S7["带超时遍历 AX 树采集角色/标题/值/局部框/菜单状态并为可操作节点编号 [1..N]"]
-    S7 --> S8{"目标进程 AX 超时无响应 (WindowUnavailable)?"}
-    S8 -->|"是"| SX4["返回 failed (提示稍后重试 get_window_state)"]
-    S8 -->|"否"| S9["MCP 进程 Control::swap_tree 更新缓存树"]
-    S9 --> S10{"changesOnly == true 且存在同窗历史基准树?"}
-    S10 -->|"是"| S11["tree::changes 计算行级结构化增量 Diff (无变化则明示 unchanged)"]
-    S10 -->|"否"| S12["tree::cut_depth 按需截断深度输出完整格式化状态树"]
-    S11 --> SR1["向 Agent 返回状态树文本与窗口元数据"]
-    S12 --> SR1
+    S6 --> S7["按 max_depth 遍历 AX 树 (含附着 Sheet 与弹出层 #205) 并刷新 Core.elements 稳定编号"]
+    S7 --> S8{"目标进程 AX 超时未响应 (WindowUnavailable)?"}
+    S8 -->|"是"| SX4["返回 failed (区别于窗口关闭的 not_found，提示稍后重试)"]
+    S8 -->|"否"| S9["后台调 screenshot::window 截取该窗口单窗图像 (复用 2s SCShareableContent 缓存)"]
+    S9 --> S10["MCP 进程 Control::swap_tree 更新 (display, window, scope) 基准树缓存"]
+    S10 --> SR1["返回 [格式化元素树文本 (含局部点击中心坐标与 strayed 提示), 单窗图像]"]
 ```
 
 ### 图 1 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `L1` | `mcp` -> GPUI 主线程 | `tools::run("list_windows")` (`crates/mcp/src/tools.rs:876-940`), `agent.rs:1021-1055` | 支持常规本屏查询与 `strays: true` 散落窗口找回模式（设 `READ_ONLY` 工具提示） | 允许在 `Takeover` 期间只读查看窗口列表 (`active = false`) | 进入 `L2` | 无变化 | [已验证: crates/mcp/src/tools.rs:876-940, apps/macos/src/control/agent.rs:1021-1055] |
-| `L2` | GPUI 主线程 | `display(&core, &p, false, cx)` (`apps/macos/src/control/agent.rs:1022, 7242-7264`) | 检查屏幕未 `Ended`（若已 `Ended` 则返回 `display_ended`） | 无 | 失败走 `LX1`，分流 `L3` / `L5` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1022, apps/macos/src/control/agent.rs:2707] |
-| `LX1` | GPUI 主线程 | `usable` (`apps/macos/src/control/agent.rs:2695-2710`) | 返回 `not_found` 或 `display_ended` | 无 | 标准错误码 | 无变化 | [已验证: apps/macos/src/control/agent.rs:2695-2710] |
-| `L3` | 后台执行器 | `windows::on_display` (`apps/macos/src/mac/windows.rs:272-320, 382-389`) | 调 `CGWindowListCopyWindowInfo` 获取在屏窗口，结合 `recorded_owners` 与 `arrangement::window_belongs_to_area` 筛出属于本虚拟屏的窗口（排除 AeroSpace `0x4145/1` closet 屏窗口） | Z 序按从前到后排列，方便 Agent 判断最顶层活动窗 | 输出 `Vec<Window>` | 无变化 | [已验证: apps/macos/src/mac/windows.rs:272-320, apps/macos/src/mac/windows.rs:382-389] |
-| `L4` | GPUI 主线程 -> `mcp` | `Window::display_json` (`apps/macos/src/mac/windows.rs:48-75`), `add_strayed` / `add_given` (`agent.rs:1045-1054, 3187-3216`) | 将全局坐标转换为与 `screenshot` 完全一致的局部缩放坐标，附上 `windowId`、`app`、`title`、`bounds` 以及任何未决 `strayed` 或被转走窗口 `givenNote` | Agent 拿到的坐标可直接原样喂给 `computer` | 返回窗口数组 JSON | 无变化 | [已验证: apps/macos/src/mac/windows.rs:48-75, apps/macos/src/control/agent.rs:1045-1054] |
-| `L5` | 后台执行器 | `strays` (`apps/macos/src/control/agent.rs:1025-1035, 3281-3349`) | 扫描用户物理屏窗口，挑出属于本会话 `Display.started`（例如宿主重启后被 macOS 弹回物理屏的窗口）或 `Catch` 标为 `undecided` 的窗口 | 配合 `RESTARTED` 恢复指引 (`tools.rs:740`) 实现崩溃/重启后无损找回工作现场 | 候选集进 `L6` | 无变化 | [已验证: apps/macos/src/control/agent.rs:3281-3349, crates/mcp/src/tools.rs:740] |
-| `L6` | GPUI 主线程 -> `mcp` | `strays` 过滤返回 (`apps/macos/src/control/agent.rs:3310-3348`) | 剔除已被其它会话正式持有的窗口，输出窗口 `windowId`、应用名与标题 | 随后对目标 `windowId` 调 `place_window` 即可免弹窗（若属 `started`）拉回本屏 | 返回 `strays` 数组 JSON | 无变化 | [已验证: apps/macos/src/control/agent.rs:3310-3348] |
-| `S1` | `mcp` -> GPUI 主线程 | `tools::window_state` (`crates/mcp/src/tools.rs:1899-1949`), `agent.rs:1343-1399` | 解析 `windowId`、局部子树根编号 `root`、最大遍历深度 `maxDepth` 与增量标志 `changesOnly` | 设 `READ_ONLY` 注解 | 进入 `S2` | 无变化 | [已验证: crates/mcp/src/tools.rs:1899-1949, apps/macos/src/control/agent.rs:1343-1399] |
-| `S2` | `mcp` + GPUI 主线程 | `scope_arg` / `max_depth_arg` (`crates/mcp/src/tools.rs:1677-1699`), `read_scope` (`agent.rs:7658-7673`) | 校验 `maxDepth >= 1`、`root >= 1`，屏幕未 `Ended` | 深度 `< 1` 直接报 `invalid_params` | 非法走 `SX1`，合法走 `S3` | 无变化 | [已验证: crates/mcp/src/tools.rs:1677-1699, apps/macos/src/control/agent.rs:7658-7673] |
-| `SX1` | `mcp` / GPUI 主线程 | `ControlError::invalid` / `not_found` / `ended` | 立即拒绝非法范围请求 | 无 | 标准错误码 | 无变化 | [已验证: crates/mcp/src/tools.rs:1677-1699] |
-| `S3` | 后台 + 主线程 | `window_on` (`apps/macos/src/control/agent.rs:7627-7644`) | 指定了 `windowId` 则核验其在本虚拟屏上，未指定则默认选取本屏最顶层标准窗口 | 空屏无任何窗口时无法读取状态树 | 无窗口走 `SX2`，命中走 `S4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7627-7644] |
-| `SX2` | GPUI 主线程 -> `mcp` | `closed_window_text` (`crates/mcp/src/tools.rs:1629-1639, 1908-1928`) | 若 Agent 指定的 `windowId` 刚刚关闭（例如点“提交”后对话框自动关了），`tools.rs` 捕获 `not_found` 后自动补查当前屏幕剩余窗口与截图，友好告知“窗口已关闭，当前屏幕状态如下”而非硬报错中断推理！ | 极大提升对话框提交流程顺畅度 | 空屏报 `not_found`，对话框正常关闭则返回更新现场 | 无变化 | [已验证: crates/mcp/src/tools.rs:1629-1639, crates/mcp/src/tools.rs:1908-1928] |
-| `S4` | GPUI 主线程 | `root` 分支检查 (`apps/macos/src/control/agent.rs:1348`) | 判断是否只展开某个大型容器节点（如长表格或侧边栏）的子树 | 节省巨型网页/IDE 窗口的上下文 Token | 有 `root` 走 `S5`，整窗走 `S6` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1348] |
-| `S5` | GPUI 主线程 + 后台 | `read_root` (`apps/macos/src/control/agent.rs:7675-7711`) | 从该窗口最近一次快照的元素表中检出 `root` 号 `AXUIElementRef`，在后台调 `ax::belongs` 验证元素仍挂载在该窗口内 | DOM 重建导致元素悬空时精准识别 | 失效走 `SX3`，有效走 `S6` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7675-7711] |
-| `SX3` | GPUI 主线程 | `SnapshotError::RootUnavailable` (`apps/macos/src/control/agent.rs:1364-1366, 7705-7710`) | 明确提示根元素已脱离窗口，请不带 `root` 重新调用 `get_window_state` | 无 | 错误码 `invalid_params` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1364-1366, apps/macos/src/control/agent.rs:7705-7710] |
-| `S6` | 后台执行器 | `ax::snapshot` / `publish_web_tree` (`REPUBLISH_TIMEOUT = 0.1s`, `apps/macos/src/mac/ax.rs:475-525, 1380-1690`) | 对 Chromium / Electron 进程设置 `AXManualAccessibility = true` / `AXEnhancedUserInterface = true`（短超时 `0.1s` 防阻塞）强制渲染进程构建完整 Web 无障碍树 (`AXWebArea`) | 默认情况下 Chrome/Electron 在未检测到读屏器时只暴露空壳外框，写该属性后才暴露全部网页按钮与输入框 | Web 树就绪 | 无读屏语音干扰 | [已验证: apps/macos/src/mac/ax.rs:475-525, apps/macos/src/mac/ax.rs:1380-1690] |
-| `S7` | 后台执行器 | `ax::snapshot` 遍历与编号 (`apps/macos/src/mac/ax.rs:1450-1690`) | 深度优先遍历 AX 树（每个节点设消息超时保护），合并冗余纯布局容器，提取角色、名称、值、局部截图系矩形、禁用/选中态及当前打开的菜单项，为所有可交互元素分配递增序号并把 `AXUIElementRef` 存入窗口快照表供 `press_element` / `set_value` 直接索引 | 包含窗口附着的模态 Sheet 与已展开菜单 (`#205` 针对 Sheet 内弹出菜单补充了关联采集逻辑) | 生成文本树与句柄表 | 无变化 | [已验证: apps/macos/src/mac/ax.rs:1450-1690, Issue #205] |
-| `S8` | 后台 -> 主线程 | `SnapshotError::WindowUnavailable` (`apps/macos/src/control/agent.rs:1360-1363`) | 目标进程主线程卡死（风火轮）未在 AX 超时内应答 | 绝不无限挂起宿主 | 超时走 `SX4`，正常走 `S9` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1360-1363] |
-| `SX4` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:1361-1363`) | 告知目标应用未及时响应无障碍查询，提示稍后重试 | 无 | 错误码 `failed` | 无变化 | [已验证: apps/macos/src/control/agent.rs:1361-1363] |
-| `S9` | `mcp` 进程 | `Control::swap_tree` (`crates/mcp/src/control.rs:113-128`), `tools.rs:1930-1948` | 在 `mcp` 内存中按 `(displayId, windowId, root)` 存入最新完整树并取出上一版基准树 | 切换窗口或重连后自动重置基准 | 进入 `S10` | 无变化 | [已验证: crates/mcp/src/control.rs:113-128, crates/mcp/src/tools.rs:1930-1948] |
-| `S10` | `mcp` 进程 | `WindowState::changes` vs `content` (`crates/mcp/src/tools.rs:1718-1767`) | 检查 `changesOnly == true` 且存在同窗口同根历史快照 | 首次调用传 `changesOnly: true` 时无历史基准，自动回退返回完整树保证安全 | 增量走 `S11`，全量走 `S12` | 无变化 | [已验证: crates/mcp/src/tools.rs:1718-1767] |
-| `S11` | `mcp` 进程 | `tree::changes` (`crates/model/src/tree.rs:195-310`) | 对比前后两棵状态树，仅输出新增、消失或属性改变的节点行及其祖先上下文路径；完全一致时返回简短无变化说明 | 将数千行的复杂页面复查压缩到寥寥数行 (` Keeping context small `) | 进入 `SR1` | 无变化 | [已验证: crates/model/src/tree.rs:195-310] |
-| `S12` | `mcp` 进程 | `tree::cut_depth` (`crates/model/src/tree.rs:165-193`) | 按请求 `maxDepth` 折叠深层子树并提示被折叠子节点数量 | 防止超深 DOM 撑爆上下文窗口 | 进入 `SR1` | 无变化 | [已验证: crates/model/src/tree.rs:165-193] |
-| `SR1` | `mcp` -> Agent | 组装最终文本输出 (`crates/mcp/src/tools.rs:1718-1767`) | 返回窗口标题、几何信息、焦点元素及格式化元素树 | 编号可直接传给 `press_element` / `set_value` | 返回结构化文本 | 无变化 | [已验证: crates/mcp/src/tools.rs:1718-1767] |
+| `L1` | `mcp` -> GPUI 主线程 | `tools::run("list_windows")` (`crates/mcp/src/tools.rs:982-990`), `"listWindows"` (`apps/macos/src/control/agent.rs:1013-1055`) | 支持默认本屏枚举与 `strays: true` 散落窗检索两种模式 | 只读操作，允许在 `Takeover` 期间调用 | 进入 `L2` | 无变化 | 已验证：`crates/mcp/src/tools.rs:982-986` `"list_windows" => { let reply = control.call("listWindows", json!({ "displayId": ..., "strays": ... }))` |
+| `L2` | GPUI 主线程 | `usable` + `display(&core, &p, false, cx)` (`apps/macos/src/control/agent.rs:1014, 1022, 2707`) | `usable` 拦截已 `Ended` 屏幕返回 `ended_error`；未 `Ended` 时放行（不拦截 `takeover`） | 无 | 失败走 `LX1`，分流 `L3` / `L5` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1014,1022,2707` `let id = display(&core, &p, false, cx)?;` / `if d.is_ended() && !matches!(method, "endDisplay" \| "waitForControl") { return Err(ended_error(...)); }` |
+| `LX1` | GPUI 主线程 | `ControlError::not_found` / `ended_error` (`apps/macos/src/control/agent.rs:2702, 2708, 7252-7256`) | 返回协议标准错误码 | 无 | 错误码 `not_found` 或 `ended` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7252-7256` `Err(ended_error(...))` / `Err(ControlError::not_found(...))` |
+| `L3` | 后台执行器 | `windows::on_display` (`apps/macos/src/mac/windows.rs:272-320, 382-389`) | 调 `CGWindowListCopyWindowInfo` 按从前到后 Z 序筛出归属本虚拟屏的窗口（忽略 AeroSpace `0x4145/1` 隐藏屏） | 准确反映叠放层级 | 得到 `Vec<Window>` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1030` `let list: Vec<Value> = off(cx, move \|\| windows::on_display(id)).await` |
+| `L4` | GPUI 主线程 -> `mcp` | `Window::display_json` + `origin` / `disposition` + `add_given` (`apps/macos/src/control/agent.rs:1033-1054`) | 输出与 `screenshot` 比例一致的局部坐标、窗口归属来源 (`launched` / `handedOver` / `placed` / `unknown`)、结束处置策略及被移交他方提示 `givenNote` | 坐标可直接传给 `computer` 点击 | 返回 `{windows, scale, ...}` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1042-1047` `json["origin"] = ...; json["disposition"] = ...; let mut reply = json!({ "windows": list, "scale": scale });` |
+| `L5` | 后台执行器 | `strays` (`apps/macos/src/control/agent.rs:1013-1020, 3281-3349`) | 扫描用户物理屏窗口，找出属于本会话 `Display.started`（如宿主重启后散落回主屏的窗口）或 `Catch` 标为未决的窗口 | 配合重启恢复指引找回遗失窗口 | 进入 `L6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1013-1019` `"listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => { ... strays(&core, id, cx).await` |
+| `L6` | GPUI 主线程 -> `mcp` | `strays` 过滤输出 (`apps/macos/src/control/agent.rs:3310-3348`) | 排除其它会话已持有的窗口，返回候选 `windows` 列表 | 对 `started` 窗口调 `place_window` 可免弹窗直接领回 | 返回 `{windows}` JSON | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1019` `Ok(json!({ "windows": list }))` |
+| `S1` | `mcp` -> GPUI 主线程 | `tools::run("get_window_state")` (`crates/mcp/src/tools.rs:1064-1075, 1900-1949`), `"windowState"` (`apps/macos/src/control/agent.rs:1343-1399`) | **必传 `display_id` 与 `window_id`**（可选非负整数 `root >= 0` 与 `max_depth >= 0`；注：`get_window_state` 无 `changesOnly` 参数，增量树输出位于 `act_on_element` 的 `result: "changes"` 分支） | 缺 `window_id` 直接报 `invalid` | 进入 `S2` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1064-1072` `"get_window_state" => { let scope = scope_arg(&a)?; ... window_state(control, a.require_int("display_id")?, a.require_int("window_id")?, scope)` |
+| `S2` | `mcp` + GPUI 主线程 | `scope_arg` / `max_depth_arg` (`crates/mcp/src/tools.rs:1665-1688`), `read_scope` (`apps/macos/src/control/agent.rs:7658-7671`) | 校验 `root >= 0`（非负整数）且 `max_depth >= 0`（`0` 表示仅根节点），屏幕未 `Ended`（允许在 `Takeover` 期只读调用） | 负数或非整数返回错误码 `invalid` | 非法走 `SX1`，合法走 `S3` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1667,1680` `Some(d) if d < 0 => Err(ControlError::invalid("max_depth must be 0 or more"))` / `"root must be a non-negative integer"` |
+| `SX1` | `mcp` / GPUI 主线程 | `ControlError::invalid` / `not_found` / `ended` | 拒绝非法参数或已结束屏幕 | 无 | 错误码 `invalid` / `not_found` / `ended` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7665` `ControlError::invalid(format!("{key} must be a non-negative integer"))` |
+| `S3` | 后台 + 主线程 | `window_on` (`apps/macos/src/control/agent.rs:7627-7644`) | 在 `windows::on_display(id)` 中精确匹配传入的 `windowId`（不做隐式顶层窗口回退） | 窗口已关或移离本屏时返回 `not_found`（注：`closed_window_text` 仅在 `act_on_element` 动作关闭自身窗口时触发，`tools.rs:1626-1635`） | 未找到走 `SX2`，找到走 `S4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7632-7643` `let window = p.int("windowId").ok_or_else(\|\| ControlError::invalid("windowId is required"))?; ... ControlError::not_found(format!("no window {window} on display {id}; see list_windows"))` |
+| `SX2` | GPUI 主线程 | `ControlError::not_found` (`apps/macos/src/control/agent.rs:7639-7643`) | 提示该 `windowId` 不在此屏幕上，请查 `list_windows` | 无 | 错误码 `not_found` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7640` `"no window {window} on display {id}; see list_windows"` |
+| `S4` | GPUI 主线程 | `scope.root` 检查 (`apps/macos/src/control/agent.rs:1347, 7682`) | 判断是否指定了子树根元素编号 `root` | 支持按需下钻巨型页面局部容器 | 有 `root` 走 `S5`，无 `root` 走 `S6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7682` `let Some(number) = root else { return Ok(None) };` |
+| `S5` | GPUI 主线程 + 后台 | `read_root` (`apps/macos/src/control/agent.rs:7675-7703`), `ax::belongs` (`apps/macos/src/mac/ax.rs:1060`) | 从 `Core.elements[(id, wid)]` 取出保留的 `AXUIElement` 并在后台沿父链校验 `ax::belongs` 仍隶属该窗口 | 区分元素失效 (`invalid`) 与应用繁忙超时 (`failed`)，绝不误报窗口已关闭 | 失败走 `SX3`，有效走 `S6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7675,7689` `async fn read_root(` / `match off(cx, move \|\| ax::belongs(retained.get(), target, false)).await` |
+| `SX3` | GPUI 主线程 | `read_root` / `RootUnavailable` 错误 (`apps/macos/src/control/agent.rs:1365-1367, 7685-7700`) | 编号未知或脱离窗口返回 `invalid` 提示去掉 `root` 重查；AX 超时返回 `failed` | 无 | 错误码 `invalid` 或 `failed` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7685,7697` `ControlError::invalid(format!("root element {number} is unavailable..."))` / `ControlError::failed("the app didn't answer accessibility in time...")` |
+| `S6` | 后台执行器 | `ax::snapshot` / `publish_web_tree` (`REPUBLISH_TIMEOUT = 0.1s`, `apps/macos/src/mac/ax.rs:475, 502, 514, 566, 1699`) | 对 Chromium / Electron 进程写 `AXManualAccessibility` / `AXEnhancedUserInterface`（首次最长 `1.0s`，后续重刷 `REPUBLISH_TIMEOUT = 0.1s`）唤醒渲染进程暴露 `AXWebArea` | 解决浏览器默认懒加载不暴露网页 DOM 无障碍节点问题 | Web 树就绪 | 不开启系统读屏语音 | 已验证：`apps/macos/src/mac/ax.rs:475,502,514,1699` `const REPUBLISH_TIMEOUT: f32 = 0.1;` / `publish_web_tree(pid, REPUBLISH_TIMEOUT)` / `publish_web_tree(pid, 1.0)` / `pub fn snapshot(` |
+| `S7` | 后台 + GPUI 主线程 | `ax::snapshot` + `numbers::relabel` (`apps/macos/src/control/agent.rs:1354-1378`) | 受 `max_depth` 与元素预算限制遍历窗口及附着 Sheet/弹出层 (`#205`)，通过 `Numbers::refresh` 复用已有元素的稳定编号并存入 `Core.elements` | 跨多次快照保持同一元素的编号稳定，支撑 `tree::changes` 按编号对比 | 产出格式化树与计数 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1372-1377` `let numbers = c.elements.entry((id, window.target.window_id)).or_default(); numbers::relabel(&snapshot.tree, &numbers.refresh(snapshot.elements, complete))` |
+| `S8` | 后台 -> 主线程 | `SnapshotError::WindowUnavailable` (`apps/macos/src/control/agent.rs:1361-1364`) | 目标应用主线程繁忙未响应 AX 查询或系统辅助功能权限被撤 | 用 `failed` 而非 `not_found`，防止 Agent 误以为窗口已关 | 超时走 `SX4`，正常走 `S9` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1362-1364` `ax::SnapshotError::WindowUnavailable => ControlError::failed("the app didn't answer accessibility in time...")` |
+| `SX4` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:1362`) | 提示稍后重试 `get_window_state` | 无 | 错误码 `failed` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1362` `ControlError::failed` |
+| `S9` | 后台执行器 | `screenshot::window` (`apps/macos/src/control/agent.rs:1380-1384`, `apps/macos/src/mac/screenshot.rs:423-482`) | 调用 `SCScreenshotManager` 单独截取该窗口图像（复用 `CONTENT_AGE = 2s` 内的 `SCShareableContent` 缓存） | 让 Agent 同时获得语义编号树与该窗口视觉画面 | 得到单窗图像 `Shot` | 无闪烁 | 已验证：`apps/macos/src/control/agent.rs:1382` `.spawn(async move { screenshot::window(target, size) })` |
+| `S10` | `mcp` 进程 | `Control::swap_tree` (`crates/mcp/src/tools.rs:1938-1944`) | 将本次状态树与 `truncated` 标志存入 MCP 缓存，供后续 `wait_for_change` 或 `act_on_element(result: "changes")` 读取 | 按 `(display, window, scope)` 精确隔离基准 | 进入 `SR1` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1938` `before: control.swap_tree(display, window, scope, tree.clone(), ...)` |
+| `SR1` | `mcp` -> Agent | `WindowState::content` (`crates/mcp/src/tools.rs:1074, 1705-1727`), `tree::cut_depth` (`crates/model/src/tree.rs:165`) | 输出包含窗口头信息、`at (x,y)` 截图系点击中心说明、`strayed` 提示、状态树文本（旧版宿主由 `cut_depth` 兜底截断）及单窗图像块两个内容项 | 元素编号可直接传给 `act_on_element` | 返回 `[文本树, 窗口图像]` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1074,1719-1725` `Ok(Output::Content(state.content(depth)))` / `vec![text(...), self.image.clone()]` |
 
 ---
 
-## 图 2：`wait_for_change` 条件匹配、自适应轮询退避 (`watch::poll_gap`) 与早期取消保护
+## 图 2：`wait_for_change` 条件匹配、自适应退避 (`poll_gap`)、Takeover 兼容与早到取消令牌清理 (`EARLY_CANCEL = 30s`)
 
 ```mermaid
 flowchart TD
-    W1["Agent 调用 wait_for_change (displayId, 可选 windowId/text/goneText/role/anyChange/timeout)"] --> W2["watch::Conditions::from_json + watch::timeout 校验条件与超时 (默认 30s, 上限 120s)"]
-    W2 -->|"条件格式非法或 timeout 越界"| WX1["返回 invalid_params 错误"]
-    W2 -->|"合法"| W3["校验屏幕存活且未处于 Takeover，register_wait((conn, id)) 抢占同屏旧等待槽"]
-    W3 -->|"屏幕不可用"| WX2["返回 not_found / display_ended / user_takeover"]
-    W3 -->|"槽位就绪"| W4["后台采集初始基准快照 (窗口集 + 目标窗口 AX 状态树)"]
-    W4 --> W5{"初始快照已立即满足目标条件 (例如 text 已在屏上或 goneText 已消失)?"}
-    W5 -->|"是 (零等待命中)"| WR1["立即返回 fired 条件名称与当前最新状态树摘要 (最多 SUMMARY_LINES=20 行)"]
-    W5 -->|"否"| W6["计算下一轮间隔 watch::poll_gap(read_cost, quiet_rounds): 基础 500ms 随静默轮数按 +100ms 退避至最高 2000ms"]
-    W6 --> W7["异步 select 等待: poll_gap 定时器 vs 槽位取消/断线 vs 总 timeout 到期"]
-    W7 -->|"被新调用或 cancelWaitForChange 取消"| WX3["Waiting::drop 释放槽位并返回取消说明 (若 <30s EARLY_CANCEL 被客户端超时掐断则记录提示)"]
-    W7 -->|"总 timeout 到期仍未满足"| WR2["返回 timedOut: true 与当前状态树摘要 (不抛异常以便 Agent 决策下一步)"]
-    W7 -->|"poll_gap 到期执行新一轮采样"| W8{"屏幕已关闭、进入 Takeover、或目标窗口已关闭/弹出新窗口?"}
-    W8 -->|"屏幕关闭 / 进入 Takeover"| WX2
-    W8 -->|"目标窗关闭或新窗出现"| WR1
-    W8 -->|"仍在同窗"| W9["重新采集 AX 状态树对比 Conditions (text 出现 / goneText 消失 / role 匹配 / 树内容变化)"]
-    W9 -->|"命中任一条件 (Fired)"| WR1
-    W9 -->|"未命中 (递增 quiet 轮数)"| W6
+    W1["Agent 调用 wait_for_change (必传 display_id + window_id，可选 changed / appears / disappears / timeout_seconds)"] --> W2["watch::Conditions::from_json + watch::timeout 校验条件与超时 (默认 30s, 范围 0..120s)"]
+    W2 -->|"条件或超时非法"| WX1["返回 invalid 错误"]
+    W2 -->|"合法"| W3["生成递增 waitId，带上次缓存树 baseline 调 waitForChange；register_wait((conn, waitId)) 注册取消槽"]
+    W3 -->|"早到取消令牌已存在 (WaitSlot::Cancelled)"| WX3["立即返回 failed ('the wait was cancelled')"]
+    W3 -->|"槽位就绪"| W4["校验屏幕未 Ended (允许 Takeover 期运行!)、定位 windowId 并校验可选 root"]
+    W4 -->|"屏幕已关或窗口不在屏"| WX2["返回 ended / not_found / invalid"]
+    W4 -->|"进入轮询循环"| W5["每轮先检连接、屏幕是否 Ended、以及目标窗口是否仍在虚拟屏"]
+    W5 -->|"屏幕已结束"| WR_END["正常返回 outcome: 'displayEnded' (附 closedByUser)"]
+    W5 -->|"窗口移去他屏或已关闭/最小化"| WR_WIN["正常返回 outcome: 'windowLeft' 或 'windowClosed'"]
+    W5 -->|"窗口仍在屏"| W6["后台调 ax::snapshot 读取状态树 (与 deadline 定时器及 cancel 信号 select)"]
+    W6 -->|"客户端取消触发 cancelWaitForChange"| WX3
+    W6 -->|"子树根脱离 (RootUnavailable)"| WR_ROOT["正常返回 outcome: 'rootGone'"]
+    W6 -->|"应用繁忙超时 (WindowUnavailable)"| W_BUSY["递增 unanswered 计数，不中断继续下一轮"]
+    W6 -->|"拿到新树"| W7["刷新 Core.elements 稳定编号并送入 Watch::read 与 baseline 比对"]
+    W7 -->|"命中 Appeared / Disappeared (非截断时) / Changed"| WR1["返回 outcome: 'fired', matched, changes, 最新树与 takeover 标志"]
+    W7 -->|"未命中 (若无初始 baseline 则本轮仅建基准)"| W8{"已达 deadline (含 timeout=0 单次读)?"}
+    W_BUSY --> W8
+    W8 -->|"是"| WR2["返回 outcome: 'timedOut'，附最多 SUMMARY_LINES=20 行未匹配变化摘要与 disappearsAbsent 提示"]
+    W8 -->|"否"| W9["算 watch::poll_gap = max(3 * read_time, min(500ms + 100ms * quiet, 2000ms)) 异步休眠"]
+    W9 -->|"休眠中收到 cancel"| WX3
+    W9 -->|"休眠到期"| W5
 ```
 
 ### 图 2 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `W1` | `mcp` -> GPUI 主线程 | `tools::run("wait_for_change")` (`crates/mcp/src/tools.rs:1150-1225`), `wait_for_change` (`apps/macos/src/control/agent.rs:7776-7944`) | 支持等待指定子串出现 (`text`)、加载提示消失 (`gone_text`)、特定控件出现 (`role`)、窗口切换或任意界面文本变化 | 避免 Agent 在客户端跑低效截图轮询 | 进入 `W2` | 无变化 | [已验证: crates/mcp/src/tools.rs:1150-1225, apps/macos/src/control/agent.rs:7776-7944] |
-| `W2` | 纯模型函数 | `watch::Conditions::from_json` / `watch::timeout` (`DEFAULT_TIMEOUT = 30.0`, `MAX_TIMEOUT = 120.0`, `crates/model/src/watch.rs:13-38, 108-156`) | 解析匹配谓词与超时秒数（`<= 0` 或 `> 120s` 报错） | 硬上限 `120s` 防止单次工具调用永久挂死 | 非法走 `WX1`，合法走 `W3` | 无变化 | [已验证: crates/model/src/watch.rs:13-38, crates/model/src/watch.rs:108-156] |
-| `WX1` | GPUI 主线程 | `ControlError::invalid` (`apps/macos/src/control/agent.rs:7783-7790`) | 参数格式错误 | 无 | 错误码 `invalid_params` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7783-7790] |
-| `W3` | GPUI 主线程 | `display(..., true)` + `register_wait` (`apps/macos/src/control/agent.rs:7724-7774, 7792-7805`) | 确认屏幕活跃未接管，以 `(connection, displayId)` 为键注册单槽 `oneshot` 取消通道；若旧调用仍在挂起则立即发信号挤掉旧调用 | 防止网络抖动重试在同一窗口上并发叠加多个 AX 轮询任务 | 不可用走 `WX2`，成功走 `W4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7724-7805] |
-| `WX2` | GPUI 主线程 | `usable` / 循环内重检 (`apps/macos/src/control/agent.rs:2695-2711, 7855-7870`) | 若等待中途用户主动点进 Viewer 触发 `Takeover` 或关闭屏幕，立即打断等待返回对应状态码 | 让 Agent 第一时间感知用户已介入接管 | `not_found` / `display_ended` / `user_takeover` | 用户接管零延迟生效 | [已验证: apps/macos/src/control/agent.rs:7855-7870] |
-| `W4` | 后台执行器 | 初始窗口列表与 `ax::snapshot` (`apps/macos/src/control/agent.rs:7808-7835`) | 记录进入等待时刻的窗口 ID 集合与目标窗口完整状态树文本 | 作为后续检测“新窗口弹出”、“旧窗口关闭”与“任意文本变化”的零点基准 | 进入 `W5` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7808-7835] |
-| `W5` | 纯模型函数 | `Conditions::check_initial` (`crates/model/src/watch.rs:158-245`) | 若指定了明确目标谓词（如等待 `"Build succeeded"` 出现或 `"Loading..."` 消失）且首帧即已满足，无需休眠直接命中 | 消除动作已完成在 `wait_for_change` 调用前的 `500ms` 冤枉等待 | 命中走 `WR1`，未命中走 `W6` | 无变化 | [已验证: crates/model/src/watch.rs:158-245] |
-| `W6` | 纯模型函数 | `watch::poll_gap` (`POLL = 500ms`, `BACK_OFF = 100ms`, `MAX_QUIET_GAP = 2s`, `crates/model/src/watch.rs:19-24, 42-47`) | 动态计算休眠时长：基础 `500ms`，页面持续无变化时每轮加 `100ms` 退避直至上限 `2000ms`；若单次 AX 读取本身耗时长（大型重页面），自动拉长间隔不挤占目标进程主线程 | 兼顾短动画快响应与长编译/长下载期间极低 CPU 占用 | 算出本轮 `gap` | 目标应用保持流畅不卡顿 | [已验证: crates/model/src/watch.rs:19-24, crates/model/src/watch.rs:42-47] |
-| `W7` | GPUI 异步定时器 | `select` 等待 (`apps/macos/src/control/agent.rs:7840-7865`) | 同时监听定时器、取消信号与总截止时刻 `deadline` | 全程异步非阻塞 | 三路唤醒 | 无变化 | [已验证: apps/macos/src/control/agent.rs:7840-7865] |
-| `WX3` | Drop 清理 | `Waiting::drop` / `cancelWaitForChange` / `EARLY_CANCEL = 30s` (`apps/macos/src/control/agent.rs:1401-1407, 7720, 7740-7774`) | 移除 `WAIT_SLOTS` 槽位，释放后台轮询协程 | 客户端提前断开不残留孤儿轮询 | 返回取消错误或无接收方 | 无变化 | [已验证: apps/macos/src/control/agent.rs:1401-1407, apps/macos/src/control/agent.rs:7720-7774] |
-| `WR2` | 宿主 -> `mcp` 进程 | `wait_output` 超时分支 (`crates/mcp/src/tools.rs:1769-1876`) | 满 `timeout` 仍未触发时返回结构化超时说明并附上此刻最新窗口变化摘要（同时用最新树更新 `Control::swap_tree`） | Agent 无需额外再调一次 `get_window_state` 即可看清卡在什么界面 | 返回超时说明 + 当前树摘要 | 无变化 | [已验证: crates/mcp/src/tools.rs:1769-1876] |
-| `W8` | 后台 + 主线程 | 窗口集与屏幕存活重检 (`apps/macos/src/control/agent.rs:7855-7895`) | 检测屏幕是否结束/接管，或目标窗口已关闭（对话框消失）、同应用弹出了新窗口/新警告框 | 对话框关闭本身就是最强状态迁移信号 | 屏幕变更走 `WX2`，窗口变更走 `WR1`，同窗走 `W9` | 无变化 | [已验证: apps/macos/src/control/agent.rs:7855-7895] |
-| `W9` | 后台执行器 + 纯模型 | `ax::snapshot` + `Conditions::check` (`crates/model/src/watch.rs:247-340`), `agent.rs:7896-7935` | 重新提取 AX 树检查 `Match` 条件或树 diff；若树有局部变化但尚未命中特定 `text`，重置 `quiet = 0` 恢复 `500ms` 高敏采样 | 界面开始动时自动提速，彻底静止时自动降频 | 命中走 `WR1`，未命中回 `W6` | 无变化 | [已验证: crates/model/src/watch.rs:247-340, apps/macos/src/control/agent.rs:7896-7935] |
-| `WR1` | 宿主 -> `mcp` 进程 | `wait_output` (`SUMMARY_LINES = 20`, `crates/model/src/watch.rs:25`, `crates/mcp/src/tools.rs:1769-1876`) | 更新 `Control::swap_tree` 缓存，返回触发原因 (`Fired`)、耗时及不超过 `20` 行的关键增量变化摘要 | 一步到位完成“等待 + 获取新元素编号” | 返回命中事件与新状态摘要 | 无变化 | [已验证: crates/model/src/watch.rs:25, crates/mcp/src/tools.rs:1769-1876] |
+| `W1` | `mcp` -> GPUI 主线程 | `tools::run("wait_for_change")` (`crates/mcp/src/tools.rs:1113-1160`), `wait_for_change` (`apps/macos/src/control/agent.rs:7776-7944`) | **必传 `display_id` 与 `window_id`**；条件对象支持 `changed: bool`、`appears: {role, text}`、`disappears: {role, text}`（省略条件时默认 `changed = true`） | 不存在 `goneText` 或 `anyChange` 字段名；未知字段在 `from_json` 报错 | 进入 `W2` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1114-1121` `let display = a.require_int("display_id")?; let window = a.require_int("window_id")?; ... "changed" ... "appears" ... "disappears"` |
+| `W2` | 纯模型函数 | `watch::Conditions::from_json` / `watch::timeout` (`DEFAULT_TIMEOUT = 30.0`, `MAX_TIMEOUT = 120.0`, `crates/model/src/watch.rs:13-16, 29-35, 121-152`) | 校验至少存在一项有效等待条件；`timeout_seconds` 默认 `30.0s`，允许 `0.0`（只读一轮），负数报错，超过 `120.0s` 自动钳制为 `120.0s` | 上限 `120s` 避免无限占用单轮工具调用 | 非法走 `WX1`，合法走 `W3` | 无变化 | 已验证：`crates/model/src/watch.rs:13-16,29-34` `pub const DEFAULT_TIMEOUT: f64 = 30.0; pub const MAX_TIMEOUT: f64 = 120.0;` / `Some(s) if s.is_nan() \|\| s < 0.0 => Err("timeout_seconds must be 0 or more".into()), Some(s) => Ok(Duration::from_secs_f64(s.min(MAX_TIMEOUT)))` |
+| `WX1` | `mcp` / GPUI 主线程 | `ControlError::invalid` (`crates/mcp/src/tools.rs:1124-1126`, `agent.rs:7796-7797`) | 在发起任何 AX 读取前拒绝非法参数 | 无 | 错误码 `invalid` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7796-7797` `.map_err(ControlError::invalid)?` |
+| `W3` | `mcp` + GPUI 主线程 | `NEXT_WAIT` + `control.last_tree` (`crates/mcp/src/tools.rs:1127-1142`), `WAITS` / `register_wait` / `EARLY_CANCEL = 30s` (`apps/macos/src/control/agent.rs:7709-7737, 7786-7793`) | MCP 分配原子递增 `waitId` 并附带上次缓存树 `baseline`；主线程以 **`(connection, waitId)`** 为键存入线程局部表 `WAITS`，并顺带清理滞留超过 **`EARLY_CANCEL = 30s` 的早到取消记录**（即 `cancelWaitForChange` 比 `waitForChange` 先到主线程、或对应等待从未到达的陈旧 `WaitSlot::Cancelled(at)`，并非客户端超时提示！） | 消除异步取消与等待注册乱序到达的竞态泄漏 | 早到取消走 `WX3`，正常走 `W4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7719-7731` `/// Forget early cancels older than this, as for a wait that never came.` / `const EARLY_CANCEL: Duration = Duration::from_secs(30);` / `waits.retain(\|_, slot\| !matches!(slot, WaitSlot::Cancelled(at) if at.elapsed() > EARLY_CANCEL));` |
+| `W4` | GPUI 主线程 + 后台 | `display(core, p, true, cx)` / `window_on` / `read_root` (`apps/macos/src/control/agent.rs:7774-7775, 7798-7801`) | 核验屏幕未 `Ended`、目标窗口在屏且 `root` 有效；**明确支持在用户 `Takeover` 期间正常工作**（不检查也不报错 `takeover`，而在返回 JSON 中附带 `"takeover": bool`） | 让 Agent 在用户协助操作或观察期仍可静默感知页面跳转 | 失败走 `WX2`，就绪进 `W5` | 与用户操作互不干扰 | 已验证：`apps/macos/src/control/agent.rs:7774-7775,7798` `/// Reads work in a Takeover, as windowState's do.` / `let id = display(core, p, true, cx)?;` |
+| `WX2` | GPUI 主线程 | `ended_error` / `not_found` / `invalid` (`apps/macos/src/control/agent.rs:7798-7801`) | 入口屏幕或窗口不存在时报错 | 无 | 错误码 `ended` / `not_found` / `invalid` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7798-7801` `let window = window_on(id, p, cx).await?; let root = read_root(core, id, target, scope.root, cx).await?;` |
+| `W5` | GPUI 主线程 + 后台 | 循环存活与窗口在位检查 (`apps/macos/src/control/agent.rs:7824-7858`) | 每轮先检连接未断、屏幕未 `Ended`，再后台检查 `window_id` 是否仍在 `windows::on_display(id)` 或已移往其它屏幕 (`cg::on_screen_ids()`) | 精确区分窗口已关闭隐藏与窗口移往其它屏幕两种状态 | 屏关走 `WR_END`，窗离走 `WR_WIN`，在位走 `W6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7836-7857` `if ended { return Ok(json!({ "outcome": "displayEnded", ... })); }` / `if !here { return Ok(json!({ "outcome": if elsewhere { "windowLeft" } else { "windowClosed" }, ... })); }` |
+| `WR_END` | 宿主 -> `mcp` | `"displayEnded"` 分支 (`apps/macos/src/control/agent.rs:7837-7841`, `tools.rs:1866-1871`) | 返回结构化文本 `display_ended after X s`（若用户主动关屏则提示未经询问勿调 `create_display`） | 正常返回结果文本而非抛协议错误 | 返回 `display_ended` 说明 | 无变化 | 已验证：`crates/mcp/src/tools.rs:1866-1870` `Some("displayEnded") if reply.get("closedByUser") == Some(&Value::Bool(true)) =>` |
+| `WR_WIN` | 宿主 -> `mcp` | `"windowLeft"` / `"windowClosed"` 分支 (`apps/macos/src/control/agent.rs:7854-7857`, `tools.rs:1857-1862`) | 对话框提交后自动关闭返回 `window_closed` 提示查 `list_windows`；移出虚拟屏返回 `window_left` 提示查 `list_windows(strays: true)` | 窗口消失本身即是重要业务完成信号 | 返回 `window_closed` 或 `window_left` 说明 | 无变化 | 已验证：`crates/mcp/src/tools.rs:1857-1861` `Some("windowClosed") => ... Some("windowLeft") =>` |
+| `W6` | 后台执行器 | `ax::snapshot` + `futures::select!` (`apps/macos/src/control/agent.rs:7862-7878`) | 后台读取 AX 树并计时 `read_time`；与 `remaining.max(watch::POLL)` 截止定时器及 `cancel` 通道竞争 | 单次慢读取在到期时立即脱手返回超时 | 按结果分流 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7872-7877` `let timer = cx.background_executor().timer(remaining.max(watch::POLL)); let snapshot = futures::select! {` |
+| `WX3` | `mcp` + Drop 守卫 | `cancelWaitForChange` (`crates/mcp/src/tools.rs:1148-1151`, `agent.rs:1401-1407`), `cancel_wait` / `Waiting::drop` (`agent.rs:7740-7768`) | MCP 侧检测到客户端取消时调 `call_open("cancelWaitForChange", {"waitId": wait})` 触发 `stop.send(())` 中止后台轮询，`Waiting::drop` 自动移除 `WAITS` 运行槽 | 客户端取消后宿主零残留轮询 | 错误码 `failed` (`"the call was cancelled"` / `"the wait was cancelled"`) | 无变化 | 已验证：`crates/mcp/src/tools.rs:1149` `control.call_open("cancelWaitForChange", json!({ "waitId": wait })).await;`；`agent.rs:7757` `impl Drop for Waiting` |
+| `WR_ROOT` | 宿主 -> `mcp` | `SnapshotError::RootUnavailable` -> `"rootGone"` (`apps/macos/src/control/agent.rs:7912-7914`, `tools.rs:1863-1865`) | 等待期间局部子树根节点被页面销毁，返回 `root_gone` 引导去掉 `root` 重查 | 不抛异常，清晰说明原因 | 返回 `root_gone` 说明 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7912-7913` `Err(ax::SnapshotError::RootUnavailable) => { return Ok(json!({ "outcome": "rootGone", ... })); }` |
+| `W_BUSY` | GPUI 主线程 | `SnapshotError::WindowUnavailable` -> `unanswered += 1` (`apps/macos/src/control/agent.rs:7916`) | 目标应用短时繁忙未响应 AX 时不报错退出，累加 `unanswered` 等待下一轮重试 | 容忍页面重负载加载期的瞬时无响应 | 进入 `W8` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7916` `Err(ax::SnapshotError::WindowUnavailable) => unanswered += 1,` |
+| `W7` | GPUI 主线程 + 纯模型 | `Watch::read` / `watch::check` (`crates/model/src/watch.rs:193-211, 250-268`), `agent.rs:7885-7910` | 若带有上次 `get_window_state` 缓存的 `baseline`（且属本轮宿主运行编号），**首轮读取即与 `baseline` 比对并可零休眠立即触发**；若无 `baseline` 则首轮仅建立基准；按内容计数检测 `Appeared` / `Disappeared`（任一侧达元素上限 `truncated` 时禁用 `Disappeared` 防误报）与 `Changed` | 按元素角色+文本计数而非按句柄比对，列表重渲染不会误触发 (`watch.rs:185-192`) | 命中走 `WR1`，未命中走 `W8` | 无变化 | 已验证：`crates/model/src/watch.rs:193,201,250` `pub fn check(` / `if let Some(m) = conditions.disappears.as_ref().filter(\|_\| !truncated)` / `pub fn read(&mut self, read: Read) -> Vec<Fired>` |
+| `WR1` | 宿主 -> `mcp` | `"fired"` 返回与缓存同步 (`apps/macos/src/control/agent.rs:7896-7909`, `tools.rs:1165-1172, 1775-1825`) | MCP 用返回的最新完整树更新 `Control::swap_tree` 缓存，向 Agent 输出命中的条件名、匹配元素行及结构化增量差异 | 命中后无需再调 `get_window_state` 即可直接操作新元素 | 返回命中详情与增量树 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7897` `"outcome": "fired"` |
+| `W8` | GPUI 主线程 | `Instant::now() >= deadline` (`apps/macos/src/control/agent.rs:7918-7920`) | 判断总等待时长是否已耗尽 | 无 | 到期走 `WR2`，未到期走 `W9` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7918-7920` `if Instant::now() >= deadline { break "timedOut"; }` |
+| `WR2` | 宿主 -> `mcp` | `"timedOut"` 返回 (`SUMMARY_LINES = 20`, `crates/model/src/watch.rs:25, 295`, `agent.rs:7929-7942`, `tools.rs:1826-1856`) | 同步最新树到 `swap_tree`，返回 `timed_out` 说明、`unanswered` 次数、若基准树原本就不含待消失元素则提示 `disappearsAbsent`、以及最多前 `SUMMARY_LINES = 20` 行未命中变化摘要 | 帮助 Agent 区分界面未发生变化与匹配词不符 | 返回超时诊断与 `<=20` 行变化摘要 | 无变化 | 已验证：`crates/model/src/watch.rs:25,295` `pub const SUMMARY_LINES: usize = 20;` / `pub fn disappears_absent(&self) -> bool` |
+| `W9` | 纯模型 + 异步定时器 | `watch::poll_gap` (`POLL = 500ms`, `BACK_OFF = 100ms`, `MAX_QUIET_GAP = 2s`, `crates/model/src/watch.rs:19-23, 42-45`), `agent.rs:7921-7927` | 计算 `(read_time * 3).max((500ms + 100ms * quiet).min(2000ms))`：既随连续无变化轮数 `quiet` 线性退避至 `2s`（一旦树有变动 `quiet` 归零恢复 `500ms`），又保证休眠至少为单次 AX 读取耗时的 **3 倍**（最多占目标应用主线程 25% 时间） | 防止重型页面频繁 AX 遍历拖慢目标应用渲染 | 休眠后回 `W5` | 目标应用主线程保持流畅 | 已验证：`crates/model/src/watch.rs:19-23,42-45` `pub const POLL: Duration = Duration::from_millis(500); pub const MAX_QUIET_GAP: Duration = Duration::from_secs(2); pub const BACK_OFF: Duration = Duration::from_millis(100);` / `pub fn poll_gap(read: Duration, quiet: u32) -> Duration { let floor = (POLL + BACK_OFF * quiet).min(MAX_QUIET_GAP); (read * 3).max(floor) }` |

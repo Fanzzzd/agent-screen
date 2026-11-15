@@ -1,6 +1,6 @@
-# SM-04. 人机交互请求 (`Request`) 与控制权交接状态机
+# SM-04. 人机交互请求 (`Requests`) 与控制权交接状态机
 
-每块 Agent Display 内部维护独立的请求协调器 `request::Requests` (`crates/model/src/request.rs:309-390`)，统一管理三类跨主体协作请求 (`Kind`)：**`Help`** (`request_help` 请求用户人工协助输入密码/过验证码)、**`Window`** (`place_window` / `window_access` 请求借用用户窗口或跨会话过户窗口)、以及 **`Control`** (`requestControl` 请求控制权交互) (`ADR 0004`, `ADR 0010`, `ADR 0017`)。该状态机还包含一个关键的**未听取决议暂存器 (`unheard: Option<Woken>`)**：由于 `request_help` 是立即返回的非阻塞调用，若用户在 Agent 紧接着发出 `wait_for_control` 之前的几十毫秒空档内就已经秒点了卡片按钮，决议会保存在 `unheard` 中，确保紧随其后的 `wait_for_control` 立即拿到准确结果而绝不会死锁挂起。
+每块 Agent Display 在模型层拥有独立的请求协调器 `request::Requests` (`crates/model/src/request.rs:309-442`)，按类型各自维护最多一个打开槽位（共三类独立 `Kind`：**`Help`** 协助请求、**`Control`** 接管期请求归还控制权、**`Window`** 请求借用用户窗口或跨会话过户窗口，`ADR 0004`, `ADR 0013`, `ADR 0015`, `ADR 0017`）。同时，`Requests` 内置多等待者唤醒列表 `waiters: Vec<oneshot::Sender<Woken>>` 与未听取答复暂存器 `unheard: Option<Woken>`：当某次 `waitForControl` 超时或客户端刚发完 `requestHelp` 尚未进入等待时，用户对 `Help` 的答复（`Continue`、`Instructions`、`HandedOver`、`TookOver`）会保存在 `unheard` 中；若随后用户在 Agent 听取该答复前又主动进入 `Takeover` 并交还，`Woken::took_over` 还会把此前未听取的文字留言或赠予窗口装入 `superseded` 随交还一并交付，确保任何人工输入都不会在状态切换中丢失。
 
 ---
 
@@ -8,45 +8,46 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle : 屏幕处于 Active 且无未决请求
-    Idle --> HelpOpen : request_help (弹出 Help Card + 发送系统通知)
-    HelpOpen --> Deferred : 用户点击稍后处理 put_off_help (收起浮层保留待办)
-    Deferred --> HelpOpen : 用户从菜单/Peek 重新唤出 recall_help
-    HelpOpen --> InTakeover : 用户点击 Open & Take Over (begin_takeover 打开 Viewer 冻结 Agent)
-    Idle --> InTakeover : 用户在 Peek / Viewer 主动点击接管按钮 (无前置 Help 请求)
-    InTakeover --> InTakeover : Agent 在接管期间调 request_help 补充说明文字
-    InTakeover --> UnheardResolution : 用户点击 Hand back 交还控制权 (end_takeover 记录 Woken)
-    HelpOpen --> UnheardResolution : 用户直接在卡片点 已完成 或 拒绝 (answer_help_with)
-    HelpOpen --> Withdrawn : Agent 主动调用 withdrawHelp 撤回请求 (撤回卡片与通知)
-    UnheardResolution --> Idle : wait_for_control 读取并消费 Woken 决议返回给 Agent
-    Idle --> WindowAskOpen : place_window / window_access(grant) 发起借窗或过户请求
-    WindowAskOpen --> WindowGranted : 用户点击允许 或 直接将目标窗口拖入该屏 Viewer
-    WindowAskOpen --> WindowDeclined : 用户点击拒绝按钮
-    WindowAskOpen --> WindowTimedOut : 等待满 timeout (30s..120s) 触发 time_out_window
-    WindowGranted --> Idle : oneshot 通道唤醒 ask_window 执行物理迁入或记录 Access
-    WindowDeclined --> Idle : oneshot 通道唤醒 ask_window 返回 declined_message
-    WindowTimedOut --> Idle : 撤回卡片与通知并返回 timed_out_message
-    Withdrawn --> Idle : 状态清空恢复常规 Active
-    HelpOpen --> EndedCancelled : 屏幕结束 Core.end (自动撤回卡片与通知并唤醒等待方)
-    InTakeover --> EndedCancelled : 屏幕结束 Core.end (释放残留按键并唤醒等待方返回 ended)
-    WindowAskOpen --> EndedCancelled : 屏幕结束 Core.end (唤醒 ask_window 返回 display_ended)
-    EndedCancelled --> [*] : 屏幕进入 Ended 生命周期
+    [*] --> ActiveIdle : 屏幕处于 Live (!ended 且 !takeover)，open 为空且 unheard 为空
+    ActiveIdle --> HelpOpen : Displays.request_help 登记 Ask.Help (同槽已有旧 Help 则先结案为 Replaced)
+    HelpOpen --> HelpPutOff : 用户点 Later 触发 put_off_help (put_off=true 隐藏浮动卡片，保留图标徽标与通知)
+    HelpPutOff --> HelpOpen : 用户从通知回复或重开卡片触发 recall_help (put_off=false)
+    HelpOpen --> UnheardOrWoken : 用户答复 Continue / Reply(<=2000字) / Give 窗口，或对话传达 answerHelp
+    HelpOpen --> HelpWithdrawn : Agent 调 withdraw_help 置 Resolution.Withdrawn 唤醒等待者
+    HelpOpen --> InTakeover : 用户点 Take Over 或在 Viewer 操作触发 begin_takeover (卡片退避 on_card)
+    ActiveIdle --> InTakeover : 用户在 Peek / Viewer 主动介入触发 begin_takeover
+    UnheardOrWoken --> InTakeover : Agent 尚未取走 unheard 时用户又切入 Takeover (交还时并入 superseded)
+    InTakeover --> InTakeover : Agent 调 request_help 更新顶栏说明，或调 withdraw_help 仅撤 Help 不退接管
+    InTakeover --> ControlAsked : Agent 调 request_control 首次打开 Ask.Control (重复调返回 AlreadyAsked)
+    ControlAsked --> InTakeover : 用户点 Keep Control (Resolution.Kept 唤醒等待者但留在 Takeover) 或 Agent 撤回催促
+    InTakeover --> UnheardOrWoken : 用户点交还或对话交还触发 end_takeover (Help/unheard 结案为 TookOver，否则 HandedBack)
+    ControlAsked --> UnheardOrWoken : 用户点 Let ... Continue 触发 end_takeover (结案 Control 与 Help)
+    UnheardOrWoken --> ActiveIdle : wait_for_control 立即消费或在线 waiter 直接接收 (answerHelp 调 forget_unheard)
+    HelpWithdrawn --> ActiveIdle : 无未决项恢复常规 Live
+    ActiveIdle --> WindowAskOpen : Displays.request_window 登记 Ask.Window 与 oneshot 通道 (旧同槽结案为 Replaced)
+    WindowAskOpen --> WindowResolved : 用户点 Hand Over 置 HandedOver (已被他方抢占则 Claimed) / 点 Keep 置 Declined / 超时置 TimedOut
+    WindowResolved --> ActiveIdle : oneshot 唤醒等待中的 place_window 执行迁入或返回拒绝/超时说明
+    ActiveIdle --> DisplayEnded : Core.end 调 end_requests
+    HelpOpen --> DisplayEnded : end_requests 结案全部 Kind 为 Ended，清空 unheard 并唤醒全部 waiters
+    InTakeover --> DisplayEnded : end_requests 并释放 Viewer 残留按键
+    ControlAsked --> DisplayEnded : end_requests 广播 Ended
+    WindowAskOpen --> DisplayEnded : end_requests 向窗口 oneshot 与 waiters 广播 Ended
+    DisplayEnded --> [*] : 进入 ReviewDisplay 或 Removing
 ```
 
 ---
 
-## 状态定义与决议传递明细表
+## 状态、枚举变体 (`Ask` / `Resolution` / `Answer`) 与副作用明细表
 
-| 状态 ID | 模型结构与方法 (`crates/model/src/request.rs`) | 核心不变量与互斥规则 | UI 与系统通知副作用 (`Effect`) | `wait_for_control` / 调用方可见输出 | 验证来源 |
+| 状态 ID | 模型结构与方法 (`crates/model/src/request.rs`) | 核心守卫与容量常数 | UI、卡片优先级 (`on_card`) 与系统通知 | Agent 侧返回结果 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `Idle` | `Requests` 无打开项且 `unheard.is_none()` (`request.rs:309-336`) | 屏幕处于 `Lifecycle::Active`，允许新发起任意 `Kind` 请求 | 右上角无该屏 Help Card，无挂起通知 | 此时若直接调 `wait_for_control`，`Wait::Ready` 立即返回 `resolution: "active"` | [已验证: crates/model/src/request.rs:302-336, crates/model/src/request.rs:761-783] |
-| `HelpOpen` | `Requests` 含 `Ask::Help { instruction, steps }` (`request.rs:51-70, 474-501`) | 同一屏幕同一时刻最多一个打开的 `Help` 请求；重复调 `request_help` 更新或拒绝而不堆叠弹窗 | `HelpCard` 展示缩略图与说明，`notify::post` 推送系统横幅通知 (`Note::Help`) | `wait_for_control` 进入 `Wait::Pending` 异步挂起；超单轮等待时长返回 `"waiting"` 继续等 | [已验证: crates/model/src/request.rs:474-501, apps/macos/src/mac/notify.rs:60-105] |
-| `Deferred` | `Model::put_off_help` (`request.rs:521-545`) | 请求仍未结案 (`is_open(Kind::Help) == true`)，仅暂时隐藏右上角浮动卡片免挡用户视线 | 收起 `HelpCard`，在 Peek 卡片保留待处理徽标供 `recall_help` 随时点开 | `wait_for_control` 仍保持 `waiting` 阻塞等待 | [已验证: crates/model/src/request.rs:521-545] |
-| `InTakeover` | `Lifecycle::Takeover` + `begin_takeover` (`request.rs:601-619`) | 冻结 `Forwarder` 与 `InputQueue`；即使用户直接将目标窗口拖入屏幕响应借窗，也能自动联动满足挂起请求 (`request.rs:903`) | 收起右上角卡片，自动前置打开 Viewer 并在顶栏常驻接管控制条 | 其它工具调用报 `user_takeover`；`wait_for_control` 挂起并在超时提示中报告用户正在 Viewer 内操作 | [已验证: crates/model/src/request.rs:601-619, crates/mcp/src/tools.rs:1487-1518] |
-| `UnheardResolution` | `unheard: Option<Woken>` (`request.rs:154-226, 419-444, 621-658`) | 保存最近一次已结案但尚未被 `wait_for_control` 取走的 `Woken { request, resolution }`（含可选用户回复文本，上限 `REPLY_CHARS = 2000`，`request.rs:22`） | 卡片与系统通知均已撤回 (`notify::retract`)，屏幕已恢复 `Active` | 下一次 `wait_for_control` 零延迟消费 `unheard`（`forget_unheard` 清空），返回 `"handed_back"` / `"completed"` / `"declined"` + 留言 + 最新窗口状态 | [已验证: crates/model/src/request.rs:22, crates/model/src/request.rs:154-226, crates/model/src/request.rs:743-783] |
-| `Withdrawn` | `Model::withdraw_help` (`request.rs:503-519`) | Agent 自行取消尚未被用户接管的协助请求（若用户已进入 `InTakeover`，Agent **无权**通过 `withdrawHelp` 退出接管！） | 发出撤回通知与关闭卡片 `Effect` | 挂起的 `wait_for_control` 收到 `"withdrawn"` | [已验证: crates/model/src/request.rs:503-519, apps/macos/src/control/agent.rs:1689-1702] |
-| `WindowAskOpen` | `Ask::Window` + `oneshot::Sender<Resolution>` (`request.rs:547-558`, `agent.rs:3706-3805`) | 与 `place_window` / `window_access(grant)` 的当次 RPC 生命周期直接通过 `oneshot` 绑定 | 弹出借窗/授权 `HelpCard`（若系跨会话占用则附加 `Held` 原持有者活跃状态 `#189`） | 当前 `place_window` / `window_access` 调用同步 `.await` 等待 | [已验证: crates/model/src/request.rs:547-558, apps/macos/src/control/agent.rs:3706-3805] |
-| `WindowGranted` | `Model::answer(..., Answer::Allow)` (`request.rs:660-727`) | 触发 `oneshot::Sender` 传递允许决议并关闭 `Window` 请求槽 | 关闭借窗卡片并调用 `notify::retract` 撤回通知 | 唤醒 `ask_window` 执行物理迁入或记录 `Access` | [已验证: crates/model/src/request.rs:660-727] |
-| `WindowDeclined` | `Model::answer(..., Answer::Decline)` (`request.rs:660-727`) | 触发 `oneshot::Sender` 传递拒绝决议 | 关闭借窗卡片并撤回系统通知 | `ask_window` 返回 `ControlError::failed(declined_message)` | [已验证: crates/model/src/request.rs:660-727, crates/model/src/held.rs:478-494] |
-| `WindowTimedOut` | `Model::time_out_window` (`request.rs:560-573`) | 严格核对 `RequestId` 一致后作废超时请求，防止误杀新发起的请求 | 关闭借窗卡片并撤回系统通知 | `ask_window` 返回 `ControlError::failed(timed_out_message)` | [已验证: crates/model/src/request.rs:560-573, crates/model/src/held.rs:496-532] |
-| `EndedCancelled` | `Model::end` 级联结算 (`crates/model/src/model.rs:1060-1125`) | 清空该屏幕全部打开的 `Requests`，向所有挂起通道广播 `Resolution::Ended` | 撤回该屏幕所有系统通知与桌面浮层 | `wait_for_control` 返回 `resolution: "ended"`（若系 `ClosedByUser` 则 `closedByUser: true`），借窗调用返回 `display_ended` | [已验证: crates/model/src/request.rs:189-226, crates/model/src/model.rs:1060-1125] |
+| `ActiveIdle` | `Display.is_live() && !takeover && !requests.any_open() && unheard.is_none()` (`request.rs:309-336, 761-775`) | 三类请求槽位均空；`!d.awaits_user()` 为真 | 无 Help Card，无挂起请求通知 | 调 `wait_for_control` 命中 `Wait::Now(Woken::of(None, Resolution::HandedBack))` 返回 `control: "agent"` | 已验证：`crates/model/src/request.rs:773-775` `if !d.awaits_user() { return Wait::Now(Woken::of(None, Resolution::HandedBack)); }` |
+| `HelpOpen` | `Ask::Help { reason, steps, answers }` (`request.rs:56-60, 391-402, 474-498`) | `steps` 最多 `HELP_STEPS = 5` 条、每条 `<= HELP_STEP_CHARS` (`160`) 字 (`model.rs:544-545`)；新开同槽请求自动将旧 `Help` 结案为 `Resolution::Replaced` | `on_card` 展示协助卡片（优先级排在 `Window` 与 `Control` 之后，`request.rs:384-388`）；`notify::update` 发送带 `Take Over` / `Continue` / `Reply` 动作的通知 | `wait_for_control` 压入 `waiters` 异步等待；超时返回 `"timedOut"` -> MCP `control: "user"` | 已验证：`crates/model/src/request.rs:56,384-388` `Help { reason: String, steps: Vec<String>, answers: bool }` / `pub fn on_card(&self, takeover: bool) -> Option<&Request>` |
+| `HelpPutOff` | `Request { put_off: true, .. }` (`request.rs:88, 521-541`) | 仅作用于已打开的 `Kind::Help`；Agent 若重发新 `request_help` 会生成新 `id` 且重置 `put_off = false` | 浮动 Help Card 收起让出屏幕视线，菜单栏图标徽标与通知中心条目保留；`recall_help` 恢复显示 | `d.awaits_user()` 仍为真，`wait_for_control` 保持等待 | 已验证：`crates/model/src/request.rs:88,521-539` `pub put_off: bool,` / `pub fn put_off_help(` / `pub fn recall_help(` |
+| `InTakeover` | `Display.takeover == true` (`request.rs:601-612`) | 产出 `Effect::Takeover { on: true }`：冻结 `Forwarder` 后台投递并暂停该屏 `InputQueue`；即便 Agent 调 `withdraw_help` 也绝不退出 `Takeover` (`request.rs:513`) | `on_card` 自动隐藏该屏 `Help` 卡片（用户在 Viewer 内直接看步骤并操作）；动作工具报错误码 `"takeover"` | `wait_for_control` 在超时后附带 `userIdleSeconds`（`>= 15s` 提示询问用户是否忘点交还） | 已验证：`crates/model/src/request.rs:601-608` `pub fn begin_takeover(&mut self, id: DisplayId) -> Vec<Effect>`；`tools.rs:1487` `const IDLE_HINT_SECONDS: u64 = 15;` |
+| `ControlAsked` | `Display.takeover == true` 且含 `Ask::Control { reason }` (`request.rs:62, 575-597`) | 仅在 `d.takeover` 为真时可打开 (`ControlAsk::Asked`)，已打开时重调返回 `AlreadyAsked` 不发重复通知；用户选 `Answer::Keep` 结案为 `Resolution::Kept` 但保持 `Takeover` | `on_card` 在接管期仍可弹出归还控制权询问卡，`notify::update` 发 `Note::Control` 通知 | 点 `Keep Control` 返回 `control: "user", kept: true`；点 `Let ... Continue` 走 `end_takeover` 返回 `control: "agent"` | 已验证：`crates/model/src/request.rs:282-289,575,682,689` `pub enum ControlAsk { Asked, AlreadyAsked, NotNeeded }` / `(Kind::Control, Answer::Continue) => return Ok(self.end_takeover(id)),` / `(Kind::Control, Answer::Keep) => Resolution::Kept,` |
+| `UnheardOrWoken` | `Requests.wake` / `unheard: Option<Woken>` / `Woken::took_over` (`request.rs:154-183, 317, 419-432, 621-648, 681-727`) | 当 `waiters` 非空时直接向所有等待者广播 `Woken` (`heard = true`)；当 `waiters` 为空且属于 `Kind::Help` 有效人工答复（`TookOver`、`Continue`、`Instructions`、`HandedOver`，其中 `Reply` 限 `REPLY_CHARS = 2000` 字）时存入 `unheard`；若在消费前又经历 `Takeover` 交还，原留言或赠窗转入 `Woken.superseded` | `notify::withdraw_help` / `withdraw_control` 撤回已送达系统通知，卡片收起 | 在线或下一次 `wait_for_control`（或下一次非接管 `request_help`）拿到完整 `Woken` 决议 | 已验证：`crates/model/src/request.rs:154-161,175,429-431` `pub struct Woken { pub request: Option<Kind>, pub resolution: Resolution, pub superseded: Option<Resolution> }` / `fn took_over(` / `self.unheard = (!heard).then_some(woken);` |
+| `HelpWithdrawn` | `Resolution::Withdrawn` (`request.rs:123, 503-518`) | 撤回打开的 `Kind::Help`；不写入 `unheard` (`request.rs:427`) | `notify::withdraw_help` 移除通知并收起卡片 | 非接管期在线 `wait_for_control` 收到 `"withdrawn"` -> `control: "agent", withdrawn: true` | 已验证：`crates/model/src/request.rs:426-428,508` `Resolution::Withdrawn \| Resolution::Replaced \| Resolution::Ended` / `.resolve(Kind::Help, Resolution::Withdrawn)` |
+| `WindowAskOpen` | `Ask::Window { window, held }` + `oneshot::Sender<Resolution>` (`request.rs:65-68, 89-90, 547-556`) | 与当次 `place_window` 请求调用通过专属 `oneshot` 通道一并创建；新借窗请求替换同屏旧借窗请求 (`Resolution::Replaced`) | `on_card` 最高优先级展示借窗卡片（若跨会话持有则展示 `Held` 占用详情，`ADR 0017`），`notify::update` 发 `Note::Window` | 当次 `place_window` 在 `ask_window` 内阻塞等待 `oneshot`（超时 `time_out_window` 校验 `r.id == request` 防误杀新请求） | 已验证：`crates/model/src/request.rs:385,547,564` `self.get(Kind::Window)` / `pub fn request_window(` / `if d.requests.get(Kind::Window).map(\|r\| r.id) != Some(request)` |
+| `WindowResolved` | `Displays::answer(Kind::Window, ..)` (`request.rs:668-673, 690-714`) | 用户选 `Answer::Keep` -> `Resolution::Declined`；选 `Answer::Give` 时：若属用户窗且未被他方抢占则产出 `Effect::HandOver` 并发 `HandedOver`；若开卡期间被另一会话抢先占走则不移动并发 `Resolution::Claimed`；若原即跨会话持有 (`held.is_some()`) 则发 `HandedOver` 交由 `place_window` 执行过户 | `notify::withdraw_window` 撤回借窗通知并关闭卡片 | `place_window` 收到对应 `Resolution` 完成迁入，或返回拒绝/被抢占/超时错误码 `failed` | 已验证：`crates/model/src/request.rs:690-713` `(Kind::Window, Answer::Keep) => Resolution::Declined,` / `if claimed { d.requests.resolve(kind, Resolution::Claimed);` / `Effect::HandOver` |
+| `DisplayEnded` | `Displays::end_requests` / `Requests::end` (`request.rs:435-441, 750-754`) | 遍历 `[Kind::Help, Kind::Control, Kind::Window]` 全部结案为 `Resolution::Ended`，清空 `unheard = None`，并向所有 `waiters` 广播 `Woken::of(None, Resolution::Ended)` | 撤回该屏幕全部通知并收起卡片 | `wait_for_control` 返回 `control: "none"`（用户关闭则 `resolution: "closedByUser"`），借窗 `place_window` 返回错误码 `ended` | 已验证：`crates/model/src/request.rs:435-441` `pub(crate) fn end(&mut self) { for kind in [Kind::Help, Kind::Control, Kind::Window] { self.resolve(kind, Resolution::Ended); } self.unheard = None; self.wake(Woken::of(None, Resolution::Ended)); }` |

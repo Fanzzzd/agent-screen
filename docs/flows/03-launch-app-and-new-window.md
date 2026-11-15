@@ -1,12 +1,12 @@
 # 03. `launch_app`、新窗口捕获 (`Catch`) 与冷启动归属判定 (`ADR 0007`)
 
-macOS 没有“将应用直接启动到指定 `CGDirectDisplayID`”的公开 API。任何新启动或新建窗口的 Cocoa / Electron 应用都会默认在主显示器或鼠标所在屏幕弹出窗口并可能抢占前台焦点。`launch_app` 通过四阶段机制在不惊扰用户的前提下完成后台启动与窗口捕获：先在专用 `CFRunLoop` 线程挂载 `AXObserver` (`Catch`)，再根据引擎类型选择 `posix_spawn` (Chromium DevTools 管道加责任免除) 或 `NSWorkspaceOpenConfiguration` (`activates = false`) 启动进程，对已运行应用通过后台 AX 触发菜单栏“新建窗口”项，最后依据 `ADR 0007` (`crates/model/src/new_window.rs`) 的三秒行动窗口与三十秒冷启动规则判定每个新窗口归属并迁入目标虚拟屏。
+macOS 没有将应用直接启动到指定 `CGDirectDisplayID` 的公开接口。新启动或新建窗口的图形应用默认在主物理屏或指针所在屏幕创建窗口。`launch_app` 通过四阶段流程在不抢占用户焦点和指针的前提下完成后台启动与窗口捕获：先在专用 `agent-screen-catch` 线程挂载 `AXObserver` (`Catch`)，再按引擎类型选择 `devtools::spawn`（`posix_spawn` 注入 `--remote-debugging-pipe` 并免除 TCC 连带责任）或 `/usr/bin/open -g`（冷启动附加 `-j` 隐藏启动）拉起进程，对已运行应用通过后台读取菜单栏触发新建窗口菜单项，最后依据 `ADR 0007` (`crates/model/src/new_window.rs`) 的 `3s` 动作窗口与 `30s` 冷启动规则裁决归属并迁入虚拟屏。
 
 ## 线程与队列分工
 
-1. **GPUI 主线程 (`AsyncApp`)**：参数解析 (`Start::parse`)、会话状态登记 (`Display.started`)、发起冷启动巡检定时器 `watch_cold_start` (`apps/macos/src/control/agent.rs:5125-5926, 6500-6692`)。
-2. **`catch` 专用 `CFRunLoop` 线程**：`catch::runner()` (`apps/macos/src/mac/catch.rs:300-385`) 独立运行单线程 `CFRunLoopRun()`，注册 `AXObserverCreate` 监听目标 `pid` 的 `kAXWindowCreatedNotification` 与 `kAXApplicationShownNotification`，一经触发立即判定归属并将窗口移入 Agent Display，避免主线程忙碌错过窗口首帧。
-3. **GPUI `background_executor` 工作池**：执行 Bundle 解析 (`app::resolve`)、`devtools::spawn`、`NSWorkspace` 打开、`ax::press_new_window` 菜单触发、`settle` 窗口就绪轮询及网页加载等待 `wait_for_page` (`apps/macos/src/control/agent.rs:5006-6103`)。
+1. **GPUI 主线程 (`AsyncApp`)**：校验参数 (`open_target`、`Start::parse`)、串行化同一应用的并发启动 (`Core.launching`)、登记 `Display.started` 与 `Origin::Launched`、调度 `watch_cold_start` (`150ms` 节拍) (`apps/macos/src/control/agent.rs:1620-1646, 4966-6150, 6500-6690`)。
+2. **`agent-screen-catch` 专用线程**：`catch::runner` (`apps/macos/src/mac/catch.rs:323-358`) 独立运行 `CFRunLoopRun()`，持有所有 `AXObserver` 实例并接收新窗口通知，避免主线程忙碌漏掉首帧。
+3. **后台执行器 (`background_executor`) 与辅助线程**：运行应用解析 (`app::resolve`)、`devtools::spawn`（衍生 `agent-screen-devtools`、`agent-screen-reap`、`agent-screen-devtools-hello` 线程）、`/usr/bin/open -g`、`ax::press_new_window`、`settle` 与 `wait_for_page` (`apps/macos/src/mac/devtools.rs:203-241`, `agent.rs:5006-6102`)。
 
 ---
 
@@ -14,130 +14,132 @@ macOS 没有“将应用直接启动到指定 `CGDirectDisplayID`”的公开 AP
 
 ```mermaid
 flowchart TD
-    L1["Agent 调用 launch_app (displayId, app, url/open/arguments/environment)"] --> L2["Start::parse 校验互斥参数与文件 URL"]
-    L2 --> L3{"参数合法且本地待打开文件存在?"}
-    L3 -->|"否"| LX1["返回 invalid_params 或 not_found 错误"]
-    L3 -->|"是"| L4["display() 校验目标屏幕处于 Active 且非 Takeover"]
-    L4 --> L5{"屏幕可用?"}
-    L5 -->|"否"| LX2["返回 not_found / display_ended / user_takeover"]
-    L5 -->|"是"| L6["后台 app::resolve 按 Bundle ID / 路径 / 应用名查找 .app"]
-    L6 --> L7{"找到应用 Bundle 且非 Agent Screen 自身?"}
-    L7 -->|"否"| LX3["返回 not_found (找不到应用) 或 failed (禁止套娃启动自身)"]
-    L7 -->|"是"| L8["检查 app::running_pids 检测目标应用是否已在运行"]
-    L8 --> L9{"进程未运行 或 带自定义 env/args 请求新实例?"}
-    L9 -->|"是 (冷启动路径)"| L10{"Chromium 内核且首次启动 (支持 --remote-debugging-pipe)?"}
-    L10 -->|"是"| L11["devtools::spawn (posix_spawn + setsid + disclaim + FD 3/4 CDP 管道)"]
-    L10 -->|"否"| L12["open_in_background (NSWorkspace activates=false hides=冷启动隐藏)"]
-    L11 --> L13["等待进程 PID 就绪 (最多 COLD_START = 30s) 并挂载 Catch AXObserver"]
+    L1["Agent 调用 launch_app (display_id, app, 可选 open/arguments/environment)"] --> L2["input_display 校验显示器存活且非 Takeover"]
+    L2 --> L3{"显示器可用?"}
+    L3 -->|"否"| LX1["返回 not_found / ended / takeover 错误"]
+    L3 -->|"是"| L4["open_target 与 Start.parse 校验 URL/文件路径与参数类型"]
+    L4 --> L5{"参数合法且本地路径存在?"}
+    L5 -->|"否"| LX2["返回 invalid 或 not_found 错误"]
+    L5 -->|"是"| L6["后台 app.resolve 解析 .app 并在 Core.launching 排队 (450x100ms)"]
+    L6 --> L7{"找到 .app 且未等满 45s 并发锁?"}
+    L7 -->|"否"| LX3["返回 not_found (无此应用) 或 failed (另一会话正启动该应用)"]
+    L7 -->|"是"| L8["暂停同 pid 旧 kept_catches 并由 running_pids 检测运行实例"]
+    L8 --> L9{"!was_running (未运行或带 arguments/environment 请求新实例)?"}
+    L9 -->|"是 (冷启动路径)"| L10{"devtools.is_chromium 为真且 (!given 或 handles_web)?"}
+    L10 -->|"是"| L11["devtools.spawn (posix_spawn + SETSID + disclaim + FD 3/4 管道)"]
+    L10 -->|"否"| L12["open_in_background (/usr/bin/open -g -j 隐藏启动)"]
+    L11 --> L13["轮询进程 pid (200x20ms)，记 Display.started 与 30s 行动窗口并挂 Catch"]
     L12 --> L13
-    L9 -->|"否 (已运行应用复用进程)"| L14{"携带 url 或 open 文档参数?"}
-    L14 -->|"是"| L15["挂载 Catch::for_document 后调 open_in_background 打开目标 URL/文档"]
-    L14 -->|"否"| L16["挂载 Catch::start(limit=1) 后后台调用 ax::press_new_window(pid)"]
-    L16 --> L17{"菜单栏找到并成功触发新建窗口项?"}
-    L17 -->|"否"| LX4["按 already_running 诊断原因并返回 failed 错误"]
-    L17 -->|"是"| L18["进入图 2 Catch 实时拦截、settle 轮询与冷启动巡检"]
+    L9 -->|"否 (已运行应用复用进程)"| L14{"open 参数为本地文件路径 (!is_url)?"}
+    L14 -->|"是 (打开文档)"| L15["挂 Catch(limit=1) 并调 open_in_background (/usr/bin/open -g -a)"]
+    L14 -->|"否 (无 open 或 open 为 URL)"| L16["挂 Catch(limit=1) 后重试调用 ax.press_new_window(pid)"]
+    L16 --> L17{"press_new_window 成功触发 (快捷键或 AXPress)?"}
+    L17 -->|"否且携带 URL"| LX4["返回 failed 错误 (无法新建窗口打开 URL)"]
+    L17 -->|"否且未携 URL"| LR0["返回无窗结果 {window: null, wasRunning: true, reason, note}"]
+    L17 -->|"是 (Pressed)"| L18["进入图 2 240x25ms 捕获等待、settle 落位与冷启动巡检"]
     L13 --> L18
     L15 --> L18
 ```
 
 ### 图 1 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `L1` | `mcp` -> GPUI 主线程 | `tools::run("launch_app")` (`crates/mcp/src/tools.rs:845-875`), `agent.rs:1620-1646` | 转发 `displayId`、`app`、可选 `url`、`open`、`arguments`、`environment` | 要求辅助功能与录屏双权限已授予 | 请求进入 `L2` | 无变化 | [已验证: crates/mcp/src/tools.rs:845-875, apps/macos/src/control/agent.rs:1620-1646] |
-| `L2` | GPUI 主线程 | `Start::parse` / `file_target` / `open_target` (`apps/macos/src/control/agent.rs:4966-4993, 5131-5180, 5972-5989`) | 校验 `url` 与 `open` 不可同时传入、`arguments` 为字符串数组、`environment` 为键值字符串字典；本地文件路径或 `file://` URL 检查磁盘存在性 | 拦截非法 URL scheme 或不存在的文档路径 | 进入 `L3` 判定 | 无变化 | [已验证: apps/macos/src/control/agent.rs:4966-4993, apps/macos/src/control/agent.rs:5131-5180, apps/macos/src/control/agent.rs:5972-5989] |
-| `L3` | GPUI 主线程 | `Start::parse` / `file_target` 返回分支 (`apps/macos/src/control/agent.rs:5139-5168, 5980-5985`) | 判断参数类型校验与本地待打开文件路径检查是否全部通过 | 无 | 非法走 `LX1`，合法走 `L4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5139-5168, apps/macos/src/control/agent.rs:5980-5985] |
-| `LX1` | GPUI 主线程 | `ControlError::invalid` / `ControlError::not_found` (`apps/macos/src/control/agent.rs:5139-5168, 5980-5985`) | 参数拒绝，不启动任何进程 | 无 | `invalid_params` (类型/互斥错误) 或 `not_found` (`<path> does not exist`) | 无变化 | [已验证: apps/macos/src/control/agent.rs:5139-5168, apps/macos/src/control/agent.rs:5980-5985] |
-| `L4` | GPUI 主线程 | `input_display` / `display(&core, &p, true, cx)` (`apps/macos/src/control/agent.rs:1621, 5209, 7242-7287`) | `active = true`：检查屏幕存在、未处于 `Ended`、且未处于用户 `Takeover` | `Takeover` 期间严禁 Agent 启动新窗口干扰用户操作 | 进入 `L5` 判定 | 无变化 | [已验证: apps/macos/src/control/agent.rs:1621, apps/macos/src/control/agent.rs:7242-7287] |
-| `L5` | GPUI 主线程 | `usable` 结果分支 (`apps/macos/src/control/agent.rs:2686-2713`) | 裁定目标屏幕此刻是否允许接受新应用启动 | 无 | 可用走 `L6`，不可用走 `LX2` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2686-2713] |
-| `LX2` | GPUI 主线程 | `usable` (`apps/macos/src/control/agent.rs:2695-2711`) | 返回对应生命周期状态码 | 无 | `not_found` / `display_ended` / `user_takeover` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2695-2711] |
-| `L6` | 后台执行器 | `app::resolve` (`apps/macos/src/mac/app.rs:388-431`), `agent.rs:5214-5221` | 依次通过 `NSWorkspace.URLForApplicationWithBundleIdentifier:`、直接路径匹配、`/Applications` 与 `~/Applications` 名称扫描解析 `.app` 目录 | 支持传入 `"Safari"`、`"com.apple.Safari"` 或完整路径 | 解析结果进 `L7` | 无变化 | [已验证: apps/macos/src/mac/app.rs:388-431, apps/macos/src/control/agent.rs:5214-5221] |
-| `L7` | GPUI 主线程 | `launch` (`apps/macos/src/control/agent.rs:5217-5259`) | 检查 Bundle 是否存在，且 Bundle ID 不等于宿主自身 Bundle ID | 禁止在 Agent Display 中递归拉起 Agent Screen 自身 | 失败走 `LX3`，成功走 `L8` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5217-5259] |
-| `LX3` | GPUI 主线程 | `ControlError::not_found` / `ControlError::failed` (`apps/macos/src/control/agent.rs:5218-5221, 5253-5258`) | 报告应用未安装或禁止启动自身 | 无 | `not_found` (`application '<app>' not found`) 或 `failed` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5218-5221, apps/macos/src/control/agent.rs:5253-5258] |
-| `L8` | 后台执行器 | `app::running_pids` (`apps/macos/src/mac/app.rs:18-31`), `launch_now` (`apps/macos/src/control/agent.rs:5295-5315`) | 通过 `proc_listallpids` + `proc_pidpath` 枚举当前机器属于该 `.app` 的全部运行中 `pid`，并检查目标进程在用户屏是否已有窗口 | 不依赖主线程 `NSWorkspace.runningApplications` 缓存延迟 | 输出已有 `pids` 列表 | 无变化 | [已验证: apps/macos/src/mac/app.rs:18-31, apps/macos/src/control/agent.rs:5295-5315] |
-| `L9` | GPUI 主线程 + 后台 | `Start::new_instance` (`apps/macos/src/control/agent.rs:5197-5201, 5355-5385`) | 若 `running_pids` 为空，或显式带 `environment` / 自定义 `arguments` 请求独立实例，走冷启动；否则走已运行进程新建窗口路径 | 已运行的单实例 Cocoa 应用（如 Safari、Finder、微信）必须走菜单/打开文档路径，否则 `open` 只会激活旧窗口 | 分流至 `L10` 或 `L14` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5197-5201, apps/macos/src/control/agent.rs:5355-5385] |
-| `L10` | 后台执行器 | `devtools::is_chromium` (`apps/macos/src/mac/devtools.rs:29-42`), `agent.rs:5386-5405` | 检测 Bundle 内是否含 `Electron Framework.framework` 或 Chromium Framework，决定是否注入 `--remote-debugging-pipe` | 仅对新拉起的 Chromium/Electron 实例生效；已运行且未挂管道的实例无法补挂管道 (`devtools.rs:858-872`) | 是走 `L11`，否走 `L12` | 无变化 | [已验证: apps/macos/src/mac/devtools.rs:29-42, apps/macos/src/control/agent.rs:5386-5405] |
-| `L11` | 后台执行器 | `devtools::spawn` (`apps/macos/src/mac/devtools.rs:57-246`) | 调 `posix_spawn`：设 `POSIX_SPAWN_SETSID` (`0x0400`)、`responsibility_spawnattrs_setdisclaim(attr, 1)` 解除 TCC 父进程连带责任，映射匿名管道至子进程 `FD 3` (读) / `FD 4` (写) 并追加 `--remote-debugging-pipe`，启动后台读线程等待 `HELLO_WAIT = 30s` | 让后续 HTML5 拖拽与原生 `<select>` 下拉框可直接走 CDP 零焦点协议 (`ADR 0009`) | 立即拿到子进程 `pid` | 应用后台静默启动，不抢键盘焦点 | [已验证: apps/macos/src/mac/devtools.rs:57-250] |
-| `L12` | 后台执行器 | `open_in_background` (`apps/macos/src/control/agent.rs:5006-5054`) | 配置 `NSWorkspaceOpenConfiguration` (`MacOSX.sdk NSWorkspace.h`)：`activates = false`、冷启动时设 `hides = true` 先隐藏启动避免主屏闪现窗口，调用 `openApplicationAtURL:configuration:completionHandler:` 或 `openURLs:withApplicationAtURL:...` | 部分第三方框架忽略 `hides = true`，靠 `L13` 的 `Catch` 毫秒级移入虚拟屏兜底 | 异步拿到 `NSRunningApplication.processIdentifier` | 不打断用户前台输入焦点 | [已验证: apps/macos/src/control/agent.rs:5006-5054, MacOSX.sdk NSWorkspace.h] |
-| `L13` | 后台 + `catch` 线程 | `catch::agent_acted_for(..., COLD_START)` (`apps/macos/src/mac/catch.rs:83-87`), `Catch::start` (`catch.rs:438-447`), `agent.rs:5475-5510` | 登记 `30s` 冷启动行动信用，若启动器中转则轮询 `running_pids` 定位真身 `pid`（失败走 `failed: <name> did not start`），在 `catch` 线程挂载 `AXObserver` | 启动器型应用（先启 launcher 再拉主进程）通过 `app::is_launcher` 追踪子进程 (`app.rs:319-329`) | 进入 `L18` | 隐藏态应用在首窗迁入虚拟屏后再 `unhide` | [已验证: apps/macos/src/mac/catch.rs:83-87, apps/macos/src/mac/catch.rs:438-447, apps/macos/src/control/agent.rs:5475-5510] |
-| `L14` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5540-5725`) | 已运行应用分支：检查本次调用是否指定了待打开的 `url` 或本地文件 `open` | 区分打开指定资源与纯粹新建空白窗口 | 有资源走 `L15`，无资源走 `L16` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5540-5725] |
-| `L15` | 后台 + `catch` 线程 | `Catch::for_document` (`apps/macos/src/mac/catch.rs:455-462`), `open_in_background` (`agent.rs:5710-5765`) | 登记 `ACTION_WINDOW = 3s` 行动窗口，启动按文档路径匹配的 `Catch`，调用 `NSWorkspace` 后台向该应用发送打开文档/URL 事件；若文档已在某窗口打开则检查归属 (`shows_document`, `agent.rs:5991-5998`) | 若该文档早已在用户自己的屏幕上打开，绝不抢夺用户窗口，返回 `failed` 说明文档已在用户窗口打开 (`agent.rs:5770-5785`) | 进入 `L18` 等待新窗口 | 用户已有窗口保持不动 | [已验证: apps/macos/src/mac/catch.rs:455-462, apps/macos/src/control/agent.rs:5710-5785] |
-| `L16` | 后台执行器 | `Catch::start(pid, id, screen, Some(1))` + `ax::press_new_window` (`apps/macos/src/mac/ax.rs:2193-2275`, `agent.rs:5580-5635`) | 读取目标 `pid` 的 `kAXMenuBarAttribute`（超时 `MENU_TIMEOUT = 1.5s`），在“文件/File/Shell”菜单中用 `pick_new_window` 匹配“新建窗口 / New Window”菜单项并执行 `AXUIElementPerformAction(kAXPressAction)`；若首次无窗口则在 `RUNNING_APP_TURN = 4000ms` 内重试一次 | 全程后台 AX 触发菜单动作，不激活应用、不弹菜单 UI (`ADR 0001`) | 结果进 `L17` | 用户屏幕不闪现菜单 | [已验证: apps/macos/src/mac/ax.rs:2193-2275, apps/macos/src/control/agent.rs:5111, apps/macos/src/control/agent.rs:5580-5635] |
-| `L17` | 后台执行器 | `NewWindow` 枚举判定 (`apps/macos/src/control/agent.rs:5590-5660`) | 检查 `press_new_window` 返回值（已按下、无菜单项、菜单项禁用、或被模态对话框阻塞） | 单窗口工具（如系统设置、计算器）无“新建窗口”项 | 失败走 `LX4`，成功走 `L18` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5590-5660] |
-| `LX4` | GPUI 主线程 | `already_running` (`apps/macos/src/control/agent.rs:5928-5970`) | 检查应用在用户屏还是其它会话屏已有窗口，生成精确指引（例如建议调用 `place_window` 借用已有窗口，或说明菜单被模态框禁用） | 遵守不抢夺用户正在使用之单实例窗口的约束 | 错误码 `failed`（附带具体原因与下一步 `place_window` 指引） | 用户窗口不受影响 | [已验证: apps/macos/src/control/agent.rs:5928-5970] |
-| `L18` | 协同进入图 2 | `settle` + `watch_cold_start` (`apps/macos/src/control/agent.rs:5810-5900, 6016-6103, 6500-6692`) | 等待新窗口出现、归属裁决与迁入稳定 | 转入图 2 详述 | 转入图 2 | 转入图 2 | [已验证: apps/macos/src/control/agent.rs:6016-6103, apps/macos/src/control/agent.rs:6500-6692] |
+| `L1` | `mcp` -> GPUI 主线程 | `tools::run("launch_app")` (`crates/mcp/src/tools.rs:1042-1063`), `agent.rs:1620-1646` | 转发 `displayId`、`app`、可选 `open`（URL 或文件路径，无独立 `url` 字段）、`arguments`、`environment`；启动新进程时 `mcp` 调 `control.started_app` 记录孤儿认领表 | 需录屏与辅助功能权限 | 进入 `L2` | 无变化 | 已验证：`crates/mcp/src/tools.rs:1050-1056` `json!({ "displayId": display, "app": app, "open": a.string("open")?, "arguments": a.0.get("arguments"), "environment": a.0.get("environment") })` |
+| `L2` | GPUI 主线程 + 后台 | `input_display` (`apps/macos/src/control/agent.rs:1621, 7266-7285`) | 校验显示器存活且 `takeover == false`，并在后台预存 `cg::all_ids()` 快照 | 接管期间拒绝启动应用 | 进入 `L3` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1621` `let id = input_display(&core, &p, cx).await?;` |
+| `L3` | GPUI 主线程 | `usable` / `input_display` (`apps/macos/src/control/agent.rs:2686-2712, 7271-7275`) | 判定目标显示器是否归属本会话、未结束且未被用户接管 | 无 | 失败走 `LX1`，通过走 `L4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:7272-7274` `if core.read_with(cx, \|c, _\| c.displays.get(id).is_some_and(\|d\| d.takeover)) { return Err(ControlError::takeover(...)); }` |
+| `LX1` | GPUI 主线程 | `ControlError` (`apps/macos/src/control/server.rs:34-51`) | 返回对应状态错误码 | 无 | 错误码 `not_found`、`ended` 或 `takeover` | 无变化 | 已验证：`apps/macos/src/control/server.rs:36,42,48` `code: "not_found"` / `code: "ended"` / `code: "takeover"` |
+| `L4` | GPUI 主线程 | `open_target` / `Start::parse` / `file_target` (`apps/macos/src/control/agent.rs:4966-4991, 5131-5172, 5972-5988`) | 展开 `~/`，检查绝对文件路径或 `file://` 目标在磁盘上存在；校验 `arguments` 为字符串数组、`environment` 为非空无 `=` 键的字符串字典 | 若为浏览器且传入本地路径，`file_target` 转为 `file://` URL 以免在用户前台窗口开新标签 (`#168`) | 进入 `L5` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4973-4976` `if std::path::Path::new(text).exists() { Ok(text.to_string()) } else { Err(ControlError::not_found(format!("no file at {text}"))) }`；`agent.rs:5973` `if let Some(path) = target.filter(\|t\| browser && t.starts_with('/'))` |
+| `L5` | GPUI 主线程 | 参数校验分支 (`apps/macos/src/control/agent.rs:1625-1626, 5235`) | 汇总 `open_target`、`Start::parse` 与 `file_target` 校验结果 | 无 | 非法走 `LX2`，合法走 `L6` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:1625-1626` `let target = p.string("open").map(\|t\| open_target(&t)).transpose()?; let start = Start::parse(&p)?;` |
+| `LX2` | GPUI 主线程 | `ControlError::invalid` / `not_found` (`apps/macos/src/control/agent.rs:4976, 4987, 5139-5165, 5982`) | 纯参数拒绝，不启动任何进程 | 无 | 错误码 `invalid` 或 `not_found` (`no file at ...`) | 无变化 | 已验证：`apps/macos/src/control/agent.rs:4987-4989` `Err(ControlError::invalid("open takes a URL such as https://example.com or an absolute file path"))` |
+| `L6` | 后台执行器 + 主线程 | `app::resolve` (`apps/macos/src/mac/app.rs:388-430`), `launch` (`agent.rs:5217-5256`) | 按 Bundle ID、`Info.plist` 路径或 `fullPathForApplication:` 解析 `.app`；随后在 `Core.launching` 上等待最多 `450 * 100ms` (`45s`) 获取同一应用启动互斥权 | 防止两个会话同时启动同一应用导致无法区分各自新窗口 (`core.rs:98-100`) | 进入 `L7` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5243-5250` `for _ in 0..450 { free = core.update(cx, \|c, _\| c.launching.insert(path.clone())); ... .timer(Duration::from_millis(100)).await; }` |
+| `L7` | GPUI 主线程 | `launch` (`apps/macos/src/control/agent.rs:5217-5256`) | 判断 `.app` 是否存在及是否拿到 `Core.launching` 锁（代码中不拦截宿主自身 Bundle ID） | 无 | 失败走 `LX3`，成功走 `L8` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5217-5221,5252-5255` `.ok_or_else(\|\| ControlError::not_found(format!("no app named {name}...")))` / `if !free { return Err(ControlError::failed(...)) }` |
+| `LX3` | GPUI 主线程 | `launch` (`apps/macos/src/control/agent.rs:5218-5220, 5253-5255`) | 返回找不到应用或并发启动忙错误 | 无 | `not_found` (`no app named {name}...`) 或 `failed` (`another session is still launching {name}...`) | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5253-5255` `Err(ControlError::failed(format!("another session is still launching {name}; try again shortly")))` |
+| `L8` | 后台执行器 + 主线程 | `app::running_pids` (`apps/macos/src/mac/app.rs:18-31`), `launch` (`agent.rs:5258-5275, 5304-5310`) | 暂停同 `pid` 上既有的 `kept_catches` 以免争抢本次新窗口；通过 `proc_listallpids` + `proc_pidpath` + `NSRunningApplication` 枚举运行中实例 | 脱离主线程快速枚举进程 | 得到 `instances_before` 与 `was_running` | 无变化 | 已验证：`apps/macos/src/mac/app.rs:25-29` `process_ids().into_iter().filter(\|&pid\| process_path(pid).as_deref() == Some(executable.as_path()))`；`agent.rs:5266` `kept.pause(on);` |
+| `L9` | GPUI 主线程 | `Start::new_instance` (`apps/macos/src/control/agent.rs:5197-5199, 5303-5310`) | `fresh = !arguments.is_empty() \|\| !environment.is_empty()`，`was_running = !fresh && !instances_before.is_empty()` | 若目标为单实例应用且已在运行，`fresh` 新进程退出后由 `already_running` 兜底 (`#29`) | `!was_running` 走 `L10`，`was_running` 走 `L14` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5197-5199,5309` `fn new_instance(&self) -> bool { !self.arguments.is_empty() \|\| !self.environment.is_empty() }` / `let was_running = !fresh && !instances_before.is_empty();` |
+| `L10` | 后台执行器 | `devtools::is_chromium` (`apps/macos/src/mac/devtools.rs:29-40`), `agent.rs:5353-5358` | 扫描 `Contents/Frameworks/*.framework` 下是否存在 `chrome_100_percent.pak`；若未传 `open` 或该应用支持网页 (`app::handles_web`)，走 DevTools 管道启动 | 非浏览器 Chromium 应用（如 Electron）带文档打开时改走 `open -g` (`agent.rs:5351-5356`) | 是走 `L11`，否走 `L12` | 无变化 | 已验证：`apps/macos/src/mac/devtools.rs:36-38` `f.join("Resources/chrome_100_percent.pak").exists() \|\| f.join("Versions/Current/Resources/chrome_100_percent.pak").exists()` |
+| `L11` | 后台执行器 | `devtools::spawn` (`apps/macos/src/mac/devtools.rs:57-67, 106-248`), `agent.rs:5360-5403` | 若宿主正在预造备用屏 (`making_spare`) 最多先等 `100 * 20ms` (`2s`，防 `#123`)；随后调用 `posix_spawn`：设 `POSIX_SPAWN_SETSID` (`0x0400`)、`responsibility_spawnattrs_setdisclaim(&mut attrs, 1)`，将匿名管道 `dup2` 至子进程 `FD 3` / `FD 4`，传入 `--remote-debugging-pipe`（浏览器附带 `--window-position`/`--window-size`），并在 `agent-screen-devtools-hello` 线程等 `HELLO_WAIT = 30s` 握手；若 `spawn` 失败回退 `L12` | 供后续网页内 HTML5 拖拽与下拉框使用 (`ADR 0010`)；仅调试构建支持 `AGENTSCREEN_OPEN_DELAY_MS` (`agent.rs:4996-5002`) | 拿到新进程 `pid` | 后台启动，不抢前台焦点 | 已验证：`apps/macos/src/mac/devtools.rs:114,151-152,167,248` `c_string("--remote-debugging-pipe")` / `posix_spawn_file_actions_adddup2(&mut actions, to_app.0, 3)` / `responsibility_spawnattrs_setdisclaim(&mut attrs, 1)` / `const HELLO_WAIT: Duration = Duration::from_secs(30);` |
+| `L12` | 后台执行器 | `open_in_background` (`apps/macos/src/control/agent.rs:5006-5052, 5181-5194`) | 执行 `/usr/bin/open -g`（不激活前台），冷启动传 `-j`（隐藏启动），`new_instance` 传 `-n`，附带 `--env`；未传自定义参数时默认追加 `-NSShowAppCentricOpenPanelInsteadOfUntitledFile NO -ApplePersistenceIgnoreState YES` | 阻止文档型应用弹出跨进程系统打开文件面板留在用户屏上 (`agent.rs:5174-5188`) | 衍生等待线程监听 `open` 退出码 | 后台隐藏启动，主屏不闪现窗口 | 已验证：`apps/macos/src/control/agent.rs:5019-5036` `let mut open = std::process::Command::new("/usr/bin/open"); open.arg("-g"); ... if hidden { open.arg("-j"); } ... open.arg("--args").args(&arguments);` |
+| `L13` | 后台 + `agent-screen-catch` 线程 | `launch_now` (`apps/macos/src/control/agent.rs:5440-5573`), `catch::agent_acted_for` (`catch.rs:83-85`) | 最多轮询 `200 * 20ms` (`4s`) 匹配新 `pid`（失败报 `{name} did not start`，单实例秒退转 `already_running`）；将 `pid` 写入 `Display.started`，登记 `LATE_WINDOW_WAIT = 30s` 冷启动窗口期，最多重试 `100 * 20ms` 挂载 `Catch` 并隐藏移入抢跑首窗 (`150 * 20ms`) 后调用 `app::unhide(pid)` | 先把窗口移入虚拟屏坐标再 `unhide`，避免主屏闪现 | 进入 `L18` | 首窗直接在虚拟屏显现 | 已验证：`apps/macos/src/control/agent.rs:5440,5488,5506,5572` `for _ in 0..200 {` / `ControlError::failed(format!("{name} did not start"))` / `agent_acted_for(id, pid, LATE_WINDOW_WAIT)` / `off(cx, move \|\| app::unhide(pid)).await;` |
+| `L14` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5316-5348, 5578`) | 已运行应用分支：先调 `forwarder.remember_user_window(pid)` 记下用户当前窗口以便事后归还焦点，再区分打开本地文件 (`!is_url`) 与新建窗口/打开 URL (`asked_for_window`) | 运行中浏览器直接 `open <url>` 会在用户前台窗口加标签，因此必须先新建窗口再填 URL (`agent.rs:5324-5328`) | 本地文件走 `L15`，无参或 URL 走 `L16` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5328,5346,5578` `let is_url = target.is_some_and(\|t\| !t.starts_with('/'));` / `.remember_user_window(pid)` / `let asked_for_window = was_running && (target.is_none() \|\| is_url);` |
+| `L15` | 后台 + `agent-screen-catch` 线程 | `Catch::start(..., Some(1))` + `open_in_background` (`apps/macos/src/control/agent.rs:5316-5321, 5409-5413`) | 挂载 `limit = Some(1)` 的 `Catch`，执行 `/usr/bin/open -g -a <app> <file>` 让运行中应用在独立新窗口打开该文件 | 若超时未见新窗，图 2 切换为 `Catch::for_document` 精准按 `AXDocument` 路径捕获 | 进入 `L18` | 不抢前台焦点 | 已验证：`apps/macos/src/control/agent.rs:5316-5317,5410` `let limit = was_running.then_some(1);` / `open_in_background(path.clone(), first, !was_running, start, cx)` |
+| `L16` | 后台执行器 | `ax::press_new_window` (`apps/macos/src/mac/ax.rs:2193-2277`), `agent.rs:5579-5623` | 读取 `"AXMenuBar"`（无额外自定义超时常量），遍历两级菜单由 `pick_new_window` 匹配新建窗口项；若菜单项带快捷键（如 `cmd+n`）优先调用 `input::post_key_to_pid(pid, chord)` 后台投键，否则调 `AXPress`；`NotReady` 最多重试 `10 * 150ms`，刚启动无窗应用报 `Missing` 再等最多 `20 * 150ms` | 不直接使用盲发 `cmd+n`，避免在备忘录/日历中误建用户数据 (`ax.rs:2191-2192`) | 进入 `L17` | 用户屏幕不弹出菜单 | 已验证：`apps/macos/src/mac/ax.rs:2220-2221,2267-2271` `pub fn press_new_window(pid: i32) -> NewWindow { let Some(bar) = element_attribute(&application(pid), "AXMenuBar")` / `else if let Some(chord) = chord { super::input::post_key_to_pid(pid, chord); NewWindow::Pressed }` |
+| `L17` | GPUI 主线程 | `NewWindow` 分支 (`apps/macos/src/control/agent.rs:5625-5654`) | 将 `Pressed`、`Disabled` (`app_busy`)、`Missing` (`still_starting` / `just_started` / `no_new_window`)、`NotReady` (`menus_unreadable`) 映射为结果 | 区分带 URL（失败必须报错防污染用户窗口）与不带 URL（返回结构化 `reason`） | `Pressed` 走 `L18`，带 URL 失败走 `LX4`，无 URL 失败走 `LR0` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5625-5634` `let missing = match asked { ax::NewWindow::Pressed => None, ax::NewWindow::Disabled => Some("app_busy"), ... ax::NewWindow::NotReady => Some("menus_unreadable"), };` |
+| `LX4` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5637-5646`) | 运行中浏览器无法新建窗口时拒绝发送 URL，以免把网页开进用户正在看的浏览器标签页 | 严格保护用户现有浏览器窗口 | 错误码 `failed`：`{name} is running and can't open a new window now ({reason}), so the URL was not opened...` | 用户窗口不受影响 | 已验证：`apps/macos/src/control/agent.rs:5643-5645` `return Err(ControlError::failed(format!("{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}")));` |
+| `LR0` | 宿主 -> `mcp` | `launch_now` (`apps/macos/src/control/agent.rs:5647-5652`), `launch_output` (`crates/mcp/src/tools.rs:2218-2247`) | 非错误返回 `Launched { window: None, was_running: true, reason: Some(reason), pid: None }`，由 `mcp` 补充对应 `note` 指引（如建议询问用户交出窗口或退出重开） | 注意：单窗口应用（如计算器）走此 `window: null` 分支而非抛异常 | 返回 `{"window": null, "wasRunning": true, "reason": "...", "note": "..."}` | 用户窗口不受影响 | 已验证：`crates/mcp/src/tools.rs:2246` `json!({ "window": null, "wasRunning": was_running, "reason": reason, "note": note })` |
+| `L18` | 协同进入图 2 | `launch_now` (`apps/macos/src/control/agent.rs:5681-5922`) | 进入 `240 * 25ms` (`6s`) 捕获等待、`settle` 落位与后台慢启动接力 | 转入图 2 | 转入图 2 | 转入图 2 | 已验证：`apps/macos/src/control/agent.rs:5681-5683` `for tick in 0..240 { cx.background_executor().timer(Duration::from_millis(25)).await;` |
 
 ---
 
-## 图 2：`Catch` 实时拦截、`ADR 0007` 归属裁决与 `watch_cold_start` 60 秒巡检子流程
+## 图 2：`Catch` 实时拦截、`ADR 0007` 归属裁决、`settle` 落位与 `watch_cold_start` 巡检
 
 ```mermaid
 flowchart TD
-    W1["catch 线程收到 kAXWindowCreatedNotification 或 settle 轮询发现新窗口"] --> W2["catch::role 读取 AXRole / AXSubrole 分类窗口角色"]
-    W2 --> W3{"角色为 Ignored (Tooltip / Menu / Dock / 零尺寸装饰层)?"}
-    W3 -->|"是"| WX1["忽略该非窗口元素，继续等待真实窗口"]
-    W3 -->|"否"| W4["catch::seen 汇总四维证据: agent_acted(3s) / cold_start(30s) / user_acted(3s) / only_here"]
-    W4 --> W5["纯模型 new_window::Seen::owner() 裁决窗口归属 (ADR 0007)"]
-    W5 --> W6{"裁决结果 Owner?"}
-    W6 -->|"Users (用户近期操作过该应用或启动器)"| WX2["记入 skipped 绝不触碰，将窗口留给用户屏幕"]
-    W6 -->|"Unclear (多处有窗且无明确因果)"| W7["暂记入 undecided 不移动，在结果 strayed 字段告知 Agent"]
-    W6 -->|"Agents (Agent 因果明确且无用户并发操作)"| W8["windows::place_for_agent 写入 claims.json 并调 AX 将窗口移入目标虚拟屏"]
-    W8 --> W9{"宿主安装有 AeroSpace 且纳管该窗口?"}
-    W9 -->|"是"| W10["follow_aerospace 将窗口迁至虚拟屏工作区防止被拉回物理屏"]
-    W9 -->|"否"| W11{"冷启动应用此前处于 hides=true 隐藏态?"}
-    W10 --> W11
-    W11 -->|"是"| W12["窗口已在虚拟屏就位，调用 app::unhide(pid) 解除隐藏"]
-    W11 -->|"否"| W13["settle 轮询窗口尺寸与标题稳定 (冷启动最多 30s / 菜单新建 3s / 打开文档 2s)"]
-    W12 --> W13
-    W13 --> W14{"携带 url 参数打开网页?"}
-    W14 -->|"是"| W15["wait_for_page 等待浏览器 AXBusy 清零或地址栏稳定"]
-    W14 -->|"否"| W16["登记 Display.started 与 Origin::Launched 并启动 watch_cold_start"]
-    W15 --> W16
-    W16 --> W17["watch_cold_start 每 250ms 巡检最多 RESOLVE_BY = 60s 处理慢启动后续弹窗/主窗"]
-    W17 --> R1["返回 pid / app / bundleId / window (含屏幕局部坐标) 及可选 strayed 提示"]
-    W7 --> W18{"等待窗口超时且无任何 Agents 窗口就位?"}
-    WX2 --> W18
-    W18 -->|"是"| WX3["返回 failed (未等到可归属新窗口，提示 list_windows strays:true)"]
-    W18 -->|"否 (已有主窗)"| R1
+    W1["agent-screen-catch 线程收到 AXWindowCreated 通知"] --> W2{"AXRole == Some(AXWindow)?"}
+    W2 -->|"否 (面板/Sheet 或主线程忙未答)"| WX1["跳过 (冷启动未答窗口留给 watch_cold_start 处理)"]
+    W2 -->|"是"| W3{"属于 kept 持续监听阶段?"}
+    W3 -->|"否 (启动首窗阶段: 按 document 与 limit 过滤)"| W7["ax.move_element_into 移入虚拟屏 + follow_aerospace (6次共630ms)"]
+    W3 -->|"是"| W4["catch.seen 采集 agent(3s/30s) / user(3s) / only_here 三项事实"]
+    W4 --> W5{"new_window.Seen.owner() 纯模型裁决"}
+    W5 -->|"Owner.User (用户近期操作过该应用/Dock/启动器)"| WX2["推入 skipped (同步至 user_made)，若冷启动则调 end_cold_start"]
+    W5 -->|"Owner.Unknown (双方均操作或跨屏无因果)"| W6["推入 undecided，留在原处供下次截图 strayed 报告"]
+    W5 -->|"Owner.Agent"| W7
+    W7 --> W8["launch_now 240x25ms (6s) 轮询 find_ours 发现目标新窗口"]
+    W8 -->|"命中新窗口"| W9["settle (12轮 x 200ms/30ms): claim(Launched) + place + replacement 跟踪"]
+    W9 --> W10{"运行中应用打开 URL?"}
+    W10 -->|"是"| W11["ax.open_in_address_field 或 open_in_background 注入 URL 并等标题变化 (40x50ms)"]
+    W10 -->|"否"| W12{"冷启动新进程 (!was_running)?"}
+    W11 --> W12
+    W12 -->|"是"| W13["forwarder.wake 消耗首击激活，保存 kept_catch 并启动 watch_cold_start (150ms 节拍)"]
+    W12 -->|"否"| W14["保存 kept_catch; 若 is_url 则 wait_for_page 最多等 10s (100ms 步长)"]
+    W13 --> W14
+    W14 --> R1["launch_output 返回 {window, wasRunning} (局部截图坐标)"]
+    W8 -->|"满 6s 或过等待窗口仍无新窗"| W15{"后续慢窗口接力分支"}
+    W15 -->|"运行中打开文档且未在旧窗显示"| W16["挂 Catch.for_document 并后台轮询 200x150ms (30s)"]
+    W15 -->|"冷启动新进程"| W17["启动 watch_cold_start (每 150ms 巡检至 COLD_START=30s / RESOLVE_BY=60s)"]
+    W15 -->|"运行中打开 URL 但无新窗"| WX3["返回 failed 错误 (未开新窗故未打开 URL)"]
+    W16 --> LR1["返回 {window: null, wasRunning, reason: still_opening/existing_window, note}"]
+    W17 --> LR2["返回 {window: null, wasRunning: false, reason: still_starting, note}"]
 ```
 
 ### 图 2 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `W1` | `catch` `CFRunLoop` 线程 + 后台执行器 | `Catch` 回调 (`apps/macos/src/mac/catch.rs:560-665`), `settle` (`apps/macos/src/control/agent.rs:6016-6103`) | 双路发现：`AXObserver` 实时推送 `kAXWindowCreatedNotification`，同时 `settle` 轮询 `CGWindowList` 与 AX 窗口表弥补部分应用漏发 AX 通知 | Electron / Qt 启动首窗有时晚发 AX 通知，双路互补确保不漏窗 | 发现候选 `(pid, window_id)` | 无变化 | [已验证: apps/macos/src/mac/catch.rs:560-665, apps/macos/src/control/agent.rs:6016-6103] |
-| `W2` | `catch` 线程 / 后台线程 | `catch::role` (`apps/macos/src/mac/catch.rs:257-269`), `new_window::role` (`crates/model/src/new_window.rs:118-156`) | 读取 `kAXRoleAttribute`、`kAXSubroleAttribute` 与窗口层级，归类为 `Standard`、`Dialog`、`Ignored` 或 `Unreadable`（AX 超时未答） | AX 无响应窗口归为 `Unreadable`，在 `watch_cold_start` 等待至最多 `60s` (`new_window.rs:449-478`) | 分类结果进 `W3` | 无变化 | [已验证: apps/macos/src/mac/catch.rs:257-269, crates/model/src/new_window.rs:118-156] |
-| `W3` | `catch` 线程 | `new_window::watch` (`crates/model/src/new_window.rs:158-176`) | 过滤菜单浮层、工具提示、输入法候选框等非独立窗口 | 防止把弹出菜单当成应用主窗口搬走 | `Ignored` 走 `WX1`，其余走 `W4` | 无变化 | [已验证: crates/model/src/new_window.rs:158-176] |
-| `WX1` | `catch` 线程 | `Catch` 循环忽略分支 | 跳过当前元素，保持 `Catch` 计数额度 `limit` 不减 | 无 | 继续等待 | 无变化 | [已验证: crates/model/src/new_window.rs:158-176, apps/macos/src/mac/catch.rs:585-605] |
-| `W4` | `catch` 线程 | `catch::seen` (`apps/macos/src/mac/catch.rs:161-255`), `ACTION_WINDOW = 3s` / `COLD_START = 30s` (`crates/model/src/new_window.rs:11-20`) | 采集四项布尔事实：当前屏是否在 `3s` 内操作过该 `pid`（或处于 `30s` 冷启动期）、其它会话是否在 `3s` 内操作过、用户是否在 `3s` 内点击过该应用/Dock/Spotlight 或按过快捷键 (`user_acted_recently`)、该应用是否仅在本虚拟屏有窗口 (`only_on`) | 若用户在 Agent 启动同一应用期间恰好点了 Dock 图标，`user_acted = true` 立即终止冷启动特权 (`ends_cold_start`, `new_window.rs:69-74`) | 生成 `Seen` 快照 | 优先保护用户本人操作意图 | [已验证: apps/macos/src/mac/catch.rs:161-255, crates/model/src/new_window.rs:11-75] |
-| `W5` | 纯模型函数 | `Seen::owner` (`crates/model/src/new_window.rs:43-67`) | 纯逻辑裁决 (`ADR 0007`)：只要 `user == true` 必判 `Owner::Users`；否则当 `(agent \|\| cold_start \|\| only_here)` 且无其它会话竞争时判 `Owner::Agents`；其余判 `Owner::Unclear` | 零 OS 调用，由单元测试穷举验证 (`new_window.rs:263-375`) | 产出 `Agents` / `Users` / `Unclear` | 无变化 | [已验证: crates/model/src/new_window.rs:43-67, ADR 0007] |
-| `W6` | `catch` 线程 | `Catch` 分支派发 (`apps/macos/src/mac/catch.rs:606-660`) | 根据 `Owner` 决定拦截迁入、彻底放手还是挂起待查 | 无 | 三路分流 | 无变化 | [已验证: apps/macos/src/mac/catch.rs:606-660] |
-| `WX2` | `catch` 线程 | `Catch::skipped` (`apps/macos/src/mac/catch.rs:522-525, 615`) | 记录窗口 ID 到 `skipped`，绝不移动该窗口 | 遵守核心红线：宁可让 Agent 重试也不抢走用户刚打开的窗口 | 若无其它新窗则转入 `W18` | 用户自己打开的新窗口安然留在物理屏 | [已验证: apps/macos/src/mac/catch.rs:522-525, crates/model/src/new_window.rs:263-284] |
-| `W7` | `catch` 线程 + 主线程 | `Catch::undecided` (`apps/macos/src/mac/catch.rs:527-530`), `undecided_strays` / `add_strayed` (`apps/macos/src/control/agent.rs:3133-3195`) | 不主动搬动归属存疑窗口，将其记入 `Display.undecided`，在工具输出中附带 `strayed` 列表 | 让 Agent 通过 `list_windows(strays: true)` + `place_window` 走显式审批流 | 附带 `strayed` 提示 | 存疑窗口不被静默搬走 | [已验证: apps/macos/src/mac/catch.rs:527-530, apps/macos/src/control/agent.rs:3133-3195] |
-| `W8` | `catch` 线程 / 后台线程 | `windows::place_for_agent` (`apps/macos/src/mac/windows.rs:621-630`), `claims::claim` (`apps/macos/src/mac/claims.rs:138-143`) | 在 `Lanes::agent_move` 保护下写 `claims.json`，计算居中/适配目标虚拟屏 `bounds` 的窗口框，调用 `ax::place_window` 设置 `kAXPositionAttribute` 与 `kAXSizeAttribute` | 全屏幕 (`AXFullScreen`) 或最小化窗口会先退出最小化或拒绝移动 | 窗口物理落入虚拟屏 | 用户桌面不残留该窗口 | [已验证: apps/macos/src/mac/windows.rs:621-630, apps/macos/src/mac/claims.rs:138-143] |
-| `W9` | 后台线程 | `AeroSpace::current()` (`apps/macos/src/mac/aerospace.rs:18-26`) | 检查宿主是否存在运行中的 AeroSpace 平铺窗口管理器 | 未装 AeroSpace 或已配置 `ignored-monitors` 时更快收敛 | 是走 `W10`，否走 `W11` | 无变化 | [已验证: apps/macos/src/mac/aerospace.rs:18-26] |
-| `W10` | 后台线程 | `catch::follow_aerospace` (`apps/macos/src/mac/catch.rs:695-730`) | 若 AeroSpace 把新窗口抓回物理屏工作区，调用 AeroSpace CLI 将其同步迁入目标虚拟屏对应监视器，但绝不切换用户当前焦点工作区 | 遵守测试与运行约束：绝不切用户的 AeroSpace 工作区 | 窗口稳定留在虚拟屏 | 用户当前平铺布局零跳动 | [已验证: apps/macos/src/mac/catch.rs:695-730] |
-| `W11` | 后台执行器 | `app::is_hidden` (`apps/macos/src/mac/app.rs:364-368`), `agent.rs:5825-5845` | 检查 `L12` 冷启动时是否设了 `hides = true` | 必须在首窗已迁到虚拟屏坐标之后再取消隐藏，否则取消隐藏瞬间会在主屏闪一下 | 是走 `W12`，否走 `W13` | 无主屏闪烁 | [已验证: apps/macos/src/mac/app.rs:364-386, apps/macos/src/control/agent.rs:5825-5845] |
-| `W12` | 后台执行器 | `app::unhide` (`apps/macos/src/mac/app.rs:380-386`) | 调用 `-[NSRunningApplication unhide]` 让已在虚拟屏上的窗口进入可渲染在屏列表 (`on_screen_windows`) | `unhide` 不等于 `activate`，不会抢占前台键盘焦点 | 窗口可在虚拟屏被截图和流捕获 | Peek 缩略图显示新应用画面 | [已验证: apps/macos/src/mac/app.rs:380-386] |
-| `W13` | 后台执行器 | `settle` / `LATE_WINDOW_WAIT = 30s` / `ASKED_WINDOW_WAIT = 3000ms` / `OPENED_WINDOW_WAIT = 2000ms` (`apps/macos/src/control/agent.rs:5101-5109, 6016-6103`) | 分场景超时轮询目标窗口出现在虚拟屏并完成初始布局（含 Splash 启动屏替换为正式主窗的 `replacement` 跟踪，`agent.rs:6105-6139`） | 若期间屏幕被关闭立即返回 `ControlError::ended` (`agent.rs:6022`) | 锁定最终 `Window` 快照 | Viewer 画面呈现稳定主窗口 | [已验证: apps/macos/src/control/agent.rs:5101-5109, apps/macos/src/control/agent.rs:6016-6139] |
-| `W14` | 后台执行器 | `launch_now` (`apps/macos/src/control/agent.rs:5855-5870`) | 判断本次启动是否打开了 `http://` / `https://` / `file://` 网页地址 | 仅网页加载需要额外等待 DOM 首屏就绪 | 是走 `W15`，否走 `W16` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5855-5870] |
-| `W15` | 后台执行器 | `wait_for_page` (`apps/macos/src/control/agent.rs:5056-5081`) | 轮询浏览器窗口内 `AXWebArea` 的 `AXLoaded` / `AXBusy` 属性，等待首屏加载完成或达到软超时 | 超时不报错，直接放行给 Agent 自行查看页面或调 `wait_for_change` | 页面初始树就绪 | Peek 中页面渲染完毕 | [已验证: apps/macos/src/control/agent.rs:5056-5081] |
-| `W16` | GPUI 主线程 | `Model::note_launched` / `guard_placed` (`apps/macos/src/control/agent.rs:5875-5900, 6141-6218`) | 将 `pid` 记入 `Display.started`，将窗口记为 `Origin::Launched`，启动短暂坐标守卫防止应用启动恢复逻辑把窗口移回主屏 | 某些应用在窗口显示 200ms 后自己读上次偏好把坐标改回 `(100, 100)`，`guard_placed` 会将其拉回虚拟屏 | 归属正式确立 | 窗口稳固停留在虚拟屏 | [已验证: apps/macos/src/control/agent.rs:5875-5900, apps/macos/src/control/agent.rs:6141-6218] |
-| `W17` | GPUI 主线程 + 后台 | `watch_cold_start` (`apps/macos/src/control/agent.rs:6500-6692`), `RESOLVE_BY = 60s` / `Step` (`crates/model/src/new_window.rs:22, 178-251`) | 启动后台 `250ms` 节拍器持续跟进最多 `60s`：捕获慢启动应用稍后弹出的登录窗/更新窗，按 `retries_catch` 退避重试未答 AX 窗口；若用户中途介入该应用则立即停止自动收编 | 满 `60s` 仍无法读取 AX 的窗口记入 `undecided` 供 Agent 查看而非盲目移动 (`new_window.rs:466-478`) | 后台异步延续，不阻塞本次返回 | 后续慢弹窗也不会跳到用户脸上 | [已验证: apps/macos/src/control/agent.rs:6500-6692, crates/model/src/new_window.rs:22, crates/model/src/new_window.rs:178-251] |
-| `R1` | 宿主 -> `mcp` 进程 | `launch_output` (`crates/mcp/src/tools.rs:860-874, 2203-2245`) | 输出 JSON：`pid`、`app`、`bundleId`、`window`（转换到截图局部像素系 `in_shot`），若存在 `undecided` 窗口则附加 `strayed` 说明 | 坐标已按截图缩放比例对齐，Agent 可直接用于下一步 `computer` 点击 | 返回完整启动结果 JSON | Peek 显示应用名称与实时缩略图 | [已验证: crates/mcp/src/tools.rs:860-874, crates/mcp/src/tools.rs:2203-2245] |
-| `W18` | 后台执行器 | `settle` 超时出口 (`apps/macos/src/control/agent.rs:6085-6102`) | 检查超时时刻是否一个归属窗口都没拿到 | 无窗口应用（菜单栏常驻工具）或窗口被判给用户时触发 | 超时无窗走 `WX3` | 无变化 | [已验证: apps/macos/src/control/agent.rs:6085-6102] |
-| `WX3` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:5904-5924, 6092-6102`) | 区分进程已退出、仅有存疑窗口 (`strays`)、或纯菜单栏无窗口应用，给出针对性错误文本 | 不盲目抓取物理屏同名应用窗口 | 错误码 `failed`：`launched <name> (pid P), but no window appeared within Ns...` | 无变化 | [已验证: apps/macos/src/control/agent.rs:5904-5924, apps/macos/src/control/agent.rs:6092-6102] |
+| `W1` | `agent-screen-catch` 线程 | `created` (`apps/macos/src/mac/catch.rs:329, 563-575`) | 独立 `CFRunLoop` 线程收到 `AXObserver` 新窗口回调；若 `paused == true` 直接返回 | 不阻塞 GPUI 主线程 | 事件进入 `W2` | 无变化 | 已验证：`apps/macos/src/mac/catch.rs:329,563` `.name("agent-screen-catch".into())` / `extern "C" fn created(` |
+| `W2` | `agent-screen-catch` 线程 | `created` (`apps/macos/src/mac/catch.rs:578-592`) | 读取窗口 `"AXRole"` 是否等于 `Some("AXWindow")` | 对话框 Sheet、菜单及启动期主线程卡死未响应 (`role.is_none()`) 的窗口不在此处强移 | 非 `AXWindow` 走 `WX1`，`AXWindow` 走 `W3` | 无变化 | 已验证：`apps/macos/src/mac/catch.rs:578-579` `let role = ax::string_attribute(window, "AXRole"); if role.as_deref() != Some("AXWindow") {` |
+| `WX1` | `agent-screen-catch` 线程 | `created` (`apps/macos/src/mac/catch.rs:584-591`) | 记录未描述窗口日志并交由冷启动 `watch_cold_start` 后续跟进，不消耗 `limit` 计数 | 避免在应用繁忙时卡死共享 `catch` 线程 | 继续监听 | 无变化 | 已验证：`apps/macos/src/mac/catch.rs:586` `"catch: pid {} made a window it doesn't describe yet, {:?}; left to the launch's watch"` |
+| `W3` | `agent-screen-catch` 线程 | `created` (`apps/macos/src/mac/catch.rs:594-607`) | 若为归还监控 (`target.home.is_some()`) 则将无 Agent 因果的自开窗退回 `home`；否则区分启动期即时捕获 (`kept == false`) 与存活期常驻捕获 (`kept == true`) | 常驻 `kept_catches` 必须经 `Seen::owner()` 逐窗裁决 | 常驻走 `W4`，启动期走 `W7` | 无变化 | 已验证：`apps/macos/src/mac/catch.rs:594,607` `if let Some(home) = target.home {` / `if target.kept.load(Ordering::Relaxed) {` |
+| `W4` | `agent-screen-catch` 线程 | `catch::seen` (`apps/macos/src/mac/catch.rs:197-199, 242-253`), `ACTION_WINDOW = 3s` (`crates/model/src/new_window.rs:11-39`) | 汇总 `Seen { agent, user, only_here }`：`agent` 为本屏在 `3s`（或 `30s` 冷启动）内驱动过且无其它持该应用的屏幕刚驱动过；`user` 为用户在 `3s` 内操作过该应用或 `Finder`/`Dock`/`Spotlight`/`Raycast`/`Alfred` (`app::opens_things`)；`only_here` 为该应用其余窗口全在本屏 | 用户操作证据保留 `RESOLVE_BY = 60s` (`catch.rs:116`) | 交 `W5` 裁决 | 无变化 | 已验证：`apps/macos/src/mac/catch.rs:245-248` `let agent = acted_recently(display, pid) && !others_acted_recently(display, pid); let user = user_acted_recently(pid); let only_here = !agent && !user && only_on(pid, bounds, new);` |
+| `W5` | 纯模型函数 | `Seen::owner` (`crates/model/src/new_window.rs:43-61`) | 纯函数裁决 (`ADR 0007`)：`(true, false) => Owner::Agent`，`(false, true) => Owner::User`，`(false, false) if only_here => Owner::Agent`，其余返回 `Owner::Unknown` | 零系统调用，枚举变体名为 `Agent` / `User` / `Unknown` | 三路分流 | 无变化 | 已验证：`crates/model/src/new_window.rs:52-60` `pub fn owner(self) -> Owner { match (self.agent, self.user) { (true, false) => Owner::Agent, (false, true) => Owner::User, (false, false) if self.only_here => Owner::Agent, _ => Owner::Unknown, } }` |
+| `WX2` | `agent-screen-catch` 线程 | `created` (`apps/macos/src/mac/catch.rs:615-630`), `sync_user_made` (`agent.rs:3117-3127`) | 若 `seen.ends_cold_start()` (`seen.user == true`) 立即调用 `end_cold_start` 终止 `30s` 冷启动特权；将窗口 ID 记入 `skipped`（后续同步到 `Display.user_made`），不移动窗口 | 保护用户在冷启动期间手动点击打开的窗口 | 无 | 用户自开窗口留在物理屏 | 已验证：`apps/macos/src/mac/catch.rs:615-629` `if seen.ends_cold_start() { end_cold_start(target.display, target.pid); } ... Owner::User => { ... lock(&target.skipped).push(id); return; }` |
+| `W6` | `agent-screen-catch` 线程 + 主线程 | `created` (`apps/macos/src/mac/catch.rs:631-644`), `undecided_strays` (`agent.rs:3133-3193`) | 将归属不明窗口记入 `Catch.undecided` 留在原处；Agent 下次截图时由 `add_strayed` 通过 `Core.told` 去重后写入截图响应的 `strayed` 数组 | 不静默搬走因果不明窗口 | 下次截图附带 `strayed` | 窗口留在原处 | 已验证：`apps/macos/src/mac/catch.rs:638` `lock(&target.undecided).push(id);`；`agent.rs:3188-3190` `let strayed = core.update(cx, \|c, _\| undecided_strays(c, id)); if !strayed.is_empty() { result["strayed"] = json!(strayed); }` |
+| `W7` | `agent-screen-catch` 线程 + 跟随线程 | `created` / `follow_aerospace` (`apps/macos/src/mac/catch.rs:649-716`) | 若指定 `document` 则核验 `ax::document_path`（未就绪时订阅 `"AXTitleChanged"`）；扣减 `limit` 配额后调用 `ax::move_element_into(window, target.bounds)` 居中移入虚拟屏；若运行 AeroSpace 且未配 `ignored-monitors`，衍生线程按 `[10, 20, 40, 80, 160, 320]` ms（6 次共 `630ms`）跟进调用 `windows::place` | 赶在 AeroSpace 把新窗排进用户焦点工作区后第一时间迁回虚拟屏工作区 | 记录 `taken = Some(wid)` | 新窗口不留在用户桌面 | 已验证：`apps/macos/src/mac/catch.rs:674,705` `let moved = ax::move_element_into(window, target.bounds).is_ok();` / `for wait in [10, 20, 40, 80, 160, 320] {` |
+| `W8` | 后台执行器 | `launch_now` (`apps/macos/src/control/agent.rs:5681-5725`), `waited_long_enough` (`agent.rs:6000-6012`) | 每 `25ms` 轮询一次共 `240` 次 (`6s`)；运行中应用受 `ASKED_WINDOW_WAIT = 3000ms`（菜单新建）、`OPENED_WINDOW_WAIT = 2000ms`（`open` 返回后）及总轮次上限 `RUNNING_APP_TURN = 4000ms`（仅 `debug_methods()` 下支持 `AGENTSCREEN_RUNNING_TURN_MS` 覆盖）约束，超时即停抓以免误抓用户随后新开的窗口 | `RUNNING_APP_TURN` 是停止等待的截止时限而非重试机制 | 命中新窗走 `W9`，超时无窗走 `W15` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5105-5111,6006-6011` `const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000); const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000); const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);` |
+| `W9` | 后台执行器 + 主线程 | `settle` / `replacement` / `guard_placed` (`apps/macos/src/control/agent.rs:6016-6150`) | 登记 `claim(..., Origin::Launched)`，循环最多 `12` 轮（装有 AeroSpace 每轮等 `200ms`，否则 `30ms`）：若首窗在加载文档时被替换为同进程新窗则通过 `replacement` 追踪新窗，调 `place`、`forwarder.focus` 与 `windows::keep_inside`；装有 AeroSpace 时启动 `guard_placed` 额外看护 `3s`（最多 `10s`）；若 12 轮均失败则 `ax::minimize` 最小化窗口并返回 `failed` | 显示器中途结束时返回错误码 `ended` (`agent.rs:6022`) | 锁定就位 `Window` | 窗口稳定落在虚拟屏内 | 已验证：`apps/macos/src/control/agent.rs:6037-6039,6071,6090` `let look = if aerospace_takes { 200 } else { 30 }; ... for _ in 0..12 {` / `guard_placed(core, target, id, cx);` / `ax::minimize(target)` |
+| `W10` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5733-5736`) | 检查是否为 `was_running && is_url`（已运行浏览器刚新建了空白窗口，尚待填入目标 URL） | 冷启动已在启动参数/首次 `open` 携带了 URL，无需重复打开 | 是走 `W11`，否走 `W12` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5733-5735` `if was_running && is_url && let Some(target) = target` |
+| `W11` | 后台执行器 | `ax::open_in_address_field` / `open_in_background` (`apps/macos/src/control/agent.rs:5738-5792`) | 优先向新窗口地址栏直接填入 URL (`open_in_address_field`)，不支持时回退调用 `open_in_background`（等 `10s` 退出码）使新成为最前窗的虚拟屏窗口接收 URL，随后最多轮询 `40 * 50ms` (`2s`) 等待窗口标题变化，再允许归还用户焦点 | 防止归还焦点过早导致浏览器把 URL 开进用户的旧窗口 (`agent.rs:5775-5777`) | 失败报 `failed`，成功走 `W12` | URL 在虚拟屏新窗口内打开 | 已验证：`apps/macos/src/control/agent.rs:5746,5779,5789` `ax::open_in_address_field(new_window, &url)` / `for _ in 0..40 {` / `.timer(Duration::from_millis(50))` |
+| `W12` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5795-5811`) | 判断本次是否为冷启动新进程 (`!was_running`) | 无 | 是走 `W13`，否走 `W14` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5795` `if !was_running {` |
+| `W13` | GPUI 主线程 + 后台 | `Forwarder::wake` / `watch_cold_start` (`apps/macos/src/control/agent.rs:5796-5797, 5807-5811`) | 调用 `forwarder.wake(placed.target, placed.bounds)` 预消耗后台启动窗口吞掉的首次点击；启动 `watch_cold_start` 持续跟进加载窗之后弹出的正式主窗口 | 修复后台冷启动应用第一次点击只激活窗口不触发控件的问题 | 转入 `W14` | 后续慢主窗自动迁入虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:5796-5797,5810` `core.update(cx, \|c, _\| c.forwarder(id)).wake(placed.target, placed.bounds);` / `watch_cold_start(core, id, pid, seen, true, launched_at, screen.clone(), cx);` |
+| `W14` | 后台执行器 + 主线程 | `wait_for_page` / `keep_catch` (`apps/macos/src/control/agent.rs:5056-5080, 5801-5805`) | 若 `is_url` 为真，调用 `wait_for_page` 每 `100ms` 检查 `ax::page(target)`（`NoWindow \| Blank` 满 `3s` 放行，`Loading` 最多等 `10s`，超时打日志直接放行）；调用 `keep_catch` 将 `Catch` 存入 `Core.kept_catches` | 避免页面脚本未就绪时 Agent 第一下点击落空 (`agent.rs:5799-5800`) | 进入 `R1` | 页面首屏加载完成 | 已验证：`apps/macos/src/control/agent.rs:5058,5065,5076` `while started.elapsed() < Duration::from_secs(10)` / `ax::Page::NoWindow \| ax::Page::Blank => started.elapsed() > Duration::from_secs(3)` / `.timer(Duration::from_millis(100))` |
+| `R1` | 宿主 -> `mcp` 进程 | `launchApp` (`apps/macos/src/control/agent.rs:1628-1645`), `launch_output` (`crates/mcp/src/tools.rs:2203-2217`) | 宿主将窗口坐标按 `in_shot(..., display_scale)` 换算为截图局部像素并返回 `window`、`wasRunning` 与内部 `pid`；`mcp` 输出 `{"window": ..., "wasRunning": ...}`（单实例合并时附带 `"reason": "already_running"` 与 `note`） | 返回值不含 `bundleId` 或 `strayed`（`strayed` 在截图工具返回中附带） | 返回 `{"window": {...}, "wasRunning": bool}` | Peek 与 Viewer 呈现新窗口 | 已验证：`crates/mcp/src/tools.rs:2216` `_ => json!({ "window": window, "wasRunning": was_running })`；`agent.rs:1630` `"window": in_shot(w.json(), display_scale(&core, id, cx))` |
+| `W15` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5824-5907`) | `6s` 内未拿到窗口时保留 `keep_catch` 并按启动场景分流慢窗口接力路径 | 不阻塞当前工具调用无限死等 | 三路分流 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5851,5886,5903` `if let Some(document) = watching` / `else if !was_running` / `if was_running && is_url` |
+| `W16` | 后台执行器 | `Catch::for_document` + 文档慢开轮询 (`apps/macos/src/control/agent.rs:5712-5715, 5832-5885`) | 若文件已在旧窗口显示 (`shown_already`) 则不移动并报 `"existing_window"`；否则挂 `Catch::for_document` 并在后台轮询 `200 * 150ms` (`30s`) 等待匹配 `shows_document` 的新窗出现后调用 `settle` | 绝不误抓用户在此期间打开的其它文档窗口 | 转入 `LR1` | 慢文档打开后自动入虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:5856-5858,5875` `for _ in 0..200 { cx.background_executor().timer(Duration::from_millis(150)).await;` / `let _ = settle(&core, late.target, id, cx).await;` |
+| `W17` | 后台执行器 + 主线程 | `watch_cold_start` (`apps/macos/src/control/agent.rs:6500-6690`), `new_window::step` / `watch` (`crates/model/src/new_window.rs:17-22, 118-248`) | 每 `150ms` 巡检一次：前 `COLD_START = 30s` (`Step::Look`) 按退避节拍 `retries_catch` 补挂 `Catch`、为隐藏完启动的应用调 `ShowHidden`，并对新窗按 `Role` (`Window \| Other \| Unanswered \| Unreadable`) 与 `Seen` 裁决（`Watch::Place` 调 `settle`，`Theirs` 记 `user_made`，`Undecided` 记 `Core.left_alone`）；`30s..60s` (`Step::Resolve`) 仅跟踪已见但未响应 `Unanswered` 的窗口，满 `RESOLVE_BY = 60s` (`Step::GiveUp`) 记入 `Core.left_alone` 停止等待 | 解决大型应用（如企业微信主窗口）构建期间主线程不响应 AX 导致的漏抓问题 (`new_window.rs:4-6`) | 转入 `LR2` | 慢启动应用窗口出来即入虚拟屏 | 已验证：`apps/macos/src/control/agent.rs:6520-6521,6548-6556` `.timer(Duration::from_millis(150)).await;` / `Step::GiveUp => { ... c.left_alone.extend(...) }`；`crates/model/src/new_window.rs:22` `pub const RESOLVE_BY: Duration = Duration::from_secs(60);` |
+| `WX3` | GPUI 主线程 | `launch_now` (`apps/macos/src/control/agent.rs:5903-5907`) | 运行中浏览器按下新建窗口后仍未生出窗口时，放弃打开 URL 并返回错误 | 防止将 URL 打开到用户最前窗口中 | 错误码 `failed`：`{name} opened no new window, so the URL was not opened...` | 用户窗口不受影响 | 已验证：`apps/macos/src/control/agent.rs:5904-5906` `return Err(ControlError::failed(format!("{name} opened no new window, so the URL was not opened; ask the user to quit {name}, then call launch_app again")));` |
+| `LR1` | 宿主 -> `mcp` 进程 | `launch_now` (`apps/macos/src/control/agent.rs:5908-5921`), `launch_output` (`tools.rs:2224-2246`) | 返回 `window: null` 及 `reason: "existing_window"` 或 `"still_opening"` 与操作指引 | 无 | 返回无窗状态 JSON | 无变化 | 已验证：`apps/macos/src/control/agent.rs:5916-5919` `else if shown_already { "existing_window" } else { "still_opening" }` |
+| `LR2` | 宿主 -> `mcp` 进程 | `launch_now` (`apps/macos/src/control/agent.rs:5908-5914`), `launch_output` (`tools.rs:2242-2246`) | 返回 `window: null`、`wasRunning: false`、`reason: "still_starting"`，提示 Agent 稍后调 `list_windows` 检查 | 新窗口在 `30s` 内出现时仍由后台 `Catch` / `watch_cold_start` 自动迁入虚拟屏 | 返回 `{"window": null, "wasRunning": false, "reason": "still_starting", "note": "..."}` | 窗口随后就位 | 已验证：`apps/macos/src/control/agent.rs:5912-5913` `if !was_running { "still_starting" }` |
 
 ---
 
 ## 关键时间常数汇总
 
-| 常量 | 数值 | 定义位置 | 作用说明 | 验证来源 |
+| 常量 | 数值 | 定义位置 | 作用说明 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- |
-| `ACTION_WINDOW` | `3 s` | `crates/model/src/new_window.rs:11` | Agent 动作与用户动作的短期因果归属窗口 | [已验证: crates/model/src/new_window.rs:11] |
-| `COLD_START` / `LATE_WINDOW_WAIT` | `30 s` | `crates/model/src/new_window.rs:17`, `agent.rs:5101` | 全新冷启动进程等待首窗出现及归属有效期的上限 | [已验证: crates/model/src/new_window.rs:17, apps/macos/src/control/agent.rs:5101] |
-| `RESOLVE_BY` | `60 s` | `crates/model/src/new_window.rs:22` | `watch_cold_start` 跟踪慢启动后续窗口与重试无响应 AX 窗口的总上限 | [已验证: crates/model/src/new_window.rs:22] |
-| `RUNNING_APP_TURN` | `4000 ms` | `apps/macos/src/control/agent.rs:5111` | 已运行应用触发菜单新建窗口并等待响应的单轮上限 | [已验证: apps/macos/src/control/agent.rs:5111] |
-| `ASKED_WINDOW_WAIT` | `3000 ms` | `apps/macos/src/control/agent.rs:5105` | 按下“新建窗口”菜单项后等待新窗落地的轮询时长 | [已验证: apps/macos/src/control/agent.rs:5105] |
-| `OPENED_WINDOW_WAIT` | `2000 ms` | `apps/macos/src/control/agent.rs:5108` | 向已运行应用发送打开文档/URL 事件后的等待窗口时长 | [已验证: apps/macos/src/control/agent.rs:5108] |
-| `HELLO_WAIT` | `30 s` | `apps/macos/src/mac/devtools.rs:248` | Chromium `--remote-debugging-pipe` 管道握手最大等待时间 | [已验证: apps/macos/src/mac/devtools.rs:248] |
+| `ACTION_WINDOW` | `3 s` | `crates/model/src/new_window.rs:11` | Agent 动作与用户键鼠动作的短期因果归属窗口 | 已验证：`crates/model/src/new_window.rs:11` `pub const ACTION_WINDOW: Duration = Duration::from_secs(3);` |
+| `COLD_START` / `LATE_WINDOW_WAIT` | `30 s` | `crates/model/src/new_window.rs:17`, `apps/macos/src/control/agent.rs:5101` | 冷启动新进程的窗口归属有效期与 `watch_cold_start` 主动寻窗时长 | 已验证：`crates/model/src/new_window.rs:17` `pub const COLD_START: Duration = Duration::from_secs(30);`；`agent.rs:5101` `const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;` |
+| `RESOLVE_BY` | `60 s` | `crates/model/src/new_window.rs:22` | `watch_cold_start` 等待冷启动期已出现但 AX 未响应 (`Unanswered`) 窗口给出角色的截止上限 | 已验证：`crates/model/src/new_window.rs:22` `pub const RESOLVE_BY: Duration = Duration::from_secs(60);` |
+| `RUNNING_APP_TURN` | `4000 ms` | `apps/macos/src/control/agent.rs:5111` | 向已运行应用发起打开请求后，不论 `open` 耗时多久，停止抓窗的总轮次截止时限（仅 `debug_methods()` 下可读 `AGENTSCREEN_RUNNING_TURN_MS` 覆盖） | 已验证：`apps/macos/src/control/agent.rs:5111,5116-5118` `const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);` / `std::env::var("AGENTSCREEN_RUNNING_TURN_MS").ok().filter(\|_\| debug_methods())` |
+| `ASKED_WINDOW_WAIT` | `3000 ms` | `apps/macos/src/control/agent.rs:5105` | 对已运行应用触发新建窗口菜单项后捕获新窗口的最长等待时间 | 已验证：`apps/macos/src/control/agent.rs:5105` `const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);` |
+| `OPENED_WINDOW_WAIT` | `2000 ms` | `apps/macos/src/control/agent.rs:5108` | 对已运行应用执行 `open` 返回后等待文件窗口出现的最长时间 | 已验证：`apps/macos/src/control/agent.rs:5108` `const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);` |
+| `HELLO_WAIT` | `30 s` | `apps/macos/src/mac/devtools.rs:248` | Chromium 子进程 `--remote-debugging-pipe` 响应 `Browser.getVersion` 的握手等待上限 | 已验证：`apps/macos/src/mac/devtools.rs:221-222,248` `channel.send("Browser.getVersion", json!({}), None)` / `const HELLO_WAIT: Duration = Duration::from_secs(30);` |

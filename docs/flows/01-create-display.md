@@ -1,14 +1,14 @@
-# 01. `create_display` 与虚拟屏幕分配及停泊流水线
+# 01. `create_display` 与虚拟显示器分配及停泊流水线
 
-`create_display` 是 Agent Screen 唯一预加载的 MCP 工具 (`always_load`, `crates/mcp/src/tools.rs:115-128`)。它通过 Unix 域套接字向宿主应用请求一块隔离的 `CGVirtualDisplay`，并将其停泊在物理显示器边界之外的对角象限，杜绝鼠标指针意外滑入。为避开 macOS 每次新建虚拟屏幕时 `WindowServer` 与 `ColorSync` 触发的全系统重配置风暴，流水线按以下优先级决策：先复用同会话已有屏幕，再从热备池 (`SPARES = 3`) 取出屏幕，最后才在预算与频率门控通过后新建 `CGVirtualDisplay` 并执行原子停泊校验。
+`create_display` 是 Agent Screen 唯一预加载的 MCP 工具 (`always_load`, `crates/mcp/src/tools.rs:115-118, 135-137`)。它通过 Unix 域套接字向宿主应用请求一块隔离的 Agent Display (`CGVirtualDisplay`)，并将其停泊在用户显示器右上角外侧的对角网格中，防止真实鼠标指针跨边滑入。为减少新建虚拟显示器引发的 `WindowServer` 与 `ColorSync` 全系统重配置，流水线按三级顺序决策：先复用同会话已有活跃显示器，再从备用池 (`SPARES = 3`) 取出显示器，最后在通过 ColorSync 耗时预算与新建频率门控后创建 `CGVirtualDisplay` 并执行停泊校验。
 
 ## 线程与队列分工
 
-1. **`AgentScreen mcp` 进程 (`tokio` 异步运行时)**：解析 MCP 工具参数，识别 `sessionKey` (`crates/mcp/src/session.rs:18-52`)，按需通过 `open -g -a <Agent Screen.app>` 拉起宿主进程并建立 Unix Socket NDJSON 连接 (`crates/mcp/src/control.rs:306-387`)。
-2. **宿主 Socket 读写任务 (GPUI `background_executor`)**：`control::server::serve` (`apps/macos/src/control/server.rs:118-198`) 读取单行 JSON，发送 `Event::Request` 到主线程事件通道。
-3. **GPUI 主线程 (`AsyncApp` / `Entity<Core>`)**：执行权限门控 `permitted`、`Core` 会话上限与 `ColorState` / `MadeLimit` 门控、热备挑选 `take_spare_with`、`Core::adopt` 登记、`NSScreen` 名称读取及 UI 刷新通知 (`apps/macos/src/control/agent.rs:2724-2965`)。
-4. **串行配置线程 (`display-config`)**：`display::configure` (`apps/macos/src/mac/display.rs:343-369`) 将所有 `CGVirtualDisplay` 初始化、模式切换、`CGBeginDisplayConfiguration` 原点停泊与 `unit_twin` 填充屏创建串行化到单一专用 OS 线程，防止并发重配置互相覆盖。
-5. **虚拟屏回调队列 (`com.agentscreen.virtual-display` GCD 串行队列)**：传给 `CGVirtualDisplayDescriptor.setQueue:` (`apps/macos/src/mac/display.rs:228, 279-289`)，避免 `WindowServer` 终止通知回调死锁主线程。
+1. **`AgentScreen mcp` 进程 (`tokio` 运行时)**：解析工具参数并识别 `sessionKey` (`crates/mcp/src/session.rs:18-51`)，按需通过 `/usr/bin/open -g` 后台拉起宿主应用并连接 `control[-<instance>].sock` (`crates/mcp/src/control.rs:306-387`, `crates/mcp/src/endpoint.rs:37-53`)。
+2. **宿主控制套接字线程 (`agent-screen-control` 专用 OS 线程)**：`control::server::start` 在独立单线程 `tokio` 运行时中运行 `serve` (`apps/macos/src/control/server.rs:96-199`)，解析单行 NDJSON 并向主线程发送 `Event::Request` 或 `Event::Closed`。
+3. **GPUI 主线程 (`AsyncApp` / `Entity<Core>`)**：执行权限检查 `permitted`、会话 `MAX_LIVE = 4` 上限检查、`ColorState` 预算与 `MadeLimit` 门控、备用池挑选 `take_spare_with`、`Core::adopt` 收养登记及 UI 通知 (`apps/macos/src/control/agent.rs:2627-2961`)。
+4. **显示器配置工作线程 (`agent-screen-displays` 专用串行 OS 线程)**：`display::configure` (`apps/macos/src/mac/display.rs:343-365`) 串行执行 `CGVirtualDisplay` 创建、模式切换、`CGBeginDisplayConfiguration` 原点停泊与 `unit_twin` 填洞占位，避免并发重配置互相覆盖并避免阻塞主线程绘制。
+5. **虚拟显示器回调队列 (`app.agentscreen.virtual-displays` GCD 串行队列)**：绑定到 `CGVirtualDisplayDescriptor.setQueue:` (`apps/macos/src/mac/display.rs:228, 279-287`)，隔离系统显示器回调与主线程。
 
 ---
 
@@ -17,132 +17,129 @@
 ```mermaid
 flowchart TD
     M1["MCP 收到 create_display 参数"] --> M2{"Unix Socket 已连接?"}
-    M2 -->|"否"| M3["open -g 后台启动宿主并重连 (50x100ms)"]
-    M3 --> M4{"5s 内连上 Socket?"}
-    M4 -->|"否"| E1["返回 start_failed 错误"]
+    M2 -->|"否"| M3["open -g 后台启动宿主并重连 (75x200ms)"]
+    M3 --> M4{"15s 内连上 Socket?"}
+    M4 -->|"否"| E1["返回 unavailable 错误"]
     M4 -->|"是"| M5["发送 NDJSON createDisplay 请求"]
     M2 -->|"是"| M5
-    M5 --> M6{"辅助功能与录屏权限均已授予?"}
-    M6 -->|"否"| E2["唤起设置引导并返回 failed 权限错误"]
+    M5 --> M6{"辅助功能与录屏权限均已生效?"}
+    M6 -->|"否"| E2["打开设置引导并返回 permission 错误"]
     M6 -->|"是"| M7{"sessionKey 非空且连接未关闭?"}
-    M7 -->|"否"| E3["返回 invalid_params 或连接已关闭"]
-    M7 -->|"是"| M8{"new != true 且会话已有屏幕?"}
-    M8 -->|"是"| M9["Core::reuse_session_display 复用并收养孤儿"]
-    M9 --> R1["返回已有 displayId (reused=true)"]
-    M8 -->|"否"| M10{"new == true 且会话存活屏 >= 4?"}
-    M10 -->|"是"| E4["返回 failed (AtCap 上限 4 块)"]
+    M7 -->|"否"| E3["返回 invalid 或 failed (连接已关闭)"]
+    M7 -->|"是"| M8{"new != true 且会话已有活跃显示器?"}
+    M8 -->|"是"| M9["Core.reuse_session_display 复用并收养孤儿"]
+    M9 --> R1["返回已有 display_id (reused=true)"]
+    M8 -->|"否"| M10{"new == true 且会话活跃显示器 >= 4?"}
+    M10 -->|"是"| E4["返回 failed (AtCap 上限 4 台)"]
     M10 -->|"否"| M11["钳制尺寸至 640x480..2560x1600 并快照 AeroSpace"]
-    M11 --> M12["后台探测热备池 Core::probe_spares"]
-    M12 --> M13{"take_spare_with 命中可用热备?"}
-    M13 -->|"是"| M14["转入图 2 热备激活与重停泊"]
-    M13 -->|"否"| M15{"ColorState::allows 耗时预算 <= 40ms?"}
-    M15 -->|"ReleaseSpares"| M16["释放全部热备屏后再检预算"]
-    M16 --> M17{"释放后预算通过?"}
-    M15 -->|"Refuse"| E5["返回 failed (ColorSync 重配置超预算)"]
-    M17 -->|"否"| E5
+    M11 --> M12["后台探测备用池 Core.probe_spares"]
+    M12 --> M13{"take_spare_with 命中可用 Spare?"}
+    M13 -->|"是"| M14["转入图 2 备用显示器激活与重停泊"]
+    M13 -->|"否"| M15{"ColorState.allows 预估耗时 <= 40ms?"}
+    M15 -->|"ReleaseSpares"| M16["释放全部 Spare 显示器"]
+    M15 -->|"Refuse"| E5["返回 failed (色彩配置查询超预算)"]
     M15 -->|"Allow"| M18{"MadeLimit 10min 内新建 < 10?"}
-    M17 -->|"是"| M18
-    M18 -->|"否"| E6["返回 failed (频率限制附带重试秒数)"]
-    M18 -->|"是"| M19["count_made 记账并转入图 2 新建虚拟屏"]
-    M14 --> M20["转入图 3 竞态复核、收养与工作区净空"]
+    M16 --> M18
+    M18 -->|"否"| E6["返回 failed (频率限制附带等待秒数)"]
+    M18 -->|"是"| M19["count_made 记账并转入图 2 新建虚拟显示器"]
+    M14 --> M20["转入图 3 竞态复核、Core.adopt 与窗口净空"]
     M19 --> M20
 ```
 
 ### 图 1 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `M1` | `mcp` 进程 `tokio` | `tools::run` (`crates/mcp/src/tools.rs:774-836`), `session::identify` (`crates/mcp/src/session.rs:18-52`) | 解析 `_meta` 会话键与客户端名，拼接 `orphans` 孤儿进程组 | 宿主重启后旧 `displayId` 失效，由 `orphans` 携带待收养 `pid` | 进入工具调用 | 无界面变化 | [已验证: crates/mcp/src/tools.rs:774-836, crates/mcp/src/session.rs:18-52] |
-| `M2` | `mcp` 进程 `tokio` | `Control::open` (`crates/mcp/src/control.rs:306-333`) | `UnixStream::connect` 连接 `~/Library/Application Support/Agent Screen/agent-screen[-<instance>].sock` (`apps/macos/src/control/server.rs:74-82`) | Socket 断开时清理上次会话遗留缓存并触发孤儿收集 (`control.rs:180-202`) | 内部连接态判断 | 无界面变化 | [已验证: crates/mcp/src/control.rs:306-333, apps/macos/src/control/server.rs:74-82] |
-| `M3` | `mcp` 进程 `tokio` | `Control::start_app` (`crates/mcp/src/control.rs:354-387`) | 执行 `/usr/bin/open -g -a <Agent Screen.app>` 后台拉起宿主，不抢前台焦点，每 `100ms` 重试连接共 `50` 次 | `AGENTSCREEN_NO_AUTOSTART=1` 时跳过自启动直接报错 (`control.rs:355`) | 等待最多 `5s` | 菜单栏出现 Agent Screen 图标，不打断当前焦点窗口 | [已验证: crates/mcp/src/control.rs:354-387] |
-| `M4` | `mcp` 进程 `tokio` | `Control::start_app` (`crates/mcp/src/control.rs:373-386`) | 检查 `50 * 100ms` 轮询期内 `UnixStream::connect` 是否成功 | 宿主初始化卡死或 Bundle 损坏时超时 | 成功则继续，超时走 `E1` | 无额外弹窗 | [已验证: crates/mcp/src/control.rs:373-386] |
-| `E1` | `mcp` 进程 `tokio` | `ControlError::new("start_failed", ...)` (`crates/mcp/src/control.rs:367-386`) | `open` 进程退出码非零或 Socket 超时未就绪 | 无虚拟屏创建 | MCP `isError: true`，错误码 `start_failed` | 无变化 | [已验证: crates/mcp/src/control.rs:367-386] |
-| `M5` | `mcp` -> 宿主后台任务 | `Control::call_open` (`crates/mcp/src/control.rs:211-244`), `server::serve` (`apps/macos/src/control/server.rs:118-174`) | 单行 JSON 写入 Unix Socket，宿主分配递增 `connection: u64` 并在 `CallGuard` 登记活跃调用 (`agent.rs:37-112`) | 客户端中途断开触发 `Event::Disconnected` (`server.rs:64, 173`) | 请求挂起等待应答 | 无变化 | [已验证: crates/mcp/src/control.rs:211-244, apps/macos/src/control/server.rs:118-174] |
-| `M6` | GPUI 主线程 + 后台执行器 | `needs_permissions` / `permitted` (`apps/macos/src/control/agent.rs:2608-2684`) | 调用 `AXIsProcessTrusted()` (`HIServices/AXUIElement.h`) 与 `CGPreflightScreenCaptureAccess()` 检测双权限 | 未授权时任何屏幕创建都被拦截 | 通过走 `M7`，未通过走 `E2` | 首次缺失权限时自动打开权限引导面板 (`shell::show_permissions`) | [已验证: apps/macos/src/control/agent.rs:2608-2684, MacOSX.sdk AXUIElement.h] |
-| `E2` | GPUI 主线程 | `permitted` (`apps/macos/src/control/agent.rs:2659-2683`) | 唤起 `shell::show_permissions` 并可打开系统设置对应隐私页 | macOS 录屏授权需重启宿主进程生效 | 错误码 `failed`：`Agent Screen needs Accessibility / Screen Recording permission...` | 弹出双语权限状态窗口 | [已验证: apps/macos/src/control/agent.rs:2659-2683] |
-| `M7` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2730-2740`) | 校验 `sessionKey` 非空且 `Core.closed` 不含当前 `connection`，将 `(connection, sessionKey)` 记入 `Core.sessions` | 连接若在排队期已断开则立即终止 | 非法走 `E3`，合法走 `M8` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2730-2740] |
-| `E3` | GPUI 主线程 | `ControlError::invalid` / `ControlError::failed` (`apps/macos/src/control/agent.rs:2733-2736`) | 纯内存校验，不触碰 `WindowServer` | 无 | `invalid_params` (`sessionKey is required`) 或 `failed` (`the connection closed`) | 无变化 | [已验证: apps/macos/src/control/agent.rs:2733-2736] |
-| `M8` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2743-2748`) | 判断 `new` 参数是否为 `true`，默认 `false` 尝试同会话复用 (`ADR 0016`) | 若传入 `width`/`height` 与已有屏不同，复用不改旧屏分辨率但附带提示 (`agent.rs:3049-3063`) | 命中走 `M9`，否则走 `M10` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2743-2748, ADR 0016] |
-| `M9` | GPUI 主线程 | `reuse` (`apps/macos/src/control/agent.rs:3032-3065`), `Core::reuse_session_display` (`apps/macos/src/core.rs:679-712`) | 取 `Session::current()` 最新存活屏，更新 `Owner` 连接号，执行 `adopt_orphans` 认领孤儿进程 | 零 `WindowServer` 调用，耗时 `< 1ms` | 转入 `R1` | Peek 卡片标题与连接状态保持在线 | [已验证: apps/macos/src/control/agent.rs:3032-3065, apps/macos/src/core.rs:679-712] |
-| `R1` | GPUI 主线程 -> `mcp` | `describe(d, true)` (`apps/macos/src/control/agent.rs:3092-3104`), `tools::run` (`crates/mcp/src/tools.rs:804-836`) | 序列化已有屏幕的 `displayId`、`width`、`height`、`reused: true` 及同会话 `displays` 列表 | 若宿主曾退出重启，`mcp` 在前面拼上 `RESTARTED` 提示 (`tools.rs:740, 811`) | 返回 JSON：`{"displayId": N, "width": W, "height": H, "reused": true}` | 无闪烁、无屏幕重排 | [已验证: apps/macos/src/control/agent.rs:3092-3104, crates/mcp/src/tools.rs:740-836] |
-| `M10` | GPUI 主线程 | `Sessions::may_add` (`crates/model/src/session.rs:21, 136-146`), `agent.rs:2749-2751` | 检查该 `sessionKey` 当前存活屏幕数是否达到 `MAX_LIVE = 4` | 单会话硬上限 `4` 块屏幕 | 超限走 `E4`，未超走 `M11` | 无变化 | [已验证: crates/model/src/session.rs:21, crates/model/src/session.rs:136-146] |
-| `E4` | GPUI 主线程 | `AtCap::message` (`crates/model/src/session.rs:105-120`) | 纯模型层拒绝 | 防止单 Agent 无节制请求 `new: true` 耗尽系统显示槽位 | 错误码 `failed`：`This session already has 4 Agent Displays (...)` | 无变化 | [已验证: crates/model/src/session.rs:105-120, apps/macos/src/control/agent.rs:2749-2751] |
-| `M11` | GPUI 主线程 + 后台执行器 | `DEFAULT_SIZE = (1280.0, 800.0)` (`agent.rs:2752-2780`), `AeroSpace::remember_before_first` (`apps/macos/src/mac/aerospace.rs:209-215`) | 宽高 `clamp(640..2560, 480..1600)`；若未启用 `ignored-monitors`，后台调用 `aerospace list-monitors`/`list-workspaces` 记录用户工作区快照 | 超界尺寸不报错，自动钳制并在最终结果写入 `note` (`agent.rs:2892-2896`) | 继续探测热备 | 无变化 | [已验证: apps/macos/src/control/agent.rs:2752-2780, apps/macos/src/mac/aerospace.rs:209-215] |
-| `M12` | 后台执行器 | `Core::probe_spares` (`apps/macos/src/core.rs:334-353`) | 调用 `CGGetOnlineDisplayList`、`CGDisplayBounds`、`CGWindowListCopyWindowInfo` 快照每块热备屏的在线状态、`unit` 号与物理窗口覆盖情况 | 移出主线程执行，防止 `WindowServer` 查询阻塞 UI 帧提交 | 输出 `SpareSnapshot` | 无变化 | [已验证: apps/macos/src/core.rs:334-353] |
-| `M13` | GPUI 主线程 | `Core::take_spare_with` (`apps/macos/src/core.rs:355-389`), `spares::pick_spare` (`crates/model/src/spares.rs:53-71`) | 过滤离线、存在 `unit_twin` 或被非归属窗口物理覆盖 (`window_covers_spare`) 的热备；优先挑同尺寸且 `unit` 最小者，次选需改分辨率者 | 避开 `#204` 热备屏上残留外部窗口被误收养 (`spares.rs:31-42`) | 命中走 `M14`，未命中走 `M15` | 无变化 | [已验证: apps/macos/src/core.rs:355-389, crates/model/src/spares.rs:31-71] |
-| `M15` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:268-288`), `ColorState::allows` (`crates/model/src/budget.rs:13, 77-92`) | 按当前 ColorSync 设备记录数与在线屏幕数估算单次重配置主线程耗时 `request_ms <= BUDGET_MS` (`40.0 ms`) | ColorSync 缓存膨胀时 `CAWSManager::restore_color_preferences()` 会卡死全系统 (`SkyLight` `0x1870e15b4`) | `Allow` / `ReleaseSpares` / `Refuse` | 无变化 | [已验证: apps/macos/src/core.rs:268-288, crates/model/src/budget.rs:13-99, SkyLight 0x1870e15b4] |
-| `M16` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:276-281`) | 清空 `self.spares` 释放热备虚拟屏句柄，缩减在线屏幕基数后再次调用 `color.allows(online, 0)` | 释放热备触发 `VirtualDisplay::drop` 销毁底层屏幕 | 进入 `M17` 复检 | 无变化 | [已验证: apps/macos/src/core.rs:276-281] |
-| `M17` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:279-287`) | 判断零热备条件下 `request_ms(online)` 是否仍超过 `40.0 ms` | 未安装 ColorSync 清理助手且历史孤儿记录过多时仍超限 | 通过走 `M18`，超限走 `E5` | 菜单与健康提示可引导安装清理助手 | [已验证: apps/macos/src/core.rs:279-287, apps/macos/src/mac/colorsync.rs:75-110] |
-| `E5` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:282-286`) | 拒绝触发新的 `WSVirtualDisplayCreate` | 保护整机免于 WindowServer / ColorSync 冻结 | 错误码 `failed`：`ColorSync has N device records; another virtual display would stall macOS...` | 无新增屏幕 | [已验证: apps/macos/src/core.rs:282-286] |
-| `M18` | GPUI 主线程 | `Core::may_make` (`apps/macos/src/core.rs:26, 39, 391-402`), `MadeLimit::allows` (`crates/model/src/budget.rs:34-50`) | 滑动窗口限流：`MADE_WINDOW = 600s` (10 分钟) 内最多新建 `MADE = 10` 块虚拟屏 (`AGENTSCREEN_MAX_MADE` 可覆盖) | 热备命中不计入 `MadeLimit`，仅真实新建计入 | 通过走 `M19`，超限走 `E6` | 无变化 | [已验证: apps/macos/src/core.rs:26-39, apps/macos/src/core.rs:391-402, crates/model/src/budget.rs:34-50] |
-| `E6` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2800-2805`) | 返回剩余冷却秒数 `wait.as_secs().max(1)` | 阻止循环调 `create_display(new: true)` 拖垮桌面 | 错误码 `failed`：`Agent Screen made many displays in the last minutes... call create_display again in N s.` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2800-2805] |
-| `M14` | 后台 -> `display-config` 线程 | `display::reuse_parked` (`apps/macos/src/mac/display.rs:405-426`) | 衔接图 2 热备路径（按需 `resize` 并校验安全停泊位） | 若热备改分辨率或重停泊失败则丢弃该热备，并在图 3 报错 (`agent.rs:2887-2903`) | 进入图 2 / 图 3 | 无变化 | [已验证: apps/macos/src/mac/display.rs:405-426, apps/macos/src/control/agent.rs:2784-2793] |
-| `M19` | GPUI 主线程 -> `display-config` 线程 | `Core::count_made` / `Core::next_name` (`apps/macos/src/core.rs:404-407, 558-570`), `display::create_parked` (`apps/macos/src/mac/display.rs:371-402`) | 租赁槽位序列号 `Serial::lease` (`KEPT_SLOTS = 16` 内循环复用身份以抑制 ColorSync 膨胀)，派发到 `display-config` 线程新建并停泊 | 耗时约 `300~500 ms`，全程脱离主线程 (`agent.rs:2807-2820`) | 进入图 2 / 图 3 | Peek 与 Viewer 保持流畅绘制 | [已验证: apps/macos/src/core.rs:558-570, apps/macos/src/mac/colorsync.rs:23, apps/macos/src/mac/display.rs:73-112] |
-| `M20` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2824-2964`) | 汇合热备激活或新建虚拟屏结果，进入竞态复核与收养阶段 | 若底层返回 `None`，在图 3 统一转为安全停泊失败错误 | 转入图 3 | 转入图 3 | [已验证: apps/macos/src/control/agent.rs:2824-2964] |
+| `M1` | `mcp` 进程 `tokio` | `tools::run` (`crates/mcp/src/tools.rs:774-809`), `session::identify` (`crates/mcp/src/session.rs:18-51`) | 读取环境变量或 `_meta` 生成稳定 `sessionKey`，调用 `control.orphans(&session.key)` 提取宿主重启遗留进程组 | 宿主重启后旧 `displayId` 失效，靠 `adoptGroups` / `adopt` 传递孤儿 `pid` | 进入工具调用 | 无界面变化 | 已验证：`crates/mcp/src/session.rs:18` `pub fn identify(meta: &Map<String, Value>, client_name: Option<&str>) -> Session`；`crates/mcp/src/tools.rs:780` `let orphans = control.orphans(&session.key);` |
+| `M2` | `mcp` 进程 `tokio` | `Control::open` (`crates/mcp/src/control.rs:306-332`), `endpoint::socket_path` (`crates/mcp/src/endpoint.rs:37-53`) | 调用 `UnixStream::connect` 连接 `~/Library/Application Support/Agent Screen/control[-<instance>].sock` | 连接未建立或已断开时走 `start_app` 自启动分支 | 内部连接判断 | 无界面变化 | 已验证：`crates/mcp/src/endpoint.rs:50-51` `Some(instance) => base.join(format!("control-{instance}.sock")), None => base.join("control.sock"),` |
+| `M3` | `mcp` 进程 `tokio` | `start_app` (`crates/mcp/src/control.rs:354-387`) | 执行 `/usr/bin/open -g <bundle>`（无外包 `.app` 时传 `-b app.agentscreen.AgentScreen`），后台拉起宿主不抢焦点，每 `200ms` 重试连接共 `75` 次 | 无禁止自启动环境变量；若 `open` 退出码非零立即失败 | 最长等待 `15s` | 菜单栏出现图标，不夺取当前前台焦点 | 已验证：`crates/mcp/src/control.rs:369-372` `open.arg("-g"); match &bundle { Some(app) => open.arg(app), None => open.args(["-b", "app.agentscreen.AgentScreen"]), };`；`control.rs:380-381` `for _ in 0..75 { tokio::time::sleep(std::time::Duration::from_millis(200)).await;` |
+| `M4` | `mcp` 进程 `tokio` | `start_app` (`crates/mcp/src/control.rs:380-386`) | 检查 `75 * 200ms` 轮询期内 `endpoint::connect().await` 是否成功，连上后补发 `send_greeting` (`agentReady`) | 宿主未安装或初始化卡死满 `15s` 超时 | 成功走 `M5`，超时走 `E1` | 无额外弹窗 | 已验证：`crates/mcp/src/control.rs:329` `self.send_greeting(&connection).await;`；`control.rs:386` `Err(unavailable("it did not answer within 15 s".into()))` |
+| `E1` | `mcp` 进程 `tokio` | `start_app` (`crates/mcp/src/control.rs:355-362, 375-386`) | `open` 失败或 `15s` 未监听套接字时构造 `ControlError` | 不创建任何虚拟显示器 | 错误码 `unavailable`：`The Agent Screen app is not running and could not be started (...)` | 无变化 | 已验证：`crates/mcp/src/control.rs:356-359` `ControlError::new("unavailable", format!("The Agent Screen app is not running and could not be started ({detail})..."))` |
+| `M5` | `mcp` -> `agent-screen-control` 线程 | `Control::call` / `call_on` (`crates/mcp/src/control.rs:204-207, 222-241`), `server::serve` (`apps/macos/src/control/server.rs:118-199`) | 写入单行 NDJSON，宿主分配递增 `connection: u64`，主线程 `CallGuard` 记录 `begin_session_call` (`agent.rs:37-109`) | 客户端断开时 `serve` 发送 `Event::Closed { connection }` (`server.rs:196`) | 请求挂起等待应答 | 无变化 | 已验证：`crates/mcp/src/control.rs:204-206` `pub async fn call(&self, method: &str, params: Value)`；`apps/macos/src/control/server.rs:196` `let _ = events.unbounded_send(Event::Closed { connection });` |
+| `M6` | GPUI 主线程 + 后台执行器 | `needs_permissions` / `permitted` (`apps/macos/src/control/agent.rs:2608-2679`), `permissions::status` (`apps/macos/src/mac/permissions.rs:82-120`) | 检查 `CGPreflightScreenCaptureAccess()`（辅以窗口标题可见性探测）与 `AXIsProcessTrusted()` (`AXUIElement.h:74`)，并验证录屏重开状态 `NEEDS_REOPEN` | 任一权限缺失或录屏刚开启尚未重开应用时拦截调用 | 通过走 `M7`，缺失走 `E2` | 缺失权限时调 `shell.setup_for_agent` 弹出设置窗口 | 已验证：`apps/macos/src/mac/ax.rs:38` `unsafe { objc2_application_services::AXIsProcessTrusted() }`；`MacOSX.sdk AXUIElement.h:74` `extern Boolean AXIsProcessTrusted (void)`；`permissions.rs:115` `if CGPreflightScreenCaptureAccess()` |
+| `E2` | GPUI 主线程 | `permitted` (`apps/macos/src/control/agent.rs:2658-2678`) | 调用 `shell.setup_for_agent(state, cx)` 展示权限引导页并返回 `permission` 错误 | 首次打开录屏权限后需重开 Agent Screen 生效 (`agent.rs:2663-2666`) | 错误码 `permission`：`Agent Screen is missing the macOS ... permission...` 或提示 `Reopen Agent Screen` | 打开双语权限设置窗口 | 已验证：`apps/macos/src/control/agent.rs:2660` `let _ = shell.update(cx, \|shell, cx\| shell.setup_for_agent(state, cx));`；`agent.rs:2670` `code: "permission",` |
+| `M7` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2730-2739`) | 校验 `sessionKey` 非空且 `!c.closed.contains(&connection)`，将 `(connection, session_key)` 写入 `Core.sessions` | 连接若在排队期间已关闭则拒绝造屏 | 失败走 `E3`，通过走 `M8` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2733-2735` `.ok_or_else(\|\| ControlError::invalid("sessionKey is required"))?; if core.read_with(cx, \|c, _\| c.closed.contains(&connection))` |
+| `E3` | GPUI 主线程 | `ControlError::invalid` / `ControlError::failed` (`apps/macos/src/control/agent.rs:2733-2736`, `server.rs:28-33`) | 纯内存校验，不触发 `WindowServer` 调用 | 无 | 错误码 `invalid` (`sessionKey is required`) 或 `failed` (`the connection closed`) | 无变化 | 已验证：`apps/macos/src/control/server.rs:28-31` `pub fn invalid(m: impl Into<String>) -> Self { Self { code: "invalid", message: m.into() } }` |
+| `M8` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2742-2746`) | 检查 `new` 是否显式为 `true`，默认为 `false` 时调用 `reuse` 尝试复用同会话最新活跃显示器 (`ADR 0016`) | 传入不同宽高时复用不改变既有显示器分辨率，仅写入 `note` (`agent.rs:3049-3053`) | 命中走 `M9`，否则走 `M10` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2742-2744` `let new = p.0.get("new") == Some(&Value::Bool(true)); ... if !new && let Some(existing) = reuse(...)` |
+| `M9` | GPUI 主线程 | `reuse` (`apps/macos/src/control/agent.rs:3032-3063`), `Core::reuse_session_display` (`apps/macos/src/core.rs:679-709`) | 取 `Displays::for_session(key)` 最新活跃屏，调用 `rebind_session_in` 续绑连接与 `InputQueue` 所有者，并执行 `adopt_orphans` | 零 `WindowServer` 调用 | 转入 `R1` | Peek 卡片保持在线 | 已验证：`apps/macos/src/core.rs:706-707` `let id = displays.for_session(key)?.id; Self::rebind_session_in(displays, input_queue, closed, key, connection, now_ms);` |
+| `R1` | GPUI 主线程 -> `mcp` | `describe(d, true)` (`apps/macos/src/control/agent.rs:3092-3104`), `tools::run` (`crates/mcp/src/tools.rs:817-839`) | 宿主返回 `displayId` 等字段，`mcp` 转换为下划线命名 `display_id`、`width`、`height`、`scale`、`reused: true` 及多屏 `displays` 列表 | 若 `reply` 无 `note` 且本次携带了 `orphans`，`out["note"]` 填入 `RESTARTED` (`tools.rs:836-838`) | 返回 `{"display_id": N, "width": W, "height": H, "scale": S, "reused": true}` | 无屏幕重排 | 已验证：`crates/mcp/src/tools.rs:817-823` `let mut out = json!({ "display_id": reply.get("displayId"), ... "reused": reply.get("reused") });`；`tools.rs:836-837` `else if orphans.is_some() { out["note"] = json!(RESTARTED); }` |
+| `M10` | GPUI 主线程 | `Sessions::may_add` (`crates/model/src/session.rs:21, 136-145`), `agent.rs:2747-2749` | 检查该 `sessionKey` 当前活跃显示器数是否 `>= MAX_LIVE` (`4`)；待查看显示器不计入 | 单会话同时最多持有 `4` 台活跃显示器 | 超限走 `E4`，未超走 `M11` | 无变化 | 已验证：`crates/model/src/session.rs:21` `pub const MAX_LIVE: usize = 4;`；`crates/model/src/session.rs:138` `if live.len() >= MAX_LIVE { Err(AtCap { live: live.to_vec() }) }` |
+| `E4` | GPUI 主线程 | `AtCap::message` (`crates/model/src/session.rs:110-119`), `agent.rs:2748` | 返回已持有句柄列表并提示复用或先 `end_display` | 防止单会话循环传 `new: true` 耗尽显示槽位 | 错误码 `failed`：`this session already uses 4 displays (...), the most one session may have at once...` | 无变化 | 已验证：`crates/model/src/session.rs:114` `"this session already uses {} displays ({}), the most one session may have at once..."` |
+| `M11` | GPUI 主线程 + 后台执行器 | `DEFAULT_SIZE` (`apps/macos/src/control/agent.rs:2750-2761, 2775-2783`), `AeroSpace::remember_before_first` (`apps/macos/src/mac/aerospace.rs:209-214`) | 宽高默认 `1280x800`，执行 `clamp(640.0, 2560.0)` 与 `clamp(480.0, 1600.0)`；若 `!aerospace::ignores_now()`，后台保存用户当前工作区布局 | 超界尺寸自动钳制并在响应中附带 `note` (`agent.rs:2863-2867`) | 继续探测备用池 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2753,2758` `.clamp(640.0, 2560.0)` / `.clamp(480.0, 1600.0)`；`aerospace.rs:209` `pub fn remember_before_first(&self)` |
+| `M12` | 后台执行器 | `Core::probe_spares` (`apps/macos/src/core.rs:334-348`) | 在后台线程调用 `cg::active_displays`、`windows::counts_and_physical` 与 `cg::unit_twin` 采集备用池快照 | 脱离 UI 线程查询 `WindowServer` | 产出 `SpareSnapshot` | 无变化 | 已验证：`apps/macos/src/core.rs:334-337` `pub fn probe_spares(ids: &[DisplayId]) -> SpareSnapshot { let online = crate::mac::cg::active_displays(); let (counts, physically_occupied) = windows::counts_and_physical(ids);` |
+| `M13` | GPUI 主线程 | `Core::take_spare_with` (`apps/macos/src/core.rs:355-387`), `spares::pick_spare` (`crates/model/src/spares.rs:31-42, 53-67`) | 排除含残留窗口 (`has_windows`) 或被其他显示器窗口中心/过半面积覆盖 (`physically_covered`) 的备用屏，优先选同尺寸最小 `unit` 号，次选任意尺寸最小 `unit` 号；离线或带 `unit_twin` 的备用屏直接丢弃 | 防止 `#189` / `#204` 跨会话继承残留窗口并避免制造低 `unit` 空洞 | 命中走 `M14`，未命中走 `M15` | 无变化 | 已验证：`crates/model/src/spares.rs:57` `.filter(\|(_, s)\| !s.has_windows && !s.physically_covered && s.size == wanted)`；`core.rs:371,385` `if snap.untwinned.contains(&id) ... crate::lifecycle::note("released", id, "spare unusable");` |
+| `M14` | 后台 -> `agent-screen-displays` 线程 | `display::reuse_parked` (`apps/macos/src/mac/display.rs:405-426`), `agent.rs:2792-2797` | 衔接图 2 备用屏激活路径，按需调整分辨率并校验停泊安全；若失败返回 `None` 并继续走 `M15` 新建分支 (`agent.rs:2800-2802`) | 备用屏失效不会直接报错，会自动回退到新建流程 | 成功入 `M20`，失败退回 `M15` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2800-2802` `let (made, name) = match spare { Some((handle, name)) => (Some(handle), name), None => {` |
+| `M15` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:268-286`), `ColorState::allows` (`crates/model/src/budget.rs:13, 69-91`) | 按 `online * (1.0 + records * per_record)`（已装 helper 为 `0.05`，未装为 `0.2`）估算 `WindowServer` 色彩配置查询耗时是否 `<= BUDGET_MS` (`40.0 ms`，对照 `50 ms` 上限，`ADR 0009`)；`SkyLight` 含符号 `CAWSManager::restore_color_preferences` (`0x1870e15b4`) | 首次统计完成前 (`records == None`) 默认放行 (`budget.rs:79-81`) | `Allow` 走 `M18`，`ReleaseSpares` 走 `M16`，`Refuse` 走 `E5` | 无变化 | 已验证：`crates/model/src/budget.rs:13` `pub const BUDGET_MS: f64 = 40.0;`；`budget.rs:70-72` `let per_record = if self.helper_ready { 0.05 } else { 0.2 }; ... online as f64 * (1.0 + records * per_record)`；`SkyLight` `0x1870e15b4` `__ZN2WS8Displays11CAWSManager25restore_color_preferencesEv` |
+| `M16` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:276-281`) | 当减去现有备用屏数量后 `request_ms <= 40.0 ms` 时 (`budget.rs:86-88`)，清空 `self.spares` 释放全部备用屏并直接返回 `Ok(())` | 释放备用屏会触发底层 `VirtualDisplay::drop` | 转入 `M18` | 无变化 | 已验证：`crates/model/src/budget.rs:86-87` `if spares > 0 && self.request_ms(with_one_more.saturating_sub(spares)) <= BUDGET_MS { return Budget::ReleaseSpares; }`；`core.rs:277-280` `for spare in std::mem::take(&mut self.spares) { ... } Ok(())` |
+| `E5` | GPUI 主线程 | `Core::budget_allows` (`apps/macos/src/core.rs:282-285`), `agent.rs:2803-2805` | 当释放全部备用屏后预估耗时仍超 `40.0 ms` 时拒绝新建虚拟显示器 | 防止在线显示器与 ColorSync 记录过多时每次重配置卡顿全机窗口绘制 | 错误码 `failed`：`This Mac has {online} displays online, and with another, macOS would take longer than it allows to look up their color profiles...` | 无新增显示器 | 已验证：`apps/macos/src/core.rs:282-284` `Budget::Refuse => Err(format!("This Mac has {online} displays online, and with another, macOS would take longer than it allows..."))` |
+| `M18` | GPUI 主线程 | `Core::may_make` (`apps/macos/src/core.rs:26, 39, 391-401`), `MadeLimit::allows` (`crates/model/src/budget.rs:34-50`) | 滑动窗口限流：`MADE_WINDOW = 600s` (`10 min`) 内最多新建 `MADE = 10` 台；仅调试构建 (`cfg!(debug_assertions)`) 读取 `AGENTSCREEN_NEW_DISPLAYS` 覆盖上限 | 备用屏复用不计入 `MadeLimit` | 通过走 `M19`，超限走 `E6` | 无变化 | 已验证：`apps/macos/src/core.rs:26,39` `const MADE: usize = 10;` / `const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);`；`core.rs:393-394` `let limit = if cfg!(debug_assertions) { std::env::var("AGENTSCREEN_NEW_DISPLAYS")` |
+| `E6` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2806-2811`) | 计算最早一条新建记录滑出窗口的剩余秒数 `wait.as_secs().max(1)` 并拒绝本次新建 | 阻止高频循环创建虚拟显示器 | 错误码 `failed`：`Agent Screen made many displays in the last minutes... call create_display again in {} s.` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2807-2810` `return Err(ControlError::failed(format!("Agent Screen made many displays in the last minutes... call create_display again in {} s.", wait.as_secs().max(1))));` |
+| `M19` | GPUI 主线程 -> `agent-screen-displays` 线程 | `Core::count_made` / `Core::next_name` (`apps/macos/src/core.rs:404-406, 558-568`), `display::create_parked` (`apps/macos/src/mac/display.rs:371-401`) | 租赁最小空闲序列号 `Serial::lease`（主实例从 `1` 起，测试实例从 `10_001` 起），派发到 `agent-screen-displays` 线程创建并停泊 | 造屏脱离主线程，Peek 与 Viewer 保持绘制 (`agent.rs:2813-2827`) | 进入图 2 新建分支 | 无变化 | 已验证：`apps/macos/src/core.rs:560-561` `let first = if instance.is_some() { 10_001 } else { 1 }; let serial = display::Serial::lease(first);`；`agent.rs:2819` `.spawn(crate::mac::display::create_parked(` |
+| `M20` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2833-2960`) | 汇总备用屏激活或新建虚拟显示器结果，进入并发竞态复核与收养阶段 | 若底层返回 `None`，在图 3 统一返回安全位置校验失败 | 转入图 3 | 转入图 3 | 已验证：`apps/macos/src/control/agent.rs:2858-2875` `let id = c.adopt(made?, name, (width, height), Some(owner), cx)?; ... .ok_or_else(\|\| ControlError::failed("macOS could not create a virtual display at a verified safe position..."))` |
 
 ---
 
-## 图 2：`display-config` 线程底层创建、`unit_twin` 规避与对角停泊子流程
+## 图 2：`agent-screen-displays` 线程底层创建、`unit_twin` 填洞与对角停泊子流程
 
 ```mermaid
 flowchart TD
-    P1["进入 display::configure (display-config 专用串行线程)"] --> P2{"路径类型: 热备复用还是新建?"}
-    P2 -->|"热备复用"| P3{"目标宽高与热备当前尺寸不同?"}
-    P3 -->|"是"| P4["VirtualDisplay::resize 调用 apply_mode + settle_mode"]
-    P4 --> P5{"模式切换成功?"}
-    P5 -->|"否"| PX1["释放失效热备并返回 None"]
-    P3 -->|"否"| P6["快照当前全体屏幕原点 display::origins()"]
+    P1["进入 display.configure (agent-screen-displays 串行线程)"] --> P2{"路径类型: 备用屏复用还是新建?"}
+    P2 -->|"备用屏复用"| P3{"resize 标志为 true?"}
+    P3 -->|"是"| P4["VirtualDisplay.resize 调用 apply_mode + settle_mode (25x20ms)"]
+    P4 --> P5{"CGDisplayBounds 宽高已等于目标尺寸?"}
+    P5 -->|"否"| PX1["记 released (spare could not resize) 并返回 None"]
+    P3 -->|"否"| P6{"is_tucked 当前位置已安全?"}
     P5 -->|"是"| P6
-    P2 -->|"新建虚拟屏"| P7["快照原点 origins() 并进入 VirtualDisplay::create"]
-    P7 --> P8["构造 CGVirtualDisplayDescriptor (vendor=0x5353 model=1 2560x1600 218PPI)"]
-    P8 --> P9["alloc/initWithDescriptor 触发 SkyLight _WSVirtualDisplayCreate"]
-    P9 --> P10["apply_mode 注入请求尺寸模式并 CGConfigureDisplayWithDisplayMode"]
-    P10 --> P11{"cg::unit_twin 检测到与物理屏或已有屏共享 unit?"}
-    P11 -->|"否"| P13["记住 ColorSync UUID (colorsync::remember) 并准备停泊"]
-    P11 -->|"是"| P12{"已建填充屏 fillers.len() < 2 且未与我方屏撞号?"}
-    P12 -->|"是"| P14["保留撞号屏作占位 filler 并换新 serial 重试 create_once"]
+    P6 -->|"是"| P21["直接返回已停泊 VirtualDisplay"]
+    P6 -->|"否"| P15["进入 park_owned 最多 75 轮停泊循环 (attempt 0..74)"]
+    P2 -->|"新建虚拟显示器"| P7["快照全体屏幕原点 origins() 与 previous_fillers"]
+    P7 --> P8["VirtualDisplay.create 最多 3 次尝试: 构造描述符 (0x5353/1 5120x3200 110PPI)"]
+    P8 --> P9["initWithDescriptor 调 SkyLight _WSVirtualDisplayCreate 并登记 claims"]
+    P9 --> P10["apply_mode + settle_mode (25x20ms) 切换至 2x HiDPI 目标模式"]
+    P10 --> P11{"cg.unit_twin 检测到与在线屏 (含 closet) 共享 unit?"}
+    P11 -->|"是 (未满 3 次)"| P14["暂存撞号屏到 twinned 列表并换下一个空闲 serial 重试"]
     P14 --> P8
-    P12 -->|"否"| PX2["释放撞号屏与临时 fillers 并返回 None"]
-    P6 --> P15["进入 park_owned 最多 5 轮停泊循环 (attempt 0..4)"]
+    P11 -->|"否"| P12["将前序撞号屏最多保留 MAX_FILLERS=2 入全局 FILLERS，其余释放"]
+    P11 -->|"是 (3 次均撞号)"| P13["取出最后一块撞号屏 twinned.pop() 继续后续校验"]
+    P12 --> P15
     P13 --> P15
-    P15 --> P16["arrangement::plan 计算用户屏外对角网格目标原点"]
-    P16 --> P17["CGBeginDisplayConfiguration + CGConfigureDisplayOrigin (含恢复被挤歪旧屏)"]
-    P17 --> P18["CGCompleteDisplayConfiguration (ForSession=2) 提交事务"]
-    P18 --> P19{"parked_safely 校验通过 (零边共享、零重叠、无 twin、尺寸精确)?"}
-    P19 -->|"否 (第 0..3 轮)"| P20["线程休眠 50ms 等待 WindowServer 稳定后重试"]
+    P15 --> P16["park_fillers + arrangement.plan 计算右上外侧对角网格坐标"]
+    P16 --> P17["CGBeginDisplayConfiguration + CGConfigureDisplayOrigin (含恢复被挤移屏幕)"]
+    P17 --> P18["CGCompleteDisplayConfiguration (ForSession=1) 提交会话级事务"]
+    P18 --> P19{"tuck_away_restoring 与 is_tucked 校验均通过?"}
+    P19 -->|"否 (attempt < 74)"| P20["线程休眠 20ms 后重试下一轮"]
     P20 --> P16
-    P19 -->|"否 (5 轮耗尽)"| PX3["记录 parking_failure / misroute 诊断日志并 Drop 句柄返回 None"]
-    P19 -->|"是"| P21["释放全部临时 fillers 并返回已停泊 VirtualDisplay"]
+    P19 -->|"否 (75 轮耗尽)"| PX3["记录 parking_failure 日志，回收本次新增 filler 并返回 None"]
+    P19 -->|"是"| P21
 ```
 
 ### 图 2 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `P1` | `display-config` 串行线程 | `display::configure` (`apps/macos/src/mac/display.rs:343-369`) | 懒启动单线程队列，通过 `mpsc` 串行消费全部创建与停泊闭包 | 避免并发 `CGBeginDisplayConfiguration` 事务在 `WindowServer` 互相冲掉 | 异步等待 `oneshot` | 主线程不卡顿 | [已验证: apps/macos/src/mac/display.rs:343-369] |
-| `P2` | `display-config` 串行线程 | `reuse_parked` vs `create_parked` (`apps/macos/src/mac/display.rs:371-426`) | 区分热备句柄复用与全新 `CGVirtualDisplay` 创建 | 无 | 内部路由 | 无变化 | [已验证: apps/macos/src/mac/display.rs:371-426] |
-| `P3` | `display-config` 串行线程 | `reuse_parked` (`apps/macos/src/mac/display.rs:416-421`) | 检查 `resize: bool` 标志（热备屏缓存尺寸是否不等于请求尺寸） | 同尺寸热备跳过模式重设，零重配置开销 | 分支判断 | 无变化 | [已验证: apps/macos/src/mac/display.rs:416-421] |
-| `P4` | `display-config` 串行线程 | `VirtualDisplay::resize` / `apply_mode` / `settle_mode` (`apps/macos/src/mac/display.rs:208-219, 291-325`) | 新建 `CGVirtualDisplayMode` + `CGVirtualDisplaySettings` (`hiDPI = 1`) 调 `applySettings:`，随后最多轮询 `20 * 10ms` 调 `use_mode` (`CGConfigureDisplayWithDisplayMode`) 对齐逻辑宽高与 `scale` | `800x500` 等非常规比例若不同步切 `CGDisplayMode` 会停留在 `2560x1600` (`displays-e2e.log:180`) | 等待最多 `200ms` | 无变化 | [已验证: apps/macos/src/mac/display.rs:208-325, ~/Library/Logs/Agent Screen/displays-e2e.log:180] |
-| `P5` | `display-config` 串行线程 | `reuse_parked` (`apps/macos/src/mac/display.rs:417-420`) | 校验 `VirtualDisplay::resize` 返回布尔值且 `CGDisplayPixelsWide/High` 已就位 | 模式表被拒绝时失败 | 成功走 `P6`，失败走 `PX1` | 无变化 | [已验证: apps/macos/src/mac/display.rs:417-420] |
-| `PX1` | `display-config` 串行线程 | `VirtualDisplay::drop` (`apps/macos/src/mac/display.rs:45-64, 419`) | 释放底层 `CGVirtualDisplay` Objective-C 对象，写 `displays.log` `released` 行 | 本次 `create_display` 不会静默返回未对齐屏幕 | 交由图 3 返回 `failed` | 热备屏销毁 | [已验证: apps/macos/src/mac/display.rs:45-64, apps/macos/src/mac/display.rs:419] |
-| `P6` | `display-config` 串行线程 | `display::origins` (`apps/macos/src/mac/display.rs:527-535`) | 调 `cg::online()` + `CGDisplayBounds` 记录重停泊前所有在线屏幕坐标 | 用于防止 `WindowServer` 联动篡改其它屏幕原点 | 进入 `P15` | 无变化 | [已验证: apps/macos/src/mac/display.rs:527-535] |
-| `P7` | `display-config` 串行线程 | `create_parked` (`apps/macos/src/mac/display.rs:380-384`) | 先快照全体屏幕原点 `before`，再调用 `VirtualDisplay::create` | 必须在 `initWithDescriptor:` 前快照，因为新建瞬间 `WindowServer` 就可能挪动相邻屏幕 | 进入 `P8` | 无变化 | [已验证: apps/macos/src/mac/display.rs:380-384] |
-| `P8` | `display-config` 串行线程 | `VirtualDisplay::create_once` (`apps/macos/src/mac/display.rs:221-246, 276`) | 创建 `CGVirtualDisplayDescriptor`：`vendorID=0x5353` (`'SS'`)、`productID=1`、`serialNum`、`maxPixelsWide=5120`、`maxPixelsHigh=3200` (2x `LARGEST=2560x1600`)、`sizeInMillimeters` 按 `218 PPI` 折算，绑定 `com.agentscreen.virtual-display` 队列 | 固定最大像素上限为 `5120x3200` 支持后续免重建 `resize` | 描述符就绪 | 无变化 | [已验证: apps/macos/src/mac/display.rs:221-246, apps/macos/src/mac/display.rs:276-289] |
-| `P9` | `display-config` 串行线程 | `create_once` (`apps/macos/src/mac/display.rs:247-255`) | `-[CGVirtualDisplay initWithDescriptor:]` 调入 `SkyLight` `_WSVirtualDisplayCreate` (`0x186e6d154`) 分配 `CGDirectDisplayID` (`displayID` 属性) | 触发全系统 `CGDisplayReconfigurationCallBack` 与 `CAWSManager::restore_color_preferences()` (`0x1870e15b4`) | 拿到 `id > 0` | 用户屏幕无闪烁，但后台进程收到屏幕变更广播 | [已验证: apps/macos/src/mac/display.rs:247-255, SkyLight 0x186e6d154, SkyLight 0x1870e15b4] |
-| `P10` | `display-config` 串行线程 | `apply_mode` + `settle_mode` (`apps/macos/src/mac/display.rs:256-264, 291-325, 689-746`) | 注入请求尺寸与 `LARGEST` 两组 `CGVirtualDisplayMode`，轮询 `CGDisplayCopyAllDisplayModes` 找到匹配逻辑尺寸与 `HiDPI` (`scale=2`) 的模式调 `CGConfigureDisplayWithDisplayMode` | `AGENTSCREEN_DISPLAY_SCALE=1` 可切 1x 模式 (`display.rs:671-687`) | 分辨率切换完毕 | 无变化 | [已验证: apps/macos/src/mac/display.rs:256-325, apps/macos/src/mac/display.rs:671-746] |
-| `P11` | `display-config` 串行线程 | `cg::unit_twin` (`apps/macos/src/mac/cg.rs:75-85`), `VirtualDisplay::create` (`apps/macos/src/mac/display.rs:177`) | 调 `CGDisplayUnitNumber` 检查在线屏幕中是否有另一块屏幕与新屏共享同一 `unit` 号（忽略 AeroSpace `0x4145/1` closet 屏） | macOS 会在同一 `unit` 上把两块屏镜像或路由错乱 (`displays-e2e.log:1` 记录 `unit twin`) | 无撞号走 `P13`，撞号走 `P12` | 无变化 | [已验证: apps/macos/src/mac/cg.rs:75-85, ~/Library/Logs/Agent Screen/displays-e2e.log:1] |
-| `P12` | `display-config` 串行线程 | `MAX_FILLERS = 2` (`apps/macos/src/mac/display.rs:115, 179-189`) | 若当前占位屏 `< 2` 且该撞号屏未与我方其它虚拟屏成对，准备将其暂留占住坏 `unit` 槽位 | 最多垫 `2` 块临时 filler，防止无限造屏 | 可垫走 `P14`，超限走 `PX2` | 无变化 | [已验证: apps/macos/src/mac/display.rs:115, apps/macos/src/mac/display.rs:179-189] |
-| `P14` | `display-config` 串行线程 | `VirtualDisplay::create` (`apps/macos/src/mac/display.rs:181-188`) | 将撞号屏推入 `fillers` 列表（标记 `note = "unit twin"`），用递增临时序列号重新调用 `create_once` | 临时 filler 在 `P21` 或失败时立即销毁 (`release_fillers`) | 回到 `P8` 重建 | 无变化 | [已验证: apps/macos/src/mac/display.rs:181-196] |
-| `PX2` | `display-config` 串行线程 | `VirtualDisplay::create` (`apps/macos/src/mac/display.rs:190-198`) | 销毁撞号屏与全部临时 `fillers`，返回 `None` | 避免带着镜像 `unit_twin` 上线污染用户物理屏 | 交由图 3 返回 `failed` | 无残留虚拟屏 | [已验证: apps/macos/src/mac/display.rs:190-198] |
-| `P13` | `display-config` 串行线程 | `colorsync::remember` (`apps/macos/src/mac/colorsync.rs:314-335`), `display.rs:265-272` | 调 `CGDisplayCreateUUIDFromDisplayID` 读取新屏 UUID，持久化到 `~/Library/Application Support/Agent Screen/colorsync-identities.json` | 供 `colorsync reclaim` 保留活跃 `16` 个槽位的 UUID，清理其余孤儿记录 | 进入 `P15` | 无变化 | [已验证: apps/macos/src/mac/colorsync.rs:283-335, apps/macos/src/mac/display.rs:265-272] |
-| `P15` | `display-config` 串行线程 | `park_owned` (`apps/macos/src/mac/display.rs:429-464`) | 围绕目标屏幕执行最多 `5` 次 (`0..5`) 停泊与安全校验循环 | `AGENTSCREEN_TEST_FAIL_PARKING=1` 可注入故障供测试验证 (`display.rs:437, 598`) | 进入 `P16` | 无变化 | [已验证: apps/macos/src/mac/display.rs:429-464] |
-| `P16` | `display-config` 串行线程 | `arrangement::plan` (`crates/model/src/arrangement.rs:82-193`), `tuck_away_restoring` (`apps/macos/src/mac/display.rs:542-565`) | 读取用户屏包围盒 `user_bounds`，在右下外侧对角线 (`max_x`, `max_y` 之外，或避开负向物理屏象限) 为所有虚拟屏规划互不共享边、仅角点相接或阶梯错开的坐标 | 杜绝与任何用户屏共享水平/垂直边（共享边会让鼠标跨屏滑入虚拟屏） | 产出 `(display_id, (x, y))` 计划表 | 无变化 | [已验证: crates/model/src/arrangement.rs:82-193, apps/macos/src/mac/display.rs:542-565] |
-| `P17` | `display-config` 串行线程 | `tuck_away_restoring` (`apps/macos/src/mac/display.rs:566-589`) | `CGBeginDisplayConfiguration` 开启事务；把 `before` 中被 `WindowServer` 自动挤歪的其它屏幕原点设回原位，再对虚拟屏调用 `CGConfigureDisplayOrigin` (`MacOSX.sdk CGDisplayConfiguration.h`) | 底层触发 `WS::Displays::Display::set_origin` (`SkyLight` `0x186e6b304`) | 配置事务填充完成 | 保护用户多显示器相对排布不被篡改 | [已验证: apps/macos/src/mac/display.rs:566-589, MacOSX.sdk CGDisplayConfiguration.h, SkyLight 0x186e6b304] |
-| `P18` | `display-config` 串行线程 | `CGCompleteDisplayConfiguration(config, 2)` (`apps/macos/src/mac/display.rs:31, 590`) | 以 `kCGConfigureForSession = 2` 调用 `_SLSCompleteDisplayConfiguration` (`0x186e51008` -> `_SLSCompleteDisplayConfigurationWithOption` `0x186e51064`) 提交会话级配置，不写入永久磁盘偏好 | 若返回非 `0` 错误码则本轮视为失败 | 进入 `P19` 验证 | 无磁盘显示偏好污染 | [已验证: apps/macos/src/mac/display.rs:31, apps/macos/src/mac/display.rs:590, SkyLight 0x186e51008] |
-| `P19` | `display-config` 串行线程 | `park_owned` (`apps/macos/src/mac/display.rs:447-452`), `arrangement::parked_safely` (`crates/model/src/arrangement.rs:643-667`) | 重新读取实时 `CGDisplayBounds` 与 `unit_twin`：确认在线、无 twin、宽高等于请求值、且与所有用户屏 `out_of_the_way`（不重叠且不共享大于 `0` 长度的边） | 拦截 `WindowServer` 静默忽略原点修改或发生坐标路由错位 (`misroute`, `displays-e2e.log:180, 249`) | 通过走 `P21`，未通过走 `P20`/`PX3` | 确保鼠标绝无滑入通道 | [已验证: apps/macos/src/mac/display.rs:447-452, crates/model/src/arrangement.rs:643-667, ~/Library/Logs/Agent Screen/displays-e2e.log:249] |
-| `P20` | `display-config` 串行线程 | `park_owned` (`apps/macos/src/mac/display.rs:453-455`) | `std::thread::sleep(Duration::from_millis(50))` 后进入下一轮重停泊 | 最多等待 `4 * 50ms = 200ms` | 回到 `P16` | 无变化 | [已验证: apps/macos/src/mac/display.rs:453-455] |
-| `PX3` | `display-config` 串行线程 | `parking_failure` (`apps/macos/src/mac/display.rs:457-516`) | 向 `~/Library/Logs/Agent Screen/displays[-e2e].log` 写入 `misroute` 或停泊失败明细，调用 `release_fillers()` 并 `drop(handle)` | 宁可创建失败也不把停在用户屏内或错位路由的虚拟屏交给 Agent | 返回 `None` 至图 3 | 销毁异常虚拟屏 | [已验证: apps/macos/src/mac/display.rs:457-516, ~/Library/Logs/Agent Screen/displays-e2e.log:180] |
-| `P21` | `display-config` 串行线程 | `create_parked` (`apps/macos/src/mac/display.rs:385-400`), `lifecycle::line` (`apps/macos/src/lifecycle.rs:55-58`) | `release_fillers()` 销毁占位屏，写 `created display=<id> unit=<u> at=<x>,<y> size=<w>x<h> serial=<s>` 日志 (`displays-e2e.log:37`) | 句柄带 `Serial` 租约进入主线程收养 | 返回 `Some(VirtualDisplay)` | 无变化 | [已验证: apps/macos/src/mac/display.rs:385-400, ~/Library/Logs/Agent Screen/displays-e2e.log:37] |
+| `P1` | `agent-screen-displays` 串行线程 | `display::configure` (`apps/macos/src/mac/display.rs:343-365`) | 懒启动名为 `agent-screen-displays` 的单线程工作队列，通过 `mpsc` 串行执行闭包 | 防止并发 `CGBeginDisplayConfiguration` 事务基于未定型的原点排布互相覆盖 | 异步等待 `oneshot` | 不阻塞主线程渲染 | 已验证：`apps/macos/src/mac/display.rs:349-351` `std::thread::Builder::new().name("agent-screen-displays".into()).spawn(...)` |
+| `P2` | `agent-screen-displays` 串行线程 | `reuse_parked` vs `create_parked` (`apps/macos/src/mac/display.rs:371-426`) | 区分备用显示器句柄重配置与全新 `CGVirtualDisplay` 创建 | 无 | 内部路由 | 无变化 | 已验证：`apps/macos/src/mac/display.rs:371,405` `pub async fn create_parked(...)` / `pub async fn reuse_parked(...)` |
+| `P3` | `agent-screen-displays` 串行线程 | `reuse_parked` (`apps/macos/src/mac/display.rs:413-417`) | 先快照全体显示器原点 `before = origins()`，再检查 `resize` 标志是否需要改模式 | 同尺寸备用屏跳过模式切换 | 分支判断 | 无变化 | 已验证：`apps/macos/src/mac/display.rs:413-414` `let before = origins(); if resize && !handle.resize(width, height)` |
+| `P4` | `agent-screen-displays` 串行线程 | `VirtualDisplay::resize` / `apply_mode` / `settle_mode` (`apps/macos/src/mac/display.rs:208-219, 291-323`) | 构造单条目标尺寸 `CGVirtualDisplayMode` (`60Hz`) 与 `CGVirtualDisplaySettings` (`hiDPI = 1`) 调 `applySettings:`，随后 `for _ in 0..25` 每 `20ms` 调 `use_mode` 切换至 `2x` HiDPI 模式 | 最多轮询 `25 * 20ms = 500ms`；若测试实例复用曾跑在 `800x500` 的 `serial`，需靠 `settle_mode` 与后续 `Core::hold_modes` 切回目标分辨率 (`displays-e2e.log:306`) | 最长等待约 `500ms` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:317-321` `for _ in 0..25 { if scale == 1 \|\| use_mode(id, width, height, 2) { break; } std::thread::sleep(std::time::Duration::from_millis(20)); }`；`displays-e2e.log:306` `mode display=570 unit=9 at=8576,-800 size=1280x800 ran at 800x500, wants 1280x800, back: true` |
+| `P5` | `agent-screen-displays` 串行线程 | `VirtualDisplay::resize` (`apps/macos/src/mac/display.rs:216-218`) | 读取 `cg::display_bounds(self.id)` 校验 `(now.width as u32, now.height as u32) == (width, height)` | 超出描述符 `maxPixels` 或模式切换被拒时返回 `false` | 成功走 `P6`，失败走 `PX1` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:216-218` `let now = cg::display_bounds(self.id); self.size = (width, height); (now.width as u32, now.height as u32) == (width, height)` |
+| `PX1` | `agent-screen-displays` 串行线程 | `reuse_parked` / `VirtualDisplay::drop` (`apps/macos/src/mac/display.rs:45-64, 414-417`) | 写 `released ... spare could not resize` 日志并析构句柄；`Drop` 后台线程按 `100ms..5s` 指数退避等屏幕下线后归还 `Serial` | 回退到图 1 `M15` 尝试新建虚拟显示器 | 触发回退新建 | 失效备用屏销毁 | 已验证：`apps/macos/src/mac/display.rs:415-416` `crate::lifecycle::note("released", handle.id, "spare could not resize"); return None;`；`display.rs:56-59` `let mut wait = std::time::Duration::from_millis(100); while cg::is_online(id) { ... wait = (wait * 2).min(std::time::Duration::from_secs(5)); }` |
+| `P6` | `agent-screen-displays` 串行线程 | `reuse_parked` (`apps/macos/src/mac/display.rs:418-423`) | 调用 `is_tucked(handle.id, &ids)` 检查重用或改尺寸后的原点是否仍处于安全停泊区 | 已安全停泊的备用屏免去 `CGConfigureDisplayOrigin` 重排 | 已安全走 `P21`，否则走 `P15` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:420-423` `if is_tucked(handle.id, &ids) { return Some(handle); } park_owned(handle, ids, &before)` |
+| `P7` | `agent-screen-displays` 串行线程 | `create_parked` / `origins` (`apps/macos/src/mac/display.rs:380-383, 527-535`) | 在创建前快照全体活动显示器原点 `before = origins()` 与已有占位屏 `previous_fillers = filler_ids()` | 必须在 `initWithDescriptor:` 前快照，因为新建瞬间 macOS 会挤移相邻显示器 | 进入 `P8` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:381-383` `let before = origins(); let previous_fillers = filler_ids(); let made = VirtualDisplay::create(&name, width, height, serial)?;` |
+| `P8` | `agent-screen-displays` 串行线程 | `VirtualDisplay::create` / `create_once` (`apps/macos/src/mac/display.rs:171, 221-246, 276`) | 最多循环 `0..3` 次构造 `CGVirtualDisplayDescriptor`：`vendorID=0x5353`、`productID=1`、`serialNum`、`maxPixelsWide=5120`、`maxPixelsHigh=3200` (`LARGEST=2560x1600` 的 2 倍)、按 `110 PPI` (`25.4 / 110.0`) 计算毫米尺寸，绑定 `app.agentscreen.virtual-displays` 队列 | 调试构建设 `AGENTSCREEN_MAX_PIXELS=fit` 时按当前尺寸设像素上限 (`display.rs:232-236, 662-666`) | 描述符就绪 | 无变化 | 已验证：`apps/macos/src/mac/display.rs:237-245` `setMaxPixelsWide: largest.0.max(width) * scale ... let mm = 25.4 / 110.0; ... setVendorID: 0x5353u32; setProductID: 0x0001u32;`；`display.rs:282` `DispatchQueue::new("app.agentscreen.virtual-displays", None)` |
+| `P9` | `agent-screen-displays` 串行线程 | `create_once` (`apps/macos/src/mac/display.rs:247-265, 176`) | `-[CGVirtualDisplay initWithDescriptor:]` 调入 `SkyLight` `_WSVirtualDisplayCreate` (`0x186e6d154`) 分配 `displayID` (`> 0`)，调 `claims::add_display(id)` 并写 `created` 日志 (`displays-e2e.log:37`) | 若 `id == 0`（如在线序列号冲突被 `WindowServer` 拒绝）返回 `None` | 获得 `id > 0` | 后台广播显示器重配置通知 | 已验证：`apps/macos/src/mac/display.rs:247,253,264` `initWithDescriptor: &*descriptor ... let id: u32 = msg_send![&handle, displayID]; ... super::claims::add_display(id);`；`SkyLight` `0x186e6d154` `_WSVirtualDisplayCreate`；`displays-e2e.log:37` `created display=544 unit=8 at=6848,-800 size=1280x800 serial=10001` |
+| `P10` | `agent-screen-displays` 串行线程 | `apply_mode` / `settle_mode` / `use_mode` (`apps/macos/src/mac/display.rs:250, 263, 291-323, 671-741`) | 注入请求宽高单模式，再经 `25 * 20ms` 轮询 `CGDisplayCopyAllDisplayModes`（含 `kCGDisplayShowDuplicateLowResolutionModes`）找到 `2x` 模式，以 `CGCompleteDisplayConfiguration(config, 2)` (`kCGConfigurePermanently = 2`) 写入该 `serial` 默认模式 | 仅调试构建 (`cfg!(debug_assertions)`) 支持 `AGENTSCREEN_DISPLAY_HZ` 与 `AGENTSCREEN_DISPLAY_SCALE` (`display.rs:671-685`) | 模式就绪 | 无变化 | 已验证：`apps/macos/src/mac/display.rs:673,680` `cfg!(debug_assertions).then(\|\| std::env::var(name).ok()) ... read("AGENTSCREEN_DISPLAY_SCALE")`；`display.rs:734` `let done = CGCompleteDisplayConfiguration(config, 2);`；`MacOSX.sdk CGDisplayConfiguration.h:173` `kCGConfigurePermanently = 2` |
+| `P11` | `agent-screen-displays` 串行线程 | `cg::unit_twin` (`apps/macos/src/mac/cg.rs:75-85`), `display.rs:177` | 调 `CGGetOnlineDisplayList` 与 `CGDisplayUnitNumber` 检查在线屏幕（含 AeroSpace `0x4145/1` closet 屏）是否与新屏共享同一 `unit` 号 | `ScreenCaptureKit` 按 `unit` 号区分屏幕，撞号会导致双屏串流或拒捕 | 无撞号走 `P12`，撞号走 `P14` 或 `P13` | 无变化 | 已验证：`apps/macos/src/mac/cg.rs:70-71,83` `/// Another online display with the same unit number as id, the closet included. ... .find(\|&other\| other != id && unsafe { CGDisplayUnitNumber(other) } == unit)` |
+| `P14` | `agent-screen-displays` 串行线程 | `VirtualDisplay::create` (`apps/macos/src/mac/display.rs:171-175, 189-194`) | 将撞号屏暂存入 `twinned` 以占住冲突 `unit` 槽位，租赁下一个空闲 `Serial` 进入下一轮 `create_once` | 每次重试多触发一次显示器创建 | 回到 `P8`（最多 `3` 次） | 无变化 | 已验证：`apps/macos/src/mac/display.rs:171-172,193` `for _ in 0..3u32 { let lease = serial.take().unwrap_or_else(\|\| Serial::lease(first)); ... twinned.push(display);` |
+| `P12` | `agent-screen-displays` 串行线程 | `MAX_FILLERS = 2` (`apps/macos/src/mac/display.rs:115, 178-187`) | 拿到无撞号新屏后，将本轮 `twinned` 中未与我方屏幕成对 (`!twins_ours`) 的撞号屏最多保留 `2` 台入全局 `FILLERS` 常驻填洞（记 `kept ... filler`），超出或与我方撞号者立即释放（记 `released ... unit twin`，见 `displays-e2e.log:1`） | 保留 filler 避免后续每次造屏重复撞上同一 `unit` 空洞 | 进入 `P15` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:115,180-185` `const MAX_FILLERS: usize = 2; ... if fillers.len() < MAX_FILLERS && !twins_ours(twinned.id) { crate::lifecycle::note("kept", twinned.id, "filler"); fillers.push(twinned); } else { crate::lifecycle::note("released", twinned.id, "unit twin"); }`；`displays-e2e.log:1` `released display=539 unit=10 at=-3840,0 size=1280x800 unit twin` |
+| `P13` | `agent-screen-displays` 串行线程 | `VirtualDisplay::create` (`apps/macos/src/mac/display.rs:195-197`) | 若连续 `3` 次尝试均遭遇 `unit_twin`，弹出最后一块 `twinned.pop()`（前两块随局部 `Vec` 析构释放）继续停泊流程 | 若该屏仍处于 twin 状态，后续 `capture` 与 `probe_spares` 会拒绝采集或复用 (`cg.rs:71-73`, `capture.rs`) | 进入 `P15` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:195-196` `// Still twinned: capture refuses it, rather than show the other. twinned.pop()` |
+| `P15` | `agent-screen-displays` 串行线程 | `park_owned` (`apps/macos/src/mac/display.rs:429-456`) | 合并我方虚拟屏与 `filler_ids()`，执行 `for attempt in 0..75` 停泊与校验循环 | 仅调试构建且 `AGENTSCREEN_INSTANCE=e2e` 时，`AGENTSCREEN_TEST_PARK_REFUSED` 可强制模拟停泊校验失败 (`display.rs:598-601`) | 进入 `P16` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:442` `for attempt in 0..75 {`；`display.rs:598-600` `fn parking_refused() -> bool { knob("AGENTSCREEN_TEST_PARK_REFUSED").is_some() && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e") }` |
+| `P16` | `agent-screen-displays` 串行线程 | `core::park_fillers` (`apps/macos/src/core.rs:1469-1476`), `arrangement::plan` (`crates/model/src/arrangement.rs:82-193`) | 先清理与我方撞号的 filler 并停泊其余 filler；`arrangement::plan` 在最右侧用户显示器右上角外侧 (`x >= right`, `max_y <= top`) 规划网格，钉住已停泊且连通的既有虚拟屏 (`#204`) | 仅允许角点接触，禁止与用户屏共享正长度边 (`shares_edge`)，防止真实指针跨入 | 产出原点变更表 `moves` | 无变化 | 已验证：`crates/model/src/arrangement.rs:82-83,112,658-659` `pub fn plan(screens: &[Screen]) ... let mut pinned_allowed ... rect.x >= right && rect.max_y() <= top` |
+| `P17` | `agent-screen-displays` 串行线程 | `tuck_away_restoring` (`apps/macos/src/mac/display.rs:542-584`) | 调 `CGBeginDisplayConfiguration` 开启事务，将 `before` 中被 macOS 挤歪的其它显示器原位写回，并对需移动的虚拟屏调用 `CGConfigureDisplayOrigin` | 底层对应 `SkyLight` `WS::Displays::Display::set_origin` (`0x186e6b304`) | 配置事务组装完成 | 恢复被挤动的用户显示器位置 | 已验证：`apps/macos/src/mac/display.rs:574-576` `if CGBeginDisplayConfiguration(&mut config) == 0 { for &(d, (x, y)) in &moves { CGConfigureDisplayOrigin(config, d, x as i32, y as i32); }`；`MacOSX.sdk CGDisplayConfiguration.h:52` `CG_EXTERN CGError CGConfigureDisplayOrigin(`；`SkyLight` `0x186e6b304` `__ZN2WS8Displays7Display10set_originERK7CGPoint` |
+| `P18` | `agent-screen-displays` 串行线程 | `CGCompleteDisplayConfiguration(config, 1)` (`apps/macos/src/mac/display.rs:31, 581`) | 以 `kCGConfigureForSession = 1` 调用 `_SLSCompleteDisplayConfiguration` (`0x186e51008`) 提交当前登录会话级原点配置 | 会话级提交比永久提交快约 `1s` (`1.3s` vs `2.3s`，见 `display.rs:578-580` 注释) | 进入 `P19` 校验 | 不污染永久显示器排列偏好 | 已验证：`apps/macos/src/mac/display.rs:581` `CGCompleteDisplayConfiguration(config, 1);`；`MacOSX.sdk CGDisplayConfiguration.h:172` `kCGConfigureForSession = 1,`；`SkyLight` `0x186e51008` `_SLSCompleteDisplayConfiguration` |
+| `P19` | `agent-screen-displays` 串行线程 | `tuck_away_restoring` / `is_tucked` (`apps/macos/src/mac/display.rs:447-455, 585-593, 634-647`), `arrangement::parked_safely` (`crates/model/src/arrangement.rs:643-664`) | 复查被移动屏幕已还原 (`restored`)，且目标屏及所有在线 filler 均满足 `out_of_the_way`（位于最右用户屏右侧且不低于其顶边、零交集、零共享边） | 拦截刚添加瞬间 `WindowServer` 忽略原点配置的情况 | 通过走 `P21`（记 `parked ... tries=N`），未通过走 `P20` 或 `PX3` | 确保鼠标无法滑入虚拟屏 | 已验证：`apps/macos/src/mac/display.rs:447-453` `if tuck_away_restoring(id, &ids, before) && is_tucked(id, &ids) && fillers.iter().all(...) { crate::lifecycle::note("parked", id, &format!("tries={}", attempt + 1));`；`arrangement.rs:643` `pub fn parked_safely(id: u32, screens: &[Screen]) -> bool` |
+| `P20` | `agent-screen-displays` 串行线程 | `park_owned` (`apps/macos/src/mac/display.rs:442-445`) | 第 `1..74` 轮每次重试前 `std::thread::sleep(Duration::from_millis(20))` | 75 轮休眠累计约 `74 * 20ms = 1.48s` | 回到 `P16` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:442-445` `for attempt in 0..75 { if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(20)); }` |
+| `PX3` | `agent-screen-displays` 串行线程 | `parking_failure` / `create_parked` (`apps/macos/src/mac/display.rs:385-397, 457-509`) | 格式化未还原屏幕与全体在线屏幕矩形写入 `displays[-e2e].log` (`parking failed: ...`)，释放本次新建期间新留下的 filler (`filler from failed creation`) 并丢弃目标屏句柄 | 绝不把停泊位置未验证的虚拟屏交给会话 | 返回 `None` 至图 3 | 销毁异常虚拟屏及本次新增 filler | 已验证：`apps/macos/src/mac/display.rs:459-460` `crate::lifecycle::note("released", id, &format!("parking failed: {why}")); None`；`display.rs:395` `crate::lifecycle::note("released", filler.id, "filler from failed creation");` |
+| `P21` | `agent-screen-displays` 串行线程 | `create_parked` / `reuse_parked` (`apps/macos/src/mac/display.rs:398, 421, 454`) | 保留有效全局 `FILLERS` 在线填洞，将通过停泊校验的 `VirtualDisplay` 返回调用方 | 句柄随 `Serial` 租约移交主线程收养 | 返回 `Some(VirtualDisplay)` | 无变化 | 已验证：`apps/macos/src/mac/display.rs:398,454` `parked` / `return Some(made);` |
 
 ---
 
@@ -150,60 +147,62 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A1["GPUI 主线程收到 made: Option<VirtualDisplay>"] --> A2{"异步造屏期间连接已关闭或达到会话 4 屏上限?"}
-    A2 -->|"是"| AX1["Drop 新建 VirtualDisplay 并返回连接关闭或 AtCap 错误"]
-    A2 -->|"否"| A3{"new != true 且并发请求已先建好同会话屏幕?"}
-    A3 -->|"是"| AX2["Drop 新建 VirtualDisplay 改为复用先行屏幕并返回"]
-    A3 -->|"否"| A4{"made 为 Some(handle)?"}
-    A4 -->|"否"| AX3["返回 failed (无法在安全位置创建虚拟屏)"]
-    A4 -->|"是"| A5["Core::adopt 注册屏幕、启动 repark/hold_modes/reclaim_soon/label_soon"]
-    A5 --> A6["adopt_orphans 认领重启前遗留进程并在 claims.json 落盘窗口归属"]
-    A6 --> A7{"AeroSpace 正在运行且未配置 ignored-monitors?"}
-    A7 -->|"是"| A8["最多轮询 30x100ms (3s) 等待 Shell 守卫迁走被抢占的用户工作区"]
-    A7 -->|"否"| A9["后台扫描新屏上全部现有窗口 windows::on_display(id)"]
+    A1["GPUI 主线程收到 made: Option<VirtualDisplay>"] --> A2{"造屏期间连接已关闭 或 (new==true 且已满 4 屏)?"}
+    A2 -->|"是"| AX1["Drop VirtualDisplay 并返回 failed (连接关闭或 AtCap)"]
+    A2 -->|"否"| A3{"new != true 且并发请求已先建好同会话显示器?"}
+    A3 -->|"是"| AX2["Drop VirtualDisplay 改为 reuse 先行显示器并返回"]
+    A3 -->|"否"| A4{"made 为 Some 且 Core.adopt 复检 is_tucked 通过?"}
+    A4 -->|"否"| AX3["返回 failed (无法在安全位置创建虚拟显示器)"]
+    A4 -->|"是"| A5["Core.adopt 写 identities.json、注册队列与会话、启动 reclaim_soon 与 label_soon"]
+    A5 --> A6["adopt_orphans 认领重启前遗留进程并为已在屏上的窗口写入 claims.json"]
+    A6 --> A7{"AeroSpace 正在运行且未忽略该显示器?"}
+    A7 -->|"是"| A8["最多轮询 30x100ms (3s) 等待 visible_windows_on 清空"]
+    A7 -->|"否"| A9["后台扫描新屏上全部窗口 windows.on_display(id)"]
     A8 --> A9
-    A9 --> A10{"Model::reconcile_new_display_windows 发现非归属外来窗口?"}
-    A10 -->|"是"| A11["evacuate_window_to_user 立即将外来窗口迁回用户主屏幕"]
-    A10 -->|"否"| A12["组装 displayId / width / height / reused=false / note 响应"]
+    A9 --> A10{"Displays.reconcile_new_display_windows 筛出非归属窗口?"}
+    A10 -->|"是"| A11["evacuate_window_to_user 将外来窗口迁回用户屏幕"]
+    A10 -->|"否"| A12["组装 displayId / width / height / scale / reused=false / note"]
     A11 --> A12
-    A12 --> R2["向 AgentScreen mcp 返回新屏幕句柄"]
+    A12 --> R2["AgentScreen mcp 登记 made_display 并返回新句柄"]
 ```
 
 ### 图 3 节点明细表
 
-| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证来源 |
+| 节点 | 线程与队列 | 我方代码与常量 | macOS 组件与内部行为 | 限制与关联缺陷 | Agent 侧返回 | 用户侧表现 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `A1` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2824-2860`) | 后台 `create_parked` 或 `reuse_parked` `.await` 返回主线程 | 造屏 `300~500ms` 窗口内状态可能已变化 | 进入二次校验 | 无变化 | [已验证: apps/macos/src/control/agent.rs:2824-2860] |
-| `A2` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2835-2856`) | 重检 `Core.closed.contains(&connection)` 以及 `new == true` 时的 `sessions.may_add` | 拦截造屏期间客户端断开或并发 `new: true` 撞上限 | 命中走 `AX1`，未命中走 `A3` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2835-2856] |
-| `AX1` | GPUI 主线程 | `drop(made)` (`apps/macos/src/control/agent.rs:2857-2860`) | 立即销毁刚建好的 `VirtualDisplay`，不留孤儿屏 | 消耗了一次 `MadeLimit` 配额但保证状态一致 | `failed` (`the connection closed` 或 `AtCap` 消息) | 无新增 Peek 卡片 | [已验证: apps/macos/src/control/agent.rs:2857-2860] |
-| `A3` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2863-2866`) | 当 `new == false` 时再次调用 `reuse(...)` 检查并行调用是否已先一步登记会话主屏 | 保证并发首次调用收敛到同一块 `displayId` | 命中走 `AX2`，未命中走 `A4` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2863-2866] |
-| `AX2` | GPUI 主线程 | `drop(made)` + `Ok(existing)` (`apps/macos/src/control/agent.rs:2864-2865`) | 丢弃多余句柄，返回先行屏幕描述 (`reused: true`) | 无 | 返回先行屏幕 JSON | 仅保留一块屏幕卡片 | [已验证: apps/macos/src/control/agent.rs:2864-2865] |
-| `A4` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2867-2903`) | 解包 `made: Option<VirtualDisplay>` | 图 2 中 `PX1`/`PX2`/`PX3` 均在此汇合 | `None` 走 `AX3`，`Some` 走 `A5` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2867-2903] |
-| `AX3` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:2899-2903`) | 生成明确无屏幕分配的错误消息 | 绝不把未安全停泊的屏幕暴露给 Agent | 错误码 `failed`：`macOS could not create a virtual display at a verified safe position...` | 无新增屏幕 | [已验证: apps/macos/src/control/agent.rs:2899-2903] |
-| `A5` | GPUI 主线程 | `Core::adopt` (`apps/macos/src/core.rs:572-625`) | `claims::add_display` 写 `claims.json`；`Model::insert` 记入屏幕表并加入 `Sessions`；`repark::note_adopted` 记录停泊框并触发 `repark()`、`hold_modes()`、`reclaim_soon()` (`3s` 后后台跑 `colorsync reclaim`)、`label_soon()` (贴壁纸标签) 与 `cx.notify()` | 菜单栏状态文字绘制在高频重绘时可能引起 `CA::Transaction::commit` 短暂繁忙 (`hang 2026-11-15-11-08-52.015.txt` 采样 `273ms`) | 获得正式 `displayId` | 菜单栏图标点亮活跃态，Peek 新增该屏幕缩略图卡片 | [已验证: apps/macos/src/core.rs:572-625, ~/Library/Logs/Agent Screen/hang 2026-11-15-11-08-52.015.txt] |
-| `A6` | GPUI 主线程 + 后台执行器 | `adopt_orphans` (`apps/macos/src/control/agent.rs:3009-3030`), `claims::claim` (`apps/macos/src/mac/claims.rs:138-143`), `agent.rs:2908-2923` | 将 `adoptGroups` / `adopt` 传入的已启动 `pid` 绑定回对应屏幕的 `Display.started`，并对已回到该屏的窗口立即写入 `claims.json` | 抢在 AeroSpace 1 秒轮询前锁定窗口归属 | 孤儿归属恢复 | 无变化 | [已验证: apps/macos/src/control/agent.rs:2908-2923, apps/macos/src/control/agent.rs:3009-3030] |
-| `A7` | GPUI 主线程 + 后台执行器 | `app::screen_name` (`apps/macos/src/mac/app.rs:528-537`), `aerospace::ignoring_with_display` (`apps/macos/src/mac/aerospace.rs:391-393`), `agent.rs:2929-2936` | 在主线程读取 `NSScreen.localizedName`，后台执行 `aerospace list-monitors` 判断新虚拟屏是否被 AeroSpace 纳管 | 配好 `ignored-monitors` (`^Agent Screen`) 时直接跳过等待 (`ADR 0006`) | 被纳管走 `A8`，已忽略走 `A9` | 若未配置忽略，界面提示一键写入 AeroSpace 配置 | [已验证: apps/macos/src/control/agent.rs:2929-2936, apps/macos/src/mac/aerospace.rs:391-461] |
-| `A8` | 后台执行器 | `create_display` (`apps/macos/src/control/agent.rs:2937-2958`) | 最多循环 `30` 次、每次间隔 `100ms` 调用 `aerospace list-windows --monitor` 等待 `ui::shell` 的显示器守卫将误绑到虚拟屏的用户工作区迁回原物理屏 | 最长阻塞 `3.0 s`，防止首张截图拍到用户隐私窗口 | 等待净空或满 `3s` | 用户工作区留在物理屏 | [已验证: apps/macos/src/control/agent.rs:2937-2958] |
-| `A9` | 后台执行器 | `windows::on_display` (`apps/macos/src/mac/windows.rs:382-389`), `agent.rs:2959` | 通过 `CGWindowListCopyWindowInfo` 列出此刻落在该虚拟屏 `bounds` 内的全部标准窗口 | 捕获因历史坐标重合遗留在停泊位的外来窗口 (`#204` 修复逻辑) | 得到 `on_new` 窗口表 | 无变化 | [已验证: apps/macos/src/control/agent.rs:2959, apps/macos/src/mac/windows.rs:382-389, Issue #204] |
-| `A10` | GPUI 主线程 | `Model::reconcile_new_display_windows` (`crates/model/src/model.rs:1495-1535`), `agent.rs:2960-2963` | 对照会话 `started` 与 `placed` 表，筛出不属于本会话的外来窗口列表 `unowned` | 修复 `#204` 新屏停泊在曾用坐标时误吞旧窗口的缺陷 | 有外来窗走 `A11`，无则走 `A12` | 无变化 | [已验证: apps/macos/src/control/agent.rs:2960-2963, Issue #204] |
-| `A11` | 后台执行器 | `evacuate_window_to_user` (`apps/macos/src/core.rs:1418-1441`), `agent.rs:2964-2972` | 通过 `AXUIElementSetAttributeValue(kAXPositionAttribute)` 将外来窗口移回用户主屏安全区域 | 若目标进程挂起无 AX 响应，窗口移动可能超时 | 疏散完成 | 外来窗口回到用户物理屏 | [已验证: apps/macos/src/control/agent.rs:2964-2972, apps/macos/src/core.rs:1418-1441] |
-| `A12` | GPUI 主线程 | `describe` (`apps/macos/src/control/agent.rs:2889-2897, 3092-3104`) | 组装 `displayId`、`width`、`height`、`reused: false`；若输入宽高被钳制则附加 `note` | 无 | JSON 负载生成 | Peek 实时流 (`SCStream`) 开始以低帧率采样新屏幕 | [已验证: apps/macos/src/control/agent.rs:2889-2897, apps/macos/src/control/agent.rs:3092-3104] |
-| `R2` | 宿主 -> `mcp` 进程 | `tools::run` (`crates/mcp/src/tools.rs:804-836`), `Control::made_display` (`crates/mcp/src/control.rs:147-158`) | `mcp` 记录 `(displayId, sessionKey)` 供后续断线重连推导孤儿，向 Agent 输出文本 JSON | 无 | 返回 `{"displayId": N, "width": W, "height": H, "reused": false}` | 新屏幕正式服役 | [已验证: crates/mcp/src/tools.rs:804-836, crates/mcp/src/control.rs:147-158] |
+| `A1` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2817-2833`) | `create_parked` 或 `reuse_parked` `.await` 完成后回到主线程 | 异步造屏数百毫秒窗口内会话与连接状态可能已变 | 进入二次校验 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2826-2834` `.await; (made, name) ... let raced = core.read_with(cx, \|c, _\| {` |
+| `A2` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2834-2846`) | 重检 `c.closed.contains(&connection)` 及 `new == true` 时的 `c.displays.sessions.may_add(&key)` | 拦截造屏期间连接断开或并发 `new: true` 触顶 | 命中走 `AX1`，未命中走 `A3` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2835-2840` `if c.closed.contains(&connection) { ... } else if new { c.displays.sessions.may_add(&key)` |
+| `AX1` | GPUI 主线程 | `drop(made)` (`apps/macos/src/control/agent.rs:2847-2850`) | 析构刚创建的 `VirtualDisplay`，不留无主屏幕 | 若走过新建分支则已消耗一次 `MadeLimit` 配额 | 错误码 `failed` (`the connection closed` 或 `AtCap` 文案) | 无新增 Peek 卡片 | 已验证：`apps/macos/src/control/agent.rs:2847-2849` `if let Some(answer) = raced { drop(made); return answer; }` |
+| `A3` | GPUI 主线程 | `create_display` (`apps/macos/src/control/agent.rs:2853-2856`) | 当 `!new` 时再次调用 `reuse(core, connection, &key, &orphans, asked, cx)` 检查并行请求是否已先一步建屏 | 保证同一会话并发无 `new` 请求收敛到同一 `displayId` | 命中走 `AX2`，未命中走 `A4` | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2853` `if !new && let Some(existing) = reuse(core, connection, &key, &orphans, asked, cx)` |
+| `AX2` | GPUI 主线程 | `drop(made)` + `Ok(existing)` (`apps/macos/src/control/agent.rs:2854-2855`) | 丢弃多余句柄，直接返回先行屏幕描述 (`reused: true`) | 无 | 返回先行显示器 JSON | 仅显示一块显示器卡片 | 已验证：`apps/macos/src/control/agent.rs:2854-2855` `drop(made); return Ok(existing);` |
+| `A4` | GPUI 主线程 | `create_display` / `Core::adopt` (`apps/macos/src/control/agent.rs:2857-2875`, `apps/macos/src/core.rs:583-587`) | 解包 `made?`，并在 `Core::adopt` 内再次调 `display::is_tucked(id, &virtual_ids)` 复核停泊位 | 兜底拦截备用屏或新屏在移交主线程间隙偏离安全区 | 失败走 `AX3`，成功走 `A5` | 无变化 | 已验证：`apps/macos/src/core.rs:583-586` `if !display::is_tucked(id, &virtual_ids) { ... crate::lifecycle::note("released", id, "unsafe at adoption"); return None; }` |
+| `AX3` | GPUI 主线程 | `ControlError::failed` (`apps/macos/src/control/agent.rs:2871-2875`) | 汇总图 2 造屏/停泊失败或 `adopt` 复检失败，返回明确错误 | 绝不分配未验证安全停泊的虚拟显示器 | 错误码 `failed`：`macOS could not create a virtual display at a verified safe position. No Agent Display was assigned; retry create_display later.` | 无新增显示器 | 已验证：`apps/macos/src/control/agent.rs:2872-2874` `ControlError::failed("macOS could not create a virtual display at a verified safe position...")` |
+| `A5` | GPUI 主线程 | `Core::adopt` (`apps/macos/src/core.rs:572-604`), `colorsync::remember` (`apps/macos/src/mac/colorsync.rs:300-334`) | 若槽位 `slot <= KEPT_SLOTS` (`16`)，调 `CGDisplayCreateUUIDFromDisplayID` 将 UUID 记入 `identities.json`；注册 `input_queue` 与 `displays.add`；调度 `reclaim_soon` (`3s` 后跑 `colorsync reclaim`) 与 `label_soon` (`10 * 300ms` 设桌面壁纸)；记录 `tucked` 与 `repark_state.note_adopted` 并 `cx.notify()` | 后续若发生拓扑变化，由屏幕变更回调触发 `Core::repark` 与 `Core::hold_modes` | 获得正式 `displayId` | 菜单栏图标点亮，Peek 新增缩略图卡片 | 已验证：`apps/macos/src/core.rs:588-602` `colorsync::remember(serial, slot, id); ... self.displays.add(...); self.reclaim_soon(cx); label_soon(id, cx); self.tucked.insert(id); self.repark_state.note_adopted(...);`；`colorsync.rs:302` `.../identities.json` |
+| `A6` | GPUI 主线程 + 后台执行器 | `adopt_orphans` (`apps/macos/src/control/agent.rs:2860, 2882-2897, 3009-3027`), `claims::claim` (`apps/macos/src/mac/claims.rs:138-140`) | 通过 `libc::kill(pid, 0)` 过滤仍在运行的孤儿进程记入 `Display.started`，后台枚举 `windows::on_display(id)` 为其窗口立即写入 `claims.json` | 抢在 AeroSpace 周期刷新前声明窗口归属 | 宿主重启前的进程恢复纳管 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:3018` `\|\| unsafe { libc::kill(pid, 0) } != 0`；`agent.rs:2891-2893` `if started.contains(&w.target.pid) { crate::mac::claims::claim(w.target.window_id, id); }` |
+| `A7` | GPUI 主线程 + 后台执行器 | `app::screen_name` (`apps/macos/src/mac/app.rs:528-536`), `aerospace::ignoring_with_display` (`apps/macos/src/mac/aerospace.rs:391-393`), `agent.rs:2904-2914` | 主线程读取 `NSScreen.localizedName`，后台执行 `ignoring_with_display()` 检测 AeroSpace 是否已加载 `ignored-monitors` 忽略该屏 (`ADR 0006`) | 已配置忽略时缓存 `IGNORES = true`，跳过等待 | 未忽略走 `A8`，已忽略或未运行走 `A9` | 未配置忽略时界面可引导一键配置 | 已验证：`apps/macos/src/control/agent.rs:2904,2911` `let screen = MainThreadMarker::new().and_then(\|mtm\| app::screen_name(id, mtm)); ... aerospace::ignoring_with_display().is_some_and(\|i\| i != aerospace::Ignoring::Yes)` |
+| `A8` | 后台执行器 | `create_display` (`apps/macos/src/control/agent.rs:2914-2938`) | 最多循环 `30` 次、每次间隔 `100ms` 调用 `aerospace.visible_windows_on(&screen)`，等待 Shell 显示器守卫迁走误落入新屏的用户工作区 | 最长等待 `3.0 s`，避免首张截图拍到用户窗口 | 清空或满 `3s` 后走 `A9` | 用户工作区迁回物理屏 | 已验证：`apps/macos/src/control/agent.rs:2915,2925,2935` `for _ in 0..30 { ... aerospace.visible_windows_on(&screen) ... .timer(Duration::from_millis(100))` |
+| `A9` | 后台执行器 | `windows::on_display` (`apps/macos/src/control/agent.rs:2939`) | 调用 `CGWindowListCopyWindowInfo` 列出当前落在该显示器上的全部窗口 | 捕获重启恢复或旧序列号坐标遗留窗口 (`#204`) | 得到 `on_new` 列表 | 无变化 | 已验证：`apps/macos/src/control/agent.rs:2939` `let on_new = off(cx, move \|\| windows::on_display(id)).await;` |
+| `A10` | GPUI 主线程 | `Displays::reconcile_new_display_windows` (`crates/model/src/model.rs:920-945`), `agent.rs:2940-2944` | 跳过已有 `recorded_owners` 记录的窗口；将 `d.started` 认领进程的窗口登记为 `Origin::Launched`；其余无主外来窗口归入 `unowned` | 防止新显示器把非本会话窗口隐藏在屏外 (`#204`) | `unowned` 非空走 `A11`，为空走 `A12` | 无变化 | 已验证：`crates/model/src/model.rs:920,938,940` `pub fn reconcile_new_display_windows(...) { ... d.claim(target, Origin::Launched, None); } else { unowned.push(target); }` |
+| `A11` | 后台执行器 | `core::evacuate_window_to_user` (`apps/macos/src/core.rs:1375-1402`), `agent.rs:2945-2954` | 调用 `dismissal::give_back(target, None, None)`（调试 `user_stage` 下迁往替身舞台）通过 AX 将外来窗口迁回用户主屏幕 | 若目标进程无障碍接口卡死未响应，窗口迁移会失败并返回 `false` | 疏散执行完毕 | 外来窗口回到用户主屏幕 | 已验证：`apps/macos/src/core.rs:1375,1394` `pub(crate) fn evacuate_window_to_user(...) -> bool { ... if crate::dismissal::give_back(target, None, None)` |
+| `A12` | GPUI 主线程 | `describe` (`apps/macos/src/control/agent.rs:2861-2869, 3092-3104`) | 构造含 `displayId`、`width`、`height`、`scale` (`shot_scale`)、`label`、`reused: false`、`multiDisplay: true` 及可选钳制 `note` 的响应 | 大分辨率屏幕 `shot_scale < 1.0`（长边上限 `1568`、总像素上限 `1_150_000`，`model.rs:667-673`） | 宿主返回 JSON | Peek 按需订阅实时流 | 已验证：`apps/macos/src/control/agent.rs:3092-3103` `fn describe<H>(...) -> Value { json!({ "displayId": d.id, ... "scale": shot_scale((d.width, d.height)), ... "multiDisplay": true }) }` |
+| `R2` | 宿主 -> `mcp` 进程 | `tools::run` (`crates/mcp/src/tools.rs:810-839`), `Control::made_display` (`crates/mcp/src/control.rs:147-157`) | `mcp` 记录 `(id, connection) -> Made { session }` 供后续宿主退出时推导孤儿，输出工具结果对象 | 无 | 返回 `{"display_id": N, "width": W, "height": H, "scale": S, "reused": false}` | 新 Agent Display 投入使用 | 已验证：`crates/mcp/src/tools.rs:811-812` `if let Some(id) = reply.get("displayId").and_then(Value::as_u64) { control.made_display(id, &session.key, reused); }` |
 
 ---
 
 ## 关键时间参数与门控常量汇总
 
-| 常量 / 参数 | 数值 | 定义位置 | 作用机制 | 验证来源 |
+| 常量 / 参数 | 数值 | 定义位置 | 作用机制 | 验证证据 |
 | :--- | :--- | :--- | :--- | :--- |
-| Socket 自启动重连 | `50 * 100 ms` (`5.0 s`) | `crates/mcp/src/control.rs:373-380` | `open -g` 拉起宿主后轮询 `UnixStream::connect` 的最大等待时间 | [已验证: crates/mcp/src/control.rs:373-380] |
-| `MAX_LIVE` | `4` 块屏幕 / 会话 | `crates/model/src/session.rs:21` | 单个 `sessionKey` 同时存活的 Agent Display 上限 | [已验证: crates/model/src/session.rs:21] |
-| 默认与合法分辨率 | 默认 `1280x800`，范围 `640x480..2560x1600` | `apps/macos/src/control/agent.rs:2752-2759`, `display.rs:276` | 超出范围自动 `clamp` 并写入 `note`，描述符最大像素 `5120x3200` (HiDPI 2x) | [已验证: apps/macos/src/control/agent.rs:2752-2759, apps/macos/src/mac/display.rs:235-242] |
-| `SPARES` / `SPARE_LIFE` | 最多 `3` 块热备，存活 `600 s` (`10 min`) | `apps/macos/src/core.rs:24-25` | 屏幕结束且洁净后转入热备池，免去下次创建的重配置开销 | [已验证: apps/macos/src/core.rs:24-25] |
-| `BUDGET_MS` | `40.0 ms` | `crates/model/src/budget.rs:13` | ColorSync 重配置预估主线程阻塞上限；超限时先退热备，仍超则拒绝新建 | [已验证: crates/model/src/budget.rs:13, apps/macos/src/core.rs:268-288] |
-| `MADE` / `MADE_WINDOW` | `10` 次 / `600 s` (`10 min`) | `apps/macos/src/core.rs:26, 39` | 全局真实新建 `CGVirtualDisplay` 的滑动窗口速率限制 | [已验证: apps/macos/src/core.rs:26, apps/macos/src/core.rs:39] |
-| `KEPT_SLOTS` | `16` 个序列号槽位 | `apps/macos/src/mac/colorsync.rs:23` | `Serial::lease` 循环复用序列号，配合 `RECLAIM_DELAY = 3s` (`core.rs:149`) 回收 ColorSync 孤儿设备记录 | [已验证: apps/macos/src/mac/colorsync.rs:23, apps/macos/src/core.rs:149, ~/Library/Logs/Agent Screen/displays-e2e.log:9] |
-| `MAX_FILLERS` | `2` 块占位屏 | `apps/macos/src/mac/display.rs:115` | 遭遇 `unit_twin` 镜像撞号时最多垫入 2 块临时屏绕开坏 `unit` | [已验证: apps/macos/src/mac/display.rs:115, apps/macos/src/mac/display.rs:177-196] |
-| `settle_mode` 轮询 | `20 * 10 ms` (`200 ms`) | `apps/macos/src/mac/display.rs:315-325` | 等待 `CGDisplayCopyAllDisplayModes` 暴露目标模式并完成切换 | [已验证: apps/macos/src/mac/display.rs:315-325] |
-| `park_owned` 重试 | `5` 轮，间隔 `50 ms` | `apps/macos/src/mac/display.rs:446-456` | 提交 `CGConfigureDisplayOrigin` 后验证 `parked_safely` 的有界重试 | [已验证: apps/macos/src/mac/display.rs:446-456] |
-| AeroSpace 净空等待 | `30 * 100 ms` (`3.0 s`) | `apps/macos/src/control/agent.rs:2937-2958` | 等待未配置 `ignored-monitors` 的 AeroSpace 迁走误落入新屏的用户工作区 | [已验证: apps/macos/src/control/agent.rs:2937-2958] |
+| Socket 自启动重连 | `75 * 200 ms` (`15 s`) | `crates/mcp/src/control.rs:380-386` | `/usr/bin/open -g` 拉起宿主后轮询 `endpoint::connect()` 的最大等待时间 | 已验证：`crates/mcp/src/control.rs:380-381,386` `for _ in 0..75 { tokio::time::sleep(std::time::Duration::from_millis(200)).await; ... "it did not answer within 15 s"` |
+| `MAX_LIVE` | `4` 台活跃显示器 / 会话 | `crates/model/src/session.rs:21` | 单个 `sessionKey` 同时持有的活跃 Agent Display 上限（待查看显示器不计入） | 已验证：`crates/model/src/session.rs:21` `pub const MAX_LIVE: usize = 4;` |
+| 默认与合法分辨率 | 默认 `1280x800`，范围 `640x480..2560x1600` | `apps/macos/src/control/agent.rs:2750-2759`, `apps/macos/src/mac/display.rs:276` | 超界自动 `clamp` 并写入 `note`；`LARGEST = (2560, 1600)`，2x 描述符最大像素 `5120x3200` | 已验证：`apps/macos/src/mac/display.rs:276` `const LARGEST: (u32, u32) = (2560, 1600);`；`agent.rs:2753,2758` `.clamp(640.0, 2560.0)` / `.clamp(480.0, 1600.0)` |
+| `SPARES` / `SPARE_LIFE` | 最多 `3` 台备用屏，存活 `600 s` (`10 min`) | `apps/macos/src/core.rs:24-25` | 净空结束的显示器保留在线供快速复用，满 10 分钟在用户空闲 `tidy` 时回收 | 已验证：`apps/macos/src/core.rs:24-25` `const SPARES: usize = 3;` / `const SPARE_LIFE: Duration = Duration::from_secs(10 * 60);` |
+| `BUDGET_MS` | `40.0 ms` | `crates/model/src/budget.rs:13` | 对照 `WindowServer` `50 ms` 色彩配置查询时限设定的安全预算；超限时先释放全部备用屏，仍超则拒绝新建 | 已验证：`crates/model/src/budget.rs:13` `pub const BUDGET_MS: f64 = 40.0;` |
+| `MADE` / `MADE_WINDOW` | `10` 次 / `600 s` (`10 min`) | `apps/macos/src/core.rs:26, 39` | 新建 `CGVirtualDisplay` 的全局滑动窗口上限；仅调试构建支持 `AGENTSCREEN_NEW_DISPLAYS` 覆盖 (`core.rs:393-399`) | 已验证：`apps/macos/src/core.rs:26,39` `const MADE: usize = 10;` / `const MADE_WINDOW: Duration = Duration::from_secs(10 * 60);` |
+| `KEPT_SLOTS` / `RECLAIM_DELAY` | `16` 个槽位 / 延迟 `3 s` | `apps/macos/src/mac/colorsync.rs:23`, `apps/macos/src/core.rs:149` | `identities.json` 记忆前 16 个复用序列号的 UUID，`reclaim_soon` 合并 `3 s` 内的清理请求 (`displays-e2e.log:9`) | 已验证：`apps/macos/src/mac/colorsync.rs:23` `pub const KEPT_SLOTS: u32 = 16;`；`core.rs:149` `const RECLAIM_DELAY: Duration = Duration::from_secs(3);`；`displays-e2e.log:9` `colorsync {"records_before":26,...}` |
+| `MAX_FILLERS` | `2` 台填洞屏 | `apps/macos/src/mac/display.rs:115` | 遭遇 `unit_twin` 时最多常驻保留 2 台未与我方成对的撞号屏填补 `WindowServer` `unit` 空洞 | 已验证：`apps/macos/src/mac/display.rs:115` `const MAX_FILLERS: usize = 2;` |
+| `settle_mode` / `restore_mode` | `25 * 20 ms` (`500 ms`) | `apps/macos/src/mac/display.rs:315-337` | 轮询等待 `CGDisplayCopyAllDisplayModes` 切换并稳定在目标 `2x` 分辨率 | 已验证：`apps/macos/src/mac/display.rs:317,321` `for _ in 0..25 { ... std::thread::sleep(std::time::Duration::from_millis(20)); }` |
+| `park_owned` 重试 | `75` 轮，间隔 `20 ms` (约 `1.48 s`) | `apps/macos/src/mac/display.rs:442-456` | 提交 `CGConfigureDisplayOrigin` 后校验 `tuck_away_restoring` 与 `is_tucked` 的有界循环 | 已验证：`apps/macos/src/mac/display.rs:442-444` `for attempt in 0..75 { if attempt > 0 { std::thread::sleep(std::time::Duration::from_millis(20)); }` |
+| AeroSpace 净空等待 | `30 * 100 ms` (`3.0 s`) | `apps/macos/src/control/agent.rs:2915-2937` | 未配置 `ignored-monitors` 时等待 `visible_windows_on(&screen)` 清空用户工作区窗口 | 已验证：`apps/macos/src/control/agent.rs:2915,2935` `for _ in 0..30 { ... .timer(Duration::from_millis(100))` |
+| `CAWSManager::restore_color_preferences` 卡顿归因 | `> 50 ms` (`ADR 0009`) | `docs/adr/0009-colorsync-registry-reclaim.md`, `SkyLight` `0x1870e15b4` | `SkyLight` 符号存在且 `budget.rs` 实现了 `40.0 ms` 预算门控，但该函数在显示重排中直接导致 `WindowServer` 超 `50 ms` 卡顿属于架构记录推断 | 未验证：符号 `0x1870e15b4` 与 `ADR 0009` 文本已核实，但该函数直接引发 `WindowServer` 卡顿需在多虚拟屏重排时对 `WindowServer` 运行 Instruments Time Profiler 采样验证 |
+| 主线程 `273 ms` 卡顿采样归因 | `273 ms` (`18/20` 样本) | `~/Library/Logs/Agent Screen/hang 2026-11-15-11-08-52.015.txt` | 日志文件记录主线程 `CA::Transaction::commit` 与 `NSStatusBarButtonCell` 繁忙 `273 ms`，但是否由 `Core::adopt` 重绘直接引发无法仅凭采样栈证明 | 未验证：日志文件存在且含 `"main thread busy 273 ms"`，但与 `Core::adopt` 的因果关联需结合 `create_display` 时间戳打点对照验证 |
