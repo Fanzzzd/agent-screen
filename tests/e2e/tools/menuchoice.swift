@@ -34,6 +34,13 @@ final class Unfocusable: NSPopUpButton {
 }
 
 final class CustomDragWindow: NSWindow {
+  // Resizable with its buttons hidden, as real custom-title-bar windows
+  // are; Accessibility would still report hidden buttons, and Agent Screen
+  // would then take it for a title-bar window, so they are left out there.
+  override func accessibilityCloseButton() -> Any? { nil }
+  override func accessibilityMinimizeButton() -> Any? { nil }
+  override func accessibilityZoomButton() -> Any? { nil }
+  override func accessibilityFullScreenButton() -> Any? { nil }
   var stageOrigin: NSPoint?
   var dragged = false
   override func sendEvent(_ event: NSEvent) {
@@ -279,12 +286,9 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
       width: 220,
       height: 160
     )
-    // No window buttons, so Accessibility finds no title bar on it. (A
-    // resizable window keeps its hidden buttons in Accessibility, and then
-    // takes the title-bar wake instead.)
     customWin = CustomDragWindow(
       contentRect: customFrame,
-      styleMask: [.titled, .fullSizeContentView],
+      styleMask: [.titled, .resizable, .fullSizeContentView],
       backing: .buffered,
       defer: false,
       screen: screen
@@ -294,6 +298,9 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     customWin.titlebarAppearsTransparent = true
     customWin.titleVisibility = .hidden
     customWin.title = "CustomDrag"
+    for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+      customWin.standardWindowButton(kind)?.isHidden = true
+    }
     customWin.contentView = CustomDragBarView(frame: NSRect(origin: .zero, size: customFrame.size))
     customWin.stageOrigin = NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120)
     customWin.setFrame(customFrame, display: true)

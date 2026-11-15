@@ -414,9 +414,18 @@ pub fn show_app(pid: i32) {
 
 /// Whether a window is an ordinary one, not a panel, dialog or borderless
 /// list: its Accessibility subrole is AXStandardWindow.
+/// Asked on the input thread before a click: a busy app gets 0.15 s, as in
+/// `on_title_bar`, not the usual 1 s.
 pub fn is_standard_window(target: WindowTarget) -> bool {
-    window_element(target)
-        .is_some_and(|w| string_attribute(&w, "AXSubrole").as_deref() == Some("AXStandardWindow"))
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    elements_attribute(&app, "AXWindows")
+        .into_iter()
+        .find(|w| window_id(w) == Some(target.window_id))
+        .is_some_and(|w| {
+            unsafe { w.set_messaging_timeout(0.15) };
+            string_attribute(&w, "AXSubrole").as_deref() == Some("AXStandardWindow")
+        })
 }
 
 pub fn window_element(target: WindowTarget) -> Option<Element> {

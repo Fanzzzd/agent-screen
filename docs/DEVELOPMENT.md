@@ -218,7 +218,7 @@ Each script is listed under its first area. The lines with `AGENTSCREEN_INSTANCE
 ```sh
 # viewer-input: the user's clicks, keys, drags and scrolls in the Viewer
 cargo e2e run                 # the user's side: scrolling, the menu bar strip, focus, permission setup
-AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag  # a title-bar drag in the Viewer stays on the display for native, tall and sheet-bearing windows, the first press on a background window's own drag view reaches it and moves the window, including drags ending outside the Viewer image, and Takeover clicks in the Viewer select and dismiss .appex pop-up menus
+AGENTSCREEN_INSTANCE=e2e cargo e2e viewerdrag  # a title-bar drag in the Viewer stays on the display for native, tall and sheet-bearing windows, including drags ending outside the Viewer image; the first press on a background resizable window's own drag view reaches it and moves the window without resizing it; and Takeover clicks in the Viewer select and dismiss .appex pop-up menus
 AGENTSCREEN_INSTANCE=e2e cargo e2e viewerkey  # a click that makes the Viewer key again, and a paste after it in a Takeover, keep the app running
 AGENTSCREEN_INSTANCE=e2e cargo e2e nativeclick # one click through the Viewer's handler on a field of an inactive native login window focuses it, after a click in another app, in the app's other window, and with the app in front
 AGENTSCREEN_INSTANCE=e2e cargo e2e oneclick   # one real click on a field of an Electron login window, through the Viewer, focuses it; its sign shows each of the three steps (needs Electron.app and Field.app)

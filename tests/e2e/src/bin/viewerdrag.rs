@@ -114,6 +114,12 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 break;
             }
         }
+        // Then read once more after the old 500 ms: a window pulled back
+        // after landing still fails.
+        sleep_ms(500);
+        if after.is_some() {
+            after = calculator(id)?;
+        }
         eprintln!("viewerdrag: Calculator after the drag: {}", json!(after));
         check(
             "the window stays on the Agent Display",
