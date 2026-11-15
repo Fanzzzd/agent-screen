@@ -412,6 +412,13 @@ pub fn show_app(pid: i32) {
     set_attribute(&application(pid), "AXHidden", CFBoolean::new(false));
 }
 
+/// Whether a window is an ordinary one, not a panel, dialog or borderless
+/// list: its Accessibility subrole is AXStandardWindow.
+pub fn is_standard_window(target: WindowTarget) -> bool {
+    window_element(target)
+        .is_some_and(|w| string_attribute(&w, "AXSubrole").as_deref() == Some("AXStandardWindow"))
+}
+
 pub fn window_element(target: WindowTarget) -> Option<Element> {
     elements_attribute(&application(target.pid), "AXWindows")
         .into_iter()

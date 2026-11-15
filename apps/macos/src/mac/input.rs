@@ -1646,11 +1646,13 @@ impl Worker {
         // changed. Spend one where nothing is pressed, unless it had one
         // since. Never in the user's front app, where it would take keys.
         if wake && self.woken != Some((target.window_id, activations())) && !is_front(target.pid) {
-            let empty = cg::window_bounds(target.window_id)
-                .filter(|_| on_agent_display(target.window_id))
-                .and_then(|bounds| title_bar_point(target, bounds));
-            if let Some(at) = empty {
-                log::debug!("input: waking {target:?}");
+            let bounds =
+                cg::window_bounds(target.window_id).filter(|_| on_agent_display(target.window_id));
+            let at = bounds.and_then(|bounds| {
+                title_bar_point(target, bounds).or_else(|| beside(target, bounds))
+            });
+            if let Some(at) = at {
+                log::debug!("input: waking {target:?} at {at:?}");
                 self.wake_at(target, at);
                 return;
             }
@@ -2884,6 +2886,19 @@ pub fn front() -> Option<i32> {
 
 fn activations() -> u64 {
     ACTIVATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// For a document window that draws its own title bar, a point 10 pt
+/// outside its top-left corner. AppKit routes a click posted there to the
+/// window by number and makes it key, but no view is there, and it is
+/// beyond the 4 pt ring where a press resizes. Without it, AppKit drops the
+/// next press as the window's first mouse, and every drag event after it
+/// (custom-title-bar-first-press.md). Not for panels, lists and pop-ups:
+/// they may close on a press outside them.
+fn beside(target: WindowTarget, bounds: Rect) -> Option<(f64, f64)> {
+    let document = super::windows::find(target.window_id).is_some_and(|w| w.layer == 0);
+    (document && super::ax::is_standard_window(target))
+        .then_some((bounds.x - 10.0, bounds.y - 10.0))
 }
 
 /// A point on the strip along a window's top edge with nothing to press
