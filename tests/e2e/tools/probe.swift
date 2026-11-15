@@ -11,6 +11,8 @@
 //   probe cancelmenu X Y      close the menu at global point X Y through accessibility
 //   probe front               the front app's name
 //   probe frontpid            the front app's pid
+//   probe focused PID         the window number of PID's focused window, as Accessibility names it, or 0
+//   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
 //   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
 //   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
 //   probe main                the main display's size in points, "w h"
@@ -27,6 +29,10 @@ import Carbon
 import CoreGraphics
 import Foundation
 import ImageIO
+
+// The window number of an accessibility window element (HIServices, private).
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ window: UnsafeMutablePointer<CGWindowID>) -> AXError
 
 // Top-level globals start in order, so this one comes before any use.
 var reconfigurations = Set<Int>()
@@ -176,6 +182,37 @@ case "front":
   print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
 case "frontpid":
   print(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+case "close":
+  // Only the window named: a test closes the one it opened in an app the
+  // user also works in, and never theirs.
+  var windows: CFTypeRef?
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  let wanted = CGWindowID(args[3])!
+  AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &windows)
+  var said = "no window"
+  for window in (windows as? [AXUIElement]) ?? [] {
+    var number: CGWindowID = 0
+    guard _AXUIElementGetWindow(window, &number) == .success, number == wanted else { continue }
+    var button: CFTypeRef?
+    said = "refused"
+    if AXUIElementCopyAttributeValue(window, "AXCloseButton" as CFString, &button) == .success,
+      let button, AXUIElementPerformAction(button as! AXUIElement, "AXPress" as CFString) == .success
+    {
+      said = "closed"
+    }
+  }
+  print(said)
+case "focused":
+  var focused: CFTypeRef?
+  var number: CGWindowID = 0
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  AXUIElementSetMessagingTimeout(app, 0.5)
+  if AXUIElementCopyAttributeValue(app, "AXFocusedWindow" as CFString, &focused) == .success,
+    let window = focused
+  {
+    _ = _AXUIElementGetWindow(window as! AXUIElement, &number)
+  }
+  print(number)
 case "openmenus":
   func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
     var v: CFTypeRef?

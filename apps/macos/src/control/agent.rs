@@ -5733,6 +5733,9 @@ async fn launch_now(
                 "launch: {name} window at {found} ms, placed at {} ms",
                 started.elapsed().as_millis()
             );
+            // Whether the running app's new window may give its key focus
+            // back to the user's window yet: not before it shows the URL.
+            let mut settled = was_running;
             // The new window is the app's front one now, where it opens the
             // URL or file.
             if was_running
@@ -5781,6 +5784,7 @@ async fn launch_now(
                 // the window to show it, at most 2 s, so focus handed back
                 // after doesn't make the app open it in the user's window.
                 let (window_id, title) = (placed.target.window_id, before);
+                settled = false;
                 for _ in 0..40 {
                     let title = title.clone();
                     if off(cx, move || {
@@ -5788,12 +5792,19 @@ async fn launch_now(
                     })
                     .await
                     {
+                        settled = true;
                         break;
                     }
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
                         .await;
                 }
+            }
+            // The new window took the app's key focus from the user's
+            // window, where they may be typing, as in a browser they use
+            // (#110): hand it back now rather than after the page loads.
+            if settled {
+                core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
             }
             // An app started in the background drops the first click on its
             // window, which only makes the window key: spend it here.

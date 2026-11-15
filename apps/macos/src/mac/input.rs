@@ -2821,6 +2821,23 @@ fn is_list(list: &[Hit], at: (f64, f64)) -> bool {
     front_for_press(&windows, at) == Front::AfterRelease
 }
 
+/// Whether keys posted to app `pid` now stay off the user's screens: its
+/// focused window is on an Agent Display, or Accessibility names none
+/// while every window it has is on one (#120). No window of the agent's is meant, so
+/// none matches `key_window`'s target.
+pub fn keys_stay_on_agent_displays(pid: i32) -> bool {
+    let focused = super::ax::focused_window_id(pid);
+    let listed: Vec<_> = super::windows::all()
+        .into_iter()
+        .filter(|w| w.target.pid == pid)
+        .map(|w| AppWindow {
+            id: w.target.window_id,
+            on_agent_display: on_agent_display_at(w.bounds),
+        })
+        .collect();
+    key_window(0, focused, &listed).safe()
+}
+
 /// A key chord through the public API, for apps that need no focus
 /// handshake: a running app's New Window shortcut.
 pub fn post_key_to_pid(pid: i32, chord: KeyChord) {

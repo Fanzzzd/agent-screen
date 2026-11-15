@@ -252,6 +252,9 @@ pub const SCRIPTS: &[Script] = &[
     script("cursormenu", &[Elements], Full, Agent, 1),
     script("demo", &[], Full, Hook, 3)
         .manual("it records the README's demo and writes docs/media/demo.gif"),
+    script("diashared", &[AgentInput, Browser], Full, Agent, 1).manual(
+        "it drives your own Dia: run it with E2E_DIA=1 while you type in another Dia window",
+    ),
     script("displaychange", &[Peek, Displays], Full, Hook, 2).hands_off(),
     script("electron", &[AgentInput, Windows, Browser], Full, Agent, 1),
     script("endhandover", &[WindowAccess, Windows], Full, Hook, 3),

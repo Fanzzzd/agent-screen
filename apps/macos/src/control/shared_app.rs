@@ -84,16 +84,22 @@ fn names(b: Beside) -> Names {
         .as_ref()
         .or(user.as_ref())
         .map_or_else(|| "The app".into(), |w| w.app.clone());
-    let title = |w: Option<windows::Window>, id: u32| {
-        w.map(|w| w.title)
-            .filter(|t| !t.is_empty())
-            .map_or_else(|| format!("window {id}"), |t| format!("\"{t}\""))
-    };
     Names {
         app,
         user: title(user, b.focused),
         agent: title(agent, b.target.window_id),
     }
+}
+
+/// A window's title in quotes, or its number when it has none.
+fn title(w: Option<windows::Window>, id: u32) -> String {
+    w.map(|w| w.title)
+        .filter(|t| !t.is_empty())
+        .map_or_else(|| format!("window {id}"), |t| format!("\"{t}\""))
+}
+
+fn title_of(id: u32) -> String {
+    title(windows::find(id), id)
 }
 
 const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, BackSpace and cmd+a edit the picked field, and Tab and shift+Tab move focus to the next or previous element of your page and pick it. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";
@@ -237,15 +243,16 @@ async fn check_focus(b: Beside, what: &str, cx: &AsyncApp) -> Result<(), Control
     };
     off(cx, move || ax::make_main(user)).await;
     let n = names(b);
-    log::warn!(
-        "shared app: {what} moved {}'s focus to window {now:?}",
-        n.app
-    );
+    let now = now.unwrap_or_default();
+    let took = match now == b.target.window_id {
+        true => format!("your window {}", n.agent),
+        false => format!("its window {}", title_of(now)),
+    };
+    log::warn!("shared app: {what} moved {}'s focus to window {now}", n.app);
     Err(ControlError::failed(format!(
-        "{what} went in, but {app} then moved its focus from the user's window {user} to window {now}, so Agent Screen gave it back to {user}. Take a screenshot before you go on.",
+        "{what} went in, but {app} then moved its focus from the user's window {user} to {took}, so Agent Screen gave it back to {user}. Take a screenshot before you go on.",
         app = n.app,
         user = n.user,
-        now = now.unwrap_or_default(),
     )))
 }
 

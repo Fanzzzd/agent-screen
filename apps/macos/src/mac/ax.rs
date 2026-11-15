@@ -2274,10 +2274,14 @@ pub fn press_new_window(pid: i32) -> NewWindow {
             // The item's own shortcut, where it has one: the app makes the
             // window as for a key press, and tells the catch at once. A
             // press through accessibility reports the window only after.
+            // Not while the app's focused window is the user's, as in a
+            // browser they type in (#110): the posted key would reach
+            // their window and its page.
             let chord = entries[i]
                 .shortcut
                 .as_deref()
-                .and_then(|s| crate::keychord::KeyChord::parse(s).ok());
+                .and_then(|s| crate::keychord::KeyChord::parse(s).ok())
+                .filter(|_| super::input::keys_stay_on_agent_displays(pid));
             if !enabled {
                 NewWindow::Disabled
             } else if let Some(chord) = chord {
