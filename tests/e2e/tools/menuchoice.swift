@@ -34,6 +34,13 @@ final class Unfocusable: NSPopUpButton {
 }
 
 final class CustomDragWindow: NSWindow {
+  // Resizable with its buttons hidden, as real custom-title-bar windows
+  // are; Accessibility would still report hidden buttons, and Agent Screen
+  // would then take it for a title-bar window, so they are left out there.
+  override func accessibilityCloseButton() -> Any? { nil }
+  override func accessibilityMinimizeButton() -> Any? { nil }
+  override func accessibilityZoomButton() -> Any? { nil }
+  override func accessibilityFullScreenButton() -> Any? { nil }
   var stageOrigin: NSPoint?
   var dragged = false
   override func sendEvent(_ event: NSEvent) {
@@ -54,6 +61,43 @@ final class CustomDragWindow: NSWindow {
     }
     super.sendEvent(event)
   }
+}
+
+// A drag region the app draws itself, as custom title bars do: it keeps
+// AppKit's default acceptsFirstMouse (false) and moves the window by the
+// press's travel. AppKit drops a background window's first press before it
+// reaches such a view unless the window was already key.
+final class CustomDragBarView: NSView {
+  var start: (mouse: NSPoint, origin: NSPoint)?
+  override var mouseDownCanMoveWindow: Bool { false }
+  private func onScreen(_ event: NSEvent) -> NSPoint? {
+    guard let win = window else { return nil }
+    let at = event.locationInWindow
+    return NSPoint(x: win.frame.minX + at.x, y: win.frame.minY + at.y)
+  }
+  var downs = 0
+  var drags = 0
+  // The test reads what reached the view: the window's own yank and
+  // Agent Screen's return move it even when the view got nothing.
+  private func report() {
+    guard let path = ProcessInfo.processInfo.environment["MENU_CUSTOM_STATE"] else { return }
+    try? "downs=\(downs) drags=\(drags)".write(toFile: path, atomically: true, encoding: .utf8)
+  }
+  override func mouseDown(with event: NSEvent) {
+    downs += 1
+    report()
+    guard let win = window, let at = onScreen(event) else { return }
+    start = (at, win.frame.origin)
+  }
+  override func mouseDragged(with event: NSEvent) {
+    drags += 1
+    report()
+    guard let win = window, let start, let at = onScreen(event) else { return }
+    win.setFrameOrigin(NSPoint(
+      x: start.origin.x + at.x - start.mouse.x,
+      y: start.origin.y + at.y - start.mouse.y))
+  }
+  override func mouseUp(with event: NSEvent) { start = nil }
 }
 
 final class TallToolbarView: NSView {
@@ -244,7 +288,7 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     )
     customWin = CustomDragWindow(
       contentRect: customFrame,
-      styleMask: [.titled, .fullSizeContentView],
+      styleMask: [.titled, .resizable, .fullSizeContentView],
       backing: .buffered,
       defer: false,
       screen: screen
@@ -254,6 +298,10 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     customWin.titlebarAppearsTransparent = true
     customWin.titleVisibility = .hidden
     customWin.title = "CustomDrag"
+    for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+      customWin.standardWindowButton(kind)?.isHidden = true
+    }
+    customWin.contentView = CustomDragBarView(frame: NSRect(origin: .zero, size: customFrame.size))
     customWin.stageOrigin = NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120)
     customWin.setFrame(customFrame, display: true)
     customWin.orderFrontRegardless()

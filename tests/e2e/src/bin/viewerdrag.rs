@@ -100,8 +100,27 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 "toY": from.1 + by.1,
             }),
         )?;
+        // Each move is an Accessibility write, which Calculator can take tens of
+        // milliseconds to answer under load: wait for the last one to land.
+        let close = |a: &Window| {
+            let moved = ((a.x - before.x) / w, (a.y - before.y) / h);
+            (moved.0 - by.0).abs() < 0.02 && (moved.1 - by.1).abs() < 0.02
+        };
+        let mut after = None;
+        for _ in 0..40 {
+            sleep_ms(50);
+            after = calculator(id)?;
+            if after.as_ref().is_none_or(close) {
+                break;
+            }
+        }
+        // Then read once more after the old 500 ms: a window pulled back
+        // after landing still fails.
         sleep_ms(500);
-        let after = calculator(id)?;
+        if after.is_some() {
+            after = calculator(id)?;
+        }
+        eprintln!("viewerdrag: Calculator after the drag: {}", json!(after));
         check(
             "the window stays on the Agent Display",
             after.is_some(),
@@ -125,6 +144,8 @@ fn test(fixture: &std::path::Path) -> Result<()> {
 
     let pane_state = out().join("viewerdrag-pane-state");
     let _ = std::fs::remove_file(&pane_state);
+    let custom_state = out().join("viewerdrag-custom-state");
+    let _ = std::fs::remove_file(&custom_state);
     control.call(
         "launchApp",
         json!({
@@ -136,6 +157,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 "MENU_DISPLAY_ID": id.to_string(),
                 "MENU_STAGE_ID": stage_id.to_string(),
                 "MENU_PANE_STATE": pane_state,
+                "MENU_CUSTOM_STATE": custom_state,
             }
         }),
     )?;
@@ -222,10 +244,15 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         format!("{} -> {}", json!(before_sheet), json!(after_sheet)),
     );
 
-    // 3. Custom-drag window (`y + 60 > 52` outside standard title-bar grab) that yanks onto Stage
-    // 80 ms after mouseUp and is returned by `keep_on_display` at its dragged position.
+    // 3. Custom-drag window, pressed in the background on its own drag view (default
+    // `acceptsFirstMouse`, far below the 52 pt title-bar grab), that yanks onto Stage 80 ms after
+    // mouseUp and is returned by `keep_on_display` at its dragged position. `launchApp` centers
+    // the 120 pt tall `.appex` pane host over it, 20 pt short of its bottom edge: press there.
     let before_custom = titled(id, "CustomDrag")?.context("CustomDrag on display")?;
-    let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 60.0) / h);
+    let c_from = (
+        (before_custom.x + 60.0) / w,
+        (before_custom.y + before_custom.height - 10.0) / h,
+    );
     let c_by = (0.10, 0.14);
     control.call(
         "debugViewerInput",
@@ -247,15 +274,24 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 (after.x - before_custom.x) / w,
                 (after.y - before_custom.y) / h,
             );
-            (moved.0 - c_by.0).abs() < 0.03 && (moved.1 - c_by.1).abs() < 0.03
+            (moved.0 - c_by.0).abs() < 0.03
+                && (moved.1 - c_by.1).abs() < 0.03
+                && (after.width - before_custom.width).abs() < 1.0
+                && (after.height - before_custom.height).abs() < 1.0
         });
         if custom_ok {
             break;
         }
         sleep_ms(60);
     }
+    let reached = std::fs::read_to_string(&custom_state).unwrap_or_default();
     check(
-        "a custom-title-bar window yanked off the display after mouseUp returns at its dragged position",
+        "the first press on a background window's own drag view reaches it, and the drag follows",
+        reached.starts_with("downs=1 ") && !reached.ends_with("drags=0"),
+        &reached,
+    );
+    check(
+        "a custom-title-bar window yanked off the display after mouseUp returns at its dragged position, at its size",
         custom_ok,
         format!("{} -> {}", json!(before_custom), json!(after_custom)),
     );
