@@ -2041,6 +2041,18 @@ async fn handle_one(
             shared_app::force_focus_unknown(on);
             Ok(json!({ "on": on }))
         }
+        // Test hook: what the last hold of the user's keys during a launch
+        // did (#110): how many events and key downs, how long, and why it
+        // ended. Counts only, never which keys.
+        "debugKeyHold" if debug_methods() => Ok(match crate::mac::key_hold::last() {
+            Some(s) => json!({
+                "events": s.events,
+                "keyDowns": s.key_downs,
+                "ms": s.ms,
+                "end": format!("{:?}", s.end),
+            }),
+            None => json!({ "events": null }),
+        }),
         // Test hook: turn the check for a press's effect beside the user's
         // window off or on, to time what it costs.
         "debugPressCheck" if debug_methods() => {
@@ -5116,6 +5128,30 @@ fn shows_url(target: WindowTarget, url: &str) -> bool {
     false
 }
 
+/// Send the keys hold `id` took on, once the user's window has its key
+/// focus back, waiting up to 300 ms for that to show. Without it they go
+/// to whichever window has it, and the log says so. Blocks.
+fn hand_back_held(id: u64, user: Option<WindowTarget>) {
+    use agent_screen_model::key_hold::End;
+    let started = Instant::now();
+    let back = || user.is_some_and(|u| ax::focused_window_id(u.pid) == Some(u.window_id));
+    while !back() && started.elapsed() < Duration::from_millis(300) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let back = back();
+    if !back {
+        log::warn!("key hold: the user's window isn't key; held keys go to the app's key window");
+    }
+    crate::mac::key_hold::finish(
+        id,
+        if back {
+            End::HandedBack
+        } else {
+            End::Abandoned
+        },
+    );
+}
+
 /// The user's window of app `pid` that has its key focus, when it is off
 /// the Agent Displays: the one a new window of the agent's takes it from.
 fn user_key_window(pid: i32) -> Option<WindowTarget> {
@@ -5623,6 +5659,20 @@ async fn launch_now(
     // the menu item that opens one. Without such an item, as in Calculator
     // or Notes, there is none to give: say so now.
     let asked_for_window = was_running && (target.is_none() || is_url);
+    // The new window takes the app's key focus from the user's window, in
+    // their front app, until Agent Screen hands it back: hold their keys
+    // meanwhile and send them on to their window after (#110).
+    let mut hold = match user_window {
+        Some(user) if asked_for_window => {
+            off(cx, move || {
+                crate::mac::input::is_front(user.pid)
+                    .then(|| crate::mac::key_hold::start(user.pid))
+                    .flatten()
+            })
+            .await
+        }
+        _ => None,
+    };
     if asked_for_window {
         // An app that has just started may not have its menus yet.
         let mut asked = ax::NewWindow::NotReady;
@@ -5818,6 +5868,7 @@ async fn launch_now(
             let handback = match (opened, target) {
                 (Some(true), Some(url)) => {
                     let (window, url) = (fresh.target, url.to_string());
+                    let held = hold.as_ref().map(|h| h.id());
                     Some(cx.background_executor().spawn(async move {
                         let shown = shows_url(window, &url);
                         if shown
@@ -5827,6 +5878,9 @@ async fn launch_now(
                         {
                             let given = ax::make_main(user);
                             log::debug!("launch: key focus back to the user's window: {given}");
+                        }
+                        if shown && let Some(id) = held {
+                            hand_back_held(id, user_window);
                         }
                         shown
                     }))
@@ -5860,6 +5914,9 @@ async fn launch_now(
             // Otherwise the call's end hands it back, as after any input.
             if settled {
                 core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
+                if let Some(id) = hold.take().map(|h| h.detach()) {
+                    off(cx, move || hand_back_held(id, user_window)).await;
+                }
             }
             // An app started in the background drops the first click on its
             // window, which only makes the window key: spend it here.

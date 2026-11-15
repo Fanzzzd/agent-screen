@@ -12,6 +12,7 @@ pub mod claims;
 pub mod devtools;
 pub mod held;
 pub mod input_queue;
+pub mod key_hold;
 pub mod key_window;
 pub mod keychord;
 pub mod launch;

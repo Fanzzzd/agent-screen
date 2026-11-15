@@ -162,6 +162,7 @@ window.addEventListener('focus', () => log('win focus'));
 window.addEventListener('blur', () => log('win blur'));
 let typed = 0;
 document.addEventListener('keydown', () => {
+  log('key');
   const now = Date.now();
   if (now - typed > 1000) { typed = now; log('typing'); }
 }, true);
@@ -534,7 +535,7 @@ fn test(
     let ms = |t: &Instant| t.duration_since(launch_started).as_millis();
     let timeline: Vec<String> = launch_events
         .iter()
-        .filter(|(_, e, _)| e != "typing")
+        .filter(|(_, e, _)| e != "typing" && e != "key")
         .map(|(p, e, t)| format!("{} {p} {e}", ms(t)))
         .collect();
     println!("launch_app answered at {replied} ms; pages: {timeline:?}");
@@ -561,6 +562,28 @@ fn test(
         format!(
             "{leaked:?} | your window was not key for {key_window_ms:?} ms, launch_app answered at {replied} ms"
         ),
+    );
+
+    // Your keys typed while the new window had Dia's key focus were held
+    // and sent on to your window once it had its focus back.
+    let held = control.call("debugKeyHold", json!({})).unwrap_or_default();
+    let held_downs = held["keyDowns"].as_u64().unwrap_or(0) as usize;
+    let until = launch_started + Duration::from_millis(replied as u64 + 500);
+    let reached = {
+        let all = log.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter()
+            .skip(launch_mark)
+            .filter(|(p, e, t)| p == "user" && e == "key" && *t <= until)
+            .count()
+    };
+    println!(
+        "your keys were held for {} ms: {held}",
+        held["ms"].as_u64().unwrap_or(0)
+    );
+    check(
+        "every key held during launch_app reached your window after the hand-back",
+        held["end"] == "HandedBack" && reached >= held_downs,
+        format!("hold {held} | your page got {reached} keys during launch_app"),
     );
 
     // The premise of every check after: Dia in front, your window focused.
