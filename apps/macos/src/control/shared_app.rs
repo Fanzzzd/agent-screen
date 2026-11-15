@@ -16,7 +16,7 @@ use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
     ClickRoute, Effect, Focused, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
-    text_route,
+    text_route, unlisted_press_unclear,
 };
 use gpui::AsyncApp;
 use serde_json::{Value, json};
@@ -84,16 +84,22 @@ fn names(b: Beside) -> Names {
         .as_ref()
         .or(user.as_ref())
         .map_or_else(|| "The app".into(), |w| w.app.clone());
-    let title = |w: Option<windows::Window>, id: u32| {
-        w.map(|w| w.title)
-            .filter(|t| !t.is_empty())
-            .map_or_else(|| format!("window {id}"), |t| format!("\"{t}\""))
-    };
     Names {
         app,
         user: title(user, b.focused),
         agent: title(agent, b.target.window_id),
     }
+}
+
+/// A window's title in quotes, or its number when it has none.
+fn title(w: Option<windows::Window>, id: u32) -> String {
+    w.map(|w| w.title)
+        .filter(|t| !t.is_empty())
+        .map_or_else(|| format!("window {id}"), |t| format!("\"{t}\""))
+}
+
+fn title_of(id: u32) -> String {
+    title(windows::find(id), id)
 }
 
 const ROUTES: &str = "Beside the user's window, type puts text into the field your last click picked, through accessibility; Return confirms or presses what your last click picked, Escape cancels it, BackSpace and cmd+a edit the picked field, and Tab and shift+Tab move focus to the next or previous element of your page and pick it. Other keys have no route there that can't reach the user's window: use act_on_element, or wait until the user switches to another app. Agent Screen won't switch it for them.";
@@ -237,15 +243,16 @@ async fn check_focus(b: Beside, what: &str, cx: &AsyncApp) -> Result<(), Control
     };
     off(cx, move || ax::make_main(user)).await;
     let n = names(b);
-    log::warn!(
-        "shared app: {what} moved {}'s focus to window {now:?}",
-        n.app
-    );
+    let now = now.unwrap_or_default();
+    let took = match now == b.target.window_id {
+        true => format!("your window {}", n.agent),
+        false => format!("its window {}", title_of(now)),
+    };
+    log::warn!("shared app: {what} moved {}'s focus to window {now}", n.app);
     Err(ControlError::failed(format!(
-        "{what} went in, but {app} then moved its focus from the user's window {user} to window {now}, so Agent Screen gave it back to {user}. Take a screenshot before you go on.",
+        "{what} went in, but {app} then moved its focus from the user's window {user} to {took}, so Agent Screen gave it back to {user}. Take a screenshot before you go on.",
         app = n.app,
         user = n.user,
-        now = now.unwrap_or_default(),
     )))
 }
 
@@ -544,7 +551,12 @@ async fn press_at(
         None => None,
     };
     let read = started.elapsed();
-    let pressed = off(cx, move || ax::action_result(element.get(), "AXPress")).await;
+    let (pressed, listed) = off(cx, move || {
+        let e = element.get();
+        let listed = ax::actions(e).iter().any(|a| a == "AXPress");
+        (ax::action_result(e, "AXPress"), listed)
+    })
+    .await;
     if pressed == ax::Action::NotTaken {
         return Err(ControlError::failed(format!(
             "{why}, so nothing was posted, and \"{label}\" under the point refused an accessibility press. To click it anyway, repeat the click with real_input: true, which asks the user for their pointer."
@@ -561,6 +573,17 @@ async fn press_at(
     );
     if let Some(b) = check {
         check_focus(b, &format!("The press on \"{label}\""), cx).await?;
+    }
+    if unlisted_press_unclear(listed, seen) {
+        return Ok(json!({
+            "windowId": target.window_id,
+            "route": "accessibility",
+            "note": format!(
+                "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and there was no visible change within {wait} ms: the press may not have acted, or the page may still be loading. Take a screenshot before retrying.",
+                wait = EFFECT_WAIT.as_millis(),
+            ),
+            "changed": null,
+        }));
     }
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"

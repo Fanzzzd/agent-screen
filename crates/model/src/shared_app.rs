@@ -304,6 +304,16 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     }
 }
 
+/// Whether a press that ran leaves its effect unclear: the element listed
+/// no AXPress, so it was pressed only for its role (`press_anyway`), and
+/// nothing was seen to change. Dia lists no AXPress on a page's elements
+/// and ignores the press, but a link waiting on a slow server shows
+/// nothing either, so the answer says it can't tell rather than that the
+/// press failed, which could have the agent click again and submit twice.
+pub fn unlisted_press_unclear(listed: bool, seen: Effect) -> bool {
+    !listed && seen == Effect::NoneSeen
+}
+
 /// Whether Tab stops at an element: one that is enabled and lets a client
 /// set its focus. The page itself and the scroll area around it take
 /// focus too, but Tab moves among what is in them. An element a page
@@ -706,5 +716,13 @@ mod tests {
         assert_eq!(delete_backward("abc", Some((0, 2))), ("c".into(), 0));
         assert_eq!(delete_backward("abc", Some((0, 0))), ("abc".into(), 0));
         assert_eq!(delete_backward("a😀", None), ("a".into(), 1));
+    }
+
+    #[test]
+    fn an_unlisted_press_that_changed_nothing_is_unclear() {
+        assert!(unlisted_press_unclear(false, Effect::NoneSeen));
+        assert!(!unlisted_press_unclear(false, Effect::Seen));
+        assert!(!unlisted_press_unclear(false, Effect::Unknown));
+        assert!(!unlisted_press_unclear(true, Effect::NoneSeen));
     }
 }

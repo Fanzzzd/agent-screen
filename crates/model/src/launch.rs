@@ -125,6 +125,26 @@ pub fn file_url(path: &str) -> String {
     url
 }
 
+/// Whether a page's address `shown` is the URL `asked` for: the same
+/// scheme, host and path, letter case aside for the scheme and host, a
+/// trailing slash, the query and the fragment aside. A browser adds a
+/// slash to a bare host and may drop or add a query, so the comparison is
+/// loose; a redirect to another page isn't the same page.
+pub fn same_page(asked: &str, shown: &str) -> bool {
+    fn parts(url: &str) -> Option<(String, String, String)> {
+        let (scheme, rest) = url.trim().split_once("://")?;
+        let rest = rest.split(['?', '#']).next().unwrap_or_default();
+        let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        let path = path.trim_end_matches('/');
+        Some((
+            scheme.to_ascii_lowercase(),
+            host.to_ascii_lowercase(),
+            path.to_string(),
+        ))
+    }
+    matches!((parts(asked), parts(shown)), (Some(a), Some(b)) if a == b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +329,18 @@ mod tests {
     fn no_arguments_matches_none() {
         assert!(is_opened(LAUNCHD, &strings(&["/E"]), &[]));
         assert!(!is_opened(LAUNCHD, &strings(&["/E", "x"]), &[]));
+    }
+
+    #[test]
+    fn a_page_is_the_url_asked_for_by_scheme_host_and_path() {
+        let asked = "http://127.0.0.1:5000/agent";
+        assert!(same_page(asked, "http://127.0.0.1:5000/agent"));
+        assert!(same_page(asked, "HTTP://127.0.0.1:5000/agent/?x=1#top"));
+        assert!(same_page("https://Example.com", "https://example.com/"));
+        assert!(!same_page(asked, "http://127.0.0.1:5000/next"));
+        assert!(!same_page(asked, "https://127.0.0.1:5000/agent"));
+        assert!(!same_page(asked, "http://127.0.0.1:5001/agent"));
+        assert!(!same_page(asked, "about:blank"));
+        assert!(!same_page(asked, ""));
     }
 }
