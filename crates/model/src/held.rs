@@ -372,6 +372,7 @@ impl<H> Displays<H> {
         if let Some(access) = self.access_mut(to) {
             access.excluded.remove(&window);
         }
+        self.publish_recorded_owners();
         Ok(Transfer {
             from,
             to,
@@ -430,6 +431,7 @@ impl<H> Displays<H> {
                 d.records.insert(window, record);
             }
         }
+        self.publish_recorded_owners();
     }
 
     /// The windows the user gave from display `id` to another session that
@@ -522,6 +524,64 @@ pub fn timed_out_message(app: &str, seconds: f64, held: Option<&Held>) -> String
         ),
         None => format!(
             "the user didn't answer your request for the {app} window within {seconds:.0} s, so it's withdrawn. Ask again when they're around, or work without it"
+        ),
+    }
+}
+
+/// Where a requested window sits when the user answers Hand Over, resolved
+/// before moving it (`after_hand_over`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NowState<W> {
+    Here,
+    Held(Held),
+    Users(W),
+    Unheld,
+    Gone,
+}
+
+/// Action taken after the user answers Hand Over on a Window Request card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HandOverAction<W> {
+    AlreadyHere,
+    Transfer(Held),
+    AskAgain(Held),
+    FromUser(W),
+    MovedUnheld,
+    Closed,
+}
+
+/// Pure decision function for `after_hand_over` (`control/agent.rs`): transfers
+/// only when the holder named on the approved card still holds the window, and
+/// asks again (`AskAgain`) if another session took the window meanwhile.
+pub fn decide_after_hand_over<W>(
+    where_now: NowState<W>,
+    named_holder: Option<&Held>,
+) -> HandOverAction<W> {
+    match where_now {
+        NowState::Here => HandOverAction::AlreadyHere,
+        NowState::Held(now) if named_holder.is_some_and(|n| n.display == now.display) => {
+            HandOverAction::Transfer(now)
+        }
+        NowState::Held(now) => HandOverAction::AskAgain(now),
+        NowState::Users(window) => HandOverAction::FromUser(window),
+        NowState::Unheld => HandOverAction::MovedUnheld,
+        NowState::Gone => HandOverAction::Closed,
+    }
+}
+
+/// Refusal message when an agent's pointer input on `click_display` lands on a
+/// topmost visible window recorded on `owner_display` (M2).
+pub fn foreign_top_window_message(
+    click_display: DisplayId,
+    owner_display: DisplayId,
+    holder_label: Option<&str>,
+) -> String {
+    match holder_label {
+        Some(label) => format!(
+            "the topmost window under that point belongs to {label} on display {owner_display}, not display {click_display}; no input was sent so it cannot operate that window or click through to a hidden window below"
+        ),
+        None => format!(
+            "the topmost window under that point is recorded on display {owner_display}, not display {click_display}; no input was sent so it cannot operate that window or click through to a hidden window below"
         ),
     }
 }
@@ -1238,7 +1298,8 @@ mod tests {
             .request_window(9, named(88), Some(held_for_c.clone()))
             .unwrap();
 
-        // User approves `asker` first; `asker` transfers the window from 7 to 8.
+        // User approves `asker` first; `decide_after_hand_over` confirms the
+        // holder on 7 still matches `held_for_b`, so `asker` transfers 7 -> 8.
         let _ = d
             .answer(8, Kind::Window, Some(req_b), Answer::Give)
             .unwrap();
@@ -1246,11 +1307,18 @@ mod tests {
             rx_b.try_recv().unwrap(),
             Some(Resolution::HandedOver(_))
         ));
+        let now_for_b = d
+            .held_by_at(8, target, Some(7), 2_500)
+            .map_or(NowState::Unheld::<()>, NowState::Held);
+        assert_eq!(
+            decide_after_hand_over(now_for_b, Some(&held_for_b)),
+            HandOverAction::Transfer(d.held_by_at(8, target, Some(7), 2_500).unwrap())
+        );
         assert!(d.transfer(7, 8, target, "WeChat").is_ok());
 
         // User then clicks Give on `s3`'s card (which named `holder` on display 7).
-        // Re-checking `held_by_at` now reports display 8 (`asker`), NOT `7`,
-        // preventing `s3` from taking `asker`'s window under a stale card!
+        // `decide_after_hand_over` compares `now` (display 8, `asker`) against
+        // `held_for_c` (display 7, `holder`) and returns `AskAgain` naming `asker`.
         let _ = d
             .answer(9, Kind::Window, Some(req_c), Answer::Give)
             .unwrap();
@@ -1258,42 +1326,74 @@ mod tests {
             rx_c.try_recv().unwrap(),
             Some(Resolution::HandedOver(_))
         ));
-        let current_holder = d.held_by_at(9, target, Some(8), 3_000).unwrap();
-        assert_ne!(current_holder.display, held_for_c.display);
-        assert_eq!(current_holder.display, 8);
-        assert!(current_holder.agent_label().contains("session asker"));
+        let now_for_c = d
+            .held_by_at(9, target, Some(8), 3_000)
+            .map_or(NowState::Unheld::<()>, NowState::Held);
+        match decide_after_hand_over(now_for_c, Some(&held_for_c)) {
+            HandOverAction::AskAgain(new_holder) => {
+                assert_eq!(new_holder.display, 8);
+                assert!(new_holder.agent_label().contains("session asker"));
+            }
+            other => panic!("expected AskAgain naming asker, got {other:?}"),
+        }
     }
 
     #[test]
-    fn takeover_stays_active_and_shifts_windows_once_when_display_moves() {
+    fn takeover_blocks_session_moves_and_grants_while_shifting_windows_once() {
         use crate::arrangement::ReparkState;
         use crate::viewer_press::{dragged_window_origin, rebase_grab_for_display};
 
         let mut d = two_sessions();
+        d.add(
+            10,
+            "Agent Screen 4".into(),
+            (1280.0, 800.0),
+            Some(owner("holder", "Claude Code", "Second workspace", 1)),
+            (),
+        );
         d.sessions.get_mut("holder").unwrap().access.grant_all();
         let rec_win = wechat(41);
+        let user_win = wechat(43);
         let sheet_win = WindowTarget {
             pid: 900,
             window_id: 42,
         };
-        d.get_mut(7).unwrap().claim(rec_win, Origin::Placed, None);
+        d.claim_on(7, rec_win, Origin::Placed, None);
 
-        // User begins Takeover on display 7; Window Authorization pauses on 7.
+        // User begins Takeover on display 7: Window Authorization grant hand-overs
+        // onto 7 and same-session `move_between` off 7 are both refused.
         d.begin_takeover(7);
-        assert!(d.get(7).unwrap().takeover);
-        assert!(d.get(7).unwrap().access_paused());
+        assert_eq!(
+            d.may_hand_over(7, user_win, &Authority::Grant { bundle_id: None }),
+            Err(Refusal::Takeover)
+        );
+        assert!(d.move_between(7, 10, rec_win, true).is_err());
 
         let user_rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
         let old_7 = Rect::new(2560.0, -800.0, 1280.0, 800.0);
         let new_7 = Rect::new(3840.0, -800.0, 1280.0, 800.0);
-        let mut repark = ReparkState::default();
-        repark.note_adopted(7, old_7);
-
+        // Display 8 moves into `old_7`'s slot before AX shifts `rec_win`;
+        // `held_by_bounds_at` still attributes `rec_win` to display 7, and
+        // `move_between` off 7 remains blocked by Takeover.
+        let displays_mid_move = [
+            (1, user_rect, false),
+            (7, new_7, true),
+            (8, old_7, true),
+            (10, Rect::new(5120.0, -800.0, 1280.0, 800.0), true),
+        ];
         let rec_frame = Rect::new(2660.0, -700.0, 500.0, 400.0);
         let sheet_frame = Rect::new(2740.0, -640.0, 320.0, 200.0);
+        assert_eq!(
+            d.held_by_bounds_at(8, rec_win, &rec_frame, &displays_mid_move, 1_000)
+                .map(|h| h.display),
+            Some(7)
+        );
+        assert!(d.move_between(7, 10, rec_win, true).is_err());
+
+        let mut repark = ReparkState::default();
+        repark.note_adopted(7, old_7);
         let owners = d.recorded_owners();
         let (gen1, _) = repark.begin(&[7]).unwrap();
-        // Concurrent notification during Takeover move coalesces cleanly.
         assert_eq!(repark.begin(&[7]), None);
 
         let (shifts, _) = repark.plan_shifts(
@@ -1319,7 +1419,6 @@ mod tests {
         );
         assert!(repark.finish(gen1));
 
-        // Coalesced rerun shifts nothing further; Takeover and paused access hold.
         let (gen2, _) = repark.begin(&[7]).unwrap();
         let (shifts2, _) = repark.plan_shifts(
             gen2,
@@ -1333,8 +1432,10 @@ mod tests {
         );
         assert!(shifts2.is_empty());
         assert!(!repark.finish(gen2));
-        assert!(d.get(7).unwrap().takeover);
-        assert!(d.get(7).unwrap().access_paused());
+        assert_eq!(
+            d.may_hand_over(7, user_win, &Authority::Grant { bundle_id: None }),
+            Err(Refusal::Takeover)
+        );
 
         // An active Viewer title-bar drag during the move rebases onto `new_7`.
         let (rf, rfrom, rto, rarea) = rebase_grab_for_display(

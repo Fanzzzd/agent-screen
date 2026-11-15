@@ -23,8 +23,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    McpClient, check, field_app, instance, json, out, pid_of, probe, run, sh_lenient, sleep_ms,
-    start_test_app, stop_test_app, windows_of,
+    Control, McpClient, check, field_app, instance, json, out, pid_of, probe, run, sh_lenient,
+    sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -35,7 +35,10 @@ fn main() -> ExitCode {
     }
     let tag = format!("--sessiondisplays-{}", std::process::id());
     run(|| {
-        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
+        start_test_app(&[
+            ("AGENTSCREEN_LANG", "en"),
+            ("AGENTSCREEN_DISCONNECT_GRACE_MS", "800"),
+        ])?;
         field_app()?;
         let result = test(&tag);
         // Field goes before the app quits: a window left on a display the
@@ -192,20 +195,24 @@ fn test(tag: &str) -> Result<()> {
         still.text(),
     );
 
-    // Another session reuses A's parked spare (making no virtual display) and
-    // gets a holder-aware error when asking for a missing Field window (#189).
+    // Wait past `schedule_sweep` (600 ms) so empty display A returns to the
+    // spare pool, then another session reuses A's parked spare (making no
+    // virtual display) and gets a holder-aware error within 1 s (#189).
+    let control = Control::connect()?;
+    let _ = control.call("debugShow", json!({ "surface": "dismiss", "displayId": a }));
+    sleep_ms(750);
     let other_session = format!("{session}-other");
     let other = McpClient::start(&[("CLAUDE_CODE_SESSION_ID", other_session.as_str())])?;
-    let c = other
-        .call("create_display", json!({ "title": "Other session" }))?
+    let c_reply = other.call("create_display", json!({ "title": "Other session" }))?;
+    let c = c_reply
         .display_id()
         .context("other session create_display gave no display_id")?;
     let held_err = other.tool(
         "place_window",
-        json!({ "display_id": c, "app": "Field", "window_title": "NoSuchWindowTitle" }),
+        json!({ "display_id": c, "app": "Field", "timeout_seconds": 1 }),
     )?;
     check(
-        "missing window error names the live holder session and connection state",
+        "cross-session request error names the live holder session and connection state",
         held_err.is_error
             && held_err.text().contains("Two screens")
             && held_err.text().contains("[session ")
@@ -216,17 +223,27 @@ fn test(tag: &str) -> Result<()> {
     other.close();
 
     // Closing the connection starts the disconnect grace period (#189); a
-    // reconnecting client of the same session rebinds B before grace expires.
+    // reconnecting client of the same session rebinds B on any tool call
+    // before grace expires, and regains InputQueue ownership (H1).
     client.close();
-    sleep_ms(300);
+    sleep_ms(150);
     let reconnected = McpClient::start(&env)?;
+    let rebound_queue = reconnected.tool(
+        "input_queue",
+        json!({ "display_id": b, "action": "status" }),
+    )?;
+    check(
+        "a reconnecting client within grace rebinds B on input_queue and owns its queue",
+        !rebound_queue.is_error,
+        rebound_queue.text(),
+    );
     let rebound = reconnected.call("create_display", json!({ "title": "Two screens" }))?;
     check(
-        "a reconnecting client within grace rebinds B instead of creating a new display",
+        "create_display after rebind returns B without creating a new display",
         rebound.display_id() == Some(b) && rebound.get("reused") == &json!(true),
         rebound.text(),
     );
-    sleep_ms(2300);
+    sleep_ms(1000);
     let kept = reconnected.tool("list_windows", json!({ "display_id": b }))?;
     check(
         "rebound display B stays live past the disconnect grace window",
@@ -234,30 +251,45 @@ fn test(tag: &str) -> Result<()> {
         kept.text(),
     );
 
-    // A second client of the same session joins by reusing B while connected,
-    // so it may observe B ending after reconnected closes and grace expires.
+    // An overlapping client of the same session keeps B alive and inherits its
+    // InputQueue ownership when the earlier connection closes; B ends only
+    // after the last connection closes and the grace window expires.
     let watcher = McpClient::start(&env)?;
     let joined = watcher.call("create_display", json!({ "title": "Two screens" }))?;
     check(
-        "a client of the same session reuses B, making no display",
+        "an overlapping client of the same session reuses B, making no display",
         joined.display_id() == Some(b) && joined.get("reused") == &json!(true),
         joined.text(),
     );
     reconnected.close();
+    sleep_ms(1000);
+    let fallback_queue = watcher.tool(
+        "input_queue",
+        json!({ "display_id": b, "action": "status" }),
+    )?;
+    check(
+        "closing one overlapping connection migrates B and its InputQueue to the remaining connection",
+        !fallback_queue.is_error && on(pid, window, b),
+        fallback_queue.text(),
+    );
+
+    watcher.close();
     let mut ended = None;
     for _ in 0..24 {
         sleep_ms(250);
-        let r = watcher.tool("list_windows", json!({ "display_id": b }))?;
-        if r.is_error {
-            ended = Some(r);
-            break;
+        if let Err(err) = control.call("listWindows", json!({ "displayId": b })) {
+            let msg = err.to_string();
+            let done = msg.contains("ended");
+            ended = Some(msg);
+            if done {
+                break;
+            }
         }
     }
     check(
-        "closing the connection ends the session's display after the grace period",
-        ended.as_ref().is_some_and(|r| r.text().contains("ended")),
-        ended.as_ref().map(|r| r.text()).unwrap_or("still live"),
+        "closing the session's last connection ends B after the grace period",
+        ended.as_ref().is_some_and(|msg| msg.contains("ended")),
+        ended.as_deref().unwrap_or("still live"),
     );
-    watcher.close();
     Ok(())
 }

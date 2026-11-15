@@ -517,6 +517,9 @@ pub struct Displays<H> {
     /// Of those, the ones the user closed: the agent should stop, not make
     /// another display.
     pub closed_by_user: HashSet<DisplayId>,
+    /// Optional shared snapshot updated automatically whenever window records
+    /// or display states change (L3).
+    owners_sink: Option<std::sync::Arc<std::sync::RwLock<BTreeMap<WindowId, DisplayId>>>>,
 }
 
 impl<H> Default for Displays<H> {
@@ -526,6 +529,7 @@ impl<H> Default for Displays<H> {
             sessions: Sessions::default(),
             retired: HashSet::new(),
             closed_by_user: HashSet::new(),
+            owners_sink: None,
         }
     }
 }
@@ -669,6 +673,74 @@ pub fn shot_scale((width, height): (f64, f64)) -> f64 {
 }
 
 impl<H> Displays<H> {
+    /// Bind a shared `recorded_owners` map that `Displays` updates automatically
+    /// on every record or display lifecycle mutation (L3).
+    pub fn bind_recorded_owners(
+        &mut self,
+        sink: std::sync::Arc<std::sync::RwLock<BTreeMap<WindowId, DisplayId>>>,
+    ) {
+        self.owners_sink = Some(sink);
+        self.publish_recorded_owners();
+    }
+
+    pub(crate) fn publish_recorded_owners(&self) {
+        if let Some(sink) = &self.owners_sink
+            && let Ok(mut guard) = sink.write()
+        {
+            *guard = self.recorded_owners();
+        }
+    }
+
+    pub fn claim_on(
+        &mut self,
+        id: DisplayId,
+        target: WindowTarget,
+        origin: Origin,
+        home: Option<Home>,
+    ) {
+        if let Some(d) = self.get_mut(id) {
+            d.claim(target, origin, home);
+            self.publish_recorded_owners();
+        }
+    }
+
+    pub fn forget_on(&mut self, id: DisplayId, window: WindowId) {
+        if let Some(d) = self.get_mut(id) {
+            d.forget(window);
+            self.publish_recorded_owners();
+        }
+    }
+
+    pub fn give_back_failed_on(&mut self, id: DisplayId, given: GivenBack) -> bool {
+        let restored = self.get_mut(id).is_some_and(|d| d.give_back_failed(given));
+        if restored {
+            self.publish_recorded_owners();
+        }
+        restored
+    }
+
+    pub fn restore_record_on(&mut self, id: DisplayId, window: WindowId, record: Option<Record>) {
+        if let Some(d) = self.get_mut(id) {
+            match record {
+                Some(record) => {
+                    d.records.insert(window, record);
+                }
+                None => d.forget(window),
+            }
+            self.publish_recorded_owners();
+        }
+    }
+
+    /// Re-register `ids` in `queue` using each display's current `Owner` after
+    /// a reconnect or overlapping-connection migration (H1).
+    pub fn register_queue_owners(&self, queue: &mut crate::input_queue::Queue, ids: &[DisplayId]) {
+        for &id in ids {
+            if let Some(owner) = self.get(id).and_then(|d| d.owner.as_ref()) {
+                let _ = queue.register(owner.session_key.clone(), owner.connection, id);
+            }
+        }
+    }
+
     pub fn add(
         &mut self,
         id: DisplayId,
@@ -713,6 +785,7 @@ impl<H> Displays<H> {
             given: BTreeMap::new(),
             handle,
         });
+        self.publish_recorded_owners();
     }
 
     /// Remove a display; returns it so the caller can drop its handle.
@@ -729,6 +802,7 @@ impl<H> Displays<H> {
             self.closed_by_user.insert(id);
         }
         display.requests.end();
+        self.publish_recorded_owners();
         Some(display)
     }
 
@@ -866,6 +940,7 @@ impl<H> Displays<H> {
                 unowned.push(target);
             }
         }
+        self.publish_recorded_owners();
         unowned
     }
 
@@ -906,6 +981,7 @@ impl<H> Displays<H> {
         }
         // Every request ends, and every wait hears it.
         self.end_requests(id);
+        self.publish_recorded_owners();
         true
     }
 
@@ -1013,11 +1089,17 @@ impl<H> Displays<H> {
     /// `now_ms`, starting its grace period before expiry (#189). If another
     /// open connection has already spoken for the display's session (ADR 0016
     /// overlapping MCP server restart), move the display to that connection
-    /// instead of starting a grace timer.
-    pub fn connection_disconnected(&mut self, connection: u64, now_ms: u64) -> usize {
+    /// instead of starting a grace timer and return its id in the second tuple
+    /// element so the caller can re-register its `InputQueue` owner (H1).
+    pub fn connection_disconnected_with_migrated(
+        &mut self,
+        connection: u64,
+        now_ms: u64,
+    ) -> (usize, Vec<DisplayId>) {
         self.sessions.drop_connection(connection);
         let mut touched_sessions = Vec::new();
         let mut marked = 0;
+        let mut migrated = Vec::new();
         for d in &mut self.list {
             if d.is_live()
                 && d.disconnected_at_ms.is_none()
@@ -1030,6 +1112,7 @@ impl<H> Displays<H> {
                     .and_then(|s| s.open_connections.iter().next().copied());
                 if let Some(other_conn) = fallback {
                     owner.connection = other_conn;
+                    migrated.push(d.id);
                 } else {
                     d.disconnected_at_ms = Some(now_ms);
                     marked += 1;
@@ -1050,21 +1133,27 @@ impl<H> Displays<H> {
                 s.in_flight_since_ms = None;
             }
         }
-        marked
+        (marked, migrated)
+    }
+
+    pub fn connection_disconnected(&mut self, connection: u64, now_ms: u64) -> usize {
+        self.connection_disconnected_with_migrated(connection, now_ms)
+            .0
     }
 
     /// Record `connection` as open for `session_key` and rebind any live
     /// displays of `session_key` waiting in their disconnect grace period to
-    /// `connection`. Called from `handle()` whenever a request names
-    /// `sessionKey`, so both post-close reconnects and overlapping reconnects
-    /// (ADR 0016) keep the session's displays alive.
+    /// `connection`. Refuses to note or rebind a connection that has already
+    /// closed (M1).
     pub fn rebind_disconnected(
         &mut self,
         session_key: &str,
         connection: u64,
         now_ms: u64,
     ) -> Vec<DisplayId> {
-        self.sessions.note_connection(session_key, connection);
+        if !self.sessions.note_connection(session_key, connection) {
+            return Vec::new();
+        }
         let mut rebound = Vec::new();
         for d in &mut self.list {
             if d.is_live()
@@ -1202,6 +1291,7 @@ impl<H> Displays<H> {
         d.handover_serial += 1;
         let serial = d.handover_serial;
         d.handing_over.insert(target.window_id, serial);
+        self.publish_recorded_owners();
         Ok(Ticket {
             serial,
             target,
@@ -1310,6 +1400,7 @@ impl<H> Displays<H> {
         if ticket.was_returned {
             d.returned.insert(window);
         }
+        self.publish_recorded_owners();
     }
 
     /// Give a Handover back to the user on their word, as Take Back does.
@@ -1361,7 +1452,9 @@ impl<H> Displays<H> {
                 }
             }
         }
-        Some(self.get_mut(id)?.give_back(target))
+        let out = self.get_mut(id)?.give_back(target);
+        self.publish_recorded_owners();
+        Some(out)
     }
 
     /// Whether a window off every Agent Display is display `id`'s to place:
@@ -1458,6 +1551,7 @@ impl<H> Displays<H> {
             // Its own window again on this display (ADR 0017).
             d.given.remove(&target.window_id);
         }
+        self.publish_recorded_owners();
         Ok(Moved {
             from,
             to,
@@ -1514,6 +1608,7 @@ impl<H> Displays<H> {
         {
             d.records.insert(window, record);
         }
+        self.publish_recorded_owners();
     }
 
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {

@@ -78,7 +78,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         json!({ "sessionKey": "viewerdrag", "displayId": id, "app": "Calculator" }),
     )?;
     control.call("debugShow", json!({ "surface": "viewer", "displayId": id }))?;
-    sleep_ms(1200);
+    sleep_ms(600);
     let image = control.call("debugViewer", json!({}))?["image"].clone();
     let before = calculator(id)?;
     check("Calculator opened on the display", before.is_some(), "");
@@ -100,7 +100,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 "toY": from.1 + by.1,
             }),
         )?;
-        sleep_ms(1500);
+        sleep_ms(500);
         let after = calculator(id)?;
         check(
             "the window stays on the Agent Display",
@@ -139,7 +139,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             }
         }),
     )?;
-    sleep_ms(1700);
+    sleep_ms(700);
     for _ in 0..30 {
         if titled(id, "CustomDrag")?.is_some()
             && titled(id, "TallDrag")?.is_some()
@@ -151,11 +151,14 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         sleep_ms(50);
     }
 
-    // 1. Window taller than the display (`mid.y > h`), dragged past the Viewer image (`toX = 1.2`).
-    // Run before `CustomDrag` so moving `TallDrag` to the right edge uncovers `CustomDrag` when
-    // `launchApp` centered both windows at `x = 340`.
+    // 1. Window taller than the display (`1080 > 600`), dragged diagonally past the right edge
+    // (`toX = 1.2`) and far enough down (`toY = t_from.1 + 0.4`, +240 pt) that an unclamped drag
+    // would push its center off the bottom of the display (`max_y = 600 - 1 - 540 = 59`).
+    // Run `TallDrag` and `SheetDrag` before `CustomDrag` because `launchApp` centers all three
+    // windows around `x = 335..340` and `beginSheet` orders `SheetDrag` in front of `CustomDrag`.
     let before_tall = titled(id, "TallDrag")?.context("TallDrag on display")?;
     let t_from = ((before_tall.x + 110.0) / w, (before_tall.y + 20.0) / h);
+    let expected_max_y = h - 1.0 - before_tall.height * 0.5;
     control.call(
         "debugViewerInput",
         json!({
@@ -163,7 +166,7 @@ fn test(fixture: &std::path::Path) -> Result<()> {
             "x": t_from.0,
             "y": t_from.1,
             "toX": 1.2,
-            "toY": t_from.1,
+            "toY": t_from.1 + 0.4,
         }),
     )?;
     sleep_ms(200);
@@ -174,8 +177,9 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         tall_ok = after_tall.as_ref().is_some_and(|after| {
             (after.height - before_tall.height).abs() < 2.0
                 && (after.x - (w - before_tall.width)).abs() < 4.0
-                && after.y >= -1.0
-                && after.y <= before_tall.y + 4.0
+                && (after.y - expected_max_y).abs() < 4.0
+                && after.y > before_tall.y + 8.0
+                && after.y + after.height * 0.5 < h
         });
         if tall_ok {
             break;
@@ -183,15 +187,53 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         sleep_ms(50);
     }
     check(
-        "a window taller than the display dragged outside the Viewer image clamps at the edge and keeps its height",
+        "a window taller than the display dragged diagonally clamps both x and center-y while keeping its height",
         tall_ok,
         format!("{} -> {}", json!(before_tall), json!(after_tall)),
     );
 
-    // 2. Custom-title-bar window that yanks off the display 80 ms after mouseUp.
+    // 2. Window with an attached modal sheet dragged far enough left (`-0.32 * w = -288 pt`) to
+    // uncover `CustomDrag` underneath while staying cleanly on the display.
+    let before_sheet = titled(id, "SheetDrag")?.context("SheetDrag on display")?;
+    let s_from = ((before_sheet.x + 110.0) / w, (before_sheet.y + 12.0) / h);
+    let s_by = (-0.32, 0.10);
+    control.call(
+        "debugViewerInput",
+        json!({
+            "kind": "drag",
+            "x": s_from.0,
+            "y": s_from.1,
+            "toX": s_from.0 + s_by.0,
+            "toY": s_from.1 + s_by.1,
+        }),
+    )?;
+    sleep_ms(300);
+    let after_sheet = titled(id, "SheetDrag")?;
+    let sheet_ok = after_sheet.as_ref().is_some_and(|after| {
+        let moved = (
+            (after.x - before_sheet.x) / w,
+            (after.y - before_sheet.y) / h,
+        );
+        (moved.0 - s_by.0).abs() < 0.03 && (moved.1 - s_by.1).abs() < 0.03
+    });
+    check(
+        "a window with an attached modal sheet drags cleanly and stays on the Agent Display",
+        sheet_ok,
+        format!("{} -> {}", json!(before_sheet), json!(after_sheet)),
+    );
+
+    // 3. Custom-drag window (`y + 60 > 52` outside standard title-bar grab) that yanks onto Stage
+    // 80 ms after mouseUp and is returned by `keep_on_display` at its dragged position. Wake key
+    // focus first because AppKit consumes the first background click on a window without an empty
+    // standard title bar (`input.rs:1610`).
     let before_custom = titled(id, "CustomDrag")?.context("CustomDrag on display")?;
-    let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 30.0) / h);
+    let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 60.0) / h);
     let c_by = (0.10, 0.14);
+    control.call(
+        "debugViewerInput",
+        json!({ "kind": "click", "x": c_from.0, "y": c_from.1 }),
+    )?;
+    sleep_ms(80);
     control.call(
         "debugViewerInput",
         json!({
@@ -223,35 +265,6 @@ fn test(fixture: &std::path::Path) -> Result<()> {
         "a custom-title-bar window yanked off the display after mouseUp returns at its dragged position",
         custom_ok,
         format!("{} -> {}", json!(before_custom), json!(after_custom)),
-    );
-
-    // 3. Window with an attached modal sheet dragged by its title bar stays on the display.
-    let before_sheet = titled(id, "SheetDrag")?.context("SheetDrag on display")?;
-    let s_from = ((before_sheet.x + 110.0) / w, (before_sheet.y + 12.0) / h);
-    let s_by = (-0.08, 0.10);
-    control.call(
-        "debugViewerInput",
-        json!({
-            "kind": "drag",
-            "x": s_from.0,
-            "y": s_from.1,
-            "toX": s_from.0 + s_by.0,
-            "toY": s_from.1 + s_by.1,
-        }),
-    )?;
-    sleep_ms(800);
-    let after_sheet = titled(id, "SheetDrag")?;
-    let sheet_ok = after_sheet.as_ref().is_some_and(|after| {
-        let moved = (
-            (after.x - before_sheet.x) / w,
-            (after.y - before_sheet.y) / h,
-        );
-        (moved.0 - s_by.0).abs() < 0.03 && (moved.1 - s_by.1).abs() < 0.03
-    });
-    check(
-        "a window with an attached modal sheet drags cleanly and stays on the Agent Display",
-        sheet_ok,
-        format!("{} -> {}", json!(before_sheet), json!(after_sheet)),
     );
 
     // 4. Real Takeover Viewer clicks on an `.appex` pop-up menu behind a host window (#205, #207).

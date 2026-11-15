@@ -1581,6 +1581,68 @@ pub fn set_frame_asked(target: WindowTarget, frame: Rect) -> Result<(), MoveErro
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReparkMoveError {
+    TimedOut,
+    Failed,
+}
+
+/// Bounded-timeout Accessibility frame write for `Core::repark` shifts (`M3`, `L2`).
+/// Uses `timeout_secs` on both the app root and window elements so a hung app
+/// reports `TimedOut` promptly, and verifies `cg::window_bounds` on non-timeout
+/// `AXError` answers so Chromium's spurious error codes (#167) still count as moved.
+pub fn set_frame_repark(
+    target: WindowTarget,
+    frame: Rect,
+    timeout_secs: f32,
+) -> Result<(), ReparkMoveError> {
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(timeout_secs) };
+    let list = try_elements_attribute(&app, "AXWindows").map_err(|err| {
+        if err == AXError::CannotComplete {
+            ReparkMoveError::TimedOut
+        } else {
+            ReparkMoveError::Failed
+        }
+    })?;
+    let mut found = None;
+    for w in list {
+        unsafe { w.set_messaging_timeout(timeout_secs) };
+        if window_id(&w) == Some(target.window_id) {
+            found = Some(w);
+            break;
+        }
+    }
+    let window = found.ok_or(ReparkMoveError::Failed)?;
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| match value {
+        Some(value) => set_attribute_answer(&window, name, &value),
+        None => AXError::IllegalArgument,
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let answers = with_moves_direct(&window, || {
+        [
+            write("AXPosition", at()),
+            write(
+                "AXSize",
+                ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+            ),
+            write("AXPosition", at()),
+        ]
+    });
+    if answers.contains(&AXError::CannotComplete) {
+        return Err(ReparkMoveError::TimedOut);
+    }
+    if answers.iter().all(|a| *a == AXError::Success) {
+        return Ok(());
+    }
+    if super::cg::window_bounds(target.window_id)
+        .is_some_and(|b| (b.x - frame.x).abs() <= 2.0 && (b.y - frame.y).abs() <= 2.0)
+    {
+        return Ok(());
+    }
+    Err(ReparkMoveError::Failed)
+}
+
 /// Press the window's close button. The app may still keep it open, for
 /// example to ask about unsaved changes.
 /// Whether the window shows a sheet, such as one asking whether to save.

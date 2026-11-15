@@ -96,6 +96,7 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct Sessions {
     map: BTreeMap<String, Session>,
+    closed_connections: BTreeSet<u64>,
 }
 
 /// Why a session may not have another display now.
@@ -189,17 +190,30 @@ impl Sessions {
         }
     }
 
+    /// Whether `connection` has already been closed via [`Sessions::drop_connection`].
+    pub fn is_connection_closed(&self, connection: u64) -> bool {
+        self.closed_connections.contains(&connection)
+    }
+
     /// Record that `connection` is an open control socket speaking for `key`.
-    pub fn note_connection(&mut self, key: &str, connection: u64) {
+    /// Returns `false` and changes nothing if `connection` was already closed,
+    /// preventing a request handled after close from re-opening or rebinding a
+    /// dead connection.
+    pub fn note_connection(&mut self, key: &str, connection: u64) -> bool {
+        if self.closed_connections.contains(&connection) {
+            return false;
+        }
         self.map
             .entry(key.to_string())
             .or_default()
             .open_connections
             .insert(connection);
+        true
     }
 
-    /// Remove `connection` from every session's open connection set.
+    /// Tombstone `connection` and remove it from every session's open connection set.
     pub fn drop_connection(&mut self, connection: u64) {
+        self.closed_connections.insert(connection);
         for session in self.map.values_mut() {
             session.open_connections.remove(&connection);
         }

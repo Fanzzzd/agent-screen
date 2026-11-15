@@ -191,15 +191,19 @@ pub fn dragged_window_origin(
         let centered = area.mid().0 - initial_frame.width * 0.5;
         (centered, centered)
     };
-    let max_y = if initial_frame.height <= area.height {
-        area.max_y() - initial_frame.height
-    } else {
-        (area.max_y() - MIN_TITLE_STRIP)
+    let (min_y, max_y) = if initial_frame.height <= area.height {
+        (area.y, area.max_y() - initial_frame.height)
+    } else if initial_frame.height <= 2.0 * area.height - 2.0 {
+        let max_y = (area.max_y() - MIN_TITLE_STRIP)
             .min(area.max_y() - 1.0 - initial_frame.height * 0.5)
-            .max(area.y)
+            .max(area.y);
+        (area.y, max_y)
+    } else {
+        let centered = area.mid().1 - initial_frame.height * 0.5;
+        (centered, centered)
     };
     let x = (initial_frame.x + to.0 - from.0).clamp(min_x, max_x.max(min_x));
-    let y = (initial_frame.y + to.1 - from.1).clamp(area.y, max_y.max(area.y));
+    let y = (initial_frame.y + to.1 - from.1).clamp(min_y, max_y.max(min_y));
     (x, y)
 }
 

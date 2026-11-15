@@ -15,9 +15,20 @@ pub struct Window {
     /// Window level: 0 for documents, 3 for floating panels, 8 for modal
     /// panels and alerts.
     pub layer: i64,
+    /// True when the window belongs to an Agent Display via an active record
+    /// while its global frame currently sits outside that display's viewport.
+    pub off_display: bool,
 }
 
 impl Window {
+    fn kind_str(&self) -> &'static str {
+        match self.layer {
+            0 => "window",
+            l if l >= 8 => "dialog",
+            _ => "panel",
+        }
+    }
+
     pub fn json(&self) -> Value {
         json!({
             "windowId": self.target.window_id,
@@ -27,12 +38,34 @@ impl Window {
             "y": self.bounds.y as i64,
             "width": self.bounds.width as i64,
             "height": self.bounds.height as i64,
-            "kind": match self.layer {
-                0 => "window",
-                l if l >= 8 => "dialog",
-                _ => "panel",
-            }
+            "kind": self.kind_str(),
         })
+    }
+
+    /// JSON serialized for `listWindows` on an Agent Display (`M2`): omits
+    /// misleading coordinates and sets `offDisplay: true` when a recorded
+    /// window sits outside its display's viewport.
+    pub fn display_json(&self, scale: f64) -> Value {
+        if self.off_display {
+            json!({
+                "windowId": self.target.window_id,
+                "app": self.app,
+                "title": self.title,
+                "kind": self.kind_str(),
+                "offDisplay": true,
+            })
+        } else {
+            json!({
+                "windowId": self.target.window_id,
+                "app": self.app,
+                "title": self.title,
+                "x": (self.bounds.x * scale).round() as i64,
+                "y": (self.bounds.y * scale).round() as i64,
+                "width": (self.bounds.width * scale).round() as i64,
+                "height": (self.bounds.height * scale).round() as i64,
+                "kind": self.kind_str(),
+            })
+        }
     }
 }
 
@@ -189,24 +222,23 @@ pub fn all() -> Vec<Window> {
             title: w.title,
             bounds: w.bounds,
             layer: w.layer,
+            off_display: false,
         })
         .collect()
 }
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{LazyLock, RwLock};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, LazyLock, RwLock};
 
-/// Active window-to-display ownership snapshot synced from `Core::displays`
-/// (`Displays::recorded_owners()`), so every `windows::on_display`, `counts`,
-/// dismissal, spare, and input-routing check resolves ownership with the same
-/// single rule (`effective_agent_display`, ADR 0018).
-static RECORDED_OWNERS: LazyLock<RwLock<BTreeMap<u32, DisplayId>>> =
-    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+/// Active window-to-display ownership snapshot bound directly to
+/// `Core::displays` (`Displays::bind_recorded_owners`, L3), so every
+/// `windows::on_display`, `counts`, dismissal, spare, and input-routing check
+/// resolves ownership with one rule (`effective_agent_display`, ADR 0018).
+static RECORDED_OWNERS: LazyLock<Arc<RwLock<BTreeMap<u32, DisplayId>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(BTreeMap::new())));
 
-pub fn set_recorded_owners(owners: BTreeMap<u32, DisplayId>) {
-    if let Ok(mut guard) = RECORDED_OWNERS.write() {
-        *guard = owners;
-    }
+pub fn recorded_owners_handle() -> Arc<RwLock<BTreeMap<u32, DisplayId>>> {
+    RECORDED_OWNERS.clone()
 }
 
 pub fn recorded_owners_snapshot() -> BTreeMap<u32, DisplayId> {
@@ -258,6 +290,7 @@ pub fn filter_on_display(
             .filter(|w| belongs(&w.bounds, &area, &others))
             .map(|w| Window {
                 bounds: w.bounds.offset(-area.x, -area.y),
+                off_display: false,
                 ..w.clone()
             })
             .collect();
@@ -265,15 +298,36 @@ pub fn filter_on_display(
     windows
         .iter()
         .filter_map(|w| {
-            let (owner, base) = agent_screen_model::arrangement::effective_agent_display(
+            let (owner, _) = agent_screen_model::arrangement::effective_agent_display(
                 &w.bounds,
                 online_displays,
                 recorded_owners.get(&w.target.window_id).copied(),
             )?;
             (owner == display).then(|| Window {
-                bounds: w.bounds.offset(-base.x, -base.y),
+                bounds: w.bounds.offset(-area.x, -area.y),
+                off_display: !w.bounds.intersects(&area),
                 ..w.clone()
             })
+        })
+        .collect()
+}
+
+/// Pure check returning every display in `ids` whose online bounds are
+/// physically intersected by any window in `windows`, regardless of recorded
+/// ownership (L4). Prevents `pick_spare` from handing out a spare covered by
+/// another display's unshifted recorded window.
+pub fn physically_occupied_displays(
+    ids: &[DisplayId],
+    windows: &[Window],
+    online_displays: &[(DisplayId, Rect, bool)],
+) -> HashSet<DisplayId> {
+    ids.iter()
+        .copied()
+        .filter(|&id| {
+            online_displays
+                .iter()
+                .find(|&&(oid, _, _)| oid == id)
+                .is_some_and(|&(_, area, _)| windows.iter().any(|w| w.bounds.intersects(&area)))
         })
         .collect()
 }
@@ -292,19 +346,29 @@ fn other_displays(display: DisplayId) -> Vec<Rect> {
         .collect()
 }
 
-/// How many windows each display has, from one window list and one display
-/// layout snapshot, honoring `RECORDED_OWNERS` (ADR 0018).
-pub fn counts(displays: &[DisplayId]) -> HashMap<DisplayId, usize> {
+/// How many windows each display has, plus which displays have any window
+/// physically intersecting their viewport (`L4`).
+pub fn counts_and_physical(
+    displays: &[DisplayId],
+) -> (HashMap<DisplayId, usize>, HashSet<DisplayId>) {
     if displays.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), HashSet::new());
     }
     let windows = all();
     let online = online_display_areas();
     let owners = recorded_owners_snapshot();
-    displays
+    let counts = displays
         .iter()
         .map(|&id| (id, filter_on_display(id, &windows, &online, &owners).len()))
-        .collect()
+        .collect();
+    let physical = physically_occupied_displays(displays, &windows, &online);
+    (counts, physical)
+}
+
+/// How many windows each display has, from one window list and one display
+/// layout snapshot, honoring `RECORDED_OWNERS` (ADR 0018).
+pub fn counts(displays: &[DisplayId]) -> HashMap<DisplayId, usize> {
+    counts_and_physical(displays).0
 }
 
 /// Windows on a display, with display-relative bounds, resolved through
@@ -339,7 +403,10 @@ pub fn keep_inside(display: DisplayId) -> bool {
         super::menubar_height(display),
     );
     let mut moved = false;
-    for window in on_display(display).into_iter().filter(|w| w.layer == 0) {
+    for window in on_display(display)
+        .into_iter()
+        .filter(|w| w.layer == 0 && !w.off_display)
+    {
         let kept = window.bounds.kept_inside(&local);
         if kept != window.bounds {
             moved |= ax::set_frame(window.target, kept.offset(area.x, area.y)).is_ok();
@@ -760,6 +827,7 @@ mod tests {
             title: format!("w{window_id}"),
             bounds: Rect::new(x, y, 400.0, 300.0),
             layer: 0,
+            off_display: false,
         };
         let windows = vec![
             // Recorded on 7, transiently sitting on 8 before AX shift finishes.
@@ -768,20 +836,38 @@ mod tests {
             win(11, 4000.0, -650.0),
             // Recorded on 7, returned to user screen 1.
             win(12, 200.0, 200.0),
+            // Recorded on 7, actually sitting on 7.
+            win(13, 2660.0, -700.0),
         ];
         let mut owners = BTreeMap::new();
         owners.insert(10, 7);
         owners.insert(12, 7);
+        owners.insert(13, 7);
 
         let on_7 = filter_on_display(7, &windows, &online, &owners);
-        assert_eq!(on_7.len(), 1);
+        assert_eq!(on_7.len(), 2);
         assert_eq!(on_7[0].target.window_id, 10);
-        // Preserves display-relative offset `(100, 100)` until AX shift finishes.
-        assert_eq!(on_7[0].bounds, Rect::new(100.0, 100.0, 400.0, 300.0));
+        assert!(on_7[0].off_display);
+        assert_eq!(on_7[0].bounds, Rect::new(1380.0, 100.0, 400.0, 300.0));
+        let off_json = on_7[0].display_json(1.0);
+        assert_eq!(off_json["offDisplay"], json!(true));
+        assert!(off_json.get("x").is_none() && off_json.get("y").is_none());
 
+        assert_eq!(on_7[1].target.window_id, 13);
+        assert!(!on_7[1].off_display);
+        let on_json = on_7[1].display_json(1.0);
+        assert!(on_json.get("offDisplay").is_none());
+        assert_eq!(on_json["x"], json!(100));
+        assert_eq!(on_json["y"], json!(100));
+
+        // Display 8 sees only its own unrecorded window 11 in `filter_on_display`,
+        // yet `physically_occupied_displays` STILL flags 8 as occupied if 8 were
+        // a spare covered by 7's unshifted window 10 (L4).
         let on_8 = filter_on_display(8, &windows, &online, &owners);
         assert_eq!(on_8.len(), 1);
         assert_eq!(on_8[0].target.window_id, 11);
+        let occupied = physically_occupied_displays(&[8], &[windows[0].clone()], &online);
+        assert!(occupied.contains(&8));
 
         let on_user = filter_on_display(1, &windows, &online, &owners);
         assert_eq!(on_user.len(), 1);

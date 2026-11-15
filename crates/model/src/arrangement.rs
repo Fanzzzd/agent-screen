@@ -317,7 +317,7 @@ pub fn effective_agent_display(
     } else {
         displays
             .iter()
-            .find(|&&(id, area, _)| id == owner && bounds.intersects(&area))
+            .find(|&&(id, _, _)| id == owner)
             .map_or(geom_area, |&(_, area, _)| area)
     };
     Some((owner, base))
@@ -326,15 +326,26 @@ pub fn effective_agent_display(
 pub type WindowShift = (WindowTarget, Rect);
 pub type DisplayMove = (DisplayId, Rect, Rect);
 
-/// Serializes `repark` passes and tracks each adopted display's verified
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingShift {
+    target: WindowTarget,
+    display: DisplayId,
+    dest: Rect,
+    failures: u32,
+}
+
+/// Serializes window-shift planning and tracks each adopted display's verified
 /// `parked_rects` baseline with a monotonic generation counter (H1).
 /// Overlapping `ScreensChanged` notifications coalesce into a single follow-up
 /// pass (`rerun`) that starts only after in-flight AX moves finish, so
 /// unrecorded windows never shift twice and stale runs cannot overwrite newer
-/// baselines.
+/// baselines. Failed AX moves stay in `pending_shifts` (rebased across any
+/// further display moves) and retry on subsequent passes (L2).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReparkState {
     parked_rects: BTreeMap<DisplayId, Rect>,
+    pending_shifts: BTreeMap<u32, PendingShift>,
+    planned_in_pass: BTreeMap<u32, (DisplayId, Rect)>,
     in_flight: bool,
     rerun: bool,
     generation: u64,
@@ -349,13 +360,30 @@ impl ReparkState {
 
     pub fn remove_display(&mut self, id: DisplayId) {
         self.parked_rects.remove(&id);
+        self.pending_shifts.retain(|_, ps| ps.display != id);
+        self.planned_in_pass.retain(|_, (d, _)| *d != id);
     }
 
     pub fn parked_rect(&self, id: DisplayId) -> Option<Rect> {
         self.parked_rects.get(&id).copied()
     }
 
-    /// Start a serialized repark pass for `adopted` displays. If a pass is
+    pub fn has_pending_retries(&self, adopted: &[DisplayId]) -> bool {
+        self.pending_shifts
+            .values()
+            .any(|ps| adopted.contains(&ps.display))
+    }
+
+    pub fn max_pending_failures(&self, adopted: &[DisplayId]) -> u32 {
+        self.pending_shifts
+            .values()
+            .filter(|ps| adopted.contains(&ps.display))
+            .map(|ps| ps.failures)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Start a serialized shift pass for `adopted` displays. If a pass is
     /// already running, marks `rerun` and returns `None`.
     pub fn begin(&mut self, adopted: &[DisplayId]) -> Option<(u64, Vec<(DisplayId, Rect)>)> {
         if self.in_flight {
@@ -365,6 +393,7 @@ impl ReparkState {
         self.in_flight = true;
         self.rerun = false;
         self.generation += 1;
+        self.planned_in_pass.clear();
         let snapshot = adopted
             .iter()
             .filter_map(|&id| self.parked_rects.get(&id).copied().map(|r| (id, r)))
@@ -374,8 +403,8 @@ impl ReparkState {
 
     /// Compute window shifts for `generation` from the current `parked_rects`
     /// baseline to `settled`, advancing `parked_rects` atomically so a later
-    /// pass sees the updated origins. Returns `(shifts, moved_displays)` or
-    /// empty vectors if `generation` is stale.
+    /// pass sees the updated origins, and including any previously failed
+    /// shifts whose window has not yet reached its destination.
     pub fn plan_shifts(
         &mut self,
         generation: u64,
@@ -396,41 +425,130 @@ impl ReparkState {
                 moved.push((id, old, now));
             }
         }
-        let shifts = window_shifts(&moved, stationary, windows);
+        let active_moves: Vec<DisplayMove> = moved
+            .iter()
+            .copied()
+            .filter(|&(_, old, now)| (now.x - old.x).abs() > 0.5 || (now.y - old.y).abs() > 0.5)
+            .collect();
+
+        // Rebase any pending failed shifts whose display moved again.
+        for &(id, old, now) in &active_moves {
+            let resized =
+                (now.width - old.width).abs() > 0.5 || (now.height - old.height).abs() > 0.5;
+            for ps in self.pending_shifts.values_mut() {
+                if ps.display == id {
+                    let shifted = ps.dest.offset(now.x - old.x, now.y - old.y);
+                    ps.dest = if resized {
+                        shifted.kept_inside(&now)
+                    } else {
+                        shifted
+                    };
+                }
+            }
+        }
+
+        let owned_shifts = window_shifts_with_owner(&moved, stationary, windows);
         for &(id, now) in settled {
             if adopted.contains(&id) && now.width > 0.0 && now.height > 0.0 {
                 self.parked_rects.insert(id, now);
             }
         }
-        let active_moves = moved
-            .into_iter()
-            .filter(|&(_, old, now)| (now.x - old.x).abs() > 0.5 || (now.y - old.y).abs() > 0.5)
-            .collect();
+
+        self.planned_in_pass.clear();
+        let mut shifts = Vec::new();
+        for (target, owner, dest) in owned_shifts {
+            self.planned_in_pass.insert(target.window_id, (owner, dest));
+            shifts.push((target, dest));
+        }
+
+        // Retry previously failed shifts if the window is still open and has
+        // not yet arrived at its destination.
+        self.pending_shifts.retain(|&wid, ps| {
+            if !adopted.contains(&ps.display) {
+                return false;
+            }
+            let Some(&(_, cur_bounds, rec_owner)) =
+                windows.iter().find(|&&(t, _, _)| t.window_id == wid)
+            else {
+                return false;
+            };
+            if rec_owner.is_some_and(|o| o != ps.display) {
+                return false;
+            }
+            let arrived =
+                (cur_bounds.x - ps.dest.x).abs() <= 2.0 && (cur_bounds.y - ps.dest.y).abs() <= 2.0;
+            !arrived
+        });
+        for ps in self.pending_shifts.values() {
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                self.planned_in_pass.entry(ps.target.window_id)
+            {
+                e.insert((ps.display, ps.dest));
+                shifts.push((ps.target, ps.dest));
+            }
+        }
+
         (shifts, active_moves)
     }
 
-    /// Complete `generation` and report whether another pass was requested
-    /// while it ran.
+    /// Complete `generation` when every planned shift succeeded.
     pub fn finish(&mut self, generation: u64) -> bool {
+        self.finish_with_failures(generation, &[]).0
+    }
+
+    /// Complete `generation`, recording `failed` targets so the next pass
+    /// retries them. Returns `(rerun, first_failures)` where `first_failures`
+    /// lists targets failing for the first time.
+    pub fn finish_with_failures(
+        &mut self,
+        generation: u64,
+        failed: &[WindowTarget],
+    ) -> (bool, Vec<WindowTarget>) {
         if !self.in_flight || generation != self.generation {
-            return false;
+            return (false, Vec::new());
+        }
+        let planned = std::mem::take(&mut self.planned_in_pass);
+        for &wid in planned.keys() {
+            if !failed.iter().any(|t| t.window_id == wid) {
+                self.pending_shifts.remove(&wid);
+            }
+        }
+        let mut first_failures = Vec::new();
+        for &target in failed {
+            let wid = target.window_id;
+            let resolved = planned.get(&wid).copied().or_else(|| {
+                self.pending_shifts
+                    .get(&wid)
+                    .map(|ps| (ps.display, ps.dest))
+            });
+            let Some((display, dest)) = resolved else {
+                continue;
+            };
+            let prev = self.pending_shifts.get(&wid).map_or(0, |ps| ps.failures);
+            let failures = prev.saturating_add(1);
+            self.pending_shifts.insert(
+                wid,
+                PendingShift {
+                    target,
+                    display,
+                    dest,
+                    failures,
+                },
+            );
+            if failures == 1 {
+                first_failures.push(target);
+            }
         }
         self.in_flight = false;
-        std::mem::take(&mut self.rerun)
+        (std::mem::take(&mut self.rerun), first_failures)
     }
 }
 
-/// Target global frames for windows whose Agent Display moved from `old_rect`
-/// to `new_rect`. Membership is evaluated against both explicit placement or
-/// handover records (`recorded_owner`) and the pre-move snapshot of all
-/// displays (`moved`'s `old_rect`s plus `stationary_areas`), so a chain move
-/// (`A: R1 -> R2`, `B: R2 -> R3`) shifts `A`'s windows to `R2` and `B`'s
-/// windows to `R3` without mixing them up.
-pub fn window_shifts(
+fn window_shifts_with_owner(
     moved: &[(DisplayId, Rect, Rect)],
     stationary_areas: &[Rect],
     windows: &[(WindowTarget, Rect, Option<DisplayId>)],
-) -> Vec<(WindowTarget, Rect)> {
+) -> Vec<(WindowTarget, DisplayId, Rect)> {
     let active_moves: Vec<(DisplayId, Rect, Rect)> = moved
         .iter()
         .copied()
@@ -448,7 +566,7 @@ pub fn window_shifts(
         .map(|&(id, old, _)| (Some(id), old))
         .chain(stationary_areas.iter().map(|&r| (None, r)))
         .collect();
-    let mut shifts = Vec::new();
+    let mut shifts: Vec<(WindowTarget, DisplayId, Rect)> = Vec::new();
     for &(id, old, new) in &active_moves {
         let others: Vec<Rect> = all_old
             .iter()
@@ -457,7 +575,7 @@ pub fn window_shifts(
             .collect();
         let resized = (new.width - old.width).abs() > 0.5 || (new.height - old.height).abs() > 0.5;
         for &(target, bounds, recorded_owner) in windows {
-            if shifts.iter().any(|&(t, _)| t == target) {
+            if shifts.iter().any(|&(t, _, _)| t == target) {
                 continue;
             }
             let belongs = match recorded_owner {
@@ -471,11 +589,28 @@ pub fn window_shifts(
                 } else {
                     shifted
                 };
-                shifts.push((target, next));
+                shifts.push((target, id, next));
             }
         }
     }
     shifts
+}
+
+/// Target global frames for windows whose Agent Display moved from `old_rect`
+/// to `new_rect`. Membership is evaluated against both explicit placement or
+/// handover records (`recorded_owner`) and the pre-move snapshot of all
+/// displays (`moved`'s `old_rect`s plus `stationary_areas`), so a chain move
+/// (`A: R1 -> R2`, `B: R2 -> R3`) shifts `A`'s windows to `R2` and `B`'s
+/// windows to `R3` without mixing them up.
+pub fn window_shifts(
+    moved: &[(DisplayId, Rect, Rect)],
+    stationary_areas: &[Rect],
+    windows: &[(WindowTarget, Rect, Option<DisplayId>)],
+) -> Vec<(WindowTarget, Rect)> {
+    window_shifts_with_owner(moved, stationary_areas, windows)
+        .into_iter()
+        .map(|(target, _, next)| (target, next))
+        .collect()
 }
 
 /// A parking attempt succeeds once display `id`, one of Agent Screen's,
@@ -1174,11 +1309,11 @@ mod tests {
             (8, Rect::new(3840., -800., 1280., 800.), true),
         ];
         // Window recorded on 7, transiently sitting on virtual display 8 -> owned by 7,
-        // with base rect of 8 until shifted.
+        // with owner 7's own base rect so display 8's origin never leaks into 7's coordinates (M2).
         let on_8 = Rect::new(3940., -700., 500., 400.);
         assert_eq!(
             effective_agent_display(&on_8, &displays, Some(7)),
-            Some((7, Rect::new(3840., -800., 1280., 800.)))
+            Some((7, Rect::new(2560., -800., 1280., 800.)))
         );
         // Unrecorded window on virtual display 8 -> owned by 8.
         assert_eq!(

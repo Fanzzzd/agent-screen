@@ -3398,9 +3398,9 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let given = self.core.update(cx, |core, _| {
+        let given = self.core.update(cx, |core, cx| {
             let out = core.displays.give_back(id, target);
-            core.sync_recorded_owners();
+            cx.notify();
             out
         });
         self.send_home(target, id, given, cx)
@@ -3569,12 +3569,9 @@ impl Shell {
                 );
                 let _ = this.update(cx, |shell, cx| {
                     shell.core.update(cx, |core, cx| {
-                        if let Some(given) = given
-                            && let Some(d) = core.displays.get_mut(id)
-                        {
-                            d.give_back_failed(given);
+                        if let Some(given) = given {
+                            core.displays.give_back_failed_on(id, given);
                         }
-                        core.sync_recorded_owners();
                         cx.notify();
                     })
                 });
@@ -4696,7 +4693,6 @@ impl Shell {
                     }
                     let landed = core.displays.commit_hand_over(id, &ticket, named);
                     if landed {
-                        core.sync_recorded_owners();
                         // Handed over again: the app's late windows are the
                         // agent's to have, not to send back.
                         core.returning

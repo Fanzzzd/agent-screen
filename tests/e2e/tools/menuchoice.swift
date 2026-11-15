@@ -33,6 +33,10 @@ final class Unfocusable: NSPopUpButton {
   override var acceptsFirstResponder: Bool { false }
 }
 
+final class CustomDragView: NSView {
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 final class CustomDragWindow: NSWindow {
   var stageOrigin: NSPoint?
   var dragged = false
@@ -215,9 +219,9 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
 
     let tallFrame = NSRect(
       x: screen.frame.minX + 300,
-      y: screen.frame.maxY - 40 - 1300,
+      y: screen.frame.maxY - 40 - 1080,
       width: 220,
-      height: 1300
+      height: 1080
     )
     tallWin = NSWindow(
       contentRect: tallFrame,
@@ -228,10 +232,10 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     )
     tallWin.titlebarAppearsTransparent = true
     tallWin.titleVisibility = .hidden
-    tallWin.minSize = NSSize(width: 220, height: 1300)
+    tallWin.minSize = NSSize(width: 220, height: 1080)
     tallWin.title = "TallDrag"
     tallWin.setFrame(tallFrame, display: true)
-    let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1248, width: 220, height: 52))
+    let tallBar = TallToolbarView(frame: NSRect(x: 0, y: 1028, width: 220, height: 52))
     tallBar.stageOrigin = NSPoint(x: stage.frame.minX + 400, y: stage.frame.minY + 80)
     tallWin.contentView!.addSubview(tallBar)
     tallWin.orderFrontRegardless()
@@ -254,6 +258,7 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     customWin.titlebarAppearsTransparent = true
     customWin.titleVisibility = .hidden
     customWin.title = "CustomDrag"
+    customWin.contentView = CustomDragView(frame: NSRect(x: 0, y: 0, width: 220, height: 160))
     customWin.stageOrigin = NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120)
     customWin.setFrame(customFrame, display: true)
     customWin.orderFrontRegardless()

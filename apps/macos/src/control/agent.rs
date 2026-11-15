@@ -91,14 +91,13 @@ pub async fn handle(
             let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
             core.update(cx, |c, cx| {
                 c.drain_dropped_calls();
+                if c.closed.contains(&connection) {
+                    return None;
+                }
                 let now_ms = c.elapsed_ms();
                 if let Some(ref k) = named_key {
                     c.sessions.insert(connection, k.clone());
-                    if !c
-                        .displays
-                        .rebind_disconnected(k, connection, now_ms)
-                        .is_empty()
-                    {
+                    if !c.rebind_session(k, connection, now_ms).is_empty() {
                         cx.notify();
                     }
                 }
@@ -429,6 +428,7 @@ async fn handle_one(
         "click" => {
             let (id, point) = target(&core, &p, cx).await?;
             outside_menu_bar(id, point)?;
+            guard_agent_point(&core, id, point, cx).await?;
             let button = Button::parse(p.string("button").as_deref().unwrap_or("left"))
                 .ok_or_else(|| {
                     ControlError::invalid(format!(
@@ -542,6 +542,7 @@ async fn handle_one(
                 }
                 None => {}
             }
+            guard_agent_point(&core, id, point, cx).await?;
             show_pointer(&core, id, point, false, cx)
                 .move_to(point)
                 .await;
@@ -552,6 +553,8 @@ async fn handle_one(
             let from = global(&core, id, p.require("fromX")?, p.require("fromY")?, cx)?;
             let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
             outside_menu_bar(id, from)?;
+            guard_agent_point(&core, id, from, cx).await?;
+            guard_agent_point(&core, id, to, cx).await?;
             let modifiers = modifiers(&p)?;
             if p.0.get("realInput") == Some(&Value::Bool(true)) {
                 return queued_drag(
@@ -684,6 +687,7 @@ async fn handle_one(
             };
             if down {
                 outside_menu_bar(id, point)?;
+                guard_agent_point(&core, id, point, cx).await?;
             }
             let grabbed = GRAB.with(|g| g.borrow_mut().remove(&id));
             if down && let Some(grab) = title_bar_at(id, point, cx).await {
@@ -798,6 +802,7 @@ async fn handle_one(
         }
         "scroll" => {
             let (id, point) = target(&core, &p, cx).await?;
+            guard_agent_point(&core, id, point, cx).await?;
             let delta = (
                 p.number("deltaX").unwrap_or(0.0),
                 p.number("deltaY").unwrap_or(0.0),
@@ -1035,7 +1040,7 @@ async fn handle_one(
                 .await
                 .iter()
                 .map(|w| {
-                    let mut json = in_shot(w.json(), scale);
+                    let mut json = w.display_json(scale);
                     let record = records.get(&w.target.window_id);
                     // A further window of an app the agent started, which its
                     // catch moved here, is as launched as the first.
@@ -1316,9 +1321,7 @@ async fn handle_one(
                 Some(from) => Some(
                     core.update(cx, |c, cx| {
                         cx.notify();
-                        let out = c.displays.move_between(from, id, window.target, false);
-                        c.sync_recorded_owners();
-                        out
+                        c.displays.move_between(from, id, window.target, false)
                     })
                     .map_err(ControlError::failed)?,
                 ),
@@ -1329,21 +1332,14 @@ async fn handle_one(
             };
             if let Err(e) = place_and_hold(window.target, id, cx).await {
                 // Still a stray, so the agent can try again.
-                core.update(cx, |c, _| {
+                core.update(cx, |c, cx| {
                     match moved {
                         Some(moved) => c.displays.undo_move(moved),
-                        None => {
-                            if let Some(d) = c.displays.get_mut(id) {
-                                match before {
-                                    Some(record) => {
-                                        d.records.insert(window.target.window_id, record);
-                                    }
-                                    None => d.forget(window.target.window_id),
-                                }
-                            }
-                        }
+                        None => c
+                            .displays
+                            .restore_record_on(id, window.target.window_id, before),
                     }
-                    c.sync_recorded_owners();
+                    cx.notify();
                 });
                 return Err(ControlError::failed(format!(
                     "could not move the window: {e}"
@@ -2190,11 +2186,10 @@ async fn handle_one(
                 ));
             }
             core.update(cx, |c, _| {
+                c.displays.forget_on(id, window);
                 if let Some(d) = c.displays.get_mut(id) {
-                    d.forget(window);
                     d.user_made.insert(window);
                 }
-                c.sync_recorded_owners();
             });
             Ok(json!({}))
         }
@@ -2954,9 +2949,7 @@ async fn create_display(
     if !on_new.is_empty() {
         let targets: Vec<WindowTarget> = on_new.iter().map(|w| w.target).collect();
         let unowned = core.update(cx, |c, _| {
-            let out = c.displays.reconcile_new_display_windows(id, &targets);
-            c.sync_recorded_owners();
-            out
+            c.displays.reconcile_new_display_windows(id, &targets)
         });
         if !unowned.is_empty() {
             off(cx, move || {
@@ -3054,9 +3047,12 @@ fn reuse(
     cx: &mut AsyncApp,
 ) -> Option<Value> {
     let (mut existing, (w, h)) = core.update(cx, |c, cx| {
+        if c.closed.contains(&connection) {
+            return None;
+        }
         let id = c.displays.for_session(key)?.id;
         let now_ms = c.elapsed_ms();
-        c.displays.rebind_disconnected(key, connection, now_ms);
+        c.rebind_session(key, connection, now_ms);
         adopt_orphans(c, key, id, orphans);
         cx.notify();
         let d = c.displays.get(id)?;
@@ -3480,6 +3476,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
                     title: w.title,
                     bounds: w.bounds,
                     layer: w.layer,
+                    off_display: false,
                 };
                 if windows::display_role(&window).accepts_window_request() {
                     WindowSighting::NotDocument { app: window.app }
@@ -3691,21 +3688,28 @@ async fn after_hand_over(
     named: Option<&Held>,
     cx: &mut AsyncApp,
 ) -> Result<Asked, ControlError> {
-    match where_now(core, id, target, cx).await {
-        Now::Here => Ok(Asked::Done(Map::new())),
-        Now::Held(now) if named.is_some_and(|n| n.display == now.display) => {
-            transfer_window(core, &now, id, target, app, cx)
+    let state = match where_now(core, id, target, cx).await {
+        Now::Here => held::NowState::Here,
+        Now::Held(now) => held::NowState::Held(now),
+        Now::Users(window) => held::NowState::Users(window),
+        Now::Unheld => held::NowState::Unheld,
+        Now::Gone => held::NowState::Gone,
+    };
+    match held::decide_after_hand_over(state, named) {
+        held::HandOverAction::AlreadyHere => Ok(Asked::Done(Map::new())),
+        held::HandOverAction::Transfer(now) => transfer_window(core, &now, id, target, app, cx)
+            .await
+            .map(Asked::Done),
+        held::HandOverAction::AskAgain(now) => Ok(Asked::Again(now)),
+        held::HandOverAction::FromUser(window) => {
+            hand_over(core, id, window, Authority::User, None, cx)
                 .await
                 .map(Asked::Done)
         }
-        Now::Held(now) => Ok(Asked::Again(now)),
-        Now::Users(window) => hand_over(core, id, window, Authority::User, None, cx)
-            .await
-            .map(Asked::Done),
-        Now::Unheld => Err(ControlError::failed(format!(
+        held::HandOverAction::MovedUnheld => Err(ControlError::failed(format!(
             "the {app} window moved to another display while the user decided, so nothing moved. Call list_windows on your displays, then place_window again"
         ))),
-        Now::Gone => Err(ControlError::failed(format!(
+        held::HandOverAction::Closed => Err(ControlError::failed(format!(
             "the {app} window closed while the user decided"
         ))),
     }
@@ -3932,16 +3936,13 @@ async fn transfer_window(
     let moved = core
         .update(cx, |c, cx| {
             cx.notify();
-            let out = c.displays.transfer(from, to, target, app);
-            c.sync_recorded_owners();
-            out
+            c.displays.transfer(from, to, target, app)
         })
         .map_err(ControlError::failed)?;
     let handed_over = moved.record.origin == Origin::HandedOver;
     if let Err(e) = place_and_hold(target, to, cx).await {
         core.update(cx, |c, cx| {
             c.displays.undo_transfer(moved);
-            c.sync_recorded_owners();
             cx.notify();
         });
         return Err(ControlError::failed(format!(
@@ -4054,7 +4055,6 @@ async fn hand_over(
     let landed = core.update(cx, |c, cx| {
         let landed = c.displays.commit_hand_over(id, &ticket, None);
         if landed {
-            c.sync_recorded_owners();
             // The app's late windows are the agent's to have, not to send
             // back, as after the user's own Hand Over.
             c.returning
@@ -4548,15 +4548,12 @@ async fn move_between_own(
     let moved = core
         .update(cx, |c, cx| {
             cx.notify();
-            let out = c.displays.move_between(from, to, target, true);
-            c.sync_recorded_owners();
-            out
+            c.displays.move_between(from, to, target, true)
         })
         .map_err(ControlError::failed)?;
     if let Err(e) = place_and_hold(target, to, cx).await {
         core.update(cx, |c, cx| {
             c.displays.undo_move(moved);
-            c.sync_recorded_owners();
             cx.notify();
         });
         return Err(ControlError::failed(format!(
@@ -4583,12 +4580,39 @@ fn claim(
     cx: &mut AsyncApp,
 ) {
     core.update(cx, |c, cx| {
-        if let Some(d) = c.displays.get_mut(id) {
-            d.claim(target, origin, None);
-            c.sync_recorded_owners();
+        if c.displays.get(id).is_some() {
+            c.displays.claim_on(id, target, origin, None);
             cx.notify();
         }
     });
+}
+
+/// Refuse agent pointer input at `at` on `id` if the visibly topmost window
+/// there is recorded on another display, naming that holder instead of
+/// operating its window or clicking through to a hidden window below (`M2`).
+async fn guard_agent_point(
+    core: &Entity<Core>,
+    id: DisplayId,
+    at: (f64, f64),
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let Some((target, owner_display)) =
+        off(cx, move || crate::mac::input::foreign_window_at(id, at)).await
+    else {
+        return Ok(());
+    };
+    let holder_label = core.read_with(cx, |c, _| {
+        let now_ms = c.elapsed_ms();
+        c.displays
+            .held_by_at(id, target, Some(owner_display), now_ms)
+            .map(|h| h.agent_label())
+            .or_else(|| c.displays.holder_label_at(owner_display, now_ms))
+    });
+    Err(ControlError::failed(held::foreign_top_window_message(
+        id,
+        owner_display,
+        holder_label.as_deref(),
+    )))
 }
 
 /// Move a window onto a display, off the main thread.
@@ -6147,12 +6171,12 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
             }
             looks += 1;
             // Ended, taken back by the user, or closed: no longer ours to keep.
-            // During Takeover, the Viewer's own `keep_on_display` watch restores
-            // dragged windows to their dragged position rather than centering.
-            let (recorded, takeover) = core.read_with(cx, |c, _| {
-                c.displays.get(id).map_or((false, false), |d| {
-                    (d.records.contains_key(&target.window_id), d.takeover)
-                })
+            // Pause only while the Viewer is actively dragging or watching this
+            // window (`keep_on_display`), not for the entire Takeover (`L5`).
+            let recorded = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.records.contains_key(&target.window_id))
             });
             if !recorded
                 || !takes_windows(&core, id, cx)
@@ -6160,7 +6184,7 @@ fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &m
             {
                 return;
             }
-            if takeover {
+            if crate::mac::input::viewer_watching_window(target.window_id) {
                 continue;
             }
             // Displays move as others come and go, and their windows a
