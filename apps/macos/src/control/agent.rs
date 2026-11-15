@@ -5802,6 +5802,28 @@ async fn launch_now(
         }
         if let Some(fresh) = cx.background_executor().spawn(find_ours(taken)).await {
             let found = started.elapsed().as_millis();
+            let detected = Instant::now();
+            // A hold that ended before the window came, on a click or its
+            // time limit, left the window free to take the user's keys:
+            // hold them again until the hand-back.
+            if let Some(user) = user_window
+                && asked_for_window
+                && !hold.as_ref().is_some_and(|h| h.holding())
+            {
+                if let Some(ended) = hold.take() {
+                    ended.detach();
+                }
+                hold = off(cx, move || {
+                    crate::mac::input::is_front(user.pid)
+                        .then(|| crate::mac::key_hold::start(user))
+                        .flatten()
+                })
+                .await;
+                log::debug!(
+                    "launch: keys held again for the late window: {}",
+                    hold.is_some()
+                );
+            }
             // A running app's new window is its key window from the start,
             // where the user's typing goes until Agent Screen hands focus
             // back (#110): send the URL now, before placing the window, so
@@ -5849,28 +5871,26 @@ async fn launch_now(
             // front app, so it goes through accessibility, as a click would.
             let handback = match (opened, target) {
                 (Some(true), Some(url)) => {
-                    let (window, url, created) = (fresh.target, url.to_string(), Instant::now());
+                    let (window, url) = (fresh.target, url.to_string());
                     let held = hold.take().map(|h| h.detach());
                     Some(cx.background_executor().spawn(async move {
-                        let shown = shows_url(window, &url, created);
-                        match held {
-                            // Makes the user's window key, then sends on
-                            // what it held.
-                            Some(id) => crate::mac::key_hold::finish(
+                        let shown = shows_url(window, &url, detected);
+                        // The hold makes the user's window key, then sends
+                        // on what it held. Without one going on, focus goes
+                        // back here.
+                        let ran = held.is_some_and(|id| {
+                            crate::mac::key_hold::finish(
                                 id,
                                 agent_screen_model::key_hold::End::HandedBack,
-                            ),
-                            None => {
-                                if let Some(user) = user_window
-                                    && crate::mac::input::is_front(user.pid)
-                                    && ax::focused_window_id(user.pid) == Some(window.window_id)
-                                {
-                                    let given = ax::make_main(user);
-                                    log::debug!(
-                                        "launch: key focus back to the user's window: {given}"
-                                    );
-                                }
-                            }
+                            )
+                        });
+                        if !ran
+                            && let Some(user) = user_window
+                            && crate::mac::input::is_front(user.pid)
+                            && ax::focused_window_id(user.pid) == Some(window.window_id)
+                        {
+                            let given = ax::make_main(user);
+                            log::debug!("launch: key focus back to the user's window: {given}");
                         }
                         shown
                     }))

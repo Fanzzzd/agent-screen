@@ -574,7 +574,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `debugMoveWindow` | Moves the window named by `pid` and `windowId` to global `x`, `y`. |
 | `debugHandOver` | Hands `windowId` over to `displayId`, as the Give menu does, which answers an open Help Request. With `gave` false it stands in for a drag, which doesn't. |
 | `debugFocusUnknown` | `AGENTSCREEN_INSTANCE=e2e` only. `on` true makes the front app's focused window read as unknown to the input routes, as when the app doesn't answer in time; false ends it. |
-| `debugKeyHold` | what the last hold of the user's keys during a `launch_app` did: `events`, `keyDowns`, `ms`, why it ended (`end`), whether it went out (`sent`) and how many events were dropped (`discarded`), counts only; `diashared` checks it. |
+| `debugKeyHold` | what the last hold of the user's keys during a `launch_app` did: `events`, `keyDowns`, `ms`, why it ended (`end`), whether it went out (`sent`) and how many key downs were dropped (`discarded`), counts only; `diashared` checks it. |
 | `debugPressCheck` | `on` false stops checking a press beside the user's window for its effect, true starts again; `sharedbrowser` times a press both ways. |
 | `debugTakeBack` | Takes `windowId` back from `displayId`, as from the Windows menu. |
 | `debugUserWindow` | Debug builds only. On this session's user stand-in stage (`userStage`), makes `windowId`, a window it launched there, the user's own: the stage forgets it, and the claim keeps AeroSpace off it. |

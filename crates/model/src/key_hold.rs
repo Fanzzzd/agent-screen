@@ -16,8 +16,9 @@
 /// The longest input is held, in ms, whatever happens to the hand-back.
 pub const MAX_HOLD_MS: u64 = 3000;
 
-/// The most events held at once. Past it an event is discarded, not sent
-/// to the agent's window; no one types that much in `MAX_HOLD_MS`.
+/// Held events past which the hold ends, as no one types that much in
+/// `MAX_HOLD_MS`. Events keep being held until it has ended, and none is
+/// dropped for the count.
 pub const MAX_EVENTS: usize = 512;
 
 /// What happens to one event the hold sees.
@@ -27,8 +28,8 @@ pub enum Verdict {
     Pass,
     /// Taken into the hold.
     Hold,
-    /// The hold is full: dropped, and counted.
-    Discard,
+    /// Taken into the hold, which is full: end it now.
+    HoldAndEnd,
 }
 
 /// Why a hold ended, for the log.
@@ -39,6 +40,8 @@ pub enum End {
     /// The user pressed a mouse button: the hold ends at once, and the
     /// press goes out after the keys before it.
     Pressed,
+    /// `MAX_EVENTS` were held.
+    Full,
     /// `MAX_HOLD_MS` went by first.
     TimedOut,
     /// The new window never came: the press failed or the catch gave up.
@@ -47,13 +50,34 @@ pub enum End {
     Abandoned,
 }
 
+/// What kind of input an event is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    KeyDown,
+    KeyUp,
+    /// A modifier key's change.
+    Modifiers,
+    MouseDown,
+    MouseUp,
+    MouseDragged,
+    /// Anything else, which passes.
+    Other,
+}
+
+impl Kind {
+    fn mouse(self) -> bool {
+        matches!(self, Kind::MouseDown | Kind::MouseUp | Kind::MouseDragged)
+    }
+}
+
 /// What the hold sees of one event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seen {
     /// The front app when the event came, the one it goes to.
     pub front: i32,
-    /// A key, modifier or mouse button event; anything else passes.
-    pub input: bool,
+    pub kind: Kind,
+    /// The key code or mouse button, to pair a release with its press.
+    pub code: i64,
     /// One Agent Screen sent itself, from a hold or an Input Loan.
     pub ours: bool,
 }
@@ -63,7 +87,7 @@ pub struct Seen {
 pub enum Destination {
     /// Sent on to the app's key window.
     Send,
-    /// Dropped, and the count logged.
+    /// Key downs dropped and counted; the rest sent on (`sent_on_discard`).
     Discard,
 }
 
@@ -84,12 +108,22 @@ pub fn destination(
     }
 }
 
+/// Whether a held event of `kind` still goes out when the hold's input is
+/// discarded. Only a key down types anything. A mouse event goes to the
+/// window under the pointer, on the user's screen, never to an Agent
+/// Display's; a key up or modifier change types nothing, and dropping one
+/// whose press went out would leave the key held in the app.
+pub fn sent_on_discard(kind: Kind) -> bool {
+    kind != Kind::KeyDown
+}
+
 /// Input held for app `app`. `E` is the event, kept as it came.
 #[derive(Debug)]
 pub struct KeyHold<E> {
     app: i32,
-    held: Vec<E>,
-    discarded: usize,
+    held: Vec<(Kind, E)>,
+    /// Presses held, by kind and code, whose releases are held with them.
+    pressed: Vec<(bool, i64)>,
     open: bool,
     ended: Option<End>,
 }
@@ -99,7 +133,7 @@ impl<E> KeyHold<E> {
         KeyHold {
             app,
             held: Vec::new(),
-            discarded: 0,
+            pressed: Vec::new(),
             open: true,
             ended: None,
         }
@@ -117,33 +151,43 @@ impl<E> KeyHold<E> {
         self.ended
     }
 
-    /// Events dropped because the hold was full.
-    pub fn discarded(&self) -> usize {
-        self.discarded
-    }
-
-    /// What to do with `event`. On `Hold` it is kept; on `Pass` it comes
-    /// back to go on its way.
+    /// What to do with `event`. On `Hold` and `HoldAndEnd` it is kept; on
+    /// `Pass` it comes back to go on its way.
     pub fn see(&mut self, seen: Seen, event: E) -> (Verdict, Option<E>) {
         // Input for another app goes there, as the user means it to.
-        if !self.open || seen.ours || !seen.input || seen.front != self.app {
+        if !self.open || seen.ours || seen.kind == Kind::Other || seen.front != self.app {
             return (Verdict::Pass, Some(event));
         }
-        if self.held.len() >= MAX_EVENTS {
-            self.discarded += 1;
-            return (Verdict::Discard, None);
+        let press = (seen.kind.mouse(), seen.code);
+        match seen.kind {
+            Kind::KeyDown | Kind::MouseDown => {
+                if !self.pressed.contains(&press) {
+                    self.pressed.push(press);
+                }
+            }
+            // A release or drag whose press went out before the hold goes
+            // out too, so no key or button is left held.
+            Kind::KeyUp | Kind::MouseUp | Kind::MouseDragged if !self.pressed.contains(&press) => {
+                return (Verdict::Pass, Some(event));
+            }
+            Kind::KeyUp | Kind::MouseUp => self.pressed.retain(|p| *p != press),
+            _ => {}
         }
-        self.held.push(event);
-        (Verdict::Hold, None)
+        self.held.push((seen.kind, event));
+        match self.held.len() >= MAX_EVENTS {
+            true => (Verdict::HoldAndEnd, None),
+            false => (Verdict::Hold, None),
+        }
     }
 
     /// End the hold, if it is still open, and take what it held, in the
-    /// order it came, for `destination` to decide.
-    pub fn release(&mut self, why: End) -> Vec<E> {
+    /// order it came, with each event's kind, for `destination` to decide.
+    pub fn release(&mut self, why: End) -> Vec<(Kind, E)> {
         if self.open {
             self.open = false;
             self.ended = Some(why);
         }
+        self.pressed.clear();
         std::mem::take(&mut self.held)
     }
 }
@@ -152,41 +196,64 @@ impl<E> KeyHold<E> {
 mod tests {
     use super::*;
 
-    fn input(front: i32) -> Seen {
+    fn seen(kind: Kind, code: i64) -> Seen {
         Seen {
-            front,
-            input: true,
+            front: 7,
+            kind,
+            code,
             ours: false,
         }
+    }
+
+    fn kinds<E>(held: Vec<(Kind, E)>) -> Vec<E> {
+        held.into_iter().map(|(_, e)| e).collect()
     }
 
     #[test]
     fn input_for_the_app_is_held_in_order_and_released_whole() {
         let mut hold = KeyHold::new(7);
-        assert_eq!(hold.see(input(7), "a down"), (Verdict::Hold, None));
-        assert_eq!(hold.see(input(7), "click"), (Verdict::Hold, None));
-        assert_eq!(hold.see(input(7), "a up"), (Verdict::Hold, None));
         assert_eq!(
-            hold.release(End::HandedBack),
-            vec!["a down", "click", "a up"]
+            hold.see(seen(Kind::KeyDown, 0), "a down"),
+            (Verdict::Hold, None)
+        );
+        assert_eq!(
+            hold.see(seen(Kind::MouseDown, 0), "press"),
+            (Verdict::Hold, None)
+        );
+        assert_eq!(
+            hold.see(seen(Kind::MouseUp, 0), "release"),
+            (Verdict::Hold, None)
+        );
+        assert_eq!(
+            hold.see(seen(Kind::KeyUp, 0), "a up"),
+            (Verdict::Hold, None)
+        );
+        assert_eq!(
+            kinds(hold.release(End::HandedBack)),
+            vec!["a down", "press", "release", "a up"]
         );
         assert_eq!(hold.ended(), Some(End::HandedBack));
-        // After the hold, input passes, as a key's release does.
-        assert_eq!(hold.see(input(7), "b up"), (Verdict::Pass, Some("b up")));
+        assert_eq!(
+            hold.see(seen(Kind::KeyUp, 1), "b up"),
+            (Verdict::Pass, Some("b up"))
+        );
     }
 
     #[test]
     fn other_apps_input_moves_and_our_own_pass() {
         let mut hold = KeyHold::new(7);
-        assert_eq!(hold.see(input(8), "other"), (Verdict::Pass, Some("other")));
-        let moved = Seen {
-            input: false,
-            ..input(7)
+        let other = Seen {
+            front: 8,
+            ..seen(Kind::KeyDown, 0)
         };
-        assert_eq!(hold.see(moved, "move"), (Verdict::Pass, Some("move")));
+        assert_eq!(hold.see(other, "other"), (Verdict::Pass, Some("other")));
+        assert_eq!(
+            hold.see(seen(Kind::Other, 0), "move"),
+            (Verdict::Pass, Some("move"))
+        );
         let ours = Seen {
             ours: true,
-            ..input(7)
+            ..seen(Kind::KeyDown, 0)
         };
         assert_eq!(
             hold.see(ours, "replayed"),
@@ -196,38 +263,86 @@ mod tests {
     }
 
     #[test]
-    fn a_full_hold_discards_and_never_passes_to_the_agent() {
+    fn a_release_or_drag_whose_press_went_out_before_passes() {
         let mut hold = KeyHold::new(7);
-        for i in 0..MAX_EVENTS {
-            assert_eq!(hold.see(input(7), i), (Verdict::Hold, None));
+        assert_eq!(
+            hold.see(seen(Kind::KeyUp, 4), "up"),
+            (Verdict::Pass, Some("up"))
+        );
+        assert_eq!(
+            hold.see(seen(Kind::MouseDragged, 0), "drag"),
+            (Verdict::Pass, Some("drag"))
+        );
+        assert_eq!(
+            hold.see(seen(Kind::MouseUp, 0), "mup"),
+            (Verdict::Pass, Some("mup"))
+        );
+        // A key's code and a button's number don't pair with each other.
+        hold.see(seen(Kind::KeyDown, 0), "a down");
+        assert_eq!(
+            hold.see(seen(Kind::MouseUp, 0), "m"),
+            (Verdict::Pass, Some("m"))
+        );
+        assert_eq!(
+            hold.see(seen(Kind::KeyUp, 0), "a up"),
+            (Verdict::Hold, None)
+        );
+    }
+
+    #[test]
+    fn a_full_hold_ends_and_drops_nothing() {
+        let mut hold = KeyHold::new(7);
+        for i in 0..MAX_EVENTS - 1 {
+            assert_eq!(
+                hold.see(seen(Kind::Modifiers, 56), i),
+                (Verdict::Hold, None)
+            );
         }
-        assert_eq!(hold.see(input(7), MAX_EVENTS), (Verdict::Discard, None));
-        assert_eq!(hold.discarded(), 1);
-        assert_eq!(hold.release(End::TimedOut).len(), MAX_EVENTS);
+        assert_eq!(
+            hold.see(seen(Kind::Modifiers, 56), MAX_EVENTS - 1),
+            (Verdict::HoldAndEnd, None)
+        );
+        // Until it has ended, input is still held.
+        assert_eq!(
+            hold.see(seen(Kind::Modifiers, 56), MAX_EVENTS),
+            (Verdict::HoldAndEnd, None)
+        );
+        assert_eq!(hold.release(End::Full).len(), MAX_EVENTS + 1);
     }
 
     #[test]
     fn held_input_goes_only_to_the_users_key_window() {
         use Destination::*;
-        // Confirmed: the user's window is key in the front app.
         assert_eq!(destination(true, true, Some(true)), Send);
-        // Not confirmed, but the key window is off the Agent Displays.
         assert_eq!(destination(true, false, Some(false)), Send);
-        // The agent's window, or unknown: never sent there.
         assert_eq!(destination(true, false, Some(true)), Discard);
         assert_eq!(destination(true, false, None), Discard);
-        // Another app in front would get it.
         assert_eq!(destination(false, true, Some(false)), Discard);
     }
 
     #[test]
+    fn a_discard_drops_only_key_downs() {
+        // Mouse events go to the window under the pointer, on the user's
+        // screen; key ups and modifier changes type nothing and keep the
+        // app's key state paired.
+        assert!(!sent_on_discard(Kind::KeyDown));
+        for kind in [
+            Kind::KeyUp,
+            Kind::Modifiers,
+            Kind::MouseDown,
+            Kind::MouseUp,
+            Kind::MouseDragged,
+        ] {
+            assert!(sent_on_discard(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn a_failed_press_ends_the_hold_with_the_users_input_intact() {
-        // The New Window press failed before any window came: focus is
-        // still the user's, so what was held goes to their window.
         let mut hold = KeyHold::new(7);
-        hold.see(input(7), "a down");
-        hold.see(input(7), "a up");
-        assert_eq!(hold.release(End::NoWindow), vec!["a down", "a up"]);
+        hold.see(seen(Kind::KeyDown, 0), "a down");
+        hold.see(seen(Kind::KeyUp, 0), "a up");
+        assert_eq!(kinds(hold.release(End::NoWindow)), vec!["a down", "a up"]);
         assert_eq!(hold.ended(), Some(End::NoWindow));
         assert_eq!(destination(true, true, Some(false)), Destination::Send);
     }
