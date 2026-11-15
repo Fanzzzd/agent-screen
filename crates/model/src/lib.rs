@@ -40,3 +40,4 @@ pub mod watch;
 pub mod diagnostics;
 pub mod peek;
 pub mod pointer_geometry;
+pub mod web_preview;

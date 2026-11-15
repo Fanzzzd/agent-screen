@@ -1916,6 +1916,7 @@ async fn handle_one(
             });
             Ok(json!({ "streams": streams }))
         }
+        "debugWebPreview" if debug_methods() => Ok(crate::web::debug_status()),
         "debugViewerInput" if debug_methods() => {
             use crate::mac::viewer_input;
             // A frame from the display's stream leaves the Viewer to draw,
@@ -3090,7 +3091,7 @@ fn session_displays(c: &Core, key: &str, reused: DisplayId) -> Option<(Value, St
 }
 
 fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
-    json!({
+    let mut out = json!({
         "displayId": d.id,
         "width": d.width as i64,
         "height": d.height as i64,
@@ -3100,7 +3101,11 @@ fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
         // This app takes `new` and `adoptGroups` (ADR 0016). An MCP server
         // refuses `new` against an app whose reply lacks it.
         "multiDisplay": true
-    })
+    });
+    if let Some(url) = crate::web::preview_url(d.id) {
+        out["preview_url"] = json!(url);
+    }
+    out
 }
 
 fn shot_json(shot: &screenshot::Shot) -> Value {

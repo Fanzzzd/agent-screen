@@ -19,6 +19,7 @@ fn main() {
         "AVFoundation",
         "CoreMedia",
         "CoreVideo",
+        "VideoToolbox",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

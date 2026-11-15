@@ -80,8 +80,9 @@ impl Stream {
         } else {
             self.wants.remove(who);
         }
-        if who == "agent" {
-            self.latest.count_changes(fps > 0);
+        let should_count = self.wants.contains_key("agent");
+        if should_count != self.latest.counting() {
+            self.latest.count_changes(should_count);
         }
         let wanted = self
             .wants
@@ -495,6 +496,8 @@ impl Streams {
         ids.iter()
             .map(|id| {
                 let s = &self.streams[id];
+                let mut wants: Vec<&str> = s.wants.keys().copied().collect();
+                wants.sort_unstable();
                 serde_json::json!({
                     "displayId": id,
                     "running": s.capture.is_some(),
@@ -506,14 +509,34 @@ impl Streams {
                     "breaks": s.breaks,
                     "repairs": s.repairs,
                     "fps": s.running.0,
+                    "wants": wants,
                 })
             })
             .collect()
     }
 
+    /// Subscribe `"web"` to `id` at `fps` and `pixels`, returning the shared
+    /// `Latest` handle for off-thread JPEG encoding.
+    pub fn subscribe_web(
+        &mut self,
+        id: DisplayId,
+        fps: i32,
+        pixels: (u32, u32),
+        cx: &mut Context<Self>,
+    ) -> Arc<Latest> {
+        self.want(id, "web", fps, pixels, cx);
+        self.streams
+            .get(&id)
+            .map(|s| s.latest.clone())
+            .unwrap_or_default()
+    }
+
     pub fn drop_display(&mut self, id: DisplayId, cx: &mut Context<Self>) {
-        if let Some(capture) = self.streams.remove(&id).and_then(|s| s.capture) {
-            cx.background_spawn(async move { drop(capture) }).detach();
+        if let Some(stream) = self.streams.remove(&id) {
+            stream.latest.clear();
+            if let Some(capture) = stream.capture {
+                cx.background_spawn(async move { drop(capture) }).detach();
+            }
         }
         self.frames.remove(&id);
     }
@@ -637,5 +660,24 @@ mod tests {
             s.apply_want("viewer", 0, (0, 0), true, true, future),
             WantPlan::Stop
         );
+    }
+
+    #[test]
+    fn web_want_does_not_enable_agent_change_counting() {
+        let now = std::time::Instant::now();
+        let mut s = Stream::new();
+        assert!(!s.latest.counting());
+
+        let _ = s.apply_want("web", 8, (1280, 800), false, false, now);
+        assert!(!s.latest.counting());
+
+        let _ = s.apply_want("agent", 30, (416, 260), true, true, now);
+        assert!(s.latest.counting());
+
+        let _ = s.apply_want("agent", 0, (0, 0), true, true, now);
+        assert!(!s.latest.counting());
+
+        let _ = s.apply_want("web", 0, (0, 0), true, true, now);
+        assert!(!s.latest.counting());
     }
 }

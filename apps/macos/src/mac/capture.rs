@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub struct Latest {
     frame: Mutex<Option<Frame>>,
+    current: Mutex<Option<(Frame, u64)>>,
+    pub notify: tokio::sync::Notify,
     pub delivered: AtomicU64,
     /// The serial of the capture that stored the newest frame.
     pub from: AtomicU64,
@@ -29,8 +31,8 @@ pub struct Latest {
     /// Luma samples of the previous frame, for the comparison.
     samples: Mutex<Vec<u8>>,
     /// Count changes: only while an agent waits for the display to settle.
-    /// Sampling locks each frame's IOSurface for the CPU, the largest cost
-    /// of showing a 60 fps display in the Viewer.
+    /// Sampling locks each frame's IOSurface for the CPU, the largest cost of
+    /// showing a 60 fps display in the Viewer.
     counting: std::sync::atomic::AtomicBool,
 }
 
@@ -111,9 +113,32 @@ pub struct Frame(pub CVPixelBuffer);
 // threads is safe.
 unsafe impl Send for Frame {}
 
+impl Frame {
+    pub fn size(&self) -> (usize, usize) {
+        (self.0.get_width(), self.0.get_height())
+    }
+}
+
 impl Latest {
     pub fn take(&self) -> Option<CVPixelBuffer> {
         self.frame.lock().unwrap().take().map(|f| f.0)
+    }
+
+    /// Retain the latest frame and its `delivered` sequence number without
+    /// removing it from `Streams`.
+    pub fn current(&self) -> Option<(Frame, u64)> {
+        self.current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(f, seq)| (Frame(f.0.clone()), *seq))
+    }
+
+    pub fn clear(&self) {
+        *self.frame.lock().unwrap() = None;
+        *self.current.lock().unwrap() = None;
+        self.samples.lock().unwrap().clear();
+        self.notify.notify_waiters();
     }
 }
 
@@ -253,8 +278,10 @@ impl Capture {
                     *before = now;
                 }
                 latest.from.store(serial, Ordering::Relaxed);
+                let seq = latest.delivered.fetch_add(1, Ordering::AcqRel) + 1;
+                *latest.current.lock().unwrap() = Some((Frame(buffer.clone()), seq));
                 *latest.frame.lock().unwrap() = Some(Frame(buffer));
-                latest.delivered.fetch_add(1, Ordering::Relaxed);
+                latest.notify.notify_waiters();
                 on_frame();
             },
             SCStreamOutputType::Screen,

@@ -612,6 +612,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                 dismissal::execute(&plans, main_screen_name().as_deref());
             }
             crate::mac::claims::delete();
+            crate::web::delete_state();
             // Every display goes with the process: the log says so, as
             // each is a display change all apps handle.
             for id in core.read(cx).virtual_ids() {
@@ -734,7 +735,7 @@ impl Shell {
             Native::IconClicked { right: true, .. } => {
                 self.peek_intent.release(false);
                 self.hide_peek(cx);
-                self.status_menu();
+                self.status_menu(cx);
             }
             Native::IconClicked { right: false, .. } if !self.permissions.complete() => {
                 self.hide_peek(cx);
@@ -2841,7 +2842,8 @@ impl Shell {
             // AppKit and GPUI report it.
             "icon-hover" => self.native(Native::IconHover(id != 0), cx),
             "card-hover" => self.card_hover(id != 0, cx),
-            "menu" => self.status_menu(),
+            "menu" => self.status_menu(cx),
+            "display-menu" => self.display_menu(id, None, cx),
             "hide" => self.hide_peek(cx),
             "collapse" => self.close_viewer(cx),
             "create" => self.create_display(cx),
@@ -2894,7 +2896,45 @@ impl Shell {
 
     // MARK: Menus
 
-    fn status_menu(&self) {
+    fn build_display_menu(core: &Core, id: DisplayId) -> Option<native::Menu> {
+        let display = core.displays.get(id)?;
+        let menu = native::Menu::new(&display.label());
+        menu.action(
+            t("Open Viewer", "打开查看器"),
+            MenuAction::OpenDisplay { display: id },
+        );
+        if crate::web::preview_url(id).is_some() {
+            menu.action(
+                t("Copy Web Link", "复制网页链接"),
+                MenuAction::CopyWebLink { display: id },
+            );
+        } else {
+            menu.disabled(t("Copy Web Link", "复制网页链接"));
+        }
+        menu.separator();
+        menu.action(
+            t("Close Display…", "关闭显示器…"),
+            MenuAction::DismissDisplay { display: id },
+        );
+        Some(menu)
+    }
+
+    pub fn display_menu(&mut self, id: DisplayId, at: Option<(f64, f64)>, cx: &App) {
+        let Some(menu) = Self::build_display_menu(self.core.read(cx), id) else {
+            return;
+        };
+        let debug_at = self
+            .debug_menu_at
+            .take()
+            .map(|(x, y)| (x, native::primary_height() - y));
+        let (x, y) = at.or(debug_at).unwrap_or_else(|| {
+            let (x, y) = native::mouse_location();
+            (x - 12.0, y - 14.0)
+        });
+        menu.pop_up_at(x, y);
+    }
+
+    fn status_menu(&self, cx: &App) {
         let menu = native::Menu::new("Agent Screen");
         let missing = self.permissions.missing();
         if !missing.is_empty() {
@@ -2948,6 +2988,18 @@ impl Shell {
             )),
         };
         menu.separator();
+        let core = self.core.read(cx);
+        let ordered = peek::ordered(core);
+        if !ordered.is_empty() {
+            for id in ordered {
+                if let Some(display) = core.displays.get(id)
+                    && let Some(sub) = Self::build_display_menu(core, id)
+                {
+                    menu.submenu(&display.label(), sub);
+                }
+            }
+            menu.separator();
+        }
         // What to do with displays and their videos, then the app itself.
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
@@ -3179,6 +3231,13 @@ impl Shell {
             MenuAction::ChooseWallpaper => self.choose_wallpaper(cx),
             MenuAction::DefaultWallpaper => self.set_wallpaper(None, cx),
             MenuAction::Quit => self.quit(cx),
+            MenuAction::OpenDisplay { display } => self.select(display, cx),
+            MenuAction::CopyWebLink { display } => {
+                if let Some(url) = crate::web::preview_url(display) {
+                    native::copy(&url);
+                }
+            }
+            MenuAction::DismissDisplay { display } => self.dismiss(display, cx),
             MenuAction::HandOver {
                 display,
                 pid,

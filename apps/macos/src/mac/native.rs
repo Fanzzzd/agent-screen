@@ -113,6 +113,15 @@ pub enum MenuAction {
     ChooseWallpaper,
     DefaultWallpaper,
     Quit,
+    OpenDisplay {
+        display: u32,
+    },
+    CopyWebLink {
+        display: u32,
+    },
+    DismissDisplay {
+        display: u32,
+    },
     HandOver {
         display: u32,
         pid: i32,

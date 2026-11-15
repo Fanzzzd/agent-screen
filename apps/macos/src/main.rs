@@ -13,6 +13,7 @@ mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
 mod ui;
+mod web;
 
 // The domain rules live in their own crate, which builds on every platform.
 use agent_screen_model::{keychord, model, numbers};
@@ -236,6 +237,7 @@ fn main() {
         ));
         report(info);
         mac::claims::delete();
+        web::delete_state();
     }));
     log::debug!("language: {:?}", i18n::lang());
     // An update brings a newer skill: the copies `mcp install` wrote follow.
@@ -275,6 +277,42 @@ fn main() {
         core::watch_idle(core.clone(), cx);
         if let Err(error) = ui::shell::start(core.clone(), cx) {
             eprintln!("Agent Screen: UI failed: {error}");
+        }
+        match web::start() {
+            Ok(mut web_events) => {
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    while let Some(event) = web_events.next().await {
+                        match event {
+                            web::Event::Subscribe {
+                                display,
+                                fps,
+                                pixels,
+                                reply,
+                            } => {
+                                let latest = cx.update(|cx| {
+                                    ui::stream::global().map(|streams| {
+                                        streams.update(cx, |s, cx| {
+                                            s.subscribe_web(display, fps, pixels, cx)
+                                        })
+                                    })
+                                });
+                                let _ = reply.send(latest);
+                            }
+                            web::Event::Unsubscribe { display } => {
+                                cx.update(|cx| {
+                                    if let Some(streams) = ui::stream::global() {
+                                        streams.update(cx, |s, cx| {
+                                            s.want(display, "web", 0, (0, 0), cx);
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+            Err(error) => log::warn!("web preview server failed to start: {error}"),
         }
         mac::update::start();
         app_menu(cx);
