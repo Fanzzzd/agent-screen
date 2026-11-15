@@ -15,9 +15,20 @@ pub struct Window {
     /// Window level: 0 for documents, 3 for floating panels, 8 for modal
     /// panels and alerts.
     pub layer: i64,
+    /// True when the window belongs to an Agent Display via an active record
+    /// while its global frame currently sits outside that display's viewport.
+    pub off_display: bool,
 }
 
 impl Window {
+    fn kind_str(&self) -> &'static str {
+        match self.layer {
+            0 => "window",
+            l if l >= 8 => "dialog",
+            _ => "panel",
+        }
+    }
+
     pub fn json(&self) -> Value {
         json!({
             "windowId": self.target.window_id,
@@ -27,12 +38,34 @@ impl Window {
             "y": self.bounds.y as i64,
             "width": self.bounds.width as i64,
             "height": self.bounds.height as i64,
-            "kind": match self.layer {
-                0 => "window",
-                l if l >= 8 => "dialog",
-                _ => "panel",
-            }
+            "kind": self.kind_str(),
         })
+    }
+
+    /// JSON serialized for `listWindows` on an Agent Display (`M2`): omits
+    /// misleading coordinates and sets `offDisplay: true` when a recorded
+    /// window sits outside its display's viewport.
+    pub fn display_json(&self, scale: f64) -> Value {
+        if self.off_display {
+            json!({
+                "windowId": self.target.window_id,
+                "app": self.app,
+                "title": self.title,
+                "kind": self.kind_str(),
+                "offDisplay": true,
+            })
+        } else {
+            json!({
+                "windowId": self.target.window_id,
+                "app": self.app,
+                "title": self.title,
+                "x": (self.bounds.x * scale).round() as i64,
+                "y": (self.bounds.y * scale).round() as i64,
+                "width": (self.bounds.width * scale).round() as i64,
+                "height": (self.bounds.height * scale).round() as i64,
+                "kind": self.kind_str(),
+            })
+        }
     }
 }
 
@@ -45,7 +78,9 @@ pub struct Grab {
     pub target: WindowTarget,
     frame: Rect,
     from: (f64, f64),
-    /// The display's global bounds: the window stays inside them.
+    display: DisplayId,
+    /// The display's global bounds at the press: refreshed from `display` if
+    /// the display moves mid-drag.
     area: Rect,
 }
 
@@ -62,56 +97,109 @@ impl Grab {
                 ..w
             })
             .find(|w| w.bounds.contains(at))?;
-        Grab::title_bar(window.target, window.bounds, at, area)
+        Grab::title_bar(window.target, window.bounds, at, id)
     }
 
-    /// `target`, at global `bounds` inside `area`, if `at` is on its title
+    /// `target`, at global `bounds` on `display`, if `at` is on its title
     /// bar.
     pub fn title_bar(
         target: WindowTarget,
         bounds: Rect,
         at: (f64, f64),
-        area: Rect,
+        display: DisplayId,
     ) -> Option<Grab> {
-        Grab::held(target, bounds, at, area).filter(|_| ax::on_title_bar(target, bounds, at))
+        let is_sheet = ax::host_window_target(target) != target;
+        let min_or_full = ax::is_minimized_or_fullscreen(target);
+        Grab::held_checked(target, bounds, at, display, min_or_full, false, is_sheet)
+            .filter(|_| ax::on_title_bar(target, bounds, at))
     }
 
-    /// `target`, at global `bounds` inside `area`, pressed at `at`
-    /// wherever that is on it.
-    pub fn held(target: WindowTarget, bounds: Rect, at: (f64, f64), area: Rect) -> Option<Grab> {
-        area.contains(bounds.mid()).then_some(Grab {
+    /// `target`, at global `bounds` belonging to `display`, pressed at `at`
+    /// inside `display` wherever that is on the window (including a tall or
+    /// wide window hanging past `display`'s edges).
+    pub fn held(
+        target: WindowTarget,
+        bounds: Rect,
+        at: (f64, f64),
+        display: DisplayId,
+    ) -> Option<Grab> {
+        let min_or_full = ax::is_minimized_or_fullscreen(target);
+        Grab::held_checked(target, bounds, at, display, min_or_full, false, false)
+    }
+
+    fn held_checked(
+        target: WindowTarget,
+        bounds: Rect,
+        at: (f64, f64),
+        display: DisplayId,
+        minimized: bool,
+        fullscreen: bool,
+        is_sheet: bool,
+    ) -> Option<Grab> {
+        let area = cg::display_bounds(display);
+        let others = other_displays(display);
+        agent_screen_model::viewer_press::can_grab_window(
+            bounds, at, area, &others, minimized, fullscreen, is_sheet,
+        )
+        .then_some(Grab {
             target,
             frame: bounds,
             from: at,
+            display,
             area,
         })
     }
 
+    fn rebased(&self, to: (f64, f64)) -> (Rect, (f64, f64), (f64, f64), Rect) {
+        agent_screen_model::viewer_press::rebase_grab_for_display(
+            self.frame,
+            self.from,
+            to,
+            self.area,
+            cg::display_bounds(self.display),
+        )
+    }
+
     /// Whether the window has left its display, carried off by something
-    /// other than this grab. Blocking.
+    /// other than this grab. Uses single-window `cg::window_bounds` instead of
+    /// enumerating the global window list (M3). Blocking.
     pub fn left_display(&self) -> bool {
-        find(self.target.window_id).is_some_and(|w| !self.area.contains(w.bounds.mid()))
+        let (_, _, _, area) = self.rebased(self.from);
+        let others = other_displays(self.display);
+        cg::window_bounds(self.target.window_id).is_some_and(|bounds| {
+            !agent_screen_model::arrangement::window_belongs_to_area(&bounds, &area, &others)
+        })
     }
 
     /// Where it was pressed.
     pub fn from(&self) -> (f64, f64) {
-        self.from
+        self.rebased(self.from).1
     }
 
     /// Whether the pointer has gone far enough from the press to count as
     /// a drag rather than a click.
     pub fn moved(&self, to: (f64, f64)) -> bool {
-        (to.0 - self.from.0).hypot(to.1 - self.from.1) >= 3.0
+        let (_, from, to, _) = self.rebased(to);
+        (to.0 - from.0).hypot(to.1 - from.1) >= 3.0
     }
 
-    /// Move the window as far as the pointer moved from the press.
-    /// Blocking.
+    /// Move the window's origin as far as the pointer moved from the press,
+    /// without mutating its size. Blocking.
     pub fn drag_to(&self, to: (f64, f64)) -> bool {
-        let frame = self
-            .frame
-            .offset(to.0 - self.from.0, to.1 - self.from.1)
-            .kept_inside(&self.area);
-        ax::set_frame(self.target, frame).is_ok()
+        let (frame, from, to, area) = self.rebased(to);
+        let (x, y) = agent_screen_model::viewer_press::dragged_window_origin(frame, from, to, area);
+        ax::set_window_position(self.target, x, y).is_ok()
+    }
+
+    /// Put a window that escaped onto the user's screen back at its dragged
+    /// frame on the display, restoring its size as well in case the user's
+    /// window manager tiled it (`set_frame_asked` also tolerates Chromium's
+    /// spurious AX error codes, #167). Blocking.
+    pub fn restore_to(&self, to: (f64, f64)) -> bool {
+        let (frame, from, to, area) = self.rebased(to);
+        let (x, y) = agent_screen_model::viewer_press::dragged_window_origin(frame, from, to, area);
+        let _ = ax::set_frame_asked(self.target, Rect::new(x, y, frame.width, frame.height));
+        !self.left_display()
     }
 }
 
@@ -134,6 +222,118 @@ pub fn all() -> Vec<Window> {
             title: w.title,
             bounds: w.bounds,
             layer: w.layer,
+            off_display: false,
+        })
+        .collect()
+}
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, LazyLock, RwLock};
+
+/// Active window-to-display ownership snapshot bound directly to
+/// `Core::displays` (`Displays::bind_recorded_owners`, L3), so every
+/// `windows::on_display`, `counts`, dismissal, spare, and input-routing check
+/// resolves ownership with one rule (`effective_agent_display`, ADR 0018).
+static RECORDED_OWNERS: LazyLock<Arc<RwLock<BTreeMap<u32, DisplayId>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(BTreeMap::new())));
+
+pub fn recorded_owners_handle() -> Arc<RwLock<BTreeMap<u32, DisplayId>>> {
+    RECORDED_OWNERS.clone()
+}
+
+pub fn recorded_owners_snapshot() -> BTreeMap<u32, DisplayId> {
+    RECORDED_OWNERS
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+pub fn recorded_owner(window_id: u32) -> Option<DisplayId> {
+    RECORDED_OWNERS
+        .read()
+        .ok()
+        .and_then(|g| g.get(&window_id).copied())
+}
+
+pub fn online_display_areas() -> Vec<(DisplayId, Rect, bool)> {
+    cg::active_displays()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                cg::display_bounds(id),
+                cg::window_display_role(id) == crate::model::DisplayRole::Agent,
+            )
+        })
+        .collect()
+}
+
+/// Pure ownership filter used by `on_display`, `counts`, and unit tests.
+pub fn filter_on_display(
+    display: DisplayId,
+    windows: &[Window],
+    online_displays: &[(DisplayId, Rect, bool)],
+    recorded_owners: &BTreeMap<u32, DisplayId>,
+) -> Vec<Window> {
+    let Some(&(_, area, is_agent)) = online_displays.iter().find(|&&(id, _, _)| id == display)
+    else {
+        return Vec::new();
+    };
+    if !is_agent {
+        let others: Vec<Rect> = online_displays
+            .iter()
+            .filter(|&&(id, _, _)| id != display)
+            .map(|&(_, r, _)| r)
+            .collect();
+        return windows
+            .iter()
+            .filter(|w| belongs(&w.bounds, &area, &others))
+            .map(|w| Window {
+                bounds: w.bounds.offset(-area.x, -area.y),
+                off_display: false,
+                ..w.clone()
+            })
+            .collect();
+    }
+    windows
+        .iter()
+        .filter_map(|w| {
+            let (owner, _) = agent_screen_model::arrangement::effective_agent_display(
+                &w.bounds,
+                online_displays,
+                recorded_owners.get(&w.target.window_id).copied(),
+            )?;
+            (owner == display).then(|| Window {
+                bounds: w.bounds.offset(-area.x, -area.y),
+                off_display: !w.bounds.intersects(&area),
+                ..w.clone()
+            })
+        })
+        .collect()
+}
+
+/// Pure check returning every display in `ids` whose online bounds are
+/// physically covered by any window in `windows` (center on the display or more
+/// than half of the window's area on it, `M1`), regardless of recorded
+/// ownership (`L4`). Prevents `pick_spare` from handing out a spare covered by
+/// another display's unshifted recorded window without flagging narrow edge
+/// overhangs from an adjacent display.
+pub fn physically_occupied_displays(
+    ids: &[DisplayId],
+    windows: &[Window],
+    online_displays: &[(DisplayId, Rect, bool)],
+) -> HashSet<DisplayId> {
+    ids.iter()
+        .copied()
+        .filter(|&id| {
+            online_displays
+                .iter()
+                .find(|&&(oid, _, _)| oid == id)
+                .is_some_and(|&(_, area, _)| {
+                    windows
+                        .iter()
+                        .any(|w| agent_screen_model::spares::window_covers_spare(&w.bounds, &area))
+                })
         })
         .collect()
 }
@@ -141,8 +341,7 @@ pub fn all() -> Vec<Window> {
 /// Whether a window with `bounds` is on the display covering `area`: it
 /// overlaps it, and no other display holds its center instead.
 fn belongs(bounds: &Rect, area: &Rect, others: &[Rect]) -> bool {
-    let center = bounds.mid();
-    bounds.intersects(area) && (area.contains(center) || !others.iter().any(|o| o.contains(center)))
+    agent_screen_model::arrangement::window_belongs_to_area(bounds, area, others)
 }
 
 fn other_displays(display: DisplayId) -> Vec<Rect> {
@@ -153,37 +352,38 @@ fn other_displays(display: DisplayId) -> Vec<Rect> {
         .collect()
 }
 
-/// How many windows each display has, from one window list.
-pub fn counts(displays: &[DisplayId]) -> std::collections::HashMap<DisplayId, usize> {
+/// How many windows each display has, plus which displays have any window
+/// physically intersecting their viewport (`L4`).
+pub fn counts_and_physical(
+    displays: &[DisplayId],
+) -> (HashMap<DisplayId, usize>, HashSet<DisplayId>) {
+    if displays.is_empty() {
+        return (HashMap::new(), HashSet::new());
+    }
     let windows = all();
-    displays
+    let online = online_display_areas();
+    let owners = recorded_owners_snapshot();
+    let counts = displays
         .iter()
-        .map(|&id| {
-            let (area, others) = (cg::display_bounds(id), other_displays(id));
-            let n = windows
-                .iter()
-                .filter(|w| belongs(&w.bounds, &area, &others))
-                .count();
-            (id, n)
-        })
-        .collect()
+        .map(|&id| (id, filter_on_display(id, &windows, &online, &owners).len()))
+        .collect();
+    let physical = physically_occupied_displays(displays, &windows, &online);
+    (counts, physical)
 }
 
-/// Windows on a display, with display-relative bounds. A window counts if it
-/// touches the display and its center is on no other display. A window
-/// hanging off the bottom edge still counts, so dismissing the display does
-/// not strand it off-screen.
+/// How many windows each display has, from one window list and one display
+/// layout snapshot, honoring `RECORDED_OWNERS` (ADR 0018).
+pub fn counts(displays: &[DisplayId]) -> HashMap<DisplayId, usize> {
+    counts_and_physical(displays).0
+}
+
+/// Windows on a display, with display-relative bounds, resolved through
+/// `effective_agent_display` and `RECORDED_OWNERS` (ADR 0018).
 pub fn on_display(display: DisplayId) -> Vec<Window> {
-    let area = cg::display_bounds(display);
-    let others = other_displays(display);
-    all()
-        .into_iter()
-        .filter(|w| belongs(&w.bounds, &area, &others))
-        .map(|w| Window {
-            bounds: w.bounds.offset(-area.x, -area.y),
-            ..w
-        })
-        .collect()
+    let windows = all();
+    let online = online_display_areas();
+    let owners = recorded_owners_snapshot();
+    filter_on_display(display, &windows, &online, &owners)
 }
 
 /// Menus open on a display: an app's pop-up menus, as a web page's select
@@ -209,7 +409,10 @@ pub fn keep_inside(display: DisplayId) -> bool {
         super::menubar_height(display),
     );
     let mut moved = false;
-    for window in on_display(display).into_iter().filter(|w| w.layer == 0) {
+    for window in on_display(display)
+        .into_iter()
+        .filter(|w| w.layer == 0 && !w.off_display)
+    {
         let kept = window.bounds.kept_inside(&local);
         if kept != window.bounds {
             moved |= ax::set_frame(window.target, kept.offset(area.x, area.y)).is_ok();
@@ -235,6 +438,14 @@ pub fn display_role(window: &Window) -> crate::model::DisplayRole {
         .find(|&id| cg::display_bounds(id).contains(mid))
         .map(cg::window_display_role)
         .unwrap_or(crate::model::DisplayRole::User)
+}
+
+/// Whether `bounds`'s center sits on one of `displays`. Blocking.
+pub fn on_any(bounds: &Rect, displays: &[DisplayId]) -> bool {
+    let mid = bounds.mid();
+    displays
+        .iter()
+        .any(|&id| cg::display_bounds(id).contains(mid))
 }
 
 /// Windows on any of `displays` that AeroSpace leaves there. With
@@ -607,5 +818,68 @@ mod tests {
         // Decided after the return, it writes.
         let now = times_returned(900_003);
         assert!(write_frame_unless_returned(900_003, now, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn filter_on_display_uses_recorded_owners_on_virtual_displays_and_geometry_on_user_screens() {
+        let online = [
+            (1, Rect::new(0.0, 0.0, 2560.0, 1440.0), false),
+            (7, Rect::new(2560.0, -800.0, 1280.0, 800.0), true),
+            (8, Rect::new(3840.0, -800.0, 1280.0, 800.0), true),
+        ];
+        let win = |window_id, x, y| Window {
+            target: WindowTarget { pid: 42, window_id },
+            app: "Test".into(),
+            title: format!("w{window_id}"),
+            bounds: Rect::new(x, y, 400.0, 300.0),
+            layer: 0,
+            off_display: false,
+        };
+        let windows = vec![
+            // Recorded on 7, transiently sitting on 8 before AX shift finishes.
+            win(10, 3940.0, -700.0),
+            // Unrecorded sheet sitting on 8.
+            win(11, 4000.0, -650.0),
+            // Recorded on 7, returned to user screen 1.
+            win(12, 200.0, 200.0),
+            // Recorded on 7, actually sitting on 7.
+            win(13, 2660.0, -700.0),
+        ];
+        let mut owners = BTreeMap::new();
+        owners.insert(10, 7);
+        owners.insert(12, 7);
+        owners.insert(13, 7);
+
+        let on_7 = filter_on_display(7, &windows, &online, &owners);
+        assert_eq!(on_7.len(), 2);
+        assert_eq!(on_7[0].target.window_id, 10);
+        assert!(on_7[0].off_display);
+        assert_eq!(on_7[0].bounds, Rect::new(1380.0, 100.0, 400.0, 300.0));
+        let off_json = on_7[0].display_json(1.0);
+        assert_eq!(off_json["offDisplay"], json!(true));
+        assert!(off_json.get("x").is_none() && off_json.get("y").is_none());
+
+        assert_eq!(on_7[1].target.window_id, 13);
+        assert!(!on_7[1].off_display);
+        let on_json = on_7[1].display_json(1.0);
+        assert!(on_json.get("offDisplay").is_none());
+        assert_eq!(on_json["x"], json!(100));
+        assert_eq!(on_json["y"], json!(100));
+
+        // Display 8 sees only its own unrecorded window 11 in `filter_on_display`,
+        // yet `physically_occupied_displays` STILL flags 8 as occupied if 8 were
+        // a spare covered by 7's unshifted window 10 (L4).
+        let on_8 = filter_on_display(8, &windows, &online, &owners);
+        assert_eq!(on_8.len(), 1);
+        assert_eq!(on_8[0].target.window_id, 11);
+        let occupied = physically_occupied_displays(&[8], &[windows[0].clone()], &online);
+        assert!(occupied.contains(&8));
+        // A narrow overhang from a window centered on display 7 does NOT mark 8 occupied (M1).
+        let overhang = win(14, 920.0, 100.0);
+        assert!(physically_occupied_displays(&[8], &[overhang], &online).is_empty());
+
+        let on_user = filter_on_display(1, &windows, &online, &owners);
+        assert_eq!(on_user.len(), 1);
+        assert_eq!(on_user[0].target.window_id, 12);
     }
 }

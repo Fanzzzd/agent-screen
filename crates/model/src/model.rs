@@ -279,6 +279,9 @@ pub struct Display<H> {
     pub height: f64,
     /// None for displays the user created from Peek.
     pub owner: Option<Owner>,
+    /// Monotonic timestamp (ms) when `owner.connection` closed, while waiting
+    /// out the disconnect grace period before ending (#189).
+    pub disconnected_at_ms: Option<u64>,
     /// Set once the owning Agent Session stopped using the display.
     pub ended: Option<EndReason>,
     /// Windows Agent Screen put on this display, by id.
@@ -514,6 +517,9 @@ pub struct Displays<H> {
     /// Of those, the ones the user closed: the agent should stop, not make
     /// another display.
     pub closed_by_user: HashSet<DisplayId>,
+    /// Optional shared snapshot updated automatically whenever window records
+    /// or display states change (L3).
+    owners_sink: Option<std::sync::Arc<std::sync::RwLock<BTreeMap<WindowId, DisplayId>>>>,
 }
 
 impl<H> Default for Displays<H> {
@@ -523,6 +529,7 @@ impl<H> Default for Displays<H> {
             sessions: Sessions::default(),
             retired: HashSet::new(),
             closed_by_user: HashSet::new(),
+            owners_sink: None,
         }
     }
 }
@@ -666,6 +673,74 @@ pub fn shot_scale((width, height): (f64, f64)) -> f64 {
 }
 
 impl<H> Displays<H> {
+    /// Bind a shared `recorded_owners` map that `Displays` updates automatically
+    /// on every record or display lifecycle mutation (L3).
+    pub fn bind_recorded_owners(
+        &mut self,
+        sink: std::sync::Arc<std::sync::RwLock<BTreeMap<WindowId, DisplayId>>>,
+    ) {
+        self.owners_sink = Some(sink);
+        self.publish_recorded_owners();
+    }
+
+    pub(crate) fn publish_recorded_owners(&self) {
+        if let Some(sink) = &self.owners_sink
+            && let Ok(mut guard) = sink.write()
+        {
+            *guard = self.recorded_owners();
+        }
+    }
+
+    pub fn claim_on(
+        &mut self,
+        id: DisplayId,
+        target: WindowTarget,
+        origin: Origin,
+        home: Option<Home>,
+    ) {
+        if let Some(d) = self.get_mut(id) {
+            d.claim(target, origin, home);
+            self.publish_recorded_owners();
+        }
+    }
+
+    pub fn forget_on(&mut self, id: DisplayId, window: WindowId) {
+        if let Some(d) = self.get_mut(id) {
+            d.forget(window);
+            self.publish_recorded_owners();
+        }
+    }
+
+    pub fn give_back_failed_on(&mut self, id: DisplayId, given: GivenBack) -> bool {
+        let restored = self.get_mut(id).is_some_and(|d| d.give_back_failed(given));
+        if restored {
+            self.publish_recorded_owners();
+        }
+        restored
+    }
+
+    pub fn restore_record_on(&mut self, id: DisplayId, window: WindowId, record: Option<Record>) {
+        if let Some(d) = self.get_mut(id) {
+            match record {
+                Some(record) => {
+                    d.records.insert(window, record);
+                }
+                None => d.forget(window),
+            }
+            self.publish_recorded_owners();
+        }
+    }
+
+    /// Re-register `ids` in `queue` using each display's current `Owner` after
+    /// a reconnect or overlapping-connection migration (H1).
+    pub fn register_queue_owners(&self, queue: &mut crate::input_queue::Queue, ids: &[DisplayId]) {
+        for &id in ids {
+            if let Some(owner) = self.get(id).and_then(|d| d.owner.as_ref()) {
+                let _ = queue.register(owner.session_key.clone(), owner.connection, id);
+            }
+        }
+    }
+
     pub fn add(
         &mut self,
         id: DisplayId,
@@ -683,6 +758,8 @@ impl<H> Displays<H> {
             // one session never get the same Display Label.
             owner.title = self.distinct_title(&owner.session_key, &owner.title);
             self.sessions.join(&owner.session_key, id);
+            self.sessions
+                .note_connection(&owner.session_key, owner.connection);
         }
         self.list.push(Display {
             id,
@@ -690,6 +767,7 @@ impl<H> Displays<H> {
             width: size.0,
             height: size.1,
             owner,
+            disconnected_at_ms: None,
             ended: None,
             records: BTreeMap::new(),
             started: Default::default(),
@@ -707,6 +785,7 @@ impl<H> Displays<H> {
             given: BTreeMap::new(),
             handle,
         });
+        self.publish_recorded_owners();
     }
 
     /// Remove a display; returns it so the caller can drop its handle.
@@ -723,6 +802,7 @@ impl<H> Displays<H> {
             self.closed_by_user.insert(id);
         }
         display.requests.end();
+        self.publish_recorded_owners();
         Some(display)
     }
 
@@ -772,6 +852,98 @@ impl<H> Displays<H> {
         key(a).is_some() && key(a) == key(b)
     }
 
+    /// The display with an active Placement, Handover, Launch or Found record
+    /// for `window` (not returned to the user and not given to another
+    /// session), preferring a live display over a Review Display (#204).
+    pub fn recorded_display_of(&self, window: WindowId) -> Option<DisplayId> {
+        let active = |d: &Display<H>| {
+            d.records.contains_key(&window)
+                && !d.returned.contains(&window)
+                && !d.given.contains_key(&window)
+        };
+        self.list
+            .iter()
+            .find(|d| d.is_live() && active(d))
+            .or_else(|| self.list.iter().find(|d| active(d)))
+            .map(|d| d.id)
+    }
+
+    /// Reconcile geometric display `geom_display` with any active Placement,
+    /// Handover, Launch or Found record while `window` sits on a virtual
+    /// display (`on_virtual`).
+    pub fn effective_display_of(
+        &self,
+        window: WindowId,
+        geom_display: Option<DisplayId>,
+        on_virtual: bool,
+    ) -> Option<DisplayId> {
+        crate::arrangement::resolve_display_owner(
+            geom_display,
+            on_virtual,
+            self.recorded_display_of(window),
+        )
+    }
+
+    /// Snapshot of active recorded window owners (`window_id -> DisplayId`) so
+    /// off-thread window queries and repark shifts honor Placement and Handover
+    /// records while displays reconfigure (#204). Shares the exact tie-break of
+    /// [`Displays::recorded_display_of`]: first live display, then first Review
+    /// Display.
+    pub fn recorded_owners(&self) -> BTreeMap<WindowId, DisplayId> {
+        let mut out = BTreeMap::new();
+        for d in &self.list {
+            if d.is_live() {
+                for &w in d.records.keys() {
+                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
+                        out.entry(w).or_insert(d.id);
+                    }
+                }
+            }
+        }
+        for d in &self.list {
+            if d.is_ended() {
+                for &w in d.records.keys() {
+                    if !d.returned.contains(&w) && !d.given.contains_key(&w) {
+                        out.entry(w).or_insert(d.id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Reconcile windows macOS restored onto a newly created display `id`
+    /// (such as after an app restart or serial reuse). Windows of apps adopted
+    /// into `d.started` are recorded as `Origin::Launched` on `id`; windows no
+    /// display owns are returned so the caller can move them back to the user's
+    /// screen instead of hiding them on `id`.
+    pub fn reconcile_new_display_windows(
+        &mut self,
+        id: DisplayId,
+        on_display: &[WindowTarget],
+    ) -> Vec<WindowTarget> {
+        let recorded = self.recorded_owners();
+        let Some(d) = self.get_mut(id) else {
+            return Vec::new();
+        };
+        let mut unowned = Vec::new();
+        for &target in on_display {
+            if recorded.contains_key(&target.window_id) {
+                continue;
+            }
+            if d.started.contains(&target.pid)
+                && !d.returned.contains(&target.window_id)
+                && !d.user_made.contains(&target.window_id)
+            {
+                d.claim(target, Origin::Launched, None);
+            } else {
+                unowned.push(target);
+            }
+        }
+        self.publish_recorded_owners();
+        unowned
+    }
+
     /// The Window Access of the session using display `id`, which covers
     /// all its displays. None for a Review Display or one the user made.
     pub fn access(&self, id: DisplayId) -> Option<&Access> {
@@ -795,6 +967,7 @@ impl<H> Displays<H> {
             return false;
         }
         let key = display.owner.as_ref().map(|o| o.session_key.clone());
+        display.disconnected_at_ms = None;
         display.ended = Some(reason);
         display.takeover = false;
         display.pointer = None;
@@ -808,6 +981,7 @@ impl<H> Displays<H> {
         }
         // Every request ends, and every wait hears it.
         self.end_requests(id);
+        self.publish_recorded_owners();
         true
     }
 
@@ -865,18 +1039,165 @@ impl<H> Displays<H> {
             .unwrap_or_default()
     }
 
-    /// End every display a closed connection owned. Each session's
-    /// Window Access ends once, with its last display.
-    pub fn connection_closed(&mut self, connection: u64) -> Vec<DisplayId> {
+    /// Holder liveness for live display `id` at monotonic `now_ms`: session key,
+    /// idle / call-in-flight / disconnected duration, and connection state (#189).
+    pub fn holder_status_at(
+        &self,
+        id: DisplayId,
+        now_ms: u64,
+    ) -> Option<crate::session::HolderStatus> {
+        use crate::session::{HolderStatus, Liveness};
+        let d = self.get(id).filter(|d| d.is_live())?;
+        let owner = d.owner.as_ref()?;
+        let liveness = if let Some(at) = d.disconnected_at_ms {
+            Liveness::Disconnected {
+                disconnected_secs: now_ms.saturating_sub(at) / 1000,
+            }
+        } else if let Some(s) = self.sessions.get(&owner.session_key) {
+            if s.in_flight > 0 {
+                let busy_secs = s
+                    .in_flight_since_ms
+                    .map_or(0, |t| now_ms.saturating_sub(t) / 1000);
+                Liveness::InFlight { busy_secs }
+            } else {
+                let idle_secs = s
+                    .last_active_ms
+                    .map_or(0, |t| now_ms.saturating_sub(t) / 1000);
+                Liveness::Idle { idle_secs }
+            }
+        } else {
+            Liveness::Idle { idle_secs: 0 }
+        };
+        Some(HolderStatus {
+            session_key: owner.session_key.clone(),
+            liveness,
+        })
+    }
+
+    /// Display label formatted for agent error messages: includes session key,
+    /// activity duration, and connection liveness for live Agent Displays (#189).
+    pub fn holder_label_at(&self, id: DisplayId, now_ms: u64) -> Option<String> {
+        let d = self.get(id)?;
+        let base = d.label();
+        Some(match self.holder_status_at(id, now_ms) {
+            Some(status) => format!("{base} [{}]", status.summary()),
+            None => base,
+        })
+    }
+
+    /// Mark every live display owned by `connection` as disconnected at
+    /// `now_ms`, starting its grace period before expiry (#189). If another
+    /// open connection has already spoken for the display's session (ADR 0016
+    /// overlapping MCP server restart), move the display to that connection
+    /// instead of starting a grace timer and return its id in the second tuple
+    /// element so the caller can re-register its `InputQueue` owner (H1).
+    pub fn connection_disconnected_with_migrated(
+        &mut self,
+        connection: u64,
+        now_ms: u64,
+    ) -> (usize, Vec<DisplayId>) {
+        self.sessions.drop_connection(connection);
+        let mut touched_sessions = Vec::new();
+        let mut marked = 0;
+        let mut migrated = Vec::new();
+        for d in &mut self.list {
+            if d.is_live()
+                && d.disconnected_at_ms.is_none()
+                && let Some(owner) = &mut d.owner
+                && owner.connection == connection
+            {
+                let fallback = self
+                    .sessions
+                    .get(&owner.session_key)
+                    .and_then(|s| s.open_connections.iter().next().copied());
+                if let Some(other_conn) = fallback {
+                    owner.connection = other_conn;
+                    migrated.push(d.id);
+                } else {
+                    d.disconnected_at_ms = Some(now_ms);
+                    marked += 1;
+                    if !touched_sessions.contains(&owner.session_key) {
+                        touched_sessions.push(owner.session_key.clone());
+                    }
+                }
+            }
+        }
+        for key in touched_sessions {
+            let any_connected = self.list.iter().any(|d| {
+                d.is_live()
+                    && d.disconnected_at_ms.is_none()
+                    && d.owner.as_ref().is_some_and(|o| o.session_key == key)
+            });
+            if !any_connected && let Some(s) = self.sessions.get_mut(&key) {
+                s.in_flight = 0;
+                s.in_flight_since_ms = None;
+            }
+        }
+        (marked, migrated)
+    }
+
+    pub fn connection_disconnected(&mut self, connection: u64, now_ms: u64) -> usize {
+        self.connection_disconnected_with_migrated(connection, now_ms)
+            .0
+    }
+
+    /// Record `connection` as open for `session_key` and rebind any live
+    /// displays of `session_key` waiting in their disconnect grace period to
+    /// `connection`. Refuses to note or rebind a connection that has already
+    /// closed (M1).
+    pub fn rebind_disconnected(
+        &mut self,
+        session_key: &str,
+        connection: u64,
+        now_ms: u64,
+    ) -> Vec<DisplayId> {
+        if !self.sessions.note_connection(session_key, connection) {
+            return Vec::new();
+        }
+        let mut rebound = Vec::new();
+        for d in &mut self.list {
+            if d.is_live()
+                && d.disconnected_at_ms.is_some()
+                && let Some(owner) = &mut d.owner
+                && owner.session_key == session_key
+            {
+                owner.connection = connection;
+                d.disconnected_at_ms = None;
+                rebound.push(d.id);
+            }
+        }
+        if !rebound.is_empty()
+            && let Some(s) = self.sessions.get_mut(session_key)
+        {
+            s.last_active_ms = Some(now_ms);
+        }
+        rebound
+    }
+
+    /// End every disconnected display whose grace period `grace_ms` has elapsed
+    /// by `now_ms`. Ended displays use `EndReason::Disconnected`, returning
+    /// their Handovers to the user (#189).
+    pub fn expire_disconnected(&mut self, now_ms: u64, grace_ms: u64) -> Vec<DisplayId> {
         let ids: Vec<DisplayId> = self
             .list
             .iter()
-            .filter(|d| d.owner.as_ref().is_some_and(|o| o.connection == connection))
+            .filter(|d| {
+                d.is_live()
+                    && d.disconnected_at_ms
+                        .is_some_and(|at| now_ms.saturating_sub(at) >= grace_ms)
+            })
             .map(|d| d.id)
             .collect();
         ids.into_iter()
             .filter(|&id| self.end(id, EndReason::Disconnected))
             .collect()
+    }
+
+    /// End every display a closed connection owned immediately. Each session's
+    /// Window Access ends once, with its last display.
+    pub fn connection_closed(&mut self, connection: u64) -> Vec<DisplayId> {
+        self.connection_disconnected(connection, 0);
+        self.expire_disconnected(0, 0)
     }
 
     /// Whether another session's display, or a display no session uses,
@@ -970,6 +1291,7 @@ impl<H> Displays<H> {
         d.handover_serial += 1;
         let serial = d.handover_serial;
         d.handing_over.insert(target.window_id, serial);
+        self.publish_recorded_owners();
         Ok(Ticket {
             serial,
             target,
@@ -1078,6 +1400,7 @@ impl<H> Displays<H> {
         if ticket.was_returned {
             d.returned.insert(window);
         }
+        self.publish_recorded_owners();
     }
 
     /// Give a Handover back to the user on their word, as Take Back does.
@@ -1129,7 +1452,9 @@ impl<H> Displays<H> {
                 }
             }
         }
-        Some(self.get_mut(id)?.give_back(target))
+        let out = self.get_mut(id)?.give_back(target);
+        self.publish_recorded_owners();
+        Some(out)
     }
 
     /// Whether a window off every Agent Display is display `id`'s to place:
@@ -1226,6 +1551,7 @@ impl<H> Displays<H> {
             // Its own window again on this display (ADR 0017).
             d.given.remove(&target.window_id);
         }
+        self.publish_recorded_owners();
         Ok(Moved {
             from,
             to,
@@ -1282,6 +1608,7 @@ impl<H> Displays<H> {
         {
             d.records.insert(window, record);
         }
+        self.publish_recorded_owners();
     }
 
     pub fn point(&mut self, id: DisplayId, x: f64, y: f64, click: bool) {
@@ -2658,9 +2985,11 @@ mod tests {
             (),
         );
         d.access_mut(7).unwrap().grant_all();
-        assert_eq!(d.connection_closed(1), vec![7, 8]);
+        assert_eq!(d.connection_closed(1), Vec::<DisplayId>::new());
+        assert!(d.get(7).unwrap().is_live());
+        assert!(d.get(8).unwrap().is_live());
         assert!(d.access(10).unwrap().scope.is_some());
-        assert_eq!(d.connection_closed(3), vec![10]);
+        assert_eq!(d.connection_closed(3), vec![7, 8, 10]);
         assert_eq!(d.sessions.get("s").unwrap().access.scope, None);
     }
 
@@ -2718,5 +3047,35 @@ mod tests {
             assert!(!d.get(8).unwrap().started.contains(&5), "{reason:?}");
             assert_eq!(d.starter_of(5), None);
         }
+    }
+
+    #[test]
+    fn restart_adoption_records_live_orphan_windows_and_flags_unowned_recalled_windows() {
+        let mut d: Displays<()> = Displays::default();
+        d.add(
+            11,
+            "Agent Screen 1".into(),
+            DEFAULT_SIZE,
+            session_owner("s", 1, "Work"),
+            (),
+        );
+        // Session reconnected after an app restart with pid 500 as an adopted orphan.
+        d.get_mut(11).unwrap().started.insert(500);
+        let agent_win = WindowTarget {
+            pid: 500,
+            window_id: 41,
+        };
+        let recalled_user_win = WindowTarget {
+            pid: 600,
+            window_id: 42,
+        };
+        let unowned = d.reconcile_new_display_windows(11, &[agent_win, recalled_user_win]);
+        assert_eq!(unowned, vec![recalled_user_win]);
+        assert_eq!(d.recorded_display_of(41), Some(11));
+        assert_eq!(
+            d.get(11).unwrap().records.get(&41).map(|r| r.origin),
+            Some(Origin::Launched)
+        );
+        assert_eq!(d.recorded_display_of(42), None);
     }
 }

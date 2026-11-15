@@ -13,12 +13,61 @@
 
 use crate::access::Access;
 use crate::model::DisplayId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most live Agent Displays one session may use at once. Every new
 /// display makes WindowServer reconfigure each screen, and dozens in a few
 /// hours once froze a Mac. Review Displays don't count.
 pub const MAX_LIVE: usize = 4;
+pub const MAX_CLOSED_CONNECTIONS: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Liveness {
+    /// Connection is open and no call is currently running.
+    Idle { idle_secs: u64 },
+    /// Connection is open and at least one call has been running for `busy_secs`.
+    InFlight { busy_secs: u64 },
+    /// Owning connection closed `disconnected_secs` ago, within the grace period.
+    Disconnected { disconnected_secs: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HolderStatus {
+    pub session_key: String,
+    pub liveness: Liveness,
+}
+
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+impl HolderStatus {
+    pub fn summary(&self) -> String {
+        match &self.liveness {
+            Liveness::Idle { idle_secs } => format!(
+                "session {}, idle {}, connection open",
+                self.session_key,
+                format_elapsed(*idle_secs)
+            ),
+            Liveness::InFlight { busy_secs } => format!(
+                "session {}, call in flight {}, connection open",
+                self.session_key,
+                format_elapsed(*busy_secs)
+            ),
+            Liveness::Disconnected { disconnected_secs } => format!(
+                "session {}, disconnected {} ago, connection closed",
+                self.session_key,
+                format_elapsed(*disconnected_secs)
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Session {
@@ -27,6 +76,14 @@ pub struct Session {
     /// The session's Window Authorization: what it may take of the user's
     /// windows on their word, onto any of its displays (ADR 0013).
     pub access: Access,
+    /// Monotonic timestamp (ms) when a call last started or finished.
+    pub last_active_ms: Option<u64>,
+    /// Calls currently running on this session.
+    pub in_flight: usize,
+    /// Monotonic timestamp (ms) when `in_flight` moved above zero.
+    pub in_flight_since_ms: Option<u64>,
+    /// Open control socket connections that have spoken for this session.
+    pub open_connections: BTreeSet<u64>,
 }
 
 impl Session {
@@ -40,6 +97,7 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct Sessions {
     map: BTreeMap<String, Session>,
+    closed_connections: BTreeSet<u64>,
 }
 
 /// Why a session may not have another display now.
@@ -106,8 +164,60 @@ impl Sessions {
         let left = session.displays.len() != before;
         if left && session.displays.is_empty() {
             session.access.clear();
+            session.in_flight = 0;
+            session.in_flight_since_ms = None;
         }
         left
+    }
+
+    /// Record the start of a request for session `key` at monotonic `now_ms`.
+    pub fn note_call_start(&mut self, key: &str, now_ms: u64) {
+        let session = self.map.entry(key.to_string()).or_default();
+        session.last_active_ms = Some(now_ms);
+        if session.in_flight == 0 {
+            session.in_flight_since_ms = Some(now_ms);
+        }
+        session.in_flight += 1;
+    }
+
+    /// Record the end of a request for session `key` at monotonic `now_ms`.
+    pub fn note_call_end(&mut self, key: &str, now_ms: u64) {
+        if let Some(session) = self.map.get_mut(key) {
+            session.in_flight = session.in_flight.saturating_sub(1);
+            if session.in_flight == 0 {
+                session.in_flight_since_ms = None;
+            }
+            session.last_active_ms = Some(now_ms);
+        }
+    }
+
+    /// Record that `connection` is an open control socket speaking for `key`.
+    /// Returns `false` and changes nothing if `connection` was already closed,
+    /// preventing a request handled after close from re-opening or rebinding a
+    /// dead connection.
+    pub fn note_connection(&mut self, key: &str, connection: u64) -> bool {
+        if self.closed_connections.contains(&connection) {
+            return false;
+        }
+        self.map
+            .entry(key.to_string())
+            .or_default()
+            .open_connections
+            .insert(connection);
+        true
+    }
+
+    /// Tombstone `connection` (bounded to the [`MAX_CLOSED_CONNECTIONS`] most
+    /// recent closed connection ids, `L7`) and remove it from every session's
+    /// open connection set.
+    pub fn drop_connection(&mut self, connection: u64) {
+        self.closed_connections.insert(connection);
+        while self.closed_connections.len() > MAX_CLOSED_CONNECTIONS {
+            self.closed_connections.pop_first();
+        }
+        for session in self.map.values_mut() {
+            session.open_connections.remove(&connection);
+        }
     }
 }
 

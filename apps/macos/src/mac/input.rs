@@ -591,12 +591,18 @@ impl Forwarder {
             .press(at);
         self.send(move |w| {
             diagnostics::within(trace, Phase::Down, || {
+                w.drag_guard = None;
                 let grabbed = w.grab(at, button);
+                if grabbed && let Some(grab) = w.grab {
+                    w.drag_guard = Some(ViewerDragGuard::new(grab.target.window_id));
+                }
                 diagnostics::emit(|| ClickEvent::Grab { held: grabbed });
                 if !grabbed {
                     w.user_press = true;
                     let target = w.mouse_down(at, button, clicks, flags);
                     w.user_press = false;
+                    w.pressed_moved = false;
+                    w.last_escape_check = None;
                     w.pressed = target.and_then(|t| held(t, at));
                 }
             })
@@ -611,7 +617,32 @@ impl Forwarder {
                     grab.drag_to(to);
                 }
             }
-            None => w.mouse_dragged(to, button, flags),
+            None => {
+                if let Some(press) = w.pressed {
+                    w.pressed_moved |= press.moved(to);
+                    if w.pressed_moved && w.drag_guard.is_none() {
+                        w.drag_guard = Some(ViewerDragGuard::new(press.target.window_id));
+                    }
+                }
+                w.mouse_dragged(to, button, flags);
+                if w.pressed_moved
+                    && let Some(press) = w.pressed
+                    && w.last_escape_check
+                        .is_none_or(|t| t.elapsed() >= Duration::from_millis(50))
+                {
+                    w.last_escape_check = Some(Instant::now());
+                    if press.left_display() {
+                        w.mouse_up(to, button, 1, flags);
+                        press.restore_to(to);
+                        w.pressed = None;
+                        w.pressed_moved = false;
+                        w.last_escape_check = None;
+                        w.grab = Some(press);
+                        w.grab_moved = true;
+                        w.grab_watch = true;
+                    }
+                }
+            }
         });
     }
 
@@ -624,20 +655,30 @@ impl Forwarder {
         trace: Option<Click>,
     ) {
         self.send(move |w| {
-            diagnostics::within(trace, Phase::Up, || match w.grab.take() {
-                Some(grab) if std::mem::take(&mut w.grab_moved) => {
-                    grab.drag_to(at);
-                }
-                // Pressed and released in place: a click on the title bar,
-                // such as a double click that zooms the window.
-                Some(grab) => {
-                    w.mouse_down(grab.from(), button, clicks, flags);
-                    w.mouse_up(grab.from(), button, clicks, flags);
-                }
-                None => {
-                    w.mouse_up(at, button, clicks, flags);
-                    if let Some(press) = w.pressed.take() {
-                        keep_on_display(press, at);
+            diagnostics::within(trace, Phase::Up, || {
+                w.drag_guard = None;
+                match w.grab.take() {
+                    Some(grab) if std::mem::take(&mut w.grab_moved) => {
+                        if std::mem::take(&mut w.grab_watch) {
+                            grab.restore_to(at);
+                            keep_on_display(grab, at, true);
+                        } else {
+                            grab.drag_to(at);
+                        }
+                    }
+                    // Pressed and released in place: a click on the title bar,
+                    // such as a double click that zooms the window.
+                    Some(grab) => {
+                        w.grab_watch = false;
+                        w.mouse_down(grab.from(), button, clicks, flags);
+                        w.mouse_up(grab.from(), button, clicks, flags);
+                    }
+                    None => {
+                        w.mouse_up(at, button, clicks, flags);
+                        let drag_moved = std::mem::take(&mut w.pressed_moved);
+                        if let Some(press) = w.pressed.take() {
+                            keep_on_display(press, at, drag_moved);
+                        }
                     }
                 }
             })
@@ -645,7 +686,10 @@ impl Forwarder {
     }
 
     pub fn mouse_moved(&self, to: (f64, f64), flags: CGEventFlags) {
-        self.send(move |w| w.mouse_moved(to, flags));
+        self.send(move |w| {
+            w.drag_guard = None;
+            w.mouse_moved(to, flags);
+        });
     }
 
     pub fn scroll(
@@ -978,11 +1022,27 @@ impl Forwarder {
             if !w.keys_reach(target) {
                 return PopupTyped::Refused;
             }
+            if !super::ax::is_window_or_sheet_focused(target) && !is_front(target.pid) {
+                let _ = super::ax::make_main(target);
+                w.send_focus(target);
+            }
             if is_stopped() {
                 return PopupTyped::Stopped(0);
             }
             // The keys go to the app's focused element, which must be the
-            // button: read it back.
+            // button: read it back. An ExtensionKit `.appex` button may report
+            // its own service pid while hosted inside `target.pid` (#205).
+            let element_pid = super::ax::pid_of(element.get()).unwrap_or(target.pid);
+            let key_pid = if element_pid != target.pid && cg::is_remote_view_service(element_pid) {
+                element_pid
+            } else {
+                target.pid
+            };
+            let focused_button = || {
+                super::ax::is_focused_element(target.pid, element.get())
+                    || (element_pid != target.pid
+                        && super::ax::is_focused_element(element_pid, element.get()))
+            };
             if !super::ax::set_attribute(
                 element.get(),
                 "AXFocused",
@@ -993,7 +1053,7 @@ impl Forwarder {
             // Chromium moves focus a moment after it answers: look for up
             // to 300 ms, and send nothing if it never arrives.
             let asked = Instant::now();
-            while !super::ax::is_focused_element(target.pid, element.get()) {
+            while !focused_button() {
                 if is_stopped() {
                     return PopupTyped::Stopped(0);
                 }
@@ -1019,8 +1079,10 @@ impl Forwarder {
                 // off the display.
                 if (!front_at_start && is_front(target.pid))
                     || !placed()
-                    || super::ax::focused_window_id(target.pid) != Some(target.window_id)
-                    || !super::ax::is_focused_element(target.pid, element.get())
+                    || !(super::ax::is_window_or_sheet_focused(target)
+                        || (key_pid != target.pid
+                            && super::ax::focused_window_id(target.pid).is_none()))
+                    || !focused_button()
                 {
                     return PopupTyped::Interrupted(typed);
                 }
@@ -1044,7 +1106,7 @@ impl Forwarder {
                     .collect();
                 // A real-input loan holds the gate: measure the gap once
                 // it is ours, just before the key goes out.
-                let gate = super::real_input::process_gate(target.pid);
+                let gate = super::real_input::process_gate(key_pid);
                 let input = gate.read().unwrap_or_else(|e| e.into_inner());
                 if is_stopped() {
                     return PopupTyped::Stopped(typed);
@@ -1053,7 +1115,7 @@ impl Forwarder {
                     return PopupTyped::Slow(typed);
                 }
                 for event in &events {
-                    post_now(event, target.pid, true);
+                    post_now(event, key_pid, true);
                 }
                 last = Some(Instant::now());
                 drop(input);
@@ -1279,37 +1341,117 @@ fn display_of(id: u32) -> Option<Rect> {
         .find(|area| area.contains(window.bounds.mid()))
 }
 
-/// The window at a global point's display, held at that point.
+/// The window at a global point's display, held at that point. If `target` is
+/// an attached modal sheet, watches its parent host window instead.
 fn held(target: WindowTarget, at: (f64, f64)) -> Option<Grab> {
-    let window = super::windows::find(target.window_id)?;
-    let area = super::cg::active_displays()
+    let host = super::ax::host_window_target(target);
+    let watch = agent_screen_model::viewer_press::press_watch_target(target, host);
+    let window = super::windows::find(watch.window_id)?;
+    let display = super::cg::active_displays()
         .into_iter()
-        .map(super::cg::display_bounds)
-        .find(|area| area.contains(at))?;
-    Grab::held(target, window.bounds, at, area)
+        .find(|&id| super::cg::display_bounds(id).contains(at))?;
+    Grab::held(watch, window.bounds, at, display)
 }
 
 /// After the user's press and release in the Viewer: put the window back
 /// on its display if the drag carried it off. An app that draws its own
 /// title bar, as Electron apps do, has WindowServer move the window with
 /// the real pointer, onto the user's screen, where their window manager
-/// may then tile it. It lands where the drag would have taken it on the
-/// display. Checked again for a while, since the window manager may move
-/// it after the release.
-fn keep_on_display(press: Grab, at: (f64, f64)) {
-    // A click, or a drag inside the display: nothing to put back.
-    if !press.left_display() {
+/// may then tile it. Posted drag events are processed asynchronously, so
+/// any non-grabbed drag monitors `[0, 40, 150, 350, 700]` ms after release
+/// even when the window has not left at `t = 0` ms yet.
+const VIEWER_DRAG_GUARD_TTL: Duration = Duration::from_secs(10);
+
+static NEXT_VIEWER_DRAG_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+type ActiveViewerDragMap = std::collections::HashMap<u32, Vec<(u64, Instant)>>;
+
+static ACTIVE_VIEWER_DRAGS: std::sync::LazyLock<std::sync::Mutex<ActiveViewerDragMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// RAII token marking `window_id` as actively being dragged in the Viewer or
+/// watched by `keep_on_display`, so `guard_placed` pauses only for that window
+/// rather than for the whole Takeover (`L5`), with a 10 s auto-expiry if a
+/// Viewer release never arrives (`L7`).
+pub(crate) struct ViewerDragGuard {
+    window_id: u32,
+    token: u64,
+}
+
+impl ViewerDragGuard {
+    pub(crate) fn new(window_id: u32) -> Self {
+        Self::new_at(window_id, Instant::now())
+    }
+
+    fn new_at(window_id: u32, now: Instant) -> Self {
+        let token = NEXT_VIEWER_DRAG_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock() {
+            let entries = map.entry(window_id).or_default();
+            entries.retain(|(_, started)| {
+                now.saturating_duration_since(*started) < VIEWER_DRAG_GUARD_TTL
+            });
+            entries.push((token, now));
+        }
+        Self { window_id, token }
+    }
+}
+
+impl Drop for ViewerDragGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock()
+            && let Some(entries) = map.get_mut(&self.window_id)
+        {
+            entries.retain(|(token, _)| *token != self.token);
+            if entries.is_empty() {
+                map.remove(&self.window_id);
+            }
+        }
+    }
+}
+
+pub fn viewer_watching_window(window_id: u32) -> bool {
+    viewer_watching_window_at(window_id, Instant::now())
+}
+
+fn viewer_watching_window_at(window_id: u32, now: Instant) -> bool {
+    let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock() else {
+        return false;
+    };
+    let Some(entries) = map.get_mut(&window_id) else {
+        return false;
+    };
+    entries.retain(|(_, started)| now.saturating_duration_since(*started) < VIEWER_DRAG_GUARD_TTL);
+    if entries.is_empty() {
+        map.remove(&window_id);
+        false
+    } else {
+        true
+    }
+}
+
+fn keep_on_display(press: Grab, at: (f64, f64), drag_moved: bool) {
+    let left_now = press.left_display();
+    if !agent_screen_model::viewer_press::should_watch_after_release(
+        drag_moved,
+        press.from(),
+        at,
+        left_now,
+    ) {
         return;
     }
+    let _watch_guard = ViewerDragGuard::new(press.target.window_id);
     thread::spawn(move || {
-        for wait in [0, 150, 350, 700] {
-            thread::sleep(Duration::from_millis(wait));
-            if wait == 0 || press.left_display() {
+        let _keep_guard = _watch_guard;
+        for wait in [0, 40, 150, 350, 700] {
+            if wait > 0 {
+                thread::sleep(Duration::from_millis(wait));
+            }
+            if press.left_display() {
                 log::info!(
                     "input: window {} left its display in a drag, put back",
                     press.target.window_id
                 );
-                press.drag_to(at);
+                press.restore_to(at);
             }
         }
     });
@@ -1393,8 +1535,12 @@ struct Worker {
     /// whether it has moved since the press.
     grab: Option<Grab>,
     grab_moved: bool,
+    grab_watch: bool,
     /// The window the user's press in the Viewer went to, as it was then.
     pressed: Option<Grab>,
+    pressed_moved: bool,
+    last_escape_check: Option<Instant>,
+    drag_guard: Option<ViewerDragGuard>,
     cache: Option<(Vec<Hit>, Instant)>,
     /// Whether the press being handled is the user's, in the Viewer.
     user_press: bool,
@@ -1435,7 +1581,11 @@ impl Worker {
             gesture: None,
             grab: None,
             grab_moved: false,
+            grab_watch: false,
             pressed: None,
+            pressed_moved: false,
+            last_escape_check: None,
+            drag_guard: None,
             cache: None,
             user_press: false,
             seed: std::process::id() as u64 ^ 0x9e37_79b9_7f4a_7c15,
@@ -1574,31 +1724,74 @@ impl Worker {
         self.release_agent_button();
         let hit = self.hit(at, true).or_else(|| self.edge_hit(at));
         record_hit(hit);
+        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
         let Some(hit) = hit else {
+            // Clicking empty space on a display where an NSMenu (`layer == 101`)
+            // is stuck open should still cancel that menu (#207).
+            if matches!(button, Button::Left)
+                && let Some(within) = cg::active_displays()
+                    .into_iter()
+                    .map(cg::display_bounds)
+                    .find(|b| b.contains(at))
+            {
+                let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+                let mut cancelled = None;
+                for m in &windows {
+                    if m.layer == popup_menu
+                        && m.bounds.intersects(&within)
+                        && !m.bounds.contains(at)
+                    {
+                        let pids = menu_pids_for(m, &windows);
+                        if super::ax::cancel_menu_at(&pids, m.bounds.mid()) {
+                            cancelled = Some(m.host);
+                        }
+                    }
+                }
+                if let Some(host) = cancelled {
+                    return Some(host);
+                }
+            }
             log::info!("input: no window at {at:?}");
             return None;
         };
         let target = hit.target;
         log::debug!("input: press at {at:?} goes to {target:?}");
-        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+        // The windows the press was hit-tested in, taken a moment ago.
+        let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
+        let within_display = cg::active_displays()
+            .into_iter()
+            .map(cg::display_bounds)
+            .find(|b| b.contains(at))
+            .or_else(|| display_of(target.window_id));
         if hit.layer == popup_menu
             && matches!(button, Button::Left)
-            && super::ax::press_menu_item_at(hit.host.pid, at)
+            && super::ax::press_menu_item_at(&menu_pids_for(&hit, &windows), at)
         {
             // No gesture: the release that follows has nothing to send.
             log::debug!("input: pressed the menu item at {at:?}");
             return Some(target);
         }
+        // An open pop-up menu runs a modal tracking loop in AppKit / `.appex`
+        // that ignores posted clicks outside its window (#207). Cancel it
+        // first when a click on the same display lands outside the menu.
+        if hit.layer != popup_menu
+            && matches!(button, Button::Left)
+            && let Some(within) = within_display
+        {
+            for m in &windows {
+                if m.layer == popup_menu && m.bounds.intersects(&within) && !m.bounds.contains(at) {
+                    let _ = super::ax::cancel_menu_at(&menu_pids_for(m, &windows), m.bounds.mid());
+                }
+            }
+        }
         if hit.target != hit.host {
             self.pressed_panels.push(target.window_id);
         }
-        // The windows the press was hit-tested in, taken a moment ago. A
-        // list of the front app takes the user's press as it is: making it key
+        // A list of the front app takes the user's press as it is: making it key
         // would take key from the window it belongs to, and a list that
         // closes then closes before the press lands. An app in the
         // background drops a press on a window that isn't key, and a file
         // panel is another process's, so there the focus goes as before.
-        let windows = self.cache.as_ref().map_or_else(hits, |(l, _)| l.clone());
         // Only for the user's press: an agent's click focuses as before, so
         // the user's key window is remembered and handed back.
         if self.user_press
@@ -1640,6 +1833,7 @@ impl Worker {
     fn grab(&mut self, at: (f64, f64), button: Button) -> bool {
         self.grab = None;
         self.grab_moved = false;
+        self.grab_watch = false;
         if button != Button::Left {
             return false;
         }
@@ -1649,17 +1843,16 @@ impl Worker {
         let Some(hit) = hit else {
             return false;
         };
-        let Some(area) = cg::active_displays()
+        let Some(display) = cg::active_displays()
             .into_iter()
-            .map(cg::display_bounds)
-            .find(|area| area.contains(at))
+            .find(|&id| cg::display_bounds(id).contains(at))
         else {
             return false;
         };
         if hit.layer != 0 || hit.target != hit.host {
             return false;
         }
-        let Some(grab) = Grab::title_bar(hit.target, hit.bounds, at, area) else {
+        let Some(grab) = Grab::title_bar(hit.target, hit.bounds, at, display) else {
             return false;
         };
         {
@@ -2081,7 +2274,9 @@ impl Worker {
     }
 
     /// The topmost resizable window whose edge is just outside a point:
-    /// macOS takes a press there as the start of a resize.
+    /// macOS takes a press there as the start of a resize. Follows visual
+    /// Z-order so the Viewer never clicks through a visible window onto one
+    /// hidden below (`M2`).
     fn edge_hit(&mut self, at: (f64, f64)) -> Option<Hit> {
         const MARGIN: f64 = 4.0;
         let hit = self
@@ -2096,8 +2291,8 @@ impl Worker {
             .then_some(hit)
     }
 
-    /// Topmost window at a global point. Moves and scrolls reuse a list up to
-    /// 100 ms old; clicks always query WindowServer.
+    /// Topmost window at a global point in visual Z-order (`M2`). Moves and
+    /// scrolls reuse a list up to 100 ms old; clicks always query WindowServer.
     fn hit(&mut self, at: (f64, f64), fresh: bool) -> Option<Hit> {
         let now = Instant::now();
         let reuse = !fresh
@@ -2108,13 +2303,12 @@ impl Worker {
         if !reuse {
             self.cache = Some((hits(), now));
         }
-        self.cache
-            .as_ref()?
-            .0
-            .iter()
-            .find(|h| h.bounds.contains(at))
-            .copied()
+        topmost_hit_in(&self.cache.as_ref()?.0, at)
     }
+}
+
+fn topmost_hit_in(hits: &[Hit], at: (f64, f64)) -> Option<Hit> {
+    hits.iter().find(|h| h.bounds.contains(at)).copied()
 }
 
 /// Fields WindowServer and Chromium use to route an event to a window that
@@ -2271,13 +2465,15 @@ type PanelKey = (WindowTarget, i64, Rect);
 pub struct DragScene {
     hits: Vec<Hit>,
     frames: Vec<(u32, Rect)>,
-    source: i32,
+    source: WindowTarget,
+    drop: WindowTarget,
+    area: Rect,
 }
 
 impl DragSight {
     /// The windows now, read once for every point a check looks at. `source`
-    /// is the pid of the app the drag starts in.
-    pub fn look(&self, source: i32) -> DragScene {
+    /// and `drop` are the windows the drag starts and ends in on `area`.
+    pub fn look(&self, source: WindowTarget, drop: WindowTarget, area: Rect) -> DragScene {
         let menu = CGWindowLevelForKey(CGWindowLevelKey::MainMenuWindowLevelKey) as i64;
         let status = CGWindowLevelForKey(CGWindowLevelKey::StatusWindowLevelKey) as i64;
         let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
@@ -2293,7 +2489,7 @@ impl DragSight {
         let mut hits = reachable(on_screen, menu, status);
         let key: Vec<PanelKey> = hits
             .iter()
-            .filter(|h| !(h.layer == dragging && h.target.pid == source))
+            .filter(|h| !(h.layer == dragging && h.target.pid == source.pid))
             .map(|h| (h.target, h.layer, h.bounds))
             .collect();
         let mut cache = self.panels.borrow_mut();
@@ -2307,6 +2503,8 @@ impl DragSight {
             hits,
             frames,
             source,
+            drop,
+            area,
         }
     }
 }
@@ -2322,18 +2520,125 @@ impl DragScene {
     }
 
     /// The app window under a point of the drag: as `window_at`, but the
-    /// drag's own image, which the source app draws at the dragging level
-    /// under the pointer, doesn't cover it. Another app's window at that
-    /// level still does.
+    /// drag's own image doesn't cover it, sheets and panels (levels 0..=8)
+    /// count by their host window, and a pop-up menu the drag itself opened
+    /// on `area` counts as `drop` (#205).
     pub fn under(&self, at: (f64, f64)) -> Option<WindowTarget> {
         let dragging = CGWindowLevelForKey(CGWindowLevelKey::DraggingWindowLevelKey) as i64;
-        self.hits
-            .iter()
-            .filter(|h| !(h.layer == dragging && h.target.pid == self.source))
-            .find(|h| h.bounds.contains(at))
-            .filter(|h| h.layer == 0 && h.target == h.host)
-            .map(|h| h.target)
+        let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+        resolve_drag_under(
+            &self.hits,
+            (self.source, self.drop),
+            self.area,
+            (dragging, popup_menu),
+            cg::is_remote_view_service,
+            at,
+        )
     }
+}
+
+fn resolve_drag_under(
+    hits: &[Hit],
+    (source, drop): (WindowTarget, WindowTarget),
+    area: Rect,
+    (dragging, popup_menu): (i64, i64),
+    is_remote: impl Fn(i32) -> bool,
+    at: (f64, f64),
+) -> Option<WindowTarget> {
+    let hit = hits
+        .iter()
+        .filter(|h| !(h.layer == dragging && h.target.pid == source.pid))
+        .find(|h| h.bounds.contains(at))?;
+    if (0..=8).contains(&hit.layer) {
+        Some(hit.host)
+    } else if hit.layer == popup_menu
+        && area.contains(at)
+        && (hit.host.pid == source.pid || is_remote(hit.host.pid))
+    {
+        Some(drop)
+    } else {
+        None
+    }
+}
+
+/// Pure check returning `(host_window, owner_display)` when the topmost
+/// reachable window at `at` is a document/panel (`layer 0..=8`) recorded on a
+/// display other than `display` (`M2`). Agent pointer tools refuse instead of
+/// operating that foreign window or clicking through it to a hidden window below.
+fn foreign_recorded_top_window_in(
+    hits: &[Hit],
+    display: crate::model::DisplayId,
+    at: (f64, f64),
+    recorded_owners: &std::collections::BTreeMap<u32, crate::model::DisplayId>,
+) -> Option<(WindowTarget, crate::model::DisplayId)> {
+    let top = topmost_hit_in(hits, at)?;
+    if !(0..=8).contains(&top.layer) {
+        return None;
+    }
+    let owner = recorded_owners.get(&top.host.window_id).copied()?;
+    (owner != display).then_some((top.host, owner))
+}
+
+pub fn foreign_window_at(
+    display: crate::model::DisplayId,
+    at: (f64, f64),
+) -> Option<(WindowTarget, crate::model::DisplayId)> {
+    let owners = super::windows::recorded_owners_snapshot();
+    foreign_recorded_top_window_in(&hits(), display, at, &owners)
+}
+
+/// Candidate Accessibility owner PIDs for an open `NSMenu` (`layer == 101`):
+/// the menu's own target/host PIDs plus, when drawn by an out-of-process
+/// `.xpc`/`.appex` view service, only the matching remote-panel host PID or
+/// the single frontmost host window under/adjacent to `menu.bounds` (L7, #207).
+fn menu_pids_for(menu: &Hit, windows: &[Hit]) -> Vec<i32> {
+    let on_display = cg::active_displays()
+        .into_iter()
+        .map(cg::display_bounds)
+        .find(|b| b.intersects(&menu.bounds));
+    resolve_menu_pids(menu, windows, on_display, cg::is_remote_view_service)
+}
+
+fn resolve_menu_pids(
+    menu: &Hit,
+    windows: &[Hit],
+    on_display: Option<Rect>,
+    is_remote: impl Fn(i32) -> bool,
+) -> Vec<i32> {
+    let mut pids = vec![menu.target.pid];
+    if menu.host.pid != menu.target.pid {
+        pids.push(menu.host.pid);
+        return pids;
+    }
+    if is_remote(menu.target.pid) {
+        // First prefer an explicit remote-panel window backed by this `.appex`.
+        for w in windows {
+            if (0..=8).contains(&w.layer)
+                && w.target.pid == menu.target.pid
+                && w.host.pid != menu.target.pid
+                && on_display.is_none_or(|d| w.bounds.intersects(&d))
+            {
+                if !pids.contains(&w.host.pid) {
+                    pids.push(w.host.pid);
+                }
+                return pids;
+            }
+        }
+        // Otherwise pick only the frontmost host window on that display whose
+        // frame intersects or sits within 48 pt of the open menu (`windows` is
+        // in front-to-back Z-order), never unrelated apps on the display (L7).
+        for w in windows {
+            if (0..=8).contains(&w.layer)
+                && on_display.is_none_or(|d| w.bounds.intersects(&d))
+                && w.bounds.inset(-48.0, -48.0).intersects(&menu.bounds)
+                && !pids.contains(&w.host.pid)
+            {
+                pids.push(w.host.pid);
+                break;
+            }
+        }
+    }
+    pids
 }
 
 /// Windows input can reach, front to back. The desktop is left out on
@@ -2407,6 +2712,87 @@ pub fn window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
         .find(|h| h.bounds.contains(at))
         .filter(|h| h.layer == 0 && h.target == h.host)
         .map(|h| (h.target, h.bounds))
+}
+
+/// The window under a `real_input` drag's start or end: includes sheets and
+/// panels (levels 0..=8) by their host window (#205).
+pub fn real_drag_window_at(at: (f64, f64)) -> Option<(WindowTarget, Rect)> {
+    hits()
+        .into_iter()
+        .find(|h| h.bounds.contains(at))
+        .filter(|h| (0..=8).contains(&h.layer))
+        .map(|h| (h.host, h.bounds))
+}
+
+/// What a `real_input` click hits on a display: either a display window
+/// directly (levels 0..=8, sheets and hosted panels included) or an open
+/// pop-up menu (level 101) owned by an app on that display (#205).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RealClickHit {
+    pub window: WindowTarget,
+    pub window_frame: Rect,
+    pub menu: Option<(WindowTarget, Rect)>,
+    pub ax_pid: i32,
+}
+
+pub fn real_click_at(at: (f64, f64), display_windows: &[WindowTarget]) -> Option<RealClickHit> {
+    let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+    resolve_real_click(
+        &hits(),
+        display_windows,
+        popup_menu,
+        cg::is_remote_view_service,
+        at,
+    )
+}
+
+/// Whether `at` is still directly over `expected` (`menu` when clicking an
+/// open pop-up menu, else `window`).
+pub fn real_click_still_under(
+    at: (f64, f64),
+    window: WindowTarget,
+    menu: Option<WindowTarget>,
+) -> bool {
+    let popup_menu = CGWindowLevelForKey(CGWindowLevelKey::PopUpMenuWindowLevelKey) as i64;
+    let Some(hit) = hits().into_iter().find(|h| h.bounds.contains(at)) else {
+        return false;
+    };
+    match menu {
+        Some(menu) => hit.layer == popup_menu && hit.host == menu,
+        None => (0..=8).contains(&hit.layer) && hit.host == window,
+    }
+}
+
+fn resolve_real_click(
+    hits: &[Hit],
+    display_windows: &[WindowTarget],
+    popup_menu: i64,
+    is_remote: impl Fn(i32) -> bool,
+    at: (f64, f64),
+) -> Option<RealClickHit> {
+    let hit = hits.iter().find(|h| h.bounds.contains(at))?;
+    if (0..=8).contains(&hit.layer) && display_windows.contains(&hit.host) {
+        return Some(RealClickHit {
+            window: hit.host,
+            window_frame: hit.bounds,
+            menu: None,
+            ax_pid: hit.target.pid,
+        });
+    }
+    if hit.layer == popup_menu {
+        let owner = hits.iter().find(|w| {
+            (0..=8).contains(&w.layer)
+                && display_windows.contains(&w.host)
+                && (w.host.pid == hit.host.pid || is_remote(hit.host.pid))
+        })?;
+        return Some(RealClickHit {
+            window: owner.host,
+            window_frame: owner.bounds,
+            menu: Some((hit.host, hit.bounds)),
+            ax_pid: hit.target.pid,
+        });
+    }
+    None
 }
 
 /// Whether a press at a global point hits a list or panel, so Agent Screen
@@ -3057,5 +3443,227 @@ mod popup_tests {
         let start = Instant::now();
         assert!(wait_typeahead(&AtomicBool::new(false)));
         assert!(start.elapsed() >= Duration::from_millis(1200));
+    }
+
+    #[test]
+    fn drag_and_real_click_accept_session_popup_menus_and_sheets_only_on_the_display() {
+        let area = Rect::new(4288.0, -800.0, 1280.0, 800.0);
+        let sheet = WindowTarget {
+            pid: 100,
+            window_id: 201,
+        };
+        let appex_menu = WindowTarget {
+            pid: 300,
+            window_id: 401,
+        };
+        let stranger_menu = WindowTarget {
+            pid: 999,
+            window_id: 902,
+        };
+        let sheet_rect = Rect::new(4500.0, -700.0, 600.0, 400.0);
+        let menu_rect = Rect::new(4600.0, -600.0, 200.0, 180.0);
+        let hits = vec![
+            Hit {
+                host: appex_menu,
+                target: appex_menu,
+                bounds: menu_rect,
+                layer: 101,
+            },
+            Hit {
+                host: sheet,
+                target: WindowTarget {
+                    pid: 300,
+                    window_id: 301,
+                },
+                bounds: sheet_rect,
+                layer: 8,
+            },
+        ];
+        let at_menu = (4650.0, -520.0);
+        let at_sheet = (4900.0, -520.0);
+
+        // #205 Expected #3: drag opening a pop-up menu (same pid or `.appex`
+        // remote service) keeps seeing `drop` on the display.
+        assert_eq!(
+            resolve_drag_under(
+                &hits,
+                (sheet, sheet),
+                area,
+                (500, 101),
+                |p| p == 300,
+                at_menu
+            ),
+            Some(sheet)
+        );
+        assert_eq!(
+            resolve_drag_under(&hits, (sheet, sheet), area, (500, 101), |_| false, at_sheet),
+            Some(sheet)
+        );
+        // An unrelated non-remote app's menu does not pass.
+        let stranger_hits = vec![
+            Hit {
+                host: stranger_menu,
+                target: stranger_menu,
+                bounds: menu_rect,
+                layer: 101,
+            },
+            hits[1],
+        ];
+        assert_eq!(
+            resolve_drag_under(
+                &stranger_hits,
+                (sheet, sheet),
+                area,
+                (500, 101),
+                |_| false,
+                at_menu
+            ),
+            None
+        );
+
+        // #205 Expected #2: real_click on an open pop-up menu resolves to the
+        // owning display window + menu frame, and rejects unrelated menus.
+        assert_eq!(
+            resolve_real_click(&hits, &[sheet], 101, |p| p == 300, at_menu),
+            Some(RealClickHit {
+                window: sheet,
+                window_frame: sheet_rect,
+                menu: Some((appex_menu, menu_rect)),
+                ax_pid: 300,
+            })
+        );
+        assert_eq!(
+            resolve_real_click(&stranger_hits, &[sheet], 101, |_| false, at_menu),
+            None
+        );
+
+        // #207 + L7: native menus only probe their own PIDs, and `.appex`
+        // remote-service menus add only the frontmost adjacent host window PID,
+        // skipping unrelated side windows (`999`) and background windows (`888`)
+        // behind the host window.
+        let behind_host = Hit {
+            host: WindowTarget {
+                pid: 888,
+                window_id: 888,
+            },
+            target: WindowTarget {
+                pid: 888,
+                window_id: 888,
+            },
+            bounds: sheet_rect,
+            layer: 0,
+        };
+        let bystander = Hit {
+            host: WindowTarget {
+                pid: 999,
+                window_id: 999,
+            },
+            target: WindowTarget {
+                pid: 999,
+                window_id: 999,
+            },
+            bounds: Rect::new(4700.0, -500.0, 200.0, 200.0),
+            layer: 0,
+        };
+        let native_menu = Hit {
+            host: sheet,
+            target: sheet,
+            bounds: menu_rect,
+            layer: 101,
+        };
+        let all_windows = vec![hits[0], bystander, hits[1], behind_host];
+        assert_eq!(
+            resolve_menu_pids(&native_menu, &all_windows, Some(area), |_| false),
+            vec![100]
+        );
+        assert_eq!(
+            resolve_menu_pids(&hits[0], &all_windows, Some(area), |p| p == 300),
+            vec![300, 100]
+        );
+    }
+
+    #[test]
+    fn hit_routing_follows_visual_z_order_and_agent_check_refuses_foreign_top_window() {
+        let pt = (4100.0, -500.0);
+        let foreign_top = Hit {
+            host: WindowTarget {
+                pid: 10,
+                window_id: 101,
+            },
+            target: WindowTarget {
+                pid: 10,
+                window_id: 101,
+            },
+            bounds: Rect::new(4000.0, -600.0, 400.0, 300.0),
+            layer: 0,
+        };
+        let own_below = Hit {
+            host: WindowTarget {
+                pid: 20,
+                window_id: 202,
+            },
+            target: WindowTarget {
+                pid: 20,
+                window_id: 202,
+            },
+            bounds: Rect::new(3950.0, -650.0, 500.0, 400.0),
+            layer: 0,
+        };
+        let mut owners = std::collections::BTreeMap::new();
+        owners.insert(101, 7);
+        owners.insert(202, 8);
+
+        // 1. Foreign window 101 (recorded on 7) visibly covers 202 (recorded on 8) on display 8:
+        //    - Viewer `topmost_hit_in` delivers to what the user sees on top (101), never clicking through to 202!
+        //    - Agent `foreign_recorded_top_window_in` refuses on display 8 naming owner 7!
+        let stack_foreign_on_top = [foreign_top, own_below];
+        assert_eq!(
+            topmost_hit_in(&stack_foreign_on_top, pt).map(|h| h.target.window_id),
+            Some(101)
+        );
+        assert_eq!(
+            foreign_recorded_top_window_in(&stack_foreign_on_top, 8, pt, &owners),
+            Some((foreign_top.host, 7))
+        );
+
+        // 2. When display 8's own window 202 is visibly on top of 101, agent input on 8 is allowed!
+        let stack_own_on_top = [own_below, foreign_top];
+        assert_eq!(
+            topmost_hit_in(&stack_own_on_top, pt).map(|h| h.target.window_id),
+            Some(202)
+        );
+        assert_eq!(
+            foreign_recorded_top_window_in(&stack_own_on_top, 8, pt, &owners),
+            None
+        );
+    }
+
+    #[test]
+    fn viewer_drag_guard_scopes_pause_to_watched_window_only() {
+        assert!(!viewer_watching_window(777_001));
+        assert!(!viewer_watching_window(777_002));
+        {
+            let _g1 = ViewerDragGuard::new(777_001);
+            assert!(viewer_watching_window(777_001));
+            assert!(!viewer_watching_window(777_002));
+            {
+                let _g2 = ViewerDragGuard::new(777_001);
+                assert!(viewer_watching_window(777_001));
+            }
+            assert!(viewer_watching_window(777_001));
+        }
+        assert!(!viewer_watching_window(777_001));
+
+        // Leaked guards auto-expire after VIEWER_DRAG_GUARD_TTL (L7).
+        let t0 = Instant::now();
+        let _leaked = ViewerDragGuard::new_at(777_003, t0);
+        assert!(viewer_watching_window_at(
+            777_003,
+            t0 + Duration::from_secs(9)
+        ));
+        assert!(!viewer_watching_window_at(
+            777_003,
+            t0 + VIEWER_DRAG_GUARD_TTL
+        ));
     }
 }

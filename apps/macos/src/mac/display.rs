@@ -553,14 +553,18 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
         })
         .collect();
     let screens = screens(&online, virtual_ids, &restore);
-    let moves: Vec<(u32, (f64, f64))> = arrangement::plan(&screens)
+    let mut moves: Vec<(u32, (f64, f64))> = arrangement::plan(&screens)
         .into_iter()
         .filter(|&(d, (x, y))| {
             let now = cg::display_bounds(d);
             (now.x, now.y) != (x, y)
         })
-        .chain(restore.iter().copied())
         .collect();
+    for &(d, pos) in &restore {
+        if !moves.iter().any(|&(m, _)| m == d) {
+            moves.push((d, pos));
+        }
+    }
     if !restore.is_empty() {
         log::info!("display {id}: putting back displays macOS moved for it: {restore:?}");
     }
@@ -640,6 +644,17 @@ pub fn is_tucked(id: u32, virtual_ids: &[u32]) -> bool {
         return false;
     }
     arrangement::out_of_the_way(&cg::display_bounds(id), &screens(&online, virtual_ids, &[]))
+}
+
+/// Whether every online virtual display of ours in `virtual_ids` reaches a
+/// user display through touching displays. When a corner display is released,
+/// a sibling to its right may briefly float until `tuck_away` compacts it.
+pub fn arrangement_connected(virtual_ids: &[u32]) -> bool {
+    if knob("AGENTSCREEN_NO_PARK").is_some() {
+        return true;
+    }
+    let online = cg::active_displays();
+    arrangement::connected(&screens(&online, virtual_ids, &[]))
 }
 
 /// A setting a test build takes from the environment, to measure what a

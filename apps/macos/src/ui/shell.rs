@@ -253,7 +253,7 @@ pub struct Shell {
     /// Whether AeroSpace leaves Agent Displays alone; None without AeroSpace.
     aerospace: Option<aerospace::Ignoring>,
     guard_generation: u64,
-    asking: bool,
+    asking_count: usize,
     /// Screen Recording and Accessibility, as last checked.
     permissions: permissions::Status,
     /// Whether macOS lets Agent Screen notify.
@@ -465,7 +465,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             conflicts: Vec::new(),
             aerospace: None,
             guard_generation: 0,
-            asking: false,
+            asking_count: 0,
             permissions: permissions::status(),
             notifications: notify::Auth::Unknown,
             real_saved: None,
@@ -857,10 +857,10 @@ impl Shell {
         }
         let core = self.core.read(cx);
         let ids: HashSet<DisplayId> = core.displays.list.iter().map(|d| d.id).collect();
-        let asking = core.input_queue.approval_needed() || card::asking(&core.displays);
-        if asking != self.asking {
-            self.asking = asking;
-            self.icon.set_asking(asking);
+        let asking_count = card::asking_count(&core.displays, core.input_queue.approval_count());
+        if asking_count != self.asking_count {
+            self.asking_count = asking_count;
+            self.icon.set_asking_count(asking_count);
         }
         let working = core.displays.list.iter().any(|d| !d.is_ended());
         if working != self.working {
@@ -1390,9 +1390,15 @@ impl Shell {
                                 return Outcome::Refused("the window is no longer on the display");
                             };
                             let frame = window.bounds.offset(area.x, area.y);
+                            let hit_frame = click.menu.map_or(frame, |(_, mf)| mf);
+                            if let Some((menu_target, menu_frame)) = click.menu
+                                && cg::window_bounds(menu_target.window_id) != Some(menu_frame)
+                            {
+                                return Outcome::Refused("the menu closed before the click");
+                            }
                             if area != click.area
                                 || frame != click.frame
-                                || !real_click::contained(click.at, area, frame)
+                                || !real_click::contained(click.at, area, hit_frame)
                             {
                                 return Outcome::Refused(
                                     "the click is outside its authorized window or display",
@@ -1408,7 +1414,7 @@ impl Shell {
                                     return true;
                                 }
                                 let (element, _) = crate::mac::ax::target_at(
-                                    click.target.pid,
+                                    click.ax_pid,
                                     click.at,
                                     std::time::Duration::from_millis(300),
                                     false,
@@ -1451,6 +1457,8 @@ impl Shell {
                                     );
                                 }
                             }
+                            let menu_target = click.menu.map(|(m, _)| m);
+                            let menu_frame = click.menu.map(|(_, mf)| mf);
                             return real_input::click_at(
                                 click.target,
                                 click.at,
@@ -1469,9 +1477,15 @@ impl Shell {
                                         != Some(frame)
                                     {
                                         Some("the window geometry changed")
-                                    } else if !crate::mac::input::window_at(at)
-                                        .is_some_and(|(target, _)| target == click.target)
+                                    } else if let Some((mt, mf)) = menu_target.zip(menu_frame)
+                                        && cg::window_bounds(mt.window_id) != Some(mf)
                                     {
+                                        Some("the menu closed or moved")
+                                    } else if !crate::mac::input::real_click_still_under(
+                                        at,
+                                        click.target,
+                                        menu_target,
+                                    ) {
                                         Some("the window was covered or left the screen")
                                     } else {
                                         None
@@ -1572,7 +1586,7 @@ impl Shell {
                             // coordinates. One read of the on-screen
                             // windows gives both frames and what lies
                             // under every point the check looks at.
-                            let scene = sight.look(plan.target.pid);
+                            let scene = sight.look(plan.target, plan.drop, area);
                             let why = if !ok.load(Ordering::SeqCst) {
                                 Some("the loan was cancelled")
                             } else if cg::display_bounds(display) != area {
@@ -2058,6 +2072,10 @@ impl Shell {
         self.icon.state()
     }
 
+    pub fn asking_count(&self) -> usize {
+        self.icon.asking_count()
+    }
+
     fn icon_rect(&self) -> Option<NSRect> {
         let icon = self.icon.frame()?;
         let shown = self
@@ -2340,50 +2358,65 @@ impl Shell {
         }
         // A spare of the size, or a new display: macOS takes about half a
         // second for that, off the main thread, so Peek keeps drawing.
-        let spare = self
-            .core
-            .update(cx, |core, _| core.take_spare(DEFAULT_SIZE));
-        // A new display stops every window on the Mac from drawing for a
-        // moment: start it once the waiting tile has grown in.
+        let spare_ids = self.core.read(cx).spare_ids();
         let grown = peek::RESIZE + Duration::from_millis(40);
-        let (made, name) = match spare {
-            Some((handle, name, resize)) => (
-                cx.background_spawn({
-                    let executor = cx.background_executor().clone();
-                    let others = self.core.read(cx).virtual_ids();
-                    async move {
-                        if resize {
-                            executor.timer(grown).await;
-                        }
-                        let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
-                        crate::mac::display::reuse_parked(handle, w, h, resize, others).await
+        cx.spawn(async move |shell, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async move { crate::core::Core::probe_spares(&spare_ids) })
+                .await;
+            let Ok(choice) = shell.update(cx, |shell, cx| {
+                let spare = shell
+                    .core
+                    .update(cx, |core, _| core.take_spare_with(DEFAULT_SIZE, &snap));
+                match spare {
+                    Some((handle, name, resize)) => {
+                        let others = shell.core.read(cx).virtual_ids();
+                        (Ok((handle, resize, others)), name)
                     }
-                }),
-                name,
-            ),
-            None => {
-                let (serial, name) = self.core.update(cx, |core, _| core.next_name());
-                let others = self.core.read(cx).virtual_ids();
-                let executor = cx.background_executor().clone();
-                let made = cx.background_spawn({
+                    None => {
+                        let (serial, name) = shell.core.update(cx, |core, _| core.next_name());
+                        let others = shell.core.read(cx).virtual_ids();
+                        (Err((serial, others)), name)
+                    }
+                }
+            }) else {
+                return;
+            };
+            let (plan, name) = choice;
+            let executor = cx.background_executor().clone();
+            let made = cx
+                .background_executor()
+                .spawn({
                     let name = name.clone();
                     async move {
-                        executor.timer(grown).await;
-                        crate::mac::display::create_parked(
-                            name,
-                            DEFAULT_SIZE.0 as u32,
-                            DEFAULT_SIZE.1 as u32,
-                            serial,
-                            others,
-                        )
-                        .await
+                        match plan {
+                            Ok((handle, resize, others)) => {
+                                if resize {
+                                    executor.timer(grown).await;
+                                }
+                                let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
+                                crate::mac::display::reuse_parked(handle, w, h, resize, others)
+                                    .await
+                            }
+                            Err((serial, others)) => {
+                                // A new display stops every window on the Mac
+                                // from drawing for a moment: start it once the
+                                // waiting tile has grown in.
+                                executor.timer(grown).await;
+                                crate::mac::display::create_parked(
+                                    name,
+                                    DEFAULT_SIZE.0 as u32,
+                                    DEFAULT_SIZE.1 as u32,
+                                    serial,
+                                    others,
+                                )
+                                .await
+                            }
+                        }
                     }
-                });
-                (made, name)
-            }
-        };
-        cx.spawn(async move |shell, cx| {
-            let made = made.await;
+                })
+                .await;
             let _ = shell.update(cx, |shell, cx| {
                 shell.creating = shell.creating.saturating_sub(1);
                 let Some(handle) = made else {
@@ -3329,8 +3362,27 @@ impl Shell {
                     }
                 }
             }
+            let Ok(mut probe_ids) = this.update(cx, |shell, cx| {
+                let mut ids = shell.core.read(cx).spare_ids();
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            }) else {
+                return;
+            };
+            let snap = cx
+                .background_executor()
+                .spawn(async move {
+                    let snap = crate::core::Core::probe_spares(&probe_ids);
+                    probe_ids.clear();
+                    snap
+                })
+                .await;
             let _ = this.update(cx, |shell, cx| {
-                shell.core.update(cx, |core, cx| core.remove(id, cx))
+                shell
+                    .core
+                    .update(cx, |core, cx| core.remove_with(id, &snap, cx))
             });
         })
         .detach();
@@ -3346,9 +3398,11 @@ impl Shell {
         id: DisplayId,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let given = self
-            .core
-            .update(cx, |core, _| core.displays.give_back(id, target));
+        let given = self.core.update(cx, |core, cx| {
+            let out = core.displays.give_back(id, target);
+            cx.notify();
+            out
+        });
         self.send_home(target, id, given, cx)
     }
 
@@ -3515,10 +3569,8 @@ impl Shell {
                 );
                 let _ = this.update(cx, |shell, cx| {
                     shell.core.update(cx, |core, cx| {
-                        if let Some(given) = given
-                            && let Some(d) = core.displays.get_mut(id)
-                        {
-                            d.give_back_failed(given);
+                        if let Some(given) = given {
+                            core.displays.give_back_failed_on(id, given);
                         }
                         cx.notify();
                     })

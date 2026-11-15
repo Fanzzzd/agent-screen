@@ -85,5 +85,28 @@ fn test() -> Result<()> {
         "endDisplay",
         json!({ "sessionKey": "holdmode", "displayId": id }),
     )?;
+    sleep_ms(300);
+    let before_spare_log = logged().len();
+    let switched_spare = sh_lenient(tool("mode")?, &[&id.to_string(), "800", "600"]);
+    let mut spare_now = mode(id)?;
+    let mut spare_note = None;
+    for _ in 0..30 {
+        sleep_ms(100);
+        spare_now = mode(id)?;
+        spare_note = logged()
+            .get(before_spare_log..)
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.contains(&format!("mode display={id} ")) && l.contains("ran at 800x600"))
+            .map(str::to_string);
+        if spare_now == wanted && spare_note.is_some() {
+            break;
+        }
+    }
+    check(
+        "an idle spare display dropped to 800×600 also restores 1600×1000 at 2x",
+        switched_spare.trim() == "0" && spare_now == wanted && spare_note.is_some(),
+        format!("spare mode {spare_now}; display log: {spare_note:?}"),
+    );
     Ok(())
 }

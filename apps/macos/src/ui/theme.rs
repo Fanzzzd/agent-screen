@@ -12,6 +12,9 @@ pub struct Theme {
     /// The card behind the Viewer and Peek.
     pub card: Hsla,
     pub card_border: Hsla,
+    /// Warm amber-tinted card surface and border while an approval waits (#206).
+    pub asking_card: Hsla,
+    pub asking_border: Hsla,
     /// Between the rows of a list on a card.
     pub hairline: Hsla,
     pub label: Hsla,
@@ -39,6 +42,8 @@ pub fn palette(dark: bool) -> Theme {
         Theme {
             card: rgb(0x1e1e20).into(),
             card_border: rgba(0xffffff26).into(),
+            asking_card: rgb(0x282219).into(),
+            asking_border: rgba(0xff9f0ab3).into(),
             hairline: rgba(0xffffff14).into(),
             label: rgb(0xf5f5f7).into(),
             secondary: rgb(0x98989d).into(),
@@ -57,6 +62,8 @@ pub fn palette(dark: bool) -> Theme {
         Theme {
             card: rgb(0xf6f6f8).into(),
             card_border: rgba(0x0000001f).into(),
+            asking_card: rgb(0xfffaf0).into(),
+            asking_border: rgba(0xff950099).into(),
             hairline: rgba(0x00000012).into(),
             label: rgb(0x1d1d1f).into(),
             secondary: rgb(0x6e6e73).into(),

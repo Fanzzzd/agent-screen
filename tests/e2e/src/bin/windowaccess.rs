@@ -128,7 +128,9 @@ fn test(lang: &str, tag: &str) -> Result<()> {
         .display_id()
         .context("create_display gave no display_id")?;
     let result = user_window(&stage, stage_id, tag).and_then(|(user_pid, window, home)| {
-        steps(&stage, &client, id, window, user_pid, &home, lang, tag)
+        steps(
+            &stage, stage_id, &client, id, window, user_pid, &home, lang, tag,
+        )
     });
     // The fixtures go before either display: a user-owned Field on a
     // stage that ends would land on the user's screen.
@@ -214,6 +216,7 @@ fn claimed(window: u64) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn steps(
     stage: &Control,
+    stage_id: u64,
     client: &McpClient,
     id: u64,
     window: u64,
@@ -505,22 +508,113 @@ fn steps(
         ids(s.get("excluded")).contains(&window),
         s.text(),
     );
-    // No grant, and the one-time words don't carry over: a card.
-    let answer = answer_soon(id, false);
+    // No grant, and the one-time words don't carry over: a card (#206).
+    let inspect_and_answer = std::thread::spawn(move || -> Result<(Value, Value, Value)> {
+        sleep_ms(800);
+        let ctl = Control::connect()?;
+        let icon = ctl.call("debugIcon", json!({}))?;
+        let card = ctl.call("debugCard", json!({}))?;
+        let ans = ctl.call(
+            "debugAnswerWindow",
+            json!({ "displayId": id, "give": false }),
+        )?;
+        Ok((icon, card, ans))
+    });
     let r = client.call(
         "place_window",
         json!({ "display_id": id, "app": "Field", "timeout_seconds": 10 }),
     )?;
-    let answered = answer.join().expect("answer thread")?;
+    let (asking_icon, asking_card, answered) = inspect_and_answer.join().expect("answer thread")?;
     check(
         "without new words, taking it again asks with a card",
         r.is_error && answered["answered"] == true,
         format!("{} / {answered}", r.text()),
     );
     check(
+        "pending approval highlights the card and badges the menu bar icon",
+        asking_icon["state"] == "asking"
+            && asking_icon["askingCount"] == 1
+            && asking_card["highlighted"] == true,
+        format!("icon={asking_icon}, card={asking_card}"),
+    );
+    sleep_ms(200);
+    let after_icon = stage.call("debugIcon", json!({}))?;
+    check(
+        "answering the approval clears the menu bar pending count",
+        after_icon["askingCount"] == 0,
+        after_icon.to_string(),
+    );
+    check(
         "the agent's own window is still on its display at the end",
         on_display()?.iter().any(|w| w.window_id == own),
         format!("{:?}", on_display()?),
+    );
+
+    // Quit the agent-launched Field first so only the user's Handover remains
+    // when we test cross-session contention and dead-session expiry (#189).
+    let agent_tag = format!("{tag}-agent");
+    sh_lenient("/usr/bin/pkill", &["-TERM", "-f", "--", &agent_tag]);
+    sleep_ms(300);
+
+    let retook = client.call(
+        "place_window",
+        words(
+            "Take Field one more time.",
+            json!({ "window_id": window, "timeout_seconds": 2 }),
+        ),
+    )?;
+    sleep_ms(600);
+    check(
+        "the target session holds Field as a Handover again",
+        !retook.is_error && origin_of(window)? == Some("handedOver".into()),
+        retook.text(),
+    );
+
+    // Two sessions asking for the same window: stage asks while client holds
+    // it, and declining names the live holder session and connection state.
+    let decline_stage = answer_soon(stage_id, false);
+    let stage_ask = stage.call(
+        "placeWindow",
+        json!({
+            "sessionKey": "stage",
+            "displayId": stage_id,
+            "windowId": window,
+            "timeoutSeconds": 10
+        }),
+    );
+    let stage_answered = decline_stage.join().expect("decline stage")?;
+    let stage_err = stage_ask.err().map(|e| e.to_string()).unwrap_or_default();
+    check(
+        "declining a second session's request names the live holder session",
+        stage_answered["answered"] == true
+            && stage_err.contains("Window access")
+            && stage_err.contains("[session ")
+            && stage_err.contains("connection open]"),
+        format!("err={stage_err:?}, answered={stage_answered}"),
+    );
+
+    // Dead session expiry (#189): closing client without end_display holds the
+    // Handover during the disconnect grace window, then returns it to home.
+    client.close();
+    sleep_ms(400);
+    let during_grace = frame_of(user_pid, window);
+    check(
+        "a disconnected session keeps its Handover during the brief grace window",
+        during_grace.as_ref().is_some_and(|f| !same_frame(f, home)),
+        format!("during_grace={during_grace:?}, home={home:?}"),
+    );
+    let mut returned_home = false;
+    for _ in 0..20 {
+        sleep_ms(250);
+        if frame_of(user_pid, window).is_some_and(|f| same_frame(&f, home)) {
+            returned_home = true;
+            break;
+        }
+    }
+    check(
+        "after disconnect grace expires, the dead session's Handover returns to its home frame",
+        returned_home,
+        format!("now={:?}, home={home:?}", frame_of(user_pid, window)),
     );
     Ok(())
 }

@@ -17,7 +17,7 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, check, instance, json, kill_ours, menu_choice_app, our_binary, out, run, sleep_ms,
+    Control, check, instance, json, kill_ours, menu_choice_app, our_binary, out, run, sh, sleep_ms,
     start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
@@ -49,12 +49,16 @@ fn test(fixture: &std::path::Path) -> Result<()> {
     )?;
     let id = display["displayId"].as_u64().context("display id")?;
     let marker = out().join("menuchoice-setter");
+    let pane_state = out().join("menuchoice-pane-state");
     let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&pane_state);
     let result = (|| -> Result<()> {
         let launch = c.call(
             "launchApp",
             json!({ "sessionKey": KEY, "displayId": id, "app": fixture, "environment": {
-                "MENU_DISPLAY_ID": id.to_string(), "MENU_SETTER_MARKER": marker,
+                "MENU_DISPLAY_ID": id.to_string(),
+                "MENU_SETTER_MARKER": marker,
+                "MENU_PANE_STATE": pane_state,
             } }),
         )?;
         let window = launch["window"]["windowId"]
@@ -285,10 +289,240 @@ fn test(fixture: &std::path::Path) -> Result<()> {
                 && shown.contains("fruit=Banana"),
             format!("{interrupted:?}; {shown}"),
         );
+
+        let menu_bounds = || -> Result<(f64, f64, f64, f64)> {
+            for _ in 0..20 {
+                let out = sh(
+                    "/usr/bin/swift",
+                    &[
+                        "-e",
+                        &format!(
+                            "import CoreGraphics
+let disp = CGDisplayBounds({id})
+let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+for w in list {{
+  guard let layer = w[kCGWindowLayer as String] as? Int, layer == 101,
+        let b = w[kCGWindowBounds as String] as? [String: Double],
+        let x = b[\"X\"], let y = b[\"Y\"], let width = b[\"Width\"], let height = b[\"Height\"] else {{ continue }}
+  let r = CGRect(x: x, y: y, width: width, height: height)
+  if disp.intersects(r) {{ print(x - disp.origin.x, y - disp.origin.y, width, height); break }}
+}}"
+                        ),
+                    ],
+                )?;
+                let nums: Vec<f64> = out
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if let [mx, my, mw, mh] = nums[..] {
+                    return Ok((mx, my, mw, mh));
+                }
+                sleep_ms(50);
+            }
+            anyhow::bail!("no layer 101 menu on display {id}");
+        };
+
+        // #205 + #207: NSPopUpButton hosted by an out-of-process `.appex`
+        // remote view (`MenuPane.appex`) behind an empty host window (`PaneHost`).
+        let open_pane = element("button", "Open Pane")?;
+        call(
+            "elementAction",
+            json!({ "element": open_pane, "action": "press" }),
+        )?;
+        for _ in 0..30 {
+            if pane_state.exists() {
+                break;
+            }
+            sleep_ms(50);
+        }
+        let _ = c.call(
+            "click",
+            json!({ "sessionKey": KEY, "displayId": id, "x": 635, "y": 194 }),
+        );
+        let mut pane_shown = String::new();
+        for _ in 0..20 {
+            pane_shown = std::fs::read_to_string(&pane_state).unwrap_or_default();
+            if pane_shown.contains("paneMenu=1") {
+                break;
+            }
+            sleep_ms(50);
+        }
+        if let Ok((mx, my, mw, mh)) = menu_bounds() {
+            let _ = c.call(
+                "click",
+                json!({
+                    "sessionKey": KEY,
+                    "displayId": id,
+                    "x": (mx + mw * 0.5).round(),
+                    "y": (my + mh * 0.82).round()
+                }),
+            );
+            for _ in 0..20 {
+                pane_shown = std::fs::read_to_string(&pane_state).unwrap_or_default();
+                if pane_shown.contains("pane=Manually") && pane_shown.contains("paneMenu=0") {
+                    break;
+                }
+                sleep_ms(50);
+            }
+        }
+        check(
+            "background click through a host window into an .appex NSMenu item picks Manually (#205, #207)",
+            pane_shown.contains("pane=Manually") && pane_shown.contains("paneMenu=0"),
+            pane_shown,
+        );
+        let _ = std::process::Command::new("/usr/bin/pkill")
+            .args(["-f", "MenuPane.appex/Contents/MacOS/MenuPane"])
+            .status();
+        sleep_ms(150);
+
+        // #205 + #207: pop-up button inside an NSWindow.beginSheet sheet,
+        // closed-menu set_value on the AXSheet, background click on an item of
+        // its open NSMenu, and background click outside to cancel the NSMenu.
+        let open_sheet = element("button", "Open Sheet")?;
+        call(
+            "elementAction",
+            json!({ "element": open_sheet, "action": "press" }),
+        )?;
+        let mut sheet_win = None;
+        for _ in 0..30 {
+            sleep_ms(50);
+            sheet_win = call("listWindows", json!({}))?["windows"]
+                .as_array()
+                .and_then(|a| {
+                    a.iter().find_map(|w| {
+                        let wid = w["windowId"].as_u64()?;
+                        let t = w["title"].as_str().unwrap_or_default();
+                        (wid != window && t != "PaneHost" && !t.starts_with("pane=")).then_some(wid)
+                    })
+                });
+            if sheet_win.is_some() {
+                break;
+            }
+        }
+        let sheet_id = sheet_win.context("sheet window id in listWindows")?;
+        let sheet_call = |method: &str, mut p: Value| {
+            p["sessionKey"] = json!(KEY);
+            p["displayId"] = json!(id);
+            p["windowId"] = json!(sheet_id);
+            c.call(method, p)
+        };
+        let sheet_element = |role: &str, name: &str| -> Result<u64> {
+            let tree = sheet_call("windowState", json!({}))?["tree"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let found = Regex::new(&format!(r#"\[(\d+)\] {role} "{name}""#))?
+                .captures(&tree)
+                .with_context(|| format!("no {name} in sheet {tree}"))?;
+            Ok(found[1].parse()?)
+        };
+        for (value, expected) in [("Daily", "sheet=Daily "), ("Weekly", "sheet=Weekly ")] {
+            let freq = sheet_element("popupbutton", "Frequency")?;
+            let res = sheet_call(
+                "elementAction",
+                json!({ "element": freq, "action": "set_value", "value": value }),
+            );
+            let mut shown = String::new();
+            for _ in 0..20 {
+                shown = title()?;
+                if shown.contains(expected) {
+                    break;
+                }
+                sleep_ms(50);
+            }
+            check(
+                &format!("sheet pop-up Frequency chooses {value} without opening a menu (#205)"),
+                res.is_ok() && shown.contains(expected) && shown.contains("sheetOpens=0"),
+                format!("{res:?}; {shown}"),
+            );
+        }
+
+        // Open Frequency's NSMenu (#207) and click "Manually" inside it.
+        let freq = sheet_element("popupbutton", "Frequency")?;
+        let _ = sheet_call(
+            "elementAction",
+            json!({ "element": freq, "action": "press" }),
+        );
+        for _ in 0..20 {
+            if title()?.contains("sheetMenu=1") {
+                break;
+            }
+            sleep_ms(50);
+        }
+        let mut shown = title()?;
+        if let Ok((mx, my, mw, mh)) = menu_bounds() {
+            let _ = c.call(
+                "click",
+                json!({
+                    "sessionKey": KEY,
+                    "displayId": id,
+                    "x": (mx + mw * 0.5).round(),
+                    "y": (my + mh * 0.82).round()
+                }),
+            );
+            for _ in 0..20 {
+                shown = title()?;
+                if shown.contains("sheet=Manually ") && shown.contains("sheetMenu=0") {
+                    break;
+                }
+                sleep_ms(50);
+            }
+        }
+        check(
+            "background click on an open sheet NSMenu item picks Manually and closes the menu (#207)",
+            shown.contains("sheet=Manually ") && shown.contains("sheetMenu=0"),
+            shown,
+        );
+
+        // Open Frequency's NSMenu again and click outside on the host window to dismiss it (#207).
+        let freq = sheet_element("popupbutton", "Frequency")?;
+        let _ = sheet_call(
+            "elementAction",
+            json!({ "element": freq, "action": "press" }),
+        );
+        for _ in 0..20 {
+            if title()?.contains("sheetMenu=1") {
+                break;
+            }
+            sleep_ms(50);
+        }
+        let mut shown = title()?;
+        if menu_bounds().is_ok() {
+            let _ = c.call(
+                "click",
+                json!({
+                    "sessionKey": KEY,
+                    "displayId": id,
+                    "x": 70,
+                    "y": 500
+                }),
+            );
+            for _ in 0..20 {
+                shown = title()?;
+                if shown.contains("sheetMenu=0") {
+                    break;
+                }
+                sleep_ms(50);
+            }
+        }
+        check(
+            "background click outside an open NSMenu dismisses it via AXCancel (#207)",
+            shown.contains("sheetMenu=0") && shown.contains("sheet=Manually "),
+            shown,
+        );
+        if let Ok(done) = sheet_element("button", "Done") {
+            let _ = sheet_call(
+                "elementAction",
+                json!({ "element": done, "action": "press" }),
+            );
+        }
         Ok(())
     })();
     // The fixture's window goes before its display does, so macOS can't
     // move it onto the user's screen.
+    let _ = std::process::Command::new("/usr/bin/pkill")
+        .args(["-f", "MenuPane.appex/Contents/MacOS/MenuPane"])
+        .status();
     kill_ours(our_binary("MenuChoice"));
     sleep_ms(500);
     let _ = c.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));

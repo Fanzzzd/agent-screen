@@ -241,7 +241,7 @@ define_class!(
 
 pub struct StatusIcon {
     item: Retained<NSStatusItem>,
-    asking: Cell<bool>,
+    asking_count: Cell<usize>,
     needs_setup: Cell<bool>,
     working: Cell<bool>,
 }
@@ -327,7 +327,7 @@ impl StatusIcon {
         keep(Retained::into_super(Retained::into_super(target)));
         let icon = StatusIcon {
             item,
-            asking: Cell::new(false),
+            asking_count: Cell::new(0),
             needs_setup: Cell::new(false),
             working: Cell::new(false),
         };
@@ -335,10 +335,15 @@ impl StatusIcon {
         icon
     }
 
-    /// A raised hand while any Help Request is open.
-    pub fn set_asking(&self, asking: bool) {
-        self.asking.set(asking);
+    /// A raised hand with the pending approval count while any request asks
+    /// for the user (#206).
+    pub fn set_asking_count(&self, count: usize) {
+        self.asking_count.set(count);
         self.redraw();
+    }
+
+    pub fn asking_count(&self) -> usize {
+        self.asking_count.get()
     }
 
     /// The icon shows on the user's screen: keep AppKit's place for it, to
@@ -362,7 +367,7 @@ impl StatusIcon {
     pub fn state(&self) -> &'static str {
         if self.needs_setup.get() {
             "setup"
-        } else if self.asking.get() {
+        } else if self.asking_count.get() > 0 {
             "asking"
         } else if self.working.get() {
             "working"
@@ -389,18 +394,33 @@ impl StatusIcon {
         let Some(button) = self.item.button(mtm) else {
             return;
         };
-        let (svg, description) = if self.needs_setup.get() {
+        let asking_count = self.asking_count.get();
+        let badge_count = if self.needs_setup.get() {
+            0
+        } else {
+            asking_count
+        };
+        let (svg, description): (&str, String) = if self.needs_setup.get() {
             (
                 ICON_SETUP,
-                t("Agent Screen: needs permissions", "Agent Screen：需要权限"),
+                t("Agent Screen: needs permissions", "Agent Screen：需要权限").to_string(),
             )
-        } else if self.asking.get() {
+        } else if asking_count > 1 {
+            (
+                ICON_ASKING,
+                tf!(
+                    "Agent Screen: {asking_count} waiting for your approval",
+                    "Agent Screen：{asking_count} 项待你批准"
+                ),
+            )
+        } else if asking_count == 1 {
             (
                 ICON_ASKING,
                 t(
-                    "Agent Screen: an agent is asking for help",
-                    "Agent Screen：agent 在请求帮助",
-                ),
+                    "Agent Screen: waiting for your approval",
+                    "Agent Screen：待你批准",
+                )
+                .to_string(),
             )
         } else if self.working.get() {
             (
@@ -408,20 +428,37 @@ impl StatusIcon {
                 t(
                     "Agent Screen: displays in use",
                     "Agent Screen：有显示器在用",
-                ),
+                )
+                .to_string(),
             )
         } else if agent_screen_mcp::endpoint::is_dev_build() {
-            (ICON_IDLE, "Agent Screen Dev")
+            (ICON_IDLE, "Agent Screen Dev".to_string())
         } else {
-            (ICON_IDLE, "Agent Screen")
+            (ICON_IDLE, "Agent Screen".to_string())
         };
+        // -1.0 is NSVariableStatusItemLength; -2.0 is NSSquareStatusItemLength.
+        self.item
+            .setLength(if badge_count > 0 { -1.0 } else { -2.0 });
         if let Some(image) = template_svg(svg) {
-            image.setAccessibilityDescription(Some(&NSString::from_str(description)));
+            image.setAccessibilityDescription(Some(&NSString::from_str(&description)));
             button.setImage(Some(&image));
         }
-        button.setToolTip(Some(&NSString::from_str(description)));
+        if badge_count > 0 {
+            button.setTitle(&NSString::from_str(&format!(" {badge_count}")));
+            // 7 is NSCellImagePosition::NSImageLeading.
+            unsafe {
+                let _: () = msg_send![&button, setImagePosition: 7usize];
+            }
+        } else {
+            button.setTitle(&NSString::from_str(""));
+            // 1 is NSCellImagePosition::NSImageOnly.
+            unsafe {
+                let _: () = msg_send![&button, setImagePosition: 1usize];
+            }
+        }
+        button.setToolTip(Some(&NSString::from_str(&description)));
         // A development build shows purple, to tell it from the installed app.
-        let tint = if self.needs_setup.get() || self.asking.get() {
+        let tint = if self.needs_setup.get() || asking_count > 0 {
             Some(NSColor::systemOrangeColor())
         } else {
             agent_screen_mcp::endpoint::is_dev_build().then(NSColor::systemPurpleColor)

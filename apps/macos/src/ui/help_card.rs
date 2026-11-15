@@ -236,6 +236,18 @@ impl HelpCard {
         self.send_reply(text.to_string(), window, cx).is_ok()
     }
 
+    /// Whether this card currently displays an unanswered user approval (#206).
+    pub fn is_highlighted(&self, cx: &Context<Self>) -> bool {
+        let core = self.core.read(cx);
+        if self.input_queue {
+            matches!(queue_view(core, self.display).phase, Phase::Asking { .. })
+        } else {
+            self.display
+                .and_then(|id| core.displays.get(id))
+                .is_some_and(|d| d.requests.any_open())
+        }
+    }
+
     /// Test hook: the reply field's state, and whether the card has the
     /// keyboard or may take it.
     pub fn debug_state(&self, window: &Window, cx: &Context<Self>) -> serde_json::Value {
@@ -243,6 +255,7 @@ impl HelpCard {
         serde_json::json!({
             "key": key,
             "cardKeys": native::card_keys_on(),
+            "highlighted": self.is_highlighted(cx),
             "reply": self.reply.as_ref().map(|r| serde_json::json!({
                 "displayId": r.display,
                 "requestId": r.request,
@@ -687,6 +700,8 @@ impl HelpCard {
             let frame = self.streams.read(cx).frame(d.id);
             queue_picture(d.id, size, frame, &view, theme)
         });
+        let asking = matches!(view.phase, Phase::Asking { .. });
+        let border_pad = if asking { 4. } else { 2. };
         let root = div()
             .id("help-card")
             .role(Role::Dialog)
@@ -695,10 +710,14 @@ impl HelpCard {
             .flex()
             .flex_col()
             .gap(px(if zh { 6. } else { GAP }))
-            .p(px(PADDING))
-            .bg(theme.card)
-            .border_1()
-            .border_color(theme.card_border)
+            .p(px(if asking { PADDING - 1. } else { PADDING }))
+            .bg(if asking {
+                theme.asking_card
+            } else {
+                theme.card
+            })
+            .when(asking, |d| d.border_2().border_color(theme.asking_border))
+            .when(!asking, |d| d.border_1().border_color(theme.card_border))
             .rounded(px(RADIUS))
             .text_color(theme.label)
             // The window takes the card's height once it is painted. The
@@ -706,9 +725,8 @@ impl HelpCard {
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        // The canvas fills the card inside its border, a
-                        // point at the top and the bottom.
-                        let height = f32::from(bounds.size.height).ceil() + 2.;
+                        // The canvas fills the card inside its border.
+                        let height = f32::from(bounds.size.height).ceil() + border_pad;
                         if (height - QUEUE_FIT.with(Cell::get)).abs() > 0.5 {
                             QUEUE_FIT.with(|f| f.set(height));
                             tell(&shell, cx, |shell, cx| shell.fit_card(cx));
@@ -787,7 +805,7 @@ impl HelpCard {
                 )
             };
             return queue_window(
-                root.child(title_row("icons/hand.svg", theme.orange, title))
+                root.child(title_row("icons/hand.svg", theme.orange, title, true))
                     // With one request, the reason is the request.
                     .child(
                         reason_text(reason, zh)
@@ -879,7 +897,7 @@ impl HelpCard {
         };
         let revoke = self.shell.clone();
         queue_window(
-            root.child(title_row("icons/pointer.svg", theme.red, title))
+            root.child(title_row("icons/pointer.svg", theme.red, title, false))
                 .child(reason_text(reason, zh))
                 .children(picture)
                 .child(label_row(label, right, theme))
@@ -1347,8 +1365,9 @@ pub fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
-/// The family's title row: an icon and one line of semibold text.
-fn title_row(icon: &'static str, color: gpui::Hsla, title: String) -> gpui::Div {
+/// The family's title row: an icon, one line of semibold text, and an optional
+/// pending-approval badge (#206).
+fn title_row(icon: &'static str, color: gpui::Hsla, title: String, asking: bool) -> gpui::Div {
     div()
         .flex_none()
         .h(px(TITLE))
@@ -1358,12 +1377,28 @@ fn title_row(icon: &'static str, color: gpui::Hsla, title: String) -> gpui::Div 
         .child(svg().path(icon).flex_none().size(px(15.)).text_color(color))
         .child(
             div()
+                .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_size(px(13.))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(title),
         )
+        .when(asking, |d| {
+            d.child(
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(6.))
+                    .bg(color.opacity(0.16))
+                    .text_color(color)
+                    .text_size(px(10.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .whitespace_nowrap()
+                    .child(t("Approval needed", "待你批准")),
+            )
+        })
 }
 
 /// The family's reason: up to two lines, the rest in its tooltip.
@@ -1785,13 +1820,13 @@ fn card(title: String, reason: String, theme: &Theme) -> gpui::Stateful<gpui::Di
         .flex()
         .flex_col()
         .gap(px(GAP))
-        .p(px(PADDING))
-        .bg(theme.card)
-        .border_1()
-        .border_color(theme.card_border)
+        .p(px(PADDING - 1.))
+        .bg(theme.asking_card)
+        .border_2()
+        .border_color(theme.asking_border)
         .rounded(px(RADIUS))
         .text_color(theme.label)
-        .child(title_row("icons/hand.svg", theme.orange, title))
+        .child(title_row("icons/hand.svg", theme.orange, title, true))
         .child(reason_text(reason, false).h(px(REASON)))
 }
 
