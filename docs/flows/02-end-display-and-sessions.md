@@ -13,34 +13,34 @@ sequenceDiagram
     participant AX as "HIServices AX / AeroSpace"
     participant CGVD as "CGVirtualDisplay / WindowServer"
 
-    alt 代理显式调用 end_display
-        MCP->>Sock : endDisplay(display)
-        Sock->>Core : Core：：end_display(Finished)
-    else MCP 套接字断开 (EOF)
-        MCP--xSock : UnixStream EOF
-        Sock->>Core : 标记连接断开，启动 DISCONNECT_GRACE = 2000ms 计时器
-        alt 2000ms 内同 session token 重连
-            MCP->>Sock : hello(session_token)
-            Sock->>Core : session：：reconnect 恢复会话与显示器绑定
-        else 宽限期届满仍未重连
-            Sock->>Core : expire -> Core：：end_display(Disconnected)
+    alt "代理显式调用 end_display"
+        MCP->>Sock: "endDisplay(display)"
+        Sock->>Core: "Core::end_display(Finished)"
+    else "MCP 套接字断开 (EOF)"
+        MCP--xSock: "UnixStream EOF"
+        Sock->>Core: "标记连接断开，启动 DISCONNECT_GRACE = 2000ms 计时器"
+        alt "2000ms 内同 session token 重连"
+            MCP->>Sock: "hello(session_token)"
+            Sock->>Core: "session::reconnect 恢复会话与显示器绑定"
+        else "宽限期届满仍未重连"
+            Sock->>Core: "expire -> Core::end_display(Disconnected)"
         end
-    else 用户在 UI 主动关闭显示器
-        Sibling->>Core : Close Display -> Core：：end_display(ClosedByUser)
+    else "用户在 UI 主动关闭显示器"
+        Sibling->>Core: "Close Display -> Core::end_display(ClosedByUser)"
     end
 
-    alt 同屏存在持有窗口的活跃兄弟会话 (ADR 0016)
-        Core->>Core : 将显示器主导权移交给兄弟会话，不进入 Review
-    else 无兄弟会话接管
-        Core->>Core : 显示器转入 Review 态 (ADR 0004)
-        Core->>Core : 无残留代理窗口时 600ms sweep_ended 自动清扫；有窗口则等用户处理
-        Sibling->>AX : 迁回用户桌面 (give_back) 或关闭残留窗口
-        Core->>AX : 清理 ~/Library/Application Support/AeroSpace/claims/<pid>.json
-        alt 空闲 Spare 数量 < FILLERS (2)
-            Core->>CGVD : 保留 CGVirtualDisplay 转为空闲 Spare
-        else 超出 FILLERS 上限
-            Core->>CGVD : tidy_spares 释放 CGVirtualDisplay 对象
-            CGVD->>CGVD : WindowServer 注销显示器并触发全局重排
+    alt "同屏存在持有窗口的活跃兄弟会话 (ADR 0016)"
+        Core->>Core: "将显示器主导权移交给兄弟会话，不进入 Review"
+    else "无兄弟会话接管"
+        Core->>Core: "显示器转入 Review 态 (ADR 0004)"
+        Core->>Core: "无残留代理窗口时 600ms sweep_ended 自动清扫；有窗口则等用户处理"
+        Sibling->>AX: "迁回用户桌面 (give_back) 或关闭残留窗口"
+        Core->>AX: "清理 ~/Library/Application Support/AeroSpace/claims/<pid>.json"
+        alt "空闲 Spare 数量 < FILLERS (2)"
+            Core->>CGVD: "保留 CGVirtualDisplay 转为空闲 Spare"
+        else "超出 FILLERS 上限"
+            Core->>CGVD: "tidy_spares 释放 CGVirtualDisplay 对象"
+            CGVD->>CGVD: "WindowServer 注销显示器并触发全局重排"
         end
     end
 ```

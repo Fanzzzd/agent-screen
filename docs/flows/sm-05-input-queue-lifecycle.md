@@ -6,29 +6,29 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Rejected : 超出配额 (全局>256 或 会话>64) 或命中已拒绝 token
-    [*] --> Queued : enqueue 通过校验 (同 Owner 旧 Queued 项转 Stopped：：Replaced)
+    [*] --> Rejected : "超出配额 (全局>256 或 会话>64) 或命中已拒绝 token"
+    [*] --> Queued : "enqueue 通过校验 (同 Owner 旧 Queued 项转 Stopped::Replaced)"
 
-    Queued --> StoppedReplaced : 同一 Owner 提交更新请求
-    Queued --> StoppedDeclined : 用户点击 Decline 拒绝授权
-    Queued --> StoppedWithdrawn : 会话断连过期或主动撤回
+    Queued --> StoppedReplaced : "同一 Owner 提交更新请求"
+    Queued --> StoppedDeclined : "用户点击 Decline 拒绝授权"
+    Queued --> StoppedWithdrawn : "会话断连过期或主动撤回"
 
-    Queued --> WaitingIdle : 用户批准开启 Grant (30s 空闲续期) 或命中既有有效 Grant
-    WaitingIdle --> ArmedLoan : ime：：user_idle >= 1.0s 且 !inputs_busy() 且拿到 SESSION_INPUT 锁
+    Queued --> WaitingIdle : "用户批准开启 Grant (30s 空闲续期) 或命中既有有效 Grant"
+    WaitingIdle --> ArmedLoan : "ime::user_idle >= 1.0s 且 !inputs_busy() 且拿到 SESSION_INPUT 锁"
 
-    ArmedLoan --> StoppingUser : ListenOnly HIDEventTap 捕获非 'ASQ!' 硬件输入或 Tap 超时禁用
-    ArmedLoan --> StoppingTargetChanged : come_forward 后 AX Identity 或 RGB 采样不一致 (#121)
-    ArmedLoan --> Executing : 前置稳定且一致性核验通过, 发送带 'ASQ!' 标记的真实 HID 序列
+    ArmedLoan --> StoppingUser : "ListenOnly HIDEventTap 捕获非 'ASQ!' 硬件输入或 Tap 超时禁用"
+    ArmedLoan --> StoppingTargetChanged : "come_forward 后 AX Identity 或 RGB 采样不一致 (#121)"
+    ArmedLoan --> Executing : "前置稳定且一致性核验通过, 发送带 'ASQ!' 标记的真实 HID 序列"
 
-    Executing --> StoppingUser : 执行中途用户触碰物理键鼠
-    Executing --> Completed : 动作完成, Release 守卫收尾
+    Executing --> StoppingUser : "执行中途用户触碰物理键鼠"
+    Executing --> Completed : "动作完成, Release 守卫收尾"
 
-    StoppingUser --> StoppedUser : 释放合成按下键 + AXCancel 收起已开菜单, 废除 Grant 且绝不回拉光标 (restore=false)
-    StoppingTargetChanged --> StoppedFailed : 中止点击, 若未触碰用户键鼠则按 Grant 空闲收尾归还现场
+    StoppingUser --> StoppedUser : "释放合成按下键 + AXCancel 收起已开菜单, 废除 Grant 且绝不回拉光标 (restore=false)"
+    StoppingTargetChanged --> StoppedFailed : "中止点击, 若未触碰用户键鼠则按 Grant 空闲收尾归还现场"
 
-    Completed --> GrantIdle : 释放单次锁； 若队列仍有项则继续下一项, 否则等待队列或 Grant 结束
-    GrantIdle --> WaitingIdle : 30s 内新请求入队复用 Grant
-    GrantIdle --> Restored : 队列清空收尾且 !touched()： CGWarpMouseCursorPosition + 恢复用户 AXMain 与前台进程
+    Completed --> GrantIdle : "释放单次锁; 若队列仍有项则继续下一项, 否则等待队列或 Grant 结束"
+    GrantIdle --> WaitingIdle : "30s 内新请求入队复用 Grant"
+    GrantIdle --> Restored : "队列清空收尾且 !touched(): CGWarpMouseCursorPosition + 恢复用户 AXMain 与前台进程"
 
     Rejected --> [*]
     StoppedReplaced --> [*]

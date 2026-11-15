@@ -9,20 +9,20 @@ flowchart TD
     SUB["订阅者变更: warm(1fps) / card(4fps) / peek(12fps) / viewer(60fps) / agent(亮度计数)"] --> AGG["Streams 聚合该 DisplayId 的 max(fps, pixel_size)"]
     AGG --> CHK{"当前是否已有运行中的 SCStream?"}
 
-    CHK -- "无, 且当前时间 >= retry_at (should_wake_idle_stream)" --> NEW["capture.rs : SCShareableContent 定位 SCDisplay -> 创建 SCStream (YCbCr_420f, Best, queue=6)]
-    CHK -- "有, 且像素尺寸未增大且已有缓存帧" --> UPD["原地调用 SCStream : ：update_configuration 升降帧率 (如 Peek 1fps -> 12fps)]
+    CHK -- "无, 且当前时间 >= retry_at (should_wake_idle_stream)" --> NEW["capture.rs: SCShareableContent 定位 SCDisplay -> 创建 SCStream (YCbCr_420f, Best, queue=6)"]
+    CHK -- "有, 且像素尺寸未增大且已有缓存帧" --> UPD["原地调用 SCStream::update_configuration 升降帧率 (如 Peek 1fps -> 12fps)"]
     CHK -- "有, 但请求像素尺寸变大或尚无缓存首帧 (needs_fresh_stream)" --> RST["停止旧流并新建 SCStream (因静止画面仅新建流才会重发高清首帧)"]
 
     NEW & UPD & RST --> CB["replayd 回调 didOutputSampleBuffer (CMSampleBuffer)"]
     CB --> STAT{"SCStreamFrameInfoStatus 状态有效且含 CVPixelBuffer?"}
     STAT -- "否 (Idle / Blank / Stopped)" --> IGNORE["忽略空帧; 若 didStopWithError 则触发 repair"]
-    STAT -- "是" --> MIS{"校验 SCStreamFrameInfoScreenRect 与 cg : ：display_bounds 偏差 < 1.0pt?}
+    STAT -- "是" --> MIS{"校验 SCStreamFrameInfoScreenRect 与 cg::display_bounds 偏差 < 1.0pt?"}
 
     MIS -- "否: 发生屏幕错位 (misroute) 或命中 unit_twin" --> DROP["丢弃错位帧, 记录 misroute 日志, 触发 repair"]
     DROP --> REP["首次故障 0ms 立即重建并保留末帧 (无 unit_twin 时); 连续失败按 500ms * 2^n 退避至 <=30s 并清旧帧 (#190)"]
 
     MIS -- "是: 帧归属正确" --> AGENT{"存在 'agent' 订阅者?"}
-    AGENT -- "是" --> LUMA["更新 160x100 亮度网格 (跳过顶部 40pt), 画面变化则递增 Latest : ：changes]
+    AGENT -- "是" --> LUMA["更新 160x100 亮度网格 (跳过顶部 40pt), 画面变化则递增 Latest::changes"]
     AGENT -- "否" --> GPU["零拷贝封装 CVPixelBuffer 交付 GPUI surface 渲染 Peek / Card / Viewer"]
     LUMA --> GPU
 ```

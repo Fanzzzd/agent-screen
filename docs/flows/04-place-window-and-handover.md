@@ -13,31 +13,31 @@ sequenceDiagram
     participant Aero as "AeroSpace Claims"
     participant AX as "HIServices AX / WindowServer"
 
-    AgentA->>Core : placeWindow / windowAccess (display_a, window_id)
-    Core->>AX : CGWindowListCopyWindowInfo 核验 pid、layer 与当前几何
-    Core->>Core : access：：decide 判定窗口当前归属
+    AgentA->>Core: "placeWindow / windowAccess (display_a, window_id)"
+    Core->>AX: "CGWindowListCopyWindowInfo 核验 pid、layer 与当前几何"
+    Core->>Core: "access::decide 判定窗口当前归属"
 
-    alt 窗口已归属 Session A 或符合无主直领条件
-        Core->>Core : 直接登记 Held 所有权记录
-    else 窗口位于用户屏幕 (归属用户)
-        Core->>User : 创建 WindowAccess 请求横幅，等待用户批准或拒绝
-        User-->>Core : 批准移交 (Allow)
-        Core->>Core : 在 Held 中保存窗口原始用户屏 frame 以便日后归还
-    else 窗口由另一活跃会话 Session B 持有 (ADR 0017)
-        Core->>Core : 查询 Session B 的 HolderStatus (空闲/忙碌/断连宽限)
-        Core->>User : 展示跨会话 Window Request (也可由用户直接裁决)
-        AgentB-->>Core : 释放窗口或会话结束；或用户强制批准转交
-        Core->>Core : 原子迁移 Held 记录：Session B -> Session A
+    alt "窗口已归属 Session A 或符合无主直领条件"
+        Core->>Core: "直接登记 Held 所有权记录"
+    else "窗口位于用户屏幕 (归属用户)"
+        Core->>User: "创建 WindowAccess 请求横幅，等待用户批准或拒绝"
+        User-->>Core: "批准移交 (Allow)"
+        Core->>Core: "在 Held 中保存窗口原始用户屏 frame 以便日后归还"
+    else "窗口由另一活跃会话 Session B 持有 (ADR 0017)"
+        Core->>Core: "查询 Session B 的 HolderStatus (空闲/忙碌/断连宽限)"
+        Core->>User: "展示跨会话 Window Request (也可由用户直接裁决)"
+        AgentB-->>Core: "释放窗口或会话结束；或用户强制批准转交"
+        Core->>Core: "原子迁移 Held 记录：Session B -> Session A"
     end
 
-    Core->>Aero : 更新 claims/<pid>.json 声明该 wid 归属 Agent Screen
-    Core->>AX : windows：：settle 循环写入 AXPosition + AXSize 移至 display_a
-    Core-->>AgentA : 返回安置后的窗口几何与状态
+    Core->>Aero: "更新 claims/<pid>.json 声明该 wid 归属 Agent Screen"
+    Core->>AX: "windows::settle 循环写入 AXPosition + AXSize 移至 display_a"
+    Core-->>AgentA: "返回安置后的窗口几何与状态"
 
-    Note over User,AX: 用户主动 Handover 移入或 Give Back 归还
-    User->>Core : 菜单移入 Handover 或点击归还用户屏幕
-    Core->>Aero : 归还时先移除 claims/<pid>.json 中对应 wid
-    Core->>AX : 按 Held 保存的原始用户屏几何写回 AXPosition + AXSize
+    Note over User,AX: "用户主动 Handover 移入或 Give Back 归还"
+    User->>Core: "菜单移入 Handover 或点击归还用户屏幕"
+    Core->>Aero: "归还时先移除 claims/<pid>.json 中对应 wid"
+    Core->>AX: "按 Held 保存的原始用户屏几何写回 AXPosition + AXSize"
 ```
 
 ## 节点明细表

@@ -6,31 +6,31 @@ Agent Screen 将"逻辑所有权记录 `Held`"与"`WindowServer` 实时屏幕几
 
 ```mermaid
 stateDiagram-v2
-    [*] --> UserScreen : 应用在用户屏幕创建窗口
-    [*] --> UnclaimedCatch : Catch 捕获新窗口通知
+    [*] --> UserScreen : "应用在用户屏幕创建窗口"
+    [*] --> UnclaimedCatch : "Catch 捕获新窗口通知"
 
-    UnclaimedCatch --> UserScreen : ADR 0007 判定归属用户
-    UnclaimedCatch --> SettlingToAgent : ADR 0007 判定归属代理会话
+    UnclaimedCatch --> UserScreen : "ADR 0007 判定归属用户"
+    UnclaimedCatch --> SettlingToAgent : "ADR 0007 判定归属代理会话"
 
-    UserScreen --> PendingAccess : 代理调用 place_window / window_access
-    PendingAccess --> UserScreen : 用户拒绝或请求取消
-    PendingAccess --> SettlingToAgent : 用户批准或主动 Handover 移入
+    UserScreen --> PendingAccess : "代理调用 place_window / window_access"
+    PendingAccess --> UserScreen : "用户拒绝或请求取消"
+    PendingAccess --> SettlingToAgent : "用户批准或主动 Handover 移入"
 
-    SettlingToAgent --> HeldOnDisplay : AeroSpace claim 写入 + windows：：settle 落位成功
-    HeldOnDisplay --> DriftedOffDisplay : 目标应用自发重置 frame 或重排跳屏
-    DriftedOffDisplay --> HeldOnDisplay : guard_placed 或 run_repark_shifts 拉回代理屏
+    SettlingToAgent --> HeldOnDisplay : "AeroSpace claim 写入 + windows::settle 落位成功"
+    HeldOnDisplay --> DriftedOffDisplay : "目标应用自发重置 frame 或重排跳屏"
+    DriftedOffDisplay --> HeldOnDisplay : "guard_placed 或 run_repark_shifts 拉回代理屏"
 
-    HeldOnDisplay --> ViewerDragged : 用户在 Viewer 拖拽窗口 (10s ViewerDragGuard)
-    ViewerDragged --> HeldOnDisplay : 松手后 keep_on_display 夹紧回屏内
+    HeldOnDisplay --> ViewerDragged : "用户在 Viewer 拖拽窗口 (10s ViewerDragGuard)"
+    ViewerDragged --> HeldOnDisplay : "松手后 keep_on_display 夹紧回屏内"
 
-    HeldOnDisplay --> PendingCrossSession : 另一会话发起跨会话 Window Request
-    PendingCrossSession --> HeldOnDisplay : 原会话释放或用户批准, 原子切换 Held 持有者
+    HeldOnDisplay --> PendingCrossSession : "另一会话发起跨会话 Window Request"
+    PendingCrossSession --> HeldOnDisplay : "原会话释放或用户批准, 原子切换 Held 持有者"
 
-    HeldOnDisplay --> ReturningToUser : dismissal：：give_back 或用户主动收回
-    ReturningToUser --> UserScreen : 删除 AeroSpace claim + 恢复保存的原始用户屏 frame
+    HeldOnDisplay --> ReturningToUser : "dismissal::give_back 或用户主动收回"
+    ReturningToUser --> UserScreen : "删除 AeroSpace claim + 恢复保存的原始用户屏 frame"
 
-    HeldOnDisplay --> [*] : 目标窗口关闭 (CGWindowList 消失)
-    UserScreen --> [*] : 目标窗口关闭
+    HeldOnDisplay --> [*] : "目标窗口关闭 (CGWindowList 消失)"
+    UserScreen --> [*] : "目标窗口关闭"
 ```
 
 ## 状态与转换明细表

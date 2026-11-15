@@ -12,24 +12,24 @@ sequenceDiagram
     participant AX as "HIServices AX (Target App)"
     participant SCK as "Streams / Catch (Frame & Window Events)"
 
-    alt 调用 list_windows
-        MCP->>Ctrl : listWindows(display, include_all?)
-        Ctrl->>WS : CGWindowListCopyWindowInfo 读取全系统窗口几何、层级与 PID
-        Ctrl->>Ctrl : 过滤 AeroSpace closet (0x4145/1) 与系统装饰层, 关联 Held 所有权记录 (ADR 0018)
-        Ctrl-->>MCP : 返回窗口列表 (window_id, pid, app, title, bounds, owner_state)
-    else 调用 get_window_state
-        MCP->>Ctrl : getWindowState(display, window_id, root?, max_depth?)
-        Ctrl->>WS : 校验 window_id 存在且归属当前代理显示器或已授权访问
-        Ctrl->>AX : AXUIElementCreateApplication(pid) + AXUIElementSetMessagingTimeout
-        Ctrl->>AX : 按 _AXUIElementGetWindow 精确定位目标 AXWindow (可选从 root 子树起步)
-        AX-->>Ctrl : 递归读取角色、标题、值、可用动作与坐标 (上限 tree：：MAX_ELEMENTS)
-        Ctrl->>Ctrl : 分配元素短引用 ID 供 act_on_element 寻址, 并与上一次快照做结构化 diff
-        Ctrl-->>MCP : 返回 AX 语义树或增量 diff + 焦点状态
-    else 调用 wait_for_change
-        MCP->>Ctrl : waitForChange(display, timeout_ms)
-        Ctrl->>SCK : 订阅 'agent' 捕获流读取初始 Latest：：changes 计数 + 记录初始窗口与树摘要
-        SCK-->>Ctrl : 160x100 亮度网格帧差递增 或 Catch 收到新窗/焦点变化通知
-        Ctrl-->>MCP : 立即唤醒并返回变化类型摘要； 超时则返回未变化状态
+    alt "调用 list_windows"
+        MCP->>Ctrl: "listWindows(display, include_all?)"
+        Ctrl->>WS: "CGWindowListCopyWindowInfo 读取全系统窗口几何、层级与 PID"
+        Ctrl->>Ctrl: "过滤 AeroSpace closet (0x4145/1) 与系统装饰层, 关联 Held 所有权记录 (ADR 0018)"
+        Ctrl-->>MCP: "返回窗口列表 (window_id, pid, app, title, bounds, owner_state)"
+    else "调用 get_window_state"
+        MCP->>Ctrl: "getWindowState(display, window_id, root?, max_depth?)"
+        Ctrl->>WS: "校验 window_id 存在且归属当前代理显示器或已授权访问"
+        Ctrl->>AX: "AXUIElementCreateApplication(pid) + AXUIElementSetMessagingTimeout"
+        Ctrl->>AX: "按 _AXUIElementGetWindow 精确定位目标 AXWindow (可选从 root 子树起步)"
+        AX-->>Ctrl: "递归读取角色、标题、值、可用动作与坐标 (上限 tree::MAX_ELEMENTS)"
+        Ctrl->>Ctrl: "分配元素短引用 ID 供 act_on_element 寻址, 并与上一次快照做结构化 diff"
+        Ctrl-->>MCP: "返回 AX 语义树或增量 diff + 焦点状态"
+    else "调用 wait_for_change"
+        MCP->>Ctrl: "waitForChange(display, timeout_ms)"
+        Ctrl->>SCK: "订阅 'agent' 捕获流读取初始 Latest::changes 计数 + 记录初始窗口与树摘要"
+        SCK-->>Ctrl: "160x100 亮度网格帧差递增 或 Catch 收到新窗/焦点变化通知"
+        Ctrl-->>MCP: "立即唤醒并返回变化类型摘要; 超时则返回未变化状态"
     end
 ```
 

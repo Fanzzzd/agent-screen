@@ -14,33 +14,33 @@ sequenceDiagram
     participant WS as "WindowServer / Global HID / AX"
     participant Target as "Target App (AppKit / Electron)"
 
-    MCP->>Q : enqueue(token, owner, payload： Click / Drag / MenuPress)
-    Q->>Q : 容量校验 (全局<=256, 会话<=64) + token 去重 + 同 Owner 替换旧 Queued 请求
-    alt 会话尚无有效 Grant (IDLE_MS = 30s)
-        Q->>UI : 显示琥珀色徽标与系统通知请求授权 (#206, 排队期不亮全屏红框)
-        UI-->>Q : 用户点击 Allow 开启共享 Grant
+    MCP->>Q: "enqueue(token, owner, payload: Click / Drag / MenuPress)"
+    Q->>Q: "容量校验 (全局<=256, 会话<=64) + token 去重 + 同 Owner 替换旧 Queued 请求"
+    alt "会话尚无有效 Grant (IDLE_MS = 30s)"
+        Q->>UI: "显示琥珀色徽标与系统通知请求授权 (#206, 排队期不亮全屏红框)"
+        UI-->>Q: "用户点击 Allow 开启共享 Grant"
     end
-    Exec->>Exec : 等待 ime：：user_idle() >= 1.0s 且 !inputs_busy() (无 SecureInput / 无物理按键按下)
-    Exec->>Tap : 置 ARMED = true，监听非 0x4153_5121 ('ASQ!') 标记的真实硬件事件
-    Exec->>Exec : 加锁 SESSION_INPUT + process_gate(pid) 写锁，保存用户当前光标、前台应用与主窗口
-    Exec->>WS : come_forward： 续期 AeroSpace claim 500ms + 置目标窗 AXMain/AXFrontmost (等待稳定<=1500ms)
+    Exec->>Exec: "等待 ime::user_idle() >= 1.0s 且 !inputs_busy() (无 SecureInput / 无物理按键按下)"
+    Exec->>Tap: "置 ARMED = true，监听非 0x4153_5121 ('ASQ!') 标记的真实硬件事件"
+    Exec->>Exec: "加锁 SESSION_INPUT + process_gate(pid) 写锁，保存用户当前光标、前台应用与主窗口"
+    Exec->>WS: "come_forward: 续期 AeroSpace claim 500ms + 置目标窗 AXMain/AXFrontmost (等待稳定<=1500ms)"
 
-    alt 借用期间用户触碰物理鼠标或键盘 (或 Tap 超时禁用)
-        WS-->>Tap : 未带 'ASQ!' 标记的 HID 事件 / TapDisabledByTimeout
-        Tap->>Q : 触发 Native：：UserTookInput -> revoke(restore： false)
-        Exec->>WS : Release RAII 守卫释放已按下的合成鼠标键，不回跳光标不抢回焦点
-        Q-->>MCP : 返回 Stopped(Stop：：User)
-    else 全程无用户抢占，执行真实输入载荷
-        alt Real Click
-            Exec->>WS : come_forward 前后双重核验 AX Identity + 局部 RGB 采样 (容差<=10%)
-            Exec->>Target : CGWarpMouseCursorPosition + 带 'ASQ!' 标记的 HID 按下(50ms)与抬起(40ms)
-        else Real Drag (含跨窗口拖拽)
-            Exec->>Target : 12..24 步 smoothstep 轨迹 (8ms 步进)；跨窗轮询 NSPasteboardNameDrag.changeCount<=500ms 并在落点悬停>=200ms
-        else Electron / 原生菜单项 (MenuPress, #39)
-            Exec->>Target : 移至代理屏顶部菜单栏 (<40pt) 等待 AXMenuBarItem<=1000ms -> L 形轨迹滑入子菜单校验 on_display -> 点击或失败 AXCancel 收起
+    alt "借用期间用户触碰物理鼠标或键盘 (或 Tap 超时禁用)"
+        WS-->>Tap: "未带 'ASQ!' 标记的 HID 事件 / TapDisabledByTimeout"
+        Tap->>Q: "触发 Native::UserTookInput -> revoke(restore: false)"
+        Exec->>WS: "Release RAII 守卫释放已按下的合成鼠标键，不回跳光标不抢回焦点"
+        Q-->>MCP: "返回 Stopped(Stop::User)"
+    else "全程无用户抢占，执行真实输入载荷"
+        alt "Real Click"
+            Exec->>WS: "come_forward 前后双重核验 AX Identity + 局部 RGB 采样 (容差<=10%)"
+            Exec->>Target: "CGWarpMouseCursorPosition + 带 'ASQ!' 标记的 HID 按下(50ms)与抬起(40ms)"
+        else "Real Drag (含跨窗口拖拽)"
+            Exec->>Target: "12..24 步 smoothstep 轨迹 (8ms 步进)；跨窗轮询 NSPasteboardNameDrag.changeCount<=500ms 并在落点悬停>=200ms"
+        else "Electron / 原生菜单项 (MenuPress, #39)"
+            Exec->>Target: "移至代理屏顶部菜单栏 (<40pt) 等待 AXMenuBarItem<=1000ms -> L 形轨迹滑入子菜单校验 on_display -> 点击或失败 AXCancel 收起"
         end
-        Exec->>WS : Grant 结束且 !touched() 时： CGWarpMouseCursorPosition 回原位 + 恢复用户 AXMain/AXFocused/前台进程
-        Q-->>MCP : 返回 Completed
+        Exec->>WS: "Grant 结束且 !touched() 时: CGWarpMouseCursorPosition 回原位 + 恢复用户 AXMain/AXFocused/前台进程"
+        Q-->>MCP: "返回 Completed"
     end
 ```
 

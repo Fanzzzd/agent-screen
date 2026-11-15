@@ -14,24 +14,24 @@ sequenceDiagram
     participant SCK as "ScreenCaptureKit"
     participant App as "Target App (AppKit)"
 
-    MCP->>Ctrl : createDisplay(name, width, height, scale)
-    Ctrl->>Ctrl : spares：：pick_spare 优先挑选最小 unit 的空闲 Spare
-    alt 命中空闲 Spare
-        Ctrl->>CGVD : applySettings 切换目标分辨率与 HiDPI
-    else 无可用 Spare 且 budget::within_budget <= 40ms
-        Ctrl->>CGVD : alloc CGVirtualDisplay (vendor=0x5353, model=0x0001, serial)
-        CGVD->>WS : 注册虚拟帧缓冲并分配 CGDirectDisplayID + unitNumber
-        WS->>CS : 注册显示器 ICC 配置并广播重排
+    MCP->>Ctrl: "createDisplay(name, width, height, scale)"
+    Ctrl->>Ctrl: "spares::pick_spare 优先挑选最小 unit 的空闲 Spare"
+    alt "命中空闲 Spare"
+        Ctrl->>CGVD: "applySettings 切换目标分辨率与 HiDPI"
+    else "无可用 Spare 且 budget::within_budget <= 40ms"
+        Ctrl->>CGVD: "alloc CGVirtualDisplay (vendor=0x5353, model=0x0001, serial)"
+        CGVD->>WS: "注册虚拟帧缓冲并分配 CGDirectDisplayID + unitNumber"
+        WS->>CS: "注册显示器 ICC 配置并广播重排"
     end
-    Ctrl->>Ctrl : arrangement：：park 计算对角停放原点 (GAP=2000pt)
-    Ctrl->>WS : CGFBeginDisplayConfiguration + CGConfigureDisplayOrigin
-    Ctrl->>WS : CGCompleteDisplayConfiguration(kCGConfigureForSession=1)
-    WS-->>Ctrl : NSApplicationDidChangeScreenParameters (ScreensChanged)
-    Ctrl->>Ctrl : cg：：unit_twin 检测同 unitNumber 冲突
-    Ctrl->>Ctrl : Core：：screens_changed -> repark + hold_modes + run_repark_shifts
-    Ctrl->>App : AXPosition 平移因重排漂移的已归属窗口
-    Ctrl->>SCK : Streams 预热 1fps warm 流
-    Ctrl-->>MCP : 返回 DisplayHandle (display_id, bounds, scale)
+    Ctrl->>Ctrl: "arrangement::park 计算对角停放原点 (GAP=2000pt)"
+    Ctrl->>WS: "CGFBeginDisplayConfiguration + CGConfigureDisplayOrigin"
+    Ctrl->>WS: "CGCompleteDisplayConfiguration(kCGConfigureForSession=1)"
+    WS-->>Ctrl: "NSApplicationDidChangeScreenParameters (ScreensChanged)"
+    Ctrl->>Ctrl: "cg::unit_twin 检测同 unitNumber 冲突"
+    Ctrl->>Ctrl: "Core::screens_changed -> repark + hold_modes + run_repark_shifts"
+    Ctrl->>App: "AXPosition 平移因重排漂移的已归属窗口"
+    Ctrl->>SCK: "Streams 预热 1fps warm 流"
+    Ctrl-->>MCP: "返回 DisplayHandle (display_id, bounds, scale)"
 ```
 
 ## 节点明细表
