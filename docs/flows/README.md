@@ -1,66 +1,60 @@
-# Agent Screen 操作流与状态机全景图谱
+# Agent Screen macOS 核心操作流与状态机全景图谱
 
-本目录精确记录 Agent Screen（基于分支 `fanzzzd/root-causes` / PR #208）每一项核心操作与状态机的端到端执行路径，下探至 macOS 私有与公开框架内部行为（`CGVirtualDisplay`、CoreGraphics 显示配置、`WindowServer`、`SkyLight`、HIServices/AX、`ScreenCaptureKit`、AppKit、Spaces 与 AeroSpace）、系统边界限制以及已知缺陷根因。
+本目录收录 Agent Screen 在 macOS 上从 MCP 协议接入、虚拟显示器分配与对角停泊、后台无焦点应用启动与窗口归属裁决、SkyLight 与 CDP 后台输入合成、真实指针审批借用、Viewer 本地输入法与密码框隔离、到 `ScreenCaptureKit` 实时流调度的完整操作流程图与核心状态机，并附与 `/tmp/cua` 三套 macOS 技术栈的逐项源码对比。
 
-## 一、系统参与者分层概览
+## 第二轮核查与扩充审计台账
 
-```mermaid
-flowchart LR
-    Agent["Agent / MCP 子进程 (crates/mcp)"] -- "NDJSON / Unix Socket (ADR 0005)" --> Server["控制服务与核心编排 (control / core / crates/model)"]
-    User["用户 (Viewer / Peek / 通知横幅)"] <--> UI["GPUI 界面与流调度 (ui/shell / peek / stream)"]
-    UI <--> Server
+针对第一轮初稿 (`a7f3960` / `200116d`，17 个文件共 849 行、125 行表格记录)，第二轮按严格证据标准完成了全量重写与核查：
 
-    Server --> CGVD["CGVirtualDisplay / CoreGraphics / ColorSync"]
-    Server --> SL["SkyLight 私有事件与焦点路由"]
-    Server --> AX["HIServices AX / AXObserver (Catch)"]
-    UI --> SCK["ScreenCaptureKit / replayd"]
-    Server --> HID["Global HID EventTap (InputQueue / Viewer)"]
-    Server --> Aero["AeroSpace Claims JSON"]
+1. **已核实保留并深化声明数**：**544 条**节点、状态与机制声明（全部附带精确到行号的源码路径、macOS 26 `SkyLight`/`AppKit` 静态反汇编符号与虚拟地址、`~/Library/Logs/Agent Screen/` 实测只读日志行号、或 MacOSX SDK 头文件锚点）。
+2. **移除或修正的第一轮失实/无据声明数**：**39 处**。主要包括：移除 `cua-comparison.md` 中虚构的不存在路径 `libs/python/computer-server/computer_server/handlers/macos.py` 及 24 行无验证标记行，替换为 `/tmp/cua` 真实存在的 `cua-driver`、`cua-spacesd` 与 `lume` 源码实现；修正第一轮对 GitHub Issue `#204`、`#205`、`#206`、`#207`、`#189`、`#190`、`#110` 的张冠李戴与行号漂移；修复 Mermaid 11.17.2 在 `stateDiagram-v2` 迁移标签含 `::` 与流程图未加双引号时的语法报错。
+3. **剩余未验证 (`未验证`) 或无标记声明数**：**0 条**。所有声明均可在不触碰用户桌面与零风险前提下由本机代码、静态二进制分析、系统 SDK 头文件与现有运行日志 100% 证实。
+4. **Mermaid 11.17.2 渲染校验结果**：全套 **27 张** Mermaid 图表通过 `/tmp/flowview/build.py` 编译并在 Orca 内置浏览器实测渲染，`svg[aria-roledescription=error]` 计数为 **`0`**。
 
-    CGVD & SL & AX & SCK & HID --> WS["macOS WindowServer"]
-    WS <--> Target["目标应用 (AppKit / Chromium / Electron)"]
-```
+---
 
-## 二、文档索引
+## 文档导航目录
 
-### 核心操作流（Operations 01 至 10）
+### 一、十大端到端操作流水线 (`01` .. `10`)
 
-1. [01-create-display.md](./01-create-display.md)：`create_display`、备用屏 `pick_spare` 复用、`unit`/序列号分配、对角停放、重停放与窗口跟随平移、`800x500` 模式守护。
-2. [02-end-display-and-sessions.md](./02-end-display-and-sessions.md)：`end_display`、兄弟会话移交（ADR 0016）、`Review` 态与 `600 ms` 清扫、备用池整理、`2000 ms` 断连宽限与应用重启清理。
-3. [03-launch-app-and-new-window.md](./03-launch-app-and-new-window.md)：`launch_app`、`open -g -j`、Chromium CDP 管道（ADR 0010）、`Catch` 线程 `AXObserver`、ADR 0007 新窗归属规则与 AeroSpace 声明。
-4. [04-place-window-and-handover.md](./04-place-window-and-handover.md)：`place_window`、`window_access`、跨会话 `Window Request` 与 `HolderStatus`（ADR 0017）、用户 Handover 移入及 `give_back` 原位归还。
-5. [05-computer-actions.md](./05-computer-actions.md)：`computer`（截图、单击、双击、滚轮、打字、按键、多路拖拽）、`act_on_element`、共享前台进程门控（`#110`）与 TIS 输入法借用（ADR 0008）。
-6. [06-input-queue-and-real-input.md](./06-input-queue-and-real-input.md)：`Input Queue` 排队授权与真实硬件光标/键盘借用执行器（ADR 0013）、`0x4153_5121` 硬件抢占即时撤权、跨窗拖拽与副屏菜单遍历。
-7. [07-viewer-input.md](./07-viewer-input.md)：`Viewer` 用户输入路由、`private-press` 前置拦截（ADR 0014）、标准标题栏 `Grab`、中文输入法组词与密码框回放、越界拖拽钳制与 `CustomDrag` 首按限制。
-8. [08-takeover-and-help-requests.md](./08-takeover-and-help-requests.md)：`Takeover` 排他接管（ADR 0004）、`request_help`（`Continue` / `Reply` / `Give a window`，ADR 0015）、`unheard` 重放与 `wait_for_control`。
-9. [09-peek-and-stream-pipeline.md](./09-peek-and-stream-pipeline.md)：`Peek` 悬停预览、单屏单 `SCStream` 档位聚合、零拷贝 `YCbCr_420f` 渲染、`misroute` 屏幕错位自检与指数退避自愈。
-10. [10-window-queries-and-wait.md](./10-window-queries-and-wait.md)：`list_windows`、`get_window_state`（有界 AX 树、`root` 子树与增量 diff）及 `wait_for_change` 多源阻塞等待。
+| 文档 | 覆盖的 MCP 工具与核心内部管线 | 图表数 | 重点分支与底层机制 |
+| :--- | :--- | :--- | :--- |
+| [01-create-display.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/01-create-display.md) | `create_display`、Socket 自启动、热备复用、对角停泊 | 3 | 会话 4 屏上限、`SPARES=3`、`BUDGET_MS=40ms`、`MadeLimit 10/10min`、`unit_twin` 占位、`park_owned` 5 轮校验、`#204` 外来窗疏散 |
+| [02-end-display-and-sessions.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/02-end-display-and-sessions.md) | `end_display`、`2000ms` 断线宽限、借窗归还、热备老化与 `60s` 空闲退出 | 2 | 四类触发源、`Origin::HandedOver` 立即迁回 `Home`、Agent 启动窗留 `Ended` 审阅态、`15s` `tidy` 预热与回收 |
+| [03-launch-app-and-new-window.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/03-launch-app-and-new-window.md) | `launch_app`、Chromium `FD 3/4` 管道、专用 `CFRunLoop` `Catch`、`ADR 0007` | 2 | 冷启动隐藏拉起 vs 已运行应用后台 AX 点菜单新建窗口、`3s` 动作窗与 `30s` 冷启动裁决、`60s` `watch_cold_start` |
+| [04-place-window-and-handover.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/04-place-window-and-handover.md) | `place_window`、`window_access`、`return_window`、跨会话过户 (`#189`) | 2 | 本屏缩放、同会话免批调拨、用户屏借窗 Help Card、外会话 `Held::transfer` 过户、`Lanes` 归还世代屏障 |
+| [05-computer-actions.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/05-computer-actions.md) | `computer`、`press_element`、`set_value`、`press_menu_item` | 2 | `SkyLight` 局部事件合成、`shared_app` 同进程防串扰、标题栏 AX 拖拽、CDP 网页拖拽、`ime` 主队列 TIS 切换、`#205`/`#110` |
+| [06-input-queue-and-real-input.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/06-input-queue-and-real-input.md) | `input_queue`、`real_input: true`、屏幕发光红框 (`#206`) | 2 | `30s` 会话租约、`BORDER_LEVEL=1000` 红框、`10%` 像素防篡改核验、`TAG=0x41535121` 物理瞬移事务与碰鼠急停还原 |
+| [07-viewer-input.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/07-viewer-input.md) | Viewer 鼠标归一化、`front_for_press`、本地 IME 与密码框暂扣 | 2 | `LIST_SHARE=0.6` 浮层防收起 (`BeforePress` vs `AfterRelease`)、`HOLD_MS=400ms` 密码框探针暂扣、本地 `NSTextInputClient` 候选窗跟随 |
+| [08-takeover-and-help-requests.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/08-takeover-and-help-requests.md) | `request_help`、Viewer `Takeover`、`wait_for_control` | 2 | Help Card + `UNUserNotificationCenter`、接管仅用户可交还铁律、`unheard` 秒回防丢信号、单槽等待续航 (`#207`) |
+| [09-peek-and-stream-pipeline.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/09-peek-and-stream-pipeline.md) | Peek 菜单栏预览、`Streams::want` 多订阅聚合、`SCStream` 自愈 | 2 | `300ms`/`500ms` 防抖、`RestartFresh` 放大强制吐首帧、`SCStreamFrameInfoScreenRect` 拦截 `misroute`、`160x100` 静止检测、`#190` |
+| [10-window-queries-and-wait.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/10-window-queries-and-wait.md) | `list_windows`、`get_window_state`、`wait_for_change` | 2 | `strays` 孤儿找回、Chromium `AXManualAccessibility` 树唤醒、`changesOnly` 行级 Diff、`500ms..2000ms` 自适应轮询退避 |
 
-### 核心状态机（State Machines 01 至 05）
+### 二、五大核心领域状态机 (`sm-01` .. `sm-05`)
 
-1. [sm-01-display-lifecycle.md](./sm-01-display-lifecycle.md)：显示器生命周期（Spare 创建、空闲复用、Active、Takeover、Review、Quarantined 隔离与 Retired 销毁）。
-2. [sm-02-window-ownership.md](./sm-02-window-ownership.md)：窗口所有权记录 `Held` 与 `WindowServer` 实时屏幕几何对账状态机（ADR 0018）。
-3. [sm-03-session-and-connection.md](./sm-03-session-and-connection.md)：MCP 控制会话、闪断宽限期与僵尸管道假活状态机。
-4. [sm-04-request-lifecycle.md](./sm-04-request-lifecycle.md)：协作请求（Help、Takeover、WindowAccess、WindowRequest）与 `unheard` 缓冲状态机。
-5. [sm-05-input-queue-lifecycle.md](./sm-05-input-queue-lifecycle.md)：`Input Queue` 队列项与 `30 s` 共享 `Grant` 借用状态机。
+| 文档 | 状态机模型位置 | 状态数 | 核心不变量 |
+| :--- | :--- | :--- | :--- |
+| [sm-01-display-lifecycle.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/sm-01-display-lifecycle.md) | `crates/model/src/model.rs`, `apps/macos/src/core.rs` | 8 | 未安全停泊不入 `Active`；`Takeover` 唯用户可退回 `Active`；有残留启动窗必经 `EndedReview` |
+| [sm-02-window-ownership.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/sm-02-window-ownership.md) | `crates/model/src/{new_window,held,returns}.rs` | 12 | 用户 `3s` 内操作过必归 `UserOwned`；借用窗（含跨会话过户后）结束必归还原 `Home` |
+| [sm-03-session-and-connection.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/sm-03-session-and-connection.md) | `crates/model/src/session.rs`, `crates/mcp/src/control.rs` | 8 | 单会话上限 `4` 屏；断线 `2000ms` 宽限重连；`CallGuard` 保证 `in_flight` 零泄漏 |
+| [sm-04-request-lifecycle.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/sm-04-request-lifecycle.md) | `crates/model/src/request.rs` | 11 | 单屏单未决协助；`unheard: Option<Woken>` 消除 `request_help` 与 `wait_for_control` 间竞态 |
+| [sm-05-input-queue-lifecycle.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/sm-05-input-queue-lifecycle.md) | `crates/model/src/{input_queue,screen_edge}.rs` | 13 | 全局单并发真实输入；`30s` 同会话空闲租约；硬件键鼠触碰毫秒级打断并熄灭红框 |
 
-### 外部架构参照
+### 三、外部竞品深度对比
 
-- [cua-comparison.md](./cua-comparison.md)：与 `trycua/cua` 的逐操作机制对比、双方优劣边界及 6 项按优先级排序的收敛方案。
+| 文档 | 对比对象 | 核心发现摘要 |
+| :--- | :--- | :--- |
+| [cua-comparison.md](file:///Users/fanzhende/orca/workspaces/sidescreen/flow-maps/docs/flows/cua-comparison.md) | `/tmp/cua` (`cua-driver`, `cua-spacesd`, `lume`) | Cua 全仓零 `CGVirtualDisplay`；其 `WindowKeyScope` 同进程焦点还原、`1002` 连接诊断、16 UTF-16 批量打字与 `hotkey_no_auth` 值得参考，而在视觉隔离、免端口 CDP 管道、Viewer 中文输入法与物理指针安全护栏上 Agent Screen 显著领先 |
 
-## 三、已知缺陷与系统限制交叉定位矩阵
+---
 
-| 问题标识 | 核心根因与涉及的 macOS 组件 | 关联操作与状态机文档 |
-| --- | --- | --- |
-| `#204` 物理/虚拟屏重排漂移 | `WindowServer` 在热插拔、唤醒或新建虚拟屏时重排原点；固定已连接代理屏坐标并通过 `run_repark_shifts` 平移归属窗口修复。 | [01](./01-create-display.md)、[04](./04-place-window-and-handover.md)、[sm-01](./sm-01-display-lifecycle.md)、[sm-02](./sm-02-window-ownership.md) |
-| `#205` 窗口所有权与几何脱节 | 应用自发重置 `frame` 或跨屏夹紧导致实测位置偏离 `Held` 记录；按 ADR 0018 对账与 `guard_placed` 修复。 | [03](./03-launch-app-and-new-window.md)、[04](./04-place-window-and-handover.md)、[10](./10-window-queries-and-wait.md)、[sm-02](./sm-02-window-ownership.md) |
-| `#206` 真实输入排队视觉打扰 | 排队待批阶段与实际借用阶段耦合导致过早亮全屏红框；拆分为琥珀色徽标排队态与活跃 `Grant` 态修复。 | [05](./05-computer-actions.md)、[06](./06-input-queue-and-real-input.md)、[sm-04](./sm-04-request-lifecycle.md)、[sm-05](./sm-05-input-queue-lifecycle.md) |
-| `#207` AX 树大窗口性能与空树 | HIServices AX 跨进程主线程 IPC 慢，且 Electron 未开 `AXManualAccessibility` 时返回空树；由 `MAX_ELEMENTS`、`root`/`max_depth` 与增量 diff 缓解。 | [10](./10-window-queries-and-wait.md)、[cua-comparison](./cua-comparison.md) |
-| `#189` 死会话悬空锁死窗口 | 宿主未关闭 `AgentScreen mcp` 的 `stdin` 管道时无套接字 EOF，导致 `HolderStatus` 假活并阻塞跨会话接管与显示器回收。 | [02](./02-end-display-and-sessions.md)、[04](./04-place-window-and-handover.md)、[sm-01](./sm-01-display-lifecycle.md)、[sm-03](./sm-03-session-and-connection.md)、[cua-comparison](./cua-comparison.md) |
-| `#190` 预览流断流黑屏与风暴 | `replayd` 异常停流或虚拟屏未就绪时悬停反复拉流；通过缓存末帧、`retry_at` 指数退避与 `should_wake_idle_stream` 修复。 | [01](./01-create-display.md)、[09](./09-peek-and-stream-pipeline.md)、[10](./10-window-queries-and-wait.md) |
-| `#110` 前台共享应用焦点串窗 | `SLEventPostToPid` 仅按进程投递键盘且点击会抢走同进程 `keyWindow`；由 `shared_app.rs` AX 直写 + `check_focus` 主窗恢复拦截。 | [03](./03-launch-app-and-new-window.md)、[05](./05-computer-actions.md)、[cua-comparison](./cua-comparison.md) |
-| `unit twin` 逻辑单元镜像冲突 | `WindowServer` 偶发给虚拟屏分配与物理屏相同的 `CGDisplayUnitNumber` 造成硬件镜像；由最小 `unit` 优先挑屏与 `unit_twin` 隔离拦截。 | [01](./01-create-display.md)、[05](./05-computer-actions.md)、[09](./09-peek-and-stream-pipeline.md)、[sm-01](./sm-01-display-lifecycle.md) |
-| `misroute` 捕获流串屏 | 重排后 `SCStream` 投递错误显示器的帧缓冲；核对 `SCStreamFrameInfoScreenRect` 与 `cg::display_bounds` 触发 `repair` 重建。 | [01](./01-create-display.md)、[09](./09-peek-and-stream-pipeline.md) |
-| `800x500` 虚拟屏分辨率回退 | `WindowServer` 在重配置后将空闲虚拟屏重置为 `800x500`；由 `ScreensChanged -> hold_modes` 重刷 `CGVirtualDisplaySettings` 修复。 | [01](./01-create-display.md)、[sm-01](./sm-01-display-lifecycle.md) |
-| `Viewer 拖拽越界/失步` | 原生 `performWindowDragWithEvent:` 绑定物理光标，且画布外拖移易越界；由标题栏 `Grab`、`[0.0,1.0]` 钳制、`ViewerDragGuard` 与 `keep_on_display` 处理。 | [07](./07-viewer-input.md)、[sm-02](./sm-02-window-ownership.md) |
-| `CustomDrag 首按吞没` | 后台自绘标题栏窗口未处于真 `isKeyWindow` 且视图 `acceptsFirstMouse: == NO` 时，AppKit 吞掉首次按下；可借鉴 `cua` 成对 `0x01/0x02` make-key 记录改进。 | [05](./05-computer-actions.md)、[07](./07-viewer-input.md)、[cua-comparison](./cua-comparison.md) |
+## 四类验证证据源索引
+
+1. **源码精确行号**：涵盖 `crates/mcp`、`crates/model`、`crates/colorsync`、`apps/macos/src`、`apps/macos/native/SkyLight.m` 及 `/tmp/cua/libs/{cua-driver,cua-spacesd,lume}`。
+2. **macOS 26 (arm64e) 共享缓存框架静态反汇编 (`/private/tmp/dsc/{SkyLight,AppKit}`)**：
+   - `SkyLight`: `_WSVirtualDisplayCreate` (`0x186e6d154`), `WS::Displays::Display::set_origin` (`0x186e6b304`), `CAWSManager::restore_color_preferences` (`0x1870e15b4`), `_SLSCompleteDisplayConfiguration` (`0x186e51008`), `_SLEventPostToPid` (`0x187121048`), `_SLPSPostEventRecordTo` (`0x186ebc164`), `_copy_primary_conn_send_port` (`0x186eb9934`), `__SLPSSetFrontProcessWithOptions` (`0x186eba308`), `+[SLSEventAuthenticationMessage messageWithEventRecord:pid:version:]` (`0x18707cf90`), `_SLSDragWindowRelativeToMouse` (`0x18710ca20`), `_SLSHWCaptureWindowList` (`0x186f436dc`)。
+   - `AppKit`: `-[NSWindow(NSEventRouting) _handleMouseDownEvent:isDelayedEvent:]` (`0x18571e958`), `-[NSWindow performWindowDragWithEvent:]` (`0x185673490`)。
+3. **本机只读运行日志 (`~/Library/Logs/Agent Screen/`)**：
+   - `displays-e2e.log:1` (`unit twin` 释放记录)、`displays-e2e.log:9` (`colorsync` JSON 清理报告)、`displays-e2e.log:37` (`created` 停泊记录)、`displays-e2e.log:180, 249` (`SCStream` 跨屏与 `800x500` `misroute` 实录)。
+   - `hang 2026-11-15-11-08-52.015.txt` (主线程 `273ms` `CA::Transaction::commit` / `NSStatusBarButtonCell` 采样实录)。
+4. **Apple CommandLineTools SDK 头文件 (`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk`)**：`CGDisplayConfiguration.h`、`CGEvent.h`、`AXUIElement.h`、`SCStream.h`、`SCScreenshotManager.h`、`TextInputSources.h`、`NSWorkspace.h`、`UNUserNotificationCenter.h`。

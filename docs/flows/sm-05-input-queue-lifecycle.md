@@ -1,50 +1,53 @@
-# 状态机 05：Input Queue 真实输入项与授权生命周期（ADR 0013）
+# SM-05. 真实输入队列 (`InputQueue`) 与租约授权 (`Grant`) 状态机
 
-`Input Queue` 严密管控每一次真实物理光标与前台焦点的借用。它将单条请求状态机与会话级 `30 s` 共享 `Grant` 解耦，保证队列等待期零视觉打扰（`#206`），并在真实硬件输入到达的第一时间无条件中止借用且不回拉用户光标。
+全局唯一的真实输入队列状态机 `input_queue::Queue` (`crates/model/src/input_queue.rs`) 负责协调多会话并发发起的物理指针借用请求 (`ADR 0013`)，并驱动用户物理屏幕四周的发光红框状态机 `screen_edge` (`crates/model/src/screen_edge.rs`, `#206`)。它同时维护两层状态：**单条请求状态 (`Status`)** 与 **会话级临时输入租约 (`Grant`)**。一次用户点击“允许”为当前会话建立 `Grant` 租约，使该会话紧接着的后续真实输入步骤在 `IDLE_MS = 30_000` (`30s`) 空闲期内免于重复弹窗；但只要用户移动物理鼠标、敲击物理键盘、进入 `Takeover`、Agent 主动调 `done`、或空闲满 `30s`，`Grant` 租约即刻废止并熄灭屏幕边缘红框。
 
-## 状态图
+---
+
+## 状态迁移图
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Rejected : "超出配额 (全局>256 或 会话>64) 或命中已拒绝 token"
-    [*] --> Queued : "enqueue 通过校验 (同 Owner 旧 Queued 项转 Stopped::Replaced)"
-
-    Queued --> StoppedReplaced : "同一 Owner 提交更新请求"
-    Queued --> StoppedDeclined : "用户点击 Decline 拒绝授权"
-    Queued --> StoppedWithdrawn : "会话断连过期或主动撤回"
-
-    Queued --> WaitingIdle : "用户批准开启 Grant (30s 空闲续期) 或命中既有有效 Grant"
-    WaitingIdle --> ArmedLoan : "ime::user_idle >= 1.0s 且 !inputs_busy() 且拿到 SESSION_INPUT 锁"
-
-    ArmedLoan --> StoppingUser : "ListenOnly HIDEventTap 捕获非 'ASQ!' 硬件输入或 Tap 超时禁用"
-    ArmedLoan --> StoppingTargetChanged : "come_forward 后 AX Identity 或 RGB 采样不一致 (#121)"
-    ArmedLoan --> Executing : "前置稳定且一致性核验通过, 发送带 'ASQ!' 标记的真实 HID 序列"
-
-    Executing --> StoppingUser : "执行中途用户触碰物理键鼠"
-    Executing --> Completed : "动作完成, Release 守卫收尾"
-
-    StoppingUser --> StoppedUser : "释放合成按下键 + AXCancel 收起已开菜单, 废除 Grant 且绝不回拉光标 (restore=false)"
-    StoppingTargetChanged --> StoppedFailed : "中止点击, 若未触碰用户键鼠则按 Grant 空闲收尾归还现场"
-
-    Completed --> GrantIdle : "释放单次锁; 若队列仍有项则继续下一项, 否则等待队列或 Grant 结束"
-    GrantIdle --> WaitingIdle : "30s 内新请求入队复用 Grant"
-    GrantIdle --> Restored : "队列清空收尾且 !touched(): CGWarpMouseCursorPosition + 恢复用户 AXMain 与前台进程"
-
-    Rejected --> [*]
-    StoppedReplaced --> [*]
-    StoppedDeclined --> [*]
-    StoppedWithdrawn --> [*]
-    StoppedUser --> [*]
-    StoppedFailed --> [*]
-    Restored --> [*]
+    [*] --> Rejected : 超出全局上限 (MAX_REQUESTS=256) 或单会话上限 (MAX_SESSION_REQUESTS=64)
+    [*] --> QueuedWaiting : Queue.enqueue 入队且当前无覆盖本会话的 Grant 租约 (点亮审批态红框与 Input Bar)
+    [*] --> AdmittedReady : Queue.enqueue 入队且命中同 sessionKey 活跃 Grant 租约
+    QueuedWaiting --> Withdrawn : Agent 调用 input_queue(withdraw) 主动撤回
+    QueuedWaiting --> Declined : 用户在 Input Bar 点击 Decline 拒绝本次批次
+    QueuedWaiting --> Cancelled : 屏幕结束 end_display / 用户接管 takeover / 连接断开 disconnect
+    QueuedWaiting --> AdmittedReady : 用户点击 Allow 批准 (Queue.allow 建立同会话 Grant 租约并保持激活红框)
+    AdmittedReady --> Cancelled : 轮到执行前屏幕结束 / 用户接管 / 连接断开
+    AdmittedReady --> LapsedBeforeRun : 获批后尚未开跑前用户动了鼠标 (user_input) 或满 30s 空闲过期 (tick)
+    AdmittedReady --> RunningActive : Queue.start 锁定队首唯一下发执行并挂载硬件监听 arm(true)
+    RunningActive --> InterruptedByUser : 执行中途 CGEventTap 捕获非 TAG 真实键鼠事件 (松键还原并废止 Grant)
+    RunningActive --> AbortedPrePress : inputs_busy 忙 或 CONTENT_CHANGED (像素变化 >=10% / 控件改变) 放弃按下
+    RunningActive --> Completed : 动作干净跑完且 restore(saved) 还原用户原光标与原前台进程 (Queue.finish)
+    Completed --> GrantIdleWindow : 同会话 Grant 租约进入 30s 倒计时 (允许后续同会话请求走 AdmittedReady)
+    AbortedPrePress --> GrantIdleWindow : 未触及用户中断时保留租约供 Agent 刷新坐标重试
+    GrantIdleWindow --> GrantEnded : 满 IDLE_MS (30s) 无新请求 / 用户碰键鼠 / Agent 调 done / 屏幕结束 (熄灭红框)
+    InterruptedByUser --> GrantEnded : 硬件抢占立即销毁租约并熄灭红框
+    LapsedBeforeRun --> GrantEnded : 租约失效返回 LAPSED_NEXT 提示重新申请
+    Withdrawn --> [*] : forget 清理终端记录
+    Declined --> [*] : 返回拒绝错误并熄灭红框
+    Cancelled --> [*] : 返回对应生命周期中断错误
+    GrantEnded --> [*] : acknowledge_end 确认红框与 Input Bar 已完全收起
 ```
 
-## 状态与转换明细表
+---
 
-| 节点 | 我方代码 | macOS 组件与内部行为 | 限制与故障模式 | 关联问题 | 验证状态 |
-| --- | --- | --- | --- | --- | --- |
-| 1. `[*] -> Queued / StoppedReplaced` | `crates/model/src/input_queue.rs:1-210` | 检查 `MAX_REQUESTS = 256` 与 `MAX_SESSION_REQUESTS = 64`；校验 `token` 幂等表（若该 `token` 此前已被拒绝，原样返回 `Stopped::Declined` 防止重复弹窗）；若同一 `Owner` 已有 `Queued` 项，将其置为 `Stopped::Replaced`。排队态仅亮琥珀色徽标与通知，不画屏幕红框（`#206`）。 | 单会话短时间堆积超过 64 条未决请求时新请求直接被拒。 | `#206`、ADR 0013 | `[已验证]` `crates/model/src/input_queue.rs:1-210` |
-| 2. `Queued -> WaitingIdle -> ArmedLoan` | `crates/model/src/input_queue.rs:211-340`、`apps/macos/src/ui/shell.rs:1330-1410` | 用户批准后生成 `IDLE_MS = 30_000 ms` 的会话共享 `Grant`。调度循环轮询 `ime::user_idle() >= 1.0 s`（利用 `ime::note_posted()` 排除 SkyLight `_CGSTickleActivityMonitor` 伪活跃）、`!IsSecureEventInputEnabled()`、无物理按键/修饰键按下，获取 `SESSION_INPUT` 与 `process_gate(pid)` 写锁，并置 `ARMED = true`。 | 终端或密码输入开启 `SecureEventInput`、或用户持续打字移动鼠标时，状态安全停留在 `WaitingIdle` 不抢控制权。 | ADR 0013 | `[已验证]` `apps/macos/src/mac/real_input.rs:300-415`、`apps/macos/src/mac/ime.rs:64-80` |
-| 3. `ArmedLoan -> Executing / StoppingTargetChanged` | `apps/macos/src/mac/real_input.rs:420-545`、`crates/model/src/real_click.rs:1-210` | 采集前置前 AX `Identity` 与像素 RGB 样本，刷新 AeroSpace `claims/<pid>.json` `500 ms`，置目标 `AXMain` + `AXFrontmost` 等待几何稳定 `300 ms`（上限 `1500 ms`），再次采集并调用 `still()` 比对；不一致则转入 `StoppingTargetChanged`。 | 拦截激活瞬间弹窗顶替或 AeroSpace 强拉窗口造成的误点击（修复 `#121`）。 | `#121` | `[已验证]` `apps/macos/src/ui/shell.rs:1385-1500` |
-| 4. `ArmedLoan / Executing -> StoppingUser -> StoppedUser` | `apps/macos/src/mac/real_input.rs:80-295, 1180-1240` | 主运行循环 `ListenOnly` `HIDEventTap` 发现不含 `kCGEventSourceUserData == 0x4153_5121`（`"ASQ!"`）的真实硬件事件，或收到 `kCGEventTapDisabledByTimeout`（`0xFFFFFFFE`），立即触发 `Native::UserTookInput -> revoke()`：`Release` 守卫松开合成鼠标键，菜单路径发送 `AXCancel` 关闭半开菜单，销毁当前 `Grant`，且强制 `restore = false` 绝不回跳光标或切走用户刚点中的前台窗口。 | 主线程若阻塞引发系统自动禁用 EventTap，会被保守当作用户抢占立即中止本次借用。 | ADR 0013、`CGEventTypes.h:130-131` | `[已验证]` `apps/macos/src/mac/real_input.rs:80-295` |
-| 5. `Completed -> GrantIdle -> Restored` | `apps/macos/src/ui/shell.rs:1505-1560`、`apps/macos/src/mac/real_input.rs:550-640` | 单项执行完毕后若队列为空且全程 `!touched()`，执行 `GrantEnd { restore: true }`：`CGWarpMouseCursorPosition` 跳回原光标坐标、`CGAssociateMouseAndMouseCursorPosition(true)` 解除跳变冻结、写回用户原窗口 `AXMain` 与焦点元素 `AXFocused`、调用 `ime::return_front_unless` 恢复原前台应用；`Grant` 自身在 `30 s` 空闲期内仍可免弹窗服务同会话后续请求。 | 连续多项真实输入可在一次用户授权下批处理完成；超过 `30 s` 无后续请求则 `Grant` 自动失效，下次需重新确认。 | `#206`、ADR 0013 | `[已验证]` `apps/macos/src/ui/shell.rs:1505-1560`、`crates/model/src/input_queue.rs:280-380` |
+## 状态、停止原因 (`Stop`) 与发光红框 (`screen_edge`) 映射表
+
+| 状态 ID | 模型表示 (`crates/model/src/input_queue.rs`) | 核心守卫与容量/计时常数 | 物理屏边缘红框与 Input Bar (`#206`) | Agent 侧返回结果 | 验证来源 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `Rejected` | `EnqueueError::QueueFull` / `SessionFull` (`input_queue.rs:10-13, 140-148`) | 全局未决请求 `>= 256` 或单 `sessionKey` 未决请求 `>= 64` | 不改变现有 UI 状态 | 错误码 `failed`（队列已满） | [已验证: crates/model/src/input_queue.rs:10-13, crates/model/src/input_queue.rs:140-148] |
+| `QueuedWaiting` | `Status::Waiting` 且 `grant.is_none()` (`input_queue.rs:49-58, 299-390`) | 按 FIFO 排队等待用户批准当前 `approval` 批次号 | 点亮 `BORDER_LEVEL = 1000` 四周发光红框 (`EDGE = 2.0pt`, `GLOW_RADIUS = 7.0pt`, `GLOW_OPACITY = 0.45`) + 弹出顶部双语 `InputBar` 显示操作目标与原因 | 工具调用阻塞挂起等待审批 | [已验证: crates/model/src/input_queue.rs:299-390, apps/macos/src/mac/native.rs:143, apps/macos/src/mac/native.rs:765-950, Issue #206] |
+| `AdmittedReady` | `Status::Waiting` 且 `Grant::admits(owner) == true` (`input_queue.rs:115-132, 392-424`) | `Grant` 的 `session_key` 与请求方一致且租约未失效 | 红框保持点亮警示指针随时会被借用，无需用户再次点按钮 | 排到队首即转 `RunningActive` | [已验证: crates/model/src/input_queue.rs:115-132, crates/model/src/input_queue.rs:392-424] |
+| `Withdrawn` | `Status::Stopped(Stop::Withdrawn)` (`input_queue.rs:34-47, 267-297`) | 仅请求所属 `Owner` 可撤回尚未开始执行的 `Waiting` 请求 | 若无其余排队项且无租约，红框与 `InputBar` 收起 | `withdraw` 返回成功确认，原挂起调用返回已撤回 | [已验证: crates/model/src/input_queue.rs:34-47, crates/model/src/input_queue.rs:267-297] |
+| `Declined` | `Status::Stopped(Stop::Declined)` (`input_queue.rs:502-515`) | 用户针对当前 `approval` 代数点击拒绝，同批次同会话等待项一并结案 | 红框与 `InputBar` 立即收起 | 错误码 `failed`：`the user declined the real-input request` | [已验证: crates/model/src/input_queue.rs:502-515, apps/macos/src/input_queue.rs:360-385] |
+| `Cancelled` | `Status::Stopped(Stop::DisplayEnded \| UserTakeover \| Disconnected)` (`input_queue.rs:530-563`) | 归属屏幕关闭、用户在 Viewer 接管屏幕、或所属连接断开 | 若当前 `Grant` 属于该屏/连接则一并终止红框 | 返回 `display_ended` / `user_takeover` / `failed` | [已验证: crates/model/src/input_queue.rs:530-563] |
+| `LapsedBeforeRun` | `Status::Stopped(Stop::ApprovalEnded)` (`input_queue.rs:492-500, 565-576`) | 请求曾获批，但在排到它开跑前用户动了鼠标 (`user_input`) 或租约空闲超 `30s` | 生成 `GrantEnd` 熄灭红框 | 错误码 `failed`：返回 `LAPSED_NEXT` 说明获批后在运行前租约已结束 (`apps/macos/src/input_queue.rs:16-19`) | [已验证: crates/model/src/input_queue.rs:492-500, apps/macos/src/input_queue.rs:16-19] |
+| `RunningActive` | `Status::Active` (`input_queue.rs:426-447`) | 全局严格单并发（最多 `1` 个 `Active` 请求）；`real_input::arm(true)` 实时监测物理键鼠，合成事件携带 `TAG = 0x4153_5121` | 红框持续发光，`InputBar` 展示正在执行指示 | 后台执行约 `110ms` (点击) 或插值拖拽过程 | [已验证: crates/model/src/input_queue.rs:426-447, apps/macos/src/mac/real_input.rs:46, apps/macos/src/mac/real_input.rs:84-97] |
+| `AbortedPrePress` | `Queue::fail` / `finish` (`input_queue.rs:618-624`, `real_input.rs:757`, `real_click.rs:73`) | 按下鼠标前发现用户正按着按键 (`inputs_busy`)，或审批期间页面变化 `>= 10%` (`CONTENT_CHANGED`) | 若因用户按着鼠标则废止租约熄红框；若仅因页面内容改变则保留租约供重发 | 错误码 `failed`（明确承诺 `nothing was pressed`） | [已验证: apps/macos/src/mac/real_input.rs:653-672, apps/macos/src/mac/real_input.rs:757-762, crates/model/src/real_click.rs:73-78] |
+| `InterruptedByUser` | `real_input::touched() == true` + `Queue::user_input` (`real_input.rs:98-102, 618-635`, `input_queue.rs:492-500`) | 执行途中捕获任何非 `TAG` 硬件输入：`Release::drop` 强制补发 `MouseUp`，`restore(saved)` 归还前台并停止抢指针 | 立即废止 `Grant` 并熄灭屏幕红框 | 错误码 `failed`（报告用户移动鼠标/按键打断了执行） | [已验证: apps/macos/src/mac/real_input.rs:98-102, apps/macos/src/mac/real_input.rs:618-635, crates/model/src/input_queue.rs:492-500] |
+| `Completed` | `Status::Done` (`input_queue.rs:49-58, 470-490`) | `restore(saved)` 已把物理光标瞬移回原坐标并恢复原前台窗口；`Times` 记录审批与执行毫秒耗时 | 动作执行指示结束，转入租约空闲保持 | 返回动作成功结果与耗时元数据 | [已验证: crates/model/src/input_queue.rs:84-113, crates/model/src/input_queue.rs:470-490] |
+| `GrantIdleWindow` | `Grant` 刷新最后活跃时间 (`input_queue.rs:9, 115-132, 470-490`) | 同 `sessionKey` 后续真实输入请求在此窗口内直接走 `AdmittedReady` 免二次弹窗 | 红框维持在线最多 `IDLE_MS = 30_000` (`30s`) | 对同会话后续请求免批放行 | [已验证: crates/model/src/input_queue.rs:9, crates/model/src/input_queue.rs:115-132] |
+| `GrantEnded` | `GrantEnd` / `acknowledge_end` (`input_queue.rs:134-138, 219-233, 517-528, 565-576`) | Agent 调 `input_queue(done)`、空闲满 `30s` `Queue::tick` 到期、或用户碰物理键鼠 | `native::hide_screen_edge` 彻底隐藏四边红框覆盖窗与 `InputBar` | 后续新请求需重新走用户点击批准 | [已验证: crates/model/src/input_queue.rs:134-138, crates/model/src/input_queue.rs:219-233, crates/model/src/input_queue.rs:517-528] |
