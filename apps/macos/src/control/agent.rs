@@ -2050,6 +2050,8 @@ async fn handle_one(
                 "keyDowns": s.key_downs,
                 "ms": s.ms,
                 "end": format!("{:?}", s.end),
+                "sent": s.sent,
+                "discarded": s.discarded,
             }),
             None => json!({ "events": null }),
         }),
@@ -5096,60 +5098,32 @@ async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
     log::info!("launch: page still loading after 10 s");
 }
 
-/// Whether `target`'s page reports the URL `url`, within the bound
-/// `wait_for_page` keeps. A browser sent a URL with `open` opens it in its
-/// key window: until the new window shows it, handing key focus back to
-/// the user's window could make the browser open it there (#110). False
-/// once the page has loaded another address than the one it showed first,
-/// as after a redirect. Blocks: run it off the main thread.
-fn shows_url(target: WindowTarget, url: &str) -> bool {
-    let started = Instant::now();
-    // What the window showed first, as a new tab page: loaded, but not
-    // yet what the browser was sent.
+/// Wait until `target`, a running browser's new window made at
+/// `created`, shows the page the agent's URL opened: that URL, or any
+/// address after the one it showed first, as a redirect to https or www
+/// shows. A browser sent a URL with `open` opens it in its key window:
+/// until the new window has it, handing key focus back to the user's
+/// window could make the browser open it there (#110). After 2 s from the
+/// window's start, the URL has gone out and a slow page doesn't need the
+/// user's focus: whether the page came by then. Blocks.
+fn shows_url(target: WindowTarget, url: &str, created: Instant) -> bool {
+    // What the window showed first, as a new tab page, before the URL.
     let mut first = None;
-    while started.elapsed() < Duration::from_secs(10) {
+    while created.elapsed() < Duration::from_secs(2) {
         if let Some(shown) = ax::web_url(target) {
             let first = first.get_or_insert_with(|| shown.clone());
-            if agent_screen_model::launch::same_page(url, &shown) {
+            if agent_screen_model::launch::same_page(url, &shown) || shown != *first {
                 log::debug!(
-                    "launch: the new window shows the URL at {} ms",
-                    started.elapsed().as_millis()
+                    "launch: the new window shows {shown:?} at {} ms",
+                    created.elapsed().as_millis()
                 );
                 return true;
-            }
-            if ax::page(target) == ax::Page::Loaded && shown != *first {
-                log::info!("launch: the new window loaded {shown:?}, not the URL");
-                return false;
             }
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    log::info!("launch: the new window didn't show the URL within 10 s");
+    log::info!("launch: the new window didn't show the agent's page within 2 s");
     false
-}
-
-/// Send the keys hold `id` took on, once the user's window has its key
-/// focus back, waiting up to 300 ms for that to show. Without it they go
-/// to whichever window has it, and the log says so. Blocks.
-fn hand_back_held(id: u64, user: Option<WindowTarget>) {
-    use agent_screen_model::key_hold::End;
-    let started = Instant::now();
-    let back = || user.is_some_and(|u| ax::focused_window_id(u.pid) == Some(u.window_id));
-    while !back() && started.elapsed() < Duration::from_millis(300) {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let back = back();
-    if !back {
-        log::warn!("key hold: the user's window isn't key; held keys go to the app's key window");
-    }
-    crate::mac::key_hold::finish(
-        id,
-        if back {
-            End::HandedBack
-        } else {
-            End::Abandoned
-        },
-    );
 }
 
 /// The user's window of app `pid` that has its key focus, when it is off
@@ -5666,7 +5640,7 @@ async fn launch_now(
         Some(user) if asked_for_window => {
             off(cx, move || {
                 crate::mac::input::is_front(user.pid)
-                    .then(|| crate::mac::key_hold::start(user.pid))
+                    .then(|| crate::mac::key_hold::start(user))
                     .flatten()
             })
             .await
@@ -5730,6 +5704,14 @@ async fn launch_now(
             ax::NewWindow::NotReady => Some("menus_unreadable"),
         };
         if let Some(reason) = missing {
+            // No window will take the user's focus: what was held goes to
+            // their window, which still has it.
+            if let Some(id) = hold.take().map(|h| h.detach()) {
+                off(cx, move || {
+                    crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
+                })
+                .await;
+            }
             drop(catch);
             if is_url {
                 let next = if matches!(reason, "just_started" | "still_starting") {
@@ -5867,20 +5849,28 @@ async fn launch_now(
             // front app, so it goes through accessibility, as a click would.
             let handback = match (opened, target) {
                 (Some(true), Some(url)) => {
-                    let (window, url) = (fresh.target, url.to_string());
-                    let held = hold.as_ref().map(|h| h.id());
+                    let (window, url, created) = (fresh.target, url.to_string(), Instant::now());
+                    let held = hold.take().map(|h| h.detach());
                     Some(cx.background_executor().spawn(async move {
-                        let shown = shows_url(window, &url);
-                        if shown
-                            && let Some(user) = user_window
-                            && crate::mac::input::is_front(user.pid)
-                            && ax::focused_window_id(user.pid) == Some(window.window_id)
-                        {
-                            let given = ax::make_main(user);
-                            log::debug!("launch: key focus back to the user's window: {given}");
-                        }
-                        if shown && let Some(id) = held {
-                            hand_back_held(id, user_window);
+                        let shown = shows_url(window, &url, created);
+                        match held {
+                            // Makes the user's window key, then sends on
+                            // what it held.
+                            Some(id) => crate::mac::key_hold::finish(
+                                id,
+                                agent_screen_model::key_hold::End::HandedBack,
+                            ),
+                            None => {
+                                if let Some(user) = user_window
+                                    && crate::mac::input::is_front(user.pid)
+                                    && ax::focused_window_id(user.pid) == Some(window.window_id)
+                                {
+                                    let given = ax::make_main(user);
+                                    log::debug!(
+                                        "launch: key focus back to the user's window: {given}"
+                                    );
+                                }
+                            }
                         }
                         shown
                     }))
@@ -5902,11 +5892,12 @@ async fn launch_now(
                         "{name} opened a window on the display but not {target}; open it there yourself"
                     )));
                 }
-                // `open` returns once the URL is sent, not handled.
-                settled = match handback {
-                    Some(task) => task.await,
-                    None => false,
-                };
+                // `open` returns once the URL is sent, not handled; the
+                // hand-back comes within 2 s whether the page does or not.
+                if let Some(task) = handback {
+                    task.await;
+                    settled = true;
+                }
             }
             // The new window took the app's key focus from the user's
             // window, where they may be typing, as in a browser they use
@@ -5915,7 +5906,13 @@ async fn launch_now(
             if settled {
                 core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
                 if let Some(id) = hold.take().map(|h| h.detach()) {
-                    off(cx, move || hand_back_held(id, user_window)).await;
+                    off(cx, move || {
+                        crate::mac::key_hold::finish(
+                            id,
+                            agent_screen_model::key_hold::End::HandedBack,
+                        )
+                    })
+                    .await;
                 }
             }
             // An app started in the background drops the first click on its
@@ -5951,6 +5948,12 @@ async fn launch_now(
     }
     keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
+    if let Some(id) = hold.take().map(|h| h.detach()) {
+        off(cx, move || {
+            crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
+        })
+        .await;
+    }
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen: for an app Agent Screen
     // started, any new window; for a running app, the one showing the file.

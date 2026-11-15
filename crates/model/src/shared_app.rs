@@ -304,13 +304,13 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     }
 }
 
-/// Whether a press that ran counts as failed: the element listed no
-/// AXPress, so it was pressed only for its role (`press_anyway`), and
+/// Whether a press that ran leaves its effect unclear: the element listed
+/// no AXPress, so it was pressed only for its role (`press_anyway`), and
 /// nothing was seen to change. Dia lists no AXPress on a page's elements
-/// and ignores the press, so a click on its link or button had come back
-/// as a success that changed nothing. A press the element lists may act
-/// without showing it, as a download does, and stays a success.
-pub fn unlisted_press_failed(listed: bool, seen: Effect) -> bool {
+/// and ignores the press, but a link waiting on a slow server shows
+/// nothing either, so the answer says it can't tell rather than that the
+/// press failed, which could have the agent click again and submit twice.
+pub fn unlisted_press_unclear(listed: bool, seen: Effect) -> bool {
     !listed && seen == Effect::NoneSeen
 }
 
@@ -719,10 +719,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unlisted_press_that_changed_nothing_fails() {
-        assert!(unlisted_press_failed(false, Effect::NoneSeen));
-        assert!(!unlisted_press_failed(false, Effect::Seen));
-        assert!(!unlisted_press_failed(false, Effect::Unknown));
-        assert!(!unlisted_press_failed(true, Effect::NoneSeen));
+    fn an_unlisted_press_that_changed_nothing_is_unclear() {
+        assert!(unlisted_press_unclear(false, Effect::NoneSeen));
+        assert!(!unlisted_press_unclear(false, Effect::Seen));
+        assert!(!unlisted_press_unclear(false, Effect::Unknown));
+        assert!(!unlisted_press_unclear(true, Effect::NoneSeen));
     }
 }

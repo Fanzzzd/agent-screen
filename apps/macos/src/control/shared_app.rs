@@ -16,7 +16,7 @@ use crate::mac::{ax, windows};
 use crate::model::{DisplayId, WindowTarget};
 use agent_screen_model::shared_app::{
     ClickRoute, Effect, Focused, Front, KeyRoute, TextRoute, Watch, click_route, effect, key_route,
-    text_route, unlisted_press_failed,
+    text_route, unlisted_press_unclear,
 };
 use gpui::AsyncApp;
 use serde_json::{Value, json};
@@ -574,11 +574,16 @@ async fn press_at(
     if let Some(b) = check {
         check_focus(b, &format!("The press on \"{label}\""), cx).await?;
     }
-    if unlisted_press_failed(listed, seen) {
-        return Err(ControlError::failed(format!(
-            "{why}, so nothing was posted. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and the press Agent Screen tried changed nothing on the page within {wait} ms, so it didn't act. No background route clicks it beside the user's window. Repeat the click with real_input: true, which asks the user for their pointer, or wait until the user switches to another app.",
-            wait = EFFECT_WAIT.as_millis(),
-        )));
+    if unlisted_press_unclear(listed, seen) {
+        return Ok(json!({
+            "windowId": target.window_id,
+            "route": "accessibility",
+            "note": format!(
+                "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events. \"{label}\" lists no accessibility press action, as the elements of a page in Dia don't, and there was no visible change within {wait} ms: the press may not have acted, or the page may still be loading. Take a screenshot before retrying.",
+                wait = EFFECT_WAIT.as_millis(),
+            ),
+            "changed": null,
+        }));
     }
     let what = format!(
         "{why}, so the click went to \"{label}\" as an accessibility press, with no mouse events"

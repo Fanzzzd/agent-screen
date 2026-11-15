@@ -1,12 +1,17 @@
-//! The user's keys held while a new window of the agent's has their front
+//! The user's input held while a new window of the agent's has their front
 //! app's key focus (#110; the rules are in `agent_screen_model::key_hold`).
 //! An active tap at the HID level, enabled only during a hold, takes the
-//! key events bound for that app and keeps them. When the user's window
-//! has its focus back, or at the latest after `MAX_HOLD_MS`, they go out
-//! again, in order, marked so the tap lets them through, and reach the
-//! user's window.
+//! key and mouse button events bound for that app and keeps them. When
+//! the hold ends, at the latest after `MAX_HOLD_MS`, the user's window is
+//! made key again and confirmed; only then does the input go out again, in
+//! order, marked so the tap lets it through. Where that window can't be
+//! made key, it goes out only if the app's key window is off the Agent
+//! Displays, and is otherwise discarded.
 
-use agent_screen_model::key_hold::{End, KeyHold, MAX_HOLD_MS, Seen, Verdict};
+use crate::model::WindowTarget;
+use agent_screen_model::key_hold::{
+    Destination, End, KeyHold, MAX_HOLD_MS, Seen, Verdict, destination,
+};
 use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
@@ -37,6 +42,8 @@ enum State {
         id: u64,
         hold: KeyHold<Held>,
         started: Instant,
+        /// The user's window, to make key again before anything goes out.
+        user: WindowTarget,
     },
     /// Sending on keys that reach the tap after the hold, until `until`.
     Draining {
@@ -54,6 +61,11 @@ pub struct Stats {
     pub key_downs: usize,
     pub ms: u64,
     pub end: End,
+    /// Whether the held input went out or was dropped.
+    pub sent: bool,
+    /// Events dropped: all of them when not sent, else those past a full
+    /// hold.
+    pub discarded: usize,
 }
 
 static LAST: Mutex<Option<Stats>> = Mutex::new(None);
@@ -74,10 +86,6 @@ pub struct Hold {
 }
 
 impl Hold {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
     /// Its id, for a caller that ends it with `finish` itself.
     pub fn detach(self) -> u64 {
         let id = self.id;
@@ -88,14 +96,20 @@ impl Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        finish(self.id, End::Abandoned);
+        // Making the user's window key waits on the app: not on the
+        // caller's thread, which may be the main thread.
+        let id = self.id;
+        let _ = std::thread::Builder::new()
+            .name("key-hold-end".into())
+            .spawn(move || finish(id, End::Abandoned));
     }
 }
 
-/// Hold the keys bound for `app`, the user's front app. None when the tap
-/// can't be installed, or another hold is going on: the keys then go as
-/// they would without one.
-pub fn start(app: i32) -> Option<Hold> {
+/// Hold the input bound for `user`'s app, the user's front app, whose
+/// window `user` has its key focus. None when the tap can't be installed,
+/// or another hold is going on: input then goes as it would without one.
+pub fn start(user: WindowTarget) -> Option<Hold> {
+    let app = user.pid;
     let tap = TAP.get_or_init(install).as_ref()?;
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     {
@@ -107,6 +121,7 @@ pub fn start(app: i32) -> Option<Hold> {
             id,
             hold: KeyHold::new(app),
             started: Instant::now(),
+            user,
         };
     }
     CGEvent::tap_enable(&tap.0, true);
@@ -121,48 +136,103 @@ pub fn start(app: i32) -> Option<Hold> {
     Some(Hold { id })
 }
 
-/// End hold `id`, if it is still the one going on, and send its keys on.
+/// End hold `id`, if it is still the one going on: make the user's window
+/// key again, then send what it held on, or drop it where that would reach
+/// the agent's window. Blocks on the app for up to 300 ms.
 pub fn finish(id: u64, why: End) {
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let State::Holding { id: current, .. } = &*state else {
-        return;
+    let user = match &*STATE.lock().unwrap_or_else(|e| e.into_inner()) {
+        State::Holding {
+            id: current, user, ..
+        } if *current == id => *user,
+        _ => return,
     };
-    if *current != id {
+    // Input keeps being held meanwhile.
+    let user_key = make_key(user);
+    let key_on_agent_display = match user_key {
+        true => Some(false),
+        false => super::ax::focused_window_id(user.pid).and_then(|w| {
+            super::windows::find(w).map(|w| super::input::on_agent_display_at(w.bounds))
+        }),
+    };
+    let front_is_app = super::input::front() == Some(user.pid);
+    let to = destination(front_is_app, user_key, key_on_agent_display);
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(&*state, State::Holding { id: current, .. } if *current == id) {
         return;
     }
-    let State::Holding {
-        mut hold, started, ..
-    } = std::mem::replace(
-        &mut *state,
-        State::Draining {
+    let next = match to {
+        Destination::Send => State::Draining {
             until: Instant::now() + DRAIN,
         },
-    )
+        Destination::Discard => State::Idle,
+    };
+    let State::Holding {
+        mut hold, started, ..
+    } = std::mem::replace(&mut *state, next)
     else {
         return;
     };
     let held = hold.release(why);
-    send_on(held, hold.ended().unwrap_or(why), started);
+    let why = hold.ended().unwrap_or(why);
+    send_on(held, why, started, to, hold.discarded());
+    if to == Destination::Discard
+        && let Some(Some(tap)) = TAP.get()
+    {
+        CGEvent::tap_enable(&tap.0, false);
+    }
     drop(state);
-    end_drain_later();
+    if to == Destination::Send {
+        end_drain_later();
+    }
 }
 
-/// Send `held` on, in order, and note what the hold did. Called with the
-/// state locked, so a key the tap sees meanwhile waits and goes after.
-fn send_on(held: Vec<Held>, why: End, started: Instant) {
+/// Make `user` its app's key window, as a click on it would, and wait up
+/// to 300 ms for accessibility to say it is.
+fn make_key(user: WindowTarget) -> bool {
+    let key = || super::ax::focused_window_id(user.pid) == Some(user.window_id);
+    if key() {
+        return true;
+    }
+    super::ax::make_main(user);
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(300) {
+        if key() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// Send `held` on, in order, or drop it, and note what the hold did.
+/// Called with the state locked, so input the tap sees meanwhile waits and
+/// goes after.
+fn send_on(held: Vec<Held>, why: End, started: Instant, to: Destination, full: usize) {
+    let sent = to == Destination::Send;
     let stats = Stats {
         events: held.len(),
         key_downs: held.iter().filter(|h| h.down).count(),
         ms: started.elapsed().as_millis() as u64,
         end: why,
+        sent,
+        discarded: if sent { full } else { full + held.len() },
     };
-    for h in &held {
-        CGEvent::set_integer_value_field(Some(&h.event), CGEventField::EventSourceUserData, TAG);
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&h.event));
+    if sent {
+        for h in &held {
+            CGEvent::set_integer_value_field(
+                Some(&h.event),
+                CGEventField::EventSourceUserData,
+                TAG,
+            );
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&h.event));
+        }
     }
-    match why {
-        End::HandedBack => log::info!("key hold: {stats:?}"),
-        _ => log::warn!("key hold: ended before the hand-back: {stats:?}"),
+    match (why, sent) {
+        (End::HandedBack, true) => log::info!("key hold: {stats:?}"),
+        (_, true) => log::warn!("key hold: ended before the hand-back: {stats:?}"),
+        (_, false) => log::warn!(
+            "key hold: the user's window couldn't be made key, so the held input was dropped rather than sent to the agent's window: {stats:?}"
+        ),
     }
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(stats);
 }
@@ -192,6 +262,15 @@ fn install() -> Option<Tap> {
         CGEventType::KeyDown,
         CGEventType::KeyUp,
         CGEventType::FlagsChanged,
+        CGEventType::LeftMouseDown,
+        CGEventType::LeftMouseUp,
+        CGEventType::LeftMouseDragged,
+        CGEventType::RightMouseDown,
+        CGEventType::RightMouseUp,
+        CGEventType::RightMouseDragged,
+        CGEventType::OtherMouseDown,
+        CGEventType::OtherMouseUp,
+        CGEventType::OtherMouseDragged,
     ]
     .iter()
     .fold(0_u64, |mask, kind| mask | (1_u64 << kind.0));
@@ -273,14 +352,13 @@ unsafe extern "C-unwind" fn seen(
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&copy));
             std::ptr::null_mut()
         }
-        State::Holding { hold, started, .. } => {
+        State::Holding { id, hold, .. } => {
             let Some(copy) = CGEvent::new_copy(Some(cg)) else {
                 return event.as_ptr();
             };
             let seen = Seen {
-                at_ms: started.elapsed().as_millis() as u64,
                 front: super::input::front().unwrap_or(0),
-                key: true,
+                input: true,
                 ours,
             };
             let held = Held {
@@ -289,17 +367,21 @@ unsafe extern "C-unwind" fn seen(
             };
             match hold.see(seen, held) {
                 (Verdict::Pass, _) => event.as_ptr(),
-                (Verdict::Hold, _) => std::ptr::null_mut(),
-                (Verdict::Flush, _) => {
-                    let started = *started;
-                    let why = hold.ended().unwrap_or(End::Abandoned);
-                    let held = hold.release(why);
-                    *state = State::Draining {
-                        until: Instant::now() + DRAIN,
-                    };
-                    send_on(held, why, started);
-                    drop(state);
-                    end_drain_later();
+                (Verdict::Discard, _) => std::ptr::null_mut(),
+                (Verdict::Hold, _) => {
+                    // A press means the user moved on: end the hold now,
+                    // and the press goes out after the keys before it.
+                    if matches!(
+                        kind,
+                        CGEventType::LeftMouseDown
+                            | CGEventType::RightMouseDown
+                            | CGEventType::OtherMouseDown
+                    ) {
+                        let id = *id;
+                        let _ = std::thread::Builder::new()
+                            .name("key-hold-end".into())
+                            .spawn(move || finish(id, End::Pressed));
+                    }
                     std::ptr::null_mut()
                 }
             }

@@ -390,18 +390,22 @@ fn said(reply: &Result<Value>) -> String {
     }
 }
 
-/// Failed, saying no background route clicks there and offering the
-/// user's pointer: what a press Dia ignores must answer.
-fn real_input_offered(reply: &Result<Value>) -> bool {
-    reply
-        .as_ref()
-        .is_err_and(|e| e.to_string().contains("real_input: true"))
+/// Went through accessibility, and says it can't tell whether the press
+/// acted: what a press Dia ignores answers, as one on a slow link would.
+fn unclear(reply: &Result<Value>) -> bool {
+    reply.as_ref().is_ok_and(|v| {
+        v["route"] == "accessibility"
+            && v["changed"].is_null()
+            && v["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("Take a screenshot before retrying"))
+    })
 }
 
-fn note_refused(what: &str, reply: &Result<Value>) {
-    if real_input_offered(reply) {
+fn note_unclear(what: &str, reply: &Result<Value>) {
+    if unclear(reply) {
         println!(
-            "note: Dia ignored the accessibility press on {what}; beside your window only real_input clicks it"
+            "note: Dia ignored the accessibility press on {what}, and the answer says it can't tell"
         );
     }
 }
@@ -582,7 +586,7 @@ fn test(
     );
     check(
         "every key held during launch_app reached your window after the hand-back",
-        held["end"] == "HandedBack" && reached >= held_downs,
+        held["end"] == "HandedBack" && held["sent"] == true && reached >= held_downs,
         format!("hold {held} | your page got {reached} keys during launch_app"),
     );
 
@@ -700,10 +704,10 @@ fn test(
     let send_mark = mark(log);
     let sent = click(send);
     let submitted = seen_within(log, "agent", send_mark, "submit", 2000);
-    note_refused("the submit button", &sent);
+    note_unclear("the submit button", &sent);
     check(
-        "a click on the form's submit button submits it, or fails naming real_input and submits nothing",
-        (through_accessibility(&sent) && submitted) || (real_input_offered(&sent) && !submitted),
+        "a click on the form's submit button submits it, or says it can't tell and submits nothing",
+        (through_accessibility(&sent) && submitted) || (unclear(&sent) && !submitted),
         format!(
             "{} | page {:?}",
             cut(&said(&sent), 1500),
@@ -715,11 +719,10 @@ fn test(
     let link_mark = mark(log);
     let followed = click(next);
     let arrived = seen_within(log, "agent", link_mark, "arrived", 5000);
-    note_refused("the link", &followed);
+    note_unclear("the link", &followed);
     check(
-        "a click on the agent's link navigates its window, or fails naming real_input and goes nowhere",
-        (through_accessibility(&followed) && arrived)
-            || (real_input_offered(&followed) && !arrived),
+        "a click on the agent's link navigates its window, or says it can't tell and goes nowhere",
+        (through_accessibility(&followed) && arrived) || (unclear(&followed) && !arrived),
         format!(
             "{} | page {:?}",
             cut(&said(&followed), 1500),
