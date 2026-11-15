@@ -2822,20 +2822,11 @@ fn is_list(list: &[Hit], at: (f64, f64)) -> bool {
 }
 
 /// Whether keys posted to app `pid` now stay off the user's screens: its
-/// focused window is on an Agent Display, or Accessibility names none
-/// while every window it has is on one (#120). No window of the agent's is meant, so
-/// none matches `key_window`'s target.
+/// focused window, as Accessibility names it, is on an Agent Display.
+/// Without a known focused window the keys may reach one of the user's,
+/// as one on another Space or minimized, which the window list misses.
 pub fn keys_stay_on_agent_displays(pid: i32) -> bool {
-    let focused = super::ax::focused_window_id(pid);
-    let listed: Vec<_> = super::windows::all()
-        .into_iter()
-        .filter(|w| w.target.pid == pid)
-        .map(|w| AppWindow {
-            id: w.target.window_id,
-            on_agent_display: on_agent_display_at(w.bounds),
-        })
-        .collect();
-    key_window(0, focused, &listed).safe()
+    super::ax::focused_window_id(pid).is_some_and(on_agent_display)
 }
 
 /// A key chord through the public API, for apps that need no focus

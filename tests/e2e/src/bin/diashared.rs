@@ -16,7 +16,9 @@
 //!   holds the agent's text.
 //! - `/agent`: `launch_app` opens it in a new Dia window on the Agent
 //!   Display. It has a text field, a form with two buttons and a link, and
-//!   logs its keys, clicks, focus, field values and submits.
+//!   logs its keys, clicks, focus, field values and submits. An image the
+//!   server answers after 4 s holds its load back, so the check can tell
+//!   that your focus came back once its URL showed, not once it loaded.
 //!
 //! Then: a click on the agent's field, `type`, Backspace, cmd+a with more
 //! text, Tab and shift+Tab, a refused key that must name your window,
@@ -47,6 +49,8 @@ const KEY: &str = "diashared";
 /// The agent's text: you won't type it, so it in your box means the agent's
 /// text reached your window.
 const TOKEN: &str = "dsq7v";
+/// How long the agent page's image takes, which its load waits for.
+const SLOW_SECS: u64 = 4;
 
 /// What the pages reported, in order: (page, event).
 type Log = Arc<Mutex<Vec<(String, String)>>>;
@@ -117,6 +121,7 @@ const AGENT_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><ti
   <button type="button" aria-label="agent other">Other</button>
 </form>
 <p><a id="next" href="/next" aria-label="agent next link">Next page</a></p>
+<img src="/slow" alt="" width="1" height="1">
 <script>
 const log = e => fetch('/log?w=agent&e=' + encodeURIComponent(e)).catch(() => {});
 window.addEventListener('focus', () => log('win focus'));
@@ -202,6 +207,13 @@ fn answer(mut stream: TcpStream, log: &Log) -> Result<()> {
             (NEXT_PAGE.to_string(), "text/html")
         }
         "/user" => (USER_PAGE.replace("TOKEN", TOKEN), "text/html"),
+        // Holds the agent page's load event back for a few seconds, so its
+        // URL shows well before the page has loaded.
+        "/slow" => {
+            std::thread::sleep(Duration::from_secs(SLOW_SECS));
+            note(log, "agent", "slow answered");
+            (String::new(), "image/gif")
+        }
         "/log" => {
             let query = path.split_once('?').map_or("", |(_, q)| q);
             let field = |name: &str| {
@@ -473,28 +485,37 @@ fn test(
         focused_window(pid) == user_window
     };
     // Your page lost focus while the new window was key, if it reported
-    // that at all: it must report having it again.
-    let regained = {
-        let last_focus = || {
-            events(log, "user", launch_mark)
-                .into_iter()
-                .rev()
-                .find(|e| e.starts_with("hasfocus"))
-        };
-        let started = Instant::now();
-        while last_focus().as_deref() == Some("hasfocus false")
-            && started.elapsed() < Duration::from_secs(2)
-        {
-            sleep_ms(100);
-        }
-        last_focus().as_deref() != Some("hasfocus false")
+    // that at all. launch_app must give it back as soon as the new window
+    // shows the agent's URL, before that page's slow image lets it finish
+    // loading: every call hands focus back as it ends, so a hand-back only
+    // after the call's own wait for the page would come after the image.
+    let launch_events: Vec<(String, String)> = {
+        let all = log.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter().skip(launch_mark).cloned().collect()
+    };
+    let at = |page: &str, event: &str, after: usize| {
+        launch_events
+            .iter()
+            .skip(after)
+            .position(|(p, e)| p == page && e == event)
+            .map(|i| i + after)
+    };
+    let lost = at("user", "hasfocus false", 0);
+    let regained = lost.and_then(|i| at("user", "hasfocus true", i));
+    let slow = at("agent", "slow answered", 0);
+    let early = match (lost, regained, slow) {
+        // Your page never saw its window lose focus: nothing to hand back.
+        (None, _, _) => true,
+        (Some(_), Some(r), Some(s)) => r < s,
+        (Some(_), Some(_), None) => true,
+        (Some(_), None, _) => false,
     };
     let launch_user = events(log, "user", launch_mark);
     check(
-        "after launch_app your Dia window has its focus back",
-        back && regained,
+        "launch_app gives your Dia window its focus back once the agent's URL shows, before that page loads",
+        back && early,
         format!(
-            "focused window {user_window} → {} | your page {launch_user:?}",
+            "focused window {user_window} → {} | lost at {lost:?}, regained at {regained:?}, page's image answered at {slow:?} | your page {launch_user:?}",
             focused_window(pid)
         ),
     );

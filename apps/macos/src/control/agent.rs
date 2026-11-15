@@ -5084,6 +5084,41 @@ async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
     log::info!("launch: page still loading after 10 s");
 }
 
+/// Whether `target`'s page reports the URL `url`, within the bound
+/// `wait_for_page` keeps. A browser sent a URL with `open` opens it in its
+/// key window: until the new window shows it, handing key focus back to
+/// the user's window could make the browser open it there (#110). False
+/// once the page has loaded another address than the one it showed first,
+/// as after a redirect.
+async fn shows_url(target: WindowTarget, url: &str, cx: &mut AsyncApp) -> bool {
+    let started = Instant::now();
+    // What the window showed first, as a new tab page: loaded, but not
+    // yet what the browser was sent.
+    let mut first = None;
+    while started.elapsed() < Duration::from_secs(10) {
+        let (shown, page) = off(cx, move || (ax::web_url(target), ax::page(target))).await;
+        if let Some(shown) = &shown {
+            let first = first.get_or_insert_with(|| shown.clone());
+            if agent_screen_model::launch::same_page(url, shown) {
+                log::debug!(
+                    "launch: the new window shows the URL at {} ms",
+                    started.elapsed().as_millis()
+                );
+                return true;
+            }
+            if page == ax::Page::Loaded && *shown != *first {
+                log::info!("launch: the new window loaded {shown:?}, not the URL");
+                return false;
+            }
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    log::info!("launch: the new window didn't show the URL within 10 s");
+    false
+}
+
 /// What `launch_app` did.
 struct Launched {
     window: Option<windows::Window>,
@@ -5734,8 +5769,9 @@ async fn launch_now(
                 started.elapsed().as_millis()
             );
             // Whether the running app's new window may give its key focus
-            // back to the user's window yet: not before it shows the URL.
-            let mut settled = was_running;
+            // back to the user's window before the call ends: one asked for
+            // with nothing to open, or one that shows the agent's URL.
+            let mut settled = was_running && target.is_none();
             // The new window is the app's front one now, where it opens the
             // URL or file.
             if was_running
@@ -5784,7 +5820,6 @@ async fn launch_now(
                 // the window to show it, at most 2 s, so focus handed back
                 // after doesn't make the app open it in the user's window.
                 let (window_id, title) = (placed.target.window_id, before);
-                settled = false;
                 for _ in 0..40 {
                     let title = title.clone();
                     if off(cx, move || {
@@ -5792,17 +5827,18 @@ async fn launch_now(
                     })
                     .await
                     {
-                        settled = true;
                         break;
                     }
                     cx.background_executor()
                         .timer(Duration::from_millis(50))
                         .await;
                 }
+                settled = shows_url(placed.target, target, cx).await;
             }
             // The new window took the app's key focus from the user's
             // window, where they may be typing, as in a browser they use
             // (#110): hand it back now rather than after the page loads.
+            // Otherwise the call's end hands it back, as after any input.
             if settled {
                 core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
             }

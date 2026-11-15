@@ -591,6 +591,19 @@ fn publish_web_tree(pid: i32, timeout: f32) -> bool {
             })
 }
 
+/// The address of the page in `target`'s window: its first web area's
+/// AXURL, which Chromium and WebKit give as a URL. None where the window
+/// shows no page or the app doesn't say.
+pub fn web_url(target: WindowTarget) -> Option<String> {
+    let window = window_element(target)?;
+    let area = web_area(&window)?;
+    let value = attribute(&area, "AXURL")?;
+    if let Some(url) = value.downcast_ref::<objc2_core_foundation::CFURL>() {
+        return Some(url.string().to_string());
+    }
+    value.downcast_ref::<CFString>().map(|s| s.to_string())
+}
+
 /// The window's first web area, breadth first.
 pub fn web_area(window: &AXUIElement) -> Option<Element> {
     let window = unsafe { CFRetained::retain(NonNull::from(window)) };
@@ -2149,7 +2162,8 @@ pub struct MenuEntry {
 
 /// New Window as macOS titles it: Terminal's MainMenu.loctable in macOS
 /// 26 for 21 languages, and Finder's New Finder Window in English and
-/// Simplified Chinese.
+/// Simplified Chinese. Chrome titles it its own way in Chinese, in its
+/// zh_CN and zh_TW locale.pak (the string English calls New Window).
 const WINDOW_TITLES: &[&str] = &[
     "new window",
     "neues fenster",
@@ -2170,6 +2184,8 @@ const WINDOW_TITLES: &[&str] = &[
     "새로운 윈도우",
     "新建窗口",
     "新增視窗",
+    "打开新的窗口",
+    "開新視窗",
     "new finder window",
     "新建访达窗口",
 ];
@@ -2287,7 +2303,10 @@ pub fn press_new_window(pid: i32) -> NewWindow {
             } else if let Some(chord) = chord {
                 super::input::post_key_to_pid(pid, chord);
                 NewWindow::Pressed
-            } else if perform(&elements[i], "AXPress") {
+            } else if try_action(&elements[i], "AXPress") {
+                // A busy app may answer CannotComplete for a press that ran:
+                // pressing again could open a second window, so the catch
+                // decides whether one came.
                 NewWindow::Pressed
             } else {
                 NewWindow::NotReady
