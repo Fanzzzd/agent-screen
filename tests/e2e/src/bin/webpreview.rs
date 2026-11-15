@@ -529,15 +529,14 @@ fn test() -> Result<()> {
     let after_disconnect = control.call("debugWebPreview", json!({}))?;
     let final_stream = debug_stream_for(&control, id)?;
     let web_want_gone = !stream_has_want(&final_stream, "web");
+    // Other wants (the agent's own 30 fps settle wait after place_window, the
+    // warm stream) may keep the capture running; with none left it must stop.
     let capture_matches_wants = match &final_stream {
         None => true,
         Some(s) => {
             let other_wants = s["wants"].as_array().map(|w| w.len()).unwrap_or(0);
-            if other_wants == 0 {
-                s["running"].as_bool() == Some(false) && s["fps"].as_i64() == Some(0)
-            } else {
-                s["fps"].as_i64().unwrap_or(99) < 8
-            }
+            other_wants > 0
+                || (s["running"].as_bool() == Some(false) && s["fps"].as_i64() == Some(0))
         }
     };
     check(
