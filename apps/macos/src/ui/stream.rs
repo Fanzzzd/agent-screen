@@ -80,7 +80,7 @@ impl Stream {
         } else {
             self.wants.remove(who);
         }
-        let should_count = self.wants.contains_key("agent") || self.wants.contains_key("web");
+        let should_count = self.wants.contains_key("agent");
         if should_count != self.latest.counting() {
             self.latest.count_changes(should_count);
         }
@@ -496,6 +496,8 @@ impl Streams {
         ids.iter()
             .map(|id| {
                 let s = &self.streams[id];
+                let mut wants: Vec<&str> = s.wants.keys().copied().collect();
+                wants.sort_unstable();
                 serde_json::json!({
                     "displayId": id,
                     "running": s.capture.is_some(),
@@ -507,6 +509,7 @@ impl Streams {
                     "breaks": s.breaks,
                     "repairs": s.repairs,
                     "fps": s.running.0,
+                    "wants": wants,
                 })
             })
             .collect()
@@ -660,22 +663,20 @@ mod tests {
     }
 
     #[test]
-    fn web_and_agent_share_change_counting_without_disabling_each_other() {
+    fn web_want_does_not_enable_agent_change_counting() {
         let now = std::time::Instant::now();
         let mut s = Stream::new();
         assert!(!s.latest.counting());
 
         let _ = s.apply_want("web", 8, (1280, 800), false, false, now);
-        assert!(s.latest.counting());
+        assert!(!s.latest.counting());
 
         let _ = s.apply_want("agent", 30, (416, 260), true, true, now);
         assert!(s.latest.counting());
 
-        // Agent finishing its settle timer leaves counting on while web watches.
         let _ = s.apply_want("agent", 0, (0, 0), true, true, now);
-        assert!(s.latest.counting());
+        assert!(!s.latest.counting());
 
-        // Disconnecting the last web client turns counting off.
         let _ = s.apply_want("web", 0, (0, 0), true, true, now);
         assert!(!s.latest.counting());
     }

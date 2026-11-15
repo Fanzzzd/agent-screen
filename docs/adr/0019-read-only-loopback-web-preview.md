@@ -10,12 +10,12 @@ Each adopted Agent Display gets a fresh 128-bit random token (`crates/model/src/
 
 Three GET routes serve a live token:
 
-- `/d/<token>` returns a static HTML page with the Display Label and an `<img>` pointing at `/d/<token>/stream`, under `Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'`.
-- `/d/<token>/stream` streams `multipart/x-mixed-replace` JPEG frames at up to 8 fps.
-- `/d/<token>/frame.jpg` returns one JPEG frame.
+- `/d/<token>` returns a static HTML page with the Display Label, a localized read-only notice (`Read-only preview` or `只读预览`), and an `<img>` pointing at `/d/<token>/stream`, sent with the HTTP response header `Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'`.
+- `/d/<token>/stream` streams `multipart/x-mixed-replace` JPEG frames at up to 8 fps, cuts the connection immediately when the display ends, and drops stalled clients after a 10-second write timeout.
+- `/d/<token>/frame.jpg` returns one JPEG frame, serving the running feed's latest encoded frame when a feed is open and otherwise holding a 5-second grace lease so polling does not cycle the capture stream.
 
 Web Preview is read-only. The page executes no script, opens no return channel, accepts only `GET`, and never sends pointer or keyboard events, triggers a Takeover, or activates an app, keeping ADR 0001 and ADR 0004 intact.
 
-Web Preview shares the ScreenCaptureKit stream that Peek and the Viewer use (`mac/capture.rs` `Capture::start` and `Latest`). When a browser connects and no stream runs for that display, `Streams` starts a low-rate `"web"` subscription at 8 fps and stops it when the last browser disconnects. JPEG encoding runs on worker threads, downscales frames wider than 1280 pixels proportionally, skips unchanged frames via `Latest.changes`, and never runs on the main thread or when no client is connected.
+Web Preview shares the ScreenCaptureKit stream that Peek and the Viewer use (`mac/capture.rs` `Capture::start` and `Latest`). When a browser connects and no stream runs for that display, `Streams` starts a low-rate `"web"` subscription at 8 fps and stops it when the last browser lease ends. JPEG encoding runs on worker threads, downscales frames wider than 1280 pixels proportionally, gates new encodes on `Latest.delivered` (which advances only when ScreenCaptureKit delivers a `Complete` changed frame, without turning on `Latest.changes` CPU luma sampling), and never runs on the main thread or when no lease is active.
 
 `create_display` returns `preview_url` alongside `display_id` so the Agent Session can share the link in chat, and each live display's menu in Peek and the menu bar offers Copy Web Link (`复制网页链接`).

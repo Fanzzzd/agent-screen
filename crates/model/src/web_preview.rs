@@ -212,15 +212,18 @@ pub fn escape_html(input: &str) -> String {
     out
 }
 
-pub fn render_page(token: PreviewToken, label: &str) -> String {
+pub const PAGE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'";
+
+pub fn render_page(token: PreviewToken, label: &str, lang: &str, badge: &str) -> String {
     let escaped = escape_html(label);
+    let escaped_lang = escape_html(lang);
+    let escaped_badge = escape_html(badge);
     format!(
         "<!doctype html>\n\
-<html lang=\"en\">\n\
+<html lang=\"{escaped_lang}\">\n\
 <head>\n\
 <meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'\">\n\
 <title>{escaped} - Agent Screen</title>\n\
 <style>\n\
   * {{ box-sizing: border-box; }}\n\
@@ -234,7 +237,7 @@ pub fn render_page(token: PreviewToken, label: &str) -> String {
 </style>\n\
 </head>\n\
 <body>\n\
-  <header><h1>{escaped}</h1><span>Read-only preview</span></header>\n\
+  <header><h1>{escaped}</h1><span>{escaped_badge}</span></header>\n\
   <main><img src=\"/d/{token}/stream\" alt=\"{escaped}\"></main>\n\
 </body>\n\
 </html>\n"
@@ -389,11 +392,27 @@ mod tests {
     }
 
     #[test]
-    fn page_escapes_label_and_points_to_stream() {
+    fn page_escapes_label_localizes_badge_and_points_to_stream() {
         let token = PreviewToken::from_bytes(sample_bytes(11));
-        let html = render_page(token, "<script>alert(\"x\")&'y'</script>");
+        let html = render_page(
+            token,
+            "<script>alert(\"x\")&'y'</script>",
+            "en",
+            "Read-only preview",
+        );
         assert!(!html.contains("<script>"));
+        assert!(!html.contains("http-equiv=\"Content-Security-Policy\""));
         assert!(html.contains("&lt;script&gt;alert(&quot;x&quot;)&amp;&#39;y&#39;&lt;/script&gt;"));
+        assert!(html.contains("<html lang=\"en\">"));
+        assert!(html.contains("<span>Read-only preview</span>"));
         assert!(html.contains(&format!("/d/{token}/stream")));
+
+        let zh = render_page(token, "Web Preview", "zh-Hans", "只读预览");
+        assert!(zh.contains("<html lang=\"zh-Hans\">"));
+        assert!(zh.contains("<span>只读预览</span>"));
+        assert_eq!(
+            PAGE_CSP,
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'"
+        );
     }
 }

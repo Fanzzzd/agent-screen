@@ -251,6 +251,44 @@ case "imagediff":
     if max(dr, max(dg, db)) > 20 { changed += 1 }
   }
   print(changed)
+case "pixeldiff":
+  func full(_ path: String) -> (Int, Int, [UInt8]) {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+      exit(1)
+    }
+    ctx.interpolationQuality = .none
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    let bytes = Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: image.width * image.height * 4))
+    return (image.width, image.height, bytes)
+  }
+  let (wa, ha, pa) = full(args[2])
+  let (wb, hb, pb) = full(args[3])
+  guard wa == wb && ha == hb && wa > 0 && ha > 0 else { exit(1) }
+  var changedPixels = 0
+  for px in 0..<(wa * ha) {
+    let dr = abs(Int(pa[px * 4]) - Int(pb[px * 4]))
+    let dg = abs(Int(pa[px * 4 + 1]) - Int(pb[px * 4 + 1]))
+    let db = abs(Int(pa[px * 4 + 2]) - Int(pb[px * 4 + 2]))
+    if max(dr, max(dg, db)) > 20 { changedPixels += 1 }
+  }
+  func luma(_ p: [UInt8], _ px: Int) -> Int {
+    (54 * Int(p[px * 4]) + 183 * Int(p[px * 4 + 1]) + 19 * Int(p[px * 4 + 2])) >> 8
+  }
+  let top = Int(Double(ha) * (40.0 / 1000.0))
+  var settleSamples = 0
+  if ha > top {
+    for gy in 0..<100 {
+      let y = top + (ha - top - 1) * gy / 99
+      for gx in 0..<160 {
+        let x = (wa - 1) * gx / 159
+        let idx = y * wa + x
+        if abs(luma(pa, idx) - luma(pb, idx)) > 24 { settleSamples += 1 }
+      }
+    }
+  }
+  print("\(changedPixels) \(settleSamples)")
 default:
   print("unknown command \(args[1])"); exit(2)
 }
