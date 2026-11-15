@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// display makes WindowServer reconfigure each screen, and dozens in a few
 /// hours once froze a Mac. Review Displays don't count.
 pub const MAX_LIVE: usize = 4;
+pub const MAX_CLOSED_CONNECTIONS: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Liveness {
@@ -190,11 +191,6 @@ impl Sessions {
         }
     }
 
-    /// Whether `connection` has already been closed via [`Sessions::drop_connection`].
-    pub fn is_connection_closed(&self, connection: u64) -> bool {
-        self.closed_connections.contains(&connection)
-    }
-
     /// Record that `connection` is an open control socket speaking for `key`.
     /// Returns `false` and changes nothing if `connection` was already closed,
     /// preventing a request handled after close from re-opening or rebinding a
@@ -211,9 +207,14 @@ impl Sessions {
         true
     }
 
-    /// Tombstone `connection` and remove it from every session's open connection set.
+    /// Tombstone `connection` (bounded to the [`MAX_CLOSED_CONNECTIONS`] most
+    /// recent closed connection ids, `L7`) and remove it from every session's
+    /// open connection set.
     pub fn drop_connection(&mut self, connection: u64) {
         self.closed_connections.insert(connection);
+        while self.closed_connections.len() > MAX_CLOSED_CONNECTIONS {
+            self.closed_connections.pop_first();
+        }
         for session in self.map.values_mut() {
             session.open_connections.remove(&connection);
         }

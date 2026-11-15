@@ -91,22 +91,13 @@ pub async fn handle(
             let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
             core.update(cx, |c, cx| {
                 c.drain_dropped_calls();
-                if c.closed.contains(&connection) {
-                    return None;
-                }
                 let now_ms = c.elapsed_ms();
-                if let Some(ref k) = named_key {
-                    c.sessions.insert(connection, k.clone());
-                    if !c.rebind_session(k, connection, now_ms).is_empty() {
-                        cx.notify();
-                    }
+                let (key, rebound) =
+                    c.begin_session_call(connection, named_key.as_deref(), shown, now_ms);
+                if rebound {
+                    cx.notify();
                 }
-                let key = named_key
-                    .or_else(|| {
-                        shown.and_then(|id| c.displays.get(id)?.session().map(String::from))
-                    })
-                    .or_else(|| c.sessions.get(&connection).cloned())?;
-                c.displays.sessions.note_call_start(&key, now_ms);
+                let key = key?;
                 Some(CallGuard {
                     dropped: c.dropped_calls.clone(),
                     started_at: c.started_at_instant(),
@@ -3047,12 +3038,8 @@ fn reuse(
     cx: &mut AsyncApp,
 ) -> Option<Value> {
     let (mut existing, (w, h)) = core.update(cx, |c, cx| {
-        if c.closed.contains(&connection) {
-            return None;
-        }
-        let id = c.displays.for_session(key)?.id;
         let now_ms = c.elapsed_ms();
-        c.rebind_session(key, connection, now_ms);
+        let id = c.reuse_session_display(connection, key, now_ms)?;
         adopt_orphans(c, key, id, orphans);
         cx.notify();
         let d = c.displays.get(id)?;

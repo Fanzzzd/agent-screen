@@ -223,17 +223,10 @@ fn test(fixture: &std::path::Path) -> Result<()> {
     );
 
     // 3. Custom-drag window (`y + 60 > 52` outside standard title-bar grab) that yanks onto Stage
-    // 80 ms after mouseUp and is returned by `keep_on_display` at its dragged position. Wake key
-    // focus first because AppKit consumes the first background click on a window without an empty
-    // standard title bar (`input.rs:1610`).
+    // 80 ms after mouseUp and is returned by `keep_on_display` at its dragged position.
     let before_custom = titled(id, "CustomDrag")?.context("CustomDrag on display")?;
     let c_from = ((before_custom.x + 60.0) / w, (before_custom.y + 60.0) / h);
     let c_by = (0.10, 0.14);
-    control.call(
-        "debugViewerInput",
-        json!({ "kind": "click", "x": c_from.0, "y": c_from.1 }),
-    )?;
-    sleep_ms(80);
     control.call(
         "debugViewerInput",
         json!({

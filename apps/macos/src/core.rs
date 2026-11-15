@@ -78,6 +78,7 @@ pub struct Core {
     /// Connections that have closed. A request from one can still be queued
     /// behind its close, and must not create a display nobody owns.
     pub closed: HashSet<u64>,
+    closed_order: std::collections::VecDeque<u64>,
     /// The Agent Session each connection created or reused a display for.
     /// A connection may only use displays its session owns.
     pub sessions: HashMap<u64, String>,
@@ -158,6 +159,7 @@ impl Core {
             forwarders: HashMap::new(),
             elements: HashMap::new(),
             closed: HashSet::new(),
+            closed_order: std::collections::VecDeque::new(),
             sessions: HashMap::new(),
             tucked: HashSet::new(),
             repark_state: Default::default(),
@@ -320,8 +322,8 @@ impl Core {
                     size,
                     unit: Self::online_unit_in(id, online),
                     expired,
-                    has_windows: counts.get(&id).copied().unwrap_or(0) > 0
-                        || physically_occupied.contains(&id),
+                    has_windows: counts.get(&id).copied().unwrap_or(0) > 0,
+                    physically_covered: physically_occupied.contains(&id),
                 },
             )
             .collect()
@@ -602,18 +604,108 @@ impl Core {
     }
 
     /// Rebind any disconnected displays of `key` to open `connection` and
-    /// register their new `InputQueue` owners (`H1`, `M1`).
-    pub fn rebind_session(&mut self, key: &str, connection: u64, now_ms: u64) -> Vec<DisplayId> {
-        if self.closed.contains(&connection) {
+    /// register their new `InputQueue` owners (`H1`, `M1`, `L3`).
+    pub(crate) fn rebind_session_in<H>(
+        displays: &mut Displays<H>,
+        input_queue: &mut crate::input_queue::InputQueue,
+        closed: &HashSet<u64>,
+        key: &str,
+        connection: u64,
+        now_ms: u64,
+    ) -> Vec<DisplayId> {
+        if closed.contains(&connection) {
             return Vec::new();
         }
-        let rebound = self.displays.rebind_disconnected(key, connection, now_ms);
-        for &id in &rebound {
-            if let Some(owner) = self.displays.get(id).and_then(|d| d.owner.clone()) {
-                self.input_queue.register(id, &owner);
-            }
-        }
+        let rebound = displays.rebind_disconnected(key, connection, now_ms);
+        displays.register_queue_owners(&mut input_queue.queue, &rebound);
         rebound
+    }
+
+    /// Track an incoming non-debug request on `connection`, rebinding any
+    /// disconnect-grace displays when `named_key` is given while rejecting
+    /// closed connections (`M1`, `L3`). Returns `(resolved_key, rebound_any)`.
+    pub fn begin_session_call(
+        &mut self,
+        connection: u64,
+        named_key: Option<&str>,
+        shown: Option<DisplayId>,
+        now_ms: u64,
+    ) -> (Option<String>, bool) {
+        Self::begin_session_call_in(
+            &mut self.displays,
+            &mut self.input_queue,
+            &self.closed,
+            &mut self.sessions,
+            connection,
+            named_key,
+            shown,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_session_call_in<H>(
+        displays: &mut Displays<H>,
+        input_queue: &mut crate::input_queue::InputQueue,
+        closed: &HashSet<u64>,
+        sessions: &mut HashMap<u64, String>,
+        connection: u64,
+        named_key: Option<&str>,
+        shown: Option<DisplayId>,
+        now_ms: u64,
+    ) -> (Option<String>, bool) {
+        if closed.contains(&connection) {
+            return (None, false);
+        }
+        let mut rebound = false;
+        if let Some(k) = named_key {
+            sessions.insert(connection, k.to_string());
+            rebound =
+                !Self::rebind_session_in(displays, input_queue, closed, k, connection, now_ms)
+                    .is_empty();
+        }
+        let key = named_key
+            .map(String::from)
+            .or_else(|| shown.and_then(|id| displays.get(id)?.session().map(String::from)))
+            .or_else(|| sessions.get(&connection).cloned());
+        if let Some(ref k) = key {
+            displays.sessions.note_call_start(k, now_ms);
+        }
+        (key, rebound)
+    }
+
+    /// Look up and rebind `key`'s latest live display for `createDisplay`
+    /// reuse on open `connection`, rejecting closed connections (`M1`, `L3`).
+    pub fn reuse_session_display(
+        &mut self,
+        connection: u64,
+        key: &str,
+        now_ms: u64,
+    ) -> Option<DisplayId> {
+        Self::reuse_session_display_in(
+            &mut self.displays,
+            &mut self.input_queue,
+            &self.closed,
+            connection,
+            key,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn reuse_session_display_in<H>(
+        displays: &mut Displays<H>,
+        input_queue: &mut crate::input_queue::InputQueue,
+        closed: &HashSet<u64>,
+        connection: u64,
+        key: &str,
+        now_ms: u64,
+    ) -> Option<DisplayId> {
+        if closed.contains(&connection) {
+            return None;
+        }
+        let id = displays.for_session(key)?.id;
+        Self::rebind_session_in(displays, input_queue, closed, key, connection, now_ms);
+        Some(id)
     }
 
     /// The displays changed. Park any display of ours that left its verified
@@ -789,7 +881,7 @@ impl Core {
                     core.run_repark_shifts(cx);
                 } else if core.repark_state.has_pending_retries(&live_adopted) {
                     let max_f = core.repark_state.max_pending_failures(&live_adopted);
-                    if max_f <= 5 {
+                    if max_f < agent_screen_model::arrangement::MAX_PENDING_SHIFT_FAILURES {
                         let secs = 2u64.saturating_pow(max_f.saturating_sub(1).min(4)).min(30);
                         cx.spawn(async move |this, cx| {
                             cx.background_executor()
@@ -1044,21 +1136,17 @@ impl Core {
         self.drain_dropped_calls();
         #[cfg(debug_assertions)]
         crate::mac::cg::clear_user_stage_connection(connection);
-        self.closed.insert(connection);
-        // First, so the queue's requests stop as disconnected, not as
-        // their displays ending.
-        self.input_queue.disconnect(connection);
-        self.sessions.remove(&connection);
         let grace = disconnect_grace();
         let now_ms = self.elapsed_ms();
-        let (marked, migrated) = self
-            .displays
-            .connection_disconnected_with_migrated(connection, now_ms);
-        for id in migrated {
-            if let Some(owner) = self.displays.get(id).and_then(|d| d.owner.clone()) {
-                self.input_queue.register(id, &owner);
-            }
-        }
+        let marked = Self::disconnect_connection_in(
+            &mut self.displays,
+            &mut self.input_queue,
+            &mut self.closed,
+            &mut self.closed_order,
+            &mut self.sessions,
+            connection,
+            now_ms,
+        );
         if grace.is_zero() {
             let ended = self.displays.expire_disconnected(now_ms, 0);
             self.finished(&ended, cx);
@@ -1078,6 +1166,32 @@ impl Core {
             })
             .detach();
         }
+    }
+
+    pub(crate) fn disconnect_connection_in<H>(
+        displays: &mut Displays<H>,
+        input_queue: &mut crate::input_queue::InputQueue,
+        closed: &mut HashSet<u64>,
+        closed_order: &mut std::collections::VecDeque<u64>,
+        sessions: &mut HashMap<u64, String>,
+        connection: u64,
+        now_ms: u64,
+    ) -> usize {
+        if closed.insert(connection) {
+            if closed_order.len() >= agent_screen_model::session::MAX_CLOSED_CONNECTIONS
+                && let Some(oldest) = closed_order.pop_front()
+            {
+                closed.remove(&oldest);
+            }
+            closed_order.push_back(connection);
+        }
+        // First, so the queue's requests stop as disconnected, not as
+        // their displays ending.
+        input_queue.disconnect(connection);
+        sessions.remove(&connection);
+        let (marked, migrated) = displays.connection_disconnected_with_migrated(connection, now_ms);
+        displays.register_queue_owners(&mut input_queue.queue, &migrated);
+        marked
     }
 
     /// Drop a display using an off-thread `SpareSnapshot` (L3). An empty one
@@ -1497,12 +1611,133 @@ mod tests {
     }
 
     #[test]
-    fn spare_infos_mark_physically_occupied_spare_busy_even_when_counts_zero() {
-        let raw = vec![(9, (1280.0, 800.0), false)];
-        let counts = HashMap::from([(9, 0usize)]);
+    fn spare_infos_mark_physically_occupied_spare_without_releasing_it_on_tidy() {
+        let raw = vec![(9, (1280.0, 800.0), false), (10, (1280.0, 800.0), false)];
+        let counts = HashMap::from([(9, 0usize), (10, 0usize)]);
         let mut physical = HashSet::new();
         physical.insert(9);
         let infos = Core::spare_infos_with(&raw, &[], &counts, &physical);
-        assert!(infos[0].has_windows);
+        assert!(!infos[0].has_windows);
+        assert!(infos[0].physically_covered);
+        assert!(!infos[1].physically_covered);
+        // `pick_spare` skips covered spare 9 and hands out clean spare 10 (index 1).
+        assert_eq!(
+            agent_screen_model::spares::pick_spare(&infos, (1280.0, 800.0)),
+            Some(1)
+        );
+        // `keep_spares` keeps both spares so idle `tidy` causes zero churn (M1).
+        assert_eq!(
+            agent_screen_model::spares::keep_spares(&infos, true, 2, 3, &[]),
+            vec![true, true]
+        );
+    }
+
+    #[test]
+    fn core_session_wiring_reregisters_input_queue_owners_and_rejects_closed_connections() {
+        use crate::model::Owner;
+
+        let mut displays = Displays::<()>::default();
+        let mut input_queue = crate::input_queue::InputQueue::default();
+        let mut closed = HashSet::new();
+        let mut closed_order = std::collections::VecDeque::new();
+        let mut sessions = HashMap::new();
+
+        // Session "s1" creates display 7 on connection 1 and registers in InputQueue.
+        let owner1 = Owner {
+            session_key: "s1".into(),
+            client: "Claude".into(),
+            title: "Work".into(),
+            connection: 1,
+        };
+        displays.add(
+            7,
+            "Agent Screen 1".into(),
+            (1280.0, 800.0),
+            Some(owner1.clone()),
+            (),
+        );
+        input_queue.register(7, &owner1);
+        sessions.insert(1, "s1".into());
+
+        // 1. Overlapping connection 2 joins "s1"; closing connection 1 migrates display 7
+        // AND re-registers InputQueue ownership onto connection 2 (`L3` / `RV6`).
+        let (started_on_2, _) = Core::begin_session_call_in(
+            &mut displays,
+            &mut input_queue,
+            &closed,
+            &mut sessions,
+            2,
+            Some("s1"),
+            None,
+            100,
+        );
+        assert_eq!(started_on_2.as_deref(), Some("s1"));
+        assert_eq!(
+            Core::reuse_session_display_in(&mut displays, &mut input_queue, &closed, 2, "s1", 100),
+            Some(7)
+        );
+        let marked = Core::disconnect_connection_in(
+            &mut displays,
+            &mut input_queue,
+            &mut closed,
+            &mut closed_order,
+            &mut sessions,
+            1,
+            200,
+        );
+        assert_eq!(marked, 0);
+        assert!(input_queue.owner(7, 2).is_ok());
+        assert!(input_queue.owner(7, 1).is_err());
+
+        // Closed connection 1 is rejected by begin_session_call_in, reuse_session_display_in,
+        // and rebind_session_in (`L3` / `RV6`).
+        assert_eq!(
+            Core::begin_session_call_in(
+                &mut displays,
+                &mut input_queue,
+                &closed,
+                &mut sessions,
+                1,
+                Some("s1"),
+                Some(7),
+                210,
+            ),
+            (None, false)
+        );
+        assert_eq!(
+            Core::reuse_session_display_in(&mut displays, &mut input_queue, &closed, 1, "s1", 210),
+            None
+        );
+
+        // 2. Closing connection 2 puts display 7 into disconnect grace; a late call on
+        // closed connection 2 cannot rebind it, while open connection 3 rebinds display 7
+        // AND re-registers InputQueue ownership onto connection 3 (`L3` / `RV6`).
+        let marked_2 = Core::disconnect_connection_in(
+            &mut displays,
+            &mut input_queue,
+            &mut closed,
+            &mut closed_order,
+            &mut sessions,
+            2,
+            300,
+        );
+        assert_eq!(marked_2, 1);
+        assert!(
+            Core::rebind_session_in(&mut displays, &mut input_queue, &closed, "s1", 2, 350)
+                .is_empty()
+        );
+        let (started_on_3, rebound_3) = Core::begin_session_call_in(
+            &mut displays,
+            &mut input_queue,
+            &closed,
+            &mut sessions,
+            3,
+            Some("s1"),
+            Some(7),
+            400,
+        );
+        assert_eq!(started_on_3.as_deref(), Some("s1"));
+        assert!(rebound_3);
+        assert!(input_queue.owner(7, 3).is_ok());
     }
 }

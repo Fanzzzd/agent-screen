@@ -686,7 +686,10 @@ impl Forwarder {
     }
 
     pub fn mouse_moved(&self, to: (f64, f64), flags: CGEventFlags) {
-        self.send(move |w| w.mouse_moved(to, flags));
+        self.send(move |w| {
+            w.drag_guard = None;
+            w.mouse_moved(to, flags);
+        });
     }
 
     pub fn scroll(
@@ -1357,42 +1360,73 @@ fn held(target: WindowTarget, at: (f64, f64)) -> Option<Grab> {
 /// may then tile it. Posted drag events are processed asynchronously, so
 /// any non-grabbed drag monitors `[0, 40, 150, 350, 700]` ms after release
 /// even when the window has not left at `t = 0` ms yet.
-static ACTIVE_VIEWER_DRAGS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<u32, usize>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const VIEWER_DRAG_GUARD_TTL: Duration = Duration::from_secs(10);
+
+static NEXT_VIEWER_DRAG_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+type ActiveViewerDragMap = std::collections::HashMap<u32, Vec<(u64, Instant)>>;
+
+static ACTIVE_VIEWER_DRAGS: std::sync::LazyLock<std::sync::Mutex<ActiveViewerDragMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// RAII token marking `window_id` as actively being dragged in the Viewer or
 /// watched by `keep_on_display`, so `guard_placed` pauses only for that window
-/// rather than for the whole Takeover (`L5`).
-pub(crate) struct ViewerDragGuard(u32);
+/// rather than for the whole Takeover (`L5`), with a 10 s auto-expiry if a
+/// Viewer release never arrives (`L7`).
+pub(crate) struct ViewerDragGuard {
+    window_id: u32,
+    token: u64,
+}
 
 impl ViewerDragGuard {
     pub(crate) fn new(window_id: u32) -> Self {
+        Self::new_at(window_id, Instant::now())
+    }
+
+    fn new_at(window_id: u32, now: Instant) -> Self {
+        let token = NEXT_VIEWER_DRAG_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock() {
-            *map.entry(window_id).or_default() += 1;
+            let entries = map.entry(window_id).or_default();
+            entries.retain(|(_, started)| {
+                now.saturating_duration_since(*started) < VIEWER_DRAG_GUARD_TTL
+            });
+            entries.push((token, now));
         }
-        Self(window_id)
+        Self { window_id, token }
     }
 }
 
 impl Drop for ViewerDragGuard {
     fn drop(&mut self) {
         if let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock()
-            && let Some(count) = map.get_mut(&self.0)
+            && let Some(entries) = map.get_mut(&self.window_id)
         {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                map.remove(&self.0);
+            entries.retain(|(token, _)| *token != self.token);
+            if entries.is_empty() {
+                map.remove(&self.window_id);
             }
         }
     }
 }
 
 pub fn viewer_watching_window(window_id: u32) -> bool {
-    ACTIVE_VIEWER_DRAGS
-        .lock()
-        .ok()
-        .is_some_and(|map| map.get(&window_id).copied().unwrap_or(0) > 0)
+    viewer_watching_window_at(window_id, Instant::now())
+}
+
+fn viewer_watching_window_at(window_id: u32, now: Instant) -> bool {
+    let Ok(mut map) = ACTIVE_VIEWER_DRAGS.lock() else {
+        return false;
+    };
+    let Some(entries) = map.get_mut(&window_id) else {
+        return false;
+    };
+    entries.retain(|(_, started)| now.saturating_duration_since(*started) < VIEWER_DRAG_GUARD_TTL);
+    if entries.is_empty() {
+        map.remove(&window_id);
+        false
+    } else {
+        true
+    }
 }
 
 fn keep_on_display(press: Grab, at: (f64, f64), drag_moved: bool) {
@@ -3619,5 +3653,17 @@ mod popup_tests {
             assert!(viewer_watching_window(777_001));
         }
         assert!(!viewer_watching_window(777_001));
+
+        // Leaked guards auto-expire after VIEWER_DRAG_GUARD_TTL (L7).
+        let t0 = Instant::now();
+        let _leaked = ViewerDragGuard::new_at(777_003, t0);
+        assert!(viewer_watching_window_at(
+            777_003,
+            t0 + Duration::from_secs(9)
+        ));
+        assert!(!viewer_watching_window_at(
+            777_003,
+            t0 + VIEWER_DRAG_GUARD_TTL
+        ));
     }
 }

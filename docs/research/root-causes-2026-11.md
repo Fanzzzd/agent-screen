@@ -7,13 +7,13 @@
 3. 代码假设 Agent Display 上的交互目标都是宿主进程名下 `layer == 0` 的顶层 `AXWindow` `[已验证]`。实际上 AppKit Sheet 的无障碍角色是 `AXSheet`，macOS 系统设置面板运行在独立的 ExtensionKit `.appex` 进程中，弹出菜单位于 `layer == 101`，后台点击菜单外部也不会自动退出 `NSMenu` 追踪循环 `[已验证]`。议题 `#205` 与 `#207` 由此产生 `[已验证]`。
 4. 代码对 `CGVirtualDisplay` 与 `ScreenCaptureKit` 生命周期做了三项过强假设：假设释放低单元号备用显示器后新建显示器会自动回填单元号空洞，假设备用池显示器不会发生分辨率回退，假设空闲采集流在 Peek 提速时总有最新帧可用 `[已验证]`。`unit twin`、`800x500` 模式回退与议题 `#190` 均与这组生命周期边界有关 `[部分已验证]`。
 
-下表汇总全部 11 个调研对象的验证结论与推荐处置。文中代码行号默认指向基线 `origin/main` 提交 `dab5e39`，涉及分支 `PR #208` 首轮审阅提交 `e239e65` 与次轮审阅提交 `9de473c` 时单独注明。每项事实与推断均标注 `[已验证]` 或 `[未验证]`。
+下表汇总全部 11 个调研对象的验证结论与推荐处置。文中代码行号默认指向基线 `origin/main` 提交 `dab5e39`，涉及分支 `PR #208` 历轮审阅提交 `e239e65`、`9de473c` 与 `7d3684e` 时单独注明。每项事实与推断均标注 `[已验证]`、`[部分已验证]` 或 `[未验证]`。
 
 | 编号或主题 | 核心根因归类 | 根因验证状态 | 落地与验证结论 |
 | --- | --- | --- | --- |
-| `#204` 新显示器抢占原点导致窗口串会话 | 视口重排与几何归属错配 | `[已验证]` | 已落地连通性守卫、非阻塞停靠加 `ReparkState` 串行平移重试与 `effective_agent_display` 统一归属，模型与适配层单测通过 |
-| Viewer 标题栏拖拽偶发落回主屏幕 | `WindowServer` 指针吸附、高窗口中点过滤与异步越界 | `[已验证]` | 已落地超大窗口中心夹紧、单窗口节流检测与窗口级巡检暂停，`viewerdrag` 实测 `8/9` 通过，`CustomDrag` 唤醒点击待复测 |
-| `#189` 另一会话占用窗口无法收回且缺标签 | `#204` 视口平移、断连残留与错误文案缺标签 | `[已验证]` | 已补全持有者标签、重连与重叠连接 `InputQueue` 续绑及已关闭连接墓碑守卫，`sessiondisplays` 实测 `13/14` 通过 |
+| `#204` 新显示器抢占原点导致窗口串会话 | 视口重排与几何归属错配 | `[已验证]` | 已落地连通性守卫、非阻塞停靠加 `ReparkState` 串行平移与 `5` 次上限重试、`0.25 s` 无障碍超时及 `effective_agent_display` 统一归属，模型与适配层单测通过，真机强制重排未运行 `[部分已验证]` |
+| Viewer 标题栏拖拽偶发落回主屏幕 | `WindowServer` 指针吸附、高窗口中点过滤与异步越界 | `[已验证]` | 已落地原生标题栏与工具栏抓取放行、超两倍屏高窗口方向跟随夹紧及窗口级 `10 s` 过期守卫，`Calculator`、`TallDrag` 与前序 `SheetDrag` 实测通过，无空标准标题栏后台窗口单次拖拽仍丢首击 `[部分已验证]` |
+| `#189` 另一会话占用窗口无法收回且缺标签 | `#204` 视口平移、断连残留与错误文案缺标签 | `[已验证]` | 已补全持有者标签、`Core` 队列续绑单测、`1024` 上限墓碑守卫与 `window_covers_spare` 防震荡备用池隔离，`sessiondisplays` 实测 `18/18` 全部通过 `[已验证]` |
 | `#190` Peek 画出窗口边框但无画面内容 | `0.1.31` 缺串流自愈，外加 `replayd` 空闲停流 | `[部分已验证]` | 已落地 `retry_at` 退避守卫与温热帧保留并通过 `Stream::apply_want` 单测，保持 `Refs #190` |
 | `#205` Sheet 与系统设置弹出菜单四连环失败 | `AXSheet`、`.appex` 进程与 `layer == 101` 菜单未建模 | `[已验证]` | 已识别 `.appex` 与 `AXSheet` 并放行同屏关联弹出菜单，`menuchoice` 实测红转绿 |
 | `#207` Takeover 下 Viewer 点击菜单卡死 | `NSMenu` 子节点命中偏移与外部点击不关菜单 | `[已验证]` | 已限制 `AXParent` 查找层级与候选宿主进程并支持外部点击 `AXCancel`，Takeover `viewerdrag` 实测通过 |
@@ -71,12 +71,12 @@
 
 - 方案 A：停止重用低序列号，改为单调递增分配 `serial`。否决该方案：ADR 0009 已证明单调递增 `serial` 会让 `WindowServer` 与 `ColorSync` 无限累积显示器配置记录并拖慢主线程，且无法解决物理显示器热插拔或右侧固定显示器引发的视口移动 `[已验证]`。
 - 方案 B：无条件钉死已停靠显示器，不做连通性校验。否决该方案：即审阅指出的 `R1-H1`，首槽位显示器销毁后会留下悬空显示器，被 `WindowServer` 强制搬移 `[已验证]`。
-- 方案 C：已落地 ADR 0018 的三步组合方案 `[已验证]`。第一，在 `crates/model/src/arrangement.rs` 通过纯函数 `connected(screens)` 保持已停靠且连通的显示器原地不动，桥接显示器释放时自动紧缩右侧显示器保证连通。第二，将 `Core::repark` 中的 `display::configure` 即时停靠与 `ReparkState` 窗口平移解耦，窗口平移在锁外按 `0.25 s` 无障碍超时、超时进程同轮跳过与单轮 `1 s` 总预算执行，失败目标回填 `ReparkState` 退避重试并记录首次告警，消除 `R1-H2`、`R2-H1`、`R3-M3` 与 `R3-L2`。第三，在 `Displays` 内绑定自动发布 `RECORDED_OWNERS`，提炼 `arrangement::effective_agent_display` 供 `list_windows`、`place_window`、`held_by`、`counts`、备用池探测与待审清扫共用，对尚未落入目标显示器矩形的已登记窗口在 `list_windows` 中标注 `offDisplay: true` 且省略坐标，在 `Worker::hit` 保持视觉 Z 序命中的同时拒绝代理点击其他显示器登记的顶层窗口并标明持有者，备用池同时检查登记与物理几何占用，消除 `R1-M6`、`R2-M4`、`R3-M2`、`R3-L3` 与 `R3-L4`。
+- 方案 C：已落地 ADR 0018 的三步组合方案 `[部分已验证]`。第一，在 `crates/model/src/arrangement.rs` 通过纯函数 `connected(screens)` 保持已停靠且连通的显示器原地不动，桥接显示器释放时自动紧缩右侧显示器保证连通。第二，将 `Core::repark` 中的 `display::configure` 即时停靠与 `ReparkState` 窗口平移解耦，窗口平移在锁外连同 `with_moves_direct` 的 `AXEnhancedUserInterface` 读写一并施加 `0.25 s` 无障碍超时、超时进程同轮跳过与单轮 `1 s` 总预算执行，失败目标记录 `failed_bounds` 回填 `ReparkState`，若后续被用户或 `place_window` 移走则放弃旧位移并在第 `5` 次失败后终止重试，消除 `R1-H2`、`R2-H1`、`R3-M3`、`R3-L2`、`R4-L1` 与 `R4-L4`。第三，在 `Displays` 内绑定自动发布 `RECORDED_OWNERS`，提炼 `arrangement::effective_agent_display` 供 `list_windows`、`place_window`、`held_by`、`counts`、备用池探测与待审清扫共用，对尚未落入目标显示器矩形的已登记窗口在 `list_windows` 中标注 `offDisplay: true` 并在工具说明中提示调用 `place_window` 收回，在 `Worker::hit` 保持视觉 Z 序命中的同时拒绝代理点击其他显示器登记的顶层窗口并标明持有者，备用池仅在 `pick_spare` 与 `retire_instead` 中排除中心或过半面积落入的 `physically_covered` 显示器而绝不在空闲 `tidy` 中释放重建，消除 `R1-M6`、`R2-M4`、`R3-M2`、`R3-L3`、`R3-L4`、`R4-M1` 与 `R4-L6`。
 
 ### 真实路径测试方案
 
-1. 模型层与适配层单元测试：在 `crates/model/src/arrangement.rs`、`held.rs`、`crates/model/tests/round3_regressions.rs`、`apps/macos/src/mac/windows.rs`、`input.rs` 与 `core.rs` 测试低 `serial` 新显示器不挤占高 `serial` 在用显示器、桥接释放后 `connected(&planned) == true`、`ReparkState` 并发重排只平移未登记窗口一次、失败平移跨二次位移换算重试、卡死进程同轮跳过与总耗时封顶、Takeover 期间拒绝会话移动与授权、视觉 Z 序顶层跨显示器窗口拦截、`offDisplay: true` 序列化以及备用池物理几何占用拦截 `[已验证]`。
-2. 真实 `e2e` 路径说明：`sessiondisplays` 只验证多显示器会话归属而不触发已停靠显示器原点平移，受虚拟显示器创建硬预算限制，未额外编写强制重排显示器的真机 `e2e` 脚本 `[未验证]`。
+1. 模型层与适配层单元测试：在 `crates/model/src/arrangement.rs`、`held.rs`、`spares.rs`、`crates/model/tests/round3_regressions.rs`、`round4_regressions.rs`、`apps/macos/src/mac/windows.rs`、`input.rs` 与 `core.rs` 测试低 `serial` 新显示器不挤占高 `serial` 在用显示器、桥接释放后 `connected(&planned) == true`、`ReparkState` 并发重排只平移未登记窗口一次、失败平移跨二次位移换算重试、用户后续移窗自动跳过旧重试与 `5` 次重试上限、卡死进程同轮跳过与总耗时封顶、Takeover 期间拒绝会话移动与授权、视觉 Z 序顶层跨显示器窗口拦截、`offDisplay: true` 序列化以及相邻窗口越界悬挑备用显示器时连续多轮空闲 `tidy` 零创建零释放 `[已验证]`。
+2. 真实 `e2e` 路径说明：`sessiondisplays` 只验证多显示器会话归属而不触发已停靠显示器原点平移，受虚拟显示器创建硬预算限制，未运行强制移动已停靠显示器原点的真机 `e2e` 脚本 `[未验证]`。
 
 ---
 
@@ -114,12 +114,12 @@
 
 - 方案 A：拦截所有 Viewer 鼠标拖拽，无论是否点在标题栏都改为移动整个窗口。否决该方案：这会破坏窗口内文本划选、滚动条拖拽、分栏拖拽与画布拖拽 `[已验证]`。
 - 方案 B：仅在 `keep_on_display` 中无条件把越界窗口重置回起拖前的 `initial` 坐标。否决该方案：当用户在 Viewer 内把窗口往显示器边缘拖动少许超界时，窗口会弹回起拖起点，拖拽手感断裂 `[已验证]`。
-- 方案 C：已落地组合修复 `[已验证]`。第一，在 `viewer_press::map_viewer_point` 中拒绝宽高 `<= 0` 的显示器矩形。第二，在 `viewer_press::can_grab_window` 中对按压点位于显示器内且交集宽高均 `>= 40 pt` 的高宽窗口放行，在 `ax::on_title_bar` 中设置 `0.15 s` 超时、最多向上遍历 `12` 层 `AXParent`，且仅当 `"AXTabGroup"` 位于 `"AXToolbar"` 内时视为标题栏标签区，消除 `R2-L7` 与 `R2-L9`。第三，在 `viewer_press::dragged_window_origin` 中同时施加边缘可见夹紧、超大窗口几何中心留屏约束以及 `height > 2 * area.height - 2` 超高窗口居中兜底，消除 `R2-H2` 与 `R3-L1`，并通过 `ax::set_frame_asked` 保持原窗口尺寸不变。第四，`Grab::left_display` 改查单窗口 `cg::window_bounds` 并在拖拽途中按 `50 ms` 节流，消除 `R2-M3`；松手后只要拖拽发生了移动即启动 `[0, 40, 150, 350, 700] ms` 后台巡检按拖拽目标落点恢复，并通过 `ViewerDragGuard` 仅在活动拖拽与 `keep_on_display` 巡检窗口期间暂停该窗口的 `guard_placed`，消除 `R3-L5`。
+- 方案 C：已落地原生标题栏抓取与异步守卫组合修复，无空标准标题栏后台窗口首击丢弃问题保持开放 `[部分已验证]`。第一，在 `viewer_press::map_viewer_point` 中拒绝宽高 `<= 0` 的显示器矩形。第二，在 `viewer_press::can_grab_window` 中对按压点位于显示器内且交集宽高均 `>= 40 pt` 的高宽窗口放行，在 `ax::on_title_bar` 中设置 `0.15 s` 超时、最多向上遍历 `12` 层 `AXParent`，且仅当 `"AXTabGroup"` 位于 `"AXToolbar"` 内时视为标题栏标签区，消除 `R2-L7` 与 `R2-L9`。第三，在 `viewer_press::dragged_window_origin` 中同时施加边缘可见夹紧、超大窗口几何中心留屏约束以及超两倍屏高或屏宽窗口沿拖拽方向的中心留屏区间夹紧，消除 `R2-H2`、`R3-L1` 与 `R4-L2`，并通过 `ax::set_frame_asked` 保持原窗口尺寸不变。第四，`Grab::left_display` 改查单窗口 `cg::window_bounds` 并在拖拽途中按 `50 ms` 节流，消除 `R2-M3`；松手后只要拖拽发生了移动即启动 `[0, 40, 150, 350, 700] ms` 后台巡检按拖拽目标落点恢复，并通过带 `10 s` 自动过期上限并在 `mouse_moved` 清理的 `ViewerDragGuard` 仅在活动拖拽与 `keep_on_display` 巡检期间暂停该窗口的 `guard_placed`，消除 `R3-L5` 与 `R4-L7`。
 
 ### 真实路径测试方案
 
-1. 模型层与输入层单元测试：在 `crates/model/src/viewer_press.rs`、`crates/model/tests/round3_regressions.rs` 与 `apps/macos/src/mac/input.rs` 测试 `map_viewer_point` 零矩形拒绝、`normalize_viewer_point` 画布外松手夹紧、`can_grab_window` 对超高超宽与半出界窗口放行且排除最小化、全屏与附着 Sheet、超大窗口与超两倍屏高窗口 `1700 pt` 中心留屏夹紧、`rebase_grab_for_display` 拖拽中途显示器重排坐标换算、`should_watch_after_release` 松手后异步越界巡检触发条件以及 `ViewerDragGuard` 窗口级引用计数守卫 `[已验证]`。
-2. 真实 `e2e` 路径测试：在最终应用代码上以 `AGENTSCREEN_INSTANCE=e2e` 运行 `viewerdrag`，`9` 项检查中通过 `8` 项：系统 `Calculator` 原生标题栏拖拽从 `335,96` 移至 `469,156`、`TallDrag` 高 `1080 pt` 窗口沿对角线拖向 `toX = 1.2, toY = t_from.1 + 0.4` 从 `340,30` 同时夹紧横坐标与纵向中心上界至 `680,59` 且保持 `1080 pt` 高度、`SheetDrag` 附着模态 Sheet 宿主窗口从 `550,260` 拖至 `262,320`、两项 Takeover `.appex` 菜单点击与外部取消检查，全程用户主屏幕零窗口泄漏 `[已验证]`。`CustomDrag` 因无空标准标题栏后台窗口首击被 AppKit 消费而未触发拖拽，已在 `viewerdrag.rs` 补入预唤醒点击，因该次运行触发 `15 s` 空闲预热创建第 `3` 台显示器触及单次预算上限，按停机规则停止复跑，该测试改动保持 `[未验证]`。
+1. 模型层与输入层单元测试：在 `crates/model/src/viewer_press.rs`、`crates/model/tests/round3_regressions.rs`、`round4_regressions.rs` 与 `apps/macos/src/mac/input.rs` 测试 `map_viewer_point` 零矩形拒绝、`normalize_viewer_point` 画布外松手夹紧、`can_grab_window` 对超高超宽与半出界窗口放行且排除最小化、全屏与附着 Sheet、`1300 pt` 与 `1700 pt` 超两倍屏高窗口沿拖拽方向的中心留屏夹紧、`rebase_grab_for_display` 拖拽中途显示器重排坐标换算、`should_watch_after_release` 松手后异步越界巡检触发条件以及 `ViewerDragGuard` 窗口级令牌守卫与 `10 s` 自动过期 `[已验证]`。
+2. 真实 `e2e` 路径测试：已按 `R4-M3` 回退 `viewerdrag.rs` 的额外预点击与 `menuchoice.swift` 的 `CustomDragView`，恢复诚实的单次拖拽检查。在 `AGENTSCREEN_IDLE_SECS=86400` 与 `AGENTSCREEN_INSTANCE=e2e` 下单次运行 `viewerdrag`：系统 `Calculator` 原生标题栏拖拽从 `335,96` 移至 `469,156`、`TallDrag` 高 `1080 pt` 窗口沿对角线拖向 `toX = 1.2, toY = t_from.1 + 0.4` 从 `340,30` 同时夹紧至 `680,59` 且保持 `1080 pt` 高度、两项 Takeover `.appex` 菜单点击与外部取消检查以及用户主屏幕零窗口泄漏均实测通过 `[已验证]`。`SheetDrag` 在前序第 3 轮实测从 `550,260` 拖至 `262,320` 通过，第 4 轮因脚本 `300 ms` 固定等待未轮询而在 `17/20` 步读到 `335,205 -> 90,256`；`CustomDrag` 仍停在 `340,220 -> 340,220`，证实在无空标准标题栏的后台窗口上单次 Viewer 按压仍被 AppKit 消费而未启动自绘拖拽 `[已复现未解决]`。已从 `.changeset/root-causes-nov-2026.md` 与 `PR #208` 正文移除自绘标题栏拖拽已修复的表述。
 
 ---
 
@@ -160,12 +160,12 @@
 
 - 方案 A：仅靠 `PR #202` 现有的跨会话 `Window Request` 卡片加上固定显示器坐标，声称彻底修复 `#189`。否决该方案：如审阅 `M1` 所述，这没有补齐多显示器冲突时的持有者标签列表，没有清理落入备用池的残留窗口，也没有提供菜单栏侧识别哪个会话持有哪个窗口的直观视图 `[已验证]`。
 - 方案 B：对超过固定空闲时长如 15 分钟未发起工具调用的会话自动销毁显示器并把窗口弹回用户主屏幕。否决该方案：违反 ADR 0004"显示器以待审态结束且不打断用户当前屏幕"的约束，长任务等待用户回复期间被强行拆屏会破坏现场 `[已验证]`。
-- 方案 C：已落地根因修复并保持 `Refs #189` 不直接关闭议题 `[已验证]`。第一，修复 `#204` 消除视口串位，通过后台线程探测备用池窗口 `probe_spares` 并在 `evacuate_spare_windows` 中按窗口指数退避 `2 s -> 60 s` 加首次失败告警迁回残留窗口，严禁跨会话复用带窗口备用显示器，消除 `R1-H3`、`R2-L2`、`R2-L3` 与 `R3-L4`。第二，在 `held.rs` 与 `placement.rs` 所有拒绝、超时及多窗口冲突错误文案中按真实持有者数量传入标签，输出客户端、显示器标题、`session` 键、空闲或断连秒数及 `connection open/closed` 状态，并将跨实例虚拟显示器标为 `display {id} [serial {serial}, another Agent Screen instance]`，消除 `R2-L4` 与 `R2-L10`。第三，实现 ADR 0016 同 `session_key` 多连接 `open_connections` 共享保活与 `2 s` 控制连接断连宽限期 `DISCONNECT_GRACE`，在宽限期续绑与重叠连接迁移两条路径上同步重新注册 `InputQueue` 所有者，并在 `Sessions` 与 `agent.rs` 双重拦截已关闭连接重绑，消除 `R2-M1`、`R3-H1` 与 `R3-M1`。菜单栏独立多会话释放列表属于后续产品特性，暂不关闭 `#189`。
+- 方案 C：已落地根因修复并保持 `Refs #189` 不直接关闭议题 `[已验证]`。第一，修复 `#204` 消除视口串位，通过后台线程探测备用池窗口 `probe_spares` 并在 `evacuate_spare_windows` 中按窗口指数退避 `2 s -> 60 s` 加首次失败告警迁回残留窗口，通过 `window_covers_spare` 仅在 `pick_spare` 与 `retire_instead` 跳过被外部窗口中心或过半面积覆盖的备用显示器，绝不在 `keep_spares` 空闲 `tidy` 中因邻屏越界释放重建显示器，消除 `R1-H3`、`R2-L2`、`R2-L3`、`R3-L4` 与 `R4-M1`。第二，在 `held.rs` 与 `placement.rs` 所有拒绝、超时及多窗口冲突错误文案中按真实持有者数量传入标签，输出客户端、显示器标题、`session` 键、空闲或断连秒数及 `connection open/closed` 状态，并将跨实例虚拟显示器标为 `display {id} [serial {serial}, another Agent Screen instance]`，消除 `R2-L4` 与 `R2-L10`。第三，实现 ADR 0016 同 `session_key` 多连接 `open_connections` 共享保活与 `2 s` 控制连接断连宽限期 `DISCONNECT_GRACE`，在 `Core` 真实路径上直接调用 `Displays::register_queue_owners` 与 `connection_disconnected_with_migrated` 同步重绑 `InputQueue` 所有者，并在 `Sessions` 与 `Core` 中以 `1024` 条上限墓碑集合拦截已关闭连接重绑，消除 `R2-M1`、`R3-H1`、`R3-M1`、`R4-L3` 与 `R4-L7`。菜单栏独立多会话释放列表属于后续产品特性，暂不关闭 `#189`。
 
 ### 真实路径测试方案
 
-1. 模型层与回归集成测试：在 `crates/model/src/spares.rs`、`held.rs`、`model.rs`、`placement.rs` 与 `crates/model/tests/round3_regressions.rs` 测试备用池物理与登记窗口隔离、任意调用宽限期续绑与重叠连接保活、重连与重叠连接回退后的 `InputQueue::owner` 权限保持、已关闭连接晚到请求不复活已断连显示器、两个会话并发移交经 `decide_after_hand_over` 二次询问、死亡会话及跨实例 `0x5353` 错误文案 `[已验证]`。
-2. 真实 `e2e` 路径测试：在最终应用代码上以 `AGENTSCREEN_INSTANCE=e2e` 运行 `sessiondisplays`，`14` 项检查中通过 `13` 项，实测验证跨会话请求同一窗口返回 `[session ..., idle 1s, connection open]`、断连宽限期内直接调用 `input_queue` 成功续绑显示器并持有队列所有权、宽限期过后显示器保持存活、关闭重叠连接后剩余连接继承显示器与 `InputQueue` 所有权 `[已验证]`。末项 `listWindows` 轮询因脚本在 `250 ms` 宽限期内遇到 `not_found` 提前跳出循环，已在 `sessiondisplays.rs` 修正为持续轮询至 `"ended"`，受虚拟显示器创建预算上限约束未再复跑该脚本改动 `[未验证]`；前序轮次还实测通过了 `windowaccess` `[前序提交已验证]`。
+1. 模型层与回归集成测试：在 `crates/model/src/spares.rs`、`held.rs`、`model.rs`、`placement.rs`、`crates/model/tests/round3_regressions.rs`、`round4_regressions.rs` 与 `apps/macos/src/core.rs` 测试备用池物理覆盖与空闲零震荡、任意调用宽限期续绑与重叠连接保活、`Core` 真实入口在重连、复用与断连迁移时同步更新 `InputQueue::owner`、已关闭连接墓碑拦截与 `1024` 容量封顶、两个会话并发移交经 `decide_after_hand_over` 二次询问、死亡会话及跨实例 `0x5353` 错误文案 `[已验证]`。
+2. 真实 `e2e` 路径测试：在最终代码上以 `AGENTSCREEN_INSTANCE=e2e` 运行 `sessiondisplays`，`18` 项检查全部通过，实测验证跨会话请求同一窗口返回 `[session ..., idle 1s, connection open]`、断连宽限期内直接调用 `input_queue` 续绑显示器并保持队列所有权、宽限期过后显示器保持存活、关闭重叠连接后剩余连接继承显示器与 `InputQueue` 所有权、最后一条连接关闭且 `800 ms` 宽限期到期后同会话查询返回 `ended`，以及 `Field` 进程退出后已结束显示器 `B` 被 `sweep_ended` 自动清扫且用户主屏幕零窗口泄漏 `[已验证]`；前序轮次还实测通过了 `windowaccess` `[前序提交已验证]`。
 
 ---
 

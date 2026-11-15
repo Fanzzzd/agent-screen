@@ -7,6 +7,8 @@
 //! makes every later display creation collide with unit 9 ("unit twin"),
 //! forcing a throwaway filler display and extra WindowServer reconfigurations.
 
+use crate::model::Rect;
+
 /// Facts about one spare display, gathered on the caller's side.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpareInfo {
@@ -14,6 +16,29 @@ pub struct SpareInfo {
     pub unit: Option<u32>,
     pub expired: bool,
     pub has_windows: bool,
+    /// True when a window's center or majority area physically covers this
+    /// spare even though `has_windows` is false (for example a window recorded
+    /// on another live display whose shift has not completed yet). Blocks
+    /// handing the spare out in [`pick_spare`] without causing [`keep_spares`]
+    /// to release and recreate spares on idle tidy ticks (`M1`).
+    pub physically_covered: bool,
+}
+
+/// Whether `window_bounds` physically covers `spare_area`: either its center
+/// lies on `spare_area`, or more than half of the window's area sits on
+/// `spare_area`. A narrow overhang from a window on an adjacent display does
+/// not count (`M1`).
+pub fn window_covers_spare(window_bounds: &Rect, spare_area: &Rect) -> bool {
+    if spare_area.contains(window_bounds.mid()) {
+        return true;
+    }
+    let ix0 = window_bounds.x.max(spare_area.x);
+    let iy0 = window_bounds.y.max(spare_area.y);
+    let ix1 = window_bounds.max_x().min(spare_area.max_x());
+    let iy1 = window_bounds.max_y().min(spare_area.max_y());
+    let inter = (ix1 - ix0).max(0.0) * (iy1 - iy0).max(0.0);
+    let total = (window_bounds.width * window_bounds.height).max(0.0);
+    total > 0.0 && inter > 0.5 * total
 }
 
 fn unit_key(unit: Option<u32>, index: usize) -> (u32, usize) {
@@ -23,18 +48,19 @@ fn unit_key(unit: Option<u32>, index: usize) -> (u32, usize) {
 /// Index of the windowless spare to reuse for `wanted`: a matching size with
 /// the lowest unit number, or when none matches `wanted`, the windowless spare
 /// with the lowest unit number overall so the caller can resize it. A spare
-/// holding a stray window is never handed to a new session.
+/// holding a stray window or physically covered by another display's window is
+/// never handed to a new session.
 pub fn pick_spare(spares: &[SpareInfo], wanted: (f64, f64)) -> Option<usize> {
     spares
         .iter()
         .enumerate()
-        .filter(|(_, s)| !s.has_windows && s.size == wanted)
+        .filter(|(_, s)| !s.has_windows && !s.physically_covered && s.size == wanted)
         .min_by_key(|&(i, s)| unit_key(s.unit, i))
         .or_else(|| {
             spares
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| !s.has_windows)
+                .filter(|(_, s)| !s.has_windows && !s.physically_covered)
                 .min_by_key(|&(i, s)| unit_key(s.unit, i))
         })
         .map(|(i, _)| i)
@@ -56,7 +82,9 @@ pub fn retire_instead(
     spares
         .iter()
         .enumerate()
-        .filter(|(_, s)| !s.has_windows && s.unit.is_none_or(|u| u > incoming))
+        .filter(|(_, s)| {
+            !s.has_windows && !s.physically_covered && s.unit.is_none_or(|u| u > incoming)
+        })
         .max_by_key(|&(i, s)| unit_key(s.unit, i))
         .map(|(i, _)| i)
 }
@@ -65,9 +93,12 @@ pub fn retire_instead(
 /// tidy, after the caller has attempted to move any stray windows off spares
 /// back to the user's screen.
 ///
-/// - Any spare that still holds a window (`has_windows`) releases so
-///   WindowServer moves the stuck window onto the user's screen instead of
-///   hiding it on an invisible spare forever.
+/// - Any spare that still holds an unrecorded/stray window (`has_windows`)
+///   releases so WindowServer moves the stuck window onto the user's screen
+///   instead of hiding it on an invisible spare forever.
+/// - `physically_covered` spares (covered by another live display's recorded
+///   window) stay in the pool rather than releasing onto the user's screen or
+///   triggering 15-second remake churn (`M1`).
 /// - Unexpired windowless spares stay.
 /// - While `warm`, up to `ready` spares stay, preferring the lowest unit
 ///   numbers so higher units release from the top down.
@@ -82,7 +113,7 @@ pub fn keep_spares(
 ) -> Vec<bool> {
     let mut keep: Vec<bool> = spares
         .iter()
-        .map(|s| !s.has_windows && !s.expired)
+        .map(|s| !s.has_windows && (!s.expired || s.physically_covered))
         .collect();
     let mut kept_count = keep.iter().filter(|&&k| k).count();
 
@@ -148,18 +179,21 @@ mod tests {
                 unit: Some(9),
                 expired: false,
                 has_windows: false,
+                physically_covered: false,
             },
             SpareInfo {
                 size: DEFAULT,
                 unit: Some(8),
                 expired: false,
                 has_windows: false,
+                physically_covered: false,
             },
             SpareInfo {
                 size: WIDE,
                 unit: Some(7),
                 expired: false,
                 has_windows: false,
+                physically_covered: false,
             },
         ];
         assert_eq!(pick_spare(&spares, DEFAULT), Some(1));
@@ -178,12 +212,14 @@ mod tests {
                 unit: Some(8),
                 expired: true,
                 has_windows: false,
+                physically_covered: false,
             },
             SpareInfo {
                 size: DEFAULT,
                 unit: Some(9),
                 expired: true,
                 has_windows: false,
+                physically_covered: false,
             },
         ];
         assert_eq!(keep_spares(&spares, true, 1, 3, &[]), vec![true, false]);
@@ -197,12 +233,14 @@ mod tests {
                 unit: Some(8),
                 expired: true,
                 has_windows: false,
+                physically_covered: false,
             },
             SpareInfo {
                 size: DEFAULT,
                 unit: Some(10),
                 expired: true,
                 has_windows: false,
+                physically_covered: false,
             },
         ];
         assert_eq!(
@@ -219,12 +257,14 @@ mod tests {
                 unit: Some(7),
                 expired: false,
                 has_windows: true,
+                physically_covered: false,
             },
             SpareInfo {
                 size: WIDE,
                 unit: Some(9),
                 expired: false,
                 has_windows: false,
+                physically_covered: false,
             },
         ];
         // Unit 7 matches DEFAULT and has the lower unit, yet holds a window:

@@ -274,22 +274,45 @@ fn test(tag: &str) -> Result<()> {
     );
 
     watcher.close();
-    let mut ended = None;
-    for _ in 0..24 {
-        sleep_ms(250);
+    // Wait past the 800 ms disconnect grace, then query from a client of the
+    // same session (`rebind_session` touches only displays still in grace, so
+    // it cannot revive B and sees `"ended"`, `M2`).
+    sleep_ms(1100);
+    let verifier = McpClient::start(&env)?;
+    let ended = verifier.tool("list_windows", json!({ "display_id": b }))?;
+    verifier.close();
+    check(
+        "closing the session's last connection ends B after the grace period",
+        ended.is_error && ended.text().contains("ended"),
+        ended.text(),
+    );
+
+    // Once Field exits so B has no remaining windows in review, `sweep_ended`
+    // sweeps B out of the active display list into `spares`.
+    sh_lenient("/usr/bin/pkill", &["-KILL", "-f", "--", tag]);
+    let field = format!("{}-field", tag.trim_start_matches('-'));
+    for _ in 0..20 {
+        if pid_of(&field).is_none() {
+            break;
+        }
+        sleep_ms(50);
+    }
+    let mut swept = false;
+    let mut sweep_msg = String::new();
+    for _ in 0..20 {
         if let Err(err) = control.call("listWindows", json!({ "displayId": b })) {
-            let msg = err.to_string();
-            let done = msg.contains("ended");
-            ended = Some(msg);
-            if done {
+            sweep_msg = err.to_string();
+            if sweep_msg.contains("ended") && !sweep_msg.contains("belongs to another session") {
+                swept = true;
                 break;
             }
         }
+        sleep_ms(150);
     }
     check(
-        "closing the session's last connection ends B after the grace period",
-        ended.as_ref().is_some_and(|msg| msg.contains("ended")),
-        ended.as_deref().unwrap_or("still live"),
+        "ended display B is swept once its last window closes",
+        swept,
+        sweep_msg,
     );
     Ok(())
 }

@@ -764,10 +764,19 @@ pub fn drag_slider(
 
 /// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates
 /// window moves and resizes, slowly. Turn it off around a move.
-fn with_moves_direct<T>(window: &AXUIElement, f: impl FnOnce() -> T) -> T {
+fn with_moves_direct<T>(
+    window: &AXUIElement,
+    timeout_secs: Option<f32>,
+    f: impl FnOnce() -> T,
+) -> T {
     let mut pid = 0;
-    let app = (unsafe { window.pid(NonNull::from(&mut pid)) } == AXError::Success)
-        .then(|| application(pid));
+    let app = (unsafe { window.pid(NonNull::from(&mut pid)) } == AXError::Success).then(|| {
+        let app = application(pid);
+        if let Some(timeout) = timeout_secs {
+            unsafe { app.set_messaging_timeout(timeout) };
+        }
+        app
+    });
     let enhanced = app.as_ref().is_some_and(|app| {
         attribute(app, "AXEnhancedUserInterface")
             .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
@@ -1470,7 +1479,7 @@ pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveE
     }
     let id = window_id(window);
     let onto_claimed = id.is_some_and(|id| super::claims::moving_into(id, bounds));
-    let moved = with_moves_direct(window, || fit_into(window, bounds));
+    let moved = with_moves_direct(window, None, || fit_into(window, bounds));
     match id {
         Some(id) if !onto_claimed && super::claims::display_of(id).is_some() => {
             let off = super::claims::release_once_off(id, moved.is_ok());
@@ -1504,7 +1513,7 @@ fn fit_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
 /// drag does.
 pub fn set_window_position(target: WindowTarget, x: f64, y: f64) -> Result<(), MoveError> {
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
-    with_moves_direct(&window, || {
+    with_moves_direct(&window, None, || {
         if !set_position(&window, x, y) {
             return Err(MoveError::Rejected);
         }
@@ -1515,7 +1524,7 @@ pub fn set_window_position(target: WindowTarget, x: f64, y: f64) -> Result<(), M
 /// Put a window back at an exact global frame.
 pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
     let window = window_element(target).ok_or(MoveError::NoWindow)?;
-    with_moves_direct(&window, || {
+    with_moves_direct(&window, None, || {
         if !set_position(&window, frame.x, frame.y) {
             return Err(MoveError::Rejected);
         }
@@ -1557,7 +1566,7 @@ pub fn set_frame_asked(target: WindowTarget, frame: Rect) -> Result<(), MoveErro
         None => AXError::IllegalArgument,
     };
     let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
-    let answers = with_moves_direct(&window, || {
+    let answers = with_moves_direct(&window, None, || {
         [
             write("AXPosition", at()),
             write(
@@ -1619,7 +1628,7 @@ pub fn set_frame_repark(
         None => AXError::IllegalArgument,
     };
     let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
-    let answers = with_moves_direct(&window, || {
+    let answers = with_moves_direct(&window, Some(timeout_secs), || {
         [
             write("AXPosition", at()),
             write(

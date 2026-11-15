@@ -313,9 +313,11 @@ pub fn filter_on_display(
 }
 
 /// Pure check returning every display in `ids` whose online bounds are
-/// physically intersected by any window in `windows`, regardless of recorded
-/// ownership (L4). Prevents `pick_spare` from handing out a spare covered by
-/// another display's unshifted recorded window.
+/// physically covered by any window in `windows` (center on the display or more
+/// than half of the window's area on it, `M1`), regardless of recorded
+/// ownership (`L4`). Prevents `pick_spare` from handing out a spare covered by
+/// another display's unshifted recorded window without flagging narrow edge
+/// overhangs from an adjacent display.
 pub fn physically_occupied_displays(
     ids: &[DisplayId],
     windows: &[Window],
@@ -327,7 +329,11 @@ pub fn physically_occupied_displays(
             online_displays
                 .iter()
                 .find(|&&(oid, _, _)| oid == id)
-                .is_some_and(|&(_, area, _)| windows.iter().any(|w| w.bounds.intersects(&area)))
+                .is_some_and(|&(_, area, _)| {
+                    windows
+                        .iter()
+                        .any(|w| agent_screen_model::spares::window_covers_spare(&w.bounds, &area))
+                })
         })
         .collect()
 }
@@ -868,6 +874,9 @@ mod tests {
         assert_eq!(on_8[0].target.window_id, 11);
         let occupied = physically_occupied_displays(&[8], &[windows[0].clone()], &online);
         assert!(occupied.contains(&8));
+        // A narrow overhang from a window centered on display 7 does NOT mark 8 occupied (M1).
+        let overhang = win(14, 920.0, 100.0);
+        assert!(physically_occupied_displays(&[8], &[overhang], &online).is_empty());
 
         let on_user = filter_on_display(1, &windows, &online, &owners);
         assert_eq!(on_user.len(), 1);

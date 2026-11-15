@@ -187,6 +187,9 @@ pub fn dragged_window_origin(
             .min(area.max_x() - 1.0 - initial_frame.width * 0.5)
             .max(area.x);
         (min_x.min(max_x), max_x)
+    } else if area.width > 2.0 {
+        let half = initial_frame.width * 0.5;
+        (area.x + 1.0 - half, area.max_x() - 1.0 - half)
     } else {
         let centered = area.mid().0 - initial_frame.width * 0.5;
         (centered, centered)
@@ -198,6 +201,9 @@ pub fn dragged_window_origin(
             .min(area.max_y() - 1.0 - initial_frame.height * 0.5)
             .max(area.y);
         (area.y, max_y)
+    } else if area.height > 2.0 {
+        let half = initial_frame.height * 0.5;
+        (area.y + 1.0 - half, area.max_y() - 1.0 - half)
     } else {
         let centered = area.mid().1 - initial_frame.height * 0.5;
         (centered, centered)

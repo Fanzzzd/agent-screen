@@ -326,10 +326,13 @@ pub fn effective_agent_display(
 pub type WindowShift = (WindowTarget, Rect);
 pub type DisplayMove = (DisplayId, Rect, Rect);
 
+pub const MAX_PENDING_SHIFT_FAILURES: u32 = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PendingShift {
     target: WindowTarget,
     display: DisplayId,
+    failed_bounds: Rect,
     dest: Rect,
     failures: u32,
 }
@@ -340,12 +343,13 @@ struct PendingShift {
 /// pass (`rerun`) that starts only after in-flight AX moves finish, so
 /// unrecorded windows never shift twice and stale runs cannot overwrite newer
 /// baselines. Failed AX moves stay in `pending_shifts` (rebased across any
-/// further display moves) and retry on subsequent passes (L2).
+/// further display moves) while the window stays at its failed frame, and
+/// expire after [`MAX_PENDING_SHIFT_FAILURES`] failures (`L1`, `L2`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ReparkState {
     parked_rects: BTreeMap<DisplayId, Rect>,
     pending_shifts: BTreeMap<u32, PendingShift>,
-    planned_in_pass: BTreeMap<u32, (DisplayId, Rect)>,
+    planned_in_pass: BTreeMap<u32, (DisplayId, Rect, Rect)>,
     in_flight: bool,
     rerun: bool,
     generation: u64,
@@ -361,7 +365,7 @@ impl ReparkState {
     pub fn remove_display(&mut self, id: DisplayId) {
         self.parked_rects.remove(&id);
         self.pending_shifts.retain(|_, ps| ps.display != id);
-        self.planned_in_pass.retain(|_, (d, _)| *d != id);
+        self.planned_in_pass.retain(|_, (d, _, _)| *d != id);
     }
 
     pub fn parked_rect(&self, id: DisplayId) -> Option<Rect> {
@@ -457,12 +461,24 @@ impl ReparkState {
         self.planned_in_pass.clear();
         let mut shifts = Vec::new();
         for (target, owner, dest) in owned_shifts {
-            self.planned_in_pass.insert(target.window_id, (owner, dest));
+            let cur_bounds = windows
+                .iter()
+                .find(|&&(t, _, _)| t == target)
+                .map_or(dest, |&(_, b, _)| b);
+            self.planned_in_pass
+                .insert(target.window_id, (owner, cur_bounds, dest));
             shifts.push((target, dest));
         }
 
-        // Retry previously failed shifts if the window is still open and has
-        // not yet arrived at its destination.
+        // Retry previously failed shifts only while the window still sits at
+        // the frame it had when the shift failed (neither moved by the user /
+        // `place_window` since, nor already at `dest`, `L1`).
+        let same_frame = |a: &Rect, b: &Rect| {
+            (a.x - b.x).abs() <= 2.0
+                && (a.y - b.y).abs() <= 2.0
+                && (a.width - b.width).abs() <= 4.0
+                && (a.height - b.height).abs() <= 4.0
+        };
         self.pending_shifts.retain(|&wid, ps| {
             if !adopted.contains(&ps.display) {
                 return false;
@@ -477,13 +493,13 @@ impl ReparkState {
             }
             let arrived =
                 (cur_bounds.x - ps.dest.x).abs() <= 2.0 && (cur_bounds.y - ps.dest.y).abs() <= 2.0;
-            !arrived
+            !arrived && same_frame(&cur_bounds, &ps.failed_bounds)
         });
         for ps in self.pending_shifts.values() {
             if let std::collections::btree_map::Entry::Vacant(e) =
                 self.planned_in_pass.entry(ps.target.window_id)
             {
-                e.insert((ps.display, ps.dest));
+                e.insert((ps.display, ps.failed_bounds, ps.dest));
                 shifts.push((ps.target, ps.dest));
             }
         }
@@ -497,8 +513,9 @@ impl ReparkState {
     }
 
     /// Complete `generation`, recording `failed` targets so the next pass
-    /// retries them. Returns `(rerun, first_failures)` where `first_failures`
-    /// lists targets failing for the first time.
+    /// retries them up to [`MAX_PENDING_SHIFT_FAILURES`] failures. Returns
+    /// `(rerun, first_failures)` where `first_failures` lists targets failing
+    /// for the first time.
     pub fn finish_with_failures(
         &mut self,
         generation: u64,
@@ -519,18 +536,23 @@ impl ReparkState {
             let resolved = planned.get(&wid).copied().or_else(|| {
                 self.pending_shifts
                     .get(&wid)
-                    .map(|ps| (ps.display, ps.dest))
+                    .map(|ps| (ps.display, ps.failed_bounds, ps.dest))
             });
-            let Some((display, dest)) = resolved else {
+            let Some((display, failed_bounds, dest)) = resolved else {
                 continue;
             };
             let prev = self.pending_shifts.get(&wid).map_or(0, |ps| ps.failures);
             let failures = prev.saturating_add(1);
+            if failures >= MAX_PENDING_SHIFT_FAILURES {
+                self.pending_shifts.remove(&wid);
+                continue;
+            }
             self.pending_shifts.insert(
                 wid,
                 PendingShift {
                     target,
                     display,
+                    failed_bounds,
                     dest,
                     failures,
                 },

@@ -33,10 +33,6 @@ final class Unfocusable: NSPopUpButton {
   override var acceptsFirstResponder: Bool { false }
 }
 
-final class CustomDragView: NSView {
-  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
 final class CustomDragWindow: NSWindow {
   var stageOrigin: NSPoint?
   var dragged = false
@@ -258,7 +254,6 @@ final class DragDelegate: NSObject, NSApplicationDelegate {
     customWin.titlebarAppearsTransparent = true
     customWin.titleVisibility = .hidden
     customWin.title = "CustomDrag"
-    customWin.contentView = CustomDragView(frame: NSRect(x: 0, y: 0, width: 220, height: 160))
     customWin.stageOrigin = NSPoint(x: stage.frame.minX + 80, y: stage.frame.minY + 120)
     customWin.setFrame(customFrame, display: true)
     customWin.orderFrontRegardless()

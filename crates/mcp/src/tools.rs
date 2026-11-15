@@ -415,7 +415,7 @@ pub fn definitions() -> Vec<Value> {
                 "List app windows on the display, front to back, with ids and bounds in screenshot pixels. scale is",
                 "screenshot pixels per display point, the same number create_display returns. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
-                "set_disposition verdict or null. With strays: true it lists instead the windows of apps launch_app started",
+                "set_disposition verdict or null. offDisplay: true means the window is yours but not on the display yet; call place_window to bring it back. With strays: true it lists instead the windows of apps launch_app started",
                 "for you that opened off your display, and windows that were on your display and left it, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
             ],
             object(
