@@ -213,7 +213,7 @@ macOS 额外返回 `"host_window_handover"`、`"cross_display_move"`、`"input_q
 3. **每显示器独立无头 [sway](https://github.com/swaywm/sway)**：相比仅支持单窗口全屏信息亭的 [cage](https://github.com/cage-kiosk/cage)，基于 [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) 的 `sway` 支持 `WLR_BACKENDS=headless`、多窗口浮动坐标摆位、JSON 窗口树 IPC 以及 rootless Xwayland，可在数周内交付完整 MVP。每台显示器独立实例保证了各自的 `wl_seat` 修饰键、拖拽按下态与焦点互不串扰。
 4. **每显示器进程外或受控子进程内嵌 [Smithay API](https://docs.rs/smithay/latest/smithay/)**：消除了要求用户系统安装 `sway` 的外部依赖，但在实现 [xdg-shell](https://wayland.app/protocols/xdg-shell) 与 Xwayland 窗口管理器胶水上工作量较大，适合在 `sway` 跑通全部测试后平滑替换。注意为保持「守护进程重启不杀死显示器内应用」的特性，即便采用 `Smithay`，每台显示器的合成器也应作为 `agent-screen --compositor-worker` 独立子进程运行在各自的 `systemd --user` 作用域内，而非与主界面守护进程绑死在同一进程生命周期里。
 
-**用 `systemd --user` 瞬态作用域替代 `PR_SET_PDEATHSIG`**：绝不给合成器或智能体应用设置 `PR_SET_PDEATHSIG(SIGTERM)`，否则守护进程一旦崩溃或热更新就会瞬间杀死全部智能体打开的编辑器与浏览器，造成未保存数据丢失。正确做法是通过 D-Bus 或 [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html) 将每台显示器放入 `agent-screen-display-<id>.scope` 瞬态作用域，并在 `$XDG_RUNTIME_DIR/agent-screen/displays/<id>/state.json` 持久化套接字路径与归属会话键。守护进程重启后扫描存活作用域并重连套接字：若原 MCP 会话仍在，下次 `createDisplay` 携带 `adoptGroups` 即可无缝续接；若原会话已退出，则直接恢复为 Review Display 供用户处置。仅在无 `systemd --user` 的精简 CI 容器内回退至 `setsid` 独立会话进程组配合 PID 文件管理。
+**用 `systemd --user` 瞬态作用域与专属 `XDG_RUNTIME_DIR` 替代 `PR_SET_PDEATHSIG`**：绝不给合成器或智能体应用设置 `PR_SET_PDEATHSIG(SIGTERM)`，否则守护进程一旦崩溃或热更新就会瞬间杀死全部智能体打开的编辑器与浏览器，造成未保存数据丢失。正确做法是通过 D-Bus 或 [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html) 将每台显示器放入 `agent-screen-display-<id>.scope` 瞬态作用域，为该作用域分配权限 `0700` 的独立 `XDG_RUNTIME_DIR` 子目录 `$XDG_RUNTIME_DIR/agent-screen/displays/<id>/runtime`，并在 `$XDG_RUNTIME_DIR/agent-screen/displays/<id>/state.json` 持久化套接字路径与归属会话键。实测发现 Hyprland 宿主占用 `/run/user/<uid>/wayland-1` 而将 `wayland-0` 留空；若无头 `sway` 共享宿主 `XDG_RUNTIME_DIR`，会自动绑定 `wayland-0` 并劫持未显式设置 `WAYLAND_DISPLAY` 的宿主客户端。独立 `XDG_RUNTIME_DIR` 从根源上消除了套接字抢占。守护进程重启后扫描存活作用域并重连套接字：若原 MCP 会话仍在，下次 `createDisplay` 携带 `adoptGroups` 即可无缝续接；若原会话已退出，则直接恢复为 Review Display 供用户处置。仅在无 `systemd --user` 的精简 CI 容器内回退至 `setsid` 独立会话进程组配合 PID 文件管理。
 
 ### 3.2 画面采集与 GPUI 渲染链路
 
@@ -225,7 +225,7 @@ macOS 额外返回 `"host_window_handover"`、`"cross_display_move"`、`"input_q
 ### 3.3 后台输入、Viewer 按键隐私与跨合成器剪贴板桥接
 
 - **后台输入**：`apps/linux` 以长连接客户端绑定 [wlr-virtual-pointer-unstable-v1](https://wayland.app/protocols/wlr-virtual-pointer-unstable-v1) 与 [virtual-keyboard-unstable-v1](https://wayland.app/protocols/virtual-keyboard-unstable-v1)。指针点击、悬停与拖拽直接作用于私有席位；任意 UTF-8 文本通过动态上传单键 XKB keymap 输入，无需借用宿主键盘或宿主输入法。
-- **Viewer 输入与密码框按键隐私**：用户在宿主桌面聚焦 Viewer 进行 Takeover 操作时，`gpui_linux` 通过 [text-input-unstable-v3](https://wayland.app/protocols/text-input-unstable-v3) 对接宿主桌面输入法。为落实 ADR 0014，Viewer 键盘处理器复用 `crates/model::viewer_keys` 状态机，在未知目标焦点类型时暂存按键最多 `HOLD_MS` 并调用 `Access::focus_secrecy` 查询 AT-SPI 焦点角色：若命中 `ATSPI_ROLE_PASSWORD_TEXT`，立即绕过宿主输入法预编辑直接发送原始按键，并禁止在任何日志或点击诊断中记录键值。
+- **Viewer 输入与密码框按键隐私**：用户在宿主桌面聚焦 Viewer 进行 Takeover 操作时，`gpui_linux` 通过 [text-input-unstable-v3](https://wayland.app/protocols/text-input-unstable-v3) 对接宿主桌面输入法。为落实 ADR 0014，Viewer 键盘处理器复用 `crates/model::viewer_keys` 状态机，在未知目标焦点类型时暂存按键最多 `HOLD_MS` 并调用 `Access::focus_secrecy` 查询 AT-SPI 焦点角色。真机实测确认 `GetRoleName()` 在 Chromium 返回 `"password text"`，但在 GTK 4.22 返回 `"text box"`、在 Qt 6.11 返回 `"text"`；而数值方法 `GetRole()` 在四套客户端上统一返回 `40` 即 `ATSPI_ROLE_PASSWORD_TEXT`（`39` 为 `ATSPI_ROLE_PANEL`）。因此 `focus_secrecy` 以 `GetRole() == 40` 为主判据：命中时立即绕过宿主输入法预编辑直接发送原始按键，并禁止在任何日志或点击诊断中记录键值。
 - **跨合成器剪贴板隔离与 Takeover 桥接**：每个 Wayland 合成器各自维护独立的 `wl_data_device` 剪贴板。若不加桥接，用户在 Takeover 时无法在宿主桌面与 Viewer 之间互相复制粘贴。设计上区分两种状态：
   1. 当显示器处于智能体后台自主运行状态时，严格保持剪贴板隔离，禁止显示器内应用读取用户宿主剪贴板中的密码或隐私文本，智能体在同一显示器内部可正常使用 `ctrl+c` 与 `ctrl+v`。
   2. 当且仅当处于用户 Takeover 期间且 Viewer 窗口获得宿主焦点时，`apps/linux` 通过绑定私有合成器的 [ext-data-control-v1](https://wayland.app/protocols/ext-data-control-v1) 或 [wlr-data-control-unstable-v1](https://wayland.app/protocols/wlr-data-control-unstable-v1) 与 GPUI 的宿主剪贴板接口做双向文本与图片同步；一旦用户交回控制权即刻断开同步。
@@ -234,7 +234,7 @@ macOS 额外返回 `"host_window_handover"`、`"cross_display_move"`、`"input_q
 
 无障碍层基于 [at-spi2-core](https://gitlab.gnome.org/GNOME/at-spi2-core) 协议，使用纯 Rust 库 [atspi](https://docs.rs/atspi/latest/atspi/) 与 [zbus](https://docs.rs/zbus/latest/zbus/) 调用 `org.a11y.atspi.Cache.GetItems` 批量拉取节点树。
 
-**重要风险声明**：前期容器探针尚未在运行完整 GNOME 或 KDE 的真实物理桌面上验证 AT-SPI 隔离，此处标记为**尚未在真实桌面验证**，且上游源码揭示了三处必须显式处理的冲突机制。核查 [at-spi-bus-launcher.c 源码](https://gitlab.gnome.org/GNOME/at-spi2-core/-/blob/main/bus/at-spi-bus-launcher.c) 可知：
+**真机实测验证结论**（Omarchy 4.0.1，Linux 7.1.9，Hyprland 0.56.2 + `dbus-broker` + Xwayland + `at-spi2-core` 2.60.6，见 ADR 0020 与 `docs/prototypes/linux-compositor-spike/last-run-report.json`）：上游 [at-spi-bus-launcher.c 源码](https://gitlab.gnome.org/GNOME/at-spi2-core/-/blob/main/bus/at-spi-bus-launcher.c) 的三处冲突机制及隔离措施均已在真实桌面上实测确认：
 
 1. **套接字路径碰撞与误删**：第 649 至 653 行将无障碍套接字命名为 `$XDG_RUNTIME_DIR/at-spi/bus` 拼接 `$DISPLAY` 并将冒号替换为下划线，当 `DISPLAY` 未设置时退化为固定的 `$XDG_RUNTIME_DIR/at-spi/bus`，且第 483 行在 `dbus-broker` 模式下会直接 `unlink` 同名路径。若子会话未设置专属 `DISPLAY` 或共享同一 `at-spi` 目录，会直接撞上甚至摘除宿主桌面的无障碍套接字。
 2. **宿主环境变量泄漏**：若宿主桌面本身设置了 `AT_SPI_BUS_ADDRESS`，子进程继承后会绕过私有会话直接连回宿主的无障碍总线。
@@ -244,7 +244,7 @@ macOS 额外返回 `"host_window_handover"`、`"cross_display_move"`、`"input_q
 
 - 每台 Agent Display 必须启动自带的 rootless Xwayland 并通过 `-displayfd` 获取唯一的 `DISPLAY` 编号。
 - 守护进程派生显示器作用域前，必须彻底清除继承自宿主的 `AT_SPI_BUS_ADDRESS` 环境变量，并为每台显示器单独拉起监听 `$XDG_RUNTIME_DIR/agent-screen/displays/<id>/atspi.sock` 的专用无障碍 `dbus-daemon` 与 `at-spi2-registryd`，或者为该作用域配置独立的运行时子目录。
-- 向该显示器内启动的所有子进程显式注入 `AT_SPI_BUS_ADDRESS=unix:path=.../atspi.sock`、`GTK_MODULES=gail:atk-bridge`、`GTK_A11Y=atspi`、`QT_ACCESSIBILITY=1`、`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`，对 Chromium 与 Electron 追加 `--force-renderer-accessibility`，并在 Xwayland 就绪后主动向其根窗口写入 `AT_SPI_BUS` 原子属性，确保 Wayland 与 X11 应用无一遗漏地连入该显示器的专属无障碍总线。
+- 向该显示器内启动的所有子进程显式注入 `AT_SPI_BUS_ADDRESS=unix:path=.../atspi-bus.sock`、`GTK_MODULES=gail:atk-bridge`、`GTK_A11Y=atspi`、`QT_ACCESSIBILITY=1`、`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`，对 Chromium 与 Electron 追加 `--force-renderer-accessibility`，并在 Xwayland 就绪后通过 X11 `ChangeProperty` 加同步确认主动向其根窗口写入 `AT_SPI_BUS` 原子属性，确保 Wayland 与未携带 `AT_SPI_BUS_ADDRESS` 环境变量的 X11 应用全部连入专属无障碍总线。私有 `dbus-daemon` 配置省去 `<standard_session_servicedirs/>`，杜绝通过 D-Bus 激活宿主服务。
 
 ### 3.5 窗口管理与启动隔离的配套桌面服务代偿
 
@@ -273,12 +273,15 @@ macOS 额外返回 `"host_window_handover"`、`"cross_display_move"`、`"input_q
 
 演进顺序遵循「先在真实桌面上排雷 -> 先独立写出 `apps/linux` 守护进程跑通协议 -> 再基于双端真实重复抽离 `crates/app-core` -> 最后上层接 GPUI 界面与内嵌合成器」。
 
-### 阶段 0：真实 Linux 桌面与无头探针排雷
+### 阶段 0：真实 Linux 桌面与无头探针排雷（已完成）
 
-- **范围**：编写独立验证程序，在真实 Ubuntu 24.04 GNOME 桌面、KDE Wayland 桌面及无头环境中逐一实测：第一，`systemd --user` 瞬态作用域在守护进程被 `SIGKILL` 后的存活与重连；第二，`sway` 1.9 下 `wlr-screencopy-unstable-v1` 帧读取与虚拟键鼠拖拽；第三，清除 `AT_SPI_BUS_ADDRESS`、独立 `DISPLAY` 与手写 Xwayland `AT_SPI_BUS` 根属性后，GTK4、Qt6、Chromium 与 X11 应用的无障碍树是否与宿主桌面零交叉；第四，私有 D-Bus 下原生 `.deb` 浏览器与 Ubuntu Firefox Snap 的实际启动表现。
-- **涉及文件**：`docs/prototypes/linux-compositor-spike/`，完成后把实测结论回填至本文与 ADR 0020。
-- **测试方式**：在真实 GNOME/KDE Linux 机器与 `ubuntu-24.04` 环境同时运行验证脚本。
-- **主要风险**：Firefox Snap 受 AppArmor 限制拒绝连接非标准名称的私有 Wayland 套接字。若实测受阻，在 `AppLauncher` 中自动识别 `/snap/bin/*` 并给出清晰的可操作错误提示用户安装原生包，或按实测结果调整套接字命名规则。
+- **范围**：编写独立验证程序，在真实 Linux Wayland 桌面与无头环境中逐一实测：`systemd --user` 瞬态作用域在守护进程被 `SIGKILL` 后的存活与重连；无头 `sway` 下 `wlr-screencopy-unstable-v1` 帧读取与虚拟键鼠拖拽；清除 `AT_SPI_BUS_ADDRESS`、独立 `XDG_RUNTIME_DIR`、独立 `DISPLAY` 与写入 Xwayland `AT_SPI_BUS` 根属性后，GTK4、Qt6、Chromium 与 X11 应用的无障碍树是否与宿主桌面零交叉；私有 D-Bus 下通知接收器、密钥环快速失败与原生 Chromium 启动表现。
+- **涉及文件**：`docs/prototypes/linux-compositor-spike/`、`docs/adr/0020-isolated-compositor-displays.md`。
+- **实测结果**（Omarchy 4.0.1，Hyprland 0.56.2，`dbus-broker`，`sway` 1.12，见 `last-run-report.json`）：
+  1. 作用域冷启动耗时 `532.83 ms`；对守护进程发送 `SIGKILL` 后，`agent-screen-spike-*.scope`、`sway` 与 GTK4 客户端进程原位存活，新守护进程按 `state.json` 重连成功。
+  2. `1280x800` `wlr-screencopy` 首帧耗时 `39.65 ms`、次帧 `23.44 ms`；虚拟指针点击、16 步拖拽（位移 `160.0 x 30.0` 点）、动态 XKB Unicode 键入 `"Hello 中文 42"`、显示器内 `ctrl+c`/`ctrl+v` 与 `zwlr_data_control` 双向读写全部通过。全程宿主 Hyprland 光标保持在 `(602, 1190)` 未动，宿主焦点窗口未变。
+  3. 写入 `AT_SPI_BUS` 前，未设置环境变量的纯 X11 Qt6 客户端无法连入私有无障碍总线；写入并同步确认 `AT_SPI_BUS` 后，GTK4 Wayland、Qt6 Wayland、Qt6 Xwayland 与 Chromium（`387.17 ms` 注册 238 个节点）全部连入私有 `atspi-bus.sock` 且均检出 `GetRole() == 40` 密码框角色，宿主 `/run/user/1000/at-spi/bus_0` 的 inode `143` 未变且零交叉。
+  4. 省去 `<standard_session_servicedirs/>` 后，私有总线上的 `org.freedesktop.secrets` 与 `org.freedesktop.portal.Desktop` 调用分别在 `0.18 ms` 与 `0.16 ms` 内快速返回未知服务错误，无 25 秒激活超时；私有 `org.freedesktop.Notifications` 接收器响应耗时 `0.83 ms`。当前测试机无 Snap 运行时，`apps/linux` 启动器对 `/snap/bin/*` 保留显式检测与原生包引导提示。
 
 ### 阶段 1：独立 `apps/linux` 无界面守护进程 MVP 与 `crates/mcp` 能力握手
 

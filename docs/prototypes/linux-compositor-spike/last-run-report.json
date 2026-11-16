@@ -1,0 +1,239 @@
+{
+  "os_release": "Omarchy",
+  "kernel": "Linux 7.1.9-arch1-2",
+  "sway_version": "sway version 1.12",
+  "wayland_globals": {
+    "ext_data_control_manager_v1": 1,
+    "ext_foreign_toplevel_image_capture_source_manager_v1": 1,
+    "ext_foreign_toplevel_list_v1": 1,
+    "ext_idle_notifier_v1": 2,
+    "ext_image_copy_capture_manager_v1": 1,
+    "ext_output_image_capture_source_manager_v1": 1,
+    "ext_session_lock_manager_v1": 1,
+    "ext_transient_seat_manager_v1": 1,
+    "ext_workspace_manager_v1": 1,
+    "org_kde_kwin_server_decoration_manager": 1,
+    "wl_compositor": 6,
+    "wl_data_device_manager": 3,
+    "wl_fixes": 1,
+    "wl_output": 4,
+    "wl_seat": 9,
+    "wl_shm": 2,
+    "wl_subcompositor": 1,
+    "wp_alpha_modifier_v1": 1,
+    "wp_color_representation_manager_v1": 1,
+    "wp_content_type_manager_v1": 1,
+    "wp_cursor_shape_manager_v1": 2,
+    "wp_fractional_scale_manager_v1": 1,
+    "wp_linux_drm_syncobj_manager_v1": 1,
+    "wp_presentation": 2,
+    "wp_security_context_manager_v1": 1,
+    "wp_single_pixel_buffer_manager_v1": 1,
+    "wp_tearing_control_manager_v1": 1,
+    "wp_viewporter": 1,
+    "xdg_activation_v1": 1,
+    "xdg_toplevel_tag_manager_v1": 1,
+    "xdg_wm_base": 5,
+    "zwlr_data_control_manager_v1": 2,
+    "zwlr_export_dmabuf_manager_v1": 1,
+    "zwlr_foreign_toplevel_manager_v1": 3,
+    "zwlr_gamma_control_manager_v1": 1,
+    "zwlr_layer_shell_v1": 5,
+    "zwlr_output_manager_v1": 4,
+    "zwlr_output_power_manager_v1": 1,
+    "zwlr_screencopy_manager_v1": 3,
+    "zwlr_virtual_pointer_manager_v1": 2,
+    "zwp_idle_inhibit_manager_v1": 1,
+    "zwp_input_method_manager_v2": 1,
+    "zwp_keyboard_shortcuts_inhibit_manager_v1": 1,
+    "zwp_linux_dmabuf_v1": 5,
+    "zwp_pointer_constraints_v1": 1,
+    "zwp_pointer_gestures_v1": 3,
+    "zwp_primary_selection_device_manager_v1": 1,
+    "zwp_relative_pointer_manager_v1": 1,
+    "zwp_tablet_manager_v2": 1,
+    "zwp_text_input_manager_v3": 1,
+    "zwp_virtual_keyboard_manager_v1": 1,
+    "zxdg_decoration_manager_v1": 1,
+    "zxdg_exporter_v1": 1,
+    "zxdg_exporter_v2": 1,
+    "zxdg_importer_v1": 1,
+    "zxdg_importer_v2": 1,
+    "zxdg_output_manager_v1": 3
+  },
+  "probe1_systemd_sigkill_survival": {
+    "daemon_exit": "signal: 9 (SIGKILL)",
+    "daemon_killed_pid": 765773,
+    "gtk4_pid_survived": 765820,
+    "passed": true,
+    "reattached_windows": [
+      "Spike GTK4 Fixture"
+    ],
+    "scope_active_after_sigkill": true,
+    "scope_unit": "agent-screen-spike-765773.scope",
+    "startup_ms": 532.83,
+    "sway_pid_survived": 765798
+  },
+  "probe2_screencopy_and_virtual_input": {
+    "button_rgba_after_click": [
+      239,
+      68,
+      68,
+      255
+    ],
+    "button_rgba_before_click": [
+      34,
+      197,
+      94,
+      255
+    ],
+    "capture_resolution": [
+      1280,
+      800
+    ],
+    "data_control_readback": "Hello 中文 42",
+    "data_control_write_roundtrip": "桥接粘贴 BridgeOK",
+    "drag_delta_points": [
+      160.0,
+      30.0
+    ],
+    "first_capture_ms": 39.65,
+    "in_display_ctrl_c_ctrl_v_result": "Hello 中文 42Hello 中文 42",
+    "passed": true,
+    "second_capture_ms": 23.44,
+    "typed_utf8": "Hello 中文 42"
+  },
+  "probe3_atspi_isolation_and_xwayland": {
+    "chromium_a11y_ready_ms": 387.17,
+    "host_atspi_apps_during": [
+      "gtk:quickshell",
+      "gtk:xdg-desktop-portal-gtk",
+      "gtk:udiskie"
+    ],
+    "host_atspi_bus0_inode_before": 143,
+    "host_atspi_bus0_inode_during": 143,
+    "isolated_atspi_apps": [
+      {
+        "bus_name": ":1.1",
+        "has_password_role": true,
+        "name": "python3",
+        "node_count": 8,
+        "sample_nodes": [
+          "75:application:python3",
+          "23:window:Spike GTK4 Fixture",
+          "39:generic:",
+          "43:button:Click Counter: 1",
+          "29:label:Click Counter: 1",
+          "29:label:Drag Zone (160, 30)",
+          "61:text box:Normal Field",
+          "40:text box:Secret Password"
+        ],
+        "toolkit": "GTK"
+      },
+      {
+        "bus_name": ":1.4",
+        "has_password_role": true,
+        "name": "qt6_fixture",
+        "node_count": 5,
+        "sample_nodes": [
+          "75:application:qt6_fixture",
+          "20:filler:Spike Qt6 Wayland",
+          "61:text:Spike Qt6 Wayland Input",
+          "40:text:Spike Qt6 Wayland Password",
+          "43:push button:Spike Qt6 Wayland Button"
+        ],
+        "toolkit": "Qt"
+      },
+      {
+        "bus_name": ":1.5",
+        "has_password_role": true,
+        "name": "qt6_fixture",
+        "node_count": 5,
+        "sample_nodes": [
+          "75:application:qt6_fixture",
+          "20:filler:Spike Qt6 Xwayland",
+          "61:text:Spike Qt6 Xwayland Input",
+          "40:text:Spike Qt6 Xwayland Password",
+          "43:push button:Spike Qt6 Xwayland Button"
+        ],
+        "toolkit": "Qt"
+      },
+      {
+        "bus_name": ":1.6",
+        "has_password_role": true,
+        "name": "Chromium",
+        "node_count": 238,
+        "sample_nodes": [
+          "75:application:Chromium",
+          "23:frame:Spike Chromium Page - Chromium",
+          "39:panel:",
+          "39:panel:",
+          "43:button:Minimize",
+          "43:button:Maximize",
+          "43:button:Restore",
+          "43:button:Close",
+          "116:static:Untitled - Chromium",
+          "39:panel:",
+          "39:panel:",
+          "39:panel:",
+          "40:password text:Web Secret"
+        ],
+        "toolkit": "Chromium"
+      }
+    ],
+    "isolated_xwayland_display": ":1",
+    "passed": true,
+    "password_role_detected": true,
+    "x11_registered_after_root_atom": true,
+    "x11_registered_without_root_atom": false,
+    "xwayland_at_spi_bus_after_write": "unix:path=/run/user/1000/agent-screen-spike-765439/runtime/atspi-bus.sock",
+    "xwayland_at_spi_bus_before_write": null
+  },
+  "probe4_private_dbus_compensations": {
+    "flatpak_present_on_host": false,
+    "notifications_captured": [
+      "spike-client:Isolated Alert"
+    ],
+    "notifications_stub_latency_ms": 0.83,
+    "notifications_stub_reply_id": 1,
+    "passed": true,
+    "portal_absent_fast_fail": true,
+    "portal_fail_ms": 0.16,
+    "secret_service_absent_fast_fail": true,
+    "secret_service_fail_ms": 0.18,
+    "snap_present_on_host": false
+  },
+  "probe5_host_zero_interference": {
+    "before": {
+      "atspi_bus0_inode": 143,
+      "atspi_bus0_mtime": 1794304624,
+      "host_atspi_apps": [
+        "gtk:quickshell",
+        "gtk:xdg-desktop-portal-gtk",
+        "gtk:udiskie"
+      ],
+      "hypr_active_window": ":0",
+      "hypr_cursor": "602, 1190",
+      "wayland_sockets": [
+        "wayland-1"
+      ],
+      "x0_inode": 46
+    },
+    "during_active_display": {
+      "atspi_bus0_inode": 143,
+      "atspi_bus0_mtime": 1794304624,
+      "host_atspi_apps": [
+        "gtk:quickshell",
+        "gtk:xdg-desktop-portal-gtk",
+        "gtk:udiskie"
+      ],
+      "hypr_active_window": ":0",
+      "hypr_cursor": "602, 1190",
+      "wayland_sockets": [
+        "wayland-1"
+      ],
+      "x0_inode": 46
+    },
+    "passed": true
+  }
+}
