@@ -47,6 +47,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 | Works with your real apps and logins | Yes                   | Yes                   | No, set them up again |
 | Several agents at once               | Yes, one display each | No                    | One VM each           |
 | Watch and step in                    | Menu bar, one click   | Watch your own screen | VM window             |
+| Isolated from your Mac               | No; uses private macOS APIs | No              | Yes                   |
 
 ## Install
 
