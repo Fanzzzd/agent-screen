@@ -1,5 +1,5 @@
-//! Private DevTools pipe (`--remote-debugging-pipe` on fds 3 and 4) for
-//! Chromium and Electron apps launched inside an isolated Linux Agent Display.
+//! Private POSIX DevTools pipe (`--remote-debugging-pipe` on fds 3 and 4) for
+//! Chromium and Electron apps launched by Agent Screen (ADR 0010).
 //!
 //! Uses `agent_screen_model::devtools` for NUL-delimited framing, viewport
 //! selection, modifier bits, and drag path interpolation, with Wayland
@@ -69,11 +69,13 @@ impl PipeSetup {
     }
 }
 
-/// Called inside `Command::pre_exec` to bind fd 3 (read from daemon) and fd 4
-/// (write to daemon) with `FD_CLOEXEC` cleared so Chromium inherits them.
+/// Bind fd 3 (read from daemon) and fd 4 (write to daemon) inside
+/// `Command::pre_exec` with `FD_CLOEXEC` cleared so Chromium inherits them.
+///
+/// # Safety
+/// Must only be called in the forked child before `exec` (`pre_exec`).
 pub unsafe fn pre_exec_dup_fds(to_app_read: RawFd, from_app_write: RawFd) -> std::io::Result<()> {
     unsafe {
-        // Avoid clobbering `from_app_write` if it happened to be fd 3!
         let mut src4 = from_app_write;
         if src4 == 3 {
             src4 = libc::dup(src4);
@@ -106,8 +108,19 @@ unsafe fn dup_clear_cloexec(src: RawFd, dst: RawFd) -> std::io::Result<()> {
 
 fn raw_cloexec_pipe() -> std::io::Result<(RawFd, RawFd)> {
     let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    for &fd in &fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(err);
+        }
     }
     Ok((fds[0], fds[1]))
 }
@@ -424,7 +437,6 @@ pub fn choose_wayland_aware(
         vp.origin.1 += bounds.y;
         return Some((idx, vp));
     }
-    // Wayland CSD / tab bar size discrepancy fallback when there is a single visible page:
     let visible: Vec<usize> = (0..views.len()).filter(|&i| views[i].visible).collect();
     if visible.len() == 1 {
         let idx = visible[0];

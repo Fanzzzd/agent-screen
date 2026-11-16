@@ -2,8 +2,10 @@
 //! `wlr-virtual-pointer`, `virtual-keyboard` (chords and UTF-8 XKB keymaps),
 //! and `wlr-data-control` clipboard reads and writes.
 
-use crate::ports::{
-    ClipboardPayload, ClipboardSync, ImageFormat, InputOp, MouseButton, PortError, SnapshotOpts,
+pub use agent_screen_app_core::ports::RawRgbaFrame;
+use agent_screen_app_core::ports::{
+    ClipboardPayload, ClipboardSync, EncodedImage, ImageFormat, InputOp, MouseButton, PortError,
+    SnapshotOpts,
 };
 use agent_screen_model::keychord::{KeyChord, Modifiers};
 use agent_screen_model::model::Rect;
@@ -51,14 +53,6 @@ const BTN_MIDDLE: u32 = 0x112;
 const KEY_PRESSED: u32 = 1;
 const KEY_RELEASED: u32 = 0;
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
-
-#[derive(Clone)]
-pub struct RawRgbaFrame {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-    pub digest: u64,
-}
 
 enum WorkerCmd {
     Capture {
@@ -155,7 +149,7 @@ impl WaylandWorker {
         &self,
         display_points: (u32, u32),
         opts: SnapshotOpts,
-    ) -> Result<crate::ports::EncodedImage, PortError> {
+    ) -> Result<EncodedImage, PortError> {
         if opts.settle {
             self.settle().await?;
         }
@@ -274,7 +268,7 @@ pub fn encode_snapshot(
     raw: RawRgbaFrame,
     display_points: (u32, u32),
     opts: SnapshotOpts,
-) -> Result<crate::ports::EncodedImage, PortError> {
+) -> Result<EncodedImage, PortError> {
     let mut img = RgbaImage::from_raw(raw.width, raw.height, raw.rgba)
         .ok_or_else(|| PortError::failed("invalid RGBA frame dimensions"))?;
 
@@ -323,7 +317,7 @@ pub fn encode_snapshot(
         }
     };
 
-    Ok(crate::ports::EncodedImage {
+    Ok(EncodedImage {
         data,
         mime_type,
         width,
@@ -337,7 +331,7 @@ pub fn crop_window_image(
     display_points: (u32, u32),
     bounds: Rect,
     scale: f64,
-) -> Result<crate::ports::EncodedImage, PortError> {
+) -> Result<EncodedImage, PortError> {
     let target_w = ((bounds.width * scale).round().max(1.0)) as u32;
     let target_h = ((bounds.height * scale).round().max(1.0)) as u32;
     encode_snapshot(

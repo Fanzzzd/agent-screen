@@ -1,11 +1,10 @@
-//! Deep domain ports (`Display`, `Access`, `Shell`) shared across Linux
-//! implementations and designed for extraction into `crates/app-core` in Phase 3.
-
-#![allow(dead_code)]
+//! Deep domain ports (`Display`, `DisplayManager`, `HostWindowBridge`,
+//! `Access`, `Shell`) shared across platform backends.
 
 use agent_screen_mcp::capabilities::Capabilities;
 use agent_screen_model::keychord::{KeyChord, Modifiers};
 use agent_screen_model::model::{DisplayId, Rect, WindowTarget};
+use agent_screen_model::request::Answer;
 use agent_screen_model::session::Orphans;
 use agent_screen_model::tree::Scope as TreeScope;
 use futures::future::BoxFuture;
@@ -47,6 +46,16 @@ impl std::fmt::Display for PortError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)
     }
+}
+
+impl std::error::Error for PortError {}
+
+#[derive(Clone)]
+pub struct RawRgbaFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub digest: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -223,7 +232,7 @@ pub trait Display: Send + Sync {
     fn runtime_dir(&self) -> PathBuf;
     fn wayland_socket(&self) -> PathBuf;
     fn settle(&self) -> BoxFuture<'_, Result<(), PortError>>;
-    fn capture_raw(&self) -> BoxFuture<'_, Result<crate::wayland_worker::RawRgbaFrame, PortError>>;
+    fn capture_raw(&self) -> BoxFuture<'_, Result<RawRgbaFrame, PortError>>;
     fn screenshot(&self, opts: SnapshotOpts) -> BoxFuture<'_, Result<EncodedImage, PortError>>;
     fn act_input(&self, op: InputOp) -> BoxFuture<'_, Result<InputOutcome, PortError>>;
     fn clipboard(&self, op: ClipboardSync) -> BoxFuture<'_, Result<ClipboardPayload, PortError>>;
@@ -248,6 +257,23 @@ pub trait DisplayManager: Send + Sync {
         orphans: &'a [Orphans],
     ) -> BoxFuture<'a, Result<Arc<dyn Display>, PortError>>;
     fn reattach_surviving(&self) -> BoxFuture<'_, Vec<RecoveredDisplay>>;
+    fn host_window_bridge(&self) -> Option<&dyn HostWindowBridge> {
+        None
+    }
+}
+
+pub trait HostWindowBridge: Send + Sync {
+    fn list_host_windows(&self) -> BoxFuture<'_, Result<Vec<WindowInfo>, PortError>>;
+    fn move_to_display<'a>(
+        &'a self,
+        window: WindowTarget,
+        display: &'a dyn Display,
+    ) -> BoxFuture<'a, Result<(), PortError>>;
+    fn return_to_host<'a>(
+        &'a self,
+        window: WindowTarget,
+        display: &'a dyn Display,
+    ) -> BoxFuture<'a, Result<(), PortError>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +281,16 @@ pub enum Secrecy {
     Open,
     Secure,
     Unknown,
+}
+
+impl From<Secrecy> for agent_screen_model::viewer_keys::Secrecy {
+    fn from(s: Secrecy) -> Self {
+        match s {
+            Secrecy::Open => Self::Open,
+            Secrecy::Secure => Self::Secure,
+            Secrecy::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -328,6 +364,45 @@ pub trait Access: Send + Sync {
     ) -> BoxFuture<'a, Result<ElementActionReply, PortError>>;
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NotificationCapabilities {
+    pub actions: bool,
+    pub inline_reply: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct NotificationSpec {
+    pub display_id: DisplayId,
+    pub title: String,
+    pub body: String,
+    pub urgent: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct PeekState {
+    pub active_displays: usize,
+    pub takeover: bool,
+    pub needs_attention: bool,
+    pub title: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HelpPrompt {
+    pub display_id: DisplayId,
+    pub title: String,
+    pub message: String,
+    pub steps: Vec<String>,
+}
+
 pub trait Shell: Send + Sync {
     fn platform_diagnostics(&self) -> Value;
+    fn notification_capabilities(&self) -> NotificationCapabilities {
+        NotificationCapabilities::default()
+    }
+    fn notify(&self, _spec: NotificationSpec) {}
+    fn show_viewer(&self, _display_id: DisplayId) {}
+    fn update_peek(&self, _state: PeekState) {}
+    fn prompt_help(&self, _prompt: HelpPrompt) -> BoxFuture<'_, Option<Answer>> {
+        Box::pin(async { None })
+    }
 }

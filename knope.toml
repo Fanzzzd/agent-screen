@@ -6,9 +6,13 @@
 [package]
 versioned_files = [
   "apps/macos/Cargo.toml",
+  "apps/linux/Cargo.toml",
+  "crates/app-core/Cargo.toml",
   "crates/mcp/Cargo.toml",
   "crates/model/Cargo.toml",
   { path = "Cargo.lock", dependency = "agent-screen" },
+  { path = "Cargo.lock", dependency = "agent-screen-linux" },
+  { path = "Cargo.lock", dependency = "agent-screen-app-core" },
   { path = "Cargo.lock", dependency = "agent-screen-mcp" },
   { path = "Cargo.lock", dependency = "agent-screen-model" },
 ]

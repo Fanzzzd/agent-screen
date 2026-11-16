@@ -37,9 +37,9 @@ jobs:
             python3-gi gir1.2-gtk-4.0 qt6-base-dev qt6-wayland \
             libwayland-dev libxkbcommon-dev
       - run: cargo fmt --all --check
-      - run: cargo clippy -p agent-screen-model -p agent-screen-mcp -p agent-screen-linux -p agent-screen-linux-e2e --all-targets -- -D warnings
+      - run: cargo clippy -p agent-screen-model -p agent-screen-mcp -p agent-screen-app-core -p agent-screen-linux -p agent-screen-linux-e2e --all-targets -- -D warnings
       - run: cargo build -p agent-screen-linux
-      - run: cargo test -p agent-screen-model -p agent-screen-mcp -p agent-screen-linux -p agent-screen-linux-e2e -- --test-threads=1
+      - run: cargo test -p agent-screen-model -p agent-screen-mcp -p agent-screen-app-core -p agent-screen-linux -p agent-screen-linux-e2e -- --test-threads=1
 
   changeset-package:
     # knope's single [package] is named default. Any other key leaves the
@@ -89,7 +89,7 @@ jobs:
           set -euo pipefail
           git cat-file -e "$BEFORE" 2>/dev/null || exit 0
           changed="$(git diff --name-only "$BEFORE" "$AFTER")"
-          app="$(grep -E '^(apps/(macos|linux)|crates/(mcp|model))/(src|resources)/' <<<"$changed" || true)"
+          app="$(grep -E '^(apps/(macos|linux)|crates/(app-core|mcp|model))/(src|resources)/' <<<"$changed" || true)"
           notes="$(grep -E '^\.changeset/.+\.md$' <<<"$changed" || true)"
           if [[ -n "$app" && -z "$notes" ]]; then
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."

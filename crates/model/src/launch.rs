@@ -125,6 +125,63 @@ pub fn file_url(path: &str) -> String {
     url
 }
 
+/// Freedesktop XDG `.desktop` search directories, ordered from user overrides
+/// (`$XDG_DATA_HOME/applications`) to system data dirs (`$XDG_DATA_DIRS`),
+/// Flatpak exports, and Snap desktop entries.
+pub fn xdg_application_dirs(
+    home: &str,
+    xdg_data_home: Option<&str>,
+    xdg_data_dirs: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    match xdg_data_home.filter(|s| !s.is_empty()) {
+        Some(data_home) => dirs.push(Path::new(data_home).join("applications")),
+        None if !home.is_empty() => {
+            dirs.push(Path::new(home).join(".local/share/applications"));
+        }
+        None => {}
+    }
+    let raw_dirs = xdg_data_dirs
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/usr/local/share:/usr/share");
+    for part in raw_dirs.split(':').filter(|s| !s.is_empty()) {
+        dirs.push(Path::new(part).join("applications"));
+    }
+    if !home.is_empty() {
+        dirs.push(Path::new(home).join(".local/share/flatpak/exports/share/applications"));
+    }
+    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+    dirs.push(PathBuf::from("/var/lib/snapd/desktop/applications"));
+    dirs
+}
+
+/// Strip Freedesktop `.desktop` `Exec=` field codes (`%f`, `%F`, `%u`, `%U`,
+/// `%i`, `%c`, `%k`, etc.) and unescape `%%` to `%`.
+pub fn strip_desktop_field_codes(tokens: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(tokens.len());
+    for tok in tokens {
+        if matches!(
+            tok.as_str(),
+            "%f" | "%F"
+                | "%u"
+                | "%U"
+                | "%d"
+                | "%D"
+                | "%n"
+                | "%N"
+                | "%i"
+                | "%c"
+                | "%k"
+                | "%v"
+                | "%m"
+        ) {
+            continue;
+        }
+        out.push(tok.replace("%%", "%"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +366,24 @@ mod tests {
     fn no_arguments_matches_none() {
         assert!(is_opened(LAUNCHD, &strings(&["/E"]), &[]));
         assert!(!is_opened(LAUNCHD, &strings(&["/E", "x"]), &[]));
+    }
+
+    #[test]
+    fn xdg_desktop_dirs_and_field_codes_follow_freedesktop_rules() {
+        let dirs = xdg_application_dirs("/home/me", None, Some("/opt/share:/usr/share"));
+        assert_eq!(dirs[0], PathBuf::from("/home/me/.local/share/applications"));
+        assert_eq!(dirs[1], PathBuf::from("/opt/share/applications"));
+        assert_eq!(dirs[2], PathBuf::from("/usr/share/applications"));
+
+        let cleaned = strip_desktop_field_codes(strings(&[
+            "/usr/bin/chromium",
+            "--incognito",
+            "%U",
+            "100%%",
+        ]));
+        assert_eq!(
+            cleaned,
+            strings(&["/usr/bin/chromium", "--incognito", "100%"])
+        );
     }
 }

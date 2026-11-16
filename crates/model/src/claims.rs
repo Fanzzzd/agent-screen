@@ -175,6 +175,21 @@ impl Publication {
     }
 }
 
+/// Window-claim policy: macOS shares a global WindowServer with tiling managers
+/// such as AeroSpace and publishes [`Claims`], whereas isolated Linux Wayland
+/// compositors confine every surface to its own compositor socket (ADR 0020).
+#[derive(Clone, Debug, PartialEq)]
+pub enum WindowClaimPolicy {
+    CompositorBound,
+    SharedWindowServer(Publication),
+}
+
+impl WindowClaimPolicy {
+    pub fn uses_publication(&self) -> bool {
+        matches!(self, Self::SharedWindowServer(_))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +434,7 @@ mod tests {
         state.publish(false, |c| c.claim(7, 3), write).unwrap();
         assert_eq!(writes.get(), 3);
         assert_eq!(state.published().display_of(7), Some(3));
+        assert!(!WindowClaimPolicy::CompositorBound.uses_publication());
+        assert!(WindowClaimPolicy::SharedWindowServer(state).uses_publication());
     }
 }

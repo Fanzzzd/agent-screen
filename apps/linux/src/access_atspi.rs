@@ -8,15 +8,15 @@
 //! (with `EditableText`, `Value`, CDP `<select>`, and keyboard readback fallback),
 //! and detects `ATSPI_ROLE_PASSWORD_TEXT` (`GetRole() == 40`) for `focus_secrecy`.
 
-use crate::devtools_pipe::{self, SelectChoice};
-use crate::ports::{
+use crate::wayland_worker::crop_window_image;
+use agent_screen_app_core::devtools_pipe::{self, SelectChoice};
+use agent_screen_app_core::elements::WindowElementCache;
+use agent_screen_app_core::ports::{
     Access, Display, ElementActionReply, ElementActionReq, InputOp, MouseButton, PortError,
     Secrecy, WindowInfo, WindowStateSnapshot, WindowTreeSnapshot,
 };
-use crate::wayland_worker::crop_window_image;
 use agent_screen_model::keychord::{KeyChord, Modifiers};
 use agent_screen_model::model::{DisplayId, Rect, shot_scale};
-use agent_screen_model::numbers::{Numbers, relabel};
 use agent_screen_model::tree::{Branch, Scope as TreeScope, cut_line, preview, walk, within};
 use futures::future::BoxFuture;
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ struct NodeRef {
 
 #[derive(Default)]
 pub struct AtspiAccess {
-    numbers: Mutex<HashMap<(DisplayId, u32), Numbers<NodeRef>>>,
+    numbers: Mutex<WindowElementCache<NodeRef>>,
     connections: tokio::sync::Mutex<HashMap<(DisplayId, String), zbus::Connection>>,
 }
 
@@ -58,10 +58,7 @@ impl AtspiAccess {
     }
 
     pub fn remove_display(&self, display_id: DisplayId) {
-        self.numbers
-            .lock()
-            .unwrap()
-            .retain(|&(d, _), _| d != display_id);
+        self.numbers.lock().unwrap().remove_display(display_id);
         if let Ok(mut conns) = self.connections.try_lock() {
             conns.retain(|&(d, _), _| d != display_id);
         }
@@ -117,7 +114,7 @@ impl Access for AtspiAccess {
         self.numbers
             .lock()
             .unwrap()
-            .contains_key(&(display_id, window_id))
+            .has_window(display_id, window_id)
     }
 
     fn remove_display(&self, display_id: DisplayId) {
@@ -172,8 +169,8 @@ impl Access for AtspiAccess {
 
             let root_node = if let Some(root_num) = scope.root {
                 let candidate = {
-                    let map = self.numbers.lock().unwrap();
-                    let Some(nums) = map.get(&(display.id(), window_id)) else {
+                    let cache = self.numbers.lock().unwrap();
+                    let Some(nums) = cache.window_numbers(display.id(), window_id) else {
                         return Err(PortError::invalid(format!(
                             "no element [{root_num}] in window {window_id}; call get_window_state without root first"
                         )));
@@ -248,12 +245,13 @@ impl Access for AtspiAccess {
             let (raw_tree, visited_nodes, truncated, depth_limited) = walked;
             let complete =
                 scope.root.is_none() && scope.max_depth.is_none() && !truncated && !depth_limited;
-            let assigned = {
-                let mut map = self.numbers.lock().unwrap();
-                let nums = map.entry((display.id(), window_id)).or_default();
-                nums.refresh(visited_nodes, complete)
-            };
-            let tree = relabel(&raw_tree, &assigned);
+            let (tree, assigned) = self.numbers.lock().unwrap().refresh_and_relabel(
+                display.id(),
+                window_id,
+                &raw_tree,
+                visited_nodes,
+                complete,
+            );
             let elements = assigned.len();
 
             Ok(WindowTreeSnapshot {
@@ -358,8 +356,8 @@ impl Access for AtspiAccess {
                 })?;
 
             let node = {
-                let map = self.numbers.lock().unwrap();
-                let Some(nums) = map.get(&(display.id(), req.window_id)) else {
+                let cache = self.numbers.lock().unwrap();
+                let Some(nums) = cache.window_numbers(display.id(), req.window_id) else {
                     return Err(PortError::invalid(format!(
                         "no element [{}] in window {}; call get_window_state first",
                         req.element, req.window_id

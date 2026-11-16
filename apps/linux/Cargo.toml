@@ -11,6 +11,7 @@ name = "agent-screen"
 path = "src/main.rs"
 
 [dependencies]
+agent-screen-app-core = { path = "../../crates/app-core" }
 agent-screen-mcp = { path = "../../crates/mcp" }
 agent-screen-model = { path = "../../crates/model" }
 anyhow = "1"

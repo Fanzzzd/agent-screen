@@ -1,5 +1,5 @@
 //! Read-only loopback HTTP/1.1 Web Preview server (`127.0.0.1:<port>/d/<token>`),
-//! implementing ADR 0019 for Linux Agent Displays.
+//! implementing ADR 0019 across platforms via [`crate::ports::Display`].
 
 use crate::ports::{Display, ImageFormat, SnapshotOpts};
 use agent_screen_model::model::DisplayId;
@@ -9,13 +9,15 @@ use agent_screen_model::web_preview::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(125);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -219,7 +221,6 @@ impl WebPreviewServer {
         format!("http://127.0.0.1:{}/d/{token}", self.port)
     }
 
-    #[allow(dead_code)]
     pub fn update_label(&self, id: DisplayId, label: impl Into<String>) {
         let mut reg = self.registry.lock().unwrap();
         reg.tokens.update_label(id, label);
@@ -275,11 +276,14 @@ pub fn delete_state_file() {
     }
 }
 
-fn write_state_file(port: u16) -> std::io::Result<()> {
+pub fn write_state_file(port: u16) -> std::io::Result<()> {
     let path = agent_screen_mcp::endpoint::web_state_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let body = json!({
@@ -288,12 +292,15 @@ fn write_state_file(port: u16) -> std::io::Result<()> {
     })
     .to_string();
     std::fs::write(&tmp, body)?;
-    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    #[cfg(unix)]
+    {
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
-fn random_token_bytes() -> [u8; TOKEN_BYTES] {
+pub fn random_token_bytes() -> [u8; TOKEN_BYTES] {
     let mut out = [0u8; TOKEN_BYTES];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let _ = f.read_exact(&mut out);
@@ -787,4 +794,25 @@ Connection: close\r\n\
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_request_parser_accepts_get_and_rejects_mutations() {
+        assert_eq!(
+            parse_http_request(b"GET /d/abc HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            Some(ParsedRequest::Get("/d/abc"))
+        );
+        assert_eq!(
+            parse_http_request(b"POST /d/abc HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+            Some(ParsedRequest::MethodNotAllowed)
+        );
+        assert_eq!(
+            parse_http_request(b"GET relative HTTP/1.1\r\n\r\n"),
+            Some(ParsedRequest::BadRequest)
+        );
+    }
 }

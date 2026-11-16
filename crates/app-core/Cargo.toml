@@ -1,0 +1,20 @@
+[package]
+name = "agent-screen-app-core"
+version = "0.1.37"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Cross-platform application ports, control socket server, loopback web preview, DevTools pipe client, element numbering cache, and recording timeline writer."
+
+[dependencies]
+agent-screen-mcp = { path = "../mcp" }
+agent-screen-model = { path = "../model" }
+anyhow = "1"
+futures = "0.3"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

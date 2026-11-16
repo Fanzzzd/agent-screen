@@ -2,13 +2,15 @@
 //! to the Linux `Display`, `Access`, and `WebPreviewServer` implementations.
 
 use crate::clipboard_wl::ClipboardBridge;
-use crate::devtools_pipe;
-use crate::ports::{
+use agent_screen_app_core::devtools_pipe;
+use agent_screen_app_core::disconnect_grace::{ConnectionSessions, DISCONNECT_GRACE_MS};
+use agent_screen_app_core::ports::{
     Access, ClipboardPayload, ClipboardSync, Display, DisplayManager, DisplaySpec,
     ElementActionReq, ImageFormat, InputOp, LaunchRequest, MouseButton, Secrecy, SnapshotOpts,
+    WindowInfo,
 };
-use crate::server::ControlError;
-use crate::web::WebPreviewServer;
+use agent_screen_app_core::server::{ControlError, Reply, RequestHandler};
+use agent_screen_app_core::web_preview::WebPreviewServer;
 use agent_screen_model::keychord::KeyChord;
 use agent_screen_model::model::{
     ControlAsk, DisplayId, Displays, Disposition, EndReason, Origin, Owner, Rect, Wait, help_steps,
@@ -19,6 +21,7 @@ use agent_screen_model::session::Orphans;
 use agent_screen_model::tree::Scope as TreeScope;
 use agent_screen_model::watch;
 use base64::Engine as _;
+use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -26,13 +29,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 const DEFAULT_SIZE: (f64, f64) = (1280.0, 800.0);
-const DISCONNECT_GRACE_MS: u64 = 2000;
 
 struct State {
     displays: Displays<Arc<dyn Display>>,
     /// Surviving displays recovered on daemon startup that await reattachment
     /// by their original `sessionKey` or `adoptGroups` (or user review).
     surviving: BTreeMap<DisplayId, SurvivingEntry>,
+    conn_sessions: ConnectionSessions,
     conn_last_session: HashMap<u64, String>,
     last_agent_client: Option<String>,
 }
@@ -85,6 +88,7 @@ impl Coordinator {
             state: Mutex::new(State {
                 displays: Displays::default(),
                 surviving,
+                conn_sessions: ConnectionSessions::new(),
                 conn_last_session: HashMap::new(),
                 last_agent_client: None,
             }),
@@ -161,6 +165,7 @@ impl Coordinator {
         let now = self.now_ms();
         let mut st = self.state.lock().unwrap();
         st.conn_last_session.remove(&connection);
+        let _ = st.conn_sessions.on_closed(connection);
         st.displays.connection_disconnected(connection, now);
     }
 
@@ -209,6 +214,7 @@ impl Coordinator {
         {
             let now = self.now_ms();
             let mut st = self.state.lock().unwrap();
+            st.conn_sessions.bind(connection, key.clone());
             st.conn_last_session.insert(connection, key.clone());
             st.displays.rebind_disconnected(key, connection, now);
             st.displays.sessions.note_call_start(key, now);
@@ -1580,11 +1586,26 @@ impl<H> DisplaysAllIdsExt for Displays<H> {
     }
 }
 
+impl RequestHandler for Coordinator {
+    fn dispatch<'a>(
+        &'a self,
+        connection: u64,
+        method: &'a str,
+        params: Map<String, Value>,
+    ) -> BoxFuture<'a, Reply> {
+        Box::pin(async move { Coordinator::dispatch(self, connection, method, params).await })
+    }
+
+    fn connection_closed(&self, connection: u64) -> BoxFuture<'_, ()> {
+        Box::pin(async move { Coordinator::connection_closed(self, connection).await })
+    }
+}
+
 fn debug_methods_enabled() -> bool {
     cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some()
 }
 
-fn window_json(w: &crate::ports::WindowInfo, scale: f64) -> Value {
+fn window_json(w: &WindowInfo, scale: f64) -> Value {
     json!({
         "windowId": w.target.window_id,
         "pid": w.target.pid,

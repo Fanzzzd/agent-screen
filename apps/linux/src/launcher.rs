@@ -1,7 +1,8 @@
 //! Freedesktop `.desktop` and executable resolution, Snap confinement check,
 //! and isolated Chromium/Electron profile configuration.
 
-use crate::ports::{LaunchRequest, PortError};
+use agent_screen_app_core::ports::{LaunchRequest, PortError};
+use agent_screen_model::launch::{strip_desktop_field_codes, xdg_application_dirs};
 use agent_screen_model::model::DisplayId;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -177,13 +178,9 @@ fn is_executable(path: &Path) -> bool {
 fn find_in_desktop_entries(query: &str) -> Option<(PathBuf, Vec<String>)> {
     let q = query.trim_end_matches(".desktop").to_ascii_lowercase();
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut dirs = vec![PathBuf::from(&home).join(".local/share/applications")];
-    if let Ok(xdg) = std::env::var("XDG_DATA_DIRS") {
-        dirs.extend(std::env::split_paths(&xdg).map(|d| d.join("applications")));
-    } else {
-        dirs.push(PathBuf::from("/usr/local/share/applications"));
-        dirs.push(PathBuf::from("/usr/share/applications"));
-    }
+    let data_home = std::env::var("XDG_DATA_HOME").ok();
+    let data_dirs = std::env::var("XDG_DATA_DIRS").ok();
+    let dirs = xdg_application_dirs(&home, data_home.as_deref(), data_dirs.as_deref());
 
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -238,11 +235,11 @@ fn find_in_desktop_entries(query: &str) -> Option<(PathBuf, Vec<String>)> {
 }
 
 fn parse_desktop_exec(exec: &str) -> Option<(PathBuf, Vec<String>)> {
-    let tokens: Vec<String> = exec
+    let raw_tokens: Vec<String> = exec
         .split_whitespace()
         .map(|t| t.trim_matches('"').to_string())
-        .filter(|t| !t.starts_with('%'))
         .collect();
+    let tokens = strip_desktop_field_codes(raw_tokens);
     let (first, rest) = tokens.split_first()?;
     let prog = if Path::new(first).is_absolute() {
         PathBuf::from(first)

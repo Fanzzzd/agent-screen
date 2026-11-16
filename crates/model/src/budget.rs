@@ -98,6 +98,24 @@ pub enum Budget {
     Refuse,
 }
 
+/// Platform display-budget policy: macOS shares WindowServer and ColorSync
+/// across all displays (ADR 0009), whereas isolated Linux compositor instances
+/// incur zero host WindowServer or ColorSync cost (ADR 0020).
+#[derive(Clone, Copy, Debug)]
+pub enum DisplayBudgetPolicy {
+    Unlimited,
+    ColorSync(ColorState),
+}
+
+impl DisplayBudgetPolicy {
+    pub fn allows(&self, online: usize, spares: usize) -> Budget {
+        match self {
+            Self::Unlimited => Budget::Allow,
+            Self::ColorSync(state) => state.allows(online, spares),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +216,10 @@ mod tests {
         };
         assert_eq!(without.allows(2, 0), Budget::Refuse);
         assert_eq!(with.allows(2, 0), Budget::Allow);
+        assert_eq!(DisplayBudgetPolicy::Unlimited.allows(64, 0), Budget::Allow);
+        assert_eq!(
+            DisplayBudgetPolicy::ColorSync(without).allows(2, 0),
+            Budget::Refuse
+        );
     }
 }

@@ -93,14 +93,31 @@ pub struct Element<'a> {
     pub selection: bool,
 }
 
-/// The focus an element makes.
+/// The focus an element makes, across macOS AX roles and AT-SPI2 / normalized
+/// roles (`"textfield"`, `"password text"`, `subrole: Some("secure")`).
 pub fn focus_of(element: Element) -> Focus {
-    if element.subrole == Some("AXSecureTextField") || element.role == Some("AXSecureTextField") {
+    if matches!(element.subrole, Some("AXSecureTextField" | "secure"))
+        || matches!(
+            element.role,
+            Some("AXSecureTextField" | "password text" | "textfield(secure)")
+        )
+    {
         return Focus::Secure;
     }
     let text_role = matches!(
         element.role,
-        Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField")
+        Some(
+            "AXTextField"
+                | "AXTextArea"
+                | "AXComboBox"
+                | "AXSearchField"
+                | "textfield"
+                | "textarea"
+                | "combobox"
+                | "searchfield"
+                | "entry"
+                | "text"
+        )
     );
     if text_role || element.editable || (element.value_settable && element.selection) {
         Focus::Text
@@ -242,6 +259,31 @@ pub fn holds_modifier(source: Source, secrecy: Secrecy, code: u16, gave_up: bool
 /// each would hold the next key back while the arrow keeps firing.
 pub fn moves_focus(press: Press) -> bool {
     !press.repeat && (press.command || press.control || matches!(press.code, 36 | 48 | 76))
+}
+
+/// Linux evdev counterpart to [`holds_modifier`]: LeftShift (`42`), RightShift
+/// (`54`), and CapsLock (`58`) toggle Chinese/English IME modes and wait for
+/// the password-field lookup like keys.
+pub fn holds_evdev_modifier(source: Source, secrecy: Secrecy, evdev: u16, gave_up: bool) -> bool {
+    matches!(evdev, 42 | 54 | 58)
+        && holds(
+            source,
+            secrecy,
+            Press {
+                code: evdev,
+                command: false,
+                control: false,
+                repeat: false,
+            },
+            gave_up,
+        )
+}
+
+/// Linux evdev counterpart to [`moves_focus`]: Tab (`15`), Return (`28`),
+/// KP_Enter (`96`), or any Super/Control shortcut may move focus into a
+/// password field.
+pub fn evdev_moves_focus(press: Press) -> bool {
+    !press.repeat && (press.command || press.control || matches!(press.code, 15 | 28 | 96))
 }
 
 /// What the input method did with a key, in order.
@@ -675,5 +717,42 @@ mod tests {
         assert_eq!(Outcome::Text("x".into()).name(), "text");
         assert_eq!(Outcome::TextThenKey("x".into()).name(), "textThenKey");
         assert_eq!(Outcome::Nothing.name(), "inputMethod");
+    }
+
+    #[test]
+    fn cross_platform_roles_and_evdev_codes_classify_focus_and_secrecy() {
+        let of = |role, subrole| Element {
+            role: Some(role),
+            subrole,
+            ..Element::default()
+        };
+        assert_eq!(focus_of(of("password text", None)), Focus::Secure);
+        assert_eq!(focus_of(of("textfield", Some("secure"))), Focus::Secure);
+        assert_eq!(focus_of(of("textfield", None)), Focus::Text);
+        assert_eq!(focus_of(of("entry", None)), Focus::Text);
+        assert!(holds_evdev_modifier(
+            Source::InputMethod,
+            Secrecy::Unknown,
+            42,
+            false
+        ));
+        assert!(!holds_evdev_modifier(
+            Source::InputMethod,
+            Secrecy::Unknown,
+            29,
+            false
+        ));
+        assert!(evdev_moves_focus(Press {
+            code: 15,
+            command: false,
+            control: false,
+            repeat: false,
+        }));
+        assert!(!evdev_moves_focus(Press {
+            code: 30,
+            command: false,
+            control: false,
+            repeat: false,
+        }));
     }
 }

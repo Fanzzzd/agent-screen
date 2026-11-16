@@ -10,19 +10,11 @@ mod coordinator;
 #[cfg(target_os = "linux")]
 mod dbus_stubs;
 #[cfg(target_os = "linux")]
-mod devtools_pipe;
-#[cfg(target_os = "linux")]
 mod launcher;
-#[cfg(target_os = "linux")]
-mod ports;
-#[cfg(target_os = "linux")]
-mod server;
 #[cfg(target_os = "linux")]
 mod sway_display;
 #[cfg(target_os = "linux")]
 mod wayland_worker;
-#[cfg(target_os = "linux")]
-mod web;
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> std::process::ExitCode {
@@ -103,8 +95,8 @@ fn run_daemon() -> anyhow::Result<()> {
         .build()?;
 
     runtime.block_on(async move {
-        let socket_path = server::prepare_socket_path()?;
-        let web_server = web::WebPreviewServer::start().await?;
+        let socket_path = agent_screen_app_core::server::prepare_socket_path()?;
+        let web_server = agent_screen_app_core::web_preview::WebPreviewServer::start().await?;
         let manager = std::sync::Arc::new(sway_display::SwayDisplayManager::new());
         let access = std::sync::Arc::new(access_atspi::AtspiAccess::new());
         let quit = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -123,8 +115,10 @@ fn run_daemon() -> anyhow::Result<()> {
             quit_sig.notify_waiters();
         });
 
-        let serve_res = server::serve_socket(socket_path, coordinator.clone(), quit).await;
-        web::delete_state_file();
+        let serve_res =
+            agent_screen_app_core::server::serve_socket(socket_path, coordinator.clone(), quit)
+                .await;
+        agent_screen_app_core::web_preview::delete_state_file();
         // Clean shutdown on SIGTERM / debugQuit closes owned displays; a crash
         // or SIGKILL leaves transient systemd scopes alive for reattachment!
         if std::env::var_os("AGENTSCREEN_KEEP_SCOPES_ON_QUIT").is_none() {

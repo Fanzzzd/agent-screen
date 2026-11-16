@@ -6,14 +6,14 @@ use crate::dbus_stubs::{
     NotificationStats, set_xwayland_atspi_bus, spawn_silent_notifications,
     write_isolated_dbus_config,
 };
-use crate::devtools_pipe;
 use crate::launcher::resolve_launch_command;
-use crate::ports::{
-    ClipboardPayload, ClipboardSync, Display, DisplayManager, DisplayMetrics, DisplaySpec,
-    EncodedImage, InputOp, InputOutcome, LaunchRequest, LaunchedApp, PlaceOutcome, PortError,
-    RecoveredDisplay, SnapshotOpts, WindowInfo,
-};
 use crate::wayland_worker::{RawRgbaFrame, WaylandWorker};
+use agent_screen_app_core::devtools_pipe;
+use agent_screen_app_core::ports::{
+    ClipboardPayload, ClipboardSync, Display, DisplayManager, DisplayMetrics, DisplaySpec,
+    EncodedImage, FramePatch, InputOp, InputOutcome, LaunchRequest, LaunchedApp, PlaceOutcome,
+    PortError, RecoveredDisplay, SnapshotOpts, WindowInfo,
+};
 use agent_screen_mcp::capabilities::Capabilities;
 use agent_screen_model::model::{DisplayId, Rect, WindowTarget};
 use agent_screen_model::session::Orphans;
@@ -379,7 +379,7 @@ impl Display for SwayDisplay {
     fn place_window(
         &self,
         target: WindowTarget,
-        frame: Option<crate::ports::FramePatch>,
+        frame: Option<FramePatch>,
     ) -> BoxFuture<'_, Result<PlaceOutcome, PortError>> {
         let (sock, w, h) = {
             let m = self.meta.lock().unwrap();

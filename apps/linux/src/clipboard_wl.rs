@@ -10,7 +10,7 @@
 //! soon as the user hands control back or leaves the Viewer, synchronization
 //! stops immediately.
 
-use crate::ports::{ClipboardPayload, ClipboardSync, Display, PortError};
+use agent_screen_app_core::ports::{ClipboardPayload, ClipboardSync, Display, PortError};
 use agent_screen_model::model::DisplayId;
 use std::collections::HashMap;
 use std::sync::Mutex;
