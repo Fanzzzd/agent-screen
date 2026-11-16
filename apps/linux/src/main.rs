@@ -12,6 +12,8 @@ mod dbus_stubs;
 #[cfg(target_os = "linux")]
 mod launcher;
 #[cfg(target_os = "linux")]
+mod recording;
+#[cfg(target_os = "linux")]
 mod sway_display;
 #[cfg(target_os = "linux")]
 mod ui;

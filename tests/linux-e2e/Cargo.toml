@@ -7,6 +7,7 @@ publish = false
 description = "End-to-end tests driving `agent-screen mcp` and `apps/linux` against headless sway on Linux."
 
 [dependencies]
+agent-screen-model = { path = "../../crates/model" }
 anyhow = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -110,10 +110,41 @@ jobs:
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
 
+  build-linux:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged && github.head_ref == 'release')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libfontconfig1-dev libvulkan-dev rpm
+      - name: Build .deb and .rpm packages
+        run: |
+          cargo build --release -p agent-screen-linux
+          bash apps/linux/packaging/build-deb.sh
+          bash apps/linux/packaging/build-rpm.sh
+      - name: Keep the Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            target/agent-screen_*.deb
+            target/agent-screen-*.rpm
+          if-no-files-found: error
+
   # knope's release binary runs on Linux runners; the DMG comes over as an
   # artifact.
   publish:
-    needs: build
+    needs: [build, build-linux]
     if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-latest
     steps:
@@ -123,6 +154,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release
+          path: target
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux
           path: target
       - uses: knope-dev/action@v2.1.2
         with:
@@ -153,8 +188,8 @@ jobs:
             notes="$(gh release view "v$VERSION" --json body --jq .body)"
             printf '%s\n\n%s\n' "$notes" "$(cat .github/release-footer.md)" > "$RUNNER_TEMP/notes.md"
             gh release edit "v$VERSION" --title "Agent Screen $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
-            # The feed installed apps check, signed for this DMG.
-            gh release upload "v$VERSION" target/appcast.xml --clobber
+            # The feed installed apps check, signed for this DMG, plus Linux packages.
+            gh release upload "v$VERSION" target/appcast.xml target/agent-screen_*.deb target/agent-screen-*.rpm --clobber
           fi
           # What users download must be what the cask names.
           rm -rf "$RUNNER_TEMP/check"

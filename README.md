@@ -19,7 +19,7 @@ Claude Code or Codex opens apps, clicks and types on a virtual display, while yo
 
 [![Latest release](https://img.shields.io/github/v/release/Fanzzzd/agent-screen?label=release)](https://github.com/Fanzzzd/agent-screen/releases/latest)
 [![CI](https://github.com/Fanzzzd/agent-screen/actions/workflows/ci.yml/badge.svg)](https://github.com/Fanzzzd/agent-screen/actions/workflows/ci.yml)
-[![macOS 15 or later](https://img.shields.io/badge/macOS-15%2B-lightgrey)](#install)
+[![macOS 15+ | Linux Wayland](https://img.shields.io/badge/platform-macOS%2015%2B%20%7C%20Linux-lightgrey)](#install)
 [![MIT license](https://img.shields.io/github/license/Fanzzzd/agent-screen)](LICENSE)
 
 </div>
@@ -72,6 +72,8 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    ```
 
    This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. It also writes the Agent Screen skill (step 4) to `~/.claude/skills/agent-screen` and `~/.codex/skills/agent-screen`. Each update of the app brings those copies up to its version. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
+
+   **On Linux (Wayland or headless):** install the `.deb` or `.rpm` package from the [latest release](https://github.com/Fanzzzd/agent-screen/releases/latest), then register your agents with `agent-screen connect` (or add `agent-screen mcp` as a stdio server). Each Agent Display runs inside its own isolated headless `sway` compositor, `systemd --user` scope, Xwayland instance, clipboard, and AT-SPI2 bus ([ADR 0020](docs/adr/0020-isolated-compositor-displays.md)): no screen-recording or accessibility permission prompts are needed, your host cursor and keyboard focus never move, and `ctrl+c` / `ctrl+v` work inside every display. Because Wayland clients bind to one compositor socket for life, Linux displays omit host-window `Handover` (`window_access` and `set_disposition`); browser logins persist in isolated profiles under `$XDG_STATE_HOME/agent-screen/profiles/`, and recordings write MP4 + `.timeline.jsonl` files into `~/Videos/Agent Screen`.
 
 4. The Agent Screen skill makes agents use their display without being told. Step 3 installs it for Claude Code and Codex. Claude Code loads MCP tools only when it searches for them, so without the skill it often opens apps with `open -a` or AppleScript on your screen instead. The skill tells it when a task needs a screen: opening, operating or testing a Mac app or a web page, clicking or filling in something on screen, a screenshot of an app, a login to a site.
 

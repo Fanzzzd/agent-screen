@@ -3,12 +3,16 @@
 ## Layout
 
 ```
-apps/macos/        the app: GPUI UI, control socket, `AgentScreen mcp`
+apps/macos/        the macOS menu bar app: GPUI UI, control socket, `AgentScreen mcp`
+apps/linux/        the Linux daemon and GPUI UI: isolated sway displays, AT-SPI2, `agent-screen mcp`
 apps/website/      agentscreen.app, a Cloudflare Worker with static assets
+crates/app-core/   cross-platform ports, control socket, web preview, DevTools pipe, timeline writer
+crates/ui-common/  pure-GPUI shared theme, icons, bilingual i18n, Agent Pointer, IME ReplyField
 crates/mcp/        the MCP server (rmcp), built into the app binary
 crates/model/      domain rules with no OS calls: displays, windows, key chords
 crates/colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
-tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
+tests/e2e/         macOS MCP scripts, user-side e2e tests and the README demo recorder
+tests/linux-e2e/   Linux headless and SimulatedHostSway GPUI e2e suites (`mvp_daemon`, `ax_gtk`, `ax_chromium`, `clipboard`, `ui_smoke`, `recording`)
 vendor/            Zed's gpui_apple, patched
 docs/              ADRs, the AGENTS.md convention, Linux and Windows feasibility notes
 skills/            the agent-screen skill, docs/agents/AGENTS.md with frontmatter
@@ -33,6 +37,8 @@ Agent Screen started as a Swift app; the Rust app replaced it ([ADR 0005](adr/00
 ```sh
 apps/macos/scripts/bundle.sh [release]   # build target/Agent Screen Dev.app (release: Agent Screen.app)
 apps/macos/scripts/release.sh            # the DMG and Homebrew cask for a release
+apps/linux/packaging/build-deb.sh        # build target/agent-screen_<version>_<arch>.deb on Linux
+apps/linux/packaging/build-rpm.sh        # build target/agent-screen-<version>-1.<arch>.rpm on Linux
 ```
 
 A debug bundle is a separate app, "Agent Screen Dev" (`app.agentscreen.AgentScreen.dev`), so it runs beside an installed Agent Screen without touching it: its own privacy grants, its own control socket (instance `dev` unless `AGENTSCREEN_INSTANCE` says otherwise), and its own agent registration (`agent-screen-dev`). Its menu bar icon is purple.

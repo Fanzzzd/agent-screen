@@ -719,6 +719,7 @@ impl Render for ViewerView {
             .map(|s| (s.width as f64, s.height as f64))
             .unwrap_or((1280.0, 800.0));
         let takeover = snap.as_ref().is_some_and(|s| s.takeover);
+        let recording = snap.as_ref().is_some_and(|s| s.recording);
         let ended = snap.as_ref().is_some_and(|s| s.ended);
         let kept_review = snap.as_ref().is_some_and(|s| s.kept_review);
         let ptr = snap.as_ref().and_then(|s| s.pointer);
@@ -774,7 +775,19 @@ impl Render for ViewerView {
                                     .bg(theme.control)
                                     .text_color(theme.secondary)
                                     .child(status_text),
-                            ),
+                            )
+                            .when(recording, |el| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .px(px(6.))
+                                        .py(px(2.))
+                                        .rounded(px(6.))
+                                        .bg(theme.red)
+                                        .text_color(gpui::white())
+                                        .child(t("Recording", "录制中")),
+                                )
+                            }),
                     )
                     .child(
                         div()

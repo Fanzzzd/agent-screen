@@ -20,6 +20,7 @@ use zbus::zvariant::Value as ZValue;
 #[derive(Clone, Debug)]
 pub enum TrayAction {
     TogglePeek,
+    OpenRecordings,
     OpenViewer(DisplayId),
     ToggleTakeover(DisplayId),
     OpenHelpReply(DisplayId),
@@ -110,6 +111,16 @@ impl ksni::Tray for AgentScreenTray {
                 label: t("Show Peek", "显示概览").into(),
                 activate: Box::new(|tray: &mut Self| {
                     let _ = tray.tx.unbounded_send(TrayAction::TogglePeek);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: t("Recordings...", "录屏库…").into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.tx.unbounded_send(TrayAction::OpenRecordings);
                 }),
                 ..Default::default()
             }

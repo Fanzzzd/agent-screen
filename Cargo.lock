@@ -207,6 +207,7 @@ dependencies = [
 name = "agent-screen-linux-e2e"
 version = "0.0.0"
 dependencies = [
+ "agent-screen-model",
  "anyhow",
  "base64 0.22.1",
  "libc",

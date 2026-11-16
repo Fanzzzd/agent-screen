@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Screen isolated Wayland Agent Display daemon
+Documentation=https://github.com/Fanzzzd/agent-screen
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/agent-screen
+Restart=on-failure
+RestartSec=2
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target

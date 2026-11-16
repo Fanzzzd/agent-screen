@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Screen
+GenericName=AI Agent Display Manager
+Comment=Give each AI agent its own isolated Wayland display
+Exec=/usr/bin/agent-screen
+TryExec=/usr/bin/agent-screen
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=false
+StartupWMClass=app.agentscreen.AgentScreen

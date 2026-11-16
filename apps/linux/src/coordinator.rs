@@ -2,6 +2,7 @@
 //! to the Linux `Display`, `Access`, and `WebPreviewServer` implementations.
 
 use crate::clipboard_wl::ClipboardBridge;
+use crate::recording::RecordingManager;
 use agent_screen_app_core::devtools_pipe;
 use agent_screen_app_core::disconnect_grace::{ConnectionSessions, DISCONNECT_GRACE_MS};
 use agent_screen_app_core::ports::{
@@ -10,6 +11,7 @@ use agent_screen_app_core::ports::{
     WindowInfo,
 };
 use agent_screen_app_core::server::{ControlError, Reply, RequestHandler};
+use agent_screen_app_core::timeline::recorded_action_event;
 use agent_screen_app_core::web_preview::WebPreviewServer;
 use agent_screen_model::keychord::KeyChord;
 use agent_screen_model::model::{
@@ -65,6 +67,7 @@ pub struct UiDisplaySnapshot {
     pub width: u32,
     pub height: u32,
     pub takeover: bool,
+    pub recording: bool,
     pub ended: bool,
     pub kept_review: bool,
     pub pointer: Option<AgentPointer>,
@@ -102,6 +105,7 @@ pub struct Coordinator {
     manager: Arc<dyn DisplayManager>,
     access: Option<Arc<dyn Access>>,
     clipboard_bridge: ClipboardBridge,
+    recording: Arc<RecordingManager>,
     web: Arc<WebPreviewServer>,
     quit: Arc<Notify>,
     started_at: Instant,
@@ -136,6 +140,7 @@ impl Coordinator {
             manager,
             access,
             clipboard_bridge: ClipboardBridge::new(),
+            recording: RecordingManager::new(),
             web,
             quit,
             started_at: Instant::now(),
@@ -186,6 +191,7 @@ impl Coordinator {
     }
 
     async fn finalize_ended_display(&self, id: DisplayId, handle: Arc<dyn Display>) {
+        let _ = self.recording.stop(id).await;
         // ADR 0019: expire Web Preview token as soon as the session stops using the display.
         self.web.expire_display(id);
         self.clipboard_bridge.disconnect(id);
@@ -227,6 +233,7 @@ impl Coordinator {
     }
 
     pub async fn shutdown_all(&self) {
+        self.recording.stop_all().await;
         let handles: Vec<Arc<dyn Display>> = {
             let mut st = self.state.lock().unwrap();
             let ids: Vec<DisplayId> = st.displays.of_all_ids();
@@ -277,9 +284,21 @@ impl Coordinator {
             st.displays.sessions.note_call_start(key, now);
         }
 
+        let pending_tl = p
+            .int("displayId")
+            .and_then(|v| DisplayId::try_from(v).ok())
+            .filter(|&id| self.recording.is_recording(id))
+            .and_then(|id| recorded_action_event(method, &params).map(|ev| (id, ev)));
+
         let outcome = self
             .handle_method(connection, method, &p, session_key.as_deref())
             .await;
+
+        if outcome.is_ok()
+            && let Some((id, ev)) = pending_tl
+        {
+            self.recording.note_action(id, ev);
+        }
 
         if !is_debug
             && method != "agentReady"
@@ -314,6 +333,50 @@ impl Coordinator {
                 Ok(self.manager.capabilities().to_json())
             }
             "createDisplay" => self.create_display(connection, p).await,
+            "recordStart" => {
+                let (id, handle) = self.require_display(p, session_key, false, false)?;
+                let label = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .displays
+                    .get(id)
+                    .map(|d| d.label())
+                    .unwrap_or_default();
+                let (video, timeline, codec) = self
+                    .recording
+                    .start(handle, &label)
+                    .map_err(ControlError::failed)?;
+                Ok(json!({
+                    "video": video,
+                    "timeline": timeline,
+                    "selectedCodec": codec,
+                    "hardwareEncoderVerified": false,
+                    "codecNote": "Configured H.264 MP4 via ffmpeg. Hardware encoder use has not been verified.",
+                }))
+            }
+            "recordStop" => {
+                let (id, _) = self.require_display(p, session_key, false, false)?;
+                let done = self
+                    .recording
+                    .stop(id)
+                    .await
+                    .ok_or_else(|| ControlError::invalid("the display isn't being recorded"))?;
+                Ok(json!({
+                    "video": done.video,
+                    "timeline": done.timeline,
+                    "selectedCodec": done.codec,
+                    "hardwareEncoderVerified": false,
+                    "seconds": (done.seconds * 10.0).round() / 10.0,
+                    "actions": done.actions,
+                    "problem": done.problem,
+                    "sound": {
+                        "apps": [],
+                        "leftOut": [],
+                        "problem": "audio muxing is disabled in isolated sway mode",
+                    },
+                }))
+            }
             "endDisplay" => {
                 let (id, handle) = self.require_display(p, session_key, false, true)?;
                 {
@@ -973,6 +1036,8 @@ impl Coordinator {
                     }
                 }
                 if active {
+                    self.recording
+                        .note_action(id, json!({ "action": "takeoverStart" }));
                     if p.0.contains_key("viewerFocused") {
                         self.clipboard_bridge
                             .set_viewer_focused(id, p.bool("viewerFocused"));
@@ -1656,11 +1721,14 @@ impl Coordinator {
     }
 
     fn note_pointer(&self, id: DisplayId, pt: (f64, f64), click: bool) {
-        self.state
-            .lock()
-            .unwrap()
-            .displays
-            .point(id, pt.0, pt.1, click);
+        let active_agent = {
+            let mut st = self.state.lock().unwrap();
+            st.displays.point(id, pt.0, pt.1, click);
+            st.displays
+                .get(id)
+                .is_some_and(|d| !d.takeover && !d.is_ended())
+        };
+        self.recording.note_pointer(id, pt, click, active_agent);
     }
 
     pub fn attach_ui_bridge(&self, bridge: Arc<dyn UiControlBridge>) {
@@ -1675,7 +1743,8 @@ impl Coordinator {
         let st = self.state.lock().unwrap();
         let mut out = Vec::new();
         for id in st.displays.of_all_ids() {
-            if let Some(snap) = Self::snapshot_from_state(&st, id) {
+            if let Some(mut snap) = Self::snapshot_from_state(&st, id) {
+                snap.recording = self.recording.is_recording(id);
                 out.push(snap);
             }
         }
@@ -1684,7 +1753,9 @@ impl Coordinator {
 
     pub fn ui_snapshot_of(&self, id: DisplayId) -> Option<UiDisplaySnapshot> {
         let st = self.state.lock().unwrap();
-        Self::snapshot_from_state(&st, id)
+        let mut snap = Self::snapshot_from_state(&st, id)?;
+        snap.recording = self.recording.is_recording(id);
+        Some(snap)
     }
 
     fn snapshot_from_state(st: &State, id: DisplayId) -> Option<UiDisplaySnapshot> {
@@ -1721,6 +1792,7 @@ impl Coordinator {
                 width: m.width,
                 height: m.height,
                 takeover: d.takeover,
+                recording: false,
                 ended: d.is_ended(),
                 kept_review: st.kept_reviews.contains(&id),
                 pointer: d.pointer,
@@ -1737,6 +1809,7 @@ impl Coordinator {
                 width: surv.spec.width,
                 height: surv.spec.height,
                 takeover: false,
+                recording: false,
                 ended: true,
                 kept_review: st.kept_reviews.contains(&id),
                 pointer: None,
@@ -1757,6 +1830,10 @@ impl Coordinator {
                 !st.displays.end_takeover(id).is_empty()
             }
         };
+        if active && changed {
+            self.recording
+                .note_action(id, json!({ "action": "takeoverStart" }));
+        }
         if !active {
             self.clipboard_bridge.disconnect(id);
         }
@@ -1809,6 +1886,7 @@ impl Coordinator {
     }
 
     pub async fn ui_dismiss_display(&self, id: DisplayId) {
+        let _ = self.recording.stop(id).await;
         let removed = {
             let mut st = self.state.lock().unwrap();
             st.kept_reviews.remove(&id);

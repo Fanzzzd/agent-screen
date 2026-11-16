@@ -7,6 +7,7 @@
 pub mod frame;
 pub mod help_card;
 pub mod peek;
+pub mod recordings;
 pub mod tray_and_notify;
 pub mod viewer;
 
@@ -28,6 +29,7 @@ use gpui::{
 };
 use help_card::HelpCardView;
 use peek::{PeekView, StatusWindowView};
+use recordings::RecordingsView;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -171,6 +173,7 @@ struct ShellWindows {
     viewers: HashMap<DisplayId, WindowHandle<ViewerView>>,
     peek: Option<(WindowHandle<PeekView>, bool)>,
     card: Option<WindowHandle<HelpCardView>>,
+    recordings_win: Option<WindowHandle<RecordingsView>>,
     status_win: Option<WindowHandle<StatusWindowView>>,
     last_auto_prompt: Option<(DisplayId, u64)>,
 }
@@ -202,7 +205,7 @@ impl ShellWindows {
                 cx,
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some(format!("Agent Screen — {}", snap.label).into()),
+                title: Some(format!("Agent Screen: {}", snap.label).into()),
                 ..Default::default()
             }),
             focus: true,
@@ -407,6 +410,55 @@ impl ShellWindows {
         }
     }
 
+    fn open_recordings(
+        &mut self,
+        cx: &mut App,
+    ) -> Result<WindowHandle<RecordingsView>, ControlError> {
+        if let Some(existing) = self.recordings_win
+            && existing
+                .update(cx, |v, window, cx| {
+                    v.refresh_library(cx);
+                    window.activate_window();
+                })
+                .is_ok()
+        {
+            return Ok(existing);
+        }
+        let rt = self.coord.tokio_handle();
+        let opts = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(880.), px(560.)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Agent Screen: Recordings".into()),
+                ..Default::default()
+            }),
+            focus: true,
+            show: true,
+            kind: WindowKind::Normal,
+            app_id: Some("app.agentscreen.AgentScreen".into()),
+            ..Default::default()
+        };
+        let handle = cx
+            .open_window(opts, move |window, cx| {
+                cx.new(|cx| RecordingsView::new(rt, window, cx))
+            })
+            .map_err(|e| ControlError::failed(format!("open Recordings failed: {e}")))?;
+        self.recordings_win = Some(handle);
+        Ok(handle)
+    }
+
+    fn close_recordings(&mut self, cx: &mut App) {
+        if let Some(h) = self.recordings_win.take() {
+            let _ = h.update(cx, |v, window, _| {
+                v.cleanup(window);
+                window.remove_window();
+            });
+        }
+    }
+
     fn handle_debug_show(
         &mut self,
         p: &Map<String, Value>,
@@ -438,6 +490,15 @@ impl ShellWindows {
             "status-window" => {
                 self.ensure_status_window(cx)?;
                 Ok(json!({ "surface": "status-window", "open": true }))
+            }
+            "recordings" => {
+                let handle = self.open_recordings(cx)?;
+                let count = handle.read_with(cx, |v, _| v.entries.len()).unwrap_or(0);
+                Ok(json!({ "surface": "recordings", "open": true, "entries": count }))
+            }
+            "recordings-close" => {
+                self.close_recordings(cx);
+                Ok(json!({ "surface": "recordings-close", "open": false }))
             }
             "card-open" => {
                 let target = (id > 0).then_some(id);
@@ -627,6 +688,7 @@ pub fn run_gui_daemon() -> anyhow::Result<()> {
             viewers: HashMap::new(),
             peek: None,
             card: None,
+            recordings_win: None,
             status_win: None,
             last_auto_prompt: None,
         }));
@@ -750,6 +812,9 @@ pub fn run_gui_daemon() -> anyhow::Result<()> {
                             } else {
                                 let _ = sh.open_peek(cx);
                             }
+                        }
+                        TrayAction::OpenRecordings => {
+                            let _ = sh.open_recordings(cx);
                         }
                         TrayAction::OpenViewer(id) => {
                             let _ = sh.open_viewer(id, cx);

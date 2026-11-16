@@ -104,6 +104,8 @@ impl Render for PeekView {
                 let tx_take = self.action_tx.clone();
                 let badge = if s.ended {
                     t("Review", "待审阅")
+                } else if s.recording {
+                    t("Recording", "录制中")
                 } else if s.takeover {
                     t("User Control", "已接管")
                 } else if s.help.is_some() || s.control_req.is_some() {
