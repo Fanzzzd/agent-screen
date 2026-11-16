@@ -29,8 +29,8 @@
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="preload" as="image" href="/media/hero.webp?v=f3a96771a4" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
-<link rel="preload" as="image" href="/media/hero-m.webp?v=44147799df" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero.webp?v=b0dddf1620" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero-m.webp?v=054f73cb41" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -45,10 +45,10 @@
         <button class="peek-btn" type="button" aria-expanded="false" aria-controls="peek" ><svg viewBox="0 0 20 18" aria-hidden="true"><path d="M7.277 4.969L15.471 4.969Q18.218 4.969 18.218 7.717L18.218 11.766L16.520 10.144L16.520 7.717Q16.520 6.668 15.471 6.668L12.879 6.668L12.414 6.223Q11.220 5.083 10.080 6.277Q9.906 6.459 9.799 6.668L7.277 6.668Q6.228 6.668 6.228 7.717L6.228 11.914Q6.228 12.963 7.277 12.963L9.623 12.963L9.623 14.661L7.277 14.661Q4.529 14.661 4.529 11.914L4.529 7.717Q4.529 4.969 7.277 4.969ZM11.022 7.417Q11.022 7.316 11.092 7.243Q11.266 7.061 11.448 7.235L17.953 13.446Q18.031 13.520 18.031 13.628Q18.031 13.880 17.779 13.880L15.311 13.880L16.582 16.758Q16.583 16.759 16.583 16.760Q16.683 16.992 16.451 17.091L14.982 17.720Q14.754 17.818 14.653 17.591L13.326 14.597L11.445 16.331Q11.372 16.398 11.274 16.398Q11.022 16.398 11.022 16.146ZM4.230 2.221L11.024 2.221Q13.236 2.221 13.449 4.220L11.672 4.220Q11.498 3.920 11.024 3.920L4.230 3.920Q3.480 3.920 3.480 4.669L3.480 8.966Q3.480 9.440 3.780 9.614L3.780 11.376Q3.051 11.249 2.499 10.697Q1.782 9.980 1.782 8.966L1.782 4.669Q1.782 3.655 2.499 2.938Q3.216 2.221 4.230 2.221Z"/></svg><span class="peek-label">Peek</span><span class="ping" aria-hidden="true"></span></button>
         <div class="peek" id="peek" tabindex="-1">
           <div class="tiles">
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.webp?v=051b6561fb" data-src="/media/tile-checkout.mp4?v=1288f1959f"></video><figcaption><b>Claude Code · Checkout</b><span>Controlled by Claude Code</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.webp?v=6111b17acc" data-src="/media/tile-kanban.mp4?v=ed4120870f"></video><figcaption><b>Codex · Launch board</b><span>Controlled by Codex</span></figcaption></figure>
-            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.webp?v=10e7b188c4" data-src="/media/tile-booking.mp4?v=47b281a3c7"></video><figcaption><b>Claude Code · Book a demo</b><span>Controlled by Claude Code</span></figcaption></figure>
-            <figure class="asks"><img src="/media/tile-help.webp?v=c6e2822d7c" alt="" loading="lazy" width="416" height="252"><figcaption><b>Codex · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-checkout.webp?v=051b6561fb" data-src="/media/tile-checkout.mp4?v=1288f1959f"></video><figcaption><b>Agent 1 · Checkout</b><span>Controlled by Agent 1</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-kanban.webp?v=6111b17acc" data-src="/media/tile-kanban.mp4?v=ed4120870f"></video><figcaption><b>Agent 2 · Launch board</b><span>Controlled by Agent 2</span></figcaption></figure>
+            <figure><video muted loop playsinline preload="none" poster="/media/tile-booking.webp?v=10e7b188c4" data-src="/media/tile-booking.mp4?v=47b281a3c7"></video><figcaption><b>Agent 3 · Book a demo</b><span>Controlled by Agent 3</span></figcaption></figure>
+            <figure class="asks"><img src="/media/tile-help.webp?v=c6e2822d7c" alt="" loading="lazy" width="416" height="252"><figcaption><b>Agent 4 · Release PR</b><span>Needs help: Sign in to GitHub</span></figcaption></figure>
           </div>
           <p class="peek-note">The tiles replay scripted test sessions. In the app, Peek drops from the menu bar icon.</p>
         </div>
@@ -80,8 +80,8 @@
     <figure class="film">
       <div class="backscreen" aria-hidden="true"></div>
       <video id="hero" muted loop playsinline preload="none"
-        data-poster="/media/hero.webp?v=f3a96771a4" data-src="/media/hero.mp4?v=fdd04bf8d9" data-av1="/media/hero.av1.mp4?v=333115970d" data-src-m="/media/hero-m.mp4?v=55a91fb03e" data-av1-m="/media/hero-m.av1.mp4?v=ebec6d81f3" data-poster-m="/media/hero-m.webp?v=44147799df"
-        aria-label="A film of scripted test sessions. You work in your editor and spreadsheet. Test sessions labelled as agents take over your pointer, then Agent Screen moves each session onto a display of its own while your pointer stays put. One session asks for help with a sign-in; you take over, sign in and hand it back."></video>
+        data-poster="/media/hero.webp?v=b0dddf1620" data-src="/media/hero.mp4?v=798cd5da60" data-av1="/media/hero.av1.mp4?v=4db1f9f1d0" data-src-m="/media/hero-m.mp4?v=d7ba00d85b" data-av1-m="/media/hero-m.av1.mp4?v=5192a43894" data-poster-m="/media/hero-m.webp?v=054f73cb41"
+        aria-label="A film of scripted test sessions. You work in your editor and spreadsheet. Test sessions labelled Agent 1 to Agent 4 take over your pointer, then Agent Screen moves each session onto a display of its own while your pointer stays put. One session asks for help with a sign-in; you take over, sign in and hand it back."></video>
       <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
       <figcaption class="film-note">Footage: scripted test sessions making the same calls an agent's MCP tools make.</figcaption>
     </figure>
@@ -132,7 +132,7 @@
         <h2>Every Agent Display, one hover away.</h2>
         <p>Hover the menu bar icon to see every Agent Display live, or click it to keep Peek up. Open any of them in the Viewer to watch it full size.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.webp?v=5e6db37fe7" data-poster-m="/media/peek-m.webp?v=f983cbf6f0" data-src="/media/peek.mp4?v=85509e8fdc" data-av1="/media/peek.av1.mp4?v=bf17c4e3ec" data-src-m="/media/peek-m.mp4?v=76b5eb314c" data-av1-m="/media/peek-m.av1.mp4?v=05d834416b" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live Agent Displays. One grows into the Viewer, where a scripted test session fills a checkout form."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/peek.webp?v=81bb8767e2" data-poster-m="/media/peek-m.webp?v=9275f11442" data-src="/media/peek.mp4?v=b26134a621" data-av1="/media/peek.av1.mp4?v=906258b5a8" data-src-m="/media/peek-m.mp4?v=dd0e3a3455" data-av1-m="/media/peek-m.av1.mp4?v=564d33559a" aria-label="The pointer hovers the Agent Screen menu bar icon. Peek drops with four live Agent Displays. One grows into the Viewer, where a scripted test session fills a checkout form."></video>
     </div>
 
     <div class="feature flip">
@@ -141,7 +141,7 @@
         <h2>It asks when it's stuck. You answer your way.</h2>
         <p>An agent stuck on a login or a captcha asks for you with a card under the menu bar icon and a notification, then waits. Did the step yourself? Press Continue. Reply sends it what you type, word for word. Take Over pauses it while you drive; press Let … Continue or tell the agent to continue in the conversation to hand the display back.</p>
       </div>
-      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.webp?v=d58726d9fe" data-src="/media/help.mp4?v=7b483cc014" data-av1="/media/help.av1.mp4?v=9057087f27" aria-label="A scripted test session, labelled Claude Code, asks for help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Claude Code Continue and the session clicks Sign in."></video>
+      <video class="f-video" muted loop playsinline preload="none" data-poster="/media/help.webp?v=1a312604ef" data-src="/media/help.mp4?v=fcf731923e" data-av1="/media/help.av1.mp4?v=70303bb45f" aria-label="A scripted test session, labelled Agent 1, asks for help signing in to GitHub. The user presses Take Over, types the username and password in the Viewer, then presses Let Agent 1 Continue and the session clicks Sign in."></video>
     </div>
 
     <div class="feature">
@@ -150,7 +150,7 @@
         <h2>Hand a window over. Take it back.</h2>
         <p>Drag one of your windows onto the Viewer, or tell the agent to take it in the conversation. Press Take Back or ask the agent to return it, and the window goes back to where it was. An agent can also ask for a window; you answer Hand Over or Keep.</p>
       </div>
-      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/handover.webp?v=33e133afe9" data-poster-m="/media/handover-m.webp?v=6c1b24da23" data-src="/media/handover.mp4?v=7a7c6649dc" data-av1="/media/handover.av1.mp4?v=f0cabeeda5" data-src-m="/media/handover-m.mp4?v=5a943403de" data-av1-m="/media/handover-m.av1.mp4?v=b69afac198" aria-label="The user drags a Chrome checkout window onto the Viewer. A scripted test session fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/handover.webp?v=83f7521329" data-poster-m="/media/handover-m.webp?v=f801c27ad8" data-src="/media/handover.mp4?v=6e87ae2a04" data-av1="/media/handover.av1.mp4?v=8ee7506c23" data-src-m="/media/handover-m.mp4?v=b91d87a0c3" data-av1-m="/media/handover-m.av1.mp4?v=ec1ee918f1" aria-label="The user drags a Chrome checkout window onto the Viewer. A scripted test session fills in the form on its display. The user picks the window under Take Back and it flies home, filled in."></video>
     </div>
 
     <div class="feature flip">
@@ -159,15 +159,7 @@
         <h2>Watch from a browser tab.</h2>
         <p><code>create_display</code> returns a link the agent can paste in chat, and Copy Web Link in Peek or the menu copies it too. The page shows the display live and read-only: it sends no clicks or keys, serves on 127.0.0.1 only, encodes nothing while no tab is open, and stops working when the display ends.</p>
       </div>
-      <div class="code preview-code">
-        <div class="code-bar"><span>create_display returns</span></div>
-        <pre><code>{
-  "display_id": 3,
-  "width": 1280,
-  "height": 800,
-  "preview_url": "http://127.0.0.1:<span class="hl">&lt;port&gt;</span>/d/<span class="hl">&lt;token&gt;</span>"
-}</code></pre>
-      </div>
+      <video class="f-video cut" muted loop playsinline preload="none" data-poster="/media/webpreview.webp?v=455d547a7c" data-poster-m="/media/webpreview-m.webp?v=a11587f24e" data-src="/media/webpreview.mp4?v=787964b90f" data-av1="/media/webpreview.av1.mp4?v=ff2e341ea0" data-src-m="/media/webpreview-m.mp4?v=6e00800bdf" data-av1-m="/media/webpreview-m.av1.mp4?v=6b759fa0a3" aria-label="A browser tab at 127.0.0.1 shows the page titled Agent 3 · Launch board, marked Read-only preview. Inside it, a scripted test session's Agent Display moves cards across a launch board, live."></video>
     </div>
   </section>
 
@@ -176,7 +168,7 @@
       <h2>A display per agent session. Up to four when it needs them.</h2>
       <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. A session that needs two screens side by side can ask for more, up to four, each with its own label. Your windows stay put unless you give them to an agent. With many displays, turn on Smooth Display Changes in Settings.</p>
     </div>
-    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.webp?v=aeb239a206" data-poster-m="/media/fleet-m.webp?v=5eb343b866" data-src="/media/fleet.mp4?v=16aaf07726" data-av1="/media/fleet.av1.mp4?v=ed740079fb" data-src-m="/media/fleet-m.mp4?v=0faa120b47" data-av1-m="/media/fleet-m.av1.mp4?v=f71b12b3e0" aria-label="Twelve Agent Displays, each driven by a scripted test session, work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.webp?v=4f5df150fe" data-poster-m="/media/fleet-m.webp?v=3b856474c0" data-src="/media/fleet.mp4?v=3c1c969dd2" data-av1="/media/fleet.av1.mp4?v=935f4a4e6b" data-src-m="/media/fleet-m.mp4?v=643386ad91" data-av1-m="/media/fleet-m.av1.mp4?v=ae7d335074" aria-label="Twelve Agent Displays, each driven by a scripted test session, work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
       <li><h3>Your browser, shared</h3><p>An agent can open a window in the browser you are typing in. Your keys stay in your window: while the agent's window opens, Agent Screen holds what you type, about a second in Dia, and then delivers it to your window in order. The agent's clicks and text reach its page through accessibility.</p></li>
       <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. They choose an item in a standard Mac pop-up, or in a select on a page in a browser they started, without opening its menu. They step sliders that support it without dragging.</p></li>

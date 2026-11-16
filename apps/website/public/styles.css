@@ -240,10 +240,6 @@ main > .hero { max-width: 1360px; padding-top: 56px; text-align: center; }
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 30px 90px rgba(0, 0, 0, 0.6);
 }
 
-.preview-code { margin: 0; }
-.preview-code pre { font-size: 15px; padding: 22px 24px 24px; }
-.preview-code .hl { color: var(--link); }
-
 /* Fleet */
 
 .fleet-head { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); gap: 64px; align-items: end; }
