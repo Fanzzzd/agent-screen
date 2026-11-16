@@ -29,8 +29,8 @@
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon-64.png" type="image/png" sizes="64x64">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="preload" as="image" href="/media/hero.webp?v=b0dddf1620" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
-<link rel="preload" as="image" href="/media/hero-m.webp?v=054f73cb41" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero.webp?v=fcb02548e0" type="image/webp" media="(min-width: 601px)" fetchpriority="high">
+<link rel="preload" as="image" href="/media/hero-m.webp?v=8085a60bce" type="image/webp" media="(max-width: 600px)" fetchpriority="high">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -80,7 +80,7 @@
     <figure class="film">
       <div class="backscreen" aria-hidden="true"></div>
       <video id="hero" muted loop playsinline preload="none"
-        data-poster="/media/hero.webp?v=b0dddf1620" data-src="/media/hero.mp4?v=798cd5da60" data-av1="/media/hero.av1.mp4?v=4db1f9f1d0" data-src-m="/media/hero-m.mp4?v=d7ba00d85b" data-av1-m="/media/hero-m.av1.mp4?v=5192a43894" data-poster-m="/media/hero-m.webp?v=054f73cb41"
+        data-poster="/media/hero.webp?v=fcb02548e0" data-src="/media/hero.mp4?v=34117d2088" data-av1="/media/hero.av1.mp4?v=3fae162fe9" data-src-m="/media/hero-m.mp4?v=573e5bd3b3" data-av1-m="/media/hero-m.av1.mp4?v=3bc27619f4" data-poster-m="/media/hero-m.webp?v=8085a60bce"
         aria-label="A film of scripted test sessions. You work in your editor and spreadsheet. Test sessions labelled Agent 1 to Agent 4 take over your pointer, then Agent Screen moves each session onto a display of its own while your pointer stays put. One session asks for help with a sign-in; you take over, sign in and hand it back."></video>
       <script>{const v=document.getElementById('hero');v.poster=matchMedia('(max-width: 600px)').matches?v.dataset.posterM:v.dataset.poster;}</script>
       <figcaption class="film-note">Footage: scripted test sessions making the same calls an agent's MCP tools make.</figcaption>
@@ -168,7 +168,7 @@
       <h2>A display per agent session. Up to four when it needs them.</h2>
       <p>Run three agents at once and each gets its own screen. Subagents of one session share theirs. A session that needs two screens side by side can ask for more, up to four, each with its own label. Your windows stay put unless you give them to an agent. With many displays, turn on Smooth Display Changes in Settings.</p>
     </div>
-    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.webp?v=4f5df150fe" data-poster-m="/media/fleet-m.webp?v=3b856474c0" data-src="/media/fleet.mp4?v=3c1c969dd2" data-av1="/media/fleet.av1.mp4?v=935f4a4e6b" data-src-m="/media/fleet-m.mp4?v=643386ad91" data-av1-m="/media/fleet-m.av1.mp4?v=ae7d335074" aria-label="Twelve Agent Displays, each driven by a scripted test session, work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
+    <video class="world" muted loop playsinline preload="none" data-poster="/media/fleet.webp?v=60c826dcb6" data-poster-m="/media/fleet-m.webp?v=18b4d88403" data-src="/media/fleet.mp4?v=7727104e63" data-av1="/media/fleet.av1.mp4?v=95bf7a51dd" data-src-m="/media/fleet-m.mp4?v=c00192a8f2" data-av1-m="/media/fleet-m.av1.mp4?v=b84ae13d8c" aria-label="Twelve Agent Displays, each driven by a scripted test session, work at once around the user's own screen: code, spreadsheets, chat, a pull request and sign-in forms."></video>
     <ul class="also">
       <li><h3>Your browser, shared</h3><p>An agent can open a window in the browser you are typing in. Your keys stay in your window: while the agent's window opens, Agent Screen holds what you type, about a second in Dia, and then delivers it to your window in order. The agent's clicks and text reach its page through accessibility.</p></li>
       <li><h3>Menus and controls through accessibility</h3><p>Agents press buttons and pick menu items by name, so a button still gets pressed after its window moves or resizes. They choose an item in a standard Mac pop-up, or in a select on a page in a browser they started, without opening its menu. They step sliders that support it without dragging.</p></li>
