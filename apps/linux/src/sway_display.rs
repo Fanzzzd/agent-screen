@@ -6,11 +6,12 @@ use crate::dbus_stubs::{
     NotificationStats, set_xwayland_atspi_bus, spawn_silent_notifications,
     write_isolated_dbus_config,
 };
+use crate::devtools_pipe;
 use crate::launcher::resolve_launch_command;
 use crate::ports::{
-    ClipboardSync, Display, DisplayManager, DisplayMetrics, DisplaySpec, EncodedImage, InputOp,
-    InputOutcome, LaunchRequest, LaunchedApp, PlaceOutcome, PortError, RecoveredDisplay,
-    SnapshotOpts, WindowInfo,
+    ClipboardPayload, ClipboardSync, Display, DisplayManager, DisplayMetrics, DisplaySpec,
+    EncodedImage, InputOp, InputOutcome, LaunchRequest, LaunchedApp, PlaceOutcome, PortError,
+    RecoveredDisplay, SnapshotOpts, WindowInfo,
 };
 use crate::wayland_worker::{RawRgbaFrame, WaylandWorker};
 use agent_screen_mcp::capabilities::Capabilities;
@@ -108,8 +109,16 @@ impl Display for SwayDisplay {
         self.meta.lock().unwrap().runtime_dir.clone()
     }
 
+    fn wayland_socket(&self) -> PathBuf {
+        self.meta.lock().unwrap().wayland_socket.clone()
+    }
+
     fn settle(&self) -> BoxFuture<'_, Result<(), PortError>> {
         Box::pin(async move { self.worker.settle().await })
+    }
+
+    fn capture_raw(&self) -> BoxFuture<'_, Result<RawRgbaFrame, PortError>> {
+        Box::pin(async move { self.worker.capture_raw().await })
     }
 
     fn screenshot(&self, opts: SnapshotOpts) -> BoxFuture<'_, Result<EncodedImage, PortError>> {
@@ -151,7 +160,7 @@ impl Display for SwayDisplay {
         })
     }
 
-    fn clipboard(&self, op: ClipboardSync) -> BoxFuture<'_, Result<Option<String>, PortError>> {
+    fn clipboard(&self, op: ClipboardSync) -> BoxFuture<'_, Result<ClipboardPayload, PortError>> {
         Box::pin(async move { self.worker.clipboard(op).await })
     }
 
@@ -182,6 +191,25 @@ impl Display for SwayDisplay {
                 .and_then(|n| n.to_str())
                 .unwrap_or("wayland-1");
 
+            let pipe_setup = if resolved.is_chromium_like
+                && !resolved
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with("--remote-debugging-"))
+            {
+                devtools_pipe::PipeSetup::create().ok()
+            } else {
+                None
+            };
+            let child_pipe_fds = pipe_setup.as_ref().map(|p| p.child_fds());
+
+            let stderr_stdio = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(meta.base_dir.join("apps.stderr.log"))
+                .map(Stdio::from)
+                .unwrap_or_else(|_| Stdio::null());
+
             let mut cmd = Command::new(&resolved.program);
             cmd.env_clear()
                 .env("HOME", &home)
@@ -197,10 +225,18 @@ impl Display for SwayDisplay {
                 .env("GTK_A11Y", "atspi")
                 .env("QT_ACCESSIBILITY", "1")
                 .env("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1")
-                .args(&resolved.args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stderr(stderr_stdio);
+
+            if let Some(cfg_dir) = &resolved.isolated_xdg_config {
+                cmd.env("XDG_CONFIG_HOME", cfg_dir);
+            }
+
+            if pipe_setup.is_some() {
+                cmd.arg("--remote-debugging-pipe");
+            }
+            cmd.args(&resolved.args);
 
             if let Ok(lang) = std::env::var("LANG") {
                 cmd.env("LANG", lang);
@@ -209,19 +245,40 @@ impl Display for SwayDisplay {
                 cmd.env(k, v);
             }
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     libc::setsid();
+                    let min_close = if let Some((r3, w4)) = child_pipe_fds {
+                        devtools_pipe::pre_exec_dup_fds(r3, w4)?;
+                        5u32
+                    } else {
+                        3u32
+                    };
+                    let _ = libc::syscall(
+                        libc::SYS_close_range,
+                        min_close,
+                        u32::MAX,
+                        libc::CLOSE_RANGE_CLOEXEC,
+                    );
                     Ok(())
                 });
             }
 
-            let mut child = cmd.spawn().map_err(|e| {
-                PortError::failed(format!(
-                    "failed to start {}: {e}",
-                    resolved.program.display()
-                ))
-            })?;
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(p) = pipe_setup {
+                        p.abort();
+                    }
+                    return Err(PortError::failed(format!(
+                        "failed to start {}: {e}",
+                        resolved.program.display()
+                    )));
+                }
+            };
             let pid = child.id() as i32;
+            if let Some(p) = pipe_setup {
+                devtools_pipe::register_spawned(meta.display_id, pid, p);
+            }
             if let Some(scope) = &meta.scope_unit {
                 attach_pid_to_scope(scope, child.id());
             }
@@ -426,6 +483,7 @@ impl Display for SwayDisplay {
 
     fn shutdown(&self) -> BoxFuture<'_, Result<(), PortError>> {
         let meta = self.snapshot_meta();
+        devtools_pipe::remove_display_channels(meta.display_id);
         self.worker.shutdown();
         Box::pin(async move {
             terminate_persisted_display(&meta).await;
@@ -931,11 +989,10 @@ fn collect_sway_windows(node: &Value, out: &mut Vec<WindowInfo>) {
     if node.get("name").and_then(Value::as_str) == Some("__i3_scratch") {
         return;
     }
-    let pid = node.get("pid").and_then(Value::as_i64).unwrap_or(0);
+    let pid = node.get("pid").and_then(Value::as_i64).unwrap_or(0).max(0);
     let con_id = node.get("id").and_then(Value::as_u64).unwrap_or(0);
-    let is_view = pid > 0
-        && (node.get("app_id").is_some_and(|v| !v.is_null())
-            || node.get("window").is_some_and(|v| !v.is_null()));
+    let is_view = node.get("app_id").is_some_and(|v| !v.is_null())
+        || node.get("window").is_some_and(|v| !v.is_null());
     if is_view && let Ok(window_id) = u32::try_from(con_id) {
         let app = node
             .get("app_id")

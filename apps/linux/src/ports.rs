@@ -153,10 +153,28 @@ pub struct InputOutcome {
     pub note: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardPayload {
+    Empty,
+    Text(String),
+    ImagePng(Vec<u8>),
+}
+
+impl ClipboardPayload {
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ClipboardSync {
-    ReadText,
+    Read,
     WriteText(String),
+    WriteImagePng(Vec<u8>),
+    Clear,
 }
 
 #[derive(Clone, Debug)]
@@ -203,10 +221,12 @@ pub trait Display: Send + Sync {
     fn atspi_bus_address(&self) -> String;
     fn session_bus_address(&self) -> String;
     fn runtime_dir(&self) -> PathBuf;
+    fn wayland_socket(&self) -> PathBuf;
     fn settle(&self) -> BoxFuture<'_, Result<(), PortError>>;
+    fn capture_raw(&self) -> BoxFuture<'_, Result<crate::wayland_worker::RawRgbaFrame, PortError>>;
     fn screenshot(&self, opts: SnapshotOpts) -> BoxFuture<'_, Result<EncodedImage, PortError>>;
     fn act_input(&self, op: InputOp) -> BoxFuture<'_, Result<InputOutcome, PortError>>;
-    fn clipboard(&self, op: ClipboardSync) -> BoxFuture<'_, Result<Option<String>, PortError>>;
+    fn clipboard(&self, op: ClipboardSync) -> BoxFuture<'_, Result<ClipboardPayload, PortError>>;
     fn launch_app(&self, req: LaunchRequest) -> BoxFuture<'_, Result<LaunchedApp, PortError>>;
     fn list_windows(&self) -> BoxFuture<'_, Result<Vec<WindowInfo>, PortError>>;
     fn place_window(
@@ -238,6 +258,16 @@ pub enum Secrecy {
 }
 
 #[derive(Clone, Debug)]
+pub struct WindowTreeSnapshot {
+    pub window: WindowInfo,
+    pub tree: String,
+    pub elements: usize,
+    pub truncated: bool,
+    pub depth_limited: bool,
+    pub root: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
 pub struct WindowStateSnapshot {
     pub window: WindowInfo,
     pub tree: String,
@@ -266,6 +296,20 @@ pub struct ElementActionReply {
 }
 
 pub trait Access: Send + Sync {
+    fn has_numbers(&self, display_id: DisplayId, window_id: u32) -> bool;
+    fn remove_display(&self, display_id: DisplayId);
+    fn web_area_at<'a>(
+        &'a self,
+        display: &'a dyn Display,
+        win: &'a WindowInfo,
+        at: (f64, f64),
+    ) -> BoxFuture<'a, Option<Rect>>;
+    fn window_tree<'a>(
+        &'a self,
+        display: &'a dyn Display,
+        window_id: u32,
+        scope: TreeScope,
+    ) -> BoxFuture<'a, Result<WindowTreeSnapshot, PortError>>;
     fn window_state<'a>(
         &'a self,
         display: &'a dyn Display,

@@ -395,3 +395,96 @@ pub fn snapshot_physical_desktop() -> PhysicalDesktopCheck {
         hypr_active,
     }
 }
+
+pub struct IsolatedTestEnv {
+    pub scratch: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub state_home: PathBuf,
+    pub instance: String,
+    pub control_sock: PathBuf,
+    pub web_state_file: PathBuf,
+}
+
+impl IsolatedTestEnv {
+    pub fn new(tag: &str) -> Result<Self> {
+        let scratch = PathBuf::from(format!("/tmp/as-linux-e2e-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch)?;
+
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| scratch.join("xdg-runtime"));
+        std::fs::create_dir_all(&runtime_dir)?;
+        let state_home = scratch.join("state-home");
+        std::fs::create_dir_all(&state_home)?;
+        let instance = format!("e2e-{tag}-{}", std::process::id());
+        let as_state = runtime_dir.join("agent-screen");
+        let control_sock = as_state.join(format!("control-{instance}.sock"));
+        let web_state_file = as_state.join(format!("web-{instance}.json"));
+
+        Ok(Self {
+            scratch,
+            runtime_dir,
+            state_home,
+            instance,
+            control_sock,
+            web_state_file,
+        })
+    }
+
+    pub async fn cleanup(&self) {
+        let _ = control_call(&self.control_sock, "debugQuit", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let _ = std::fs::remove_file(&self.control_sock);
+        let _ = std::fs::remove_file(&self.web_state_file);
+        let _ = std::fs::remove_dir_all(
+            self.runtime_dir
+                .join("agent-screen")
+                .join(format!("displays-{}", self.instance)),
+        );
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
+}
+
+pub fn first_text_block(res: &Value) -> String {
+    res["content"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|c| c["type"] == "text"))
+        .and_then(|c| c["text"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Find the `[n]` element number of the first tree line matching `needle`.
+pub fn find_element_id(tree_text: &str, needle: &str) -> Option<i64> {
+    for line in tree_text.lines() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let rest = trimmed.strip_prefix('[')?;
+        let (num, _) = rest.split_once(']')?;
+        if let Ok(n) = num.parse::<i64>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Parse `at (cx,cy)` from the first tree line matching `needle`.
+pub fn find_element_center(tree_text: &str, needle: &str) -> Option<(i64, i64)> {
+    for line in tree_text.lines() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let idx = line.rfind(" at (")?;
+        let coords = &line[idx + 5..];
+        let end = coords.find(')')?;
+        let (xs, ys) = coords[..end].split_once(',')?;
+        let x = xs.trim().parse::<i64>().ok()?;
+        let y = ys.trim().parse::<i64>().ok()?;
+        return Some((x, y));
+    }
+    None
+}

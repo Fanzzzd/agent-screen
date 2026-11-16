@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Chromium Phase2 E2E</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f8fafc; color: #0f172a; }
+    .row { margin-bottom: 14px; }
+    #drag-row { display: flex; gap: 36px; align-items: center; margin-top: 18px; }
+    #drag-chip {
+      width: 140px; height: 64px; background: #2563eb; color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 8px; user-select: none; cursor: grab;
+    }
+    #drop-zone {
+      width: 180px; height: 80px; border: 2px dashed #475569; background: #e2e8f0;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Agent Screen Web Fixture</h1>
+  <div class="row">
+    <label for="text-input">Web Text Input</label>
+    <input id="text-input" aria-label="Web Text Input" type="text" value="" />
+  </div>
+  <div class="row">
+    <label for="pw-input">Web Password Input</label>
+    <input id="pw-input" aria-label="Web Password Input" type="password" value="" />
+  </div>
+  <div class="row">
+    <label for="plan-select">Plan Selector</label>
+    <select id="plan-select" aria-label="Plan Selector">
+      <option value="starter">Starter</option>
+      <option value="team">Team</option>
+      <option value="enterprise">Enterprise</option>
+    </select>
+    <span id="select-status">Plan: Starter</span>
+  </div>
+  <div class="row">
+    <button id="async-btn" type="button">Load Report</button>
+    <div id="async-container"></div>
+  </div>
+  <div id="drag-row">
+    <div id="drag-chip" draggable="true" role="button" aria-label="Drag Chip">Drag Chip</div>
+    <div id="drop-zone" role="region" aria-label="Drop Zone">Drop Here</div>
+  </div>
+
+  <script>
+    const sel = document.getElementById('plan-select');
+    const selStatus = document.getElementById('select-status');
+    sel.addEventListener('change', () => {
+      const opt = sel.options[sel.selectedIndex];
+      selStatus.textContent = 'Plan: ' + opt.text;
+    });
+
+    document.getElementById('async-btn').addEventListener('click', () => {
+      setTimeout(() => {
+        const p = document.createElement('p');
+        p.id = 'report-done';
+        p.textContent = 'Report Loaded';
+        document.getElementById('async-container').appendChild(p);
+      }, 650);
+    });
+
+    const chip = document.getElementById('drag-chip');
+    const zone = document.getElementById('drop-zone');
+    chip.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', 'chip-payload-42');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    zone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const data = e.dataTransfer.getData('text/plain') || 'dropped';
+      zone.textContent = 'Dropped: ' + data;
+      zone.setAttribute('aria-label', 'Dropped: ' + data);
+      document.title = 'Dropped: ' + data;
+    });
+  </script>
+</body>
+</html>

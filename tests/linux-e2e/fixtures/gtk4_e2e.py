@@ -68,7 +68,30 @@ class E2EWindow(Gtk.ApplicationWindow):
         self.password.connect("changed", lambda *_: self.dump_state())
         root.append(self.password)
 
+        self.async_btn = Gtk.Button(label="Spawn Async Status")
+        self.async_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Spawn Async Status"])
+        self.async_btn.connect("clicked", self.on_spawn_async)
+        root.append(self.async_btn)
+        self.root_box = root
+        self.banner_added = False
+
+        init_clip = os.environ.get("E2E_INIT_CLIPBOARD")
+        if init_clip:
+            Gdk.Display.get_default().get_clipboard().set(init_clip)
+
         GLib.timeout_add(120, self.initial_dump)
+
+    def on_spawn_async(self, _btn: Gtk.Button) -> None:
+        def add_banner() -> bool:
+            if not self.banner_added:
+                self.banner_added = True
+                lbl = Gtk.Label(label="Async Banner Ready")
+                lbl.update_property([Gtk.AccessibleProperty.LABEL], ["Async Banner Ready"])
+                self.root_box.append(lbl)
+                self.dump_state()
+            return False
+
+        GLib.timeout_add(280, add_banner)
 
     def initial_dump(self) -> bool:
         self.dump_state()

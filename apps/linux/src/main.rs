@@ -2,9 +2,15 @@
 //! or `agent-screen mcp`, `agent-screen diagnostics`, `agent-screen connect`.
 
 #[cfg(target_os = "linux")]
+mod access_atspi;
+#[cfg(target_os = "linux")]
+mod clipboard_wl;
+#[cfg(target_os = "linux")]
 mod coordinator;
 #[cfg(target_os = "linux")]
 mod dbus_stubs;
+#[cfg(target_os = "linux")]
+mod devtools_pipe;
 #[cfg(target_os = "linux")]
 mod launcher;
 #[cfg(target_os = "linux")]
@@ -100,9 +106,10 @@ fn run_daemon() -> anyhow::Result<()> {
         let socket_path = server::prepare_socket_path()?;
         let web_server = web::WebPreviewServer::start().await?;
         let manager = std::sync::Arc::new(sway_display::SwayDisplayManager::new());
+        let access = std::sync::Arc::new(access_atspi::AtspiAccess::new());
         let quit = std::sync::Arc::new(tokio::sync::Notify::new());
         let coordinator =
-            coordinator::Coordinator::new(manager, None, web_server, quit.clone()).await;
+            coordinator::Coordinator::new(manager, Some(access), web_server, quit.clone()).await;
 
         let quit_sig = quit.clone();
         tokio::spawn(async move {

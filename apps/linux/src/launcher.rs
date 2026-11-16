@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 pub struct ResolvedCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
-    #[allow(dead_code)]
     pub is_chromium_like: bool,
     pub is_snap: bool,
+    pub isolated_xdg_config: Option<PathBuf>,
 }
 
 pub fn resolve_launch_command(
@@ -30,6 +30,7 @@ pub fn resolve_launch_command(
     let is_chromium_like = detect_chromium_or_electron(&program);
     let mut args = Vec::new();
     args.append(&mut base_args);
+    let mut isolated_xdg_config = None;
 
     if is_chromium_like {
         let user_args = &req.arguments;
@@ -57,8 +58,12 @@ pub fn resolve_launch_command(
         if !has_flag("--no-default-browser-check") {
             args.push("--no-default-browser-check".to_string());
         }
+        let profile = default_browser_profile_dir(&program, display_id)?;
+        let xdg_cfg = profile.join("xdg-config");
+        let _ = std::fs::create_dir_all(&xdg_cfg);
+        let _ = std::fs::set_permissions(&xdg_cfg, std::fs::Permissions::from_mode(0o700));
+        isolated_xdg_config = Some(xdg_cfg);
         if !has_flag("--user-data-dir") {
-            let profile = default_browser_profile_dir(&program, display_id)?;
             args.push(format!("--user-data-dir={}", profile.display()));
         }
     }
@@ -73,6 +78,7 @@ pub fn resolve_launch_command(
         args,
         is_chromium_like,
         is_snap,
+        isolated_xdg_config,
     })
 }
 

@@ -2,7 +2,9 @@
 //! `wlr-virtual-pointer`, `virtual-keyboard` (chords and UTF-8 XKB keymaps),
 //! and `wlr-data-control` clipboard reads and writes.
 
-use crate::ports::{ClipboardSync, ImageFormat, InputOp, MouseButton, PortError, SnapshotOpts};
+use crate::ports::{
+    ClipboardPayload, ClipboardSync, ImageFormat, InputOp, MouseButton, PortError, SnapshotOpts,
+};
 use agent_screen_model::keychord::{KeyChord, Modifiers};
 use agent_screen_model::model::Rect;
 use anyhow::{Context, Result, anyhow, bail};
@@ -69,7 +71,7 @@ enum WorkerCmd {
     },
     Clipboard {
         op: ClipboardSync,
-        reply: tokio::sync::oneshot::Sender<Result<Option<String>, String>>,
+        reply: tokio::sync::oneshot::Sender<Result<ClipboardPayload, String>>,
     },
     Shutdown,
 }
@@ -198,7 +200,7 @@ impl WaylandWorker {
             .map_err(PortError::failed)
     }
 
-    pub async fn clipboard(&self, op: ClipboardSync) -> Result<Option<String>, PortError> {
+    pub async fn clipboard(&self, op: ClipboardSync) -> Result<ClipboardPayload, PortError> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.tx
             .send(WorkerCmd::Clipboard { op, reply })
@@ -374,7 +376,8 @@ struct WlState {
     capture: CaptureSlot,
     offers: HashMap<wayland_client::backend::ObjectId, OfferMimes>,
     selection: Option<ZwlrDataControlOfferV1>,
-    clipboard_bytes: Vec<u8>,
+    clipboard_payload: ClipboardPayload,
+    owns_selection: bool,
     started: Instant,
 }
 
@@ -530,9 +533,18 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for WlState {
             zwlr_data_control_source_v1::Event::Send { fd, .. } => {
                 use std::io::Write;
                 let mut file = std::fs::File::from(fd);
-                let _ = file.write_all(&state.clipboard_bytes);
+                match &state.clipboard_payload {
+                    ClipboardPayload::Text(s) => {
+                        let _ = file.write_all(s.as_bytes());
+                    }
+                    ClipboardPayload::ImagePng(png) => {
+                        let _ = file.write_all(png);
+                    }
+                    ClipboardPayload::Empty => {}
+                }
             }
             zwlr_data_control_source_v1::Event::Cancelled => {
+                state.owns_selection = false;
                 source.destroy();
             }
             _ => {}
@@ -569,7 +581,8 @@ impl Client {
             capture: CaptureSlot::default(),
             offers: HashMap::new(),
             selection: None,
-            clipboard_bytes: Vec::new(),
+            clipboard_payload: ClipboardPayload::Empty,
+            owns_selection: false,
             started: Instant::now(),
         };
         let _registry = conn.display().get_registry(&qh, ());
@@ -600,7 +613,7 @@ impl Client {
             .map(|mgr| mgr.get_data_device(seat, &qh, ()));
         queue.roundtrip(&mut state)?;
 
-        Ok(Self {
+        let mut client = Self {
             conn,
             queue,
             qh,
@@ -609,7 +622,11 @@ impl Client {
             keyboard,
             data_device,
             active_source: None,
-        })
+        };
+        // Upload a valid XKB keymap immediately: Chromium Ozone Wayland crashes
+        // on startup if a virtual keyboard exists on the seat with no keymap.
+        client.upload_keymap(&build_chord_keymap("space"))?;
+        Ok(client)
     }
 
     fn capture(&mut self) -> Result<RawRgbaFrame> {
@@ -912,18 +929,33 @@ impl Client {
     }
 
     fn type_utf8(&mut self, text: &str) -> Result<()> {
-        let mut unique: Vec<char> = Vec::new();
-        for ch in text.chars() {
-            if !unique.contains(&ch) {
-                unique.push(ch);
+        let chars: Vec<char> = text.chars().collect();
+        let mut start = 0usize;
+        while start < chars.len() {
+            let mut unique: Vec<char> = Vec::new();
+            let mut end = start;
+            while end < chars.len() {
+                let ch = chars[end];
+                if !matches!(ch, ' ' | '\n' | '\r' | '\t') && !unique.contains(&ch) {
+                    if unique.len() >= UNICODE_EVDEV_SLOTS.len() {
+                        break;
+                    }
+                    unique.push(ch);
+                }
+                end += 1;
             }
-        }
-        if unique.len() <= 100 {
             let keymap = build_unicode_keymap(&unique);
             self.upload_keymap(&keymap)?;
-            for ch in text.chars() {
-                let idx = unique.iter().position(|&c| c == ch).unwrap();
-                let evdev_code = 100 + idx as u32;
+            for &ch in &chars[start..end] {
+                let evdev_code = match ch {
+                    ' ' => 57,
+                    '\n' | '\r' => 28,
+                    '\t' => 15,
+                    c => {
+                        let idx = unique.iter().position(|&u| u == c).unwrap();
+                        UNICODE_EVDEV_SLOTS[idx]
+                    }
+                };
                 self.keyboard
                     .key(self.state.now_ms(), evdev_code, KEY_PRESSED);
                 self.keyboard
@@ -931,39 +963,46 @@ impl Client {
                 self.queue.roundtrip(&mut self.state)?;
                 std::thread::sleep(Duration::from_millis(3));
             }
-        } else {
-            for ch in text.chars() {
-                let keymap = build_unicode_keymap(&[ch]);
-                self.upload_keymap(&keymap)?;
-                self.keyboard.key(self.state.now_ms(), 100, KEY_PRESSED);
-                self.keyboard.key(self.state.now_ms(), 100, KEY_RELEASED);
-                self.queue.roundtrip(&mut self.state)?;
-                std::thread::sleep(Duration::from_millis(3));
-            }
+            start = end;
         }
         Ok(())
     }
 
-    fn clipboard(&mut self, op: ClipboardSync) -> Result<Option<String>> {
+    fn clipboard(&mut self, op: ClipboardSync) -> Result<ClipboardPayload> {
         match op {
-            ClipboardSync::ReadText => {
+            ClipboardSync::Read => {
                 self.queue.roundtrip(&mut self.state)?;
+                if self.state.owns_selection {
+                    return Ok(self.state.clipboard_payload.clone());
+                }
                 let Some(offer) = self.state.selection.clone() else {
-                    return Ok(None);
+                    return Ok(ClipboardPayload::Empty);
                 };
                 use wayland_client::Proxy;
-                let mime = self
+                let mimes = self
                     .state
                     .offers
                     .get(&offer.id())
-                    .and_then(|o| {
-                        o.mimes
+                    .map(|o| o.mimes.clone())
+                    .unwrap_or_default();
+                let chosen = mimes
+                    .iter()
+                    .find(|m| m.as_str() == "image/png")
+                    .map(|m| (m.clone(), true))
+                    .or_else(|| {
+                        mimes
                             .iter()
                             .find(|m| m.as_str() == "text/plain;charset=utf-8")
-                            .or_else(|| o.mimes.iter().find(|m| m.starts_with("text/plain")))
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| "text/plain;charset=utf-8".to_string());
+                            .or_else(|| {
+                                mimes.iter().find(|m| {
+                                    m.starts_with("text/plain") || m.as_str() == "UTF8_STRING"
+                                })
+                            })
+                            .map(|m| (m.clone(), false))
+                    });
+                let Some((mime, is_png)) = chosen else {
+                    return Ok(ClipboardPayload::Empty);
+                };
                 let mut fds = [0i32; 2];
                 if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
                     bail!("pipe2 failed");
@@ -973,35 +1012,93 @@ impl Client {
                 offer.receive(mime, write_fd.as_fd());
                 self.conn.flush()?;
                 drop(write_fd);
-                let mut file = std::fs::File::from(read_fd);
-                let mut out = String::new();
-                file.read_to_string(&mut out)?;
-                Ok(Some(out))
+
+                let (done_tx, done_rx) = mpsc::sync_channel::<Result<Vec<u8>, std::io::Error>>(1);
+                std::thread::spawn(move || {
+                    let mut file = std::fs::File::from(read_fd);
+                    let mut buf = Vec::new();
+                    let _ = done_tx.send(file.read_to_end(&mut buf).map(|_| buf));
+                });
+
+                let deadline = Instant::now() + Duration::from_millis(1500);
+                let raw = loop {
+                    match done_rx.recv_timeout(Duration::from_millis(15)) {
+                        Ok(res) => break res?,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let _ = self.queue.dispatch_pending(&mut self.state);
+                            let _ = self.conn.flush();
+                            if Instant::now() >= deadline {
+                                bail!("timed out reading Wayland clipboard offer");
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            bail!("clipboard reader thread disconnected");
+                        }
+                    }
+                };
+                if is_png {
+                    Ok(ClipboardPayload::ImagePng(raw))
+                } else {
+                    Ok(ClipboardPayload::Text(
+                        String::from_utf8_lossy(&raw).into_owned(),
+                    ))
+                }
             }
             ClipboardSync::WriteText(text) => {
-                let mgr = self
-                    .state
-                    .data_mgr
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("missing zwlr_data_control_manager_v1"))?;
+                self.write_selection(
+                    ClipboardPayload::Text(text),
+                    &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"],
+                )?;
+                Ok(ClipboardPayload::Empty)
+            }
+            ClipboardSync::WriteImagePng(png) => {
+                self.write_selection(ClipboardPayload::ImagePng(png), &["image/png"])?;
+                Ok(ClipboardPayload::Empty)
+            }
+            ClipboardSync::Clear => {
                 let dev = self
                     .data_device
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing zwlr_data_control_device_v1"))?;
-                if let Some(prev) = self.active_source.take() {
+                if let Some(prev) = self.active_source.take()
+                    && self.state.owns_selection
+                {
                     prev.destroy();
                 }
-                self.state.clipboard_bytes = text.into_bytes();
-                let source = mgr.create_data_source(&self.qh, ());
-                source.offer("text/plain;charset=utf-8".into());
-                source.offer("UTF8_STRING".into());
-                source.offer("text/plain".into());
-                dev.set_selection(Some(&source));
-                self.active_source = Some(source);
+                self.state.owns_selection = false;
+                self.state.clipboard_payload = ClipboardPayload::Empty;
+                dev.set_selection(None);
                 self.queue.roundtrip(&mut self.state)?;
-                Ok(None)
+                Ok(ClipboardPayload::Empty)
             }
         }
+    }
+
+    fn write_selection(&mut self, payload: ClipboardPayload, mimes: &[&str]) -> Result<()> {
+        let mgr = self
+            .state
+            .data_mgr
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing zwlr_data_control_manager_v1"))?;
+        let dev = self
+            .data_device
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing zwlr_data_control_device_v1"))?;
+        if let Some(prev) = self.active_source.take()
+            && self.state.owns_selection
+        {
+            prev.destroy();
+        }
+        self.state.clipboard_payload = payload;
+        self.state.owns_selection = true;
+        let source = mgr.create_data_source(&self.qh, ());
+        for &m in mimes {
+            source.offer(m.into());
+        }
+        dev.set_selection(Some(&source));
+        self.active_source = Some(source);
+        self.queue.roundtrip(&mut self.state)?;
+        Ok(())
     }
 
     fn upload_keymap(&mut self, keymap: &str) -> Result<()> {
@@ -1117,20 +1214,23 @@ fn keysym_for_mac_code(code: u16) -> Result<&'static str> {
     })
 }
 
+/// Standard printable alphanumeric evdev scancodes (1..0, Q..P, A..L, Z..M)
+/// so Chromium Ozone Wayland always maps every slot to a valid `DomCode`.
+const UNICODE_EVDEV_SLOTS: [u32; 36] = [
+    2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 30, 31, 32, 33, 34, 35,
+    36, 37, 38, 44, 45, 46, 47, 48, 49, 50,
+];
+
 fn build_unicode_keymap(chars: &[char]) -> String {
     let mut keycodes = String::from(
-        "xkb_keymap {\n  xkb_keycodes \"u\" {\n    minimum = 8;\n    maximum = 255;\n    <LCTL> = 37;\n    <LFSH> = 50;\n",
+        "xkb_keymap {\n  xkb_keycodes \"u\" {\n    minimum = 8;\n    maximum = 255;\n    <LCTL> = 37;\n    <LFSH> = 50;\n    <SPCE> = 65;\n    <RTRN> = 36;\n    <TAB> = 23;\n",
     );
     let mut symbols = String::from(
-        "  xkb_types \"u\" { include \"complete\" };\n  xkb_compatibility \"u\" { include \"complete\" };\n  xkb_symbols \"u\" {\n    key <LCTL> { [ Control_L ] };\n    key <LFSH> { [ Shift_L ] };\n",
+        "  xkb_types \"u\" { include \"complete\" };\n  xkb_compatibility \"u\" { include \"complete\" };\n  xkb_symbols \"u\" {\n    key <LCTL> { [ Control_L ] };\n    key <LFSH> { [ Shift_L ] };\n    key <SPCE> { [ space ] };\n    key <RTRN> { [ Return ] };\n    key <TAB> { [ Tab ] };\n",
     );
     for (i, &ch) in chars.iter().enumerate() {
-        let xkb_code = 108 + i;
-        let sym = match ch {
-            '\n' | '\r' => "Return".to_string(),
-            '\t' => "Tab".to_string(),
-            c => format!("U{:04X}", c as u32),
-        };
+        let xkb_code = UNICODE_EVDEV_SLOTS[i] + 8;
+        let sym = format!("U{:04X}", ch as u32);
         keycodes.push_str(&format!("    <K{i:03}> = {xkb_code};\n"));
         symbols.push_str(&format!("    key <K{i:03}> {{ [ {sym} ] }};\n"));
     }

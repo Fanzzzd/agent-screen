@@ -1,9 +1,11 @@
 //! Request coordinator for `apps/linux`: binds `agent_screen_model::model::Displays`
 //! to the Linux `Display`, `Access`, and `WebPreviewServer` implementations.
 
+use crate::clipboard_wl::ClipboardBridge;
+use crate::devtools_pipe;
 use crate::ports::{
-    Access, ClipboardSync, Display, DisplayManager, DisplaySpec, ElementActionReq, ImageFormat,
-    InputOp, LaunchRequest, MouseButton, SnapshotOpts,
+    Access, ClipboardPayload, ClipboardSync, Display, DisplayManager, DisplaySpec,
+    ElementActionReq, ImageFormat, InputOp, LaunchRequest, MouseButton, Secrecy, SnapshotOpts,
 };
 use crate::server::ControlError;
 use crate::web::WebPreviewServer;
@@ -15,6 +17,7 @@ use agent_screen_model::model::{
 use agent_screen_model::request::{Answer, HelpAsked, Kind, Resolution, Woken};
 use agent_screen_model::session::Orphans;
 use agent_screen_model::tree::Scope as TreeScope;
+use agent_screen_model::watch;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -43,10 +46,12 @@ struct SurvivingEntry {
 pub struct Coordinator {
     manager: Arc<dyn DisplayManager>,
     access: Option<Arc<dyn Access>>,
+    clipboard_bridge: ClipboardBridge,
     web: Arc<WebPreviewServer>,
     quit: Arc<Notify>,
     started_at: Instant,
     state: Mutex<State>,
+    waits: Mutex<HashMap<(u64, u64), tokio::sync::oneshot::Sender<()>>>,
     create_lock: tokio::sync::Mutex<()>,
 }
 
@@ -73,6 +78,7 @@ impl Coordinator {
         let coord = Arc::new(Self {
             manager,
             access,
+            clipboard_bridge: ClipboardBridge::new(),
             web,
             quit,
             started_at: Instant::now(),
@@ -82,6 +88,7 @@ impl Coordinator {
                 conn_last_session: HashMap::new(),
                 last_agent_client: None,
             }),
+            waits: Mutex::new(HashMap::new()),
             create_lock: tokio::sync::Mutex::new(()),
         });
 
@@ -120,6 +127,7 @@ impl Coordinator {
     async fn finalize_ended_display(&self, id: DisplayId, handle: Arc<dyn Display>) {
         // ADR 0019: expire Web Preview token as soon as the session stops using the display.
         self.web.expire_display(id);
+        self.clipboard_bridge.disconnect(id);
         // ADR 0004 & ADR 0020: an empty ended display closes immediately; one
         // with open windows stays alive as a Review Display.
         let windows = handle.list_windows().await.unwrap_or_default();
@@ -128,11 +136,28 @@ impl Coordinator {
                 let mut st = self.state.lock().unwrap();
                 let _ = st.displays.remove(id);
             }
+            if let Some(ax) = &self.access {
+                ax.remove_display(id);
+            }
+            self.clipboard_bridge.remove_display(id);
             let _ = handle.shutdown().await;
         }
     }
 
     pub async fn connection_closed(&self, connection: u64) {
+        {
+            let mut waits = self.waits.lock().unwrap();
+            let keys: Vec<(u64, u64)> = waits
+                .keys()
+                .filter(|&&(c, _)| c == connection)
+                .copied()
+                .collect();
+            for k in keys {
+                if let Some(tx) = waits.remove(&k) {
+                    let _ = tx.send(());
+                }
+            }
+        }
         let now = self.now_ms();
         let mut st = self.state.lock().unwrap();
         st.conn_last_session.remove(&connection);
@@ -368,6 +393,31 @@ impl Coordinator {
                     self.display_point(&handle, p.require_num("toX")?, p.require_num("toY")?)?;
                 let modifiers = p.modifiers()?;
                 self.note_pointer(id, to, false);
+
+                // Route drags inside piped Chromium/Electron pages over DevTools pipe (ADR 0010).
+                if let Ok(wins) = handle.list_windows().await
+                    && let Some(hit) = wins.into_iter().find(|w| w.bounds.contains(from))
+                {
+                    let web_area = match &self.access {
+                        Some(ax) => ax.web_area_at(handle.as_ref(), &hit, from).await,
+                        None => None,
+                    };
+                    let target = hit.target;
+                    let bounds = hit.bounds;
+                    let cdp_drag = tokio::task::spawn_blocking(move || {
+                        devtools_pipe::try_drag_via_pipe(
+                            id, target, bounds, web_area, 1.0, from, to, modifiers,
+                        )
+                    })
+                    .await
+                    .map_err(|e| ControlError::failed(e.to_string()))?;
+                    match cdp_drag {
+                        Ok(true) => return Ok(json!({ "route": "devtools" })),
+                        Ok(false) => {}
+                        Err(e) => return Err(ControlError::failed(e)),
+                    }
+                }
+
                 let out = handle
                     .act_input(InputOp::Drag {
                         from,
@@ -750,7 +800,14 @@ impl Coordinator {
                 };
                 let snap = access
                     .window_state(handle.as_ref(), window_id, scope)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        if e.code == "root_gone" {
+                            ControlError::invalid(e.message)
+                        } else {
+                            ControlError::from(e)
+                        }
+                    })?;
                 let m = handle.metrics();
                 let scale = shot_scale((m.width as f64, m.height as f64));
                 Ok(json!({
@@ -763,6 +820,20 @@ impl Coordinator {
                     "data": base64::engine::general_purpose::STANDARD.encode(&snap.image.data),
                     "mimeType": snap.image.mime_type,
                 }))
+            }
+            "waitForChange" => self.wait_for_change(connection, p, session_key).await,
+            "cancelWaitForChange" => {
+                let wait_id = p
+                    .int("waitId")
+                    .and_then(|v| u64::try_from(v).ok())
+                    .ok_or_else(|| ControlError::invalid("waitId is required"))?;
+                let cancelled = self
+                    .waits
+                    .lock()
+                    .unwrap()
+                    .remove(&(connection, wait_id))
+                    .is_some_and(|tx| tx.send(()).is_ok());
+                Ok(json!({ "cancelled": cancelled }))
             }
             "elementAction" => {
                 let (_, handle) = self.require_display(p, session_key, true, false)?;
@@ -820,11 +891,21 @@ impl Coordinator {
             "debugTakeover" => {
                 let id = p.require_display_id()?;
                 let active = p.bool("active");
-                let mut st = self.state.lock().unwrap();
+                {
+                    let mut st = self.state.lock().unwrap();
+                    if active {
+                        st.displays.begin_takeover(id);
+                    } else {
+                        st.displays.end_takeover(id);
+                    }
+                }
                 if active {
-                    st.displays.begin_takeover(id);
+                    if p.0.contains_key("viewerFocused") {
+                        self.clipboard_bridge
+                            .set_viewer_focused(id, p.bool("viewerFocused"));
+                    }
                 } else {
-                    st.displays.end_takeover(id);
+                    self.clipboard_bridge.disconnect(id);
                 }
                 Ok(json!({ "active": active }))
             }
@@ -850,15 +931,107 @@ impl Coordinator {
                 }
                 Ok(json!({ "answered": true }))
             }
+            "debugFocusSecrecy" => {
+                let id = p.require_display_id()?;
+                let handle = self.find_handle_any(id)?;
+                let access = self
+                    .access
+                    .as_ref()
+                    .ok_or_else(|| ControlError::failed("accessibility port is not initialized"))?;
+                let sec = access.focus_secrecy(handle.as_ref(), None).await;
+                let name = match sec {
+                    Secrecy::Open => "open",
+                    Secrecy::Secure => "secure",
+                    Secrecy::Unknown => "unknown",
+                };
+                Ok(json!({ "secrecy": name }))
+            }
             "debugClipboard" => {
                 let id = p.require_display_id()?;
                 let handle = self.find_handle_any(id)?;
                 if let Some(text) = p.string("write") {
                     handle.clipboard(ClipboardSync::WriteText(text)).await?;
                     Ok(json!({ "written": true }))
+                } else if let Some(b64) = p.string("writePngBase64") {
+                    let png = base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map_err(|e| ControlError::invalid(format!("invalid base64: {e}")))?;
+                    handle.clipboard(ClipboardSync::WriteImagePng(png)).await?;
+                    Ok(json!({ "written": true }))
+                } else if p.bool("clear") {
+                    handle.clipboard(ClipboardSync::Clear).await?;
+                    Ok(json!({ "cleared": true }))
                 } else {
-                    let text = handle.clipboard(ClipboardSync::ReadText).await?;
-                    Ok(json!({ "text": text }))
+                    match handle.clipboard(ClipboardSync::Read).await? {
+                        ClipboardPayload::Empty => Ok(json!({ "kind": "empty", "text": null })),
+                        ClipboardPayload::Text(t) => Ok(json!({ "kind": "text", "text": t })),
+                        ClipboardPayload::ImagePng(png) => Ok(json!({
+                            "kind": "image/png",
+                            "pngBase64": base64::engine::general_purpose::STANDARD.encode(png),
+                        })),
+                    }
+                }
+            }
+            "debugClipboardBridge" => {
+                let id = p.require_display_id()?;
+                let handle = self.find_handle_any(id)?;
+                if p.0.contains_key("viewerFocused") {
+                    self.clipboard_bridge
+                        .set_viewer_focused(id, p.bool("viewerFocused"));
+                }
+                let takeover_active = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .displays
+                    .get(id)
+                    .is_some_and(|d| d.takeover);
+                let dir = p.string("direction").unwrap_or_else(|| "status".into());
+                match dir.as_str() {
+                    "hostToDisplay" => {
+                        let payload = if let Some(b64) = p.string("pngBase64") {
+                            let png = base64::engine::general_purpose::STANDARD
+                                .decode(b64)
+                                .map_err(|e| ControlError::invalid(e.to_string()))?;
+                            ClipboardPayload::ImagePng(png)
+                        } else if let Some(text) = p.string("text") {
+                            ClipboardPayload::Text(text)
+                        } else {
+                            ClipboardPayload::Empty
+                        };
+                        let synced = self
+                            .clipboard_bridge
+                            .sync_host_to_display(handle.as_ref(), takeover_active, payload)
+                            .await?;
+                        Ok(json!({
+                            "synced": synced,
+                            "maySync": self.clipboard_bridge.may_sync(id, takeover_active),
+                        }))
+                    }
+                    "displayToHost" => {
+                        let pulled = self
+                            .clipboard_bridge
+                            .sync_display_to_host(handle.as_ref(), takeover_active)
+                            .await?;
+                        Ok(match pulled {
+                            None => json!({ "synced": false, "kind": "none" }),
+                            Some(ClipboardPayload::Empty) => {
+                                json!({ "synced": false, "kind": "empty" })
+                            }
+                            Some(ClipboardPayload::Text(t)) => {
+                                json!({ "synced": true, "kind": "text", "text": t })
+                            }
+                            Some(ClipboardPayload::ImagePng(png)) => json!({
+                                "synced": true,
+                                "kind": "image/png",
+                                "pngBase64": base64::engine::general_purpose::STANDARD.encode(png),
+                            }),
+                        })
+                    }
+                    _ => Ok(json!({
+                        "maySync": self.clipboard_bridge.may_sync(id, takeover_active),
+                        "takeover": takeover_active,
+                    })),
                 }
             }
             "debugDismissDisplay" => {
@@ -871,6 +1044,10 @@ impl Coordinator {
                         .or_else(|| st.surviving.remove(&id).map(|s| s.display))
                 };
                 self.web.expire_display(id);
+                self.clipboard_bridge.remove_display(id);
+                if let Some(ax) = &self.access {
+                    ax.remove_display(id);
+                }
                 if let Some(h) = removed {
                     let _ = h.shutdown().await;
                 }
@@ -886,6 +1063,228 @@ impl Coordinator {
             }
             other => Err(ControlError::invalid(format!("unknown method {other}"))),
         }
+    }
+
+    async fn wait_for_change(
+        &self,
+        connection: u64,
+        p: &Params<'_>,
+        session_key: Option<&str>,
+    ) -> Result<Value, ControlError> {
+        let access = self
+            .access
+            .as_ref()
+            .ok_or_else(|| ControlError::failed("accessibility port is not initialized"))?;
+
+        let wait_key = p
+            .int("waitId")
+            .and_then(|v| u64::try_from(v).ok())
+            .map(|id| (connection, id));
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        if let Some(key) = wait_key {
+            let mut waits = self.waits.lock().unwrap();
+            if waits.contains_key(&key) {
+                return Err(ControlError::failed("duplicate waitId"));
+            }
+            waits.insert(key, cancel_tx);
+        } else {
+            // Keep `cancel_tx` alive inside this scope when no waitId was sent.
+            std::mem::forget(cancel_tx);
+        }
+        struct WaitGuard<'a> {
+            waits: &'a Mutex<HashMap<(u64, u64), tokio::sync::oneshot::Sender<()>>>,
+            key: Option<(u64, u64)>,
+        }
+        impl Drop for WaitGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(k) = self.key {
+                    self.waits.lock().unwrap().remove(&k);
+                }
+            }
+        }
+        let _guard = WaitGuard {
+            waits: &self.waits,
+            key: wait_key,
+        };
+
+        let scope = TreeScope {
+            root: p.int("root").and_then(|r| usize::try_from(r).ok()),
+            max_depth: p.int("maxDepth").and_then(|d| usize::try_from(d).ok()),
+        };
+        let conditions =
+            watch::Conditions::from_json(p.0.get("conditions").unwrap_or(&Value::Null))
+                .map_err(ControlError::invalid)?;
+        let timeout = watch::timeout(p.num("timeoutSeconds")).map_err(ControlError::invalid)?;
+        let (id, handle) = self.require_display(p, session_key, false, false)?;
+        let window_id = p
+            .int("windowId")
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| ControlError::invalid("windowId is required"))?;
+
+        // Verify the window (and optional subtree root) exists at call start.
+        let wins = handle.list_windows().await?;
+        if !wins.iter().any(|w| w.target.window_id == window_id) {
+            return Err(ControlError::not_found(format!(
+                "no window {window_id} on display {id}"
+            )));
+        }
+
+        let numbered = access.has_numbers(id, window_id);
+        let baseline = p
+            .string("baseline")
+            .filter(|_| numbered)
+            .map(|tree| watch::Read {
+                tree,
+                truncated: p.bool("baselineTruncated"),
+            });
+        let from_agent = baseline.is_some();
+        let mut watcher = watch::Watch::new(conditions, baseline);
+        let mut depth_limited = false;
+        let mut count: Option<usize> = None;
+        let mut unanswered: u64 = 0;
+
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let waited = |s: Instant| (s.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+
+        loop {
+            let (ended, by_user, in_takeover) = {
+                let st = self.state.lock().unwrap();
+                let d = st.displays.get(id);
+                (
+                    d.is_none_or(|d| d.is_ended()),
+                    st.displays.closed_by_user.contains(&id)
+                        || d.is_some_and(|d| d.ended == Some(EndReason::ClosedByUser)),
+                    d.is_some_and(|d| d.takeover),
+                )
+            };
+            if ended {
+                return Ok(json!({
+                    "outcome": "displayEnded",
+                    "closedByUser": by_user,
+                    "waitedSeconds": waited(started),
+                }));
+            }
+
+            let here = handle
+                .list_windows()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|w| w.target.window_id == window_id);
+            if !here {
+                return Ok(json!({
+                    "outcome": "windowClosed",
+                    "waitedSeconds": waited(started),
+                }));
+            }
+
+            let read_started = Instant::now();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let read_fut = access.window_tree(handle.as_ref(), window_id, scope);
+            let snap_res = tokio::select! {
+                res = read_fut => res,
+                _ = tokio::time::sleep(remaining.max(watch::POLL)) => break,
+                _ = &mut cancel_rx => {
+                    return Err(ControlError::failed("the wait was cancelled"));
+                }
+            };
+            let read_elapsed = read_started.elapsed();
+
+            match snap_res {
+                Ok(snap) => {
+                    count = Some(snap.elements);
+                    depth_limited |= snap.depth_limited;
+                    let truncated = snap.truncated;
+                    let fired = watcher.read(watch::Read {
+                        tree: snap.tree,
+                        truncated,
+                    });
+                    if !fired.is_empty() {
+                        let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
+                        let matched: Vec<&String> =
+                            fired.iter().flat_map(|f| f.elements()).collect();
+                        return Ok(json!({
+                            "outcome": "fired",
+                            "fired": names,
+                            "matched": matched,
+                            "changes": watcher.changes(),
+                            "tree": watcher.last().map(|r| &r.tree),
+                            "treeTruncated": truncated,
+                            "elements": count,
+                            "truncated": watcher.any_cut(),
+                            "depthLimited": depth_limited,
+                            "baselineFromAgent": from_agent,
+                            "takeover": in_takeover,
+                            "waitedSeconds": waited(started),
+                        }));
+                    }
+                }
+                Err(err) if err.code == "root_gone" => {
+                    if watcher.baseline().is_none() && !from_agent {
+                        return Err(ControlError::invalid(err.message));
+                    }
+                    return Ok(json!({
+                        "outcome": "rootGone",
+                        "waitedSeconds": waited(started),
+                    }));
+                }
+                Err(err) if err.code == "invalid" => {
+                    return Err(ControlError::invalid(err.message));
+                }
+                Err(err) if err.code == "not_found" => {
+                    return Ok(json!({
+                        "outcome": "windowClosed",
+                        "waitedSeconds": waited(started),
+                    }));
+                }
+                Err(_) => {
+                    unanswered += 1;
+                }
+            }
+
+            if Instant::now() >= deadline {
+                break;
+            }
+            // On Linux AT-SPI over local Unix socket is fast, so allow responsive
+            // 150ms minimum polling on early ticks while respecting `watch::poll_gap`
+            // backoff on longer quiet waits.
+            let gap = if watcher.quiet() <= 1 {
+                Duration::from_millis(150).max(read_elapsed * 3)
+            } else {
+                watch::poll_gap(read_elapsed, watcher.quiet())
+            }
+            .min(deadline.saturating_duration_since(Instant::now()));
+
+            tokio::select! {
+                _ = tokio::time::sleep(gap) => {}
+                _ = &mut cancel_rx => {
+                    return Err(ControlError::failed("the wait was cancelled"));
+                }
+            }
+        }
+
+        let in_takeover = self
+            .state
+            .lock()
+            .unwrap()
+            .displays
+            .get(id)
+            .is_some_and(|d| d.takeover);
+        Ok(json!({
+            "outcome": "timedOut",
+            "changes": watcher.changes(),
+            "tree": watcher.last().map(|r| &r.tree),
+            "treeTruncated": watcher.last().is_some_and(|r| r.truncated),
+            "elements": watcher.last().and(count),
+            "unanswered": unanswered,
+            "truncated": watcher.any_cut(),
+            "depthLimited": depth_limited,
+            "disappearsAbsent": watcher.disappears_absent(),
+            "baselineFromAgent": from_agent,
+            "takeover": in_takeover,
+            "waitedSeconds": waited(started),
+        }))
     }
 
     async fn create_display(&self, connection: u64, p: &Params<'_>) -> Result<Value, ControlError> {
