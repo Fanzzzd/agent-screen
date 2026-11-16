@@ -47,6 +47,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 | Works with your real apps and logins | Yes                   | Yes                   | No, set them up again |
 | Several agents at once               | Yes, one display each | No                    | One VM each           |
 | Watch and step in                    | Menu bar, one click   | Watch your own screen | VM window             |
+| Isolated from your Mac               | No; uses private macOS APIs | No              | Yes                   |
 
 ## Install
 
@@ -137,7 +138,7 @@ The app follows your Mac's language: Chinese when it comes first in your preferr
 
 ## Privacy
 
-Agent Screen runs on your Mac and sends nothing anywhere. Screen & System Audio Recording lets it show agent displays and take the screenshots agents ask for. Accessibility lets it click, type and place windows on them. Agents reach it through a socket only your user account can open.
+Agent Screen runs on your Mac and collects no telemetry. It checks GitHub for updates once a day, through Sparkle. Screen & System Audio Recording lets it show agent displays and take the screenshots agents ask for. Accessibility lets it click, type and place windows on them. Agents reach it through a socket only your user account can open.
 
 ## Known limits
 
