@@ -22,6 +22,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  linux:
+    if: github.event_name != 'pull_request' || github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Install headless sway and GTK4/AT-SPI2 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            sway xwayland dbus-x11 at-spi2-core \
+            python3-gi gir1.2-gtk-4.0 libwayland-dev libxkbcommon-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p agent-screen-model -p agent-screen-mcp -p agent-screen-linux -p agent-screen-linux-e2e --all-targets -- -D warnings
+      - run: cargo build -p agent-screen-linux
+      - run: cargo test -p agent-screen-model -p agent-screen-mcp -p agent-screen-linux -p agent-screen-linux-e2e -- --test-threads=1
+
   changeset-package:
     # knope's single [package] is named default. Any other key leaves the
     # change out of the release without an error (0.1.18 and 0.1.19 lost
@@ -70,7 +88,7 @@ jobs:
           set -euo pipefail
           git cat-file -e "$BEFORE" 2>/dev/null || exit 0
           changed="$(git diff --name-only "$BEFORE" "$AFTER")"
-          app="$(grep -E '^(apps/macos|crates/(mcp|model))/(src|resources)/' <<<"$changed" || true)"
+          app="$(grep -E '^(apps/(macos|linux)|crates/(mcp|model))/(src|resources)/' <<<"$changed" || true)"
           notes="$(grep -E '^\.changeset/.+\.md$' <<<"$changed" || true)"
           if [[ -n "$app" && -z "$notes" ]]; then
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."

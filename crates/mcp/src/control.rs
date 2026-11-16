@@ -10,6 +10,7 @@
 //! process. The app treats its closing as the end of the Agent Session, so the
 //! session's display stops taking input when the MCP server exits.
 
+use crate::capabilities::Capabilities;
 use crate::endpoint::{self, Reader, Writer};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -63,6 +64,9 @@ pub struct Control {
     /// Sent first on every connection, so an app that starts or restarts
     /// later still hears it.
     greeting: std::sync::Mutex<Option<(String, Value)>>,
+    /// Platform capabilities negotiated via `agentReady` (or compile-target
+    /// defaults until a daemon answers).
+    capabilities: std::sync::RwLock<Capabilities>,
     /// Connections opened so far. The app ends its displays when it quits,
     /// so one made on an earlier connection is gone.
     connections: AtomicU64,
@@ -274,8 +278,12 @@ impl Control {
         let _ = self.open_running().await;
     }
 
-    /// Write the greeting without waiting for its reply, which `receive`
-    /// drops for want of a pending entry.
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities.read().unwrap().clone()
+    }
+
+    /// Send `agentReady` and record any capability set the daemon returns.
+    /// Bounded to 300 ms so `list_tools` stays fast even against a slow peer.
     async fn send_greeting(&self, connection: &Connection) {
         let Some((method, params)) = self.greeting.lock().unwrap().clone() else {
             return;
@@ -287,7 +295,24 @@ impl Control {
             return;
         };
         line.push(b'\n');
-        let _ = connection.writer.lock().await.write_all(&line).await;
+        let (tx, rx) = oneshot::channel();
+        connection.pending.lock().unwrap().insert(id, tx);
+        if connection
+            .writer
+            .lock()
+            .await
+            .write_all(&line)
+            .await
+            .is_err()
+        {
+            connection.pending.lock().unwrap().remove(&id);
+            return;
+        }
+        if let Ok(Ok(Ok(reply))) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), rx).await
+        {
+            *self.capabilities.write().unwrap() = Capabilities::from_agent_ready(&reply);
+        }
     }
 
     async fn open_running(&self) -> Option<Arc<Connection>> {
@@ -312,9 +337,9 @@ impl Control {
             Ok(ends) => ends,
             // The app isn't running: start it, as the user would, and wait
             // for its socket.
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             Err(first) => start_app(first).await?,
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             Err(error) => {
                 return Err(ControlError::new(
                     "unavailable",
@@ -384,6 +409,55 @@ async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlErr
         }
     }
     Err(unavailable("it did not answer within 15 s".into()))
+}
+
+#[cfg(target_os = "linux")]
+async fn start_app(first: std::io::Error) -> Result<(Reader, Writer), ControlError> {
+    use std::os::unix::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    let unavailable = |detail: String| {
+        ControlError::new(
+            "unavailable",
+            format!(
+                "The Agent Screen daemon is not running and could not be started ({detail}). Start `agent-screen` first."
+            ),
+        )
+    };
+    if std::env::var_os("AGENTSCREEN_NO_AUTOSTART").is_some() {
+        return Err(unavailable(first.to_string()));
+    }
+
+    let daemon = std::env::var_os("AGENTSCREEN_DAEMON")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let exe = std::env::current_exe().ok()?;
+            let name = exe.file_name()?.to_string_lossy();
+            if name != "agent-screen-mcp" {
+                Some(exe)
+            } else {
+                let sibling = exe.with_file_name("agent-screen");
+                sibling.is_file().then_some(sibling)
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("agent-screen"));
+
+    let mut cmd = Command::new(&daemon);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    cmd.spawn()
+        .map_err(|e| unavailable(format!("{}: {e}; first error: {first}", daemon.display())))?;
+
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(ends) = endpoint::connect().await {
+            return Ok(ends);
+        }
+    }
+    Err(unavailable("it did not answer within 10 s".into()))
 }
 
 async fn receive(

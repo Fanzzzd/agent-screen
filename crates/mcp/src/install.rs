@@ -134,8 +134,11 @@ pub fn install(exe: &Path) -> Vec<Outcome> {
 pub fn refresh_skills(exe: &Path) -> Vec<PathBuf> {
     // Only the installed app: tests launch builds of a branch, some under
     // other names, and their skill may not be released.
-    let installed =
-        exe.starts_with("/Applications") || exe.starts_with(home().join("Applications"));
+    let installed = exe.starts_with("/Applications")
+        || exe.starts_with(home().join("Applications"))
+        || exe.starts_with("/usr/bin")
+        || exe.starts_with("/usr/local/bin")
+        || exe.starts_with(home().join(".local/bin"));
     if !installed
         || crate::endpoint::is_dev_exe(exe)
         || std::env::var_os("AGENTSCREEN_INSTANCE").is_some()
@@ -228,7 +231,12 @@ fn home() -> PathBuf {
 fn user_path() -> Option<std::ffi::OsString> {
     static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+        let default_shell = if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        };
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| default_shell.into());
         let marker = "__AGENTSCREEN_PATH__";
         let mut child = Command::new(shell)
             .args(["-ilc", &format!("printf '\\n{marker}%s' \"$PATH\"")])

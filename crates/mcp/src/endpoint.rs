@@ -30,6 +30,7 @@ pub fn is_dev_build() -> bool {
 
 pub fn is_dev_exe(exe: &std::path::Path) -> bool {
     exe.components().any(|c| c.as_os_str() == DEV_BUNDLE)
+        || exe.file_name().is_some_and(|n| n == "agent-screen-dev")
 }
 
 /// The per-user directory where the app keeps its control socket and web

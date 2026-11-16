@@ -3,6 +3,7 @@
 //! Schemas are written out as JSON rather than derived, so what the model
 //! reads is exactly what is here.
 
+use crate::capabilities::Capabilities;
 use crate::control::{Control, ControlError, Object};
 use crate::session::Session;
 use agent_screen_model::tree::Scope;
@@ -117,8 +118,152 @@ fn always_load(mut tool: Value) -> Value {
     tool
 }
 
+#[allow(dead_code)]
 pub fn definitions() -> Vec<Value> {
-    vec![
+    definitions_for(&Capabilities::default_for_target())
+}
+
+pub fn definitions_for(caps: &Capabilities) -> Vec<Value> {
+    let is_linux = caps.platform == "linux";
+    let has_input_queue = caps.has("input_queue");
+    let has_ime_borrow = caps.has("ime_borrow");
+    let has_handover = caps.has("host_window_handover");
+    let has_menubar = caps.has("separate_menubar");
+    let has_clipboard_keys = caps.has("in_display_clipboard_shortcuts");
+
+    let mut computer_props = json!({
+        "display_id": display_id(),
+        "action": { "type": "string", "enum": [
+            "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click",
+            "mouse_move", "left_click_drag", "left_mouse_down", "left_mouse_up", "scroll", "type", "key",
+            "hold_key", "cursor_position", "zoom", "wait"
+        ] },
+        "coordinate": coordinate(),
+        "start_coordinate": coordinate(),
+        "region": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "[x0, y0, x1, y1] in screenshot pixels, for zoom."
+        },
+        "text": { "type": "string" },
+        "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+        "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
+        "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
+    });
+    if has_input_queue {
+        computer_props["real_input"] = json!({
+            "type": "boolean",
+            "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click, middle_click or a click with ctrl held: the menu they open would close when the user's front app comes back."
+        });
+    }
+    if has_ime_borrow {
+        computer_props["via_input_method"] = json!({
+            "type": "boolean",
+            "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao \" for 你好. Compose and commit in one call: the user's app comes back to the front after each call, and the input method drops what it was composing. This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
+        });
+        computer_props["input_source"] = json!({
+            "type": "string",
+            "description": "With via_input_method: the input source to use for the call, such as com.apple.inputmethod.SCIM.ITABC; the user's own comes back after. Default: the current one."
+        });
+    }
+
+    let computer_desc: Vec<&str> = if is_linux
+        || (has_clipboard_keys && !has_menubar && !has_input_queue)
+    {
+        vec![
+            "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
+            "screenshot pixels and coordinates are the same space. Every action except wait and cursor_position returns a fresh screenshot.",
+            "type sends UTF-8 characters directly into the focused window on your isolated display; for long text in a field, act_on_element insert_text is faster. Keys go to the window you last clicked; after a shortcut opens a window, click in it before typing.",
+            "Your display runs an isolated Wayland compositor with its own focused seat, so ctrl+a, ctrl+c, ctrl+v and ctrl+z work normally inside the display. Its clipboard is isolated from the user's host clipboard during background work.",
+            "key takes xdotool-style chords such as \"Return\", \"ctrl+l\" or \"ctrl+shift+t\"; hold_key holds one for",
+            "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
+            "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
+            "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available, and otherwise run on the display's private Wayland seat.",
+            "cursor_position returns the pointer without a screenshot. zoom",
+            "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
+            "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
+            "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
+            "wait_for_control.",
+        ]
+    } else {
+        vec![
+            "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
+            "screenshot pixels and coordinates are the same space. Every action except wait and cursor_position returns a fresh screenshot.",
+            "type sends one character at a time, about 200 a second: for long text in a field, use act_on_element insert_text. Keys go to the window you last clicked; after a shortcut opens a window, click in it before typing.",
+            "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
+            "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
+            "Apps on your display stay in the background, so menu shortcuts that act on the selection (copy, paste,",
+            "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. To copy and paste, use",
+            "act_on_element's read_text and insert_text; set_value replaces a field's text. Shortcuts for app commands,",
+            "such as cmd+n or cmd+w, work.",
+            "When the app is also the user's front app with another of its windows focused on their screen, as a browser they work in,",
+            "nothing is posted to it, since keys would reach their window: a single left click presses the control or",
+            "picks the text field under it through accessibility, type puts text into the picked field, Return,",
+            "Escape, BackSpace and cmd+a act on what the click picked, and other keys fail and name the user's window.",
+            "After such a press the text says whether anything in the window changed within 0.6 s; a select is never",
+            "pressed there, and act_on_element show_menu is refused, since a menu would take the user's keyboard: choose a",
+            "select's item with act_on_element set_value. Items of the app's menu bar act on the user's window there, so",
+            "pressing them is refused.",
+            "The text before the screenshot says when an action went in this way.",
+            "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
+            "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
+            "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
+            "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available.",
+            "Sliders with enough accessibility information can instead change their value without moving your pointer.",
+            "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
+            "So does a drag from one window to another, such as a file from Finder onto a web page: only the user's pointer starts the system drag session that carries it.",
+            "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
+            "Click with the normal background route first. Some apps take a background click only partway, for example",
+            "selecting a row without opening it. If a screenshot or get_window_state shows the click had no effect, retry",
+            "the same left, double or triple click with real_input true: it asks the user to allow a click with their real",
+            "pointer and waits up to 60 seconds. Input route: real_input means it ran. input_pending means nothing was sent,",
+            "not even the background click; retry the same click to wait again. If what is under the point changed while",
+            "the user decided, nothing is clicked: take a new screenshot and ask again. Don't use real_input on the first",
+            "try. A menu or popover a real click opens closes when the user's front app comes back, so right, middle and",
+            "Control clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
+            "cursor_position returns the pointer without a screenshot. zoom",
+            "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
+            "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
+            "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
+            "wait_for_control.",
+        ]
+    };
+
+    let create_desc: &[&str] = if is_linux {
+        &[
+            "Get an isolated Wayland display for this session to operate GUI apps on, without touching the user's screen,",
+            "cursor or keyboard. Call it when a task needs a screen: to open, operate, test or screenshot a Linux desktop app or a",
+            "web page, instead of starting GUI apps on the user's session or calling xdg-open, xdotool, wtype or grim. Calling it again returns the same display, and so",
+            "does a call from a subagent of this session: let one subagent do all the GUI work.",
+            "Pass new: true only when the task needs a second screen at once, such as two apps side by side that each need",
+            "a full display; a session may use up to 4. Every tool takes the display_id of the display it acts on.",
+            "The returned display_id stays valid until end_display or until this session ends.",
+            "The result includes preview_url, a local read-only web link showing the live display; give preview_url to the user so they can watch your screen in their browser.",
+            "The result's width and height are the display in points; scale is screenshot pixels per point",
+            "(1 on the default 1280×800, less when the screenshot is scaled down).",
+            "list_windows bounds, get_window_state centers and computer clicks use screenshot pixels.",
+            "Open apps on it with launch_app and resize or position them with place_window, then drive it with the computer tool.",
+        ]
+    } else {
+        &[
+            "Get a private virtual display for this session to operate GUI apps on, without touching the user's screen,",
+            "cursor or keyboard. Call it when a task needs a screen: to open, operate, test or screenshot a Mac app or a",
+            "web page, in place of open -a, AppleScript, System Events or screencapture. Calling it again returns the same display, and so",
+            "does a call from a subagent of this session: let one subagent do all the GUI work.",
+            "Pass new: true only when the task needs a second screen at once, such as two apps side by side that each need",
+            "a full display; a session may use up to 4. Every tool takes the display_id of the display it acts on.",
+            "The returned display_id stays valid until end_display or until this session ends.",
+            "The result includes preview_url, a local read-only web link showing the live display; give preview_url to the user so they can watch your screen in their browser.",
+            "The result's width and height are the display in points; scale is screenshot pixels per point",
+            "(1 on the default 1280×800, less when the screenshot is scaled down).",
+            "list_windows bounds, get_window_state centers and computer clicks use screenshot pixels.",
+            "Put windows on it with launch_app or place_window, then drive it with the computer tool.",
+        ]
+    };
+
+    let mut tools = vec![
         tool(
             "get_diagnostics",
             "Collect bug report diagnostics",
@@ -135,24 +280,15 @@ pub fn definitions() -> Vec<Value> {
         always_load(tool(
             "create_display",
             "Create Agent Display",
-            &[
-                "Get a private virtual display for this session to operate GUI apps on, without touching the user's screen,",
-                "cursor or keyboard. Call it when a task needs a screen: to open, operate, test or screenshot a Mac app or a",
-                "web page, in place of open -a, AppleScript, System Events or screencapture. Calling it again returns the same display, and so",
-                "does a call from a subagent of this session: let one subagent do all the GUI work.",
-                "Pass new: true only when the task needs a second screen at once, such as two apps side by side that each need",
-                "a full display; a session may use up to 4. Every tool takes the display_id of the display it acts on.",
-                "The returned display_id stays valid until end_display or until this session ends.",
-                "The result includes preview_url, a local read-only web link showing the live display; give preview_url to the user so they can watch your screen in their browser.",
-                "The result's width and height are the display in points; scale is screenshot pixels per point",
-                "(1 on the default 1280×800, less when the screenshot is scaled down).",
-                "list_windows bounds, get_window_state centers and computer clicks use screenshot pixels.",
-                "Put windows on it with launch_app or place_window, then drive it with the computer tool.",
-            ],
+            create_desc,
             object(
                 json!({
                     "title": { "type": "string", "description": "Short task title shown to the user, e.g. \"Book flights\". Give each of the session's displays its own." },
-                    "new": { "type": "boolean", "description": "Make another display for this session beside the ones it has, instead of returning its latest. Each new display costs the whole Mac a screen reconfiguration: use one display unless the task needs two at once. At most 4 per session; end_display one you no longer need first." },
+                    "new": { "type": "boolean", "description": if is_linux {
+                        "Make another isolated display for this session beside the ones it has, instead of returning its latest. At most 4 per session; end_display one you no longer need first."
+                    } else {
+                        "Make another display for this session beside the ones it has, instead of returning its latest. Each new display costs the whole Mac a screen reconfiguration: use one display unless the task needs two at once. At most 4 per session; end_display one you no longer need first."
+                    } },
                     "width": { "type": "integer", "description": "Width in points. Default 1280. Screenshots of wider displays are scaled down to fit the model's image limit." },
                     "height": { "type": "integer", "description": "Height in points. Default 800." }
                 }),
@@ -163,11 +299,19 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "end_display",
             "End Agent Display",
-            &[
-                "Finish with the display. It accepts no more input and its display_id stops working. Windows the user",
-                "handed over go back to them now. If other windows remain, it waits for the user to review them; give",
-                "each a set_disposition first. An empty display closes. Your other displays, if any, go on.",
-            ],
+            if has_handover {
+                &[
+                    "Finish with the display. It accepts no more input and its display_id stops working. Windows the user",
+                    "handed over go back to them now. If other windows remain, it waits for the user to review them; give",
+                    "each a set_disposition first. An empty display closes. Your other displays, if any, go on.",
+                ]
+            } else {
+                &[
+                    "Finish with the display. It accepts no more input and its display_id stops working. If windows remain,",
+                    "the display becomes a Review Display until the user closes them or dismisses the display; give each a",
+                    "set_disposition first. An empty display closes immediately. Your other displays, if any, go on.",
+                ]
+            },
             object(json!({ "display_id": display_id() }), &["display_id"]),
             Hints {
                 destructive: true,
@@ -198,86 +342,14 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "computer",
             "Operate the display",
-            &[
-                "See and operate your Agent Display. Works like Anthropic's computer-use tool, scoped to one display:",
-                "screenshot pixels and coordinates are the same space. Every action except wait and cursor_position returns a fresh screenshot.",
-                "type sends one character at a time, about 200 a second: for long text in a field, use act_on_element insert_text. Keys go to the window you last clicked; after a shortcut opens a window, click in it before typing.",
-                "The desktop is plain gray. The strip at the top, where macOS draws the user's menu bar, is empty and takes no",
-                "clicks; reach your app's menus through the menu bar list at the end of get_window_state.",
-                "Apps on your display stay in the background, so menu shortcuts that act on the selection (copy, paste,",
-                "undo, bold) do nothing there, by key or by menu item; cmd+a still selects all text. To copy and paste, use",
-                "act_on_element's read_text and insert_text; set_value replaces a field's text. Shortcuts for app commands,",
-                "such as cmd+n or cmd+w, work.",
-                "When the app is also the user's front app with another of its windows focused on their screen, as a browser they work in,",
-                "nothing is posted to it, since keys would reach their window: a single left click presses the control or",
-                "picks the text field under it through accessibility, type puts text into the picked field, Return,",
-                "Escape, BackSpace and cmd+a act on what the click picked, and other keys fail and name the user's window.",
-                "After such a press the text says whether anything in the window changed within 0.6 s; a select is never",
-                "pressed there, and act_on_element show_menu is refused, since a menu would take the user's keyboard: choose a",
-                "select's item with act_on_element set_value. Items of the app's menu bar act on the user's window there, so",
-                "pressing them is refused.",
-                "The text before the screenshot says when an action went in this way.",
-                "key takes xdotool-style chords such as \"Return\", \"cmd+l\" or \"cmd+shift+t\"; hold_key holds one for",
-                "duration seconds. Click, drag and scroll actions accept held modifiers in text, e.g. \"shift\". For a drag",
-                "left_click_drag can't express, use left_mouse_down, mouse_move steps, then left_mouse_up; without a",
-                "coordinate they act at the pointer. Web drags use the app's private DevTools pipe when available.",
-                "Sliders with enough accessibility information can instead change their value without moving your pointer.",
-                "A web drag with neither route queues an approval intent and returns input_pending; no press or drag was sent.",
-                "So does a drag from one window to another, such as a file from Finder onto a web page: only the user's pointer starts the system drag session that carries it.",
-                "Use input_queue to inspect, wait or withdraw. A complete queued drag can run with the user's pointer once they allow it. Only completed means it ran.",
-                "Click with the normal background route first. Some apps take a background click only partway, for example",
-                "selecting a row without opening it. If a screenshot or get_window_state shows the click had no effect, retry",
-                "the same left, double or triple click with real_input true: it asks the user to allow a click with their real",
-                "pointer and waits up to 60 seconds. Input route: real_input means it ran. input_pending means nothing was sent,",
-                "not even the background click; retry the same click to wait again. If what is under the point changed while",
-                "the user decided, nothing is clicked: take a new screenshot and ask again. Don't use real_input on the first",
-                "try. A menu or popover a real click opens closes when the user's front app comes back, so right, middle and",
-                "Control clicks don't take real_input; use act_on_element's show_menu, or press for a menu bar item.",
-                "cursor_position returns the pointer without a screenshot. zoom",
-                "returns a region at up to twice the detail, to read small text; aim with the full screenshot. Before you",
-                "solve a captcha, ask the user to confirm that challenge. After they confirm, fill it. Call request_help if they",
-                "prefer to do it or you cannot. Fails with a takeover error while the user is operating the display; then call",
-                "wait_for_control.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "action": { "type": "string", "enum": [
-                        "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click",
-                        "mouse_move", "left_click_drag", "left_mouse_down", "left_mouse_up", "scroll", "type", "key",
-                        "hold_key", "cursor_position", "zoom", "wait"
-                    ] },
-                    "coordinate": coordinate(),
-                    "start_coordinate": coordinate(),
-                    "region": {
-                        "type": "array",
-                        "items": { "type": "number" },
-                        "minItems": 4,
-                        "maxItems": 4,
-                        "description": "[x0, y0, x1, y1] in screenshot pixels, for zoom."
-                    },
-                    "text": { "type": "string" },
-                    "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
-                    "scroll_amount": { "type": "integer", "description": "Scroll wheel clicks. Default 3." },
-                    "duration": { "type": "number", "description": "Seconds: for wait, at most 30; for hold_key, at most 10." },
-                    "real_input": {
-                        "type": "boolean",
-                        "description": "For left_click, double_click, triple_click, left_click_drag or left_mouse_down: ask to use the user's real pointer after a background attempt visibly had no effect. A complete click or drag runs only once the user allows it; a split press only asks and sends nothing. Not for right_click, middle_click or a click with ctrl held: the menu they open would close when the user's front app comes back."
-                    },
-                    "via_input_method": {
-                        "type": "boolean",
-                        "description": "For type and key: send the keys through the user's input method (pinyin, Japanese, Korean), so it composes as when a person types; text is then the keys to press, such as \"nihao \" for 你好. Compose and commit in one call: the user's app comes back to the front after each call, and the input method drops what it was composing. This briefly brings the app to the front and uses the user's keyboard, so only use it to test or reproduce input-method behavior. It is refused while the user is typing or moving the pointer, stops if they start, and takes at most 250 keys a call."
-                    },
-                    "input_source": {
-                        "type": "string",
-                        "description": "With via_input_method: the input source to use for the call, such as com.apple.inputmethod.SCIM.ITABC; the user's own comes back after. Default: the current one."
-                    }
-                }),
-                &["display_id", "action"],
-            ),
+            &computer_desc,
+            object(computer_props, &["display_id", "action"]),
             PLAIN,
         ),
-        tool(
+    ];
+
+    if has_input_queue {
+        tools.push(tool(
             "input_queue",
             "Inspect or withdraw an input request",
             &[
@@ -305,23 +377,27 @@ pub fn definitions() -> Vec<Value> {
                 &["display_id", "action"],
             ),
             PLAIN,
+        ));
+    }
+
+    tools.push(tool(
+        "wait_for_control",
+        "Wait for the user to hand the display back",
+        &[
+            "Block until the user stops operating your display (a Takeover) and hands it back, or until the timeout.",
+            "Call it after any tool fails with a takeover error. Returns at once if you already have control.",
+        ],
+        object(
+            json!({ "display_id": display_id(), "timeout_seconds": timeout() }),
+            &["display_id"],
         ),
-        tool(
-            "wait_for_control",
-            "Wait for the user to hand the display back",
-            &[
-                "Block until the user stops operating your display (a Takeover) and hands it back, or until the timeout.",
-                "Call it after any tool fails with a takeover error. Returns at once if you already have control.",
-            ],
-            object(
-                json!({ "display_id": display_id(), "timeout_seconds": timeout() }),
-                &["display_id"],
-            ),
-            READ_ONLY,
-        ),
-        tool(
-            "request_help",
-            "Ask the user to step in",
+        READ_ONLY,
+    ));
+
+    tools.push(tool(
+        "request_help",
+        "Ask the user to step in",
+        if has_handover {
             &[
                 "Ask the user to step in on your display for something you cannot do, such as a login or a",
                 "two-factor code. For a captcha, ask them to confirm the current challenge immediately before you",
@@ -336,51 +412,70 @@ pub fn definitions() -> Vec<Value> {
                 "past it yourself, call request_help with withdraw: true. When the",
                 "user answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the",
                 "request; use it only for an explicit answer the user gave in this chat.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "reason": { "type": "string", "description": "What you need the user to do, in one short sentence." },
-                    "steps": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 short steps, when the reason alone can't say how. The Viewer lists them while the user is in control." },
-                    "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
-                    "user_instruction": user_instruction("go on without them stepping in"),
-                    "timeout_seconds": timeout()
-                }),
-                &["display_id"],
-            ),
-            PLAIN,
-        ),
-        tool(
-            "request_control",
-            "Ask the user to hand the display back",
+            ]
+        } else {
             &[
-                "While the user is operating your display (a Takeover) and you need it to go on, ask them to hand it",
-                "back, with a short reason. The user gets a notification and a card with Let <agent> Continue and Keep",
-                "Control. The call then waits like wait_for_control. Returns control: agent at once if you have control",
-                "already. control: user with kept: true means the user chose to keep control: don't ask again right",
-                "away. One request per display: asking again while one is open changes nothing and waits on. On a timeout",
-                "the request stays open; call wait_for_control to keep waiting, or request_control with withdraw: true",
-                "when you no longer need the display. Only the user ends a Takeover: by a button, or by telling you in chat.",
-                "When the user tells you in this chat to continue (\"好了，继续\", \"go ahead\"), pass their words as",
-                "user_instruction: the Takeover ends at once, as with Let <agent> Continue. When they tell you to stop and",
-                "let them take over (\"先停一下\"), pass their words with control: user: a Takeover starts, your input",
-                "stops, and window access pauses. Use user_instruction only for an explicit instruction the user gave in",
-                "this chat, never on your own judgment.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "reason": { "type": "string", "description": "Why you need the display back, in one short sentence." },
-                    "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
-                    "user_instruction": user_instruction("continue, or to stop and let them take over"),
-                    "control": { "type": "string", "enum": ["agent", "user"], "description": "With user_instruction: agent (default) hands the display back to you; user starts a Takeover." },
-                    "timeout_seconds": timeout()
-                }),
-                &["display_id"],
-            ),
-            PLAIN,
+                "Ask the user to step in on your display for something you cannot do, such as a login or a",
+                "two-factor code. For a captcha, ask them to confirm the current challenge immediately before you",
+                "solve it. After they confirm, solve it when you can. Call this if they prefer to do it or you cannot.",
+                "The user gets a Help Card and a system notification with your reason. The call",
+                "waits until they answer, and answer says how: tookOver (they took over and handed the display back),",
+                "continue (they let you go on without taking over), or instructions (they replied; user_reply holds their words exactly as typed).",
+                "Follow a reply as the user's instruction for this step. Take a screenshot before you go on.",
+                "On a timeout the request stays open; call wait_for_control to keep waiting, and it returns the",
+                "answer when it comes. Asking again after the user answered returns that answer at once. If you got",
+                "past it yourself, call request_help with withdraw: true. When the",
+                "user answers in this chat instead (\"done, go on\"), pass their words as user_instruction to close the",
+                "request; use it only for an explicit answer the user gave in this chat.",
+            ]
+        },
+        object(
+            json!({
+                "display_id": display_id(),
+                "reason": { "type": "string", "description": "What you need the user to do, in one short sentence." },
+                "steps": { "type": "array", "items": { "type": "string" }, "maxItems": 5, "description": "Up to 5 short steps, when the reason alone can't say how. The Viewer lists them while the user is in control." },
+                "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
+                "user_instruction": user_instruction("go on without them stepping in"),
+                "timeout_seconds": timeout()
+            }),
+            &["display_id"],
         ),
-        tool(
+        PLAIN,
+    ));
+
+    tools.push(tool(
+        "request_control",
+        "Ask the user to hand the display back",
+        &[
+            "While the user is operating your display (a Takeover) and you need it to go on, ask them to hand it",
+            "back, with a short reason. The user gets a notification and a card with Let <agent> Continue and Keep",
+            "Control. The call then waits like wait_for_control. Returns control: agent at once if you have control",
+            "already. control: user with kept: true means the user chose to keep control: don't ask again right",
+            "away. One request per display: asking again while one is open changes nothing and waits on. On a timeout",
+            "the request stays open; call wait_for_control to keep waiting, or request_control with withdraw: true",
+            "when you no longer need the display. Only the user ends a Takeover: by a button, or by telling you in chat.",
+            "When the user tells you in this chat to continue (\"好了，继续\", \"go ahead\"), pass their words as",
+            "user_instruction: the Takeover ends at once, as with Let <agent> Continue. When they tell you to stop and",
+            "let them take over (\"先停一下\"), pass their words with control: user: a Takeover starts, your input",
+            "stops, and window access pauses. Use user_instruction only for an explicit instruction the user gave in",
+            "this chat, never on your own judgment.",
+        ],
+        object(
+            json!({
+                "display_id": display_id(),
+                "reason": { "type": "string", "description": "Why you need the display back, in one short sentence." },
+                "withdraw": { "type": "boolean", "description": "Take back the open request instead; reason is then not needed." },
+                "user_instruction": user_instruction("continue, or to stop and let them take over"),
+                "control": { "type": "string", "enum": ["agent", "user"], "description": "With user_instruction: agent (default) hands the display back to you; user starts a Takeover." },
+                "timeout_seconds": timeout()
+            }),
+            &["display_id"],
+        ),
+        PLAIN,
+    ));
+
+    if has_handover {
+        tools.push(tool(
             "window_access",
             "Use the user's windows on their word",
             &[
@@ -408,29 +503,45 @@ pub fn definitions() -> Vec<Value> {
                 &["display_id", "action"],
             ),
             PLAIN,
-        ),
-        tool(
-            "list_windows",
-            "List windows on the display",
+        ));
+    }
+
+    tools.push(tool(
+        "list_windows",
+        "List windows on the display",
+        if has_handover {
             &[
                 "List app windows on the display, front to back, with ids and bounds in screenshot pixels. scale is",
                 "screenshot pixels per display point, the same number create_display returns. origin says how",
                 "a window got here (launched, placed, handedOver by the user, found, unknown); disposition is your current",
                 "set_disposition verdict or null. offDisplay: true means the window is yours but not on the display yet; call place_window to bring it back. With strays: true it lists instead the windows of apps launch_app started",
                 "for you that opened off your display, and windows that were on your display and left it, for place_window. It never lists the user's windows; to ask for one, call place_window with the app's name.",
-            ],
-            object(
+            ]
+        } else {
+            &[
+                "List app windows on the display, front to back, with ids and bounds in screenshot pixels. scale is",
+                "screenshot pixels per display point, the same number create_display returns. Every window belongs to this",
+                "isolated display (origin: launched); disposition is your current set_disposition verdict or null.",
+            ]
+        },
+        object(
+            if has_handover {
                 json!({
                     "display_id": display_id(),
                     "strays": { "type": "boolean", "description": "List your apps' windows that opened off the display, and your windows that left it." }
-                }),
-                &["display_id"],
-            ),
-            READ_ONLY,
+                })
+            } else {
+                json!({ "display_id": display_id() })
+            },
+            &["display_id"],
         ),
-        tool(
-            "place_window",
-            "Place a window on the display",
+        READ_ONLY,
+    ));
+
+    tools.push(tool(
+        "place_window",
+        "Place a window on the display",
+        if has_handover {
             &[
                 "Move a window onto the display, by window_id or by app name or bundle id. A window of an app launch_app started for you",
                 "moves at once: get ids from list_windows with strays: true. Any other window is the user's, such as one an app",
@@ -451,8 +562,18 @@ pub fn definitions() -> Vec<Value> {
                 "display to resize or move it there. An explicit frame stays below the reserved menu bar strip and inside the display. For a window already on this display, no frame arguments leaves its frame unchanged. Apps hold to their own minimum",
                 "and maximum sizes, so the result's window is the frame the window actually ended with. For a width wider",
                 "than the display, create_display with a larger width first.",
-            ],
-            object(
+            ]
+        } else {
+            &[
+                "Move or resize a window already on this display, by window_id or app name. On Linux each display runs an",
+                "isolated Wayland compositor, so windows stay on the display where launch_app started them and cannot move",
+                "from the host desktop or across displays. x, y, width and height set the window's frame in screenshot pixels",
+                "from the display's top-left corner, constrained inside the display; each dimension left out keeps the window's",
+                "current value. Apps hold to their own minimum and maximum sizes, so read window in the result for the actual frame.",
+            ]
+        },
+        object(
+            if has_handover {
                 json!({
                     "display_id": display_id(),
                     "window_id": { "type": "integer", "description": "The window to move: a stray, a window of the user's, one on another of your displays, one another agent session is using (the user decides), or one already on this display." },
@@ -463,14 +584,35 @@ pub fn definitions() -> Vec<Value> {
                     "height": { "type": "number", "description": "Height in screenshot pixels." },
                     "timeout_seconds": { "type": "number", "description": "How long to wait for the user to answer a request for one of their windows. Default 120, up to 600." },
                     "user_instruction": user_instruction("take this window")
-                }),
-                &["display_id"],
-            ),
-            PLAIN,
+                })
+            } else {
+                json!({
+                    "display_id": display_id(),
+                    "window_id": { "type": "integer", "description": "The window on this display to move or resize." },
+                    "app": { "type": "string", "description": "Instead of window_id: the app on this display whose front window to move or resize." },
+                    "x": { "type": "number", "description": "Left edge in screenshot pixels from the display's left edge." },
+                    "y": { "type": "number", "description": "Top edge in screenshot pixels from the display's top edge." },
+                    "width": { "type": "number", "description": "Width in screenshot pixels." },
+                    "height": { "type": "number", "description": "Height in screenshot pixels." }
+                })
+            },
+            &["display_id"],
         ),
-        tool(
-            "launch_app",
-            "Launch an app on the display",
+        PLAIN,
+    ));
+
+    tools.push(tool(
+        "launch_app",
+        "Launch an app on the display",
+        if is_linux {
+            &[
+                "Start a GUI app directly inside this isolated display. Its windows open on the display without touching",
+                "the user's desktop, focus or cursor.",
+                "With open, the app opens that URL or file. With arguments or environment, the app starts with them.",
+                "A Chromium or Electron app started here gets an isolated profile under $XDG_STATE_HOME/agent-screen/profiles",
+                "with --password-store=basic and a private DevTools pipe so drags in its web pages work. Ask before signing in.",
+            ]
+        } else {
             &[
                 "Open an app in the background and put its new window on the display. If the app is already running, Agent Screen asks it for a new window and moves only that one, never a window of the user's; a file may then open in one of the app's existing windows, which stays where it is. A browser opens a file in a new window, as a URL.",
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
@@ -478,159 +620,201 @@ pub fn definitions() -> Vec<Value> {
                 "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
                 "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance.",
                 "A fresh profile has separate sign-ins; it does not reuse the user's existing login session. Ask before making a separate profile or signing in.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "app": { "type": "string", "description": "App name (\"Safari\", \"Finder\"), bundle id (\"com.apple.Safari\") or the absolute path of an .app bundle (\"/tmp/build/MyApp.app\")." },
-                    "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." },
-                    "arguments": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments for a new instance of the app, passed as given." },
-                    "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables for a new instance of the app." }
-                }),
-                &["display_id", "app"],
-            ),
-            PLAIN,
+            ]
+        },
+        object(
+            json!({
+                "display_id": display_id(),
+                "app": { "type": "string", "description": if is_linux {
+                    "Executable name (\"chromium\", \"firefox\"), desktop entry ID (\"org.gnome.TextEditor\") or absolute binary path (\"/usr/bin/gedit\")."
+                } else {
+                    "App name (\"Safari\", \"Finder\"), bundle id (\"com.apple.Safari\") or the absolute path of an .app bundle (\"/tmp/build/MyApp.app\")."
+                } },
+                "open": { "type": "string", "description": "A URL (https://…, file://…) or a file path starting with / or ~/ to open in the app. Relative paths are refused." },
+                "arguments": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments for a new instance of the app, passed as given." },
+                "environment": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables for a new instance of the app." }
+            }),
+            &["display_id", "app"],
         ),
-        tool(
-            "set_disposition",
-            "Keep or close a window when the display goes",
+        PLAIN,
+    ));
+
+    tools.push(tool(
+        "set_disposition",
+        "Keep or close a window when the display goes",
+        if has_handover {
             &[
                 "Say what should happen to one of your windows when the user dismisses this display: keep it for the user",
                 "to review (a result page, a filled form) or close it (scratch windows). Set it as soon as you know and",
                 "change it any time; your session may end without warning. The user has the final say. Windows the user",
                 "handed over always go back to them, whatever you choose.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "window_id": { "type": "integer", "description": "A window on the display, from list_windows." },
-                    "disposition": { "type": "string", "enum": ["keep", "close"] }
-                }),
-                &["display_id", "window_id", "disposition"],
-            ),
-            Hints {
-                idempotent: true,
-                ..PLAIN
-            },
-        ),
-        tool(
-            "get_window_state",
-            "See one window",
+            ]
+        } else {
             &[
-                "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
-                "brackets that act_on_element takes, and its center in screenshot pixels. An element keeps its number",
-                "while it stays in the window; a number whose element went away fails instead of hitting another one.",
-                "root reads only that element's subtree. max_depth stops traversal below that depth, relative to the root,",
-                "so a long list in an earlier branch cannot consume the budget for later branches. Discover branch numbers",
-                "with a small max_depth (a branch with unread children is marked \"more inside\") before reading one with root.",
-                "Numbers outside a partial read stay available, but stale elements fail.",
-            ],
-            object(
-                json!({ "display_id": display_id(), "window_id": window_id(), "root": tree_root(), "max_depth": max_depth() }),
-                &["display_id", "window_id"],
-            ),
-            READ_ONLY,
+                "Say what should happen to one of your windows when this display enters review: keep it in the Review",
+                "Display for the user to inspect (a result page, a filled form) or close it (scratch windows). Set it as",
+                "soon as you know and change it any time; your session may end without warning. The user has the final say.",
+            ]
+        },
+        object(
+            json!({
+                "display_id": display_id(),
+                "window_id": { "type": "integer", "description": "A window on the display, from list_windows." },
+                "disposition": { "type": "string", "enum": ["keep", "close"] }
+            }),
+            &["display_id", "window_id", "disposition"],
         ),
-        tool(
-            "act_on_element",
-            "Act on a window element",
-            &[
-                "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
-                "set_value, increment, decrement and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
-                "double_click and right_click send a real click at the element's center. press falls back to a click when",
-                "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
-                "set_value on a popupbutton takes the exact full title of one of its items, case included, and never opens",
-                "its menu. A web page's select is chosen through the private DevTools pipe of a Chromium app launch_app",
-                "started, with one change event; a select the pipe can't reach, as in a frame from another site or a browser",
-                "the user started, or in a WebKit page, gets no key. An AppKit app's pop-up button takes the title as",
-                "type-ahead into the closed control, sent only to its app; the app may run the pop-up's action for items",
-                "shown on the way, and the answer says so. A space is never typed, so a title with one is refused, as are",
-                "pop-ups of other toolkits and a control that won't take focus: call request_help. Typing stops if focus",
-                "moves, as to a next field. It fails naming what the control shows. On a combobox it sets the text and",
-                "confirms it, and fails if the app rejects it; a web page's combobox has nothing to confirm, so the call",
-                "fails saying the text is set but no option is chosen: press the option in its list.",
-                "Prefer set_value to opening a menu, which closes at the user's next key anywhere.",
-                "Electron apps take a menu item pressed through accessibility for its keyboard shortcut, which some ignore",
-                "while a text field has focus. So pressing an item of an Electron app's menu bar while a text field has focus,",
-                "or with real_input true, asks the user to allow a real click on the display's menu bar and waits up to 60",
-                "seconds; input_pending means nothing was sent, not even the shortcut. real_input false sends the shortcut.",
-                "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
-                "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
-                "Both work in background apps, where Command-C and Command-V do nothing.",
-                "increment and decrement adjust a slider or stepper by one app-defined step, with no pointer movement.",
-                "They never fall back to a click. If an action is not confirmed, inspect the current value before retrying.",
-                "result picks what comes back: state, the default, is the whole window state; changes lists only the",
-                "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
-                "none says only that it is done. root and max_depth scope the returned state, not the action's target.",
-                "changes compares only reads with the same root and max_depth. Fails with a takeover error while the user operates the display.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "window_id": window_id(),
-                    "element": { "type": "integer", "description": "The bracketed number from get_window_state." },
-                    "action": { "type": "string", "enum": [
-                        "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "insert_text",
-                        "read_text", "scroll_into_view", "increment", "decrement"
-                    ] },
-                    "value": { "type": "string", "description": "Text for set_value and insert_text." },
-                    "real_input": {
-                        "type": "boolean",
-                        "description": "For press on an item of an Electron app's menu bar only. true: choose it with a real click once the user allows it. false: press it through accessibility, which Electron takes as the item's shortcut. Default: a real click only while a text field has focus."
-                    },
-                    "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
-                    "root": tree_root(),
-                    "max_depth": max_depth()
-                }),
-                &["display_id", "window_id", "element", "action"],
-            ),
-            PLAIN,
+        Hints {
+            idempotent: true,
+            ..PLAIN
+        },
+    ));
+
+    tools.push(tool(
+        "get_window_state",
+        "See one window",
+        &[
+            "Screenshot of one window on your display plus its accessibility tree. Every element has a number in",
+            "brackets that act_on_element takes, and its center in screenshot pixels. An element keeps its number",
+            "while it stays in the window; a number whose element went away fails instead of hitting another one.",
+            "root reads only that element's subtree. max_depth stops traversal below that depth, relative to the root,",
+            "so a long list in an earlier branch cannot consume the budget for later branches. Discover branch numbers",
+            "with a small max_depth (a branch with unread children is marked \"more inside\") before reading one with root.",
+            "Numbers outside a partial read stay available, but stale elements fail.",
+        ],
+        object(
+            json!({ "display_id": display_id(), "window_id": window_id(), "root": tree_root(), "max_depth": max_depth() }),
+            &["display_id", "window_id"],
         ),
-        tool(
-            "wait_for_change",
-            "Wait for a window to change",
-            &[
-                "Wait until one window on your display changes, then say what changed, with no screenshot or tree read per check:",
-                "use it after an action whose effect lands later, such as a sent message, a page load or a reply.",
-                "It compares the window's accessibility tree with the last tree you got for it with the same root and max_depth,",
-                "from get_window_state, act_on_element or an earlier wait, so a change that landed before the call fires at once;",
-                "with no such tree, with the tree when the call starts. It reads the tree again at most twice a second, less often",
-                "while nothing changes, and gives a slow app three times as long between reads as a read takes.",
-                "Conditions, any of: changed, an element appearing, changing or going away; appears, more elements matching role",
-                "and text than that tree had; disappears, fewer. With neither appears nor disappears, changed applies.",
-                "role is a role as the tree writes it (button, statictext); text is part of an element's label or of its value,",
-                "any case, within the first 80 characters the tree shows. Position, focus and enabled state don't make an element",
-                "appear or disappear. A read takes at most 400 elements: in a longer window, such as a chat history, pass root to",
-                "watch the part you need, as elements past the budget are not seen, and the result says when a read was cut.",
-                "Returns the conditions that fired and the elements that changed since that tree, in act_on_element's changes form",
-                "(+ new, ~ changed, - gone), without a picture; or timed_out with the window's element count and the changes that",
-                "matched no condition. It also returns when the window closes or leaves your display, or the display ends.",
-                "timeout_seconds is 30 by default and at most 120, since a longer wait holds your turn with no news: call again to",
-                "keep waiting. It reads during a Takeover, as get_window_state does, and says so, since the changes may be the user's.",
-            ],
-            object(
-                json!({
-                    "display_id": display_id(),
-                    "window_id": window_id(),
-                    "root": tree_root(),
-                    "max_depth": max_depth(),
-                    "changed": {
-                        "type": "boolean",
-                        "description": "Fire on any element appearing, changing or going away. Default: true when appears and disappears are left out, false otherwise."
-                    },
-                    "appears": element_match("Fire when more elements match than the tree it compares with had: a new row, a status that turned into this text."),
-                    "disappears": element_match("Fire when fewer elements match than the tree it compares with had: a spinner or a \"Sending\" label gone."),
-                    "timeout_seconds": {
-                        "type": "number",
-                        "minimum": 0,
-                        "description": "Seconds to wait. Default 30, at most 120; 0 checks once."
-                    }
-                }),
-                &["display_id", "window_id"],
-            ),
-            READ_ONLY,
+        READ_ONLY,
+    ));
+
+    let mut element_props = json!({
+        "display_id": display_id(),
+        "window_id": window_id(),
+        "element": { "type": "integer", "description": "The bracketed number from get_window_state." },
+        "action": { "type": "string", "enum": [
+            "press", "click", "double_click", "right_click", "show_menu", "focus", "set_value", "insert_text",
+            "read_text", "scroll_into_view", "increment", "decrement"
+        ] },
+        "value": { "type": "string", "description": "Text for set_value and insert_text." },
+        "result": { "type": "string", "enum": ["state", "changes", "none"], "description": "What to return after the action. Default state." },
+        "root": tree_root(),
+        "max_depth": max_depth()
+    });
+    if has_input_queue {
+        element_props["real_input"] = json!({
+            "type": "boolean",
+            "description": "For press on an item of an Electron app's menu bar only. true: choose it with a real click once the user allows it. false: press it through accessibility, which Electron takes as the item's shortcut. Default: a real click only while a text field has focus."
+        });
+    }
+    let element_desc: &[&str] = if is_linux || (has_clipboard_keys && !has_input_queue) {
+        &[
+            "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
+            "set_value, increment, decrement and scroll_into_view use accessibility actions; click, double_click and",
+            "right_click send a click on the display's private Wayland seat at the element's center. press falls back",
+            "to a click when the element has no press action.",
+            "A web page's select is chosen through the private DevTools pipe of a Chromium app launch_app started, with",
+            "one change event. On a combobox set_value sets the text and confirms it.",
+            "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters.",
+            "insert_text replaces the selection, or inserts at the caret, with value. Inside your isolated display,",
+            "ctrl+c and ctrl+v also work on the focused window, using the display's own isolated clipboard.",
+            "increment and decrement adjust a slider or stepper by one app-defined step, with no pointer movement.",
+            "They never fall back to a click. If an action is not confirmed, inspect the current value before retrying.",
+            "result picks what comes back: state, the default, is the whole window state; changes lists only the",
+            "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
+            "none says only that it is done. root and max_depth scope the returned state, not the action's target.",
+            "changes compares only reads with the same root and max_depth. Fails with a takeover error while the user operates the display.",
+        ]
+    } else {
+        &[
+            "Act on an element from get_window_state, then return the window's new state. press, show_menu, focus,",
+            "set_value, increment, decrement and scroll_into_view use accessibility actions, which reach the app without focusing it; click,",
+            "double_click and right_click send a real click at the element's center. press falls back to a click when",
+            "the element has no press action. Pressing a menubaritem lists that menu's items instead of opening it.",
+            "set_value on a popupbutton takes the exact full title of one of its items, case included, and never opens",
+            "its menu. A web page's select is chosen through the private DevTools pipe of a Chromium app launch_app",
+            "started, with one change event; a select the pipe can't reach, as in a frame from another site or a browser",
+            "the user started, or in a WebKit page, gets no key. An AppKit app's pop-up button takes the title as",
+            "type-ahead into the closed control, sent only to its app; the app may run the pop-up's action for items",
+            "shown on the way, and the answer says so. A space is never typed, so a title with one is refused, as are",
+            "pop-ups of other toolkits and a control that won't take focus: call request_help. Typing stops if focus",
+            "moves, as to a next field. It fails naming what the control shows. On a combobox it sets the text and",
+            "confirms it, and fails if the app rejects it; a web page's combobox has nothing to confirm, so the call",
+            "fails saying the text is set but no option is chosen: press the option in its list.",
+            "Prefer set_value to opening a menu, which closes at the user's next key anywhere.",
+            "Electron apps take a menu item pressed through accessibility for its keyboard shortcut, which some ignore",
+            "while a text field has focus. So pressing an item of an Electron app's menu bar while a text field has focus,",
+            "or with real_input true, asks the user to allow a real click on the display's menu bar and waits up to 60",
+            "seconds; input_pending means nothing was sent, not even the shortcut. real_input false sends the shortcut.",
+            "read_text returns a text element's whole value and its selected text, which the tree cuts at 80 characters:",
+            "use it to copy. insert_text replaces the selection, or inserts at the caret, with value: use it to paste.",
+            "Both work in background apps, where Command-C and Command-V do nothing.",
+            "increment and decrement adjust a slider or stepper by one app-defined step, with no pointer movement.",
+            "They never fall back to a click. If an action is not confirmed, inspect the current value before retrying.",
+            "result picks what comes back: state, the default, is the whole window state; changes lists only the",
+            "elements that appeared, changed (~) or went away (-) since the window's last tree, with the window image;",
+            "none says only that it is done. root and max_depth scope the returned state, not the action's target.",
+            "changes compares only reads with the same root and max_depth. Fails with a takeover error while the user operates the display.",
+        ]
+    };
+    tools.push(tool(
+        "act_on_element",
+        "Act on a window element",
+        element_desc,
+        object(
+            element_props,
+            &["display_id", "window_id", "element", "action"],
         ),
-    ]
+        PLAIN,
+    ));
+
+    tools.push(tool(
+        "wait_for_change",
+        "Wait for a window to change",
+        &[
+            "Wait until one window on your display changes, then say what changed, with no screenshot or tree read per check:",
+            "use it after an action whose effect lands later, such as a sent message, a page load or a reply.",
+            "It compares the window's accessibility tree with the last tree you got for it with the same root and max_depth,",
+            "from get_window_state, act_on_element or an earlier wait, so a change that landed before the call fires at once;",
+            "with no such tree, with the tree when the call starts. It reads the tree again at most twice a second, less often",
+            "while nothing changes, and gives a slow app three times as long between reads as a read takes.",
+            "Conditions, any of: changed, an element appearing, changing or going away; appears, more elements matching role",
+            "and text than that tree had; disappears, fewer. With neither appears nor disappears, changed applies.",
+            "role is a role as the tree writes it (button, statictext); text is part of an element's label or of its value,",
+            "any case, within the first 80 characters the tree shows. Position, focus and enabled state don't make an element",
+            "appear or disappear. A read takes at most 400 elements: in a longer window, such as a chat history, pass root to",
+            "watch the part you need, as elements past the budget are not seen, and the result says when a read was cut.",
+            "Returns the conditions that fired and the elements that changed since that tree, in act_on_element's changes form",
+            "(+ new, ~ changed, - gone), without a picture; or timed_out with the window's element count and the changes that",
+            "matched no condition. It also returns when the window closes or leaves your display, or the display ends.",
+            "timeout_seconds is 30 by default and at most 120, since a longer wait holds your turn with no news: call again to",
+            "keep waiting. It reads during a Takeover, as get_window_state does, and says so, since the changes may be the user's.",
+        ],
+        object(
+            json!({
+                "display_id": display_id(),
+                "window_id": window_id(),
+                "root": tree_root(),
+                "max_depth": max_depth(),
+                "changed": {
+                    "type": "boolean",
+                    "description": "Fire on any element appearing, changing or going away. Default: true when appears and disappears are left out, false otherwise."
+                },
+                "appears": element_match("Fire when more elements match than the tree it compares with had: a new row, a status that turned into this text."),
+                "disappears": element_match("Fire when fewer elements match than the tree it compares with had: a spinner or a \"Sending\" label gone."),
+                "timeout_seconds": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Seconds to wait. Default 30, at most 120; 0 checks once."
+                }
+            }),
+            &["display_id", "window_id"],
+        ),
+        READ_ONLY,
+    ));
+
+    tools
 }
 
 // MARK: Arguments
@@ -739,9 +923,18 @@ fn needs_newer_app(new: bool, reply: &Object) -> Option<ControlError> {
 }
 
 const RESTARTED: &str = "Agent Screen quit since your last call and restarted; your earlier display ended with it, and macOS moved its windows to the user's screen. Windows of apps you launched there are strays now: list_windows with strays: true, then place_window.";
+const RESTARTED_LINUX: &str = "Agent Screen restarted since your last call. Call create_display to reattach any surviving display or create a fresh isolated display.";
 
 /// What a call naming a display that ended when the app quit gets back.
-pub fn ended_with_app(id: i64) -> ControlError {
+pub fn ended_with_app(id: i64, caps: &Capabilities) -> ControlError {
+    if caps.platform == "linux" {
+        return ControlError::new(
+            "ended",
+            format!(
+                "display {id} is not bound on this connection after Agent Screen restarted. Call create_display to reattach your surviving display or start a new one."
+            ),
+        );
+    }
     ControlError::new(
         "ended",
         format!(
@@ -838,7 +1031,12 @@ pub async fn run(
             if let Some(note) = reply.get("note") {
                 out["note"] = note.clone();
             } else if orphans.is_some() {
-                out["note"] = json!(RESTARTED);
+                let restarted = if control.capabilities().platform == "linux" {
+                    RESTARTED_LINUX
+                } else {
+                    RESTARTED
+                };
+                out["note"] = json!(restarted);
             }
             Ok(Output::Object(out))
         }
@@ -2685,7 +2883,7 @@ mod tests {
 
     #[test]
     fn seventeen_tools_with_object_schemas() {
-        let tools = definitions();
+        let tools = definitions_for(&Capabilities::macos());
         assert_eq!(tools.len(), 17);
         let diagnostics = tools
             .iter()
@@ -2701,7 +2899,7 @@ mod tests {
 
     #[test]
     fn current_schema_exposes_frame_recovery_and_separate_profile_signins() {
-        let tools = definitions();
+        let tools = definitions_for(&Capabilities::macos());
         let place = tools
             .iter()
             .find(|tool| tool["name"] == "place_window")
@@ -2867,7 +3065,7 @@ mod tests {
 
     #[test]
     fn chat_paths_are_only_for_the_users_explicit_words() {
-        let tools = definitions();
+        let tools = definitions_for(&Capabilities::macos());
         let find = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap().clone();
         let control = find("request_control");
         assert_eq!(
@@ -2950,5 +3148,44 @@ mod tests {
             description.contains("give preview_url to the user"),
             "{description}"
         );
+    }
+
+    #[test]
+    fn linux_capabilities_prune_unsupported_tools_and_params() {
+        let linux = definitions_for(&Capabilities::linux());
+        assert_eq!(linux.len(), 15);
+        for tool in &linux {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
+        }
+        let names: Vec<&str> = linux.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(!names.contains(&"window_access"), "{names:?}");
+        assert!(!names.contains(&"input_queue"), "{names:?}");
+
+        let computer = linux.iter().find(|t| t["name"] == "computer").unwrap();
+        let c_props = computer["inputSchema"]["properties"].as_object().unwrap();
+        assert!(!c_props.contains_key("real_input"));
+        assert!(!c_props.contains_key("via_input_method"));
+        assert!(!c_props.contains_key("input_source"));
+        let c_desc = computer["description"].as_str().unwrap();
+        assert!(c_desc.contains("ctrl+c"), "{c_desc}");
+        assert!(
+            c_desc.contains("isolated from the user's host clipboard"),
+            "{c_desc}"
+        );
+        assert!(!c_desc.contains("where macOS draws the user's menu bar"));
+
+        let element = linux
+            .iter()
+            .find(|t| t["name"] == "act_on_element")
+            .unwrap();
+        let e_props = element["inputSchema"]["properties"].as_object().unwrap();
+        assert!(!e_props.contains_key("real_input"));
+        let e_desc = element["description"].as_str().unwrap();
+        assert!(!e_desc.contains("Command-C and Command-V do nothing"));
+
+        let macos = definitions_for(&Capabilities::macos());
+        let mac_names: Vec<&str> = macos.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(mac_names.contains(&"window_access"));
+        assert!(mac_names.contains(&"input_queue"));
     }
 }

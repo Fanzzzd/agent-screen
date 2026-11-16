@@ -1,6 +1,7 @@
 //! Agent Screen's MCP server. A client (Claude Code, Codex) starts it over
 //! stdio; it serves the tools and forwards them to the menu bar app.
 
+pub mod capabilities;
 mod control;
 pub mod diagnostics;
 pub mod endpoint;
@@ -8,6 +9,7 @@ pub mod install;
 mod session;
 mod tools;
 
+use capabilities::Capabilities;
 use control::Control;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
@@ -18,7 +20,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Value, json};
 use tools::{Output, text};
 
-const INSTRUCTIONS: &[&str] = &[
+const MACOS_INSTRUCTIONS: &[&str] = &[
     "Agent Screen gives this session its own virtual display for operating GUI apps in the background.",
     "Use it whenever a task needs a screen: to open, operate or test a Mac app or a web page, click, type into or check something on screen, take a screenshot of an app, or log in to a site.",
     "Use launch_app where you would use open -a, and these tools where you would use AppleScript, System Events or screencapture, which act on the user's screen. Use open -a only to show the user something on their own screen when they ask for it.",
@@ -37,6 +39,33 @@ const INSTRUCTIONS: &[&str] = &[
     "then attach the report and reproduction steps to a GitHub bug report. Do not auto-submit or upload user content.",
 ];
 
+const LINUX_INSTRUCTIONS: &[&str] = &[
+    "Agent Screen gives this session its own isolated Wayland display for operating GUI apps in the background.",
+    "Use it whenever a task needs a screen: to open, operate or test a Linux desktop app or a web page, click, type into or check something on screen, take a screenshot of an app, or log in to a site.",
+    "Use launch_app instead of starting GUI apps on the user's desktop or calling xdg-open, xdotool, ydotool, wtype or grim, which act on the user's screen.",
+    "Call create_display only when a task needs a screen, then launch_app to open apps on it and place_window to resize or move windows within that display.",
+    "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
+    "Inside the isolated display, your window has seat focus: ctrl+c, ctrl+v, ctrl+z and ctrl+a work normally, and the display's clipboard stays separate from the user's host clipboard.",
+    "To wait for a window to update after an action, call wait_for_change instead of sleeping and taking another screenshot.",
+    "Mark each window with set_disposition so the user knows what to keep.",
+    "If the user takes over, tools fail with a takeover error: call wait_for_control, or request_control",
+    "to ask them to hand the display back when you need it. For a login or",
+    "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",
+    "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
+    "do it or you cannot. Captcha consent is not approval to create an account.",
+    "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
+    "For an Agent Screen bug, collect get_diagnostics in the failing session before restarting the client,",
+    "then attach the report and reproduction steps to a GitHub bug report. Do not auto-submit or upload user content.",
+];
+
+pub fn instructions_for(caps: &Capabilities) -> String {
+    if caps.platform == "linux" {
+        LINUX_INSTRUCTIONS.join(" ")
+    } else {
+        MACOS_INSTRUCTIONS.join(" ")
+    }
+}
+
 #[derive(Default)]
 struct AgentScreen {
     control: std::sync::Arc<Control>,
@@ -51,7 +80,8 @@ impl ServerHandler for AgentScreen {
             json!({ "name": "agent-screen", "version": env!("CARGO_PKG_VERSION") }),
         )
         .expect("implementation info");
-        info.instructions = Some(INSTRUCTIONS.join(" "));
+        let caps = self.control.capabilities();
+        info.instructions = Some(instructions_for(&caps));
         info
     }
 
@@ -60,8 +90,8 @@ impl ServerHandler for AgentScreen {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        // The menu and setup window show that an agent loaded the tools. A
-        // running app hears it now, one that starts later when it connects.
+        // Negotiate capabilities with a running daemon without starting one;
+        // when the daemon is down, fall back to compile-target defaults.
         if !self
             .announced
             .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -71,17 +101,14 @@ impl ServerHandler for AgentScreen {
                 .peer_info()
                 .map(|info| info.client_info.name.clone());
             let client = session::pretty_client_name(name.as_deref());
-            let control = self.control.clone();
-            tokio::spawn(async move {
-                control
-                    .greet("agentReady", json!({ "client": client }))
-                    .await;
-            });
+            self.control
+                .greet("agentReady", json!({ "client": client, "protocol": 2 }))
+                .await;
         }
+        let caps = self.control.capabilities();
         // Protocol 2026-07-28 requires resultType on every result, and ttlMs
         // and cacheScope on lists; rmcp drops them for older clients.
-        let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));
-        // The list is fixed for a build, the same for every user.
+        let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions_for(&caps) }));
         Ok(ListToolsResult::with_all_items(tools.tools)
             .with_ttl_ms(3_600_000)
             .with_cache_scope(CacheScope::Public))
@@ -121,7 +148,7 @@ impl ServerHandler for AgentScreen {
                         if error.code != "unavailable"
                             && self.control.ended_with_app(id as u64) =>
                     {
-                        tools::ended_with_app(id)
+                        tools::ended_with_app(id, &self.control.capabilities())
                     }
                     _ => error,
                 }
@@ -178,7 +205,7 @@ mod tests {
 
     #[test]
     fn instructions_name_the_tasks_and_the_commands_they_replace() {
-        let instructions = INSTRUCTIONS.join(" ");
+        let macos = instructions_for(&Capabilities::macos());
         for words in [
             "web page",
             "screenshot",
@@ -186,7 +213,14 @@ mod tests {
             "AppleScript",
             "screencapture",
         ] {
-            assert!(instructions.contains(words), "{words}");
+            assert!(macos.contains(words), "{words}");
         }
+        let linux = instructions_for(&Capabilities::linux());
+        for words in ["web page", "screenshot", "launch_app", "ctrl+c", "ctrl+v"] {
+            assert!(linux.contains(words), "{words}");
+        }
+        assert!(!linux.contains("open -a"));
+        assert!(!linux.contains("AppleScript"));
+        assert!(!linux.contains("input_queue"));
     }
 }
