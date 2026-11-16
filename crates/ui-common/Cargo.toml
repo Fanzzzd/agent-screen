@@ -1,0 +1,11 @@
+[package]
+name = "agent-screen-ui-common"
+version = "0.1.37"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Cross-platform pure-GPUI components shared between macOS and Linux: theme, icons, bilingual i18n, Agent Pointer overlay, Help Card layout, and IME ReplyField."
+
+[dependencies]
+agent-screen-model = { path = "../model" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c83abe7d0e060de08db386fbf86f7e95bfe6cb09", default-features = false, features = ["font-kit"] }

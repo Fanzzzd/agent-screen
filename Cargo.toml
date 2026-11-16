@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/macos", "apps/linux", "crates/app-core", "crates/model", "crates/mcp", "crates/colorsync", "tests/e2e", "tests/linux-e2e"]
+members = ["apps/macos", "apps/linux", "crates/app-core", "crates/ui-common", "crates/model", "crates/mcp", "crates/colorsync", "tests/e2e", "tests/linux-e2e"]
 # Zed's code, patched in below; linted upstream, not here.
 exclude = ["vendor", "docs/prototypes/linux-compositor-spike"]
 

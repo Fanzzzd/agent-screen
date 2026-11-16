@@ -551,24 +551,24 @@ impl DisplayManager for SwayDisplayManager {
         Box::pin(async move {
             let base_dir = self.displays_root.join(format!("d{}", spec.id));
             let _ = std::fs::remove_dir_all(&base_dir);
-            let runtime_dir = base_dir.join("runtime");
+            let runtime_dir = base_dir.join("rt");
             std::fs::create_dir_all(&runtime_dir).map_err(|e| PortError::failed(e.to_string()))?;
             set_mode_0700(&base_dir)?;
             set_mode_0700(&runtime_dir)?;
 
-            let session_bus_socket = runtime_dir.join("session-bus.sock");
+            let session_bus_socket = runtime_dir.join("sbus.sock");
             let session_bus_conf = base_dir.join("session-dbus.conf");
             write_isolated_dbus_config(&session_bus_conf, &session_bus_socket)
                 .map_err(|e| PortError::failed(e.to_string()))?;
             let session_bus_address = format!("unix:path={}", session_bus_socket.display());
 
-            let atspi_bus_socket = runtime_dir.join("atspi-bus.sock");
+            let atspi_bus_socket = runtime_dir.join("abus.sock");
             let atspi_bus_conf = base_dir.join("atspi-dbus.conf");
             write_isolated_dbus_config(&atspi_bus_conf, &atspi_bus_socket)
                 .map_err(|e| PortError::failed(e.to_string()))?;
             let atspi_bus_address = format!("unix:path={}", atspi_bus_socket.display());
 
-            let sway_socket = runtime_dir.join("sway-ipc.sock");
+            let sway_socket = runtime_dir.join("sway.sock");
             let ready_file = runtime_dir.join("sway-ready.env");
             let sway_cfg = base_dir.join("sway.cfg");
             std::fs::write(

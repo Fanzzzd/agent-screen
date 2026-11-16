@@ -60,6 +60,9 @@ impl McpStdioClient {
         let bin = agent_screen_bin();
         let mut cmd = Command::new(&bin);
         cmd.arg("mcp")
+            .env("AGENTSCREEN_HEADLESS", "1")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
             .env("XDG_RUNTIME_DIR", xdg_runtime_dir)
             .env("XDG_STATE_HOME", state_home)
             .env("AGENTSCREEN_INSTANCE", instance)
@@ -134,6 +137,38 @@ impl McpStdioClient {
 
     pub fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
         self.call_tool_with_session(name, arguments, "e2e-session-main")
+    }
+
+    pub fn send_tool_call(&mut self, name: &str, arguments: Value) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "_meta": { "session_id": "e2e-session-main" }
+            }
+        });
+        writeln!(self.stdin, "{msg}")?;
+        self.stdin.flush()?;
+        Ok(id)
+    }
+
+    pub fn read_tool_reply(&mut self, expected_id: u64) -> Result<Value> {
+        let mut line = String::new();
+        let n = self.stdout.read_line(&mut line)?;
+        if n == 0 {
+            bail!("MCP server closed stdout waiting for reply {expected_id}");
+        }
+        let resp: Value = serde_json::from_str(line.trim_end())?;
+        assert_eq!(resp["id"].as_u64(), Some(expected_id));
+        if let Some(err) = resp.get("error") {
+            bail!("MCP JSON-RPC error: {err}");
+        }
+        Ok(resp["result"].clone())
     }
 
     pub fn call_tool_with_session(
@@ -302,6 +337,14 @@ impl SimulatedHostSway {
         bail!("host GTK4 window did not gain focus on simulated host sway")
     }
 
+    pub fn wayland_display_name(&self) -> String {
+        self.wayland_socket
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wayland-1")
+            .to_string()
+    }
+
     pub fn focused_window_title(&self) -> Option<String> {
         let out = Command::new("swaymsg")
             .arg("-s")
@@ -311,6 +354,16 @@ impl SimulatedHostSway {
             .ok()?;
         let tree: Value = serde_json::from_slice(&out.stdout).ok()?;
         find_focused_title(&tree)
+    }
+
+    pub fn sway_tree(&self) -> Option<Value> {
+        let out = Command::new("swaymsg")
+            .arg("-s")
+            .arg(&self.sway_socket)
+            .args(["-t", "get_tree"])
+            .output()
+            .ok()?;
+        serde_json::from_slice(&out.stdout).ok()
     }
 }
 

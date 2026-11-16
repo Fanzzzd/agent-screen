@@ -624,6 +624,7 @@ The control socket accepts these methods in debug builds. `AGENTSCREEN_DEBUG=1` 
 | `assist-screen`, `assist-ax` | Open the Screen Recording or Accessibility pane and its helper. |
 | `assist-preview`, `assist-preview-unlisted`, `assist-hide` | Show the helper preview, preview an app absent from the permission list, or hide the helper. |
 | `connect`, `wallpaper`, `quit` | Run Connect Claude Code and Codex, open Settings' wallpaper picker, or quit. |
+| `status-window`, `keep-review` | Linux only: open the compact GNOME fallback status window, or mark a Review Display kept open (`displayId`). |
 | `stage` | Select the test display that stands in for the user's screen. `displayId` 0 clears the selection. |
 | `userStage` | Supply the selected stage's user-display role to window ownership rules. Only debug-assertion builds compile this surface. |
 

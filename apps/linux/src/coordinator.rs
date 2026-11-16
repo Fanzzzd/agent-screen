@@ -13,10 +13,10 @@ use agent_screen_app_core::server::{ControlError, Reply, RequestHandler};
 use agent_screen_app_core::web_preview::WebPreviewServer;
 use agent_screen_model::keychord::KeyChord;
 use agent_screen_model::model::{
-    ControlAsk, DisplayId, Displays, Disposition, EndReason, Origin, Owner, Rect, Wait, help_steps,
-    lowest_free_serial, shot_scale,
+    AgentPointer, ControlAsk, DisplayId, Displays, Disposition, EndReason, Origin, Owner, Rect,
+    Wait, help_steps, lowest_free_serial, shot_scale,
 };
-use agent_screen_model::request::{Answer, HelpAsked, Kind, Resolution, Woken};
+use agent_screen_model::request::{Answer, Ask, HelpAsked, Kind, RequestId, Resolution, Woken};
 use agent_screen_model::session::Orphans;
 use agent_screen_model::tree::Scope as TreeScope;
 use agent_screen_model::watch;
@@ -35,9 +35,61 @@ struct State {
     /// Surviving displays recovered on daemon startup that await reattachment
     /// by their original `sessionKey` or `adoptGroups` (or user review).
     surviving: BTreeMap<DisplayId, SurvivingEntry>,
+    /// Review Displays the user explicitly chose to keep open (ADR 0020).
+    kept_reviews: BTreeSet<DisplayId>,
     conn_sessions: ConnectionSessions,
     conn_last_session: HashMap<u64, String>,
     last_agent_client: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiHelpSnapshot {
+    pub request_id: RequestId,
+    pub reason: String,
+    pub steps: Vec<String>,
+    pub answers: bool,
+    pub put_off: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UiControlSnapshot {
+    pub request_id: RequestId,
+    pub reason: String,
+}
+
+#[derive(Clone)]
+pub struct UiDisplaySnapshot {
+    pub id: DisplayId,
+    pub label: String,
+    pub agent_name: String,
+    pub width: u32,
+    pub height: u32,
+    pub takeover: bool,
+    pub ended: bool,
+    pub kept_review: bool,
+    pub pointer: Option<AgentPointer>,
+    pub help: Option<UiHelpSnapshot>,
+    pub control_req: Option<UiControlSnapshot>,
+    pub handle: Arc<dyn Display>,
+}
+
+pub trait UiControlBridge: Send + Sync {
+    fn on_attention_requested(&self, display_id: DisplayId, title: String, body: String);
+    fn debug_show<'a>(
+        &'a self,
+        params: Map<String, Value>,
+    ) -> BoxFuture<'a, Result<Value, ControlError>>;
+    fn debug_viewer<'a>(
+        &'a self,
+        display_id: DisplayId,
+    ) -> BoxFuture<'a, Result<Value, ControlError>>;
+    fn debug_viewer_input<'a>(
+        &'a self,
+        params: Map<String, Value>,
+    ) -> BoxFuture<'a, Result<Value, ControlError>>;
+    fn debug_card(&self) -> BoxFuture<'_, Result<Value, ControlError>>;
+    fn debug_icon(&self) -> BoxFuture<'_, Result<Value, ControlError>>;
+    fn request_quit(&self);
 }
 
 struct SurvivingEntry {
@@ -53,6 +105,8 @@ pub struct Coordinator {
     web: Arc<WebPreviewServer>,
     quit: Arc<Notify>,
     started_at: Instant,
+    tokio_rt: tokio::runtime::Handle,
+    ui_bridge: Mutex<Option<Arc<dyn UiControlBridge>>>,
     state: Mutex<State>,
     waits: Mutex<HashMap<(u64, u64), tokio::sync::oneshot::Sender<()>>>,
     create_lock: tokio::sync::Mutex<()>,
@@ -85,9 +139,12 @@ impl Coordinator {
             web,
             quit,
             started_at: Instant::now(),
+            tokio_rt: tokio::runtime::Handle::current(),
+            ui_bridge: Mutex::new(None),
             state: Mutex::new(State {
                 displays: Displays::default(),
                 surviving,
+                kept_reviews: BTreeSet::new(),
                 conn_sessions: ConnectionSessions::new(),
                 conn_last_session: HashMap::new(),
                 last_agent_client: None,
@@ -695,13 +752,18 @@ impl Coordinator {
                 };
                 let steps = help_steps(steps).map_err(ControlError::invalid)?;
                 let answers = p.bool("answers");
-                let asked = self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .displays
-                    .request_help(id, reason, steps, answers);
-                Ok(match asked {
+                let asked = {
+                    let mut st = self.state.lock().unwrap();
+                    let label = st.displays.get(id).map(|d| d.label()).unwrap_or_default();
+                    let res = st.displays.request_help(id, reason.clone(), steps, answers);
+                    (label, res)
+                };
+                if matches!(asked.1, Some(HelpAsked::Opened(_)))
+                    && let Some(ui) = self.ui_bridge.lock().unwrap().clone()
+                {
+                    ui.on_attention_requested(id, asked.0, reason);
+                }
+                Ok(match asked.1 {
                     Some(HelpAsked::Answered(woken)) => json!({ "answered": woken.to_json(false) }),
                     Some(HelpAsked::Opened(req_id)) => json!({ "requestId": req_id }),
                     None => json!({ "requestId": null }),
@@ -742,12 +804,17 @@ impl Coordinator {
                     .string("reason")
                     .filter(|r| !r.is_empty())
                     .ok_or_else(|| ControlError::invalid("reason is required"))?;
-                let asked = self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .displays
-                    .request_control(id, reason);
+                let (label, asked) = {
+                    let mut st = self.state.lock().unwrap();
+                    let label = st.displays.get(id).map(|d| d.label()).unwrap_or_default();
+                    let res = st.displays.request_control(id, reason.clone());
+                    (label, res)
+                };
+                if asked == ControlAsk::Asked
+                    && let Some(ui) = self.ui_bridge.lock().unwrap().clone()
+                {
+                    ui.on_attention_requested(id, label, reason);
+                }
                 Ok(json!({
                     "requested": asked != ControlAsk::NotNeeded,
                     "alreadyAsked": asked == ControlAsk::AlreadyAsked,
@@ -1042,28 +1109,49 @@ impl Coordinator {
             }
             "debugDismissDisplay" => {
                 let id = p.require_display_id()?;
-                let removed = {
-                    let mut st = self.state.lock().unwrap();
-                    st.displays
-                        .remove(id)
-                        .map(|d| d.handle)
-                        .or_else(|| st.surviving.remove(&id).map(|s| s.display))
-                };
-                self.web.expire_display(id);
-                self.clipboard_bridge.remove_display(id);
-                if let Some(ax) = &self.access {
-                    ax.remove_display(id);
-                }
-                if let Some(h) = removed {
-                    let _ = h.shutdown().await;
-                }
+                self.ui_dismiss_display(id).await;
                 Ok(json!({ "dismissed": true }))
+            }
+            "debugShow" => {
+                let ui = self.ui_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    ControlError::failed("GUI shell is not active (headless mode)")
+                })?;
+                ui.debug_show(p.0.clone()).await
+            }
+            "debugViewer" => {
+                let id = p.require_display_id()?;
+                let ui = self.ui_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    ControlError::failed("GUI shell is not active (headless mode)")
+                })?;
+                ui.debug_viewer(id).await
+            }
+            "debugViewerInput" => {
+                let ui = self.ui_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    ControlError::failed("GUI shell is not active (headless mode)")
+                })?;
+                ui.debug_viewer_input(p.0.clone()).await
+            }
+            "debugCard" => {
+                let ui = self.ui_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    ControlError::failed("GUI shell is not active (headless mode)")
+                })?;
+                ui.debug_card().await
+            }
+            "debugIcon" => {
+                let ui = self.ui_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    ControlError::failed("GUI shell is not active (headless mode)")
+                })?;
+                ui.debug_icon().await
             }
             "debugQuit" => {
                 let quit = self.quit.clone();
+                let ui = self.ui_bridge.lock().unwrap().clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                     quit.notify_waiters();
+                    if let Some(ui) = ui {
+                        ui.request_quit();
+                    }
                 });
                 Ok(json!({}))
             }
@@ -1573,6 +1661,222 @@ impl Coordinator {
             .unwrap()
             .displays
             .point(id, pt.0, pt.1, click);
+    }
+
+    pub fn attach_ui_bridge(&self, bridge: Arc<dyn UiControlBridge>) {
+        *self.ui_bridge.lock().unwrap() = Some(bridge);
+    }
+
+    pub fn tokio_handle(&self) -> tokio::runtime::Handle {
+        self.tokio_rt.clone()
+    }
+
+    pub fn ui_snapshots(&self) -> Vec<UiDisplaySnapshot> {
+        let st = self.state.lock().unwrap();
+        let mut out = Vec::new();
+        for id in st.displays.of_all_ids() {
+            if let Some(snap) = Self::snapshot_from_state(&st, id) {
+                out.push(snap);
+            }
+        }
+        out
+    }
+
+    pub fn ui_snapshot_of(&self, id: DisplayId) -> Option<UiDisplaySnapshot> {
+        let st = self.state.lock().unwrap();
+        Self::snapshot_from_state(&st, id)
+    }
+
+    fn snapshot_from_state(st: &State, id: DisplayId) -> Option<UiDisplaySnapshot> {
+        if let Some(d) = st.displays.get(id) {
+            let m = d.handle.metrics();
+            let help = d.requests.get(Kind::Help).and_then(|req| match &req.ask {
+                Ask::Help {
+                    reason,
+                    steps,
+                    answers,
+                } => Some(UiHelpSnapshot {
+                    request_id: req.id,
+                    reason: reason.clone(),
+                    steps: steps.clone(),
+                    answers: *answers,
+                    put_off: req.put_off,
+                }),
+                _ => None,
+            });
+            let control_req = d
+                .requests
+                .get(Kind::Control)
+                .and_then(|req| match &req.ask {
+                    Ask::Control { reason } => Some(UiControlSnapshot {
+                        request_id: req.id,
+                        reason: reason.clone(),
+                    }),
+                    _ => None,
+                });
+            return Some(UiDisplaySnapshot {
+                id,
+                label: d.label(),
+                agent_name: d.agent_name().to_string(),
+                width: m.width,
+                height: m.height,
+                takeover: d.takeover,
+                ended: d.is_ended(),
+                kept_review: st.kept_reviews.contains(&id),
+                pointer: d.pointer,
+                help,
+                control_req,
+                handle: d.handle.clone(),
+            });
+        }
+        if let Some(surv) = st.surviving.get(&id) {
+            return Some(UiDisplaySnapshot {
+                id,
+                label: format!("{} · {}", surv.spec.client, surv.spec.title),
+                agent_name: surv.spec.client.clone(),
+                width: surv.spec.width,
+                height: surv.spec.height,
+                takeover: false,
+                ended: true,
+                kept_review: st.kept_reviews.contains(&id),
+                pointer: None,
+                help: None,
+                control_req: None,
+                handle: surv.display.clone(),
+            });
+        }
+        None
+    }
+
+    pub fn ui_set_takeover(&self, id: DisplayId, active: bool) -> bool {
+        let changed = {
+            let mut st = self.state.lock().unwrap();
+            if active {
+                !st.displays.begin_takeover(id).is_empty()
+            } else {
+                !st.displays.end_takeover(id).is_empty()
+            }
+        };
+        if !active {
+            self.clipboard_bridge.disconnect(id);
+        }
+        changed
+    }
+
+    pub fn ui_answer_help(
+        &self,
+        id: DisplayId,
+        request_id: Option<RequestId>,
+        answer: Answer,
+    ) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        st.displays
+            .answer(id, Kind::Help, request_id, answer)
+            .map(|_| ())
+            .map_err(|e| e.message().to_string())
+    }
+
+    pub fn ui_put_off_help(&self, id: DisplayId) -> bool {
+        self.state.lock().unwrap().displays.put_off_help(id)
+    }
+
+    pub fn ui_answer_control(
+        &self,
+        id: DisplayId,
+        request_id: Option<RequestId>,
+        let_continue: bool,
+    ) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        let answer = if let_continue {
+            Answer::Continue
+        } else {
+            Answer::Keep
+        };
+        st.displays
+            .answer(id, Kind::Control, request_id, answer)
+            .map(|_| ())
+            .map_err(|e| e.message().to_string())
+    }
+
+    pub fn ui_keep_review_display(&self, id: DisplayId) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.displays.get(id).is_some_and(|d| d.is_ended()) || st.surviving.contains_key(&id) {
+            st.kept_reviews.insert(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn ui_dismiss_display(&self, id: DisplayId) {
+        let removed = {
+            let mut st = self.state.lock().unwrap();
+            st.kept_reviews.remove(&id);
+            st.displays
+                .remove(id)
+                .map(|d| d.handle)
+                .or_else(|| st.surviving.remove(&id).map(|s| s.display))
+        };
+        self.web.expire_display(id);
+        self.clipboard_bridge.remove_display(id);
+        if let Some(ax) = &self.access {
+            ax.remove_display(id);
+        }
+        if let Some(h) = removed {
+            let _ = h.shutdown().await;
+        }
+    }
+
+    pub fn ui_set_viewer_focused(&self, id: DisplayId, focused: bool) {
+        self.clipboard_bridge.set_viewer_focused(id, focused);
+    }
+
+    pub async fn ui_sync_host_clipboard(&self, id: DisplayId, text: String) -> bool {
+        let (Some(handle), takeover) = ({
+            let st = self.state.lock().unwrap();
+            let d = st.displays.get(id);
+            (d.map(|x| x.handle.clone()), d.is_some_and(|x| x.takeover))
+        }) else {
+            return false;
+        };
+        self.clipboard_bridge
+            .sync_host_to_display(handle.as_ref(), takeover, ClipboardPayload::Text(text))
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn ui_pull_display_clipboard(&self, id: DisplayId) -> Option<String> {
+        let (Some(handle), takeover) = ({
+            let st = self.state.lock().unwrap();
+            let d = st.displays.get(id);
+            (d.map(|x| x.handle.clone()), d.is_some_and(|x| x.takeover))
+        }) else {
+            return None;
+        };
+        match self
+            .clipboard_bridge
+            .sync_display_to_host(handle.as_ref(), takeover)
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(ClipboardPayload::Text(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub async fn ui_focus_secrecy(
+        &self,
+        id: DisplayId,
+        at: Option<(f64, f64)>,
+    ) -> agent_screen_model::viewer_keys::Secrecy {
+        let Ok(handle) = self.find_handle_any(id) else {
+            return agent_screen_model::viewer_keys::Secrecy::Unknown;
+        };
+        let Some(ax) = &self.access else {
+            return agent_screen_model::viewer_keys::Secrecy::Open;
+        };
+        ax.focus_secrecy(handle.as_ref(), at).await.into()
     }
 }
 

@@ -14,6 +14,8 @@ mod launcher;
 #[cfg(target_os = "linux")]
 mod sway_display;
 #[cfg(target_os = "linux")]
+mod ui;
+#[cfg(target_os = "linux")]
 mod wayland_worker;
 
 #[cfg(not(target_os = "linux"))]
@@ -90,6 +92,9 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(target_os = "linux")]
 fn run_daemon() -> anyhow::Result<()> {
+    if ui::should_run_gui() {
+        return ui::run_gui_daemon();
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
