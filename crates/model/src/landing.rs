@@ -345,6 +345,95 @@ pub fn arrangement_key(displays: &[(String, (u32, u32))]) -> String {
     words.join(" ")
 }
 
+/// `arrangement_key` of the displays online `now` (id, UUID, size), each
+/// display that was online `before` (id, size) at its size then. A user
+/// display mirroring a new one runs at the new one's size meanwhile: this
+/// is the key of the set as it is once the mirror is off.
+pub fn arrangement_key_before(
+    now: &[(u32, String, (u32, u32))],
+    before: &[(u32, (u32, u32))],
+) -> String {
+    let displays: Vec<(String, (u32, u32))> = now
+        .iter()
+        .map(|(id, uuid, size)| {
+            let size = before
+                .iter()
+                .find(|(b, _)| b == id)
+                .map_or(*size, |&(_, s)| s);
+            (uuid.clone(), size)
+        })
+        .collect();
+    arrangement_key(&displays)
+}
+
+/// A user display as it was before Agent Screen made a display.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct UserBefore {
+    pub id: u32,
+    pub origin: (f64, f64),
+    /// The display it mirrored, by the user's choice: a projector showing
+    /// the built-in display. None when it mirrored none.
+    pub mirrors: Option<u32>,
+}
+
+/// One display configuration that undoes what a new display's arrival did
+/// to the user's displays (`unmirror_plan`).
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct UnmirrorPlan {
+    /// Displays to take out of their mirror set.
+    pub unmirror: Vec<u32>,
+    /// User mirrors to set again, (display, the display it mirrors).
+    pub remirror: Vec<(u32, u32)>,
+    /// User displays to put back at their earlier origins.
+    pub origins: Vec<(u32, (f64, f64))>,
+    /// User displays to give back their earlier mode.
+    pub modes: Vec<u32>,
+}
+
+/// What to configure once new displays `new` landed on the user's screen,
+/// from the user displays `before` and what each online display mirrors
+/// `now` (display, master). Only mirrors a new display is in come apart:
+/// the new displays, and the displays mirroring one. A mirror the user
+/// chose before stays, set again where macOS moved it to a new display.
+/// A display mirroring another shares that one's origin and mode, so only
+/// displays that mirrored none before get theirs back.
+pub fn unmirror_plan(before: &[UserBefore], now: &[(u32, u32)], new: &[u32]) -> UnmirrorPlan {
+    let master_now = |d: u32| now.iter().find(|&&(s, _)| s == d).map(|&(_, m)| m);
+    let mut plan = UnmirrorPlan::default();
+    for u in before {
+        match u.mirrors {
+            Some(m) if before.iter().any(|b| b.id == m) => {
+                if master_now(u.id) != Some(m) {
+                    plan.remirror.push((u.id, m));
+                }
+            }
+            Some(_) => {}
+            None => {
+                if master_now(u.id).is_some_and(|m| new.contains(&m)) {
+                    plan.unmirror.push(u.id);
+                }
+                plan.origins.push((u.id, u.origin));
+                plan.modes.push(u.id);
+            }
+        }
+    }
+    for &d in new {
+        if !plan.unmirror.contains(&d) {
+            plan.unmirror.push(d);
+        }
+    }
+    // Others' displays macOS put under a new one.
+    for &(d, m) in now {
+        if new.contains(&m)
+            && !plan.unmirror.contains(&d)
+            && !plan.remirror.iter().any(|&(r, _)| r == d)
+        {
+            plan.unmirror.push(d);
+        }
+    }
+    plan
+}
+
 /// What Agent Screen does with a new display that landed on the user's
 /// screen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1077,5 +1166,85 @@ mod tests {
             None
         );
         assert_eq!(StoredSets::from_json(&serde_json::json!({})), None);
+    }
+
+    fn user(id: u32, x: f64, mirrors: Option<u32>) -> UserBefore {
+        UserBefore {
+            id,
+            origin: (x, 0.),
+            mirrors,
+        }
+    }
+
+    /// 2026-11-18 09:58:16: the built-in display (1) mirrored new display
+    /// 0x40, which macOS made main.
+    #[test]
+    fn a_built_in_display_mirroring_a_new_one_comes_back_with_its_mode() {
+        let plan = unmirror_plan(&[user(1, 0., None)], &[(1, 0x40)], &[0x40]);
+        assert_eq!(
+            plan,
+            UnmirrorPlan {
+                unmirror: vec![1, 0x40],
+                remirror: vec![],
+                origins: vec![(1, (0., 0.))],
+                modes: vec![1],
+            }
+        );
+    }
+
+    /// The user mirrors the built-in display (1) to a projector (3). macOS
+    /// adds new display 9 to that mirror set as its master: only 9 comes
+    /// out, 3 mirrors 1 again, and 3 keeps 1's origin and mode.
+    #[test]
+    fn a_mirror_the_user_chose_stays() {
+        let before = [user(1, 0., None), user(3, 0., Some(1))];
+        let plan = unmirror_plan(&before, &[(1, 9), (3, 9)], &[9]);
+        assert_eq!(plan.unmirror, vec![1, 9]);
+        assert_eq!(plan.remirror, vec![(3, 1)]);
+        assert_eq!(plan.origins, vec![(1, (0., 0.))]);
+        assert_eq!(plan.modes, vec![1]);
+        // A new display that only mirrors the built-in leaves the user's
+        // pair as it is.
+        let plan = unmirror_plan(&before, &[(3, 1), (9, 1)], &[9]);
+        assert_eq!(plan.unmirror, vec![9]);
+        assert!(plan.remirror.is_empty());
+        assert!(!plan.unmirror.contains(&1) && !plan.unmirror.contains(&3));
+    }
+
+    /// The mode a mirror leaves the built-in display at (1280x800 for new
+    /// display 9) is never what the plan keeps: every user display that
+    /// mirrored none gets its earlier mode back, mirrored or not now.
+    #[test]
+    fn every_user_display_of_its_own_gets_its_mode_back() {
+        let before = [user(1, 0., None), user(2, 1728., None)];
+        let plan = unmirror_plan(&before, &[(1, 9)], &[9]);
+        assert_eq!(plan.modes, vec![1, 2]);
+        assert_eq!(plan.origins, vec![(1, (0., 0.)), (2, (1728., 0.))]);
+        assert_eq!(plan.unmirror, vec![1, 9]);
+    }
+
+    /// The key Agent Screen decides by while the built-in display mirrors
+    /// the new one is the key it stores once the mirror is off.
+    #[test]
+    fn the_key_decided_while_mirrored_is_the_key_stored_after() {
+        let before = [(1, (1728, 1117)), (6, (2560, 1440))];
+        let mirrored = [
+            (1, "builtin".to_string(), (1280, 800)),
+            (6, "closet".to_string(), (2560, 1440)),
+            (9, "serial10001".to_string(), (1280, 800)),
+        ];
+        let unmirrored = [
+            (1, "builtin".to_string(), (1728, 1117)),
+            (6, "closet".to_string(), (2560, 1440)),
+            (9, "serial10001".to_string(), (1280, 800)),
+        ];
+        let decided = arrangement_key_before(&mirrored, &before);
+        assert_eq!(decided, arrangement_key_before(&unmirrored, &[]));
+        assert_eq!(
+            decided,
+            "builtin@1728x1117 closet@2560x1440 serial10001@1280x800"
+        );
+        // Read without the sizes from before, the mirrored set is another.
+        assert_ne!(arrangement_key_before(&mirrored, &[]), decided);
     }
 }

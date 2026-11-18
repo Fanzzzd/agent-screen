@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayIsInMirrorSet(display: u32) -> u32;
+    fn CGDisplayMirrorsDisplay(display: u32) -> u32;
     fn CGDisplayRegisterReconfigurationCallback(
         callback: extern "C" fn(u32, u32, *mut std::ffi::c_void),
         user_info: *mut std::ffi::c_void,
@@ -88,6 +89,13 @@ pub fn unit_twin(id: DisplayId) -> Option<DisplayId> {
 /// or another mirrors it.
 pub fn in_mirror_set(id: DisplayId) -> bool {
     unsafe { CGDisplayIsInMirrorSet(id) != 0 }
+}
+
+/// The display `id` mirrors, None when it mirrors none (it may be the
+/// master of a mirror set).
+pub fn mirrors(id: DisplayId) -> Option<DisplayId> {
+    let master = unsafe { CGDisplayMirrorsDisplay(id) };
+    (master != 0).then_some(master)
 }
 
 /// Whether `id` is among the online displays.

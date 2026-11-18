@@ -4,7 +4,7 @@
 use super::cg;
 use agent_screen_model::arrangement;
 use agent_screen_model::landing::{
-    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets,
+    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets, UserBefore,
 };
 use objc2::msg_send;
 use objc2::rc::Retained;
@@ -648,27 +648,67 @@ fn release_if_on_user(
 /// it had then: a user display mirroring a new one runs at the new one's
 /// size meanwhile. None when a display has no identity.
 fn arrangement_key(before: &[arrangement::Screen]) -> Option<String> {
-    let displays = cg::online()
+    let now = cg::online()
         .into_iter()
         .map(|d| {
-            let rect = before
-                .iter()
-                .find(|s| s.id == d)
-                .map_or_else(|| cg::display_bounds(d), |s| s.rect);
+            let b = cg::display_bounds(d);
             let uuid = super::colorsync::uuid_of(d)?;
-            Some((uuid, (rect.width as u32, rect.height as u32)))
+            Some((d, uuid, (b.width as u32, b.height as u32)))
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(landing::arrangement_key(&displays))
+    let sizes: Vec<(u32, (u32, u32))> = before
+        .iter()
+        .map(|s| (s.id, (s.rect.width as u32, s.rect.height as u32)))
+        .collect();
+    Some(landing::arrangement_key_before(&now, &sizes))
+}
+
+/// A display mode CoreGraphics gave, released with this.
+struct Mode(*const c_void);
+
+// Only the display worker touches it; CoreGraphics modes are immutable.
+unsafe impl Send for Mode {}
+
+impl Drop for Mode {
+    fn drop(&mut self) {
+        unsafe { CGDisplayModeRelease(self.0) };
+    }
+}
+
+/// The user's displays before the display worker's current creation or
+/// reuse: origin, the display each mirrored, and mode
+/// (`snapshot_users`). `unmirror` puts them back as they were.
+static USERS_BEFORE: std::sync::Mutex<Vec<(UserBefore, Option<Mode>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Take `USERS_BEFORE` from the user displays among `before`.
+fn snapshot_users(before: &[arrangement::Screen]) {
+    let users = before
+        .iter()
+        .filter(|s| s.role == arrangement::Role::User)
+        .map(|s| {
+            let mode = unsafe { CGDisplayCopyDisplayMode(s.id) };
+            let user = UserBefore {
+                id: s.id,
+                origin: (s.rect.x, s.rect.y),
+                mirrors: cg::mirrors(s.id),
+            };
+            (user, (!mode.is_null()).then_some(Mode(mode)))
+        })
+        .collect();
+    *USERS_BEFORE.lock().unwrap_or_else(|e| e.into_inner()) = users;
 }
 
 /// New displays `new` of which one landed on the user's screen, with
-/// Agent Screen's displays `others` and the displays `before` them: turn
-/// every mirror they're in off, put the user's displays back, park `new`,
-/// in one change that WindowServer stores for this set of displays
+/// Agent Screen's displays `others` and the displays `before` them: take
+/// the new displays out of their mirror set, keep every mirror the user
+/// chose, give the user's displays back their origins and modes
+/// (`USERS_BEFORE`, `landing::unmirror_plan`) and park `new`, in one change
+/// that WindowServer stores for this set of displays
 /// (`landing::OnLanding::Unmirror`). True once every display in `new` is
-/// clear of the user's screen. False, changing nothing, for a set Agent
-/// Screen stored before and macOS mirrored anyway: the caller releases.
+/// clear of the user's screen. False for a set Agent Screen stored before
+/// and macOS mirrored anyway, a change WindowServer refused, or a mirror
+/// still on after 8 s: the caller releases.
 fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool {
     // A test's injected landing has no mirror to turn off: it takes the
     // release path.
@@ -695,11 +735,6 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
     }
     let started = std::time::Instant::now();
     let online = cg::online();
-    let user = |d: u32| {
-        before
-            .iter()
-            .any(|s| s.id == d && s.role == arrangement::Role::User)
-    };
     // The user's displays where they were, Agent Screen's others too; the
     // new ones wherever macOS put them, for the plan to park.
     let mut screens: Vec<arrangement::Screen> = before
@@ -718,33 +753,52 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         });
     }
     let parked = arrangement::plan(&screens);
-    let users: Vec<(u32, (f64, f64))> = before
+    let mirrors_now: Vec<(u32, u32)> = online
         .iter()
-        .filter(|s| user(s.id) && online.contains(&s.id))
-        .map(|s| (s.id, (s.rect.x, s.rect.y)))
+        .filter_map(|&d| cg::mirrors(d).map(|m| (d, m)))
         .collect();
-    // One change: the mirror off, the user's displays back, the new ones
-    // parked, stored for this set of displays. The next time the set
-    // comes, at these sizes, WindowServer applies it, not its default,
-    // which mirrors (#220). WindowServer had already stored the mirror
-    // for the set when it added the display; a change for the session
-    // only would leave that. Split in two, the user's screen came back no
-    // sooner (1.4 s for the session part alone).
+    let users = USERS_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
+    let plan = landing::unmirror_plan(
+        &users.iter().map(|(u, _)| *u).collect::<Vec<_>>(),
+        &mirrors_now,
+        new,
+    );
+    log::info!("displays {new:?}: unmirroring, mirrors {mirrors_now:?}, plan {plan:?}");
+    // One change: the new displays out of their mirror set, the user's own
+    // mirrors kept, the user's displays back at their origins and modes,
+    // the new ones parked, stored for this set of displays. The next time
+    // the set comes, at these sizes, WindowServer applies it, not its
+    // default, which mirrors (#220). WindowServer had already stored the
+    // mirror for the set when it added the display; a change for the
+    // session only would leave that. Split in two, the user's screen came
+    // back no sooner (1.4 s for the session part alone).
     let completed = unsafe {
         let mut config = std::ptr::null_mut();
         if CGBeginDisplayConfiguration(&mut config) != 0 {
             return false;
         }
-        for &d in &online {
-            if cg::in_mirror_set(d) && (user(d) || new.contains(&d)) {
-                CGConfigureDisplayMirrorOfDisplay(config, d, 0);
+        for &d in &plan.unmirror {
+            CGConfigureDisplayMirrorOfDisplay(config, d, 0);
+        }
+        for &(d, master) in &plan.remirror {
+            CGConfigureDisplayMirrorOfDisplay(config, d, master);
+        }
+        for &d in &plan.modes {
+            if let Some((_, Some(mode))) = users.iter().find(|(u, _)| u.id == d) {
+                CGConfigureDisplayWithDisplayMode(config, d, mode.0, std::ptr::null());
             }
         }
-        for &(d, (x, y)) in users.iter().chain(&parked) {
+        for &(d, (x, y)) in plan.origins.iter().chain(&parked) {
             CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
         }
         CGCompleteDisplayConfiguration(config, PERMANENTLY)
     };
+    drop(users);
+    // A refused change leaves the mirror on: release at once, as 0.1.39.
+    if completed != 0 {
+        log::warn!("displays {new:?}: unmirroring refused ({completed}); releasing");
+        return false;
+    }
     let stored_ms = started.elapsed().as_millis();
     let clear = || {
         new.iter().all(|&d| {
@@ -761,9 +815,7 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
     }
     let ms = started.elapsed().as_millis();
     if !clear() {
-        log::warn!(
-            "displays {new:?}: still on the user's screen {ms} ms after unmirroring (completed {completed})"
-        );
+        log::warn!("displays {new:?}: still on the user's screen {ms} ms after unmirroring");
         return false;
     }
     let stored = arrangement_key(&[]).unwrap_or(key);
@@ -920,6 +972,7 @@ pub async fn create_parked(
         }
         let before = origins();
         let before_screens = online_screens(&others);
+        snapshot_users(&before_screens);
         let online = cg::online().len();
         let previous_fillers = filler_ids();
         let made = VirtualDisplay::create(&name, width, height, serial, &others, &before_screens);
@@ -967,6 +1020,7 @@ pub async fn reuse_parked(
     configure(move || {
         let before = origins();
         let before_screens = online_screens(&others);
+        snapshot_users(&before_screens);
         if resize && !handle.resize(width, height) {
             crate::lifecycle::note("released", handle.id, "spare could not resize");
             return None;
