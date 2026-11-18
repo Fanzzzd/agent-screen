@@ -424,19 +424,27 @@ pub enum NotMade {
     Refused(String),
 }
 
-/// How this process's last new displays ended. Mirrors every instance
-/// recorded come from the shared file at each decision.
+/// How this process's last new displays ended. Mirrors this instance
+/// recorded before a restart come from its file at each decision.
 static GUARD: std::sync::Mutex<CreationGuard> = std::sync::Mutex::new(CreationGuard::new());
 
-/// `~/Library/Application Support/Agent Screen/bad-units.json`, one for
-/// every instance: the state it records is WindowServer's.
+/// `~/Library/Application Support/Agent Screen/bad-units.json`, or
+/// `bad-units-<instance>.json`: one per instance, so a test instance's
+/// refusal doesn't refuse the user's agents. Another instance's landing is
+/// unmirrored before it could refuse anything (`unmirror`).
 fn bad_units_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    std::path::Path::new(&home).join("Library/Application Support/Agent Screen/bad-units.json")
+    let name = match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("bad-units-{instance}.json"),
+        None => "bad-units.json".into(),
+    };
+    std::path::Path::new(&home)
+        .join("Library/Application Support/Agent Screen")
+        .join(name)
 }
 
-/// Run `job` on the shared file's record, holding an exclusive lock on
-/// `bad-units.lock` so instances don't write over each other. A record
+/// Run `job` on the instance's file's record, holding an exclusive lock
+/// on its `.lock` sibling. A record
 /// `job` returns replaces the file: written beside it, then renamed in.
 fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
     with_shared(
@@ -450,7 +458,8 @@ fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
 /// `~/Library/Application Support/Agent Screen/arrangements.json`, one for
 /// every instance: the arrangements it records are WindowServer's.
 fn stored_sets_path() -> std::path::PathBuf {
-    bad_units_path().with_file_name("arrangements.json")
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::Path::new(&home).join("Library/Application Support/Agent Screen/arrangements.json")
 }
 
 /// `with_bad_units` for the sets Agent Screen stored an arrangement for.
@@ -553,7 +562,7 @@ pub fn paused_by_mirror() -> bool {
 }
 
 /// The user's Allow New Displays: forget where displays landed on their
-/// screen, in every instance.
+/// screen, in this instance.
 pub fn allow_new_displays() {
     GUARD
         .lock()
@@ -579,9 +588,9 @@ pub fn debug_pause_new_displays() {
 }
 
 /// Why Agent Screen makes no new display now, for the agent: the last new
-/// display, this instance's or another's, landed on the user's screen
-/// with these displays online or this unit next, or parking failed twice.
-/// None while it may.
+/// display of this instance landed on the user's screen with these
+/// displays online or this unit next, or parking failed twice. None while
+/// it may.
 pub fn creation_refusal() -> Option<String> {
     let now = now();
     with_bad_units(|file| {
@@ -719,7 +728,7 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         log::warn!("displays {new:?}: a display has no identity; releasing");
         return false;
     };
-    let decision = with_stored_sets(|stored| match stored.on_landing(&key) {
+    let decision = with_stored_sets(|stored| match stored.on_landing(&key, wall()) {
         OnLanding::Release => {
             let mut stored = stored;
             stored.forget(&key);
@@ -729,7 +738,7 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
     });
     if decision == OnLanding::Release {
         crate::lifecycle::line(&format!(
-            "displays {new:?} landed on the user's screen although Agent Screen stored an arrangement for this set; releasing"
+            "displays {new:?} landed on the user's screen although Agent Screen stored this arrangement less than 30 min ago; releasing"
         ));
         return false;
     }

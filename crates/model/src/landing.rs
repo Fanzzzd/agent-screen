@@ -12,9 +12,12 @@
 //! arrangement is stored for the set: the user's screen flashes once per
 //! set and size, and the display stays (`OnLanding::Unmirror`).
 //!
-//! When unmirroring fails, or a set mirrors again after Agent Screen
-//! stored its arrangement, the display is released at once, as in 0.1.39.
-//! Agent Screen then makes no display while the same number of displays is
+//! WindowServer keeps one arrangement per set of displays, whatever their
+//! sizes: a set stored at another size since mirrors again, and is
+//! unmirrored and stored again like a new one. When unmirroring fails, or
+//! the same set at the same sizes mirrors again soon after Agent Screen
+//! stored it, the display is released at once, as in 0.1.39. That
+//! instance then makes no display while the same number of displays is
 //! online, or that would get the same unit number, in that login session,
 //! for 30 minutes or until the user allows it (`BadUnits`): every retry
 //! would resize the user's screen again.
@@ -119,9 +122,10 @@ pub const BAD_UNIT_SECS: u64 = 1800;
 
 /// Where displays landed on the user's screen in login session `session`:
 /// their unit numbers, and how many displays were online when each was
-/// made, each with the time it last happened. The state is WindowServer's:
-/// it outlived Agent Screen's restart on 2026-11-18, so the app keeps it in
-/// a file all instances share.
+/// made, each with the time it last happened. It outlived Agent Screen's
+/// restart on 2026-11-18, so the app keeps it in a file, one per instance:
+/// another instance's landing is unmirrored there before it could refuse
+/// anything, so a test instance's refusal doesn't refuse the user's agents.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct BadUnits {
     pub session: String,
@@ -256,8 +260,8 @@ pub const FAILURES_BEFORE_REFUSAL: u32 = 2;
 pub const FAILURE_PAUSE_SECS: u64 = 600;
 
 /// Whether Agent Screen may make another display, from how the last ones
-/// ended in this process. Mirrors other instances recorded come in as the
-/// shared file's `BadUnits` at each decision.
+/// ended in this process. Mirrors this instance recorded before a restart
+/// come in as its file's `BadUnits` at each decision.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct CreationGuard {
     bad: BadUnits,
@@ -332,16 +336,29 @@ impl CreationGuard {
     }
 }
 
-/// A set of displays as WindowServer keys a stored arrangement: each online
-/// display's identity (its UUID) with its size in points, sorted. A stored
-/// arrangement applies only while every display can run at its stored size
-/// ("validation: no available match for persisted mode" otherwise).
+/// An arrangement as WindowServer stores it: each online display's
+/// identity (its UUID) with its size in points, sorted. WindowServer keeps
+/// one arrangement per set of identities (`display_set`), the last one
+/// stored, and applies it only while every display can run at its stored
+/// size ("validation: no available match for persisted mode" otherwise).
 pub fn arrangement_key(displays: &[(String, (u32, u32))]) -> String {
     let mut words: Vec<String> = displays
         .iter()
         .map(|(uuid, (w, h))| format!("{uuid}@{w}x{h}"))
         .collect();
     words.sort();
+    words.join(" ")
+}
+
+/// The identities in `arrangement_key` `key`, without sizes: what
+/// WindowServer keys its stored arrangements by. On 2026-11-18 its 851
+/// stored arrangements had 851 different sets.
+pub fn display_set(key: &str) -> String {
+    let mut words: Vec<&str> = key
+        .split(' ')
+        .map(|w| w.rsplit_once('@').map_or(w, |(uuid, _)| uuid))
+        .collect();
+    words.sort_unstable();
     words.join(" ")
 }
 
@@ -444,90 +461,110 @@ pub enum OnLanding {
     /// default, so the same set at the same size lands parked next time.
     Unmirror,
     /// Release it at once and refuse new displays (`BadUnits`): Agent
-    /// Screen stored an extended arrangement for this set before, and
-    /// macOS mirrored it anyway.
+    /// Screen stored this very arrangement less than `FRESH_STORE_SECS`
+    /// ago, and macOS mirrored it anyway.
     Release,
 }
 
 /// Most sets `StoredSets` remembers; the oldest go first.
 pub const STORED_SETS_MAX: usize = 256;
 
-/// The sets (`arrangement_key`) for which Agent Screen stored an extended
-/// arrangement after macOS mirrored a new display, each with the time it
-/// did (seconds since 1970). WindowServer keeps stored arrangements across
-/// logins, so the app keeps this in a file all instances share.
+/// How long after Agent Screen stored an arrangement a mirror of that same
+/// arrangement means WindowServer doesn't apply it (`OnLanding::Release`).
+/// Later, something else has replaced it in between, the user's System
+/// Settings or another app, and it is stored again.
+pub const FRESH_STORE_SECS: u64 = BAD_UNIT_SECS;
+
+/// The arrangements (`arrangement_key`) Agent Screen stored after macOS
+/// mirrored a new display, one per set of displays (`display_set`) as
+/// WindowServer keeps them, each with the time it did (seconds since 1970).
+/// WindowServer keeps stored arrangements across logins, so the app keeps
+/// this in a file all instances share.
 ///
 /// Why: since 2026-11-17 17:05 this Mac's WindowServer gives a set it has
 /// no fitting arrangement for a default that mirrors the built-in display
 /// onto the new one ("Applying default configuration … is_mirror: 0x1").
 /// A set with one never mirrored: at 13:38 serial 3 came up parked at
-/// 1728,-2400, where it had been before.
+/// 1728,-2400, where it had been before. A set stored at another size
+/// since did: at 16:44 a 1280x800 display mirrored, its set stored at
+/// 1280x800 at 14:34, then at 1200x800 and 1152x800.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct StoredSets {
-    pub keys: std::collections::BTreeMap<String, u64>,
+    /// `display_set` → (`arrangement_key`, when stored).
+    pub sets: std::collections::BTreeMap<String, (String, u64)>,
 }
 
 impl StoredSets {
     pub const fn new() -> Self {
         Self {
-            keys: std::collections::BTreeMap::new(),
+            sets: std::collections::BTreeMap::new(),
         }
     }
 
-    /// Unmirror a set Agent Screen hasn't stored an arrangement for; one
-    /// it has and that mirrored again goes back to the 0.1.39 refusal.
-    pub fn on_landing(&self, key: &str) -> OnLanding {
-        if self.keys.contains_key(key) {
-            OnLanding::Release
-        } else {
-            OnLanding::Unmirror
+    /// At `now` (seconds since 1970): release a landing of arrangement
+    /// `key` only when Agent Screen stored that very arrangement less than
+    /// `FRESH_STORE_SECS` ago. Any other landing, a set stored at another
+    /// size since included, is unmirrored and stored like a new one.
+    pub fn on_landing(&self, key: &str, now: u64) -> OnLanding {
+        match self.sets.get(&display_set(key)) {
+            Some((stored, at)) if stored == key && now < at + FRESH_STORE_SECS => {
+                OnLanding::Release
+            }
+            _ => OnLanding::Unmirror,
         }
     }
 
-    /// Agent Screen stored an extended arrangement for `key` at `at`.
+    /// Agent Screen stored arrangement `key` at `at`, replacing what its
+    /// set had, as WindowServer does.
     pub fn stored(&mut self, key: &str, at: u64) {
-        self.keys.insert(key.to_string(), at);
-        while self.keys.len() > STORED_SETS_MAX {
+        self.sets.insert(display_set(key), (key.to_string(), at));
+        while self.sets.len() > STORED_SETS_MAX {
             let oldest = self
-                .keys
+                .sets
                 .iter()
-                .min_by_key(|&(k, &t)| (t, k.clone()))
-                .map(|(k, _)| k.clone());
+                .min_by_key(|&(set, &(_, t))| (t, set.clone()))
+                .map(|(set, _)| set.clone());
             match oldest {
-                Some(k) => self.keys.remove(&k),
+                Some(set) => self.sets.remove(&set),
                 None => break,
             };
         }
     }
 
-    /// `key` mirrored despite its stored arrangement, which the user may
-    /// have reset since. Forgotten, the next landing after the refusal
-    /// tries unmirroring again: at worst one flash per refusal, as 0.1.39.
+    /// `key`'s set mirrored right after Agent Screen stored it. Forgotten,
+    /// the next landing after the refusal tries unmirroring again: at worst
+    /// one flash per refusal, as 0.1.39.
     pub fn forget(&mut self, key: &str) {
-        self.keys.remove(key);
+        self.sets.remove(&display_set(key));
     }
 
     pub fn to_json(&self) -> serde_json::Value {
         let keys: Vec<serde_json::Value> = self
-            .keys
-            .iter()
-            .map(|(k, &t)| serde_json::json!([k, t]))
+            .sets
+            .values()
+            .map(|(k, t)| serde_json::json!([k, t]))
             .collect();
         serde_json::json!({ "stored": keys })
     }
 
-    /// None for anything but what `to_json` writes.
+    /// None for anything but what `to_json` writes. Of several
+    /// arrangements of one set, as 0.1.40 wrote them, the newest counts.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
-        let keys = value
-            .get("stored")?
-            .as_array()?
-            .iter()
-            .map(|pair| match pair.as_array()?.as_slice() {
-                [k, t] => Some((k.as_str()?.to_string(), t.as_u64()?)),
-                _ => None,
-            })
-            .collect::<Option<_>>()?;
-        Some(Self { keys })
+        let mut out = Self::new();
+        for pair in value.get("stored")?.as_array()? {
+            let (key, at) = match pair.as_array()?.as_slice() {
+                [k, t] => (k.as_str()?, t.as_u64()?),
+                _ => return None,
+            };
+            let newer = out
+                .sets
+                .get(&display_set(key))
+                .is_none_or(|&(_, t)| at >= t);
+            if newer {
+                out.sets.insert(display_set(key), (key.to_string(), at));
+            }
+        }
+        Some(out)
     }
 }
 
@@ -997,11 +1034,21 @@ mod tests {
         (w.parse().unwrap(), h.parse().unwrap())
     }
 
+    /// WindowServer's stored arrangements as its plist holds them: one per
+    /// set of displays, the last stored.
+    type WindowServerStore = std::collections::BTreeMap<String, String>;
+
+    fn store_of(keys: &[&str]) -> WindowServerStore {
+        keys.iter()
+            .map(|k| (display_set(k), k.to_string()))
+            .collect()
+    }
+
     /// WindowServer as the logs of 2026-11-17 and 2026-11-18 show it: a set
-    /// with a stored arrangement that fits gets it, and any other set gets
-    /// the default, which since 17:05 mirrors the built-in display.
-    fn windowserver_mirrors(store: &std::collections::BTreeSet<String>, key: &str) -> bool {
-        !store.contains(key)
+    /// whose stored arrangement fits gets it, and any other set gets the
+    /// default, which since 17:05 mirrors the built-in display.
+    fn windowserver_mirrors(store: &WindowServerStore, key: &str) -> bool {
+        store.get(&display_set(key)).map(String::as_str) != Some(key)
     }
 
     #[test]
@@ -1018,27 +1065,23 @@ mod tests {
         ]);
         assert_eq!(a, b);
         assert_eq!(a, "builtin@1728x1117 closet@2560x1440 serial1@1280x800");
-        // The same displays at another size are another stored arrangement.
+        // The same displays at another size are another arrangement of the
+        // same set, which WindowServer keeps one of.
         let resized = arrangement_key(&[
             ("builtin".into(), (1728, 1117)),
             ("serial1".into(), (1280, 1200)),
             ("closet".into(), (2560, 1440)),
         ]);
         assert_ne!(a, resized);
+        assert_eq!(display_set(&a), display_set(&resized));
+        assert_eq!(display_set(&a), "builtin closet serial1");
     }
 
-    /// Replays the creations of 2026-11-18 from 10:32 on against the
-    /// arrangements WindowServer had stored: each landed parked exactly when
-    /// its set had one (13:38, serial 3, at 1728,-2400), and the one that
-    /// didn't (13:56, serial 10001; its set was stored at 1728x1117) landed
-    /// on the built-in display. Under the new rule that one is unmirrored and
-    /// its arrangement stored, so the same call lands parked next time: one
-    /// flash for the set and size, never repeated.
     /// The creations of the logs against WindowServer's stored
     /// arrangements, under the new rule.
     struct Replay {
         /// WindowServer's stored arrangements.
-        store: std::collections::BTreeSet<String>,
+        store: WindowServerStore,
         /// Agent Screen's displays online: id, UUID and size.
         ours: Vec<(u32, String, (u32, u32))>,
         stored: StoredSets,
@@ -1062,11 +1105,16 @@ mod tests {
             let key = arrangement_key(&set);
             let mirrors = windowserver_mirrors(&self.store, &key);
             if mirrors {
-                assert_eq!(self.stored.on_landing(&key), OnLanding::Unmirror, "{line}");
+                let at = wall_of(line);
+                assert_eq!(
+                    self.stored.on_landing(&key, at),
+                    OnLanding::Unmirror,
+                    "{line}"
+                );
                 self.flashes.push(key.clone());
                 // Unmirrored, parked and stored permanently.
-                self.store.insert(key.clone());
-                self.stored.stored(&key, secs_of(line));
+                self.store.insert(display_set(&key), key.clone());
+                self.stored.stored(&key, at);
             } else {
                 self.parked_from_store += 1;
             }
@@ -1085,11 +1133,12 @@ mod tests {
     #[test]
     fn a_set_flashes_once_then_lands_parked_from_its_stored_arrangement() {
         let mut replay = Replay {
-            store: STORED_ARRANGEMENTS
-                .lines()
-                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                .map(str::to_string)
-                .collect(),
+            store: store_of(
+                &STORED_ARRANGEMENTS
+                    .lines()
+                    .filter(|l| !l.starts_with('#') && !l.is_empty())
+                    .collect::<Vec<_>>(),
+            ),
             ours: Vec::new(),
             stored: StoredSets::new(),
             flashes: Vec::new(),
@@ -1122,15 +1171,92 @@ mod tests {
         assert_eq!(replay.parked_from_store, 5);
     }
 
+    /// Seconds since 1970 of a log line's time, read as UTC: only the
+    /// differences count.
+    fn wall_of(line: &str) -> u64 {
+        let day: u64 = line[8..10].parse().unwrap();
+        day * 86_400 + secs_of(line)
+    }
+
+    /// The e2e instance's creations of 2026-11-18 from 14:34 to 16:44, with
+    /// the installed app's displays offline: one set of displays (built-in,
+    /// closet, serial 10001) at 1280x800, 1200x800, 1152x800, then 1280x800
+    /// again. WindowServer kept only the 1152x800 arrangement, so at 16:44
+    /// the 1280x800 display mirrored; 0.1.40 took that for its stored
+    /// arrangement failing, released it and refused new displays for 30
+    /// minutes. Now it is unmirrored and stored again, and kept.
+    const SIZES_LOG: &str = "\
+2026-11-18 14:34:51.729 created display=262 unit=6 at=0,0 size=1280x800 serial=10001
+2026-11-18 14:34:57.905 released display=262 unit=6 at=1728,-800 size=1280x800 quit
+2026-11-18 14:35:01.084 created display=263 unit=6 at=1728,-800 size=1280x800 serial=10001
+2026-11-18 14:35:03.419 released display=263 unit=6 at=1728,-800 size=1280x800 quit
+2026-11-18 14:39:21.362 created display=264 unit=6 at=0,0 size=1200x800 serial=10001
+2026-11-18 14:39:26.565 released display=264 unit=6 at=1728,-800 size=1200x800 quit
+2026-11-18 14:39:28.465 created display=265 unit=6 at=1728,-800 size=1200x800 serial=10001
+2026-11-18 14:39:30.765 released display=265 unit=6 at=1728,-800 size=1200x800 quit
+2026-11-18 14:42:52.186 created display=266 unit=6 at=0,0 size=1152x800 serial=10001
+2026-11-18 14:42:57.664 released display=266 unit=6 at=1728,-800 size=1152x800 quit
+2026-11-18 14:42:59.566 created display=267 unit=6 at=1728,-800 size=1152x800 serial=10001
+2026-11-18 14:43:01.814 released display=267 unit=6 at=1728,-800 size=1152x800 quit
+2026-11-18 16:44:53.036 created display=273 unit=6 at=0,0 size=1280x800 serial=10001
+";
+
     #[test]
-    fn a_stored_set_that_mirrors_again_goes_back_to_the_refusal() {
-        let key = "builtin@1728x1117 serial10001@1280x800 closet@2560x1440";
+    fn a_set_stored_at_another_size_since_is_unmirrored_again() {
+        let mut replay = Replay {
+            // As the plist held it before 14:34.
+            store: store_of(&["builtin@1728x1117 closet@2560x1440"]),
+            ours: Vec::new(),
+            stored: StoredSets::new(),
+            flashes: Vec::new(),
+            parked_from_store: 0,
+        };
+        let mirrored: Vec<bool> = SIZES_LOG
+            .lines()
+            .filter(|l| !l.contains(" released "))
+            .map(|l| {
+                // Each display was released before the next was made.
+                let mirrors = replay.line(l);
+                let id = field(l, "display=");
+                replay.ours.retain(|(d, _, _)| d.to_string() != id);
+                mirrors
+            })
+            .collect();
+        // Each new size flashed once, its repeat landed parked, and as on
+        // the Mac the 1280x800 display mirrored again at 16:44.
+        assert_eq!(mirrored, [true, false, true, false, true, false, true]);
+        assert_eq!(
+            replay.flashes.last().unwrap(),
+            "builtin@1728x1117 closet@2560x1440 serial10001@1280x800"
+        );
+        // WindowServer and Agent Screen both hold that one arrangement.
+        let set = "builtin closet serial10001";
+        let last = replay.flashes.last().unwrap().clone();
+        assert_eq!(replay.store.get(set), Some(&last));
+        assert_eq!(replay.stored.sets.get(set).map(|(k, _)| k), Some(&last));
+        // And the same call again lands parked.
+        let again = "2026-11-18 16:46:00.000 created display=274 unit=6 at=1728,-800 size=1280x800 serial=10001";
+        assert!(!replay.line(again));
+    }
+
+    #[test]
+    fn the_same_arrangement_mirroring_right_after_its_store_is_released() {
+        let key = "builtin@1728x1117 closet@2560x1440 serial10001@1280x800";
         let mut stored = StoredSets::new();
-        assert_eq!(stored.on_landing(key), OnLanding::Unmirror);
+        assert_eq!(stored.on_landing(key, 100), OnLanding::Unmirror);
         stored.stored(key, 100);
-        // The user reset the display arrangements: macOS mirrors it again.
-        assert_eq!(stored.on_landing(key), OnLanding::Release);
+        // WindowServer didn't apply what Agent Screen just stored.
+        assert_eq!(stored.on_landing(key, 160), OnLanding::Release);
+        // Another size of the set was never stored: unmirrored.
+        let other = "builtin@1728x1117 closet@2560x1440 serial10001@1200x800";
+        assert_eq!(stored.on_landing(other, 160), OnLanding::Unmirror);
+        // Long after, something else replaced it in between: stored again.
+        assert_eq!(
+            stored.on_landing(key, 100 + FRESH_STORE_SECS),
+            OnLanding::Unmirror
+        );
         stored.forget(key);
+        assert_eq!(stored.on_landing(key, 160), OnLanding::Unmirror);
         let mut guard = CreationGuard::new();
         guard.record(
             Outcome::Mirrored {
@@ -1142,25 +1268,34 @@ mod tests {
         );
         let why = guard.refusal(&BadUnits::new(), &now(&[0, 5], 100)).unwrap();
         assert!(why.contains("Do not retry create_display"), "{why}");
-        // After the refusal the next landing tries unmirroring again.
-        assert_eq!(stored.on_landing(key), OnLanding::Unmirror);
     }
 
     #[test]
     fn stored_sets_survive_the_file_and_keep_the_newest() {
         let mut stored = StoredSets::new();
         for i in 0..(STORED_SETS_MAX as u64 + 3) {
-            stored.stored(&format!("set{i}"), i);
+            stored.stored(&format!("serial{i}@1280x800"), i);
         }
-        assert_eq!(stored.keys.len(), STORED_SETS_MAX);
-        assert!(!stored.keys.contains_key("set0"));
+        assert_eq!(stored.sets.len(), STORED_SETS_MAX);
+        assert!(!stored.sets.contains_key("serial0"));
         assert!(
             stored
-                .keys
-                .contains_key(&format!("set{}", STORED_SETS_MAX + 2))
+                .sets
+                .contains_key(&format!("serial{}", STORED_SETS_MAX + 2))
         );
         let back = StoredSets::from_json(&stored.to_json()).unwrap();
         assert_eq!(back, stored);
+        // 0.1.40 wrote one entry per size: the newest of a set counts.
+        let old = StoredSets::from_json(&serde_json::json!({"stored": [
+            ["builtin@1728x1117 serial10001@1200x800", 2],
+            ["builtin@1728x1117 serial10001@1152x800", 3],
+            ["builtin@1728x1117 serial10001@1280x800", 1],
+        ]}))
+        .unwrap();
+        assert_eq!(
+            old.sets.values().collect::<Vec<_>>(),
+            [&("builtin@1728x1117 serial10001@1152x800".to_string(), 3)]
+        );
         assert_eq!(
             StoredSets::from_json(&serde_json::json!({"stored": [["a"]]})),
             None
