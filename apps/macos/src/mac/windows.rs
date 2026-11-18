@@ -273,7 +273,13 @@ pub fn why_away(target: WindowTarget) -> PutAway {
 /// Bring a window the user put away out onto `display`, without drawing
 /// it on their screen (#221). A hidden app's window moves while the app is
 /// hidden, as launch_app moves a starting app's, and shows once the app
-/// does. Blocking.
+/// does. A minimized window would play the Dock's restore on the user's
+/// screen, so its app hides first, the window leaves the Dock and moves
+/// while hidden, and the app shows again. That needs an app in the
+/// background with no other window on screen, which hiding would take off
+/// the user's screen for a moment. A window that leaves the Dock while its
+/// app is hidden doesn't come back when the app shows; a raise puts it on
+/// the display, and activates nothing. Blocking.
 pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<(), String> {
     let bounds = cg::display_bounds(display);
     let pid = target.pid;
@@ -286,45 +292,65 @@ pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<(), String>
         "bringing out window {} of pid {pid}: minimized {minimized}, app hidden {hidden}",
         target.window_id
     );
-    if hidden {
-        ax::move_element_into(&window, bounds).map_err(|e| e.to_string())?;
-        if minimized && !ax::set_minimized(&window, false) {
-            return Err("the app didn't take it out of the Dock".into());
+    if minimized && !hidden {
+        if super::app::is_active(pid) {
+            return Err(
+                "it is minimized and its app is in front, where taking it out of the \
+                 Dock would show on the user's screen; ask the user to click it in the Dock"
+                    .into(),
+            );
         }
-        super::app::unhide(pid);
-    } else if minimized {
-        // EXPERIMENT (#221): which order keeps the restore off the user's
-        // screen. Removed before review.
-        let mode = std::fs::read_to_string("/tmp/agentscreen-bringout").unwrap_or_default();
-        log::info!("bring_out mode {:?}", mode.trim());
-        match mode.trim() {
-            "c" => {
-                ax::set_minimized(&window, false);
-            }
-            "b" if !super::app::is_active(pid) => {
-                super::app::hide(pid);
-                let _ = wait_for(|| super::app::is_hidden(pid));
-                ax::set_minimized(&window, false);
-                ax::move_element_into(&window, bounds).map_err(|e| e.to_string())?;
-                super::app::unhide(pid);
-            }
-            _ => {
-                let moved = ax::move_element_into(&window, bounds);
-                log::info!("bring_out: moved while minimized: {moved:?}");
-                ax::set_minimized(&window, false);
-            }
+        if all().iter().any(|w| w.target.pid == pid) {
+            return Err(
+                "it is minimized and its app has other windows on the user's \
+                 screen, which taking it out of the Dock unseen would hide for a moment; \
+                 ask the user to click it in the Dock"
+                    .into(),
+            );
+        }
+        super::app::hide(pid);
+        if !wait_for(|| super::app::is_hidden(pid)) {
+            log::info!("bring_out: pid {pid} didn't hide; unhiding it");
+            super::app::unhide(pid);
+            return Err("its app didn't hide, so it would show on the user's screen".into());
         }
     }
-    if !wait_for(|| cg::on_screen_ids().contains(&target.window_id)) {
+    if minimized && !ax::set_minimized(&window, false) {
+        log::info!(
+            "bring_out: AXMinimized false refused for window {}",
+            target.window_id
+        );
+    }
+    if let Err(e) = ax::move_element_into(&window, bounds) {
+        // Still hidden, it showed nowhere: put it back as it was.
+        if minimized {
+            ax::set_minimized(&window, true);
+        }
+        if !hidden {
+            super::app::unhide(pid);
+        }
+        return Err(e.to_string());
+    }
+    super::app::unhide(pid);
+    let on_screen = || cg::on_screen_ids().contains(&target.window_id);
+    if minimized && !wait_for_ms(300, on_screen) {
+        ax::perform(&window, "AXRaise");
+    }
+    if !wait_for(on_screen) {
         return Err("it didn't come back on screen".into());
     }
     Ok(())
 }
 
 /// Whether `done` came true within 2 s, checked every 20 ms. Blocking.
-fn wait_for(mut done: impl FnMut() -> bool) -> bool {
+fn wait_for(done: impl FnMut() -> bool) -> bool {
+    wait_for_ms(2000, done)
+}
+
+/// Whether `done` came true within `ms`, checked every 20 ms. Blocking.
+fn wait_for_ms(ms: u64, mut done: impl FnMut() -> bool) -> bool {
     let started = std::time::Instant::now();
-    while started.elapsed() < std::time::Duration::from_secs(2) {
+    while started.elapsed() < std::time::Duration::from_millis(ms) {
         if done() {
             return true;
         }

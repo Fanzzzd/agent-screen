@@ -3,9 +3,10 @@
 // draws a window where the list doesn't say it is. Until stdin closes,
 // ScreenCaptureKit captures each user display, and any extra display the
 // arguments name, with only that process's windows in the picture, at 60
-// fps. Then it prints one JSON line per display: the frames it got, how
-// many held any of the process's pixels, the first and last of those in ms
-// since the capture began, and where it saved the first such frame.
+// fps. Then it prints one JSON line per display: the frames it got, idle
+// ones included, how many held any of the process's pixels, the first
+// and last of those in ms since the capture began, and where it saved the
+// first such frame.
 //
 //     shown <pid> <png prefix> [<display id>...]
 //
@@ -42,8 +43,12 @@ final class Watch: NSObject, SCStreamOutput {
     guard type == .screen, sb.isValid,
       let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false)
         as? [[SCStreamFrameInfo: Any]],
-      let raw = attachments.first?[.status] as? Int,
-      SCFrameStatus(rawValue: raw) == .complete,
+      let raw = attachments.first?[.status] as? Int
+    else { return }
+    // Every frame the stream sends counts, idle ones too, so a live
+    // capture of a display the process never drew on still shows frames.
+    frames += 1
+    guard SCFrameStatus(rawValue: raw) == .complete,
       let px = CMSampleBufferGetImageBuffer(sb)
     else { return }
     CVPixelBufferLockBaseAddress(px, .readOnly)
@@ -62,7 +67,6 @@ final class Watch: NSObject, SCStreamOutput {
       }
     }
     let ms = Int(Date().timeIntervalSince(start) * 1000)
-    frames += 1
     if any {
       shown += 1
       if first == nil {

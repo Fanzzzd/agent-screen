@@ -44,23 +44,9 @@ fn test(pid: &mut Option<u64>) -> Result<()> {
     let client = McpClient::start(&[])?;
     let made = client.call("create_display", json!({ "width": 1280, "height": 800 }))?;
     let id = made.display_id().context("display id")?;
-    // EXPERIMENT (#221), removed before review: E2E_BRINGOUT_MODES=c,a,b
-    // runs the minimized case once per restore order the app reads from
-    // /tmp/agentscreen-bringout.
-    let modes = std::env::var("E2E_BRINGOUT_MODES").unwrap_or_default();
-    let mut cases: Vec<(&str, String)> = modes
-        .split(',')
-        .filter(|m| !m.is_empty())
-        .map(|m| ("minimize", m.to_string()))
-        .collect();
-    if cases.is_empty() {
-        cases.push(("minimize", String::new()));
-    }
-    cases.push(("hide", String::new()));
-    for (away, mode) in cases {
-        let _ = std::fs::write("/tmp/agentscreen-bringout", &mode);
+    for away in ["minimize", "hide"] {
         sign_step(&format!("Field put away: {away} / Field 已收起：{away}"));
-        let marker = format!("--awaywindow-{}-{away}{mode}", std::process::id());
+        let marker = format!("--awaywindow-{}-{away}", std::process::id());
         let state = out().join(format!("awaywindow-{away}.txt"));
         let _ = std::fs::remove_file(state.with_extension("txt.away"));
         sh(
@@ -90,21 +76,16 @@ fn test(pid: &mut Option<u64>) -> Result<()> {
             format!("minimized, hidden: {put_away:?}"),
         );
 
-        let (shown, placed) = watch_shown(
-            &format!("awaywindow-{away}{mode}"),
-            field_pid,
-            &[id],
-            || {
-                client.tool(
-                    "place_window",
-                    json!({
-                        "display_id": id, "app": "Field",
-                        "user_instruction": "Put my Field window on your display and check it",
-                    }),
-                )
-            },
-        )?;
-        println!("     {away}{mode}: {}", describe(&shown));
+        let (shown, placed) = watch_shown(&format!("awaywindow-{away}"), field_pid, &[id], || {
+            client.tool(
+                "place_window",
+                json!({
+                    "display_id": id, "app": "Field",
+                    "user_instruction": "Put my Field window on your display and check it",
+                }),
+            )
+        })?;
+        println!("     {away}: {}", describe(&shown));
         check(
             &format!("place_window brings the {away} window with the user's words"),
             !placed.is_error,
@@ -132,7 +113,6 @@ fn test(pid: &mut Option<u64>) -> Result<()> {
         }
         sleep_ms(800);
     }
-    let _ = std::fs::remove_file("/tmp/agentscreen-bringout");
     client.call("end_display", json!({ "display_id": id }))?;
     client.close();
     Ok(())
@@ -141,7 +121,7 @@ fn test(pid: &mut Option<u64>) -> Result<()> {
 /// The pid of the Field started with `marker` among its arguments.
 fn pid_of(marker: &str) -> Result<u64> {
     for _ in 0..50 {
-        let found = sh_lenient("/usr/bin/pgrep", &["-f", marker]);
+        let found = sh_lenient("/usr/bin/pgrep", &["-f", "--", marker]);
         if let Some(pid) = found.lines().next().and_then(|l| l.trim().parse().ok()) {
             return Ok(pid);
         }
