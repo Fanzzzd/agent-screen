@@ -70,7 +70,8 @@ impl Hello {
         }
     }
 
-    fn line(&self) -> Vec<u8> {
+    /// The hello as the first line on a control connection.
+    pub fn line(&self) -> Vec<u8> {
         let mut line =
             serde_json::to_vec(&json!({ "id": 0, "method": HELLO_METHOD, "params": self }))
                 .expect("hello");
@@ -101,6 +102,16 @@ pub fn first_line(line: &str) -> FirstLine {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let params = request.get("params").cloned().unwrap_or(Value::Null);
     match serde_json::from_value::<Hello>(params) {
+        // A version 2 hello names its connection: without it the session
+        // would fall back to the pipe's pid, a v1 process's key.
+        Ok(hello)
+            if hello.version == PIPE_PROTOCOL_VERSION && hello.client.connection.is_none() =>
+        {
+            FirstLine::Refused(reply_line(json!({
+                "id": id,
+                "error": { "code": "invalid", "message": "bad hello: no connection" }
+            })))
+        }
         Ok(hello) if hello.version == PIPE_PROTOCOL_VERSION => FirstLine::Pipe(hello),
         Ok(hello) => FirstLine::Refused(reply_line(json!({
             "id": id,
@@ -164,6 +175,7 @@ fn failure(id: &Value, method: &str, message: &str) -> Vec<u8> {
 }
 
 const CLOSED: &str = "The Agent Screen app closed the connection. Call the tool again.";
+const NO_ANSWER: &str = "The Agent Screen app did not answer in time. Call the tool again; if it keeps failing, ask the user to quit and reopen Agent Screen.";
 const TOO_OLD: &str = "The running Agent Screen app is older than this MCP server and can't serve it. Ask the user to quit and reopen Agent Screen.";
 
 struct App {
@@ -240,7 +252,11 @@ where
                     Ok(mut opened) => {
                         connected_before = true;
                         if hello.resumed {
-                            replay(&mut opened.writer, initialize.as_ref(), initialized).await;
+                            // The line about to go is the client's own
+                            // notifications/initialized: send it once.
+                            let notify = initialized
+                                && method.as_deref() != Some("notifications/initialized");
+                            replay(&mut opened.writer, initialize.as_ref(), notify).await;
                         }
                         app = Some(opened);
                     }
@@ -321,7 +337,7 @@ where
     match tokio::time::timeout(HELLO_TIMEOUT, reader.read_line(&mut answer)).await {
         Ok(Ok(n)) if n > 0 => {}
         Ok(_) => return Err(CLOSED.into()),
-        Err(_) => return Err(TOO_OLD.into()),
+        Err(_) => return Err(NO_ANSWER.into()),
     }
     let answer: Value = serde_json::from_str(answer.trim_end()).unwrap_or_default();
     if answer["result"]["version"].as_u64() != Some(PIPE_PROTOCOL_VERSION as u64) {
@@ -685,6 +701,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reconnect_on_the_clients_initialized_sends_it_once() {
+        let (mut client, mut accepted, _task) = start(Arc::default());
+        client.send(initialize()).await;
+        let mut app = FakeApp::accept(&mut accepted).await;
+        app.hello().await;
+        app.next().await;
+        app.send(json!({ "jsonrpc": "2.0", "id": 1, "result": {} }))
+            .await;
+        client.next().await;
+        // The app quits between the client's initialize and its
+        // notifications/initialized.
+        drop(app);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client
+            .send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await;
+        client
+            .send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .await;
+        let mut app = FakeApp::accept(&mut accepted).await;
+        assert!(app.hello().await.resumed);
+        assert_eq!(app.next().await["id"], REPLAY_ID);
+        assert_eq!(app.next().await["method"], "notifications/initialized");
+        assert_eq!(app.next().await["method"], "tools/list");
+    }
+
+    #[tokio::test]
+    async fn an_app_that_never_answers_the_hello_is_a_timeout() {
+        let (mut client, mut accepted, _task) = start(Arc::default());
+        client.send(initialize()).await;
+        let mut app = FakeApp::accept(&mut accepted).await;
+        assert_eq!(app.next().await["method"], HELLO_METHOD);
+        let line = tokio::time::timeout(
+            HELLO_TIMEOUT + Duration::from_secs(3),
+            client.from_pipe.next_line(),
+        )
+        .await
+        .expect("an answer")
+        .unwrap()
+        .unwrap();
+        let failed: Value = serde_json::from_str(&line).unwrap();
+        let message = failed["error"]["message"].as_str().unwrap();
+        assert!(message.contains("did not answer in time"), "{message}");
+        assert!(!message.contains("older"), "{message}");
+    }
+
+    #[tokio::test]
     async fn an_app_that_wont_start_or_predates_the_pipe_fails_the_request() {
         let down = Arc::new(Mutex::new(Some("could not start".to_string())));
         let (mut client, mut accepted, _task) = start(down.clone());
@@ -767,5 +830,15 @@ mod tests {
         let reply: Value = serde_json::from_slice(&reply).unwrap();
         assert_eq!(reply["error"]["code"], "unsupported");
         assert_eq!(reply["error"]["version"], PIPE_PROTOCOL_VERSION);
+
+        // A version 2 hello must name its connection.
+        let mut nameless = hello();
+        nameless.client.connection = None;
+        let FirstLine::Refused(reply) = first_line(&String::from_utf8(nameless.line()).unwrap())
+        else {
+            panic!("a hello without a connection served");
+        };
+        let reply: Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(reply["error"]["code"], "invalid");
     }
 }

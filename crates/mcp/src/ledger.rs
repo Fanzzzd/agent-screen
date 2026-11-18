@@ -6,17 +6,34 @@
 //! connection, since each new connection is a new app. The app counts two:
 //! the previous app run, read from its file at start, and its own, which it
 //! writes back on every change (ADR 0021).
+//!
+//! Each app is kept with its process's identity, its start time and
+//! executable, and handed on only while the process with its pid still has
+//! it: a pid macOS gave to another process since, maybe one of the user's
+//! apps, is never adopted.
 
+use crate::process::{self, Identity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-#[derive(Default)]
 pub struct Ledger {
     state: Mutex<State>,
     /// The app's file; `None` for a v1 process, which keeps it in memory.
     file: Option<PathBuf>,
+    /// Who has a pid now; tests give their own.
+    identify: fn(i64) -> Option<Identity>,
+}
+
+impl Default for Ledger {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            file: None,
+            identify: process::identity,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -29,9 +46,17 @@ struct State {
 #[derive(Default, Clone)]
 struct Made {
     session: String,
-    started: Vec<i64>,
+    started: Vec<Started>,
     /// Its apps were handed to a later display.
     adopted: bool,
+}
+
+/// An app launch_app started, and its process when it started.
+#[derive(Clone, Serialize, Deserialize)]
+struct Started {
+    pid: i64,
+    /// `None` when macOS didn't say; such an app is never handed on.
+    process: Option<Identity>,
 }
 
 /// One display in the file.
@@ -39,15 +64,29 @@ struct Made {
 struct Saved {
     display: u64,
     session: String,
-    pids: Vec<i64>,
+    apps: Vec<Started>,
 }
 
 impl Ledger {
     /// The app's ledger: the previous run's displays from `file`, then this
     /// run's, written back to it.
     pub fn persistent(file: PathBuf) -> Self {
+        Self::persistent_with(file, process::identity, process::boot_time())
+    }
+
+    /// `persistent`, with who has a pid and when the Mac booted given. A
+    /// file from before the boot is the run before a restart, whose
+    /// displays and apps are long gone.
+    pub fn persistent_with(
+        file: PathBuf,
+        identify: fn(i64) -> Option<Identity>,
+        boot: Option<std::time::SystemTime>,
+    ) -> Self {
+        let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+        let stale = matches!((modified, boot), (Some(m), Some(b)) if m < b);
         let saved: Vec<Saved> = std::fs::read(&file)
             .ok()
+            .filter(|_| !stale)
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let made = saved
@@ -57,7 +96,7 @@ impl Ledger {
                     (s.display, 0),
                     Made {
                         session: s.session,
-                        started: s.pids,
+                        started: s.apps,
                         adopted: false,
                     },
                 )
@@ -66,6 +105,7 @@ impl Ledger {
         let ledger = Self {
             state: Mutex::new(State { run: 1, made }),
             file: Some(file),
+            identify,
         };
         ledger.save(&ledger.state.lock().unwrap());
         ledger
@@ -98,10 +138,11 @@ impl Ledger {
 
     /// Note an app launch_app started for a display.
     pub fn started_app(&self, display: u64, pid: i64) {
+        let process = (self.identify)(pid);
         let mut state = self.state.lock().unwrap();
         let run = state.run;
         if let Some(made) = state.made.get_mut(&(display, run)) {
-            made.started.push(pid);
+            made.started.push(Started { pid, process });
             self.save(&state);
         }
     }
@@ -123,7 +164,8 @@ impl Ledger {
     /// The apps session `session` started on displays that ended when the
     /// app quit, by the display they were on, taken once, for its next
     /// create_display to adopt. Never another session's: an app one agent
-    /// launched once went onto another agent's display (ADR 0016).
+    /// launched once went onto another agent's display (ADR 0016). Never a
+    /// pid another process has now.
     pub fn orphans(&self, session: &str) -> Option<Vec<(u64, Vec<i64>)>> {
         let mut state = self.state.lock().unwrap();
         let run = state.run;
@@ -143,7 +185,12 @@ impl Ledger {
             if m.session == session && !m.adopted {
                 m.adopted = true;
                 any = true;
-                groups.push((key.0, std::mem::take(&mut m.started)));
+                let alive = std::mem::take(&mut m.started)
+                    .into_iter()
+                    .filter(|s| s.process.is_some() && (self.identify)(s.pid) == s.process)
+                    .map(|s| s.pid)
+                    .collect();
+                groups.push((key.0, alive));
             }
         }
         any.then_some(groups)
@@ -162,7 +209,7 @@ impl Ledger {
             .map(|(&(display, _), m)| Saved {
                 display,
                 session: m.session.clone(),
-                pids: m.started.clone(),
+                apps: m.started.clone(),
             })
             .collect();
         saved.sort_by_key(|s| s.display);
@@ -181,10 +228,33 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Pid 666 is a new process every time it is asked about; any other
+    /// pid is the same one throughout.
+    fn identify(pid: i64) -> Option<Identity> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let start_us = match pid {
+            666 => NEXT.fetch_add(1, Ordering::Relaxed),
+            p if p > 0 => p as u64,
+            _ => return None,
+        };
+        Some(Identity {
+            start_us,
+            executable: format!("/Applications/App{pid}.app/Contents/MacOS/App"),
+        })
+    }
+
+    fn ledger() -> Ledger {
+        Ledger {
+            identify,
+            ..Ledger::default()
+        }
+    }
 
     #[test]
     fn a_display_ends_with_the_connection_it_was_made_on() {
-        let ledger = Ledger::default();
+        let ledger = ledger();
         ledger.connected();
         ledger.made_display(7, "a", false);
         assert!(!ledger.ended_with_app(7, "a"));
@@ -200,7 +270,7 @@ mod tests {
 
     #[test]
     fn the_next_display_adopts_the_apps_started_on_ended_ones_once() {
-        let ledger = Ledger::default();
+        let ledger = ledger();
         ledger.connected();
         assert_eq!(ledger.orphans("a"), None);
         ledger.made_display(7, "a", false);
@@ -220,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_session_adopts_only_its_own_apps_by_the_display_they_were_on() {
-        let ledger = Ledger::default();
+        let ledger = ledger();
         ledger.connected();
         ledger.made_display(7, "a", false);
         ledger.started_app(7, 100);
@@ -241,7 +311,7 @@ mod tests {
 
     #[test]
     fn a_display_id_made_again_forgets_the_apps_of_the_display_before() {
-        let ledger = Ledger::default();
+        let ledger = ledger();
         ledger.connected();
         ledger.made_display(7, "a", false);
         ledger.started_app(7, 100);
@@ -257,19 +327,48 @@ mod tests {
     }
 
     #[test]
+    fn a_pid_another_process_has_now_is_never_adopted() {
+        let ledger = ledger();
+        ledger.connected();
+        ledger.made_display(7, "a", false);
+        ledger.started_app(7, 100);
+        // macOS gave pid 666 to another process after launch_app.
+        ledger.started_app(7, 666);
+        ledger.connected();
+        assert_eq!(ledger.orphans("a"), Some(vec![(7, vec![100])]));
+    }
+
+    #[test]
+    fn a_ledger_written_before_the_mac_booted_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("as-ledger-boot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("displays-test.json");
+        let first = Ledger::persistent_with(file.clone(), identify, None);
+        first.made_display(3, "s", false);
+        first.started_app(3, 501);
+        drop(first);
+
+        let booted_after = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let after_boot = Ledger::persistent_with(file.clone(), identify, Some(booted_after));
+        assert!(!after_boot.ended_with_app(3, "s"));
+        assert_eq!(after_boot.orphans("s"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_apps_ledger_outlives_its_run_and_only_one() {
         let dir = std::env::temp_dir().join(format!("as-ledger-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("displays-test.json");
         let _ = std::fs::remove_file(&file);
 
-        let first = Ledger::persistent(file.clone());
+        let first = Ledger::persistent_with(file.clone(), identify, None);
         first.made_display(3, "claude-code:s", false);
         first.started_app(3, 501);
         // The app aborts here: nothing else is written.
         drop(first);
 
-        let second = Ledger::persistent(file.clone());
+        let second = Ledger::persistent_with(file.clone(), identify, None);
         // A reconnecting pipe's connection is still this run.
         second.connected();
         assert!(second.ended_with_app(3, "claude-code:s"));
@@ -279,7 +378,7 @@ mod tests {
         drop(second);
 
         // The run before last is gone; only the last run's displays stay.
-        let third = Ledger::persistent(file.clone());
+        let third = Ledger::persistent_with(file.clone(), identify, None);
         assert!(!third.ended_with_app(3, "claude-code:s"));
         assert!(third.ended_with_app(4, "codex:t"));
         let _ = std::fs::remove_dir_all(&dir);

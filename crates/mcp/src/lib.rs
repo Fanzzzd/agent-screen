@@ -9,6 +9,7 @@ pub mod host;
 pub mod install;
 pub mod ledger;
 pub mod pipe;
+pub mod process;
 mod session;
 mod tools;
 

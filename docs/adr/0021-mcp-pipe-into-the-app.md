@@ -17,9 +17,9 @@ The MCP server moves into the app. `AgentScreen mcp` becomes the pipe (`crates/m
 
 It exits when stdin closes, and when the parent process it started under exits (kqueue `NOTE_EXIT` on macOS). The parent watch covers clients that leave stdin open in another process. There is no idle exit: Claude Code marks a stdio server that exits as failed until the user reconnects it.
 
-The app serves MCP in the MCP host (`crates/mcp/src/host.rs`): the rmcp server, the tools, and session detection, which now reads the client's environment from the hello instead of its own. The host calls the app through the same `Control` as before. `Control` reaches the app through one of two adapters: the control socket, for a v1 process, or an in-process duplex stream into the app's own connection handler. So the app handles every tool's requests with one code path, and the host's connection ends when the pipe's does, which starts the session's 2-second Disconnect Grace as before (ADR 0016).
+The app serves MCP in the MCP host (`crates/mcp/src/host.rs`): the rmcp server, the tools, and session detection, which now reads the client's environment from the hello instead of its own. The host calls the app through the same `Control` as before. `Control` reaches the app through one of two adapters: the control socket, for a v1 process, or an in-process duplex stream into the app's own connection handler. So the app handles every tool's requests with one code path. When the pipe's connection reaches its end, the app closes the host's connections into it at once, even while a call such as `wait_for_control` is still waiting, which starts the session's 2-second Disconnect Grace as before (ADR 0016).
 
-The note that a display ended because the app quit used to live in the MCP process's memory. It now lives in the app's display ledger, `ledger-<instance>.json` in the state directory. The app rewrites it whenever a session makes a display or launches an app there, and reads it once at start: those are the previous run's displays, so a call naming one says the app quit, and the session's next `create_display` adopts the apps it launched there.
+The note that a display ended because the app quit used to live in the MCP process's memory. It now lives in the app's display ledger, `ledger-<instance>.json` in the state directory. The app rewrites it whenever a session makes a display or launches an app there, and reads it once at start: those are the previous run's displays, so a call naming one says the app quit, and the session's next `create_display` adopts the apps it launched there. Each app is kept with its process's start time and executable, and handed on only while the process with that pid still has both, so a pid macOS has given to one of the user's apps since is never adopted. A ledger written before the Mac last booted is ignored.
 
 ## The control protocol, version 2
 
@@ -38,7 +38,7 @@ The pipe's interface to the app is only the hello and the line framing. A new to
 
 ## Sessions
 
-The hello's `connection` is a random id the pipe makes when it starts, kept for its life and sent again on every reconnect. The host picks each tool call's session from the first of these that names one (`crates/mcp/src/session.rs`):
+The hello's `connection` is a random id the pipe makes when it starts, kept for its life and sent again on every reconnect. The app refuses a version 2 hello without one. The host picks each tool call's session from the first of these that names one (`crates/mcp/src/session.rs`):
 
 1. The call's `_meta`: Codex's `x-codex-turn-metadata.session_id`, which separates the conversations one Codex process serves.
 2. `CLAUDE_CODE_SESSION_ID` from the hello, only when the client's `clientInfo.name` is `claude-code`. A client started from Claude Code's shell inherits the variable; trusting it there would put two agents in one session.
@@ -52,7 +52,7 @@ MCP processes already running from older builds speak v1. The app keeps serving 
 
 ## Orphans
 
-The app reads each control connection's peer pid (`LOCAL_PEERPID`). Every 30 s, and when a connection opens, it ends the peers whose parent is launchd (pid 1) and whose executable is an Agent Screen binary, with SIGTERM, and logs each one. A peer whose parent is still running is never touched, however long it has been idle.
+The app refuses a control connection from another user (the peer's uid), on top of the socket's mode 0600. It notes a connection's peer pid and pid version (`LOCAL_PEERTOKEN`) once the peer says it is an MCP server, with a pipe's hello or a v1 request, and forgets it when the peer's input ends. A second launch of the app, which only checks whether the socket answers, is never noted. Every 30 s, and when a peer is noted, the app ends with SIGTERM, and logs, each noted peer whose parent is launchd (pid 1) and that runs as an MCP server: `AgentScreen` with `mcp` as its first argument, or the development `agent-screen-mcp`. It first checks that the process with that pid still has the pid version it connected with. A peer whose parent is still running is never touched, however long it has been idle, and neither is the app itself.
 
 ## Consequences
 

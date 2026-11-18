@@ -179,6 +179,7 @@ cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, co
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-mcp --test pipe # the pipe's hello carries the client's session to an MCP host, and the pipe ends with its parent; no app
 cargo test -p agent-screen-mcp --test clients # the pipe driven as Claude Code, Codex, Gemini CLI and bare clients: each gets its own session by the rules in docs/clients.md, and each MCP version from 2024-11-05 to 2026-07-28 its own wire shape; no app
+cargo test -p agent-screen --bin AgentScreen control::server # the app's socket side with macOS faked: a pipe gets a host whose connections close with it, adoption skips a reused pid, the orphan sweep ends only an MCP peer launchd adopted that is still the same process, and another user is refused; no app
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
 cargo test -p agent-screen-model tree # production traversal: shallow discovery beyond a long list, subtree budgets and ancestry guards
