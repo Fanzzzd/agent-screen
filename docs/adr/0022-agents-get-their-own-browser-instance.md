@@ -14,15 +14,19 @@ When `launch_app` targets a Chromium browser that the user already runs, Agent S
 
 The agents' profile is `~/Library/Application Support/Agent Screen/Browser Profiles/<bundle id>`. A test or development instance of Agent Screen uses `Browser Profiles (<instance>)`, so tests never touch the agents' real profile. The profile persists. A sign-in the user does there once, through a Help Request, carries over to later sessions. All agents share it, as they share one Agent Screen.
 
+## Measured
+
+Status: proposed. Dia refuses a second instance. On 2026-11-18, with Agent Screen 0.1.41 and the user's Dia running, `agentbrowser` started Dia with `--user-data-dir` on the agents' profile and `--remote-debugging-pipe`. Dia created `User Data` and `RemoteAssetDirectory` in that folder, then quit at once, and `launch_app` failed with the one-instance error. Dia's own app layer refuses, since Chromium's ProcessSingleton holds a lock per profile folder and this folder was new. No window of the user's Dia shows the agent's page, though a background tab can't be ruled out without reading the user's tabs. The main display's mode didn't change during the run. So this ADR can't help Dia, and until the owner decides, Dia falls under the fallback below.
+
 ## Not yet verified
 
-Status: proposed. Nothing here has run against Dia yet. The first e2e display creation for this work hit #220: it moved one of the user's Agent Displays, so display creation is on hold until #220's fix is installed. These still need to be shown, by `agentbrowser` and `diafocused`:
+These still need to be shown, by `agentbrowser` with `E2E_BROWSER="Google Chrome"` and by `diafocused` for a browser that accepts a second instance:
 
-- Dia accepts a second process on its own `--user-data-dir` while the user's Dia runs, answers on the pipe and opens its first window on the display, with nothing on the user's screen. ADR 0010's Chrome measurements apply to Chrome. Dia's first run on a fresh profile may show onboarding or ask for a sign-in.
-- `Target.createTarget` with `left`, `top`, `width` and `height` puts Dia's window on the display.
-- With the user's Dia in front and their window focused, the agents' window takes posted clicks and keys, and the user's window keeps its focus.
+- Chrome accepts a second process on its own `--user-data-dir` while the user's Chrome runs, answers on the pipe and opens its first window on the display, with nothing on the user's screen.
+- `Target.createTarget` with `left`, `top`, `width` and `height` puts the window on the display.
+- With the user's browser in front and their window focused, the agents' window takes posted clicks and keys, and the user's window keeps its focus.
 
-If Dia refuses a second instance, the fallback is to keep #110's behavior for Dia, and to make the refusal say that the agent should ask the user to switch to another app or hand over a window.
+Since Dia refuses a second instance, the fallback is to keep #110's behavior for Dia: when the agents' instance quits at once, `launch_app` opens the window in the user's process as before this ADR, and Agent Screen stops trying the agents' instance for that browser. Where #110 refuses an action, the refusal should say that the agent should ask the user to switch to another app or hand over a window.
 
 ## Consequences
 
