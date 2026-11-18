@@ -16,7 +16,7 @@ The agents' profile is `~/Library/Application Support/Agent Screen/Browser Profi
 
 ## Measured
 
-Status: proposed. Dia refuses a second instance. On 2026-11-18, with Agent Screen 0.1.41 and the user's Dia running, `agentbrowser` started Dia with `--user-data-dir` on the agents' profile and `--remote-debugging-pipe`. Dia created `User Data` and `RemoteAssetDirectory` in that folder, then quit at once, and `launch_app` failed with the one-instance error. Dia's own app layer refuses, since Chromium's ProcessSingleton holds a lock per profile folder and this folder was new. No window of the user's Dia shows the agent's page, though a background tab can't be ruled out without reading the user's tabs. The main display's mode didn't change during the run. So this ADR can't help Dia, and until the owner decides, Dia falls under the fallback below.
+Status: proposed. On 2026-11-18, with Agent Screen 0.1.41 and the user's Dia running, `agentbrowser` started Dia on the agents' profile with the pipe, and `launch_app` answered that Dia quit at once and allows one instance. That answer is in doubt. Agent Screen decided it within milliseconds of starting the process, by listing the bundle's running apps, and a process Agent Screen starts itself isn't listed as an app until it registers. The same check misfired on Chrome, which does run a second instance. Dia had written 128 files into the profile, including `User Data/Default`, which suggests it kept running. A started process now counts as quit only once it ends, and Dia needs another run.
 
 ## Not yet verified
 
