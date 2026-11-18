@@ -500,9 +500,9 @@ impl Core {
     /// Make a spare of the size "+" makes, parked like any display.
     fn make_spare(&mut self, cx: &mut Context<Self>) {
         self.warming = true;
-        let (serial, name) = self.next_name();
-        let others = self.virtual_ids();
         let size = crate::model::DEFAULT_SIZE;
+        let (serial, name) = self.next_name((size.0 as u32, size.1 as u32));
+        let others = self.virtual_ids();
         cx.spawn(async move |this, cx| {
             let made = cx
                 .background_executor()
@@ -555,12 +555,12 @@ impl Core {
         self.forwarders.entry(id).or_default().clone()
     }
 
-    /// The serial and name for the next display. A test instance's
-    /// displays must not pass for the user's.
-    pub fn next_name(&mut self) -> (display::Serial, String) {
+    /// The serial and name for the next display, of `size` in points. A
+    /// test instance's displays must not pass for the user's.
+    pub fn next_name(&mut self, size: (u32, u32)) -> (display::Serial, String) {
         let instance = agent_screen_mcp::endpoint::instance();
         let first = if instance.is_some() { 10_001 } else { 1 };
-        let serial = display::Serial::lease(first);
+        let serial = display::Serial::lease(first, size);
         let number = serial.get() + 1 - first;
         let name = match instance {
             Some(instance) => format!("Agent Screen {instance} {number}"),

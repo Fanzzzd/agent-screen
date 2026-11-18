@@ -1,7 +1,7 @@
 //! A new display macOS mirrors onto the user's screen is unmirrored and
-//! kept, and the next one of that size in that set lands parked (#220).
-//! macOS keeps one arrangement per set of displays, so a size stored since
-//! replaces it: the old size mirrors again, and is unmirrored and kept too.
+//! kept, and the next one of that size lands parked (#220). macOS keeps
+//! one arrangement per set of displays, and each size gets its own serial,
+//! so its own set: sizes in turn don't mirror again.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e unmirror
 //!
@@ -9,10 +9,10 @@
 //!
 //! One display per size, one at a time, the test app restarted between
 //! them so each is new, not a spare: 1280x800, 1200x800, 1280x800 and
-//! 1280x800 by default. A sampler reads the user's main display every
-//! 10 ms. Where macOS mirrors a new display, one of a size other than the
-//! last one's flashes the user's screen once, for under 2 s (0.7 to 1.6 s
-//! on 2026-11-18), and one of the last one's size doesn't. Where it doesn't
+//! 1200x800 by default. A sampler reads the user's main display every
+//! 10 ms. Where macOS mirrors a new display, one of a size new to the run
+//! flashes the user's screen once, for under 2 s (0.6 to 1.6 s on
+//! 2026-11-18), and one of a size seen before doesn't. Where it doesn't
 //! mirror, none flashes. No app launches or pointer input.
 
 use std::io::{BufRead, BufReader};
@@ -213,9 +213,9 @@ fn attempt(user: u32, key: &str, size: (u32, u32)) -> Result<Attempt> {
     })
 }
 
-/// `SIZES=WxH,WxH,…`, 1280x800, 1200x800, 1280x800, 1280x800 by default:
-/// the third is the set mirrored again at 16:44 on 2026-11-18, after its
-/// arrangement was stored at another size.
+/// `SIZES=WxH,WxH,…`, 1280x800, 1200x800, 1280x800, 1200x800 by default:
+/// with one serial for every size, the third and fourth mirrored again, as
+/// at 16:44 on 2026-11-18.
 fn sizes() -> Vec<(u32, u32)> {
     let parse = |s: &str| {
         let (w, h) = s.split_once('x')?;
@@ -225,14 +225,14 @@ fn sizes() -> Vec<(u32, u32)> {
         .ok()
         .and_then(|s| s.split(',').map(parse).collect::<Option<Vec<_>>>())
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec![(1280, 800), (1200, 800), (1280, 800), (1280, 800)])
+        .unwrap_or_else(|| vec![(1280, 800), (1200, 800), (1280, 800), (1200, 800)])
 }
 
 fn test() -> Result<()> {
     let user = main_display()?;
     let before = online()?;
 
-    let mut last = None;
+    let mut seen = Vec::new();
     for (i, size) in sizes().into_iter().enumerate() {
         let name = format!("unmirror-{}-{}x{}", i + 1, size.0, size.1);
         let attempt = attempt(user, &name, size)?;
@@ -242,10 +242,10 @@ fn test() -> Result<()> {
             attempt.kept,
             format!("{:#?}", attempt.lines),
         );
-        if last == Some(size) {
+        if seen.contains(&size) {
             check(
                 &format!(
-                    "display {} of the last one's size doesn't flash the user's screen",
+                    "display {} of a size seen before doesn't flash the user's screen",
                     i + 1
                 ),
                 attempt.flashes.is_empty() && !mirrored,
@@ -273,7 +273,7 @@ fn test() -> Result<()> {
                 );
             }
         }
-        last = Some(size);
+        seen.push(size);
     }
     // The test app's displays end with it, a moment later.
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);

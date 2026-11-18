@@ -18,7 +18,7 @@ Setup takes the user's administrator password once, through macOS's own prompt, 
 
 - A display that is online keeps its record.
 - A record with anything besides `DeviceDescriptions` and `FactoryProfiles`, such as a profile someone chose, or a shape reclaim doesn't know, is kept.
-- A record whose UUID the app passes with `--keep` is kept: the identities of Agent Screen's serials 1 to 16 of each instance, recorded when a display with them was online. Serials are reused (lowest free), so these come back, and a record macOS makes anew has all 39 names.
+- A record whose UUID the app passes with `--keep` is kept: the identities of Agent Screen's serials 1 to 16 of each instance, recorded when a display with them was online. Serials are reused (one per display size, 8 per instance, ADR 0020), so these come back, and a record macOS makes anew has all 39 names.
 - Every other record is unregistered with `ColorSyncUnregisterDevice`. It holds only factory data, and macOS registers a display again when it connects. Profiles on disk stay.
 
 Then, after reading the registry again to see what went, every record keeps its names only in English and the languages of the Mac's users, read from each home folder's global preferences; a record keeps at least one name. If the file isn't a dictionary of such records, reclaim writes nothing.

@@ -472,14 +472,35 @@ pub const STORED_SETS_MAX: usize = 256;
 /// How long after Agent Screen stored an arrangement a mirror of that same
 /// arrangement means WindowServer doesn't apply it (`OnLanding::Release`).
 /// Later, something else has replaced it in between, the user's System
-/// Settings or another app, and it is stored again.
+/// Settings or another app, and it is stored again. Also the window in
+/// which `UNMIRRORS_PER_SET` counts.
 pub const FRESH_STORE_SECS: u64 = BAD_UNIT_SECS;
+
+/// Unmirrors of one set of displays, at any sizes, within
+/// `FRESH_STORE_SECS` after which the next landing of that set is released.
+/// Each size stored replaces the set's arrangement, so sizes that alternate
+/// would flash the user's screen at every creation.
+pub const UNMIRRORS_PER_SET: usize = 2;
+
+/// The arrangement Agent Screen last stored for a set, and when it
+/// unmirrored the set (seconds since 1970), the last time last.
+#[derive(Clone, PartialEq, Debug)]
+pub struct StoredSet {
+    pub key: String,
+    pub unmirrors: Vec<u64>,
+}
+
+impl StoredSet {
+    /// When the arrangement was stored.
+    pub fn at(&self) -> u64 {
+        self.unmirrors.last().copied().unwrap_or(0)
+    }
+}
 
 /// The arrangements (`arrangement_key`) Agent Screen stored after macOS
 /// mirrored a new display, one per set of displays (`display_set`) as
-/// WindowServer keeps them, each with the time it did (seconds since 1970).
-/// WindowServer keeps stored arrangements across logins, so the app keeps
-/// this in a file all instances share.
+/// WindowServer keeps them. WindowServer keeps stored arrangements across
+/// logins, so the app keeps this in a file all instances share.
 ///
 /// Why: since 2026-11-17 17:05 this Mac's WindowServer gives a set it has
 /// no fitting arrangement for a default that mirrors the built-in display
@@ -490,8 +511,8 @@ pub const FRESH_STORE_SECS: u64 = BAD_UNIT_SECS;
 /// 1280x800 at 14:34, then at 1200x800 and 1152x800.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct StoredSets {
-    /// `display_set` → (`arrangement_key`, when stored).
-    pub sets: std::collections::BTreeMap<String, (String, u64)>,
+    /// `display_set` → what Agent Screen stored for it.
+    pub sets: std::collections::BTreeMap<String, StoredSet>,
 }
 
 impl StoredSets {
@@ -502,27 +523,47 @@ impl StoredSets {
     }
 
     /// At `now` (seconds since 1970): release a landing of arrangement
-    /// `key` only when Agent Screen stored that very arrangement less than
-    /// `FRESH_STORE_SECS` ago. Any other landing, a set stored at another
+    /// `key` when Agent Screen stored that very arrangement less than
+    /// `FRESH_STORE_SECS` ago, or unmirrored its set `UNMIRRORS_PER_SET`
+    /// times in that window. Any other landing, a set stored at another
     /// size since included, is unmirrored and stored like a new one.
     pub fn on_landing(&self, key: &str, now: u64) -> OnLanding {
-        match self.sets.get(&display_set(key)) {
-            Some((stored, at)) if stored == key && now < at + FRESH_STORE_SECS => {
-                OnLanding::Release
-            }
-            _ => OnLanding::Unmirror,
+        let Some(set) = self.sets.get(&display_set(key)) else {
+            return OnLanding::Unmirror;
+        };
+        let fresh = |t: u64| now < t + FRESH_STORE_SECS;
+        let recent = set.unmirrors.iter().filter(|&&t| fresh(t)).count();
+        if (set.key == key && fresh(set.at())) || recent >= UNMIRRORS_PER_SET {
+            OnLanding::Release
+        } else {
+            OnLanding::Unmirror
         }
     }
 
-    /// Agent Screen stored arrangement `key` at `at`, replacing what its
-    /// set had, as WindowServer does.
+    /// Agent Screen unmirrored and stored arrangement `key` at `at`,
+    /// replacing what its set had, as WindowServer does.
     pub fn stored(&mut self, key: &str, at: u64) {
-        self.sets.insert(display_set(key), (key.to_string(), at));
+        let set = display_set(key);
+        let mut unmirrors: Vec<u64> = self.sets.get(&set).map_or(Vec::new(), |s| {
+            s.unmirrors
+                .iter()
+                .copied()
+                .filter(|&t| at < t + FRESH_STORE_SECS)
+                .collect()
+        });
+        unmirrors.push(at);
+        self.sets.insert(
+            set,
+            StoredSet {
+                key: key.to_string(),
+                unmirrors,
+            },
+        );
         while self.sets.len() > STORED_SETS_MAX {
             let oldest = self
                 .sets
                 .iter()
-                .min_by_key(|&(set, &(_, t))| (t, set.clone()))
+                .min_by_key(|&(set, s)| (s.at(), set.clone()))
                 .map(|(set, _)| set.clone());
             match oldest {
                 Some(set) => self.sets.remove(&set),
@@ -531,9 +572,9 @@ impl StoredSets {
         }
     }
 
-    /// `key`'s set mirrored right after Agent Screen stored it. Forgotten,
-    /// the next landing after the refusal tries unmirroring again: at worst
-    /// one flash per refusal, as 0.1.39.
+    /// `key`'s set was released. Forgotten, the next landing after the
+    /// refusal tries unmirroring again: at worst one flash per refusal, as
+    /// 0.1.39.
     pub fn forget(&mut self, key: &str) {
         self.sets.remove(&display_set(key));
     }
@@ -542,26 +583,40 @@ impl StoredSets {
         let keys: Vec<serde_json::Value> = self
             .sets
             .values()
-            .map(|(k, t)| serde_json::json!([k, t]))
+            .map(|s| serde_json::json!([s.key, s.at(), s.unmirrors]))
             .collect();
         serde_json::json!({ "stored": keys })
     }
 
-    /// None for anything but what `to_json` writes. Of several
-    /// arrangements of one set, as 0.1.40 wrote them, the newest counts.
+    /// None for anything but what `to_json` writes. 0.1.40 wrote each
+    /// arrangement with its time only, several per set: the newest counts.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
         let mut out = Self::new();
-        for pair in value.get("stored")?.as_array()? {
-            let (key, at) = match pair.as_array()?.as_slice() {
-                [k, t] => (k.as_str()?, t.as_u64()?),
+        for row in value.get("stored")?.as_array()? {
+            let (key, at, unmirrors) = match row.as_array()?.as_slice() {
+                [k, t] => (k.as_str()?, t.as_u64()?, vec![t.as_u64()?]),
+                [k, t, u] => (
+                    k.as_str()?,
+                    t.as_u64()?,
+                    u.as_array()?
+                        .iter()
+                        .map(serde_json::Value::as_u64)
+                        .collect::<Option<Vec<u64>>>()?,
+                ),
                 _ => return None,
             };
-            let newer = out
-                .sets
-                .get(&display_set(key))
-                .is_none_or(|&(_, t)| at >= t);
+            if unmirrors.last() != Some(&at) {
+                return None;
+            }
+            let newer = out.sets.get(&display_set(key)).is_none_or(|s| at >= s.at());
             if newer {
-                out.sets.insert(display_set(key), (key.to_string(), at));
+                out.sets.insert(
+                    display_set(key),
+                    StoredSet {
+                        key: key.to_string(),
+                        unmirrors,
+                    },
+                );
             }
         }
         Some(out)
@@ -1017,6 +1072,7 @@ mod tests {
             2 => "serial2",
             3 => "serial3",
             10001 => "serial10001",
+            10002 => "serial10002",
             _ => panic!("serial {serial}"),
         }
     }
@@ -1087,14 +1143,37 @@ mod tests {
         stored: StoredSets,
         flashes: Vec<String>,
         parked_from_store: usize,
+        /// Arrangements whose landing was released, and creations the
+        /// refusal after it stopped.
+        releases: Vec<String>,
+        refused: usize,
+        refused_until: u64,
     }
 
     impl Replay {
+        fn new(store: WindowServerStore) -> Self {
+            Self {
+                store,
+                ours: Vec::new(),
+                stored: StoredSets::new(),
+                flashes: Vec::new(),
+                parked_from_store: 0,
+                releases: Vec::new(),
+                refused: 0,
+                refused_until: 0,
+            }
+        }
+
         /// A `created` or `released` line; whether macOS mirrored it.
         fn line(&mut self, line: &str) -> bool {
             let id: u32 = field(line, "display=").parse().unwrap();
             if line.contains(" released ") {
                 self.ours.retain(|(d, _, _)| *d != id);
+                return false;
+            }
+            let at = wall_of(line);
+            if at < self.refused_until {
+                self.refused += 1;
                 return false;
             }
             let serial: u32 = field(line, "serial=").parse().unwrap();
@@ -1105,13 +1184,13 @@ mod tests {
             let key = arrangement_key(&set);
             let mirrors = windowserver_mirrors(&self.store, &key);
             if mirrors {
-                let at = wall_of(line);
-                assert_eq!(
-                    self.stored.on_landing(&key, at),
-                    OnLanding::Unmirror,
-                    "{line}"
-                );
                 self.flashes.push(key.clone());
+                if self.stored.on_landing(&key, at) == OnLanding::Release {
+                    self.releases.push(key.clone());
+                    self.stored.forget(&key);
+                    self.refused_until = at + BAD_UNIT_SECS;
+                    return true;
+                }
                 // Unmirrored, parked and stored permanently.
                 self.store.insert(display_set(&key), key.clone());
                 self.stored.stored(&key, at);
@@ -1132,18 +1211,12 @@ mod tests {
     /// flash for the set and size, never repeated.
     #[test]
     fn a_set_flashes_once_then_lands_parked_from_its_stored_arrangement() {
-        let mut replay = Replay {
-            store: store_of(
-                &STORED_ARRANGEMENTS
-                    .lines()
-                    .filter(|l| !l.starts_with('#') && !l.is_empty())
-                    .collect::<Vec<_>>(),
-            ),
-            ours: Vec::new(),
-            stored: StoredSets::new(),
-            flashes: Vec::new(),
-            parked_from_store: 0,
-        };
+        let mut replay = Replay::new(store_of(
+            &STORED_ARRANGEMENTS
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .collect::<Vec<_>>(),
+        ));
         for line in STORED_LOG.lines() {
             if line.contains("on the user's screen") {
                 // Under the new rule display 261 stays.
@@ -1184,7 +1257,9 @@ mod tests {
     /// again. WindowServer kept only the 1152x800 arrangement, so at 16:44
     /// the 1280x800 display mirrored; 0.1.40 took that for its stored
     /// arrangement failing, released it and refused new displays for 30
-    /// minutes. Now it is unmirrored and stored again, and kept.
+    /// minutes. Now it is unmirrored and stored again, and kept. The third
+    /// size within 30 minutes, at 14:42, is released: that set flashed
+    /// twice already (`UNMIRRORS_PER_SET`).
     const SIZES_LOG: &str = "\
 2026-11-18 14:34:51.729 created display=262 unit=6 at=0,0 size=1280x800 serial=10001
 2026-11-18 14:34:57.905 released display=262 unit=6 at=1728,-800 size=1280x800 quit
@@ -1203,14 +1278,8 @@ mod tests {
 
     #[test]
     fn a_set_stored_at_another_size_since_is_unmirrored_again() {
-        let mut replay = Replay {
-            // As the plist held it before 14:34.
-            store: store_of(&["builtin@1728x1117 closet@2560x1440"]),
-            ours: Vec::new(),
-            stored: StoredSets::new(),
-            flashes: Vec::new(),
-            parked_from_store: 0,
-        };
+        // As the plist held it before 14:34.
+        let mut replay = Replay::new(store_of(&["builtin@1728x1117 closet@2560x1440"]));
         let mirrored: Vec<bool> = SIZES_LOG
             .lines()
             .filter(|l| !l.contains(" released "))
@@ -1222,9 +1291,15 @@ mod tests {
                 mirrors
             })
             .collect();
-        // Each new size flashed once, its repeat landed parked, and as on
-        // the Mac the 1280x800 display mirrored again at 16:44.
+        // Each new size flashed once and its repeat landed parked; 1152x800
+        // was released and its repeat refused; as on the Mac the 1280x800
+        // display mirrored again at 16:44, and was unmirrored.
         assert_eq!(mirrored, [true, false, true, false, true, false, true]);
+        assert_eq!(
+            replay.releases,
+            ["builtin@1728x1117 closet@2560x1440 serial10001@1152x800"]
+        );
+        assert_eq!(replay.refused, 1);
         assert_eq!(
             replay.flashes.last().unwrap(),
             "builtin@1728x1117 closet@2560x1440 serial10001@1280x800"
@@ -1233,10 +1308,60 @@ mod tests {
         let set = "builtin closet serial10001";
         let last = replay.flashes.last().unwrap().clone();
         assert_eq!(replay.store.get(set), Some(&last));
-        assert_eq!(replay.stored.sets.get(set).map(|(k, _)| k), Some(&last));
+        assert_eq!(replay.stored.sets.get(set).map(|s| &s.key), Some(&last));
         // And the same call again lands parked.
         let again = "2026-11-18 16:46:00.000 created display=274 unit=6 at=1728,-800 size=1280x800 serial=10001";
         assert!(!replay.line(again));
+    }
+
+    /// Agents asking for 1280x800 and 1600x1000 in turn, one display at a
+    /// time, with nothing else of Agent Screen's online, `serial` choosing
+    /// each display's serial; what each creation did.
+    fn alternate(mut serial: impl FnMut((u32, u32), u64) -> u32) -> (Vec<bool>, Replay) {
+        let mut replay = Replay::new(store_of(&["builtin@1728x1117 closet@2560x1440"]));
+        let mut mirrored = Vec::new();
+        for (i, (w, h)) in [(1280, 800), (1600, 1000)]
+            .repeat(4)
+            .into_iter()
+            .enumerate()
+        {
+            let at = 60 * i as u64;
+            let line = format!(
+                "2026-11-18 15:{:02}:00.000 created display={} unit=6 at=0,0 size={w}x{h} serial={}",
+                i,
+                300 + i,
+                serial((w, h), at)
+            );
+            mirrored.push(replay.line(&line));
+            replay.ours.retain(|&(d, _, _)| d != 300 + i as u32);
+        }
+        (mirrored, replay)
+    }
+
+    #[test]
+    fn sizes_in_turn_flash_twice_then_refuse_or_never_with_a_serial_per_size() {
+        // One serial for every size, as 0.1.40 leased them: each size
+        // replaces the set's one arrangement, so each creation would flash.
+        // The second unmirror of the set within 30 minutes is the last.
+        let (mirrored, replay) = alternate(|_, _| 10_001);
+        assert_eq!(&mirrored[..3], [true, true, true]);
+        assert_eq!(replay.flashes.len(), 3);
+        assert_eq!(replay.releases.len(), 1);
+        assert_eq!(replay.refused, 5);
+
+        // A serial per size: each size's set is stored once and lands
+        // parked from then on.
+        let mut sizes = crate::model::SerialSizes::default();
+        let (mirrored, replay) = alternate(|size, at| {
+            let serial = sizes.serial_for(10_001, &Default::default(), size);
+            sizes.leased(serial, size, at);
+            serial
+        });
+        assert_eq!(
+            mirrored,
+            [true, true, false, false, false, false, false, false]
+        );
+        assert!(replay.releases.is_empty());
     }
 
     #[test]
@@ -1257,6 +1382,21 @@ mod tests {
         );
         stored.forget(key);
         assert_eq!(stored.on_landing(key, 160), OnLanding::Unmirror);
+        // Two sizes of one set stored within 30 minutes: the next landing
+        // of that set, at any size, is released; later it is unmirrored.
+        stored.stored(key, 1000);
+        stored.stored(other, 1100);
+        let third = "builtin@1728x1117 closet@2560x1440 serial10001@1600x1000";
+        assert_eq!(stored.on_landing(third, 1200), OnLanding::Release);
+        assert_eq!(
+            stored.on_landing(third, 1000 + FRESH_STORE_SECS),
+            OnLanding::Unmirror
+        );
+        stored.stored(third, 1000 + FRESH_STORE_SECS);
+        assert_eq!(
+            stored.sets[&display_set(third)].unmirrors,
+            [1100, 1000 + FRESH_STORE_SECS]
+        );
         let mut guard = CreationGuard::new();
         guard.record(
             Outcome::Mirrored {
@@ -1293,8 +1433,11 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(
-            old.sets.values().collect::<Vec<_>>(),
-            [&("builtin@1728x1117 serial10001@1152x800".to_string(), 3)]
+            old.sets
+                .values()
+                .map(|s| (s.key.as_str(), s.unmirrors.clone()))
+                .collect::<Vec<_>>(),
+            [("builtin@1728x1117 serial10001@1152x800", vec![3])]
         );
         assert_eq!(
             StoredSets::from_json(&serde_json::json!({"stored": [["a"]]})),

@@ -2,4 +2,4 @@
 default: patch
 ---
 
-A display macOS mirrors onto your screen again, because the same displays were since arranged at another size, is now unmirrored and kept, with one flash, instead of being released and pausing new displays for 30 minutes. macOS remembers one arrangement per set of displays, so a new size replaces the old one. The 30-minute pause now applies only when the mirror can't be turned off or comes back right after Agent Screen stored the arrangement, and a pause in a test instance no longer pauses your own agents.
+A display macOS mirrors onto your screen again, because the same displays were since arranged at another size, is now unmirrored and kept, with one flash, instead of being released and pausing new displays for 30 minutes. Each display size now gets its own identity, so macOS remembers each size's arrangement and agents switching between sizes no longer flash your screen every time. The 30-minute pause now applies only when the mirror can't be turned off, comes back right after Agent Screen stored the arrangement, or the same displays needed unmirroring twice in 30 minutes; and a pause in a test instance no longer pauses your own agents.

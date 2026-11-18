@@ -6,6 +6,7 @@ use agent_screen_model::arrangement;
 use agent_screen_model::landing::{
     self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets, UserBefore,
 };
+use agent_screen_model::model::SerialSizes;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -76,15 +77,36 @@ impl Drop for VirtualDisplay {
 static SERIALS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// A serial held for one display (`lowest_free_serial` says why), and the
-/// first of its instance's range.
+/// A serial held for one display (`lowest_free_serial` and `SerialSizes`
+/// say why), and the first of its instance's range.
 pub struct Serial(u32, u32);
 
+/// `~/Library/Application Support/Agent Screen/serials.json`, or
+/// `serials-<instance>.json`: the size each of the instance's serials was
+/// last leased for (`SerialSizes`).
+fn serial_sizes_path() -> std::path::PathBuf {
+    bad_units_path().with_file_name(match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("serials-{instance}.json"),
+        None => "serials.json".into(),
+    })
+}
+
 impl Serial {
-    /// The lowest serial from `first` no display of this app holds.
-    pub fn lease(first: u32) -> Serial {
+    /// The serial from `first` for a display of `size`, in points, that no
+    /// display of this app holds: the one last leased at that size where
+    /// it can (`SerialSizes::serial_for`).
+    pub fn lease(first: u32, size: (u32, u32)) -> Serial {
         let mut taken = SERIALS.lock().unwrap_or_else(|e| e.into_inner());
-        let serial = agent_screen_model::model::lowest_free_serial(first, &taken);
+        let serial = with_shared(
+            &serial_sizes_path(),
+            SerialSizes::from_json,
+            SerialSizes::to_json,
+            |mut sizes| {
+                let serial = sizes.serial_for(first, &taken, size);
+                sizes.leased(serial, size, wall());
+                (serial, Some(sizes))
+            },
+        );
         taken.insert(serial);
         Serial(serial, first)
     }
@@ -199,7 +221,9 @@ impl VirtualDisplay {
                 }
                 return Err(NotMade::Refused(why));
             }
-            let lease = serial.take().unwrap_or_else(|| Serial::lease(first));
+            let lease = serial
+                .take()
+                .unwrap_or_else(|| Serial::lease(first, (width, height)));
             let number = lease.get();
             let mut display =
                 Self::create_once(name, width, height, number).ok_or(NotMade::MacRefused)?;
