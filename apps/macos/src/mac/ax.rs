@@ -1,0 +1,2673 @@
+//! The Accessibility API: other apps' windows and their element trees.
+
+use crate::model::{Rect, WindowTarget};
+use agent_screen_model::tree::{MAX_DEPTH, MAX_VISITS};
+use agent_screen_model::viewer_keys::{Element as FocusedElement, Focus, caret_in, focus_of};
+use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize,
+};
+use std::ffi::c_void;
+use std::ptr::NonNull;
+
+pub type Element = CFRetained<AXUIElement>;
+
+/// An element that can move to another thread: the AX API may be called
+/// from any thread, and its calls block on the target app, so they belong
+/// off the main thread.
+pub struct Sendable(pub Element);
+unsafe impl Send for Sendable {}
+
+impl Sendable {
+    /// The element. A method, so a closure captures the whole Sendable.
+    pub fn get(&self) -> &Element {
+        &self.0
+    }
+
+    pub fn perform(&self, action: &str) -> bool {
+        perform(&self.0, action)
+    }
+}
+
+unsafe extern "C" {
+    /// _AXUIElementGetWindow, through the shim: the CGWindowID behind an AX window.
+    fn SSAXWindowID(element: &AXUIElement, out: *mut u32) -> bool;
+}
+
+pub fn is_trusted() -> bool {
+    unsafe { objc2_application_services::AXIsProcessTrusted() }
+}
+
+/// Ask for Accessibility, showing the system prompt once.
+pub fn request_trust() {
+    use objc2_core_foundation::CFDictionary;
+    let key = CFString::from_static_str("AXTrustedCheckOptionPrompt");
+    let options =
+        CFDictionary::<CFString, CFBoolean>::from_slices(&[&*key], &[CFBoolean::new(true)]);
+    unsafe { objc2_application_services::AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
+}
+
+/// Wait at most 1 s for any app to answer, not the default 6 s. Set on
+/// the system-wide element, the timeout applies to every element.
+pub fn set_global_timeout() {
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
+}
+
+/// The pid of the app with keyboard focus, which may not be the frontmost
+/// one: a launcher panel such as Spotlight's takes keys from behind it.
+pub fn focused_app_pid() -> Option<i32> {
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let app = element_attribute(&system, "AXFocusedApplication")?;
+    let mut pid = 0;
+    let ok = unsafe { app.pid(NonNull::from(&mut pid)) } == AXError::Success;
+    ok.then_some(pid)
+}
+
+/// An app's root element. A busy or modal app would otherwise hold each call
+/// for 6 s.
+pub fn application(pid: i32) -> Element {
+    let app = unsafe { AXUIElement::new_application(pid) };
+    unsafe { app.set_messaging_timeout(1.0) };
+    app
+}
+
+pub fn attribute(element: &AXUIElement, name: &str) -> Option<CFRetained<CFType>> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) })
+}
+
+pub fn element_attribute(element: &AXUIElement, name: &str) -> Option<Element> {
+    attribute(element, name)?.downcast::<AXUIElement>().ok()
+}
+
+pub fn elements_attribute(element: &AXUIElement, name: &str) -> Vec<Element> {
+    attribute(element, name)
+        .map(|v| elements(&v))
+        .unwrap_or_default()
+}
+
+/// The elements, or the error when the app gave no answer, as a busy one
+/// doesn't within the messaging timeout. An attribute without a value is
+/// an empty list.
+pub fn try_elements_attribute(element: &AXUIElement, name: &str) -> Result<Vec<Element>, AXError> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error == AXError::NoValue || error == AXError::Success && value.is_null() {
+        return Ok(Vec::new());
+    }
+    if error != AXError::Success {
+        return Err(error);
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    Ok(elements(&value))
+}
+
+fn elements(value: &CFType) -> Vec<Element> {
+    let Some(array) = value.downcast_ref::<CFArray>() else {
+        return Vec::new();
+    };
+    let array: &CFArray<CFType> = unsafe { &*(array as *const CFArray as *const CFArray<CFType>) };
+    array
+        .to_vec()
+        .into_iter()
+        .filter_map(|v| v.downcast::<AXUIElement>().ok())
+        .collect()
+}
+
+pub fn string_attribute(element: &AXUIElement, name: &str) -> Option<String> {
+    Some(
+        attribute(element, name)?
+            .downcast_ref::<CFString>()?
+            .to_string(),
+    )
+}
+
+/// Whether the app lets clients change the attribute.
+pub fn settable(element: &AXUIElement, name: &str) -> bool {
+    let name = CFString::from_str(name);
+    let mut settable: u8 = 0;
+    let error = unsafe { element.is_attribute_settable(&name, NonNull::from(&mut settable)) };
+    error == AXError::Success && settable != 0
+}
+
+/// Mutations into a process wait for its real-input loan to let go.
+fn input_gate(element: &AXUIElement) -> std::sync::Arc<std::sync::RwLock<()>> {
+    let mut pid = 0;
+    unsafe { element.pid(NonNull::from(&mut pid)) };
+    super::real_input::process_gate(pid)
+}
+
+pub fn set_attribute(element: &AXUIElement, name: &str, value: &CFType) -> bool {
+    set_attribute_answer(element, name, value) == AXError::Success
+}
+
+/// Set an attribute and return the app's answer.
+fn set_attribute_answer(element: &AXUIElement, name: &str, value: &CFType) -> AXError {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+    let name = CFString::from_str(name);
+    unsafe { element.set_attribute_value(&name, value) }
+}
+
+pub fn perform(element: &AXUIElement, action: &str) -> bool {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+    let action = CFString::from_str(action);
+    unsafe { element.perform_action(&action) == AXError::Success }
+}
+
+/// Perform an action, and say whether the element took it. An action that
+/// opens a modal often outlasts the messaging timeout and reports
+/// CannotComplete although it ran, so only an unsupported action counts as
+/// not taken: a fallback click then cannot press twice.
+pub fn try_action(element: &AXUIElement, action: &str) -> bool {
+    !matches!(action_result(element, action), Action::NotTaken)
+}
+
+/// What an app answered to an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Done,
+    /// The element doesn't take the action: nothing ran.
+    NotTaken,
+    /// The app reported an error, as Failure or CannotComplete, or answered
+    /// late: the action may have run or not.
+    Unsure(AXError),
+}
+
+/// Perform an action and say what the app answered, for a caller that
+/// checks what the action did rather than trusting the answer.
+pub fn action_result(element: &AXUIElement, action: &str) -> Action {
+    let gate = input_gate(element);
+    let _input = gate.read().unwrap_or_else(|e| e.into_inner());
+    let action = CFString::from_str(action);
+    match unsafe { element.perform_action(&action) } {
+        AXError::Success => Action::Done,
+        AXError::ActionUnsupported
+        | AXError::AttributeUnsupported
+        | AXError::IllegalArgument
+        | AXError::InvalidUIElement
+        | AXError::NoValue => Action::NotTaken,
+        error => Action::Unsure(error),
+    }
+}
+
+/// Make `target` its app's main window, as a click on it would, without
+/// the focus event that would end the front app's text input session.
+/// Open a URL in this browser window through its address field. Safari
+/// opens a URL it is sent in the window it last had active, which a
+/// window in the background never becomes. True if the window has an
+/// address field Agent Screen knows and took the URL.
+pub fn open_in_address_field(target: WindowTarget, url: &str) -> bool {
+    // Safari's.
+    const IDS: [&str; 1] = ["WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"];
+    let Some(window) = window_element(target) else {
+        return false;
+    };
+    let mut queue = std::collections::VecDeque::from([(window, 0)]);
+    let mut visited = 0;
+    while let Some((element, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 400 {
+            return false;
+        }
+        if string_attribute(&element, "AXIdentifier").is_some_and(|id| IDS.contains(&id.as_str())) {
+            return set_attribute(&element, "AXValue", &CFString::from_str(url))
+                && perform(&element, "AXConfirm");
+        }
+        if depth < 12 {
+            queue.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|c| (c, depth + 1)),
+            );
+        }
+    }
+    false
+}
+
+/// The top-level `AXWindow` for `target`: `window_element(target)` itself, or
+/// when `target` is a modal sheet (`NSWindow.beginSheet`), the parent
+/// `AXWindow` the sheet is attached to (#205).
+pub fn host_window_element(target: WindowTarget) -> Option<Element> {
+    let mut el = window_or_sheet(target)?;
+    for _ in 0..16 {
+        unsafe { el.set_messaging_timeout(0.1) };
+        if pid_of(&el) == Some(target.pid)
+            && string_attribute(&el, "AXRole").as_deref() == Some("AXWindow")
+            && window_id(&el).is_some()
+        {
+            return Some(el);
+        }
+        el = element_attribute(&el, "AXParent")?;
+    }
+    None
+}
+
+/// Top-level `AXWindow` target for `target`, resolving an attached `AXSheet`
+/// to its parent host window and falling back to `target`.
+pub fn host_window_target(target: WindowTarget) -> WindowTarget {
+    host_window_element(target)
+        .and_then(|w| window_id(&w))
+        .map(|window_id| WindowTarget {
+            pid: target.pid,
+            window_id,
+        })
+        .unwrap_or(target)
+}
+
+/// Whether `target` is minimized or in native macOS full-screen mode.
+pub fn is_minimized_or_fullscreen(target: WindowTarget) -> bool {
+    let Some(w) = window_element(target) else {
+        return false;
+    };
+    unsafe { w.set_messaging_timeout(0.1) };
+    let flag = |name: &str| {
+        attribute(&w, name)
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            .unwrap_or(false)
+    };
+    flag("AXMinimized")
+        || flag("AXFullScreen")
+        || string_attribute(&w, "AXSubrole").as_deref() == Some("AXFullScreenWindow")
+}
+
+pub fn make_main(target: WindowTarget) -> bool {
+    host_window_element(target).is_some_and(|w| set_attribute(&w, "AXMain", CFBoolean::new(true)))
+}
+
+pub fn enclosing_window_id(element: &AXUIElement) -> Option<u32> {
+    enclosing_window_id_with_timeout(element, 0.1)
+}
+
+fn enclosing_window_id_with_timeout(element: &AXUIElement, timeout: f32) -> Option<u32> {
+    unsafe { element.set_messaging_timeout(timeout) };
+    if let Some(id) = window_id(element) {
+        return Some(id);
+    }
+    let mut parent = element_attribute(element, "AXParent");
+    for _ in 0..16 {
+        let Some(p) = parent else { break };
+        unsafe { p.set_messaging_timeout(timeout) };
+        if let Some(id) = window_id(&p) {
+            return Some(id);
+        }
+        parent = element_attribute(&p, "AXParent");
+    }
+    if let Some(w) = element_attribute(element, "AXWindow") {
+        unsafe { w.set_messaging_timeout(timeout) };
+        return window_id(&w);
+    }
+    None
+}
+
+/// The window an app sends keys to: its focused window. Asked before input,
+/// so a hung app gets 0.1 s, not the usual 1 s.
+pub fn focused_window_id(pid: i32) -> Option<u32> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    let window = element_attribute(&app, "AXFocusedWindow")?;
+    window_id(&window)
+}
+
+fn focused_window_or_sheet_id(pid: i32) -> Option<u32> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    if let Some(window) = element_attribute(&app, "AXFocusedWindow")
+        .and_then(|w| enclosing_window_id_with_timeout(&w, 0.1))
+    {
+        return Some(window);
+    }
+    element_attribute(&app, "AXFocusedUIElement")
+        .and_then(|el| enclosing_window_id_with_timeout(&el, 0.1))
+}
+
+fn main_window_id(pid: i32) -> Option<u32> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.1) };
+    let window = element_attribute(&app, "AXMainWindow")?;
+    enclosing_window_id_with_timeout(&window, 0.1)
+}
+
+/// Whether `target` (or the parent `AXWindow` hosting `target` when `target`
+/// is a sheet) is currently `target.pid`'s focused window (#205). When an
+/// inactive AppKit app has a modal sheet open, `AXFocusedWindow` can be empty
+/// while `AXFocusedUIElement` sits inside the sheet or `AXMainWindow` names
+/// the sheet's host window.
+pub fn is_window_or_sheet_focused(target: WindowTarget) -> bool {
+    let host_id = host_window_element(target).and_then(|w| window_id(&w));
+    if let Some(focused) = focused_window_or_sheet_id(target.pid) {
+        return focused == target.window_id || host_id == Some(focused);
+    }
+    host_id.is_some_and(|id| id != target.window_id && main_window_id(target.pid) == Some(id))
+}
+
+pub fn window_id(element: &AXUIElement) -> Option<u32> {
+    let mut id = 0u32;
+    unsafe { SSAXWindowID(element, &mut id) }.then_some(id)
+}
+
+fn point_value(value: &CFType) -> Option<CGPoint> {
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut point = CGPoint::default();
+    unsafe {
+        value.value(
+            AXValueType::CGPoint,
+            NonNull::from(&mut point).cast::<c_void>(),
+        )
+    }
+    .then_some(point)
+}
+
+fn size_value(value: &CFType) -> Option<CGSize> {
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut size = CGSize::default();
+    unsafe {
+        value.value(
+            AXValueType::CGSize,
+            NonNull::from(&mut size).cast::<c_void>(),
+        )
+    }
+    .then_some(size)
+}
+
+fn frame_from(position: &CFType, size: &CFType) -> Option<Rect> {
+    let p = point_value(position)?;
+    let s = size_value(size)?;
+    Some(Rect::new(p.x, p.y, s.width, s.height))
+}
+
+/// Global frame of an element, top-left origin.
+pub fn frame(element: &AXUIElement) -> Option<Rect> {
+    let position = attribute(element, "AXPosition")?;
+    let size = attribute(element, "AXSize")?;
+    frame_from(&position, &size)
+}
+
+fn ax_value<T>(kind: AXValueType, value: &T) -> Option<CFRetained<AXValue>> {
+    unsafe { AXValue::new(kind, NonNull::from(value).cast::<c_void>()) }
+}
+
+pub fn set_position(element: &AXUIElement, x: f64, y: f64) -> bool {
+    ax_value(AXValueType::CGPoint, &CGPoint::new(x, y))
+        .is_some_and(|v| set_attribute(element, "AXPosition", &v))
+}
+
+pub fn set_size(element: &AXUIElement, width: f64, height: f64) -> bool {
+    ax_value(AXValueType::CGSize, &CGSize::new(width, height))
+        .is_some_and(|v| set_attribute(element, "AXSize", &v))
+}
+
+// MARK: Windows
+
+/// The AX element of a window, matched by window id.
+/// Unhide an app, whatever its activation policy, without activating it.
+pub fn show_app(pid: i32) {
+    set_attribute(&application(pid), "AXHidden", CFBoolean::new(false));
+}
+
+/// Whether a window is an ordinary one, not a panel, dialog or borderless
+/// list: its Accessibility subrole is AXStandardWindow.
+/// Asked on the input thread before a click: a busy app gets 0.15 s, as in
+/// `on_title_bar`, not the usual 1 s.
+pub fn is_standard_window(target: WindowTarget) -> bool {
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    elements_attribute(&app, "AXWindows")
+        .into_iter()
+        .find(|w| window_id(w) == Some(target.window_id))
+        .is_some_and(|w| {
+            unsafe { w.set_messaging_timeout(0.15) };
+            string_attribute(&w, "AXSubrole").as_deref() == Some("AXStandardWindow")
+        })
+}
+
+pub fn window_element(target: WindowTarget) -> Option<Element> {
+    elements_attribute(&application(target.pid), "AXWindows")
+        .into_iter()
+        .find(|w| window_id(w) == Some(target.window_id))
+}
+
+/// Chromium and Electron publish a page's elements only once an assistive
+/// app asks. Electron and Dia take AXManualAccessibility; Chrome refuses
+/// it and takes AXEnhancedUserInterface, as VoiceOver sets it. The page
+/// tree comes up to 2 s later: the first time per process, wait for it,
+/// at most 3 s, so the first read isn't the toolbar alone.
+/// Have a Chromium or Electron app publish its web pages' elements, once,
+/// so a hit test finds them.
+pub fn ensure_web_tree(target: WindowTarget) {
+    if let Some(window) = window_element(target) {
+        ask_for_web_tree(target.pid, &window);
+    }
+}
+
+fn ask_for_web_tree(pid: i32, window: &AXUIElement) {
+    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        if asked.contains(&pid) {
+            return;
+        }
+        asked.push(pid);
+    }
+    if !publish_once(pid) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if web_area(window).is_some_and(|area| !elements_attribute(&area, "AXChildren").is_empty())
+        {
+            web_tree_ready(pid);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    log::debug!(
+        "web tree of {pid} after {} ms",
+        started.elapsed().as_millis()
+    );
+}
+
+/// Apps asked to publish their web pages: whether each is a Chromium or
+/// Electron app, when it was asked, and whether its page tree came up.
+struct Published {
+    web: bool,
+    at: std::time::Instant,
+    ready: bool,
+    /// The app took the request. One busy at its first lookup is asked
+    /// again, at most once a second, within the wait for its tree.
+    set: bool,
+    tried: std::time::Instant,
+}
+
+/// How long a request to publish may hold the lookup thread when asked
+/// again: a busy app would hold it for `application`'s whole timeout.
+const REPUBLISH_TIMEOUT: f32 = 0.1;
+
+static PUBLISHED: std::sync::Mutex<Vec<(i32, Published)>> = std::sync::Mutex::new(Vec::new());
+
+/// How long a page tree takes to come up after it's asked for, at most.
+const WEB_TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Ask a Chromium or Electron app to publish its pages' elements, once per
+/// process. Whether it is one.
+fn publish_once(pid: i32) -> bool {
+    // Known: whether it is a web app, and whether to ask it again.
+    let known = {
+        let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+        published.iter_mut().find(|(p, _)| *p == pid).map(|(_, p)| {
+            let again = p.web
+                && !p.set
+                && p.tried.elapsed() >= std::time::Duration::from_secs(1)
+                && p.at.elapsed() < WEB_TREE_WAIT;
+            if again {
+                p.tried = std::time::Instant::now();
+            }
+            (p.web, again)
+        })
+    };
+    match known {
+        Some((web, false)) => return web,
+        Some((_, true)) => {
+            if publish_web_tree(pid, REPUBLISH_TIMEOUT) {
+                let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+                    // Its page tree comes up from now.
+                    p.set = true;
+                    p.at = std::time::Instant::now();
+                }
+            }
+            return true;
+        }
+        None => {}
+    }
+    let set = publish_web_tree(pid, 1.0);
+    let now = std::time::Instant::now();
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter().find(|(p, _)| *p == pid) {
+        return p.web;
+    }
+    // Whether it is one comes from its bundle too: an app that times out
+    // or fails the first request is still asked again.
+    let web = set || super::app::bundle_of(pid).is_some_and(|b| chromium(&b));
+    if published.len() >= 256 {
+        published.remove(0);
+    }
+    published.push((
+        pid,
+        Published {
+            web,
+            at: now,
+            ready: false,
+            set,
+            tried: now,
+        },
+    ));
+    web
+}
+
+/// Whether a bundle is a Chromium browser or an Electron app.
+fn chromium(bundle: &std::path::Path) -> bool {
+    super::app::handles_web(bundle)
+        || bundle
+            .join("Contents/Frameworks/Electron Framework.framework")
+            .exists()
+}
+
+fn web_tree_ready(pid: i32) {
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = published.iter_mut().find(|(p, _)| *p == pid) {
+        p.ready = true;
+    }
+}
+
+/// Whether `pid` is a Chromium or Electron app whose page tree may not be
+/// up yet: asked for less than `WEB_TREE_WAIT` ago and not seen since.
+fn web_tree_pending(pid: i32) -> bool {
+    let published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    published
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .is_some_and(|(_, p)| p.web && !p.ready && p.at.elapsed() < WEB_TREE_WAIT)
+}
+
+/// Ask a Chromium or Electron app to publish its pages' elements: whether
+/// it took the request.
+fn publish_web_tree(pid: i32, timeout: f32) -> bool {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(timeout) };
+    set_attribute(&app, "AXManualAccessibility", CFBoolean::new(true))
+        || (super::app::bundle_of(pid).is_some_and(|b| super::app::handles_web(&b))
+            // Chrome applies it but answers an error.
+            && {
+                set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
+                true
+            })
+}
+
+/// The address of the page in `target`'s window: its first web area's
+/// AXURL, which Chromium and WebKit give as a URL. None where the window
+/// shows no page or the app doesn't say.
+pub fn web_url(target: WindowTarget) -> Option<String> {
+    let window = window_element(target)?;
+    let area = web_area(&window)?;
+    let value = attribute(&area, "AXURL")?;
+    if let Some(url) = value.downcast_ref::<objc2_core_foundation::CFURL>() {
+        return Some(url.string().to_string());
+    }
+    value.downcast_ref::<CFString>().map(|s| s.to_string())
+}
+
+/// The window's first web area, breadth first.
+pub fn web_area(window: &AXUIElement) -> Option<Element> {
+    let window = unsafe { CFRetained::retain(NonNull::from(window)) };
+    let mut queue = std::collections::VecDeque::from([(window, 0)]);
+    let mut visited = 0;
+    while let Some((element, depth)) = queue.pop_front() {
+        visited += 1;
+        if visited > 3000 {
+            return None;
+        }
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXWebArea") {
+            return Some(element);
+        }
+        if depth < 40 {
+            queue.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|c| (c, depth + 1)),
+            );
+        }
+    }
+    None
+}
+
+/// The frame of the web page at a global point of a window: the outermost
+/// web area there, whose frame is the page's viewport, an iframe's own web
+/// area inside it left aside. None where the point is on anything else,
+/// such as a toolbar, a native control or a title bar, and where the app
+/// publishes no page tree at all. Chromium and WebKit both report web
+/// content as AXWebArea.
+pub fn web_area_at(target: WindowTarget, at: (f64, f64)) -> Option<Rect> {
+    let window = window_element(target)?;
+    ask_for_web_tree(target.pid, &window);
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(target.pid).copy_element_at_position(
+            at.0 as f32,
+            at.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    let mut outermost = None;
+    for _ in 0..200 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXWebArea") => outermost = Some(element.clone()),
+            Some("AXWindow" | "AXSheet" | "AXApplication") => break,
+            _ => {}
+        }
+        match element_attribute(&element, "AXParent") {
+            Some(parent) => element = parent,
+            None => break,
+        }
+    }
+    frame(&outermost?.clone())
+}
+
+/// Substitute a slider value change for a drag only when AX publishes a
+/// numeric range, orientation and a thumb position that identifies its
+/// direction. After attempting a set, uncertainty is an error, never a
+/// reason to issue a second drag through another route.
+pub fn drag_slider(
+    target: WindowTarget,
+    from: (f64, f64),
+    to: (f64, f64),
+    allowed: impl Fn() -> bool,
+) -> Result<bool, String> {
+    use agent_screen_model::substitute::{self, Slider};
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let result = unsafe {
+        application(target.pid).copy_element_at_position(
+            from.0 as f32,
+            from.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    if result != AXError::Success {
+        return Ok(false);
+    }
+    let Some(raw) = NonNull::new(raw as *mut AXUIElement) else {
+        return Ok(false);
+    };
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    for _ in 0..8 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXSlider") => break,
+            Some("AXWindow" | "AXSheet" | "AXApplication" | "AXWebArea") => return Ok(false),
+            _ => {}
+        }
+        let Some(parent) = element_attribute(&element, "AXParent") else {
+            return Ok(false);
+        };
+        element = parent;
+    }
+    if string_attribute(&element, "AXRole").as_deref() != Some("AXSlider")
+        || !settable(&element, "AXValue")
+        || element_attribute(&element, "AXWindow").and_then(|window| window_id(&window))
+            != Some(target.window_id)
+    {
+        return Ok(false);
+    }
+    let number = |name: &str| {
+        attribute(&element, name)?
+            .downcast_ref::<CFNumber>()?
+            .as_f64()
+    };
+    let (Some(min), Some(max), Some(current), Some(frame)) = (
+        number("AXMinValue"),
+        number("AXMaxValue"),
+        number("AXValue"),
+        frame(&element),
+    ) else {
+        return Ok(false);
+    };
+    let vertical = match string_attribute(&element, "AXOrientation").as_deref() {
+        Some("AXHorizontalOrientation") => false,
+        Some("AXVerticalOrientation") => true,
+        _ => return Ok(false),
+    };
+    let slider = Slider {
+        frame,
+        min,
+        max,
+        vertical,
+    };
+    if !frame.contains(from) {
+        return Ok(false);
+    }
+    let Some(value) = substitute::drag_value(slider, from, to, current) else {
+        return Ok(false);
+    };
+    if !allowed() {
+        return Err("The slider action stopped before setting its value; its window is no longer available for agent input.".into());
+    }
+    let confirmed = || {
+        number("AXValue").is_some_and(|read| substitute::confirmed(slider, current, value, read))
+    };
+    if set_attribute(&element, "AXValue", &CFNumber::new_f64(value)) && confirmed() {
+        return Ok(true);
+    }
+    // Chromium reports the write as done and ignores it; its slider moves
+    // only by its own step, through AXIncrement and AXDecrement. Each step
+    // must show before the next, and must go toward the value.
+    let action = if value > current {
+        "AXIncrement"
+    } else {
+        "AXDecrement"
+    };
+    let mut at = current;
+    let mut step = None;
+    for _ in 0..substitute::MAX_STEPS {
+        if !substitute::step_closer(value, at, step) {
+            break;
+        }
+        if !allowed() {
+            return Err("The slider stopped moving partway; its window is no longer available for agent input. Inspect its current value before retrying.".into());
+        }
+        if !perform(&element, action) {
+            break;
+        }
+        let mut read = number("AXValue");
+        for _ in 0..60 {
+            if read.is_some_and(|read| read != at) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            read = number("AXValue");
+        }
+        match read {
+            Some(read) if read != at && (read - at).signum() == (value - at).signum() => {
+                step = Some((read - at).abs());
+                at = read;
+            }
+            _ => break,
+        }
+    }
+    if confirmed() {
+        Ok(true)
+    } else {
+        Err("The slider's accessibility value change was not confirmed. Inspect its current value before retrying; no fallback drag was sent.".into())
+    }
+}
+
+/// While VoiceOver's AXEnhancedUserInterface is on, Chromium animates
+/// window moves and resizes, slowly. Turn it off around a move.
+fn with_moves_direct<T>(
+    window: &AXUIElement,
+    timeout_secs: Option<f32>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let mut pid = 0;
+    let app = (unsafe { window.pid(NonNull::from(&mut pid)) } == AXError::Success).then(|| {
+        let app = application(pid);
+        if let Some(timeout) = timeout_secs {
+            unsafe { app.set_messaging_timeout(timeout) };
+        }
+        app
+    });
+    let enhanced = app.as_ref().is_some_and(|app| {
+        attribute(app, "AXEnhancedUserInterface")
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            == Some(true)
+    });
+    if let (true, Some(app)) = (enhanced, app.as_ref()) {
+        set_attribute(app, "AXEnhancedUserInterface", CFBoolean::new(false));
+    }
+    let result = f();
+    if let (true, Some(app)) = (enhanced, app.as_ref()) {
+        set_attribute(app, "AXEnhancedUserInterface", CFBoolean::new(true));
+    }
+    result
+}
+
+/// A browser window's page, by its first web area's AXLoaded, as Chromium
+/// and WebKit browsers publish it.
+#[derive(Debug, PartialEq)]
+pub enum Page {
+    Loading,
+    Loaded,
+    /// A web page that doesn't say.
+    Unknown,
+    /// No web page in the window, or none yet: Chromium builds a new
+    /// window's page tree a moment after it opens.
+    Blank,
+    /// Accessibility doesn't list the window yet, as just after it opened.
+    NoWindow,
+}
+
+pub fn page(target: WindowTarget) -> Page {
+    let Some(window) = window_element(target) else {
+        return Page::NoWindow;
+    };
+    ask_for_web_tree(target.pid, &window);
+    let Some(area) = web_area(&window) else {
+        return Page::Blank;
+    };
+    // Chromium answers a number, WebKit a boolean.
+    let loaded = attribute(&area, "AXLoaded").and_then(|v| {
+        v.downcast_ref::<CFBoolean>()
+            .map(|b| b.as_bool())
+            .or_else(|| v.downcast_ref::<CFNumber>()?.as_i64().map(|n| n != 0))
+    });
+    match loaded {
+        Some(true) => Page::Loaded,
+        Some(false) => Page::Loading,
+        None => Page::Unknown,
+    }
+}
+
+/// The window's element, or for one the app doesn't list, as a file panel
+/// a browser shows as a sheet of one of its windows, the sheet or window
+/// at its center. For reading and typing into it, not for moving it.
+pub fn window_or_sheet(target: WindowTarget) -> Option<Element> {
+    window_element(target).or_else(|| sheet_element(target))
+}
+
+fn sheet_element(target: WindowTarget) -> Option<Element> {
+    let bounds = super::cg::on_screen_windows()
+        .into_iter()
+        .find(|w| w.target == target)?
+        .bounds;
+    let (x, y) = bounds.mid();
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(target.pid).copy_element_at_position(
+            x as f32,
+            y as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    for _ in 0..64 {
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXSheet" | "AXWindow") => return Some(element),
+            _ => element = element_attribute(&element, "AXParent")?,
+        }
+    }
+    None
+}
+
+/// The element at a global point of app `pid`, as a click there would hit
+/// it: the deepest one accessibility knows.
+pub fn element_at(pid: i32, at: (f64, f64)) -> Option<Element> {
+    element_at_in(&application(pid), at)
+}
+
+/// The element at a global point of `app`, an application element.
+fn element_at_in(app: &AXUIElement, at: (f64, f64)) -> Option<Element> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error =
+        unsafe { app.copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw)) };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let element = unsafe { CFRetained::from_raw(raw) };
+    (error == AXError::Success).then_some(element)
+}
+
+/// What accessibility says is at a global point of app `pid`, for a real
+/// click to check that it still aims at the same thing (ADR 0013,
+/// "Clicks"): the hit element's role, subrole, title and description and
+/// the name of its row, cell or link, each None when the app didn't
+/// answer for it, and the frame of that row, cell or link, or else of the
+/// element, in global points, when `framed` asks for it. Every read
+/// together takes at most `budget`: an app that stalls past it leaves both
+/// unknown, and the pixels decide.
+pub fn target_at(
+    pid: i32,
+    at: (f64, f64),
+    budget: std::time::Duration,
+    framed: bool,
+) -> (
+    Option<agent_screen_model::real_click::Identity>,
+    Option<Rect>,
+) {
+    let started = std::time::Instant::now();
+    let budget = Budget(started + budget);
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let Some(element) = budget.arm(&app).then(|| element_at_in(&app, at)).flatten() else {
+        return (None, None);
+    };
+    let read = |e: &AXUIElement, name| budget.arm(e).then(|| string_attribute(e, name)).flatten();
+    // A list's row, a table's cell or a web row's link frames and names
+    // what a reorder would change.
+    let mut item = None;
+    let mut next = Some(element.clone());
+    for _ in 0..6 {
+        let Some(e) = next else { break };
+        if matches!(
+            read(&e, "AXRole").as_deref(),
+            Some("AXRow" | "AXCell" | "AXLink")
+        ) {
+            item = Some(e);
+            break;
+        }
+        next = budget
+            .arm(&e)
+            .then(|| element_attribute(&e, "AXParent"))
+            .flatten();
+    }
+    let name = item.as_deref().and_then(|i| item_name(i, &budget));
+    let identity = agent_screen_model::real_click::element_identity([
+        read(&element, "AXRole"),
+        read(&element, "AXSubrole"),
+        read(&element, "AXTitle"),
+        read(&element, "AXDescription"),
+        name,
+    ]);
+    let framed = framed
+        .then(|| {
+            item.as_deref()
+                .filter(|i| budget.arm(i))
+                .and_then(frame)
+                .or_else(|| budget.arm(&element).then(|| frame(&element)).flatten())
+        })
+        .flatten();
+    let took = started.elapsed().as_millis();
+    if budget.over() {
+        log::info!(
+            "input queue: accessibility at the click took {took} ms, past its budget; the pixels decide"
+        );
+        return (None, None);
+    }
+    log::info!("input queue: accessibility at the click read in {took} ms: {identity:?}");
+    (identity, framed)
+}
+
+/// When a run of accessibility reads must end.
+struct Budget(std::time::Instant);
+
+impl Budget {
+    /// Let `element`'s next read wait only what is left; false once
+    /// nothing is.
+    fn arm(&self, element: &AXUIElement) -> bool {
+        let left = self.0.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        unsafe { element.set_messaging_timeout(left.as_secs_f32().max(0.01)) };
+        true
+    }
+
+    fn over(&self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
+/// A row's name: its first static text in depth-first pre-order, within
+/// three levels and 40 elements, that `real_click::names_row` takes, or
+/// else its own title or description. The walk stops at that text.
+fn item_name(item: &AXUIElement, budget: &Budget) -> Option<String> {
+    fn walk(
+        e: &AXUIElement,
+        depth: usize,
+        seen: &mut usize,
+        texts: &mut Vec<String>,
+        budget: &Budget,
+    ) {
+        let found = texts
+            .last()
+            .is_some_and(|t| agent_screen_model::real_click::names_row(t));
+        if depth > 3 || *seen >= 40 || found || !budget.arm(e) {
+            return;
+        }
+        *seen += 1;
+        if depth > 0 && string_attribute(e, "AXRole").as_deref() == Some("AXStaticText") {
+            let text = budget
+                .arm(e)
+                .then(|| string_attribute(e, "AXValue"))
+                .flatten()
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| {
+                    budget
+                        .arm(e)
+                        .then(|| string_attribute(e, "AXTitle"))
+                        .flatten()
+                });
+            texts.extend(text);
+            return;
+        }
+        if !budget.arm(e) {
+            return;
+        }
+        for child in elements_attribute(e, "AXChildren") {
+            walk(&child, depth + 1, seen, texts, budget);
+        }
+    }
+    let mut texts = Vec::new();
+    walk(item, 0, &mut 0, &mut texts, budget);
+    if let Some(name) = agent_screen_model::real_click::item_name(&texts) {
+        return Some(name.to_string());
+    }
+    ["AXTitle", "AXDescription"]
+        .into_iter()
+        .filter_map(|a| {
+            budget
+                .arm(item)
+                .then(|| string_attribute(item, a))
+                .flatten()
+        })
+        .find(|t| !t.trim().is_empty())
+}
+
+/// The actions an element takes, such as AXPress and AXConfirm.
+pub fn actions(element: &AXUIElement) -> Vec<String> {
+    let mut raw: *const CFArray = std::ptr::null();
+    let error = unsafe { element.copy_action_names(NonNull::from(&mut raw)) };
+    let Some(raw) = NonNull::new(raw as *mut CFArray) else {
+        return Vec::new();
+    };
+    let array = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return Vec::new();
+    }
+    let array: &CFArray<CFType> =
+        unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
+    array
+        .to_vec()
+        .into_iter()
+        .filter_map(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+        .collect()
+}
+
+/// The window an element is in.
+pub fn window_of(element: &AXUIElement) -> Option<u32> {
+    window_id(&*element_attribute(element, "AXWindow")?)
+}
+
+/// Validate a retained number before a scoped read or action. Partial
+/// snapshots cannot infer that an unvisited element disappeared.
+pub fn in_window(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> bool {
+    belongs(element, target, allow_menu) == Some(true)
+}
+
+/// Whether `element` is in the window, or None when the app didn't answer
+/// within the messaging timeout, as a busy app doesn't.
+pub fn belongs(element: &AXUIElement, target: WindowTarget, allow_menu: bool) -> Option<bool> {
+    let mut pid = 0;
+    if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success
+        || (pid != target.pid && !super::cg::is_remote_view_service(pid))
+    {
+        return Some(false);
+    }
+    let name = CFString::from_static_str("AXRole");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error == AXError::CannotComplete {
+        return None;
+    }
+    if error != AXError::Success || value.is_null() {
+        return Some(false);
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    let Some(role) = value.downcast_ref::<CFString>().map(|r| r.to_string()) else {
+        return Some(false);
+    };
+    if allow_menu
+        && pid == target.pid
+        && matches!(role.as_str(), "AXMenuBarItem" | "AXMenuItem" | "AXMenu")
+    {
+        return Some(true);
+    }
+    let Some(window) = window_or_sheet(target) else {
+        return Some(false);
+    };
+    let element = unsafe { CFRetained::retain(NonNull::from(element)) };
+    // AXWindow is a direct association in many apps; some web elements
+    // expose only AXParent. Both must name this live window.
+    Some(
+        element_attribute(&element, "AXWindow").is_some_and(|owner| owner == window)
+            || agent_screen_model::tree::within(element, &window, |e| {
+                element_attribute(e, "AXParent")
+            }),
+    )
+}
+
+/// Lookups of the text focus made on the main thread, which none should be.
+pub static MAIN_THREAD_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An attribute's value: None when the app says it has none, the error
+/// when it gave no answer, as one that times out.
+fn try_attribute(element: &AXUIElement, name: &str) -> Result<Option<CFRetained<CFType>>, AXError> {
+    let name = CFString::from_str(name);
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    match error {
+        AXError::Success if !value.is_null() => Ok(Some(unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType))
+        })),
+        AXError::Success | AXError::NoValue | AXError::AttributeUnsupported => Ok(None),
+        error => Err(error),
+    }
+}
+
+/// What has the keyboard in `target`'s app, for editable text its caret in
+/// global top-left points (`viewer_keys::caret_in`), and a hash of the
+/// focused element. Other when the app reports no focused element, or one
+/// in another window that is no password field. Unanswered, so keys don't
+/// compose, when a call fails or times out, or when a Chromium or Electron
+/// app, asked to publish its page here the first time, hasn't yet: until
+/// then it reports no element, or the page itself, for a focused password
+/// field.
+///
+/// Each call waits at most 100 ms for the app. Never on the main thread,
+/// where keys are handled: `MAIN_THREAD_LOOKUPS` counts any that is, for
+/// tests.
+/// What has the keyboard in `target`, its caret, the focused element as a
+/// hash, and the element's frame.
+pub fn text_focus(target: WindowTarget) -> (Focus, Option<Rect>, Option<u64>, Option<Rect>) {
+    use std::hash::{Hash, Hasher};
+    if unsafe { libc::pthread_main_np() } == 1 {
+        MAIN_THREAD_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let web = publish_once(target.pid);
+    let pending = || web && web_tree_pending(target.pid);
+    let app = unsafe { AXUIElement::new_application(target.pid) };
+    unsafe { app.set_messaging_timeout(0.1) };
+    let element = match try_attribute(&app, "AXFocusedUIElement") {
+        Ok(Some(value)) => value.downcast::<AXUIElement>().ok(),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("ax: {} gave no focused element: {error:?}", target.pid);
+            return (Focus::Unanswered, None, None, None);
+        }
+    };
+    let Some(element) = element else {
+        log::debug!("ax: {} reports no focused element", target.pid);
+        let focus = if pending() {
+            Focus::Unanswered
+        } else {
+            Focus::Other
+        };
+        return (focus, None, None, None);
+    };
+    let id = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        element.hash(&mut hasher);
+        Some(hasher.finish())
+    };
+    unsafe { element.set_messaging_timeout(0.1) };
+    let (Ok(role), Ok(subrole)) = (
+        try_attribute(&element, "AXRole"),
+        try_attribute(&element, "AXSubrole"),
+    ) else {
+        log::debug!("ax: {} gave no role for its focused element", target.pid);
+        return (Focus::Unanswered, None, None, None);
+    };
+    let text = |v: Option<CFRetained<CFType>>| {
+        v.and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()))
+    };
+    let (role, subrole) = (text(role), text(subrole));
+    let editable = attribute(&element, "AXEditable")
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        .unwrap_or(false);
+    let range = attribute(&element, "AXSelectedTextRange").and_then(|v| range_value(&v));
+    let focus = focus_of(FocusedElement {
+        role: role.as_deref(),
+        subrole: subrole.as_deref(),
+        editable,
+        value_settable: settable(&element, "AXValue"),
+        selection: range.is_some(),
+    });
+    let element_frame = frame(&element);
+    let window = element_attribute(&element, "AXWindow").and_then(|w| window_id(&w));
+    if window != Some(target.window_id) {
+        log::debug!(
+            "ax: the focused element of {} is {focus:?} in window {window:?}",
+            target.pid
+        );
+        // A password field in a sheet or panel still is one.
+        let focus = match focus {
+            Focus::Secure => Focus::Secure,
+            _ if pending() => Focus::Unanswered,
+            _ => Focus::Other,
+        };
+        return (focus, None, id, element_frame);
+    }
+    // A field in the page shows its tree is up; the address bar doesn't.
+    if matches!(focus, Focus::Text | Focus::Secure)
+        && pending()
+        && in_web_area(&element) == Some(true)
+    {
+        web_tree_ready(target.pid);
+    }
+    if focus != Focus::Text {
+        log::debug!(
+            "ax: the focused element of {} is {role:?} {subrole:?}",
+            target.pid
+        );
+        let focus = if focus == Focus::Other && pending() {
+            Focus::Unanswered
+        } else {
+            focus
+        };
+        return (focus, None, id, element_frame);
+    }
+    let caret = range.zip(element_frame).and_then(|(range, frame)| {
+        let (location, length) = (range.location.max(0) as usize, range.length.max(0) as usize);
+        let before = (length == 0 && location > 0)
+            .then(|| bounds_for_range(&element, location - 1, 1))
+            .flatten();
+        let selection = bounds_for_range(&element, location, length);
+        caret_in(frame, location, length, before, selection)
+    });
+    (focus, caret, id, element_frame)
+}
+
+fn range_value(value: &CFType) -> Option<objc2_core_foundation::CFRange> {
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut range = objc2_core_foundation::CFRange::new(0, 0);
+    unsafe {
+        value.value(
+            AXValueType::CFRange,
+            NonNull::from(&mut range).cast::<c_void>(),
+        )
+    }
+    .then_some(range)
+}
+
+/// AXBoundsForRange, in global top-left points, when it has a height.
+fn bounds_for_range(element: &AXUIElement, location: usize, length: usize) -> Option<Rect> {
+    let range = objc2_core_foundation::CFRange::new(location as isize, length as isize);
+    let parameter = ax_value(AXValueType::CFRange, &range)?;
+    let name = CFString::from_static_str("AXBoundsForRange");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe {
+        element.copy_parameterized_attribute_value(&name, &parameter, NonNull::from(&mut value))
+    };
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+    let value = value.downcast_ref::<AXValue>()?;
+    let mut rect = objc2_core_foundation::CGRect::default();
+    unsafe {
+        value.value(
+            AXValueType::CGRect,
+            NonNull::from(&mut rect).cast::<c_void>(),
+        )
+    }
+    .then_some(())?;
+    (rect.size.height > 0.0).then(|| {
+        Rect::new(
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
+    })
+}
+
+pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)) -> bool {
+    let range = objc2_core_foundation::CFRange::new(start as isize, length as isize);
+    ax_value(AXValueType::CFRange, &range)
+        .is_some_and(|value| set_attribute(element, "AXSelectedTextRange", &value))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuWalkStep {
+    Press,
+    Stop,
+    Up,
+}
+
+fn menu_item_walk_step(role: Option<&str>) -> MenuWalkStep {
+    match role {
+        Some("AXMenuItem") => MenuWalkStep::Press,
+        // Stop at the enclosing menu container so a click on a submenu's
+        // padding never walks into the parent menu item.
+        Some("AXMenu" | "AXMenuBar") => MenuWalkStep::Stop,
+        _ => MenuWalkStep::Up,
+    }
+}
+
+/// Press the menu item at a global point of an open pop-up menu, as a
+/// web page's select or an AppKit / ExtensionKit pop-up button shows (#205,
+/// #207). True if there was one to press. A menu tracks the real pointer, not
+/// the events posted to its app, so a posted click can't choose an item.
+///
+/// Hit-testing a menu item's label or checkmark can return a child element
+/// rather than the `AXMenuItem` itself, and an ExtensionKit `.appex` pane's
+/// menu may answer through either the `.appex` pid or the host app's pid.
+pub fn press_menu_item_at(pids: &[i32], at: (f64, f64)) -> bool {
+    for &pid in pids {
+        let app = application(pid);
+        unsafe { app.set_messaging_timeout(0.15) };
+        let Some(mut el) = element_at_in(&app, at) else {
+            continue;
+        };
+        // At most 2 AXParent hops (`el`, parent, grandparent).
+        for _ in 0..3 {
+            unsafe { el.set_messaging_timeout(0.15) };
+            match menu_item_walk_step(string_attribute(&el, "AXRole").as_deref()) {
+                MenuWalkStep::Press => {
+                    if unsafe { el.perform_action(&CFString::from_static_str("AXPress")) }
+                        == AXError::Success
+                    {
+                        return true;
+                    }
+                    break;
+                }
+                MenuWalkStep::Stop => break,
+                MenuWalkStep::Up => {}
+            }
+            let Some(parent) = element_attribute(&el, "AXParent") else {
+                break;
+            };
+            el = parent;
+        }
+    }
+    false
+}
+
+/// Dismiss an open pop-up menu (`AXMenu`) at `at` through `AXCancel` when a
+/// background or Viewer click lands outside the menu (#207). Modal `NSMenu`
+/// tracking ignores posted mouse clicks outside its window until cancelled.
+pub fn cancel_menu_at(pids: &[i32], at: (f64, f64)) -> bool {
+    for &pid in pids {
+        let app = application(pid);
+        unsafe { app.set_messaging_timeout(0.15) };
+        let Some(mut el) = element_at_in(&app, at) else {
+            continue;
+        };
+        for _ in 0..4 {
+            unsafe { el.set_messaging_timeout(0.15) };
+            if string_attribute(&el, "AXRole").as_deref() == Some("AXMenu") {
+                if unsafe { el.perform_action(&CFString::from_static_str("AXCancel")) }
+                    == AXError::Success
+                {
+                    return true;
+                }
+                break;
+            }
+            let Some(parent) = element_attribute(&el, "AXParent") else {
+                break;
+            };
+            el = parent;
+        }
+    }
+    false
+}
+
+/// Whether a global point is on the title bar or toolbar background of a
+/// window, where a drag moves the window: near its top, with no control,
+/// text or web content there. Toolkits name that background differently,
+/// such as the window itself, a toolbar, a tab strip background inside a
+/// toolbar, or SwiftUI's hosting view. WindowServer moves a window for real
+/// mouse drags only, so drags made for an agent, or through the Viewer, move
+/// it through here.
+pub fn on_title_bar(target: WindowTarget, bounds: Rect, at: (f64, f64)) -> bool {
+    // Unified toolbars are up to 52 pt tall.
+    if at.1 - bounds.y > 52.0 {
+        return false;
+    }
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    let Some(mut element) = element_at_in(&app, at) else {
+        return false;
+    };
+    let mut saw_tab_group = false;
+    let mut saw_toolbar = false;
+    for _ in 0..12 {
+        unsafe { element.set_messaging_timeout(0.15) };
+        match string_attribute(&element, "AXRole").as_deref() {
+            Some("AXWindow") => {
+                return (!saw_tab_group || saw_toolbar) && has_title_bar(&element);
+            }
+            Some("AXToolbar") => {
+                saw_toolbar = true;
+            }
+            // Empty tab-strip space (`AXTabGroup`) drags the window only when
+            // inside `AXToolbar`, so a content `NSTabView` near the top of a
+            // window never drags the window (L9).
+            Some("AXTabGroup") => {
+                saw_tab_group = true;
+            }
+            Some("AXGroup" | "AXStaticText" | "AXImage" | "AXSplitGroup") => {}
+            // A control, text, a list, a web page, or anything unknown:
+            // a drag there is the app's.
+            _ => return false,
+        }
+        let Some(parent) = element_attribute(&element, "AXParent") else {
+            return false;
+        };
+        element = parent;
+    }
+    false
+}
+
+/// Whether a window has a title bar: one of its buttons. A borderless
+/// window, such as a Qt pop-up list or a custom-drawn panel, answers for
+/// itself wherever its content has no accessibility element, and its top
+/// edge is its first item: a click to wake it there picked that item.
+fn has_title_bar(window: &AXUIElement) -> bool {
+    [
+        "AXCloseButton",
+        "AXMinimizeButton",
+        "AXZoomButton",
+        "AXFullScreenButton",
+    ]
+    .iter()
+    .any(|button| element_attribute(window, button).is_some())
+}
+
+#[derive(Debug)]
+pub enum MoveError {
+    NoWindow,
+    Rejected,
+    /// Sent off the Agent Displays, the window is still on one. It stays
+    /// claimed there.
+    StillOnAgentDisplay,
+}
+
+impl std::fmt::Display for MoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MoveError::NoWindow => "no such window",
+            MoveError::Rejected => "the app rejected the change",
+            MoveError::StillOnAgentDisplay => "the window is still on an Agent Display",
+        })
+    }
+}
+
+/// Fit the window inside `bounds` with a 40 pt margin, centered.
+/// Minimize a window: what's left when it can't go where it belongs.
+pub fn minimize(target: WindowTarget) -> bool {
+    window_element(target).is_some_and(|w| set_minimized(&w, true))
+}
+
+/// Whether a window element is minimized to the Dock.
+pub fn is_minimized(window: &AXUIElement) -> bool {
+    unsafe { window.set_messaging_timeout(0.25) };
+    attribute(window, "AXMinimized")
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Minimize a window element, or bring it back from the Dock.
+pub fn set_minimized(window: &AXUIElement, minimized: bool) -> bool {
+    set_attribute(window, "AXMinimized", CFBoolean::new(minimized))
+}
+
+pub fn move_into(target: WindowTarget, bounds: Rect) -> Result<(), MoveError> {
+    // A removed display has empty bounds; the window would land in a
+    // corner of the main screen.
+    if bounds.width <= 80.0 || bounds.height <= 80.0 {
+        return Err(MoveError::Rejected);
+    }
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    move_element_into(&window, bounds)
+}
+
+/// Move every window of `pid` into `bounds`; how many there were.
+pub fn move_all_into(pid: i32, bounds: Rect) -> usize {
+    elements_attribute(&application(pid), "AXWindows")
+        .iter()
+        .filter(|w| string_attribute(w, "AXRole").as_deref() == Some("AXWindow"))
+        .filter(|w| move_element_into(w, bounds).is_ok())
+        .count()
+}
+
+/// Center a window element inside `bounds`, shrunk to fit. A window going
+/// onto a claimed display is claimed first. A claimed window going anywhere
+/// else keeps its claim until it is off every claimed display, and keeps it
+/// when it doesn't get off. Blocking.
+pub fn move_element_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
+    if bounds.width <= 80.0 || bounds.height <= 80.0 {
+        return Err(MoveError::Rejected);
+    }
+    let id = window_id(window);
+    let onto_claimed = id.is_some_and(|id| super::claims::moving_into(id, bounds));
+    let moved = with_moves_direct(window, None, || fit_into(window, bounds));
+    match id {
+        Some(id) if !onto_claimed && super::claims::display_of(id).is_some() => {
+            let off = super::claims::release_once_off(id, moved.is_ok());
+            moved.and(if off {
+                Ok(())
+            } else {
+                Err(MoveError::StillOnAgentDisplay)
+            })
+        }
+        _ => moved,
+    }
+}
+
+fn fit_into(window: &AXUIElement, bounds: Rect) -> Result<(), MoveError> {
+    let area = bounds.inset(40.0, 40.0);
+    let size = attribute(window, "AXSize")
+        .and_then(|v| size_value(&v))
+        .unwrap_or(CGSize::new(800.0, 600.0));
+    let fitted = (size.width.min(area.width), size.height.min(area.height));
+    let (mid_x, mid_y) = area.mid();
+    if !set_position(window, mid_x - fitted.0 / 2.0, mid_y - fitted.1 / 2.0) {
+        return Err(MoveError::Rejected);
+    }
+    if fitted != (size.width, size.height) {
+        set_size(window, fitted.0, fitted.1);
+    }
+    Ok(())
+}
+
+/// Move a window's top-left origin without writing `AXSize`, as a title-bar
+/// drag does.
+pub fn set_window_position(target: WindowTarget, x: f64, y: f64) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    with_moves_direct(&window, None, || {
+        if !set_position(&window, x, y) {
+            return Err(MoveError::Rejected);
+        }
+        Ok(())
+    })
+}
+
+/// Put a window back at an exact global frame.
+pub fn set_frame(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    with_moves_direct(&window, None, || {
+        if !set_position(&window, frame.x, frame.y) {
+            return Err(MoveError::Rejected);
+        }
+        set_size(&window, frame.width, frame.height);
+        Ok(())
+    })
+}
+
+/// Put a window back at an exact frame for a caller that holds its
+/// process's input gate itself, as a real-input loan does.
+pub fn set_frame_holding_gate(window: &AXUIElement, frame: Rect) -> bool {
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| {
+        value.is_some_and(|v| unsafe {
+            window.set_attribute_value(&CFString::from_str(name), &v) == AXError::Success
+        })
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let placed = write("AXPosition", at());
+    write(
+        "AXSize",
+        ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+    );
+    // An app that keeps windows on one screen clamps a size against where
+    // the window was: place it again at its size.
+    placed && write("AXPosition", at())
+}
+
+/// Give a window the frame an agent asked for. Position, size, then
+/// position again: an app that keeps its windows on one screen clamps a
+/// size against where the window was, and the second move puts it where
+/// asked once it has its new size. Every write is made whatever the app
+/// answers to the one before: Chromium answers with an error and takes the
+/// frame anyway (#167). An error means some write was refused, and only the
+/// frame the window has after says what happened.
+pub fn set_frame_asked(target: WindowTarget, frame: Rect) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| match value {
+        Some(value) => set_attribute_answer(&window, name, &value),
+        None => AXError::IllegalArgument,
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let answers = with_moves_direct(&window, None, || {
+        [
+            write("AXPosition", at()),
+            write(
+                "AXSize",
+                ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+            ),
+            write("AXPosition", at()),
+        ]
+    });
+    if answers.iter().all(|a| *a == AXError::Success) {
+        Ok(())
+    } else {
+        log::info!(
+            "window {}: setting its frame, the app answered AXPosition {}, AXSize {}, AXPosition {}",
+            target.window_id,
+            answers[0].0,
+            answers[1].0,
+            answers[2].0
+        );
+        Err(MoveError::Rejected)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReparkMoveError {
+    TimedOut,
+    Failed,
+}
+
+/// Bounded-timeout Accessibility frame write for `Core::repark` shifts (`M3`, `L2`).
+/// Uses `timeout_secs` on both the app root and window elements so a hung app
+/// reports `TimedOut` promptly, and verifies `cg::window_bounds` on non-timeout
+/// `AXError` answers so Chromium's spurious error codes (#167) still count as moved.
+pub fn set_frame_repark(
+    target: WindowTarget,
+    frame: Rect,
+    timeout_secs: f32,
+) -> Result<(), ReparkMoveError> {
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(timeout_secs) };
+    let list = try_elements_attribute(&app, "AXWindows").map_err(|err| {
+        if err == AXError::CannotComplete {
+            ReparkMoveError::TimedOut
+        } else {
+            ReparkMoveError::Failed
+        }
+    })?;
+    let mut found = None;
+    for w in list {
+        unsafe { w.set_messaging_timeout(timeout_secs) };
+        if window_id(&w) == Some(target.window_id) {
+            found = Some(w);
+            break;
+        }
+    }
+    let window = found.ok_or(ReparkMoveError::Failed)?;
+    let write = |name: &str, value: Option<CFRetained<AXValue>>| match value {
+        Some(value) => set_attribute_answer(&window, name, &value),
+        None => AXError::IllegalArgument,
+    };
+    let at = || ax_value(AXValueType::CGPoint, &CGPoint::new(frame.x, frame.y));
+    let answers = with_moves_direct(&window, Some(timeout_secs), || {
+        [
+            write("AXPosition", at()),
+            write(
+                "AXSize",
+                ax_value(AXValueType::CGSize, &CGSize::new(frame.width, frame.height)),
+            ),
+            write("AXPosition", at()),
+        ]
+    });
+    if answers.contains(&AXError::CannotComplete) {
+        return Err(ReparkMoveError::TimedOut);
+    }
+    if answers.iter().all(|a| *a == AXError::Success) {
+        return Ok(());
+    }
+    if super::cg::window_bounds(target.window_id)
+        .is_some_and(|b| (b.x - frame.x).abs() <= 2.0 && (b.y - frame.y).abs() <= 2.0)
+    {
+        return Ok(());
+    }
+    Err(ReparkMoveError::Failed)
+}
+
+/// Press the window's close button. The app may still keep it open, for
+/// example to ask about unsaved changes.
+/// Whether the window shows a sheet, such as one asking whether to save.
+pub fn has_sheet(target: WindowTarget) -> bool {
+    window_element(target).is_some_and(|window| {
+        elements_attribute(&window, "AXChildren")
+            .iter()
+            .any(|child| string_attribute(child, "AXRole").as_deref() == Some("AXSheet"))
+    })
+}
+
+pub fn close(target: WindowTarget) -> Result<(), MoveError> {
+    let window = window_element(target).ok_or(MoveError::NoWindow)?;
+    let button = element_attribute(&window, "AXCloseButton").ok_or(MoveError::Rejected)?;
+    if perform(&button, "AXPress") {
+        Ok(())
+    } else {
+        Err(MoveError::Rejected)
+    }
+}
+
+// MARK: Element trees
+
+/// A window as an agent that works per window sees it: numbered elements it
+/// can act on. Coordinates are points from the window's top-left corner.
+pub struct Snapshot {
+    pub tree: String,
+    pub elements: Vec<Element>,
+    pub truncated: bool,
+    pub depth_limited: bool,
+}
+// See Sendable.
+unsafe impl Send for Snapshot {}
+
+/// The window's elements, positioned by their centers in display points
+/// from `origin`, the display's top-left corner: the space the computer
+/// tool clicks in.
+/// `origin` is the display's top-left corner; `scale` turns its points
+/// into screenshot pixels.
+pub enum SnapshotError {
+    WindowUnavailable,
+    RootUnavailable,
+}
+
+pub fn snapshot(
+    target: WindowTarget,
+    origin: (f64, f64),
+    scale: f64,
+    root: Option<Element>,
+    max_depth: Option<usize>,
+) -> Result<Snapshot, SnapshotError> {
+    let window = window_or_sheet(target).ok_or(SnapshotError::WindowUnavailable)?;
+    if root
+        .as_ref()
+        .is_some_and(|element| !in_window(element, target, false))
+    {
+        return Err(SnapshotError::RootUnavailable);
+    }
+    ask_for_web_tree(target.pid, &window);
+    let mut walker = TreeWalker {
+        origin,
+        scale,
+        lines: Vec::new(),
+        elements: Vec::new(),
+    };
+    let scoped = root.is_some();
+    let read =
+        agent_screen_model::tree::walk(root.unwrap_or(window), max_depth, |element, depth| {
+            walker.read(element, depth)
+        });
+    // One line per named element so far: mark each cut branch under its
+    // element, from the last so earlier places stay put.
+    for cut in read.cuts.iter().rev() {
+        walker
+            .lines
+            .insert(cut.after + 1, agent_screen_model::tree::cut_line(cut));
+    }
+    // The menu bar the agent's display shows belongs to the user's front
+    // app, so list this app's menu titles here; pressing one lists its items.
+    let titles = if scoped {
+        Vec::new()
+    } else {
+        element_attribute(&application(target.pid), "AXMenuBar")
+            .map(|bar| elements_attribute(&bar, "AXChildren"))
+            .unwrap_or_default()
+    };
+    // The first title is the Apple menu.
+    for (n, item) in titles.into_iter().skip(1).enumerate() {
+        let Some(title) = string_attribute(&item, "AXTitle").filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        if n == 0 {
+            walker
+                .lines
+                .push("Menu bar (press a title to list its items):".into());
+        }
+        walker.lines.push(format!(
+            "[{}] menubaritem \"{title}\"",
+            walker.elements.len()
+        ));
+        walker.elements.push(item);
+    }
+    Ok(Snapshot {
+        tree: walker.lines.join("\n"),
+        elements: walker.elements,
+        truncated: read.truncated,
+        depth_limited: read.depth_limited,
+    })
+}
+
+/// The items of a menu bar title, numbered from `first`, or None when
+/// `item` is not a menu bar title. Reading items leaves the menu closed;
+/// AXPress on an item chooses it without opening anything. Electron takes
+/// that press for the item's shortcut, so an item of its menu bar can go
+/// through the Input Queue as a real click instead (ADR 0013).
+pub fn menu_items(item: &AXUIElement, first: usize) -> Option<Snapshot> {
+    if string_attribute(item, "AXRole")? != "AXMenuBarItem" {
+        return None;
+    }
+    let menu = elements_attribute(item, "AXChildren").into_iter().next()?;
+    let mut snapshot = Snapshot {
+        tree: String::new(),
+        elements: Vec::new(),
+        truncated: false,
+        depth_limited: false,
+    };
+    let mut lines = Vec::new();
+    list_menu(&menu, 0, first, &mut lines, &mut snapshot.elements);
+    snapshot.tree = lines.join("\n");
+    Some(snapshot)
+}
+
+fn list_menu(
+    menu: &AXUIElement,
+    depth: usize,
+    first: usize,
+    lines: &mut Vec<String>,
+    elements: &mut Vec<Element>,
+) {
+    let indent = "  ".repeat(depth);
+    for element in elements_attribute(menu, "AXChildren") {
+        let Some(title) = string_attribute(&element, "AXTitle").filter(|t| !t.is_empty()) else {
+            continue; // a separator
+        };
+        if let Some(sub) = elements_attribute(&element, "AXChildren").first() {
+            if depth < 2 {
+                lines.push(format!("{indent}\"{title}\" submenu:"));
+                list_menu(sub, depth + 1, first, lines, elements);
+            }
+            continue;
+        }
+        let mut line = format!("{indent}[{}] menuitem \"{title}\"", first + elements.len());
+        if let Some(key) = shortcut(&element) {
+            line += &format!(" key=\"{key}\"");
+        }
+        let flag = |name: &str| {
+            attribute(&element, name)
+                .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        };
+        if flag("AXEnabled") == Some(false) {
+            line += " disabled";
+        }
+        if string_attribute(&element, "AXMenuItemMarkChar").is_some_and(|m| !m.is_empty()) {
+            line += " checked";
+        }
+        lines.push(line);
+        elements.push(element);
+    }
+}
+
+/// Whether the element focused in `target` takes text: a field, a text
+/// area, a combo or search box, or anything with a settable value and a
+/// caret. An app in the background may name no focused element, as
+/// Chromium doesn't once it was in front and went back: then the window's
+/// own elements say which one has focus.
+pub fn editing(target: WindowTarget) -> bool {
+    let takes_text = |e: &AXUIElement| {
+        matches!(
+            string_attribute(e, "AXRole").as_deref(),
+            Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField")
+        ) || (settable(e, "AXValue") && attribute(e, "AXSelectedTextRange").is_some())
+    };
+    if let Some(focused) = element_attribute(&application(target.pid), "AXFocusedUIElement") {
+        return takes_text(&focused);
+    }
+    let Some(window) = window_element(target) else {
+        return false;
+    };
+    let is_focused = |e: &AXUIElement| {
+        attribute(e, "AXFocused")
+            .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+            .unwrap_or(false)
+    };
+    let mut stack = vec![(window, 0)];
+    let mut visits = 0;
+    while let Some((element, depth)) = stack.pop() {
+        visits += 1;
+        if visits > MAX_VISITS {
+            return false;
+        }
+        if depth > 0 && is_focused(&element) {
+            return takes_text(&element);
+        }
+        if depth < MAX_DEPTH {
+            stack.extend(
+                elements_attribute(&element, "AXChildren")
+                    .into_iter()
+                    .map(|child| (child, depth + 1)),
+            );
+        }
+    }
+    false
+}
+
+pub fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
+    let (a, b): (&CFType, &CFType) = (a, b);
+    a == b
+}
+
+/// Whether an element is in a web page: it has an AXWebArea above it,
+/// below its window. None when that can't be told, as when a role or
+/// parent read fails or times out before the window: callers that act on
+/// a "no" must treat None as "maybe".
+pub fn in_web_area(element: &AXUIElement) -> Option<bool> {
+    let mut above = element_attribute(element, "AXParent")?;
+    for _ in 0..200 {
+        match string_attribute(&above, "AXRole")?.as_str() {
+            "AXWebArea" => return Some(true),
+            "AXWindow" | "AXSheet" | "AXApplication" => return Some(false),
+            _ => {}
+        }
+        above = element_attribute(&above, "AXParent")?;
+    }
+    None
+}
+
+/// Whether `element` is its app's focused element, the one its keys go to.
+pub fn is_focused_element(pid: i32, element: &AXUIElement) -> bool {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.2) };
+    element_attribute(&app, "AXFocusedUIElement").is_some_and(|f| same(&f, element))
+}
+
+/// The process that owns an accessibility element.
+pub fn pid_of(element: &AXUIElement) -> Option<i32> {
+    let mut pid = 0;
+    (unsafe { element.pid(NonNull::from(&mut pid)) } == AXError::Success).then_some(pid)
+}
+
+/// Where a menu item sits in its app's own menu bar: the app, and the
+/// index among its siblings and the title of each element from the menu
+/// bar title down to the item. None for an item of a context or pop-up
+/// menu, which hangs off no menu bar.
+pub fn menu_bar_path(item: &AXUIElement) -> Option<(i32, Vec<(usize, String)>)> {
+    let pid = pid_of(item)?;
+    let mut path = Vec::new();
+    let mut element: Element = unsafe { CFRetained::retain(NonNull::from(item)) };
+    for _ in 0..8 {
+        let role = string_attribute(&element, "AXRole")?;
+        let parent = element_attribute(&element, "AXParent")?;
+        let siblings = elements_attribute(&parent, "AXChildren");
+        let index = siblings.iter().position(|s| same(s, &element))?;
+        path.push((
+            index,
+            string_attribute(&element, "AXTitle").unwrap_or_default(),
+        ));
+        match role.as_str() {
+            "AXMenuBarItem" => {
+                let bar = element_attribute(&application(pid), "AXMenuBar")?;
+                if *bar != *parent {
+                    return None;
+                }
+                path.reverse();
+                return Some((pid, path));
+            }
+            "AXMenuItem" => {
+                // An item's parent is its menu, and the menu's the item
+                // or title that opens it.
+                if string_attribute(&parent, "AXRole").as_deref() != Some("AXMenu") {
+                    return None;
+                }
+                element = element_attribute(&parent, "AXParent")?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The elements along `path` in `pid`'s menu bar, from its title down to
+/// the item, each with the title it had when the path was taken. None
+/// once the app rebuilt its menu differently.
+pub fn menu_bar_elements(pid: i32, path: &[(usize, String)]) -> Option<Vec<Element>> {
+    let mut parent = element_attribute(&application(pid), "AXMenuBar")?;
+    let mut found: Vec<Element> = Vec::new();
+    for (depth, (index, title)) in path.iter().enumerate() {
+        if depth > 0 {
+            parent = submenu(found.last()?)?;
+        }
+        let element = elements_attribute(&parent, "AXChildren")
+            .into_iter()
+            .nth(*index)?;
+        if string_attribute(&element, "AXTitle").unwrap_or_default() != *title {
+            return None;
+        }
+        found.push(element);
+    }
+    Some(found)
+}
+
+/// The menu a menu bar title or an item opens.
+pub fn submenu(element: &AXUIElement) -> Option<Element> {
+    elements_attribute(element, "AXChildren")
+        .into_iter()
+        .find(|e| string_attribute(e, "AXRole").as_deref() == Some("AXMenu"))
+}
+
+/// Whatever is on screen at a global point, any app's or the system's.
+pub fn on_screen_at(at: (f64, f64)) -> Option<(i32, Element)> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let error = unsafe {
+        system.copy_element_at_position(at.0 as f32, at.1 as f32, NonNull::from(&mut raw))
+    };
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let element = unsafe { CFRetained::from_raw(raw) };
+    if error != AXError::Success {
+        return None;
+    }
+    Some((pid_of(&element)?, element))
+}
+
+/// The text field that has focus in `target`, when the app says what it
+/// holds: a password field doesn't.
+pub fn focused_text(target: WindowTarget) -> Option<Element> {
+    element_attribute(&application(target.pid), "AXFocusedUIElement")
+        .filter(|e| {
+            matches!(
+                string_attribute(e, "AXRole").as_deref(),
+                Some("AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField")
+            )
+        })
+        .filter(|e| string_attribute(e, "AXValue").is_some())
+        .filter(|e| {
+            element_attribute(e, "AXWindow")
+                .and_then(|w| window_id(&w))
+                .is_some_and(|id| id == target.window_id)
+        })
+}
+
+/// Select all the text in `pid`'s focused text element. Select All in a
+/// menu acts on the key window's first responder, which an app in the
+/// background doesn't have, so neither its menu item nor a posted cmd+a
+/// selects anything there.
+pub fn select_all(target: WindowTarget) -> bool {
+    // An app that hasn't had a click yet may have no focused element: take
+    // the window's first text field and focus it.
+    // The app's focused element may be in another of its windows, the
+    // user's: use it only when it is in this one.
+    let focused = element_attribute(&application(target.pid), "AXFocusedUIElement")
+        .filter(|e| string_attribute(e, "AXValue").is_some())
+        .filter(|e| {
+            element_attribute(e, "AXWindow")
+                .and_then(|w| window_id(&w))
+                .is_some_and(|id| id == target.window_id)
+        })
+        .or_else(|| {
+            let window = window_or_sheet(target)?;
+            let field = first_text(&window, 0, &mut 0)?;
+            set_attribute(&field, "AXFocused", CFBoolean::new(true));
+            Some(field)
+        });
+    let Some(focused) = focused else {
+        return false;
+    };
+    let Some(mut text) = string_attribute(&focused, "AXValue") else {
+        return false;
+    };
+    // Typing just before can still be landing, and text checking such as
+    // TextEdit's automatic capitals rewrites a word late and moves the
+    // caret: wait until the text holds still for 100 ms, at most 600 ms.
+    let mut still = 0;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let now = string_attribute(&focused, "AXValue").unwrap_or_default();
+        if now == text {
+            still += 1;
+            if still >= 2 {
+                break;
+            }
+        } else {
+            still = 0;
+            text = now;
+        }
+    }
+    if !settable(&focused, "AXSelectedTextRange") {
+        return false;
+    }
+    let range = objc2_core_foundation::CFRange::new(0, text.encode_utf16().count() as isize);
+    let Some(value) =
+        (unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&range).cast::<c_void>()) })
+    else {
+        return false;
+    };
+    set_attribute(&focused, "AXSelectedTextRange", &value)
+}
+
+/// The first text area or field under `element`, depth first.
+fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Option<Element> {
+    *visited += 1;
+    if depth > 12 || *visited > 400 {
+        return None;
+    }
+    for child in elements_attribute(element, "AXChildren") {
+        let role = string_attribute(&child, "AXRole").unwrap_or_default();
+        if matches!(role.as_str(), "AXTextArea" | "AXTextField") {
+            return Some(child);
+        }
+        if let Some(found) = first_text(&child, depth + 1, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The path of a file URL, with its percent escapes decoded.
+pub fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = rest
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    Some(std::path::PathBuf::from(path.trim_end_matches('/')))
+}
+
+/// The file a window shows, from its AXDocument URL, with symlinks resolved.
+pub fn document_path(window: &AXUIElement) -> Option<std::path::PathBuf> {
+    string_attribute(window, "AXDocument")
+        .and_then(|url| file_url_path(&url))
+        .and_then(|p| std::fs::canonicalize(p).ok())
+}
+
+/// What came of asking a running app for a new window through its menus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NewWindow {
+    Pressed,
+    /// The item is there but greyed out, as while a dialog is open.
+    Disabled,
+    /// No item opens a plain window.
+    Missing,
+    /// The menus can't be read or the press failed, as just after launch.
+    NotReady,
+}
+
+/// A menu item as `pick_new_window` sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuEntry {
+    pub title: String,
+    pub shortcut: Option<String>,
+    /// The title of the submenu's item this one sits under, if any.
+    pub parent: Option<String>,
+    pub has_submenu: bool,
+}
+
+/// New Window as macOS titles it: Terminal's MainMenu.loctable in macOS
+/// 26 for 21 languages, and Finder's New Finder Window in English and
+/// Simplified Chinese. Chrome titles it its own way in Chinese, in its
+/// zh_CN and zh_TW locale.pak (the string English calls New Window).
+const WINDOW_TITLES: &[&str] = &[
+    "new window",
+    "neues fenster",
+    "nouvelle fenêtre",
+    "nueva ventana",
+    "nuova finestra",
+    "nova janela",
+    "nieuw venster",
+    "nytt fönster",
+    "nyt vindue",
+    "nytt vindu",
+    "uusi ikkuna",
+    "nowe okno",
+    "новое окно",
+    "нове вікно",
+    "yeni pencere",
+    "新規ウインドウ",
+    "새로운 윈도우",
+    "新建窗口",
+    "新增視窗",
+    "打开新的窗口",
+    "開新視窗",
+    "new finder window",
+    "新建访达窗口",
+];
+/// A document app's New: TextEdit's Edit.loctable in macOS 26, plus the
+/// English New Document.
+const DOCUMENT_TITLES: &[&str] = &[
+    "new",
+    "new document",
+    "neu",
+    "nouveau",
+    "nuevo",
+    "nuovo",
+    "novo",
+    "nieuw",
+    "nytt",
+    "ny",
+    "uusi",
+    "nowy",
+    "новый",
+    "новий",
+    "yeni",
+    "新規",
+    "신규",
+    "新建",
+    "新增",
+];
+
+fn is_one_of(title: &str, titles: &[&str]) -> bool {
+    let title = title.trim().to_lowercase();
+    titles.contains(&title.as_str())
+}
+
+/// Which item opens a plain new window: one titled New Window, or the
+/// Command-N item of a New Window submenu, as in Terminal, or a document
+/// app's Command-N New. Command-N alone isn't enough: in Notes, Music or
+/// Calendar it makes a note, playlist or event in the user's data.
+pub fn pick_new_window(items: &[MenuEntry]) -> Option<usize> {
+    let is_cmd_n = |e: &MenuEntry| e.shortcut.as_deref() == Some("cmd+n");
+    let rank = |e: &MenuEntry| {
+        if e.has_submenu {
+            None
+        } else if e.parent.is_none() && is_one_of(&e.title, WINDOW_TITLES) {
+            Some(0)
+        } else if e
+            .parent
+            .as_deref()
+            .is_some_and(|p| is_one_of(p, WINDOW_TITLES))
+            && is_cmd_n(e)
+        {
+            Some(1)
+        } else if e.parent.is_none() && is_one_of(&e.title, DOCUMENT_TITLES) && is_cmd_n(e) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    (0..items.len())
+        .filter_map(|i| rank(&items[i]).map(|r| (r, i)))
+        .min()
+        .map(|(_, i)| i)
+}
+
+/// Presses the item `pick_new_window` chooses in a running app's menus.
+pub fn press_new_window(pid: i32) -> NewWindow {
+    let Some(bar) = element_attribute(&application(pid), "AXMenuBar") else {
+        return NewWindow::NotReady;
+    };
+    let menus = elements_attribute(&bar, "AXChildren");
+    if menus.is_empty() {
+        return NewWindow::NotReady;
+    }
+    let mut entries = Vec::new();
+    let mut elements = Vec::new();
+    let entry = |item: &AXUIElement, parent: Option<String>, has_submenu: bool| MenuEntry {
+        title: string_attribute(item, "AXTitle").unwrap_or_default(),
+        shortcut: shortcut(item),
+        parent,
+        has_submenu,
+    };
+    for title in &menus {
+        for menu in elements_attribute(title, "AXChildren") {
+            for item in elements_attribute(&menu, "AXChildren") {
+                let submenu = elements_attribute(&item, "AXChildren");
+                entries.push(entry(&item, None, !submenu.is_empty()));
+                elements.push(item.clone());
+                let parent = string_attribute(&item, "AXTitle");
+                for sub in submenu {
+                    for inner in elements_attribute(&sub, "AXChildren") {
+                        entries.push(entry(&inner, parent.clone(), false));
+                        elements.push(inner);
+                    }
+                }
+            }
+        }
+    }
+    match pick_new_window(&entries) {
+        None => NewWindow::Missing,
+        Some(i) => {
+            let enabled = attribute(&elements[i], "AXEnabled")
+                .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+                .unwrap_or(true);
+            // The item's own shortcut, where it has one: the app makes the
+            // window as for a key press, and tells the catch at once. A
+            // press through accessibility reports the window only after.
+            // Not while the app's focused window is the user's, as in a
+            // browser they type in (#110): the posted key would reach
+            // their window and its page.
+            let chord = entries[i]
+                .shortcut
+                .as_deref()
+                .and_then(|s| crate::keychord::KeyChord::parse(s).ok())
+                .filter(|_| super::input::keys_stay_on_agent_displays(pid));
+            if !enabled {
+                NewWindow::Disabled
+            } else if let Some(chord) = chord {
+                super::input::post_key_to_pid(pid, chord);
+                NewWindow::Pressed
+            } else if try_action(&elements[i], "AXPress") {
+                // A busy app may answer CannotComplete for a press that ran:
+                // pressing again could open a second window, so the catch
+                // decides whether one came.
+                NewWindow::Pressed
+            } else {
+                NewWindow::NotReady
+            }
+        }
+    }
+}
+
+/// A menu item's key equivalent in the computer tool's key syntax, such as
+/// "cmd+shift+n". AXMenuItemCmdModifiers: bit 3 means no Command; bits 0-2
+/// add Shift, Option and Control.
+fn shortcut(element: &AXUIElement) -> Option<String> {
+    let key = string_attribute(element, "AXMenuItemCmdChar")?;
+    let key = key.trim();
+    if key.chars().count() != 1 || !key.chars().all(|c| c.is_ascii_graphic()) {
+        return None;
+    }
+    let mods = attribute(element, "AXMenuItemCmdModifiers")
+        .and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()))
+        .unwrap_or(0);
+    // Higher bits, such as Fn for Enter Full Screen, have no key name here.
+    if mods & !0xF != 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if mods & 4 != 0 {
+        parts.push("ctrl");
+    }
+    if mods & 2 != 0 {
+        parts.push("alt");
+    }
+    if mods & 1 != 0 {
+        parts.push("shift");
+    }
+    if mods & 8 == 0 {
+        parts.push("cmd");
+    }
+    let key = key.to_lowercase();
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
+/// Depth-first walk that numbers every element worth naming. Unlabelled
+/// containers are skipped but their children are kept, which keeps the tree
+/// short without losing anything an agent could act on.
+struct TreeWalker {
+    origin: (f64, f64),
+    scale: f64,
+    lines: Vec<String>,
+    elements: Vec<Element>,
+}
+
+const NAMES: [&str; 10] = [
+    "AXRole",
+    "AXSubrole",
+    "AXTitle",
+    "AXDescription",
+    "AXValue",
+    "AXEnabled",
+    "AXFocused",
+    "AXPosition",
+    "AXSize",
+    "AXChildren",
+];
+const CONTAINERS: [&str; 7] = [
+    "AXGroup",
+    "AXSplitGroup",
+    "AXScrollArea",
+    "AXLayoutArea",
+    "AXUnknown",
+    "AXSplitter",
+    "AXLayoutItem",
+];
+
+impl TreeWalker {
+    fn read(
+        &mut self,
+        element: &AXUIElement,
+        depth: usize,
+    ) -> Option<agent_screen_model::tree::Branch<Element>> {
+        let values = multiple_values(element)?;
+        let string = |i: usize| {
+            let text = values[i].downcast_ref::<CFString>()?.to_string();
+            // Apps wrap numbers and names in invisible direction marks.
+            let text: String = text.chars().filter(|c| !is_direction_mark(*c)).collect();
+            agent_screen_model::tree::preview(&text)
+        };
+        let boolean = |i: usize| values[i].downcast_ref::<CFBoolean>().map(|b| b.as_bool());
+        let role = string(0).unwrap_or_else(|| "AXUnknown".into());
+        // A ruler's tick marks: dozens of elements nobody acts on.
+        if role == "AXRulerMarker" {
+            return None;
+        }
+        let label = string(2).or_else(|| string(3));
+        let value = values[4]
+            .downcast_ref::<CFNumber>()
+            .and_then(|n| n.as_f64())
+            .map(|n| {
+                if n.fract() == 0.0 {
+                    format!("{}", n as i64)
+                } else {
+                    format!("{n}")
+                }
+            })
+            .or_else(|| boolean(4).map(|b| if b { "1".into() } else { "0".into() }))
+            .or_else(|| string(4));
+        let children = elements(&values[9]);
+
+        let named = !CONTAINERS.contains(&role.as_str()) || label.is_some();
+        if named {
+            let mut line = format!("[{}] {}", self.elements.len(), short(&role));
+            if let Some(subrole) = string(1) {
+                line += &format!("({})", short(&subrole));
+            }
+            if let Some(label) = &label {
+                line += &format!(" \"{label}\"");
+            }
+            if let Some(value) = &value
+                && Some(value) != label.as_ref()
+            {
+                line += &format!(" value=\"{value}\"");
+            }
+            if boolean(5) == Some(false) {
+                line += " disabled";
+            }
+            if boolean(6) == Some(true) {
+                line += " focused";
+            }
+            if let Some(f) =
+                frame_from(&values[7], &values[8]).filter(|f| f.width > 0.0 && f.height > 0.0)
+            {
+                let s = self.scale;
+                let x = ((f.x - self.origin.0 + f.width / 2.0) * s).round() as i64;
+                let y = ((f.y - self.origin.1 + f.height / 2.0) * s).round() as i64;
+                let (w, h) = ((f.width * s).round() as i64, (f.height * s).round() as i64);
+                line += &format!(" at ({x},{y}) {w}×{h}");
+            }
+            self.lines.push(format!("{}{line}", "  ".repeat(depth)));
+            self.elements
+                .push(unsafe { CFRetained::retain(NonNull::from(element)) });
+        }
+        Some(agent_screen_model::tree::Branch { named, children })
+    }
+}
+
+/// Left-to-right and right-to-left marks, embeddings and isolates.
+fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// "AXButton" → "button".
+fn short(name: &str) -> String {
+    name.strip_prefix("AX").unwrap_or(name).to_lowercase()
+}
+
+fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
+    let names: Vec<CFRetained<CFString>> =
+        NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+    let names: CFRetained<CFArray<CFString>> = CFArray::from_retained_objects(&names);
+    let mut raw: *const CFArray = std::ptr::null();
+    let error = unsafe {
+        element.copy_multiple_attribute_values(
+            names.as_opaque(),
+            objc2_application_services::AXCopyMultipleAttributeOptions(0),
+            NonNull::from(&mut raw),
+        )
+    };
+    if error != AXError::Success || raw.is_null() {
+        return None;
+    }
+    let array: CFRetained<CFArray> =
+        unsafe { CFRetained::from_raw(NonNull::new_unchecked(raw as *mut CFArray)) };
+    let array: &CFArray<CFType> =
+        unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
+    let values = array.to_vec();
+    (values.len() == NAMES.len()).then_some(values)
+}
+
+/// A digest of what a page shows: each element's role, subrole, title,
+/// description, value, enabled state and number of children, in tree
+/// order, as far as `limit` elements go. Focus and frames are left out:
+/// a press focuses what it presses, and a frame moves when the page
+/// scrolls. The digest, and whether elements were left out past `limit`.
+pub fn page_digest(root: &AXUIElement, limit: usize) -> (u64, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut stack = vec![unsafe { CFRetained::retain(NonNull::from(root)) }];
+    let mut visits = 0;
+    while let Some(element) = stack.pop() {
+        if visits >= limit {
+            return (hasher.finish(), true);
+        }
+        visits += 1;
+        let Some(values) = multiple_values(&element) else {
+            0u8.hash(&mut hasher);
+            continue;
+        };
+        for i in [0, 1, 2, 3, 4, 5] {
+            let v = &values[i];
+            if let Some(s) = v.downcast_ref::<CFString>() {
+                s.to_string().hash(&mut hasher);
+            } else if let Some(n) = v.downcast_ref::<CFNumber>().and_then(|n| n.as_f64()) {
+                n.to_bits().hash(&mut hasher);
+            } else if let Some(b) = v.downcast_ref::<CFBoolean>() {
+                b.as_bool().hash(&mut hasher);
+            } else {
+                i.hash(&mut hasher);
+            }
+        }
+        let children = elements(&values[9]);
+        children.len().hash(&mut hasher);
+        stack.extend(children.into_iter().rev());
+    }
+    (hasher.finish(), false)
+}
+
+/// The app whose Dock icon is at the global point `at`: its name, as the
+/// Dock shows it. None off the Dock and for its other items, such as
+/// folders and the Trash.
+pub fn dock_app_at(dock: i32, at: (f64, f64)) -> Option<String> {
+    let mut raw: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application(dock).copy_element_at_position(
+            at.0 as f32,
+            at.1 as f32,
+            NonNull::from(&mut raw),
+        )
+    };
+    if error != AXError::Success {
+        return None;
+    }
+    let raw = NonNull::new(raw as *mut AXUIElement)?;
+    let mut element = unsafe { CFRetained::from_raw(raw) };
+    // The icon, or a part of it, such as its running indicator.
+    for _ in 0..4 {
+        if string_attribute(&element, "AXRole").as_deref() == Some("AXDockItem") {
+            return (string_attribute(&element, "AXSubrole").as_deref()
+                == Some("AXApplicationDockItem"))
+            .then(|| string_attribute(&element, "AXTitle"))
+            .flatten();
+        }
+        element = element_attribute(&element, "AXParent")?;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str, shortcut: Option<&str>) -> MenuEntry {
+        MenuEntry {
+            title: title.into(),
+            shortcut: shortcut.map(String::from),
+            parent: None,
+            has_submenu: false,
+        }
+    }
+
+    #[test]
+    fn picks_the_item_that_opens_a_window() {
+        // Safari and VS Code: New Window, whatever else Command-N does.
+        let vscode = [
+            item("New Text File", Some("cmd+n")),
+            item("New Window", Some("cmd+shift+n")),
+        ];
+        assert_eq!(pick_new_window(&vscode), Some(1));
+        // TextEdit: a document app's New.
+        assert_eq!(
+            pick_new_window(&[item("New", Some("cmd+n")), item("Open…", Some("cmd+o"))]),
+            Some(0)
+        );
+        // Terminal: New Window is a submenu; its Command-N item.
+        let mut basic = item("Basic", Some("cmd+n"));
+        basic.parent = Some("New Window".into());
+        let mut submenu = item("New Window", None);
+        submenu.has_submenu = true;
+        assert_eq!(pick_new_window(&[submenu, basic]), Some(1));
+        // Notes, Calendar, Music: Command-N makes the user's data.
+        assert_eq!(pick_new_window(&[item("New Note", Some("cmd+n"))]), None);
+        assert_eq!(pick_new_window(&[item("New Event", Some("cmd+n"))]), None);
+        let mut playlist = item("Playlist", Some("cmd+n"));
+        playlist.parent = Some("New".into());
+        assert_eq!(pick_new_window(&[playlist]), None);
+        // Other languages, as macOS ships them: Terminal's New Window,
+        // TextEdit's New, and Notes' New Note, which must pick nothing.
+        for title in [
+            "Neues Fenster",
+            "Nouvelle fenêtre",
+            "Nueva ventana",
+            "Nova Janela",
+            "Nowe okno",
+            "Новое окно",
+            "Yeni Pencere",
+            "新規ウインドウ",
+            "새로운 윈도우",
+            "新增視窗",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neu",
+            "Nouveau",
+            "Nuovo",
+            "Nytt",
+            "Новый",
+            "新規",
+            "신규",
+            "新增",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neue Notiz",
+            "Nouvelle note",
+            "Nueva nota",
+            "新規メモ",
+            "새로운 메모",
+            "新建备忘录",
+            "新增備忘錄",
+            "Новая заметка",
+            "Yeni Not",
+            "Nowa notatka",
+        ] {
+            assert_eq!(
+                pick_new_window(&[item(title, Some("cmd+n"))]),
+                None,
+                "{title}"
+            );
+        }
+        // Calculator: nothing.
+        assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
+    }
+
+    #[test]
+    fn menu_item_walk_stops_at_menu_container_and_presses_menu_item() {
+        assert_eq!(menu_item_walk_step(Some("AXMenuItem")), MenuWalkStep::Press);
+        assert_eq!(menu_item_walk_step(Some("AXStaticText")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXImage")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXMenu")), MenuWalkStep::Stop);
+        assert_eq!(menu_item_walk_step(Some("AXMenuBar")), MenuWalkStep::Stop);
+    }
+}

@@ -13,19 +13,46 @@ jobs:
     if: github.event_name != 'pull_request' || github.head_ref != 'release' || github.event.pull_request.head.repo.full_name != github.repository
     # apple-metal needs the macOS 26 SDK.
     runs-on: macos-26
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - uses: actions/checkout@v5
       # rust-toolchain.toml pins the version; rustup installs it on first use.
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  changeset-package:
+    # knope's single [package] is named default. Any other key leaves the
+    # change out of the release without an error (0.1.18 and 0.1.19 lost
+    # seven notes that way), so a wrong key fails here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Does every changeset name the default package?
+        run: |
+          set -euo pipefail
+          # A release PR has consumed every changeset: no file is no error.
+          shopt -s nullglob
+          bad=0
+          for f in .changeset/*.md; do
+            [[ "$(basename "$f")" == README.md ]] && continue
+            keys="$(awk 'NR==1 && $0!="---" {exit} NR>1 && $0=="---" {exit} NR>1' "$f" | cut -d: -f1)"
+            if [[ "$keys" != "default" ]]; then
+              echo "::error file=$f::The front matter must be 'default: patch|minor|major', not '$keys'."
+              bad=1
+            fi
+          done
+          exit "$bad"
+
+  website:
+    # The Worker lets browsers keep a versioned /media/ file for a year,
+    # so a film changed without its new version would never reach them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Do the website's media versions match the files?
+        run: node apps/website/scripts/version-media.mjs --check
 
   changeset:
     # A reminder, not a gate: tests and refactors need no changeset.
@@ -43,7 +70,7 @@ jobs:
           set -euo pipefail
           git cat-file -e "$BEFORE" 2>/dev/null || exit 0
           changed="$(git diff --name-only "$BEFORE" "$AFTER")"
-          app="$(grep -E '^rust/agent-screen(-mcp|-model)?/(src|resources)/' <<<"$changed" || true)"
+          app="$(grep -E '^(apps/macos|crates/(mcp|model))/(src|resources)/' <<<"$changed" || true)"
           notes="$(grep -E '^\.changeset/.+\.md$' <<<"$changed" || true)"
           if [[ -n "$app" && -z "$notes" ]]; then
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."
@@ -57,14 +84,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
       - run: cargo build --release -p agent-screen
-        working-directory: rust
       - uses: actions/upload-artifact@v4
         with:
           name: agent-screen-binary
-          path: rust/target/release/AgentScreen
+          path: target/release/AgentScreen
           if-no-files-found: error
 
   starts-on-macos-15:

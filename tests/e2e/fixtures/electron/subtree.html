@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Subtree fixture</title>
+<style>
+  body { margin: 16px; font: 14px system-ui; display: flex; gap: 20px; }
+  [role=list] { width: 240px; height: 360px; overflow: auto; }
+  [role=listitem] { display: block; }
+  button { display: block; margin: 4px; }
+</style>
+<div role="list" aria-label="Conversations" id="conversations"></div>
+<section role="region" aria-label="Message pane">
+  <button id="record">Forwarded record</button>
+  <p role="status" aria-label="Record status" id="status">Closed</p>
+</section>
+<script>
+  const list = document.getElementById('conversations');
+  for (let i = 0; i < 800; i++) {
+    const row = document.createElement('div');
+    row.setAttribute('role', 'listitem');
+    row.setAttribute('aria-label', `Conversation row ${i}`);
+    const button = document.createElement('button');
+    button.textContent = `Conversation ${i}`;
+    button.onclick = () => button.setAttribute('aria-pressed', 'true');
+    row.append(button);
+    list.append(row);
+  }
+  document.getElementById('record').onclick = () => {
+    document.getElementById('status').textContent = 'Opened local record';
+  };
+</script>
+</html>

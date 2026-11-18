@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>autocomplete</title>
+<!-- Street fields for typing tests (#50). -->
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; margin: 30px; }
+  input { font: inherit; padding: 8px; width: 420px; }
+  ul { list-style: none; margin: 2px 0; padding: 0; width: 436px; border: 1px solid #888; }
+  li { padding: 4px 8px; }
+</style>
+</head>
+<body>
+<p><label for="slow">Street (busy page)</label><br><input id="slow" aria-label="Street busy" autocomplete="off"></p>
+<p><label for="ctl">Street (controlled)</label><br><input id="ctl" aria-label="Street controlled" autocomplete="off"></p>
+<p><label for="lossy">Street (drops fast keys)</label><br><input id="lossy" aria-label="Street lossy" autocomplete="off"></p>
+<ul id="list"></ul>
+<script>
+  const list = document.getElementById('list');
+  const busy = (ms) => { const end = performance.now() + ms; while (performance.now() < end) {} };
+  const suggest = (q) => { list.innerHTML = q ? [1,2,3].map(i => `<li>${q} ${i} Main St</li>`).join('') : ''; };
+  // A page that works hard on every keystroke: 40 ms of script per input.
+  const slow = document.getElementById('slow');
+  slow.addEventListener('input', () => { busy(40); suggest(slow.value); });
+  // A controlled field, as React renders one: the page keeps the value and
+  // writes it back after its suggestions arrive, 60 ms later.
+  const ctl = document.getElementById('ctl');
+  let state = '';
+  ctl.addEventListener('input', () => {
+    state = ctl.value;
+    const q = state;
+    setTimeout(() => { busy(15); suggest(q); ctl.value = state; }, 60);
+  });
+  // A page that drops a key coming within 10 ms of the last, as Safari's
+  // address autocomplete dropped the agent's typing (#50).
+  const lossy = document.getElementById('lossy');
+  let last = -1e9;
+  lossy.addEventListener('keydown', (e) => {
+    const now = performance.now();
+    if (now - last < 10) e.preventDefault();
+    last = now;
+  });
+</script>
+</body>
+</html>

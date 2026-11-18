@@ -1,5 +1,248 @@
 # Changelog
 
+## 0.1.38 (2026-11-15)
+
+### Fixes
+
+- When an agent opens a new window of a browser you are typing in, such as Dia, with `launch_app`, Agent Screen now asks for the window through the browser's menu instead of sending Command-N, which reached your window. Your window gets its focus back as soon as the new window reports the agent's address, not after the page finishes loading. Keys and clicks in the meantime, about a second in Dia and 3 seconds at most, are held, and delivered in order once your window has its focus back, none to the agent's. If your window can't get its focus back, the keys you typed are dropped rather than sent to the agent's window; clicks and key releases still go out. Chrome in Chinese gets its new window too. When the browser moves focus during an agent's click or text, the error now names the window that took it. In a browser you are typing in, a click on a web page's link or button that shows no change, as when Dia ignores the press, now says it can't tell whether the click acted instead of reporting success.
+
+## 0.1.37 (2026-11-15)
+
+### Features
+
+- You can now watch any live Agent Display in a local browser without opening the Viewer. `create_display` returns a `preview_url` on `127.0.0.1` with a random token for that display so your agent can paste the link in chat, and **Copy Web Link** in the display's menu in Peek or the menu bar copies it at any time. The page streams the display live while a tab is open, encodes nothing when nobody is watching, sends no clicks or keys, and returns `404` as soon as the display ends.
+
+## 0.1.36 (2026-11-15)
+
+### Fixes
+
+- The first press on a window in the background that draws its own title bar or drag area now reaches the app, so dragging such a window in the Viewer, or clicking in it from the Viewer or an agent, works on the first try instead of needing a second press.
+- Creating or ending an Agent Display keeps existing Agent Displays in place and moves their windows along whenever a display must shift, so an agent's windows stay on its own display instead of ending up on another agent's display or out of sight.
+- Pending Help, Input, Window, and Window Authorization requests now show an orange count on the menu bar icon, highlight the approval card, and play a notification sound for Input Requests as well.
+- Displays kept ready between tasks stay at their sharpness and size and are reused in a consistent order, reducing extra display flashes when an agent asks for a display and keeping Peek previews responsive without repeated restarts when a display's picture is unavailable.
+- Pop-up menus inside sheets and System Settings panes now work with `act_on_element` value selection, background clicks, clicks outside the menu to close it, Takeover clicks in the Viewer, and approved clicks or drags with your pointer.
+- Dragging a window by its title bar in the Viewer keeps tall, wide, and sheet-bearing windows on that Agent Display instead of letting them cross onto another display or your screen.
+- When `place_window` cannot take a window on another Agent Display, the error now names every holding agent, display, session, last activity time, and whether that connection is still open. When an agent's MCP server restarts, Agent Screen keeps its displays for two seconds so the reconnected client resumes them on any tool call instead of losing them right away.
+
+## 0.1.35 (2026-11-13)
+
+### Features
+
+- An agent that needs a window another agent is using, such as WeChat on another agent's display, now asks you for it instead of failing. A card drops from the menu bar icon, with a notification, naming the asking agent, the app and the agent that has it. Hand Over moves the window to the asking agent's display, and the other agent is told on its next call. Keep leaves it where it is. A window on a display waiting for your review is asked for the same way. A window you had given the first agent still comes back to you when the second one finishes. Window access you granted never covers another agent's window; only your answer, or your instruction naming that window or app, moves it. When you reply to a Help Request or give a window and then take over before the agent hears it, the agent now still gets your words or the window when you hand the display back.
+- You can answer an agent's Help Request without taking over its display. The Help Card and its notification now offer Continue, which lets the agent go on, for a step you did yourself, and Reply, which sends the agent what you type, word for word, up to 2000 characters. Give a Window on the card opens the Give menu for that display, and the window you pick answers the request. Take Over works as before: the agent goes on when you hand the display back. The agent is told how you answered, and an agent that withdraws its own request no longer reads that you handed control back. Later now puts off only that request: the agent's next one brings the card back, even with the same reason. An agent session that started before this update keeps Take Over and Later only until its client restarts.
+- An agent session can now use more than one display at once, up to four, when its task needs two screens side by side. An agent asks for another display only when it needs one; calling `create_display` again still returns the display it has, so agents don't pile up displays. Each display has its own label in Peek and the menu, and a repeated task title gets a number. The agent can move a window between its own displays without asking you, and a window you gave it stays yours wherever it moves. Window access you grant covers all of the session's displays. Ending one display leaves the others running; when the agent disconnects, all of them end. After Agent Screen restarts, an agent gets back only the apps it started itself, never another agent's. Several Codex conversations that share one connection to Agent Screen no longer lock each other out of their displays. If the Agent Screen app is older than its MCP server, asking for a second display says the app needs updating.
+
+## 0.1.34 (2026-11-12)
+
+### Fixes
+
+- `AgentScreen mcp install` and **Connect…** in Settings now install the Agent Screen skill for Claude Code and Codex, so agents use their Agent Display for screen tasks without being told. The skill is the one this version of the app carries, and each update brings it up to date. If you installed the agent-screen plugin in Claude Code, Agent Screen writes no second copy there.
+
+## 0.1.33 (2026-11-12)
+
+### Fixes
+
+- A click in the Viewer on a search result that opens in a window of its own, as WeCom's do, now picks that result. In 0.1.32 the list could still close as your click began, and the click then opened the chat under it. Agent Screen now delivers a click on such a list first, and only then takes the keyboard for the Viewer.
+
+## 0.1.32 (2026-11-12)
+
+### Fixes
+
+- Agents now use their Agent Display on their own when a task needs a screen. Before, Claude Code often opened apps with `open -a` or AppleScript on your screen unless you told it to use Agent Screen, since it loads MCP tools only when it searches for them. Three changes fix that. Claude Code now sees `create_display` and what it is for from the start of a session. The server's instructions name the tasks that need a screen and the commands its tools replace. And a new Agent Screen skill tells Claude Code, Codex, Cursor and Gemini CLI when and how to use the tools. Install it with `claude plugin install agent-screen --marketplace Fanzzzd/agent-screen` (Claude Code 2.1.292 or later), or `npx skills add Fanzzzd/agent-screen -g` for other agents (README, Install step 4).
+- Peek no longer shows another screen in a display's tile after you lock and unlock your Mac. When macOS mixes displays up after a display change, Agent Screen now starts that display's picture again at once, without waiting for you to open the Viewer. A picture macOS stops is started again too, and the display log notes each case.
+- A click in the Viewer on an item of an app's pop-up list, such as a contact in WeCom's search results, now picks that item. Before, the app took your click in the Viewer for a click outside it and closed the list, and the click landed on whatever was under the list. Opening the Viewer also no longer clicks the top of such a list, which could pick its first item.
+
+## 0.1.31 (2026-11-11)
+
+### Fixes
+
+- When you take over a display to help an agent, for example to approve a passkey, and then leave the mouse and keyboard alone for 15 seconds, the agent waiting for the display is told you may be done. It can then ask you in the chat to click Let … Continue, or to tell it to go on, instead of waiting again without knowing why.
+- When you work in a browser while an agent uses another of its windows, an agent's click on a button there now presses it even when the page doesn't announce that the button can be pressed. Before, the click was refused, as on a GitHub settings expander in Dia. When a click is still refused, the message names what is under the point and what the agent can try instead.
+
+## 0.1.30 (2026-11-11)
+
+### Fixes
+
+- After a click or drag with your pointer, the app you were using comes back to the front. Some apps, such as Dia, ignored the request to come back, so the agent's app stayed in front of your work.
+- A click or drag that an agent makes while your approval is still active now starts right away. Before, it could wait up to a second for the app's next check.
+
+## 0.1.29 (2026-11-10)
+
+### Fixes
+
+- A drag with your pointer, such as a file from Finder onto a web page, now takes about a second instead of several. In 0.1.27 a 580-point drag took almost 8 seconds after you allowed it: it moved 4 points at a time and read every window on your Mac twice before each move. Now the drag moves in 12 to 24 steps, checks the same things before each step with one cheaper read, and waits only as long as the drop needs: half a second for the window to come forward while AeroSpace runs, a short wait for the drag to start, and a moment on the drop point so a web page takes the file. A completed drag tells the agent to say it is done, which brings your pointer back at once. `input_queue status` now reports when each request was asked, allowed, started and ended, so an agent can tell how long you took to answer from how long the drag ran.
+
+## 0.1.28 (2026-11-10)
+
+### Features
+
+- Agents can wait for a window to update with the new `wait_for_change` tool, instead of sleeping and taking another screenshot. One call watches a window, or one part of it, and returns as soon as anything in it changes, or an element with a given role or text appears or disappears, such as a "Delivered" mark replacing "Sending…". The answer lists only the elements that changed, in the same form as `act_on_element` with `result: "changes"`. A wait lasts 30 seconds unless the agent asks for up to 120, and also ends when the window closes or the display ends.
+
+## 0.1.27 (2026-11-10)
+
+### Fixes
+
+- An agent can click and type in an app that is your front app when the app's focused window is on the agent's display, such as WeCom with its only window handed over. Every click and key used to be refused as reaching "the user's window", which was that handed-over window. When the app's focused window is on your screen, or the app has another window there, input is still refused as before. When `place_window` finds no window of a running app, its error now says that the user can reopen a closed main window from the app's Dock icon.
+- A window you handed over goes back to where it came from as soon as the agent ends its display, or its session disconnects. It used to stay on the ended display until you dismissed it there, and the same agent's next `place_window` for that app failed, saying other agent sessions held the window when there were none. The error now says which display holds a window: another agent's, one waiting for your review, or one that isn't the agent's.
+
+## 0.1.26 (2026-11-10)
+
+### Fixes
+
+- `launch_app` with a file path for a browser that is already running opens the file in a new window on the agent's display, as it does a URL. The browser used to open it as a tab of its front window, which may be yours, and the agent got `still_opening` with no window.
+- `place_window` reports the frame a window ended with when the app answers a resize with an error but takes it anyway, as some apps such as Dia do. It used to fail with "the app rejected the change" for a window that had moved and resized. It fails only when the window kept its frame, and then says which frame that is.
+- An agent can drag a file from one window to another on its display, such as from Finder onto a web page's upload area. In 0.1.25 the drag failed both ways. In the background it reported success while it only selected the file, since only your pointer starts the system drag session that carries a file. With your pointer it stopped at once after you allowed it, saying the drag was outside its authorized window, because it had to end in the window where it began. Now a drag between two windows asks for your pointer on the approval card instead of claiming it ran. Allowed, it may end in any window on the agent's display and cross the windows between them, but never leaves that display. If the window it drops on moved while you decided, nothing is pressed.
+- `launch_app` finds Finder and the other apps in /System/Library/CoreServices by name, and any other app macOS knows by name. It used to answer `not_found` for "Finder" and work only with `com.apple.finder`.
+
+## 0.1.25 (2026-11-10)
+
+### Fixes
+
+- Your Chinese, Japanese or Korean input method composes in the Viewer after you click on the display's picture. In 0.1.24, a click on the picture brought Agent Screen to the front but left the Viewer without the keyboard focus an input method needs, so it composed nothing there: the letters you typed went to the app as typed, such as "nihao" into WeCom's message box, and a number typed a digit instead of picking a candidate. Now the Viewer takes the keyboard focus before Agent Screen comes to the front. The candidates show at the app's text cursor in the Viewer, and the app gets only the text you pick. The Viewer no longer draws a box with the letters you are typing over the picture; the input method's own window shows them.
+
+## 0.1.24 (2026-11-10)
+
+### Fixes
+
+- Your Chinese, Japanese or Korean input method works in the Viewer during a Takeover (#117). Before, the Viewer sent every key straight to the app, so the input method never saw one and you could type only letters. Now the input method composes in the Viewer: the text you are typing shows at the app's text cursor, underlined, with the input method's candidates under it, and the app gets only the text you pick. With a keyboard layout such as ABC, keys go to the app as before. Keys the input method passes through, such as the arrows, Return and Escape when you aren't composing, and shortcuts with Command or Control, go to the app as keys. In a password field, keys skip the input method, including one you reach with Tab or a page focuses by itself. Korean and Vietnamese Return, Tab and arrows after a syllable commit it and still reach the app. Clicking elsewhere on the display or leaving the Viewer commits the text you were composing, as in a native field. Handing the display back drops it.
+
+## 0.1.23 (2026-11-10)
+
+### Fixes
+
+- Agent Displays work again on a Mac whose screens' tops don't line up, such as a built-in display placed lower than the main one. Since 0.1.20 every `create_display` failed there with "macOS could not create a virtual display at a verified safe position" (#155). Agent Screen now parks a new display at the top-right corner of your rightmost screen, where macOS keeps it, and accepts the position macOS chooses when that position touches your screens at most at a corner. A display that would share an edge with one of your screens, overlap one, or sit between them is still refused, so your pointer can't slide onto it.
+- When an agent works in one window of a browser while you use another window of it, the answer to a click on a link or button in the agent's window now says whether anything in that window changed afterwards, so a link whose page cancels the click no longer reads as one that worked (#110). A click, press or Return on a select there no longer opens its menu, which took your keyboard; the agent is told to choose the item with `act_on_element set_value`. The agent's context menu there isn't opened either, and the agent can't press an item of the browser's menu bar, such as Close Tab, whose command would act on your window. When the browser doesn't say which of its windows has focus while one is on your screen, Agent Screen no longer sends the agent's click as a real click, which could take your window's focus; it presses through accessibility or refuses.
+
+## 0.1.22 (2026-11-09)
+
+### Fixes
+
+#### Agents can choose an item in a pop-up button or a web page's select, such as a country or birth date field, with `act_on_element set_value` and the item's exact title (#79). No menu opens, so your keyboard stays yours.
+
+- In a Chromium browser or Electron app the agent started with `launch_app`, a page's select is chosen directly through the app's private DevTools pipe, with one change event.
+- In an AppKit app, Agent Screen types the title into the closed pop-up, sent only to that app, once the pop-up has the app's focus. It never types a space, so a title with one is refused. Keys stop if another window or field takes them, if the window leaves the display, or if a key would come too late. The app may run the pop-up's action for items shown on the way, and the answer says so.
+- Anything else gets no key at all: a Safari or other WebKit page's select, a select in a frame from another site or in a browser you started yourself, a button that opens a menu, and Qt, Java or Flutter pop-ups. The call says why and suggests asking you. If Agent Screen can't tell what kind of control it is, it sends nothing.
+
+If the control ends up showing another item, the call fails and names it. A control that already shows the title gets no keys. A combo box gets its value and then a confirmation, and the call fails if the app rejects it. A web page's combobox has nothing to confirm, so the call says the text is set but no option is chosen. When you take over the display, the choice stops before the next key and says what the control shows. A text field that reports an error but shows the new value now counts as set.
+
+## 0.1.21 (2026-11-09)
+
+### Fixes
+
+- Recover input monitoring after a macOS event-tap timeout. Previously, Allow could appear to do nothing because the app immediately revoked every new approval after that timeout. The app now re-enables and checks the input monitor after ending the previous grant and releasing its inputs. Queued actions still need a fresh Allow; recovery never resumes an old approval.
+
+## 0.1.20 (2026-11-09)
+
+### Features
+
+- Some apps take a click sent in the background only partway. In WeCom, for example, it selects a chat in the sidebar but doesn't open it (#134). An agent that sees its click had no effect can now ask to make the same click with your pointer. The request shows on the same approval card as drags, names the click, the app and the window, and marks the point on the display's picture, with a ring for each press of a double or triple click. Allow it and the window comes forward on the agent's display, and your pointer clicks there. When no other agent is using the approval, it then ends at once, and your pointer, your front app and the window you were using in it come back. If what is under the point changed while you decided, nothing is clicked and the agent is told to look again. Decline it and nothing is clicked, not even in the background. Right, middle and Control clicks can't use your pointer, since the menu they open would close as soon as your front app comes back. Agents still click in the background first and ask only after a click visibly did nothing.
+- An agent can choose a menu item of an Electron app while a text field has focus. Electron takes an item pressed in the background as its keyboard shortcut, and many apps ignore shortcuts while you type, so the press did nothing (#39). Now such a press asks to use your pointer, on the same approval card as drags, and the card names the item. Allow it and the app's menus show on the agent's display, your pointer clicks the item there, and the approval ends once it is chosen. Your pointer and front app come back. Decline it and nothing is chosen. With no field focused, the press still runs in the background. Agents can ask for the click, or skip it, with `real_input` on `act_on_element`.
+
+#### After you approve the input queue, complete web drags that have no background route can use your pointer, one at a time. The approval card now looks like the other cards from the menu bar icon: it names the agent that wants your mouse and draws each drag's path on its display's picture, numbered when there are several. While approval lasts, a thin red edge with a soft inner glow runs around the inside of your screens, following a 14- or 16-inch MacBook Pro display's rounded corners and notch. The card shows which step runs, and a small pill at the bottom of the screen names the agent using your mouse, or how long the queue has been idle, with a Stop button. Move your mouse or press a key to take control back. A stopped drag releases its button and reports that it stopped. When approval ends normally, your pointer and front app come back.
+
+Background input stays first and needs no approval. Split presses held across calls and real-keyboard actions are not executed by this queue.
+
+### Fixes
+
+- Agents can use `act_on_element` with `increment` or `decrement` to adjust a slider or stepper by one app-defined step when the control supports accessibility adjustment. These actions do not move your pointer or fall back to a click. If the app does not confirm an action, the error asks the agent to inspect the value before retrying, since the adjustment may already have run.
+- Agents can pass `root` to `get_window_state` to read one numbered element's subtree, or to `act_on_element` to scope its returned state. `max_depth` now stops the accessibility traversal before deeper elements spend its budget. A shallow read marks each branch it left unread with how many children it has, so it can find the message pane after a long conversation list, then a rooted read can reach its contents. Partial reads keep other element numbers available, and `result: "changes"` compares only reads with the same root and depth. A stale root fails before an action runs, and an action on an app too busy to answer Accessibility fails without running instead of reporting the element gone. If an action removes the subtree requested for its result, the reply still acknowledges that the action ran.
+- When `launch_app` starts Chrome or another Chromium browser, its first window opens on the Agent Display. Before, it was made on your main screen and moved, and about one launch in three showed it there for 40 to 70 ms (#123).
+- With the AeroSpace build for Agent Screen, a window that leaves an Agent Display now stays claimed until it is on your screen. Before, Agent Screen released the window first and then moved it. If the move failed, the window stayed on a display you can't see, and AeroSpace, which had taken it back once before, left it there. Now, when a window you take back can't leave the display, Agent Screen tells you, the window stays in the Viewer with its place to return to, and Take Back can try again. An agent that returns a window on your word hears that it didn't leave.
+- Agent Displays park in a compact grid off the top-right corner of your screens instead of one row that grew to the right with every display, so System Settings → Displays shows your own screens at a usable size and the same displays always land in the same places. A window zoomed to fill an Agent Display is moved below the strip that holds your menu bar, so its toolbar can be clicked (#103).
+- A display made to fill a gap in macOS's display numbering is no longer kept when it shares its number with another Agent Display. Kept, it stopped Agent Screen from capturing that display for as long as both were online, and the Viewer showed its last small thumbnail stretched up and blurry. A display Agent Screen can't capture for that reason now says so in Peek and the Viewer instead of showing an old frame.
+- An app that `launch_app` starts and that opens its main window a few seconds after a loading window, as WeCom does, now opens that window on the Agent Display. Before, if the app was too busy to answer Accessibility as the window appeared, the window stayed on your screen and AeroSpace tiled it into your workspace. For 30 seconds after the agent starts an app, its new windows go to the agent's display unless you click or type in that app, Finder, the Dock or a launcher. If you click or type in that app, Finder, the Dock or a launcher as it opens a window, or take a window of it back, the 30 seconds end, and if you hide the app, Agent Screen leaves it hidden.
+- Peek's card no longer flashes wider after a closed display's tile has shrunk out, and a new display's tile grows in once instead of twice. A closed display's tile now shrinks out with its last picture and label instead of turning into a blank box, and Peek's shadow and outline no longer trail behind the card while it changes width.
+- `place_window` finds an app's window by the app's name as you see it, its bundle id, its .app path, or the owner name macOS gives its windows, in any case. An agent that asked for WeCom as 企业微信 or `com.tencent.WeWorkMac` got `not_found`, because its windows are listed as "WeCom". When `place_window` finds no window, it now tells the agent why: no app has that name or bundle id, the app isn't running, it has no window on screen, its only windows are dialogs, its window is already on the agent's display, or the window is minimized, hidden, a dialog, or on another agent's display.
+- Recordings lists videos newest first, with each display's label and start time. Dragging the progress bar no longer blanks the picture: the video pauses, keeps its last frame and resumes on release if it was playing. Space, the arrow keys and ⌘W work in the Recordings window, and Show in Finder reveals the file. The menu bar icon's menu groups its items and adds Report a Problem…, which copies this build's diagnostics after asking and opens the bug report form.
+- Every explicit click on an app's Dock icon can show its orange window-location reminder again, including repeated clicks within five seconds. A reminder already open restarts its five-second close timer from the latest trigger instead of disappearing on the first trigger's deadline. Automatic app activation remains limited to one reminder a minute, and a pinned Peek stays pinned.
+- Agent Screen verifies that a new or reused Agent Display is above and to the right of your screens before giving it to an agent. A taller reused display is moved there first. If macOS does not accept that position after retrying, creation fails and releases the display instead of leaving an invisible screen beside yours for your pointer to enter.
+- A scroll of many wheel clicks now moves a page by all of them. Agent Screen sends them a few lines at a time, a frame apart, as a mouse wheel does; Chrome scrolled at most one page for a single event, so 60 or 800 clicks moved a long list no further than about 15 (#104).
+- An agent's `type`, `key` and `hold_key` now check which window will get the keys before sending any. When an app you use also has a window on an Agent Display, keys go to whichever of its windows has focus. If that is one of your windows and Agent Screen can't give the agent's window focus without bringing the app to the front, the call fails, names your window and sends nothing. The agent can then set the field's text with `act_on_element` instead. Agent Screen also has one more way to give the agent's window focus in the background, so more of these calls go through.
+- An agent can keep working in its window of a browser you're using in another window (#110). It used to have its keys refused while that browser was your front app, and its clicks there were sometimes lost. Now Agent Screen sends no keys or clicks to that browser at all, since they would reach your window. Instead, a plain left click presses the button or link under it, or picks the text field under it, through accessibility. Typed text goes into the picked field and is read back. Return, Escape, Backspace and Command-A act on what the click picked. Other keys, such as Tab or shortcuts, still fail, and the error names the window that has focus. Your window keeps its focus and selection throughout.
+- An agent working in its window of a browser you're also using can now press Tab and Shift-Tab there (#110). Focus moves to the next or previous field, button or link of its page through accessibility, and your window keeps its focus. The order follows the page's structure, so it can differ from the page's own tab order. Return in a web form's text field still doesn't submit the form, because the browser doesn't say which of the form's buttons submits it. The error now names those buttons, so the agent can click the right one.
+- Pressing a menu item in an app built on VS Code, such as Cursor or Windsurf, now answers with a note: the app ran the item as its keyboard shortcut in whatever has focus, so with the terminal focused Edit > Find opens the terminal's find box. The note points to the Command Palette to run the command itself (#39).
+- After you take a window back, hand it over and take another window of that app back, the app's new windows open on the screen the latest window returned to. Before, they could open on the screen from an earlier Take Back.
+
+#### Unsupported web drags now create an approval request in a queue shared by agent sessions, without sending a mouse-down first. The card names the agent that wants your mouse, shows each request, spells out what approval covers, and fits its content. During approval it shows a live thumbnail, and lets you stop and take control. New requests share an active approval until 30 seconds of queue inactivity. Agents can inspect, wait for or withdraw their own requests with `input_queue`; disconnecting or ending a display clears its work. This build provides approval and scheduling only. It has no real-input executor, and approval never reports an unexecuted drag as completed.
+
+A drag can also use a slider's accessibility value when its range, orientation and current thumb position determine the direction. Ambiguous controls stay untouched. A value write must be confirmed before it is reported as successful; an uncertain result does not trigger a second drag. Successful drags identify their background route.
+
+#### A Help Request's card now shows before the input queue's card, so a queue that cannot run no longer hides it. After you allow a batch and its approval lapses with nothing run, the card and notification don't ask about the same requests again; a new request or a revocation asks again.
+
+A slider drag that grabs beside the thumb's centre now moves the value by the drag's distance, the way the drag goes, and a drag that goes nowhere leaves the value alone.
+
+An agent that drags A, then B, then A again gets a fresh request for A instead of the replaced one; a declined or completed request still stands. One agent session can keep at most 64 input requests, so it can't fill the queue for others, and `input_queue` `done` no longer reports an error after it succeeded when given a request id: it now refuses the id before doing anything.
+
+When an approval you gave lapses with nothing run, the agent now sees `approval_lapsed` and stops waiting, instead of waiting up to a minute for a card that won't come back.
+
+A slider in a Chromium page with no DevTools pipe, such as Electron or Chrome started outside `launch_app`, now moves when an agent drags it: Chromium ignored the value Agent Screen wrote, so the drag went to the input queue. It now moves by the slider's own steps, each confirmed.
+
+## 0.1.19 (2026-10-29)
+
+### Features
+
+#### Tell your agent to continue, pause, take a window or return handed-over windows in the conversation. It can relay your explicit instruction without asking you to click a second confirmation. Agent Screen trusts the agent to relay your words; it does not read or independently verify the chat.
+
+You can also authorize the session to take windows from selected apps or all apps. Viewer and Peek show the scope and a Revoke action. Taking over pauses automatic acquisition. Revoking stops future acquisition without moving existing windows, and authorization expires when the display ends or the agent disconnects. A window you take back stays excluded until you explicitly give it again.
+
+Repeated requests to hand control back keep one pending request without another notification. Only your explicit hand-back resumes the agent.
+
+## 0.1.18 (2026-10-28)
+
+### Features
+
+- `get_window_state` and `act_on_element` take `max_depth`, which leaves out elements nested deeper and says how many. `act_on_element` takes `result`: `changes` returns only the elements that appeared, changed or went away since the window's last tree, with the window image, and `none` returns only "Done.". The default still returns the whole window state. On Calculator, a press with `changes` returned 166 bytes of text in place of 1,859.
+- `place_window` takes `x`, `y`, `width` and `height` to move or resize a window on the agent's display, in screenshot pixels from the display's top-left corner. It returns the frame the window ended with, since apps keep to their own minimum sizes, and says when that isn't the frame asked for. An agent no longer needs System Events to resize a window, where a position meant for the display moved the window onto the user's screen.
+- Recordings… in the menu bar icon's menu opens a local video library. Select a recording to play, pause or seek in the app. Show Pointer toggles a visual overlay without changing the video, sound or playhead. New recordings store timed pointer coordinates; older videos still play when their timelines cannot accurately replay a pointer. The overlay hides during Takeover because user pointer movements were not recorded. New recordings request HEVC/MP4 when macOS advertises it and use H.264/MP4 when HEVC is unavailable. The recording result reports the selected codec. Hardware encoder use and same-quality size or CPU improvements have not been verified for ScreenCaptureKit. Sound still joins through passthrough export, and the pointer stays outside the encoded video.
+- `request_control` lets an agent ask for its display back while you are operating it. You get a notification and a card under the menu bar icon with its reason, and answer Let It Continue, which hands the display back, or Keep Control, which tells the agent you kept it. Nothing else ends your Takeover: an unanswered request stays open, and the agent can withdraw it. When the agent already has control, the call returns at once.
+- Agent Screen now updates itself. It checks for a new version once a day, downloads it in the background and installs it once no Agent Display is open, so an update never ends an agent's work. The menu bar icon's menu has **Check for Updates…**, and **Restart to Update…** once an update is waiting; with Agent Displays open, it asks before the restart ends them. This version is the last to install by hand.
+- Drags in web pages work in Chromium and Electron apps an agent starts with `launch_app`: splitters, sliders, sortable lists and HTML5 drag and drop. Before, every move reached the page with no button held, so the page took the drag for hover. `launch_app` now starts these apps itself with a private DevTools pipe that only Agent Screen holds. No port opens. A drag goes through the pipe inside the app, so your mouse button and pointer stay yours. For a browser, the agent starts a new instance on a throwaway profile. A drag in a web page of an app without the pipe, such as Safari or an app you opened, now fails with a message that suggests `launch_app` or `request_help`. Before, it seemed to succeed and did nothing.
+
+### Fixes
+
+- The Apple Account sign-in alert ("Your Apple Account is being used to sign in to a new device", with Don't Allow and Allow) and its verification code window now move to your main display when macOS opens them on an Agent Display. Before, they stayed on the agent's display, where you didn't see them and an agent could answer them.
+- Collect build information for a bug with the MCP tool `get_diagnostics` in the failing session, or `AgentScreen diagnostics --json` for the CLI and responding app. Reports use compiled package versions and source revisions, distinguish stale or unknown builds, and leave the app stopped if it is not running. The bug report form and reporting guide explain older-build fallbacks and what to attach.
+- The Help Card and a Window Request's card end a long reason after two lines with "…". Before, the rest of the text ran on in the second line past the card's edge and was cut mid-letter. The Viewer is at least 640 pt wide, so its header's buttons fit for a tall, narrow display. A 640×1600 display made a 365 pt Viewer that pushed Give, Take Back and the close and collapse buttons past its edge.
+- Agent Screen retries an AeroSpace claim-file write after it fails, even when the next request repeats the same claim. It keeps the intended displays and windows separate from the last published file, so a failed display registration does not prevent later window claims.
+- The display log in `~/Library/Logs/Agent Screen/displays.log` records when the app starts and quits, and a `released … quit` line for each display still connected at quit. Before, most displays left with the process and the log never said so, so a slow or frozen Mac couldn't be matched to those display changes.
+- When you bring up an app whose windows are all on Agent Displays, from the Dock or a launcher, Peek drops down from the menu bar icon and shows where they are: that display's tile glows orange with the app's windows outlined. Click the tile to open it in the Viewer, or Take Back to bring the windows to your screen. Peek goes after 5 seconds unless your pointer is on it. Clicking the app's Dock icon does this too, also when the app is already the front app. Before, the app seemed to open with no window. It shows at most once a minute for an app, and not when an app the agent started brings itself forward.
+- Pressing a menu item of an Electron app with `act_on_element` now comes back with a note. Electron tells the app that the press was the item's keyboard shortcut, and some apps ignore shortcuts while a text field has focus. The note, the tool's description and the agent instructions all say to click outside the field first. Agent Screen can't make the press look like a click: macOS runs an accessibility press with no current event.
+- An Agent Display keeps the size it was made with. When macOS switches it to another mode by itself, as it did under heavy load from 1600×1000 to 800×600, Agent Screen switches it back as soon as macOS reports the change, and notes it in the display log (`~/Library/Logs/Agent Screen/displays.log`).
+- `launch_app` with arguments or an environment takes the instance it started. Every checkout of an Electron project runs the same Electron.app, and a copy another tool started from a shell during the launch could be taken for it: that copy's windows went to the agent's display, and the agent's own window was lost. Agent Screen now picks the new process launchd started with the arguments it asked for.
+- `launch_app` with arguments or an environment, on an app that allows only one instance and already runs, answers with the running instance's window on your display and says the app was already running. It used to wait about 10 seconds and answer that the app was still starting, or fail with "did not start". When the running instance has no window on the display, the error says the app is already running.
+- When you open an app from Spotlight, Raycast or Alfred while you work in a Viewer, its window now leaves your screen within about 70 ms. Before, it showed there for 150 to 430 ms, and AeroSpace re-tiled your windows around it meanwhile. Agent Screen now checks for the new window every frame instead of every 150 ms, and moves it before it asks AeroSpace anything.
+- macOS closes an app's open menu, such as a web page's select, at your next click or key anywhere, on your own screen too. An agent that opened one on its display and then clicked or typed to choose an item hit the page under the closed menu instead, or changed the field without seeing it. Now that click or key fails, says the menu closed, and nothing is sent.
+- Clicking the menu bar icon after hovering now pins Peek instead of closing it. A later click closes the pin. Hover opening uses a 300 ms dwell, and an unpinned Peek uses a 500 ms grace period after the pointer leaves both the icon and Peek. A left-button press keeps its original intent while hover timers run, so its release cannot turn a close into a reopen.
+- `place_window` answers `placed` only once the window has stayed on the display for half a second after its last move. When the app keeps moving it back to the user's screen, the call fails and says so. A window of the agent's that leaves the display later, as a UTM VM window did, is listed by `list_windows` with `strays: true` and `place_window` places it again. Before, `place_window` could answer `placed` for a window that was already on its way back, and then refused it, or asked the user for it as if it were theirs.
+- Clicks to remote panels drawn by an app's background service now use the target window's current frame when macOS omits it from a targeted window lookup. Before, the event could carry global coordinates in place of window-local coordinates. The fallback checks both the process and window id; it does not use the visible host's frame.
+- A new window that an app the agent started opens by itself, long after the agent's last action, goes to the agent's display when none of the app's other windows is on your screen. Before, it opened on your screen until the agent called `place_window`. UTM did this on every guest reboot, opening a new VM window each time.
+- The Agent Pointer in the Viewer and Peek uses a new original cubic arrow with a rounded cap, shoulder and heel. Uniform light and dark outlines keep the theme accent visible on different backgrounds. Existing movement and click feedback stay shared, and the image boundary clips the pointer and ripple without moving the hotspot. The Mac's system cursor is unchanged.
+- An agent's screenshot no longer shows your menu bar's status items, such as the clock, battery and CPU, right after an app on its display quits or a window there changes. macOS moves the same status item windows from your screen onto the Agent Display at those moments, and Agent Screen now checks where they are at each capture.
+- An app on an Agent Display that brings itself to the front, as Electron apps do when they open a window, no longer keeps your keyboard. Your app is back in front about 10 ms later. Before, the agent's app stayed in front for 2 to 4 seconds. A click in the Dock or a launcher that opens the app still brings it forward.
+- An explicit `place_window` frame now stays below the reserved menu strip, so an agent can move or shrink a zoomed window whose toolbar became unreachable. The result reports the actual frame and explains when the constraint shrinks a dimension. For a window already on the display, placement without frame arguments keeps its frame. Shared-browser key refusals now describe foreground/focused-window evidence instead of claiming the user is active. Browser drag guidance explains that a fresh profile has separate sign-ins and cannot add a pipe to an existing window.
+- Agent Screen no longer quits when you click a field in the Viewer and paste into it during a Takeover. If the Viewer gets redrawn while it is still handling your click or key, it now finishes handling the input first and then applies the new layout.
+- `computer type` checks the field after typing. A page that drops keys arriving faster than its script handles them, as an address autocomplete did, used to lose characters while the call reported success. Now, when the focused field's text lacks some of the typed characters, typing stops, and the call fails with how far it got and what the field holds. Typing into a busy page waits until the page shows the text.
+- Viewer clicks can be traced with `AGENTSCREEN_VIEWER_CLICK_DIAGNOSTICS=1` at startup. The opt-in stderr records link a press and release to their coordinate mapping, window target, focus handshake and event stamp. They contain no text, window titles, keys or screenshots. Diagnostics are off by default and do not confirm that the target app executed an action.
+
+## 0.1.17 (2026-10-25)
+
+### Fixes
+
+- Agents ask you to confirm a captcha immediately before they solve it, then fill it when they can. They still open a Help Request if you prefer to do it or they cannot. Confirming the challenge does not approve a new account.
+- create_display and list_windows now return scale, screenshot pixels per display point, so an agent can tell why a window's size in the tools is smaller than the app reports on a large display.
+- The `key` action types `]` and `[` on Macs whose keyboard is JIS. It used to send `[` and `@`, so `cmd+]` went Back instead of Forward.
+
+## 0.1.16 (2026-10-25)
+
+### Features
+
+- The menu bar icon's right-click menu is shorter: New Display, Settings… (⌘,) and Quit, plus whatever needs fixing, such as unfinished setup or an AeroSpace workspace on an agent's display. Settings groups the permissions, connecting Claude Code and Codex, Smooth Display Changes, the Agent Display wallpaper and AeroSpace. The wallpaper row shows the picture you chose.
+
+### Fixes
+
+- Agent Screen has a new graphite app icon. On macOS 26 it follows the system's Dark, Tinted and Clear icon styles.
+- A click on the menu bar icon closes Peek when hover opened it. Before, the first click kept it up and only the second closed it.
+
 ## 0.1.15 (2026-10-22)
 
 ### Features

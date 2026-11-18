@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      html, body { margin: 0; height: 100%; background: #00ff00; font: 16px -apple-system; }
+      .row { margin: 8px; padding: 14px; background: #ffffff; }
+      #later { position: fixed; right: 8px; bottom: 8px; width: 120px; height: 30px; }
+      #popup { position: fixed; right: 8px; top: 8px; width: 120px; height: 30px; }
+      #split { position: fixed; left: 340px; top: 200px; width: 12px; height: 160px; background: #0000ff; touch-action: none; }
+      #bin { position: fixed; left: 380px; top: 380px; width: 120px; height: 50px; background: #ff00ff; }
+      #level { position: fixed; left: 380px; top: 250px; width: 200px; height: 20px; margin: 0; }
+      #field { position: fixed; left: 8px; bottom: 8px; width: 300px; height: 30px; box-sizing: border-box; }
+      #secret { position: fixed; left: 320px; bottom: 8px; width: 150px; height: 30px; box-sizing: border-box; }
+    </style>
+  </head>
+  <body>
+    <div class="row" id="r1" draggable="true">row 1</div>
+    <div class="row" id="r2" draggable="true">row 2</div>
+    <div class="row" id="r3" draggable="true">row 3</div>
+    <button class="row" id="nav">open page</button>
+    <div id="page"></div>
+    <div id="split"></div>
+    <div id="bin"></div>
+    <input id="level" type="range" min="0" max="100" value="20" aria-label="level" />
+    <input id="field" />
+    <input id="secret" type="password" />
+    <button id="later">later</button>
+    <button id="popup">open window</button>
+    <script>
+      // The title reads "harness w=WIDTH down=N up=N click=N dbl=N drag=N
+      // nav=N ts=T", T the last click's timestamp in ms.
+      const seen = { down: 0, up: 0, click: 0, dbl: 0, drag: 0, nav: 0, ts: -1 };
+      const show = () => {
+        document.title = `harness w=${innerWidth} ` +
+          Object.entries(seen).map(([k, v]) => `${k}=${v}`).join(" ");
+      };
+      addEventListener("mousedown", (e) => {
+        seen.down++;
+        seen.at = `${e.target.id || e.target.tagName}@${e.clientX},${e.clientY}`;
+        show();
+      });
+      addEventListener("mouseup", () => { seen.up++; show(); });
+      addEventListener("click", (e) => { seen.click++; seen.ts = Math.round(e.timeStamp); show(); });
+      // A soft navigation, as a single-page app's: the URL and the page
+      // change on a click (issue #27).
+      document.getElementById("nav").addEventListener("click", () => {
+        seen.nav++;
+        history.pushState({}, "", `#page${seen.nav}`);
+        document.getElementById("page").textContent = `page ${seen.nav}`;
+        show();
+      });
+      // A second window, as an app's popup or new window (issue #67).
+      document.getElementById("popup").addEventListener("click", () => {
+        window.open("index.html", "_blank", "width=420,height=320");
+      });
+      addEventListener("dblclick", () => { seen.dbl++; show(); });
+      addEventListener("dragstart", () => { seen.drag++; show(); });
+      // A splitter as react-resizable-panels has: it captures the pointer
+      // on press and follows moves only while the button is held, by
+      // pointermove's buttons (#37). held and free count the moves seen
+      // between press and release with the button down and up; split is
+      // how far the splitter followed.
+      const split = document.getElementById("split");
+      let pressed = null;
+      split.addEventListener("pointerdown", (e) => {
+        pressed = e.clientX;
+        split.setPointerCapture(e.pointerId);
+      });
+      split.addEventListener("pointermove", (e) => {
+        if (pressed === null) return;
+        if (e.buttons & 1) {
+          seen.held = (seen.held || 0) + 1;
+          seen.split = Math.round(e.clientX - pressed);
+        } else {
+          seen.free = (seen.free || 0) + 1;
+        }
+        show();
+      });
+      split.addEventListener("pointerup", () => { pressed = null; show(); });
+      // A drop target for an HTML5 drag of row 1 (#37): dropped counts the
+      // drops it took. A file dragged in from another app (#177) names it
+      // (got); over counts the dragover events the last drop had on the
+      // bin, and overms how long from the first to the drop.
+      document.getElementById("r1").addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", "row 1");
+      });
+      const bin = document.getElementById("bin");
+      let overs = 0, first = 0;
+      bin.addEventListener("dragenter", () => { overs = 0; first = 0; });
+      bin.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        overs++;
+        if (!first) first = e.timeStamp;
+      });
+      bin.addEventListener("drop", (e) => {
+        e.preventDefault();
+        seen.dropped = (seen.dropped || 0) + 1;
+        const file = e.dataTransfer.files[0];
+        if (file) seen.got = file.name;
+        seen.over = overs;
+        seen.overms = first ? Math.round(e.timeStamp - first) : -1;
+        show();
+      });
+      // Elsewhere the page refuses a drop, as most of a page does: the drag
+      // reaches the bin over a page that said no a moment before.
+      // A slider an agent sets through accessibility when the page has no
+      // pipe: level is its value after the last change.
+      document.getElementById("level").addEventListener("input", (e) => {
+        seen.level = Number(e.target.value);
+        show();
+      });
+      addEventListener("resize", show);
+      // Turns the page red, or back, 400 ms after a click, as an app that
+      // takes a moment to show what an action did (issue #16).
+      document.getElementById("later").addEventListener("click", () => {
+        const red = document.body.style.background === "";
+        setTimeout(() => { document.body.style.background = red ? "#ff0000" : ""; }, 400);
+      });
+      document.getElementById("field").addEventListener("focus", () => { seen.focus = 1; show(); });
+      addEventListener("keydown", () => { seen.keys = (seen.keys || 0) + 1; show(); });
+      document.getElementById("field").addEventListener("input", (e) => {
+        seen.typed = e.target.value;
+        show();
+      });
+      // A password field: secret is what it holds.
+      document.getElementById("secret").addEventListener("input", (e) => {
+        seen.secret = e.target.value;
+        show();
+      });
+      show();
+    </script>
+  </body>
+</html>

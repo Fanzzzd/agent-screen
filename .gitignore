@@ -11,3 +11,8 @@ target/
 *.mobileprovision
 .env*
 .claude/
+
+# JavaScript workspaces
+node_modules/
+.turbo/
+.wrangler/

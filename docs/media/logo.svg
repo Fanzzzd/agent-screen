@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31 30" fill="#1d1d1f">
+  <defs>
+    <mask id="back"><rect width="32" height="32" fill="#fff"/><rect x="7.5" y="9.5" width="24" height="18" rx="4.5" fill="#000"/></mask>
+    <mask id="front"><rect width="32" height="32" fill="#fff"/><path transform="translate(15.6 13.2) scale(.44)" fill="#000" d="M5.2 2.6a.8.8 0 0 1 1.1-.7l13.4 6.3a.8.8 0 0 1-.1 1.5l-5.6 1.7 4.2 6.6a.8.8 0 0 1-.3 1.1l-2.1 1.2a.8.8 0 0 1-1.1-.3l-4.1-6.6-4 4.3a.8.8 0 0 1-1.4-.5z"/></mask>
+  </defs>
+  <rect x="1" y="4" width="21" height="15" rx="3" opacity=".42" mask="url(#back)"/>
+  <rect x="9" y="11" width="21" height="15" rx="3" mask="url(#front)"/>
+</svg>

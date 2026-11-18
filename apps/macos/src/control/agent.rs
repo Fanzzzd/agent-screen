@@ -1,0 +1,8441 @@
+//! Serves control requests from Agent Sessions. Coordinates are in points
+//! relative to the display's top-left corner, the same space as screenshots.
+
+use super::server::{ControlError, Reply};
+use super::shared_app::{self, Beside};
+use crate::core::Core;
+use crate::keychord::KeyChord;
+use crate::mac::devtools::{self, Route};
+use crate::mac::input::{Button, Sent};
+use crate::mac::screenshot::{self, Format};
+use crate::mac::windows::Grab;
+use crate::mac::{app, ax, cg, windows};
+use crate::model::{
+    ControlAsk, DEFAULT_SIZE, DisplayId, Disposition, EndReason, FrameRequest, Origin, Owner, Rect,
+    Wait, WindowTarget, frame_in_shot, shot_scale,
+};
+use crate::numbers;
+use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::held::{self, Held, Place};
+use agent_screen_model::input_queue::Action;
+use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, PutAway, WindowSighting};
+use agent_screen_model::real_click;
+use agent_screen_model::request::{
+    Answer, HelpAsked, Kind, NamedWindow, RequestId, Resolution, Woken,
+};
+use agent_screen_model::session::Orphans;
+use agent_screen_model::shared_app::Front;
+use base64::Engine;
+use futures::FutureExt;
+use gpui::{App, AsyncApp, Entity};
+use objc2::MainThreadMarker;
+use serde_json::{Map, Value, json};
+use std::time::{Duration, Instant};
+
+type Params = Map<String, Value>;
+
+struct CallGuard {
+    dropped: std::sync::Arc<std::sync::Mutex<Vec<(String, u64)>>>,
+    started_at: Instant,
+    key: String,
+    finished: bool,
+}
+
+impl CallGuard {
+    fn finish(mut self, core: &Entity<Core>, cx: &mut AsyncApp) {
+        self.finished = true;
+        let key = std::mem::take(&mut self.key);
+        core.update(cx, |c, _| {
+            c.drain_dropped_calls();
+            let now_ms = c.elapsed_ms();
+            c.displays.sessions.note_call_end(&key, now_ms);
+        });
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if !self.finished
+            && !self.key.is_empty()
+            && let Ok(mut g) = self.dropped.lock()
+        {
+            g.push((
+                std::mem::take(&mut self.key),
+                self.started_at.elapsed().as_millis() as u64,
+            ));
+        }
+    }
+}
+
+pub async fn handle(
+    core: Entity<Core>,
+    connection: u64,
+    method: &str,
+    p: Params,
+    cx: &mut AsyncApp,
+) -> Reply {
+    // A click, drag, scroll, element action or launch focuses the agent's
+    // window too: hand key focus back to the user's window in a shared app
+    // once it's done, as after keys.
+    let pointer = matches!(
+        method,
+        "click" | "drag" | "mouseUp" | "scroll" | "elementAction" | "launchApp"
+    )
+    .then(|| Args(&p).int("displayId"))
+    .flatten()
+    .map(|id| id as DisplayId);
+    let timeline = recorded(method, &p);
+    let shown = Args(&p).int("displayId").map(|id| id as DisplayId);
+    let call_guard = (!method.starts_with("debug"))
+        .then(|| {
+            let named_key = Args(&p).string("sessionKey").filter(|s| !s.is_empty());
+            core.update(cx, |c, cx| {
+                c.drain_dropped_calls();
+                let now_ms = c.elapsed_ms();
+                let (key, rebound) =
+                    c.begin_session_call(connection, named_key.as_deref(), shown, now_ms);
+                if rebound {
+                    cx.notify();
+                }
+                let key = key?;
+                Some(CallGuard {
+                    dropped: c.dropped_calls.clone(),
+                    started_at: c.started_at_instant(),
+                    key,
+                    finished: false,
+                })
+            })
+        })
+        .flatten();
+    if matches!(method, "click" | "mouseDown" | "key" | "type")
+        && let Some(id) = shown
+    {
+        menu_still_open(id, method, cx).await?;
+    }
+    let named = Args(&p)
+        .int("displayId")
+        .zip(Args(&p).int("windowId"))
+        .filter(|_| method != "placeWindow");
+    let reply = handle_one(core.clone(), connection, method, p, cx).await;
+    if let Some(guard) = call_guard {
+        guard.finish(&core, cx);
+    }
+    // A window the user gave to another session: say so, rather than that
+    // there is no such window (ADR 0017).
+    let reply = match (reply, named) {
+        (Err(error), Some((id, window))) if error.code == "not_found" => {
+            let given = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id as DisplayId)
+                    .and_then(|d| d.given_away(window as u32).map(String::from))
+            });
+            Err(match given {
+                Some(app) => ControlError::not_found(held::given_message(window as u32, &app)),
+                None => error,
+            })
+        }
+        (reply, _) => reply,
+    };
+    // The menus the agent's next input may be meant for.
+    if let Some(id) = shown
+        && matches!(
+            method,
+            "screenshot"
+                | "windowState"
+                | "listWindows"
+                | "click"
+                | "mouseDown"
+                | "mouseUp"
+                | "move"
+                | "drag"
+                | "scroll"
+                | "key"
+                | "holdKey"
+                | "type"
+                | "elementAction"
+        )
+    {
+        let menus = off(cx, move || windows::menus_on(id)).await;
+        MENUS.with(|m| m.borrow_mut().insert(id, menus));
+    }
+    if let Some((id, event)) = timeline
+        && reply.is_ok()
+    {
+        crate::mac::recording::note(id, event);
+    }
+    if let Some(id) = pointer
+        && let Some(forwarder) = core.read_with(cx, |c, _| c.existing_forwarder(id))
+    {
+        forwarder.keys_done().await;
+    }
+    reply
+}
+
+thread_local! {
+    /// The pop-up menus open on each display after the agent's last call.
+    static MENUS: std::cell::RefCell<std::collections::HashMap<DisplayId, Vec<u32>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Refuse a click or key meant for a menu that closed since the agent's
+/// last call. macOS ends an app's open menu at the user's next click or
+/// key anywhere, their own screen included, and the agent's input would
+/// land on the page under it instead (#48, #79).
+async fn menu_still_open(
+    id: DisplayId,
+    method: &str,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let seen = MENUS.with(|m| m.borrow().get(&id).cloned().unwrap_or_default());
+    if seen.is_empty() {
+        return Ok(());
+    }
+    let open = off(cx, move || windows::menus_on(id)).await;
+    if seen.iter().any(|w| open.contains(w)) {
+        return Ok(());
+    }
+    MENUS.with(|m| m.borrow_mut().insert(id, open));
+    let action = match method {
+        "type" => "typing",
+        "key" => "key",
+        _ => "click",
+    };
+    Err(ControlError::failed(format!(
+        "the menu open on display {id} closed before this {action}, with no choice made, so nothing was sent. macOS closes an app's open menu at the user's next click or key anywhere, on their own screen too. For a pop-up button or a web page's select, call act_on_element set_value with the item's exact full title: it chooses the item with the menu closed. Otherwise take a screenshot, open the menu again and choose its item in the next call, with act_on_element press on the item or a click on it"
+    )))
+}
+
+/// The timeline line an agent action adds to a recording of its display:
+/// the action and its arguments, in screenshot pixels as the agent gave them.
+fn recorded(method: &str, p: &Params) -> Option<(DisplayId, Value)> {
+    let id = Args(p).int("displayId")? as DisplayId;
+    if !crate::mac::recording::is_recording(id) {
+        return None;
+    }
+    let kept = matches!(
+        method,
+        "click"
+            | "mouseDown"
+            | "mouseUp"
+            | "move"
+            | "drag"
+            | "scroll"
+            | "type"
+            | "key"
+            | "holdKey"
+            | "elementAction"
+            | "launchApp"
+            | "placeWindow"
+            | "requestHelp"
+            | "withdrawHelp"
+            | "requestControl"
+            | "withdrawControlRequest"
+            | "windowAccess"
+    );
+    if !kept {
+        return None;
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("action".into(), json!(method));
+    for (key, value) in p {
+        if key != "displayId" && key != "sessionKey" && !value.is_null() {
+            event.insert(key.clone(), value.clone());
+        }
+    }
+    Some((id, Value::Object(event)))
+}
+
+async fn handle_one(
+    core: Entity<Core>,
+    connection: u64,
+    method: &str,
+    p: Params,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let p = Args(&p);
+    if needs_permissions(method) {
+        permitted(cx).await?;
+        if cx
+            .background_executor()
+            .spawn(async { cg::screen_locked() })
+            .await
+        {
+            return Err(ControlError {
+                code: "locked",
+                message: "The Mac's screen is locked, so macOS blocks input and screenshots on \
+                          every display. Wait and retry after the user unlocks it, or call \
+                          request_help to ask for them."
+                    .into(),
+            });
+        }
+    }
+    if method != "createDisplay"
+        && !method.starts_with("debug")
+        && let Some(id) = p.int("displayId")
+    {
+        usable(&core, connection, &p, id as DisplayId, method, cx)?;
+    }
+    // A window an app makes right after the agent drives the display is
+    // the agent's; the kept catches go by this.
+    let acting = matches!(
+        method,
+        "click"
+            | "mouseDown"
+            | "mouseUp"
+            | "move"
+            | "drag"
+            | "scroll"
+            | "type"
+            | "key"
+            | "holdKey"
+            | "elementAction"
+            | "launchApp"
+    )
+    .then(|| p.int("displayId"))
+    .flatten()
+    .map(|id| id as DisplayId);
+    if let Some(id) = acting {
+        crate::mac::catch::agent_acted(id);
+        if method != "launchApp" {
+            watch_for_changes(&core, id, cx);
+        }
+    }
+    let result: Result<Value, ControlError> = match method {
+        "createDisplay" => create_display(&core, connection, &p, cx).await,
+        "recordStart" => {
+            let id = display(&core, &p, true, cx)?;
+            let label = core.read_with(cx, |c, _| {
+                c.displays.get(id).map(|d| d.label()).unwrap_or_default()
+            });
+            let (video, timeline, codec) = cx
+                .background_executor()
+                .spawn(async move { crate::mac::recording::start(id, &label) })
+                .await
+                .map_err(ControlError::failed)?;
+            core.update(cx, |_, cx| cx.notify());
+            Ok(
+                json!({ "video": video, "timeline": timeline, "selectedCodec": codec,
+                    "hardwareEncoderVerified": false,
+                    "codecNote": if codec == "avc1" { "HEVC is unavailable; using H.264. Hardware encoder use has not been verified." } else { "Configured HEVC. Hardware encoder use has not been verified." }
+                }),
+            )
+        }
+        "recordStop" => {
+            let id = display(&core, &p, false, cx)?;
+            let done = cx
+                .background_executor()
+                .spawn(async move { crate::mac::recording::stop(id) })
+                .await
+                .ok_or_else(|| ControlError::invalid("the display isn't being recorded"))?;
+            core.update(cx, |_, cx| cx.notify());
+            Ok(json!({
+                "video": done.video,
+                "timeline": done.timeline,
+                "selectedCodec": done.codec,
+                "hardwareEncoderVerified": false,
+                "seconds": (done.seconds * 10.0).round() / 10.0,
+                "actions": done.actions,
+                "problem": done.problem,
+                "sound": {
+                    "apps": done.heard,
+                    "leftOut": done.left_out,
+                    "problem": done.sound_problem,
+                },
+            }))
+        }
+        "inputQueue" => input_queue_action(&core, connection, &p, cx).await,
+        "endDisplay" => {
+            let id = display(&core, &p, false, cx)?;
+            core.update(cx, |core, cx| core.end(id, EndReason::Finished, cx));
+            Ok(json!({}))
+        }
+        "settle" => {
+            let id = display(&core, &p, false, cx)?;
+            let size = core
+                .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+                .unwrap_or(DEFAULT_SIZE);
+            settle_display(&core, id, size, cx).await;
+            Ok(json!({}))
+        }
+        "screenshot" => {
+            let id = display(&core, &p, false, cx)?;
+            let size = core
+                .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+                .unwrap_or(DEFAULT_SIZE);
+            let format = if p.string("format").as_deref() == Some("png") {
+                Format::Png
+            } else {
+                Format::Jpeg
+            };
+            if p.0.get("settle") == Some(&Value::Bool(true)) {
+                settle_display(&core, id, size, cx).await;
+            }
+            // Within the image budget the agent reads coordinates in, and
+            // `global` maps them back with the same scale.
+            let scale = shot_scale(size);
+            let pixels = ((size.0 * scale).round(), (size.1 * scale).round());
+            // A zoom: a region of the screenshot, in its pixels, captured
+            // at up to twice the display's points for detail.
+            let region = match p.0.get("region").and_then(Value::as_array) {
+                Some(r) => {
+                    let n: Vec<f64> = r.iter().filter_map(Value::as_f64).collect();
+                    let [x0, y0, x1, y1] = n[..] else {
+                        return Err(ControlError::invalid("region is [x0, y0, x1, y1]"));
+                    };
+                    // The screenshot's own size, rounded the same way.
+                    let (w, h) = pixels;
+                    if !(0.0 <= x0 && x0 < x1 && x1 <= w && 0.0 <= y0 && y0 < y1 && y1 <= h) {
+                        return Err(ControlError::invalid(format!(
+                            "region must lie within the {}×{} screenshot, x0 < x1 and y0 < y1",
+                            w as i64, h as i64
+                        )));
+                    }
+                    Some(Rect::new(
+                        x0 / scale,
+                        y0 / scale,
+                        (x1 - x0) / scale,
+                        (y1 - y0) / scale,
+                    ))
+                }
+                None => None,
+            };
+            let pixels = match region {
+                Some(r) => {
+                    let zoom = (2.0f64).min(1568.0 / r.width.max(r.height));
+                    ((r.width * zoom).round(), (r.height * zoom).round())
+                }
+                None => pixels,
+            };
+            let shot = cx
+                .background_executor()
+                .spawn(async move { screenshot::display(id, pixels, format, region) })
+                .await
+                .map_err(ControlError::failed)?;
+            let mut result = shot_json(&shot);
+            result["scale"] = json!(scale);
+            add_strayed(&core, id, &mut result, cx);
+            Ok(result)
+        }
+        "click" => {
+            let (id, point) = target(&core, &p, cx).await?;
+            outside_menu_bar(id, point)?;
+            guard_agent_point(&core, id, point, cx).await?;
+            let button = Button::parse(p.string("button").as_deref().unwrap_or("left"))
+                .ok_or_else(|| {
+                    ControlError::invalid(format!(
+                        "unknown button {}",
+                        p.string("button").unwrap_or_default()
+                    ))
+                })?;
+            let modifiers = modifiers(&p)?;
+            let count = p.int("count").unwrap_or(1);
+            // The agent saw a background click have no effect and asks for
+            // the user's pointer (ADR 0013, "Clicks"). Nothing goes out on
+            // the background route meanwhile.
+            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                // The menu a real right click opens would close when the
+                // user's front app comes back.
+                // So would a Control-held left click's.
+                let pressed = real_click::Button::parse(button_name(button))
+                    .unwrap_or(real_click::Button::Left);
+                if real_click::opens_menu(pressed, modifiers.control) {
+                    return Err(ControlError::invalid(real_click::NO_MENU_CLICK));
+                }
+                let click = real_click::Button::parse(button_name(button))
+                    .and_then(|b| real_click::Click::new(b, count))
+                    .ok_or_else(|| {
+                        ControlError::invalid(
+                            "a click with the user's pointer presses its button one to three times",
+                        )
+                    })?;
+                return queued_click(&core, connection, id, point, click, modifiers, cx).await;
+            }
+            // A window of the user's front app, beside the window they
+            // work in: a posted click would make it key and take their
+            // typing (#110).
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await {
+                let plain = modifiers == Default::default();
+                let left = button == Button::Left;
+                let (front, focused) = shared_app::front(target, cx).await;
+                // With focus unknown, only an app with a window on the
+                // user's screens may have theirs focused.
+                let shared = front.shared(
+                    front == Front::FocusUnknown && shared_app::user_window(target.pid, cx).await,
+                );
+                match (front, focused) {
+                    (Front::OtherFocused, Some(focused)) => {
+                        // Keys go to this window from now on, as after a
+                        // click. The app is in front, so this sends no
+                        // focus record.
+                        show_pointer(&core, id, point, true, cx).focus(target).await;
+                        let beside = Beside { target, focused };
+                        return shared_app::click(id, point, beside, left, count, !plain, cx)
+                            .await
+                            .and_then(reply);
+                    }
+                    // The user's window may have focus: no focus record,
+                    // and nothing posted (#110).
+                    _ if shared => {
+                        show_pointer(&core, id, point, true, cx);
+                        return shared_app::click_unverified(
+                            id, point, target, left, count, !plain, cx,
+                        )
+                        .await
+                        .and_then(reply);
+                    }
+                    _ => {}
+                }
+            }
+            let forwarder = show_pointer(&core, id, point, true, cx);
+            let hit = forwarder.click(point, button, count, modifiers).await;
+            if let Some(window) = hit {
+                shared_app::note_click(id, window, point);
+            }
+            match hit {
+                Some(window) => Ok(json!({ "windowId": window.window_id })),
+                None => Err(ControlError::not_found(format!(
+                    "nothing at ({}, {}): no window there to click",
+                    p.number("x").unwrap_or(0.0) as i64,
+                    p.number("y").unwrap_or(0.0) as i64
+                ))),
+            }
+        }
+        "move" => {
+            let (id, point) = target(&core, &p, cx).await?;
+            if let Some(grab) = GRAB.with(|g| g.borrow().get(&id).copied()) {
+                show_pointer(&core, id, point, false, cx);
+                drag_to(grab, point, cx).await;
+                return reply(json!({}));
+            }
+            match HOLDS.with(|h| h.borrow_mut().remove(&id)) {
+                Some(Hold::Pipe(drag)) => {
+                    if forwarder_stopped(&core, id, cx) {
+                        off(cx, move || drag.cancel()).await;
+                        return Err(ControlError::takeover(format!(
+                            "the user took over display {id}, which let go of the button where it was. Call wait_for_control to wait until they hand it back."
+                        )));
+                    }
+                    show_pointer(&core, id, point, false, cx);
+                    let mut drag = drag;
+                    let (drag, moved) = off(cx, move || {
+                        let moved = drag.move_to(point);
+                        (drag, moved)
+                    })
+                    .await;
+                    if let Err(e) = moved {
+                        off(cx, move || drag.cancel()).await;
+                        return Err(ControlError::failed(format!(
+                            "the move didn't reach the page, so the button was let go: {e}"
+                        )));
+                    }
+                    HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
+                    return reply(json!({}));
+                }
+                None => {}
+            }
+            guard_agent_point(&core, id, point, cx).await?;
+            show_pointer(&core, id, point, false, cx)
+                .move_to(point)
+                .await;
+            Ok(json!({}))
+        }
+        "drag" => {
+            let id = input_display(&core, &p, cx).await?;
+            let from = global(&core, id, p.require("fromX")?, p.require("fromY")?, cx)?;
+            let to = global(&core, id, p.require("toX")?, p.require("toY")?, cx)?;
+            outside_menu_bar(id, from)?;
+            guard_agent_point(&core, id, from, cx).await?;
+            guard_agent_point(&core, id, to, cx).await?;
+            let modifiers = modifiers(&p)?;
+            if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    "Requested real-input retry",
+                    cx,
+                )
+                .await;
+            }
+            // A drag on a title bar moves the window, which posted events
+            // can't do.
+            if let Some(grab) = title_bar_at(id, from, cx).await {
+                show_pointer(&core, id, to, false, cx);
+                if !drag_to(grab, to, cx).await {
+                    return Err(ControlError::failed(
+                        "the app would not let its window move",
+                    ));
+                }
+                return reply(json!({ "movedWindow": true, "route": "placement" }));
+            }
+            // A drag from one window to another needs a system drag
+            // session, which follows only the real pointer: posted, it
+            // only selects what it grabbed (#166, ADR 0013, "Drags
+            // between windows").
+            let ends = off(cx, move || {
+                let at = |p| crate::mac::input::window_at(p).map(|(w, _)| w);
+                (at(from), at(to))
+            })
+            .await;
+            if agent_screen_model::real_drag::between_windows(ends.0, ends.1) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    agent_screen_model::real_drag::BETWEEN_WINDOWS,
+                    cx,
+                )
+                .await;
+            }
+            // A web page takes a drag through the app's DevTools pipe, or
+            // not at all (#37, ADR 0010).
+            let refused = match web_route(from, cx).await {
+                Route::Pipe(page) => {
+                    return pipe_drag(&core, id, page, from, to, modifiers, cx).await;
+                }
+                Route::Refused(app) => Some(app),
+                Route::Unmapped(why) => return Err(unmapped(why)),
+                Route::Posted => None,
+            };
+            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(from)).await {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                let guard = forwarder.clone();
+                let changed = off(cx, move || {
+                    ax::drag_slider(target, from, to, || {
+                        !guard.agent_stopped()
+                            && windows::on_display(id).iter().any(|w| w.target == target)
+                    })
+                })
+                .await;
+                if forwarder.agent_stopped() {
+                    return Err(ControlError::takeover(
+                        "input stopped during slider routing; inspect its current value before retrying",
+                    ));
+                }
+                let changed = changed.map_err(ControlError::failed)?;
+                if changed {
+                    show_pointer(&core, id, to, false, cx);
+                    return reply(json!({ "route": "accessibility" }));
+                }
+            }
+            if let Some(app) = refused {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (from, Some(to)),
+                    modifiers,
+                    &devtools::refused_message(&app),
+                    cx,
+                )
+                .await;
+            }
+            shared_app::posted_press_allowed(from, "drag", cx).await?;
+            let forwarder = show_pointer(&core, id, from, true, cx);
+            let dragged = forwarder.drag(from, to, modifiers).await;
+            let released = match dragged {
+                Sent::Stopped(at) => at,
+                _ => to,
+            };
+            show_pointer(&core, id, released, false, cx);
+            if matches!(dragged, Sent::Stopped(_)) {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id} during the drag, which let go short of its target; near the start, the release may have acted on what it grabbed. Call wait_for_control to wait until they hand it back."
+                )));
+            }
+            if dragged == Sent::Nowhere {
+                return Err(ControlError::not_found(format!(
+                    "nothing at ({}, {}) to drag",
+                    p.number("fromX").unwrap_or(0.0) as i64,
+                    p.number("fromY").unwrap_or(0.0) as i64
+                )));
+            }
+            Ok(json!({ "route": "posted" }))
+        }
+        "mouseDown" | "mouseUp" => {
+            let down = method == "mouseDown";
+            let id = input_display(&core, &p, cx).await?;
+            // Without a point the button acts where the Agent Pointer is.
+            let point = match (p.number("x"), p.number("y")) {
+                (Some(x), Some(y)) => global(&core, id, x, y, cx)?,
+                _ => {
+                    let bounds = cg::display_bounds(id);
+                    core.read_with(cx, |c, _| {
+                        c.displays
+                            .get(id)
+                            .and_then(|d| d.pointer)
+                            .map(|p| (p.x, p.y))
+                    })
+                    .map(|(x, y)| (bounds.x + x, bounds.y + y))
+                    .ok_or_else(|| {
+                        ControlError::invalid("no pointer position yet; give a coordinate")
+                    })?
+                }
+            };
+            if down {
+                outside_menu_bar(id, point)?;
+                guard_agent_point(&core, id, point, cx).await?;
+            }
+            let grabbed = GRAB.with(|g| g.borrow_mut().remove(&id));
+            if down && let Some(grab) = title_bar_at(id, point, cx).await {
+                show_pointer(&core, id, point, true, cx);
+                let window = grab.target.window_id;
+                GRAB.with(|g| g.borrow_mut().insert(id, grab));
+                return reply(json!({ "windowId": window }));
+            }
+            if !down && let Some(grab) = grabbed {
+                show_pointer(&core, id, point, false, cx);
+                drag_to(grab, point, cx).await;
+                return reply(json!({ "windowId": grab.target.window_id }));
+            }
+            let modifiers = modifiers(&p)?;
+            // A press in a web page goes through the app's DevTools pipe,
+            // and so do the moves and the release after it (#37, ADR 0010).
+            let held = HOLDS.with(|h| h.borrow_mut().remove(&id));
+            if let Some(Hold::Pipe(drag)) = held {
+                if down {
+                    off(cx, move || drag.cancel()).await;
+                } else {
+                    show_pointer(&core, id, point, false, cx);
+                    let window = drag.window();
+                    off(cx, move || drag.release(point)).await.map_err(|e| {
+                        ControlError::failed(format!("the release didn't reach the page: {e}"))
+                    })?;
+                    return reply(json!({ "windowId": window }));
+                }
+            }
+            if down && p.0.get("realInput") == Some(&Value::Bool(true)) {
+                return queued_drag(
+                    &core,
+                    connection,
+                    id,
+                    (point, None),
+                    modifiers,
+                    "Requested real-input press",
+                    cx,
+                )
+                .await;
+            }
+            if down {
+                match web_route(point, cx).await {
+                    Route::Pipe(page) => {
+                        if forwarder_stopped(&core, id, cx) {
+                            return Err(ControlError::takeover(format!(
+                                "the user took over display {id}, so the press was not sent. Call wait_for_control to wait until they hand it back."
+                            )));
+                        }
+                        // Keys go to the window pressed, as after a click.
+                        let window = page.window();
+                        show_pointer(&core, id, point, true, cx).focus(window).await;
+                        let window = window.window_id;
+                        let bits = modifier_bits(modifiers);
+                        let drag = off(cx, move || devtools::Drag::press(page, point, bits))
+                            .await
+                            .map_err(|e| {
+                                ControlError::failed(format!(
+                                    "the press didn't reach the page: {e}"
+                                ))
+                            })?;
+                        HOLDS.with(|h| h.borrow_mut().insert(id, Hold::Pipe(drag)));
+                        return reply(json!({ "windowId": window }));
+                    }
+                    Route::Unmapped(why) => return Err(unmapped(why)),
+                    Route::Refused(app) => {
+                        return queued_drag(
+                            &core,
+                            connection,
+                            id,
+                            (point, None),
+                            modifiers,
+                            &devtools::refused_message(&app),
+                            cx,
+                        )
+                        .await;
+                    }
+                    Route::Posted => {}
+                }
+                shared_app::posted_press_allowed(point, "press", cx).await?;
+            }
+            let hit = show_pointer(&core, id, point, down, cx)
+                .button(point, down, modifiers)
+                .await;
+            match hit {
+                Some(window) => Ok(json!({ "windowId": window.window_id })),
+                None if down && forwarder_stopped(&core, id, cx) => {
+                    Err(ControlError::takeover(format!(
+                        "the user took over display {id}, so the press was not sent. Call wait_for_control to wait until they hand it back."
+                    )))
+                }
+                None if down => Err(ControlError::not_found(
+                    "nothing under the pointer to press on",
+                )),
+                None => Err(ControlError::invalid("the left button is not down")),
+            }
+        }
+        "cursorPosition" => {
+            let id = display(&core, &p, false, cx)?;
+            let (size, pointer) = core.read_with(cx, |c, _| {
+                let d = c.displays.get(id);
+                (
+                    d.map(|d| (d.width, d.height)).unwrap_or(DEFAULT_SIZE),
+                    d.and_then(|d| d.pointer).map(|p| (p.x, p.y)),
+                )
+            });
+            let scale = shot_scale(size);
+            Ok(match pointer {
+                Some((x, y)) => json!({ "x": (x * scale).round(), "y": (y * scale).round() }),
+                None => json!({}),
+            })
+        }
+        "scroll" => {
+            let (id, point) = target(&core, &p, cx).await?;
+            guard_agent_point(&core, id, point, cx).await?;
+            let delta = (
+                p.number("deltaX").unwrap_or(0.0),
+                p.number("deltaY").unwrap_or(0.0),
+            );
+            let modifiers = modifiers(&p)?;
+            show_pointer(&core, id, point, false, cx)
+                .wheel(point, delta, modifiers)
+                .await;
+            Ok(json!({}))
+        }
+        "type" => {
+            let id = input_display(&core, &p, cx).await?;
+            let text = p
+                .string("text")
+                .ok_or_else(|| ControlError::invalid("text is required"))?;
+            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+                let keys = crate::keychord::keys_for_text(&text).map_err(|c| {
+                    ControlError::invalid(format!(
+                        "{c:?} has no key on a US keyboard. Through the input method, type the keys it composes from, such as pinyin letters."
+                    ))
+                })?;
+                return through_input_method(&core, id, keys, p.string("inputSource"), cx).await;
+            }
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let bounds = cg::display_bounds(id);
+            let chars: Vec<char> = crate::mac::input::typed_text(&text).chars().collect();
+            let total = chars.len();
+            let partial = |done: usize, e: ControlError| match done {
+                0 => e,
+                _ => ControlError::failed(format!(
+                    "typed {done} of {total} characters, then stopped: {} If you retry, type only the rest, or replace the whole field with set_value.",
+                    e.message
+                )),
+            };
+            let typed = async {
+                let mut done = 0;
+                // In runs of 20, about 100 ms each, so the user switching to
+                // the app mid-way stops the rest; the app coming to the
+                // front stops a run at the next key.
+                while done < total {
+                    let gate = keys_gate(&forwarder, bounds, cx)
+                        .await
+                        .map_err(|e| partial(done, e))?;
+                    if let Gate::Beside(beside) = gate {
+                        let rest: String = chars[done..].iter().collect();
+                        return shared_app::type_text(id, beside, &rest, done, cx).await;
+                    }
+                    let run: String = chars[done..].iter().take(20).collect();
+                    let length = run.chars().count();
+                    match forwarder.type_text(run, bounds).await {
+                        Sent::Nowhere => return Err(partial(done, keys_refused(&forwarder, id).await)),
+                        Sent::Dropped(shown) => {
+                            let typed = done + length;
+                            let shown: String = shown.chars().take(300).collect();
+                            return Err(ControlError::failed(format!(
+                                "sent {typed} of {total} characters, but the field holds {shown:?}, without some of them: the app dropped keys that came too fast, or changed the text. Typing stopped there. Select the field's text and type it again in shorter calls, a word or a few characters each, then check the field."
+                            )));
+                        }
+                        Sent::Typed(typed) => {
+                            let typed = done + typed;
+                            return Err(ControlError::takeover(format!(
+                                "the user took over display {id} after {typed} of {total} characters. Call wait_for_control, then take a screenshot before you type the rest."
+                            )));
+                        }
+                        Sent::Fronted(typed) => done += typed,
+                        _ => done += length,
+                    }
+                }
+                // Return and Tab move on from what the last click picked.
+                if chars.iter().any(|c| matches!(c, '\n' | '\r' | '\t')) {
+                    shared_app::forget(id);
+                }
+                Ok(json!({}))
+            }
+            .await;
+            forwarder.keys_done().await;
+            typed
+        }
+        "key" => {
+            let id = input_display(&core, &p, cx).await?;
+            let keys = p
+                .string("keys")
+                .ok_or_else(|| ControlError::invalid("keys is required"))?;
+            let chords = KeyChord::parse_sequence(&keys)
+                .map_err(|e| ControlError::invalid(e.to_string()))?;
+            if p.0.get("viaInputMethod") == Some(&Value::Bool(true)) {
+                return through_input_method(&core, id, chords, p.string("inputSource"), cx).await;
+            }
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let repeat = p.int("repeat").unwrap_or(1);
+            let bounds = cg::display_bounds(id);
+            let total = chords.len();
+            let names: Vec<&str> = keys.split_whitespace().collect();
+            let partial = |pressed: usize, e: ControlError| match pressed {
+                0 => e,
+                _ => ControlError::failed(format!(
+                    "pressed {pressed} of {total} keys, then stopped: {} If you retry, press only the rest.",
+                    e.message
+                )),
+            };
+            let pressed = async {
+                let mut notes = Vec::new();
+                // Whether anything changed after the last key that pressed.
+                let mut changed = None;
+                for (pressed, chord) in chords.into_iter().enumerate() {
+                    if forwarder.agent_stopped() {
+                        return Err(ControlError::takeover(format!(
+                            "the user took over display {id} after {pressed} of {total} keys. Call wait_for_control, then take a screenshot before you press the rest."
+                        )));
+                    }
+                    let gate = keys_gate(&forwarder, bounds, cx)
+                        .await
+                        .map_err(|e| partial(pressed, e))?;
+                    let name = names.get(pressed).copied().unwrap_or("key");
+                    if let Gate::Beside(beside) = gate {
+                        if repeat > 1 {
+                            return Err(partial(
+                                pressed,
+                                shared_app::refusal(beside, &format!("{name} with repeat")),
+                            ));
+                        }
+                        let (note, after) = shared_app::key(id, beside, chord, name, cx)
+                            .await
+                            .map_err(|e| partial(pressed, e))?;
+                        notes.push(note);
+                        changed = after.or(changed);
+                        continue;
+                    }
+                    // Select All needs a first responder, which an app in the
+                    // background lacks; set the selection through accessibility.
+                    if chord == KeyChord::parse("cmd+a").expect("a chord")
+                        && let Some(target) = forwarder.keys_target(bounds).await
+                        && cx
+                            .background_executor()
+                            .spawn(async move { ax::select_all(target) })
+                            .await
+                    {
+                        continue;
+                    }
+                    // A posted key may move focus on from what the last
+                    // click picked, as Tab does.
+                    shared_app::forget(id);
+                    match forwarder.press(chord, repeat, bounds).await {
+                        None => return Err(partial(pressed, keys_refused(&forwarder, id).await)),
+                        // The app came to the front partway through.
+                        Some(sent) if sent < repeat.max(1) => {
+                            let why = match keys_gate(&forwarder, bounds, cx).await {
+                                Ok(Gate::Beside(beside)) => {
+                                    shared_app::refusal(beside, "the rest").message
+                                }
+                                Err(e) => e.message,
+                                Ok(Gate::Post) => "its app came to the front.".into(),
+                            };
+                            return Err(partial(
+                                pressed,
+                                ControlError::failed(format!(
+                                    "{name} went out {sent} of {repeat} times, then stopped: {why}"
+                                )),
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                Ok(match notes.is_empty() {
+                    true => json!({}),
+                    false => {
+                        let mut reply = json!({ "route": "accessibility", "note": notes.join(" ") });
+                        if let Some(changed) = changed {
+                            reply["changed"] = json!(changed);
+                        }
+                        reply
+                    }
+                })
+            }
+            .await;
+            forwarder.keys_done().await;
+            pressed
+        }
+        "holdKey" => {
+            let id = input_display(&core, &p, cx).await?;
+            let keys = p
+                .string("keys")
+                .ok_or_else(|| ControlError::invalid("keys is required"))?;
+            let chord = KeyChord::parse(&keys).map_err(|e| ControlError::invalid(e.to_string()))?;
+            let held =
+                Duration::from_secs_f64(p.number("seconds").unwrap_or(1.0).clamp(0.05, 10.0));
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let within = cg::display_bounds(id);
+            if let Err(e) = keys_allowed(&forwarder, within, cx).await {
+                forwarder.keys_done().await;
+                return Err(e);
+            }
+            let Some(pressed) = forwarder.chord(chord, true, within).await else {
+                let e = keys_refused(&forwarder, id).await;
+                forwarder.keys_done().await;
+                return Err(e);
+            };
+            // Let go at once if the user takes over: their keys would come
+            // out with the agent's modifier held.
+            let until = std::time::Instant::now() + held;
+            while std::time::Instant::now() < until && !forwarder.agent_stopped() {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50).min(until - std::time::Instant::now()))
+                    .await;
+            }
+            // Released where it was pressed, wherever keys go now.
+            forwarder.release_chord(chord, pressed).await;
+            forwarder.keys_done().await;
+            if forwarder.agent_stopped() {
+                return Err(ControlError::takeover(format!(
+                    "the user took over display {id}, so the keys were released early. Call wait_for_control to wait until they hand it back."
+                )));
+            }
+            Ok(json!({}))
+        }
+        "listWindows" if p.0.get("strays").and_then(Value::as_bool) == Some(true) => {
+            let id = display(&core, &p, false, cx)?;
+            let list: Vec<Value> = strays(&core, id, cx)
+                .await
+                .iter()
+                .map(|w| w.json())
+                .collect();
+            Ok(json!({ "windows": list }))
+        }
+        "listWindows" => {
+            let id = display(&core, &p, false, cx)?;
+            let (records, started) = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .map(|d| (d.records.clone(), d.started.clone()))
+                    .unwrap_or_default()
+            });
+            let scale = display_scale(&core, id, cx);
+            let list: Vec<Value> = off(cx, move || windows::on_display(id))
+                .await
+                .iter()
+                .map(|w| {
+                    let mut json = w.display_json(scale);
+                    let record = records.get(&w.target.window_id);
+                    // A further window of an app the agent started, which its
+                    // catch moved here, is as launched as the first.
+                    let unrecorded = if started.contains(&w.target.pid) {
+                        "launched"
+                    } else {
+                        "unknown"
+                    };
+                    json["origin"] = json!(record.map_or(unrecorded, |r| r.origin.as_str()));
+                    json["disposition"] =
+                        json!(record.and_then(|r| r.disposition).map(Disposition::as_str));
+                    json
+                })
+                .collect();
+            let mut reply = json!({ "windows": list, "scale": scale });
+            // list_windows shows the reply as it is: the note says it.
+            if let Some(given) = add_given(&core, id, &mut reply, cx) {
+                reply["note"] = json!(held::given_note(&given));
+            }
+            Ok(reply)
+        }
+        "setDisposition" => {
+            let id = display(&core, &p, true, cx)?;
+            let wanted = p.int("windowId");
+            let window = off(cx, move || {
+                let w = wanted?;
+                windows::on_display(id)
+                    .into_iter()
+                    .find(|x| x.target.window_id as i64 == w)
+            })
+            .await
+            .ok_or_else(|| {
+                ControlError::not_found(format!("no window with that id on display {id}"))
+            })?;
+            let disposition = p
+                .string("disposition")
+                .and_then(|d| Disposition::parse(&d))
+                .ok_or_else(|| ControlError::invalid("disposition must be keep or close"))?;
+            let handed_over = core.update(cx, |c, cx| {
+                let d = c.displays.get_mut(id)?;
+                d.set_disposition(window.target, disposition);
+                cx.notify();
+                Some(d.records[&window.target.window_id].origin == Origin::HandedOver)
+            });
+            Ok(json!({ "handedOver": handed_over.unwrap_or(false) }))
+        }
+        "placeWindow" => {
+            let id = input_display(&core, &p, cx).await?;
+            let wanted = p.int("windowId");
+            let app = p.string("app").filter(|a| !a.is_empty());
+            if wanted.is_none() && app.is_none() {
+                return Err(ControlError::invalid("window_id or app is required"));
+            }
+            let asked = FrameRequest {
+                x: p.number("x"),
+                y: p.number("y"),
+                width: p.number("width"),
+                height: p.number("height"),
+            };
+            if asked.width.is_some_and(|w| w <= 0.0) || asked.height.is_some_and(|h| h <= 0.0) {
+                return Err(ControlError::invalid("width and height must be above 0"));
+            }
+            // A window already on the display only takes its new frame.
+            if let Some(wanted) = wanted {
+                let here = off(cx, move || {
+                    windows::on_display(id)
+                        .into_iter()
+                        .find(|w| w.target.window_id as i64 == wanted)
+                })
+                .await;
+                if let Some(window) = here {
+                    return frame_window(&core, id, window.target, asked, cx).await;
+                }
+            }
+            // The app the agent named, resolved once: by a running app's
+            // name or bundle id, an installed app's name, or an .app path.
+            let named: Option<(NamedApp, Option<access::AppId>)> = match app.clone() {
+                Some(text) => Some(
+                    off(cx, move || {
+                        let found = app::identify(&text);
+                        let named =
+                            NamedApp::new(&text, found.as_ref().map(|f| f.bundle_id.clone()));
+                        (named, found)
+                    })
+                    .await,
+                ),
+                None => None,
+            };
+            let matcher = named.as_ref().map(|(n, _)| n.clone());
+            // A window on another of the session's displays moves over as a
+            // Placement, with no Window Request (ADR 0016).
+            let others: Vec<DisplayId> = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .and_then(|d| d.session())
+                    .map(|key| c.displays.of_session(key))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&o| o != id)
+                    .collect()
+            });
+            if !others.is_empty() {
+                let found = off(cx, {
+                    let matcher = matcher.clone();
+                    move || {
+                        let mut ids = AppIds::default();
+                        // The app has a window here already: that one is
+                        // what the agent means, as before ADR 0016.
+                        if wanted.is_none()
+                            && windows::on_display(id).iter().any(|w| {
+                                w.layer == 0 && is_named(w, None, matcher.as_ref(), &mut ids)
+                            })
+                        {
+                            return Vec::new();
+                        }
+                        let mut found = Vec::new();
+                        for o in others {
+                            for w in windows::on_display(o) {
+                                if (wanted.is_some() || w.layer == 0)
+                                    && is_named(&w, wanted, matcher.as_ref(), &mut ids)
+                                {
+                                    found.push((o, w.target));
+                                }
+                            }
+                        }
+                        found
+                    }
+                })
+                .await;
+                // A window_id names one window: move_between_own says why
+                // it can't move. By app name, a window the user took back
+                // or made, or one on a display they operate, is skipped for
+                // the next (ADR 0016).
+                let pick = match (wanted, found.first()) {
+                    (Some(_), first) => first.copied(),
+                    (None, _) => core.update(cx, |c, _| {
+                        for &(from, _) in &found {
+                            sync_user_made(c, from);
+                        }
+                        c.displays.first_movable(id, &found)
+                    }),
+                };
+                if let Some((from, target)) = pick {
+                    return move_between_own(&core, from, id, target, asked, cx).await;
+                }
+            }
+            let words = p
+                .string("userInstruction")
+                .map(|w| access::user_instruction(&w))
+                .transpose()
+                .map_err(ControlError::invalid)?;
+            let timeout = p.number("timeoutSeconds");
+            // A window of an app the agent started is its own to place.
+            let mut ids = AppIds::default();
+            let stray = strays(&core, id, cx)
+                .await
+                .into_iter()
+                .find(|w| is_named(w, wanted, matcher.as_ref(), &mut ids));
+            let Some(window) = stray else {
+                // Any other window is the user's until they hand it over.
+                // The user's windows that match, front to back, with their
+                // apps' bundle ids, which Window Access goes by.
+                let spares = core.read_with(cx, |c, _| c.spare_ids());
+                let mut candidates: Vec<(windows::Window, Option<String>)> = off(cx, {
+                    let matcher = matcher.clone();
+                    move || {
+                        let mut ids = AppIds::default();
+                        let mut candidates = Vec::new();
+                        for w in windows::all() {
+                            if w.layer == 0
+                                && (windows::display_role(&w).accepts_window_request()
+                                    || windows::on_any(&w.bounds, &spares))
+                                && is_named(&w, wanted, matcher.as_ref(), &mut ids)
+                            {
+                                let bundle = ids.of(w.target.pid).1.clone();
+                                candidates.push((w, bundle));
+                            }
+                        }
+                        candidates
+                    }
+                })
+                .await;
+                if candidates.is_empty() {
+                    // Another session's window, or one on a Review Display:
+                    // only the user gives it (ADR 0017).
+                    if let Some((theirs, held)) =
+                        held_window(&core, id, wanted, matcher.clone(), cx).await
+                    {
+                        return take_held(&core, id, theirs, held, words, timeout, asked, cx).await;
+                    }
+                    // One the user minimized, or whose app they hid: the
+                    // same consent brings it out onto the display (#221).
+                    candidates = off(cx, {
+                        let matcher = matcher.clone();
+                        move || put_away_candidates(wanted, matcher.as_ref())
+                    })
+                    .await;
+                }
+                if candidates.is_empty() {
+                    let text = app.clone().unwrap_or_default();
+                    let holders = core.read_with(cx, |c, _| Holders::of(c, id));
+                    let message = off(cx, move || match (wanted, named) {
+                        (Some(window), _) => no_such_window(window, &holders),
+                        (None, Some((named, found))) => {
+                            no_app_window(id, &text, &named, found, &holders)
+                        }
+                        (None, None) => unreachable!("window_id or app is required"),
+                    })
+                    .await;
+                    return Err(ControlError::not_found(message));
+                }
+                // The user's word names its window: the front one. A grant
+                // takes the first window it covers, past one the user just
+                // took back; with none, the user is asked for the front one.
+                let pick = if words.is_some() {
+                    0
+                } else {
+                    let keys: Vec<(WindowTarget, Option<String>)> = candidates
+                        .iter()
+                        .map(|(w, b)| (w.target, b.clone()))
+                        .collect();
+                    core.read_with(cx, |c, _| c.displays.grantable(id, &keys))
+                        .unwrap_or(0)
+                };
+                let (theirs, bundle_id) = candidates.into_iter().nth(pick).expect("a candidate");
+                let target = theirs.target;
+                let authority = match &words {
+                    Some(_) => Authority::Once,
+                    None => Authority::Grant { bundle_id },
+                };
+                let allowed =
+                    core.read_with(cx, |c, _| c.displays.may_hand_over(id, target, &authority));
+                let mut reply = match allowed {
+                    Ok(()) => hand_over(&core, id, theirs, authority, words, cx).await?,
+                    // Not covered by the grant: the user answers on a card.
+                    Err(Refusal::NotGranted | Refusal::Excluded) if words.is_none() => {
+                        request_window(&core, id, theirs, None, timeout, cx).await?
+                    }
+                    // A stray another session's display records, on the
+                    // user's screen: the user decides (ADR 0017).
+                    Err(Refusal::Elsewhere) => {
+                        let held = core.read_with(cx, |c, _| {
+                            c.displays.held_by_at(id, target, None, c.elapsed_ms())
+                        });
+                        return match held {
+                            Some(held) => {
+                                take_held(&core, id, theirs, held, words, timeout, asked, cx).await
+                            }
+                            None => Err(ControlError::failed(
+                                Refusal::Elsewhere.message(&theirs.app),
+                            )),
+                        };
+                    }
+                    Err(Refusal::Takeover) => {
+                        return Err(ControlError::takeover(
+                            Refusal::Takeover.message(&theirs.app),
+                        ));
+                    }
+                    Err(refusal) => {
+                        return Err(ControlError::failed(refusal.message(&theirs.app)));
+                    }
+                };
+                reply.extend(frame_window(&core, id, target, asked, cx).await?);
+                return Ok(reply);
+            };
+            // A window this display recorded before keeps that record if
+            // it can't be placed: it stays a stray either way.
+            let before = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .and_then(|d| d.records.get(&window.target.window_id).cloned())
+            });
+            // A stray the session's other display recorded goes over with
+            // that record, so a Handover stays one (ADR 0016).
+            let recorded_by = core.read_with(cx, |c, _| {
+                c.displays
+                    .list
+                    .iter()
+                    .find(|d| {
+                        d.id != id
+                            && c.displays.same_session(id, d.id)
+                            && d.records.contains_key(&window.target.window_id)
+                    })
+                    .map(|d| d.id)
+            });
+            let moved = match recorded_by {
+                Some(from) => Some(
+                    core.update(cx, |c, cx| {
+                        cx.notify();
+                        c.displays.move_between(from, id, window.target, false)
+                    })
+                    .map_err(ControlError::failed)?,
+                ),
+                None => {
+                    claim(&core, id, window.target, Origin::Placed, cx);
+                    None
+                }
+            };
+            if let Err(e) = place_and_hold(window.target, id, cx).await {
+                // Still a stray, so the agent can try again.
+                core.update(cx, |c, cx| {
+                    match moved {
+                        Some(moved) => c.displays.undo_move(moved),
+                        None => c
+                            .displays
+                            .restore_record_on(id, window.target.window_id, before),
+                    }
+                    cx.notify();
+                });
+                return Err(ControlError::failed(format!(
+                    "could not move the window: {e}"
+                )));
+            }
+            frame_window(&core, id, window.target, asked, cx)
+                .await
+                .map(Value::Object)
+        }
+        "windowState" => {
+            let scope = read_scope(&p)?;
+            let id = display(&core, &p, false, cx)?;
+            let window = window_on(id, &p, cx).await?;
+            let target = window.target;
+            let root = read_root(&core, id, target, scope.root, cx).await?;
+            let area = cg::display_bounds(id);
+            let origin = (area.x, area.y);
+            let scale = display_scale(&core, id, cx);
+            // Walking a tree takes a round trip per element.
+            let started = Instant::now();
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { ax::snapshot(target, origin, scale, root.map(|r| r.0), scope.max_depth) })
+                .await
+                // The window is there, so this isn't `not_found`, which
+                // reads as closed: the app is busy, or AX is off.
+                .map_err(|error| match error {
+                    ax::SnapshotError::WindowUnavailable => ControlError::failed(
+                        "the app didn't answer accessibility in time, or Accessibility isn't granted; call get_window_state again",
+                    ),
+                    ax::SnapshotError::RootUnavailable => ControlError::invalid(
+                        "the root element no longer belongs to this window; call get_window_state without root to find it again",
+                    ),
+                })?;
+            let count = snapshot.elements.len();
+            let walked = started.elapsed();
+            let complete = scope.root.is_none() && !snapshot.truncated && !snapshot.depth_limited;
+            let tree = core.update(cx, |c, _| {
+                let numbers = c.elements.entry((id, window.target.window_id)).or_default();
+                numbers::relabel(
+                    &snapshot.tree,
+                    &numbers.refresh(snapshot.elements, complete),
+                )
+            });
+            let size = (window.bounds.width, window.bounds.height);
+            let shot = cx
+                .background_executor()
+                .spawn(async move { screenshot::window(target, size) })
+                .await
+                .map_err(ControlError::failed)?;
+            log::debug!(
+                "windowState {}: {count} elements in {} ms, picture by {} ms",
+                target.window_id,
+                walked.as_millis(),
+                started.elapsed().as_millis()
+            );
+            let mut result = shot_json(&shot);
+            result["window"] = in_shot(window.json(), scale);
+            result["tree"] = json!(tree);
+            result["elements"] = json!(count);
+            result["truncated"] = json!(snapshot.truncated);
+            result["depthLimited"] = json!(snapshot.depth_limited);
+            result["root"] = json!(scope.root);
+            add_strayed(&core, id, &mut result, cx);
+            Ok(result)
+        }
+        "waitForChange" => wait_for_change(&core, connection, &p, cx).await,
+        "cancelWaitForChange" => {
+            let wait = p
+                .int("waitId")
+                .ok_or_else(|| ControlError::invalid("waitId is required"))?;
+            cancel_wait((connection, wait as u64));
+            Ok(json!({ "cancelled": true }))
+        }
+        "elementAction" => {
+            let scope = read_scope(&p)?;
+            let id = input_display(&core, &p, cx).await?;
+            let window = window_on(id, &p, cx).await?;
+            // Validate the requested result root before any action occurs.
+            read_root(&core, id, window.target, scope.root, cx).await?;
+            let index = p
+                .int("element")
+                .ok_or_else(|| ControlError::invalid("element is required"))?;
+            let element = core.read_with(cx, |c, _| {
+                let numbers = c.elements.get(&(id, window.target.window_id));
+                numbers.map(|n| (n.get(index as usize).cloned(), n.issued(index as usize)))
+            });
+            let element = match element {
+                None => {
+                    return Err(ControlError::invalid(
+                        "call get_window_state for this window first",
+                    ));
+                }
+                Some((None, true)) => {
+                    return Err(ControlError::not_found(format!(
+                        "element {index} is no longer in the window; call get_window_state again"
+                    )));
+                }
+                Some((None, false)) => {
+                    return Err(ControlError::not_found(format!(
+                        "no element {index}; call get_window_state again"
+                    )));
+                }
+                Some((Some(element), _)) => element,
+            };
+            let current = ax::Sendable(element.clone());
+            let target = window.target;
+            match off(cx, move || ax::belongs(current.get(), target, true)).await {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(ControlError::not_found(format!(
+                        "element {index} is no longer in this window; call get_window_state again"
+                    )));
+                }
+                None => {
+                    return Err(ControlError::failed(
+                        "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+                    ));
+                }
+            }
+            let action = p.string("action").unwrap_or_else(|| "press".into());
+            // A menu bar title lists its items rather than opening a menu
+            // on the user's own menu bar.
+            if matches!(action.as_str(), "press" | "click" | "show_menu") {
+                let item = ax::Sendable(element.clone());
+                let menu = cx
+                    .background_executor()
+                    .spawn(async move { ax::menu_items(item.get(), 0) })
+                    .await;
+                if let Some(menu) = menu {
+                    let tree = core.update(cx, |c, _| {
+                        let numbers = c.elements.entry((id, window.target.window_id)).or_default();
+                        numbers::relabel(&menu.tree, &numbers.extend(menu.elements))
+                    });
+                    return reply(json!({ "menu": tree }));
+                }
+            }
+            // Beside the user's window of the same app, a menu would open
+            // in their front app and take their keyboard (#110).
+            let item = ax::Sendable(element.clone());
+            if let Some(refusal) =
+                shared_app::element_refusal(window.target, &action, &item, cx).await
+            {
+                return Err(refusal);
+            }
+            if action == "read_text" {
+                let item = ax::Sendable(element.clone());
+                let (value, selected) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let e = item.get();
+                        (
+                            ax::string_attribute(e, "AXValue"),
+                            ax::string_attribute(e, "AXSelectedText"),
+                        )
+                    })
+                    .await;
+                if value.is_none() && selected.is_none() {
+                    return Err(ControlError::not_found("the element has no text to read"));
+                }
+                return reply(
+                    json!({ "text": value, "selected": selected.filter(|s| !s.is_empty()) }),
+                );
+            }
+            // Electron takes a menu item pressed through accessibility for
+            // its shortcut: AppKit runs the press with no current event, and
+            // Electron reads only a mouse event as a click (#39). An item of
+            // its menu bar goes through the Input Queue as a real click
+            // while a text field has focus, where apps ignore shortcuts, or
+            // when the agent asks with real_input.
+            let real_input = match p.0.get("realInput") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(value)) => Some(*value),
+                Some(_) => return Err(ControlError::invalid("realInput must be true or false")),
+            };
+            if real_input.is_some() && action != "press" {
+                return Err(ControlError::invalid(
+                    "real_input applies to press on a menu item of an Electron app's menu bar",
+                ));
+            }
+            let menu_note = if action == "press" {
+                let (item, target) = (ax::Sendable(element.clone()), window.target);
+                let pid = target.pid;
+                let (press, path) = off(cx, move || {
+                    let e = item.get();
+                    if ax::string_attribute(e, "AXRole").as_deref() != Some("AXMenuItem") {
+                        return (None, None);
+                    }
+                    let electron = app::is_electron(pid);
+                    let path = electron
+                        .then(|| ax::menu_bar_path(e))
+                        .flatten()
+                        .filter(|(owner, _)| *owner == pid)
+                        .map(|(_, path)| path);
+                    let enabled = ax::attribute(e, "AXEnabled")
+                        .and_then(|v| {
+                            v.downcast_ref::<objc2_core_foundation::CFBoolean>()
+                                .map(|b| b.as_bool())
+                        })
+                        .unwrap_or(true);
+                    let press = agent_screen_model::menu_press::Press {
+                        in_menu_bar: path.is_some() && enabled,
+                        apple_menu: path
+                            .as_ref()
+                            .and_then(|p| p.first())
+                            .is_some_and(|(index, _)| *index == 0),
+                        electron,
+                        editing: electron && ax::editing(target),
+                        real_input,
+                    };
+                    (Some((press, app::is_vs_code_based(pid))), path)
+                })
+                .await;
+                if let (Some((press, _)), Some(path)) = (press, &path)
+                    && press.route() == agent_screen_model::menu_press::Route::RealClick
+                {
+                    let path = path.clone();
+                    return queued_menu_press(&core, connection, id, window.target, path, cx).await;
+                }
+                // While a real click on the item waits or runs, a press
+                // through accessibility would choose it a second time.
+                if let Some(path) = &path {
+                    let operation = menu_operation(window.target, path);
+                    let outstanding = core.read_with(cx, |c, _| {
+                        c.input_queue.owner(id, connection).is_ok_and(|owner| {
+                            c.input_queue.queue.requests().any(|r| {
+                                r.owner == owner && r.operation == operation && !r.status.terminal()
+                            })
+                        })
+                    });
+                    if outstanding {
+                        return Err(ControlError::invalid(
+                            "a real click on this menu item still waits for the user's approval or runs; use input_queue to withdraw it before pressing the item through accessibility",
+                        ));
+                    }
+                }
+                if real_input == Some(true) {
+                    return Err(ControlError::invalid(
+                        "real_input applies to press on an enabled menu item of an Electron app's own menu bar, not the Apple menu",
+                    ));
+                }
+                press
+                    .filter(|(press, _)| press.electron)
+                    .map(|(_, vs_code)| {
+                        if vs_code {
+                            VS_CODE_MENU_NOTE
+                        } else {
+                            ELECTRON_MENU_NOTE
+                        }
+                    })
+            } else {
+                None
+            };
+            // A menu bar command acts on the app's key window, the user's
+            // while they work in another window of it (#110).
+            if let Some(refusal) =
+                shared_app::menu_bar_refusal(window.target, &action, &item, cx).await
+            {
+                return Err(refusal);
+            }
+            if matches!(action.as_str(), "focus" | "set_value" | "press") {
+                core.update(cx, |c, _| c.forwarder(id))
+                    .remember_user_window(window.target.pid)
+                    .await;
+            }
+            let action_note = act(
+                &core,
+                id,
+                window.target,
+                &action,
+                &element,
+                p.string("value"),
+                cx,
+            )
+            .await?;
+            // Typing after focusing a field, or pressing in a window, goes
+            // to that window, as it would after a click there.
+            if matches!(action.as_str(), "focus" | "set_value" | "press") {
+                let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                forwarder.focus(window.target).await;
+            }
+            if let Some(note) = menu_note.map(String::from).or(action_note) {
+                return reply(json!({ "note": note }));
+            }
+            Ok(json!({}))
+        }
+        "launchApp" => {
+            let id = input_display(&core, &p, cx).await?;
+            let name = p
+                .string("app")
+                .ok_or_else(|| ControlError::invalid("app is required"))?;
+            let target = p.string("open").map(|t| open_target(&t)).transpose()?;
+            let start = Start::parse(&p)?;
+            let launched = launch(&core, id, &name, target.as_deref(), &start, cx).await?;
+            let mut reply = match launched.window {
+                Some(w) => json!({
+                    "window": in_shot(w.json(), display_scale(&core, id, cx)),
+                    "wasRunning": launched.was_running,
+                    "reason": launched.reason,
+                }),
+                None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
+            };
+            // The app this display started, which the MCP server hands to
+            // the session's next display if this app quits.
+            if let Some(pid) = launched.pid.filter(|pid| {
+                core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| d.started.contains(pid))
+                })
+            }) {
+                reply["pid"] = json!(pid);
+            }
+            Ok(reply)
+        }
+        // The MCP server of an agent session listed the tools.
+        "agentReady" => {
+            let client = p.string("client").unwrap_or_else(|| "An agent".into());
+            if let Some(shell) = crate::ui::shell::current() {
+                let _ = shell.update(cx, |shell, cx| shell.agent_ready(client, cx));
+            }
+            Ok(json!({}))
+        }
+        "requestHelp" => {
+            let id = display(&core, &p, true, cx)?;
+            let reason = p
+                .string("reason")
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            let steps = match p.0.get("steps") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .ok_or_else(|| ControlError::invalid("steps are strings"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(ControlError::invalid("steps is a list of strings")),
+            };
+            let steps =
+                agent_screen_model::model::help_steps(steps).map_err(ControlError::invalid)?;
+            // The asker's MCP server understands answers other than a
+            // Takeover (ADR 0015). One built earlier doesn't say so.
+            let answers = p.0.get("answers") == Some(&Value::Bool(true));
+            let asked = core.update(cx, |c, cx| {
+                let asked = c.displays.request_help(id, reason, steps, answers);
+                cx.notify();
+                asked
+            });
+            Ok(match asked {
+                Some(HelpAsked::Answered(woken)) => json!({ "answered": woken.to_json(false) }),
+                Some(HelpAsked::Opened(request)) => json!({ "requestId": request }),
+                None => json!({ "requestId": null }),
+            })
+        }
+        "withdrawHelp" => {
+            let id = display(&core, &p, false, cx)?;
+            let withdrawn = core.update(cx, |c, cx| {
+                let withdrawn = c.displays.withdraw_help(id);
+                if withdrawn {
+                    cx.notify();
+                }
+                withdrawn
+            });
+            Ok(json!({ "withdrawn": withdrawn }))
+        }
+        // The user answered the Help Request in the conversation, and the
+        // agent relays their words: the request ends as Continue, as the
+        // card's button ends it (ADR 0013, ADR 0015).
+        "answerHelp" => {
+            let id = display(&core, &p, true, cx)?;
+            let words = p
+                .string("userInstruction")
+                .filter(|w| !w.trim().is_empty())
+                .ok_or_else(|| ControlError::invalid("userInstruction is required"))?;
+            core.update(cx, |c, cx| {
+                c.answer(id, Kind::Help, None, Answer::Continue, cx)
+                    .map_err(|why| ControlError::failed(why.message()))?;
+                // The agent relayed it: its next wait needn't hear it.
+                c.displays.forget_unheard(id);
+                log::info!("display {id}: Help Request answered in the conversation");
+                crate::mac::recording::note(
+                    id,
+                    json!({ "action": "helpAnswered", "by": "chat", "instruction": words }),
+                );
+                Ok::<_, ControlError>(())
+            })?;
+            Ok(json!({ "answered": true }))
+        }
+        // During a Takeover, ask the user to hand the display back. The
+        // agent then waits with waitForControl.
+        "requestControl" => {
+            if let Some(words) = p.string("userInstruction") {
+                let id = display(&core, &p, true, cx)?;
+                return chat_control(&core, id, &words, p.string("control").as_deref(), cx)
+                    .and_then(reply);
+            }
+            let id = display(&core, &p, false, cx)?;
+            let reason = p
+                .string("reason")
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            let asked = core.update(cx, |c, cx| {
+                let asked = c.displays.request_control(id, reason);
+                if asked == ControlAsk::Asked {
+                    cx.notify();
+                }
+                asked
+            });
+            Ok(json!({
+                "requested": asked != ControlAsk::NotNeeded,
+                "alreadyAsked": asked == ControlAsk::AlreadyAsked,
+            }))
+        }
+        "windowAccess" => window_access(&core, &p, cx).await,
+        "withdrawControlRequest" => {
+            let id = display(&core, &p, false, cx)?;
+            let withdrawn = core.update(cx, |c, cx| {
+                let withdrawn = c.displays.withdraw_control_request(id);
+                if withdrawn {
+                    cx.notify();
+                }
+                withdrawn
+            });
+            Ok(json!({ "withdrawn": withdrawn }))
+        }
+        "waitForControl" => {
+            let id = display(&core, &p, false, cx)?;
+            let seconds = p
+                .number("timeoutSeconds")
+                .unwrap_or(100.0)
+                .clamp(1.0, 600.0);
+            let wait = core.update(cx, |c, _| c.displays.wait_for_control(id));
+            let woken = match wait {
+                Wait::Now(woken) => woken,
+                Wait::Later(rx) => {
+                    let timer = cx
+                        .background_executor()
+                        .timer(Duration::from_secs_f64(seconds));
+                    futures::select! {
+                        woken = rx.fuse() => woken.unwrap_or(Woken::of(None, Resolution::Ended)),
+                        _ = FutureExt::fuse(timer) => {
+                            // What still waits for the user.
+                            let open = core.read_with(cx, |c, _| c.displays.waiting_on(id));
+                            Woken::of(open, Resolution::TimedOut)
+                        }
+                    }
+                }
+            };
+            // Ended because the user closed it: the agent should stop.
+            let closed = woken.resolution == Resolution::Ended
+                && core.read_with(cx, |c, _| {
+                    c.displays.closed_by_user.contains(&id)
+                        || c.displays
+                            .get(id)
+                            .is_some_and(|d| d.ended == Some(EndReason::ClosedByUser))
+                });
+            // An MCP server built before resolutions reads these flags.
+            let (help_open, control_asked) = core.read_with(cx, |c, _| {
+                c.displays.get(id).map_or((false, false), |d| {
+                    (
+                        d.requests.is_open(Kind::Help) && !d.takeover,
+                        d.requests.is_open(Kind::Control),
+                    )
+                })
+            });
+            // How long the user has left the mouse and keyboard alone while
+            // they hold the display: done, they may only have missed the
+            // hand-back, as after a passkey that ended in seconds.
+            let idle = core
+                .read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
+                .then(|| crate::mac::ime::user_idle().floor() as u64);
+            let mut out = woken.to_json(closed);
+            out["helpOpen"] = json!(help_open);
+            out["controlAsked"] = json!(control_asked);
+            out["userIdleSeconds"] = json!(idle);
+            Ok(out)
+        }
+        // Test hook: stands in for the user's input in the Viewer.
+        "debugTakeover" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let active = p.0.get("active") == Some(&Value::Bool(true));
+            core.update(cx, |c, cx| {
+                if active {
+                    c.take_over(id, cx)
+                } else {
+                    c.hand_back(id, cx)
+                }
+            });
+            Ok(json!({}))
+        }
+        // Move any window, by pid and id, to a global point: a test puts a
+        // system alert on an agent display with it.
+        "debugMoveWindow" if debug_methods() => {
+            let target = WindowTarget {
+                pid: p.int("pid").unwrap_or(0) as i32,
+                window_id: p.int("windowId").unwrap_or(0) as u32,
+            };
+            let (x, y) = (p.number("x").unwrap_or(0.0), p.number("y").unwrap_or(0.0));
+            let moved = cx
+                .background_executor()
+                .spawn(async move {
+                    ax::window_element(target).is_some_and(|w| ax::set_position(&w, x, y))
+                })
+                .await;
+            Ok(json!({ "moved": moved }))
+        }
+        "debugViewer" if debug_methods() => {
+            let (frame, image, key) = crate::mac::viewer_input::debug_layout()
+                .ok_or_else(|| ControlError::not_found("the Viewer shows no display"))?;
+            // Whether the shown display's stream showed another display.
+            let misrouted = cx.update(|cx| {
+                crate::ui::shell::current()
+                    .and_then(|shell| shell.upgrade())
+                    .and_then(|shell| shell.read(cx).viewer_display())
+                    .zip(crate::ui::stream::global())
+                    .is_some_and(|(id, streams)| streams.read(cx).misrouted(id))
+            });
+            // The header's Take Back button, in points from the Viewer's
+            // top-left corner, as last painted.
+            let take_back = crate::ui::viewer::WindowMenu::TakeBack.button().map(|b| {
+                [
+                    f64::from(b.origin.x),
+                    f64::from(b.origin.y),
+                    f64::from(b.size.width),
+                    f64::from(b.size.height),
+                ]
+            });
+            Ok(json!({
+                "frame": frame,
+                "image": image,
+                "key": key,
+                // The input method's marked text in the Viewer, and the
+                // target's caret, where it shows, in points from the
+                // Viewer's top-left corner.
+                "marked": crate::mac::viewer_input::marked(),
+                // The tap that keeps presses in the Viewer from other apps
+                // is installed and enabled (ADR 0014).
+                "privatePress": crate::mac::viewer_input::private_press(),
+                // The Viewer's input context is AppKit's current one: the
+                // input method composes only then.
+                "inputContext": crate::mac::viewer_input::input_context_current(),
+                // The kind of input source the Viewer types with now.
+                "source": match crate::mac::ime::current_kind() {
+                    agent_screen_model::viewer_keys::Source::Layout => "layout",
+                    agent_screen_model::viewer_keys::Source::InputMethod => "inputMethod",
+                },
+                "caret": crate::mac::viewer_input::caret_in_window(),
+                // A password field has the keyboard in the target, as last
+                // looked up, or secure input is on.
+                "secure": crate::mac::viewer_input::secure(),
+                // "unknown" until a lookup answers after the focus may
+                // have moved; keys go as keys meanwhile.
+                "secrecy": secrecy_name(crate::mac::viewer_input::secrecy()),
+                // How long the latest focus lookups took, and how long
+                // held keys waited for them, in milliseconds.
+                "lookupMs": crate::mac::input::lookup_ms(),
+                "heldMs": crate::mac::viewer_input::held_ms(),
+                // Each key press's final route, by key code, in order, and
+                // how many compositions a lookup dropped for a password
+                // field, which a lookup in time leaves at none.
+                "routes": crate::mac::viewer_input::routes()
+                    .into_iter()
+                    .map(|(code, route)| json!([code, route]))
+                    .collect::<Vec<_>>(),
+                "secureFound": crate::mac::viewer_input::secure_found_count(),
+                // Lookups of the target's focus asked for, none with a
+                // keyboard layout, and any made on the main thread.
+                "inspections": crate::mac::viewer_input::inspections(),
+                "mainThreadLookups": crate::mac::ax::MAIN_THREAD_LOOKUPS
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "misrouted": misrouted,
+                "takeBack": take_back,
+            }))
+        }
+        "debugStreams" if debug_methods() => {
+            // Each display's capture stream: running, showing another
+            // screen, frames delivered, restarts.
+            let streams = cx.update(|cx| {
+                crate::ui::stream::global()
+                    .map(|streams| streams.read(cx).debug())
+                    .unwrap_or_default()
+            });
+            Ok(json!({ "streams": streams }))
+        }
+        "debugWebPreview" if debug_methods() => Ok(crate::web::debug_status()),
+        "debugViewerInput" if debug_methods() => {
+            use crate::mac::viewer_input;
+            // A frame from the display's stream leaves the Viewer to draw,
+            // as it nearly always is while the user works in it.
+            if p.int("key") == Some(1) {
+                cx.update(|cx| cx.refresh_windows());
+            }
+            let mut routed = None;
+            let mut secrecy = None;
+            // `source` stands in for the user's input source: "layout" or
+            // "inputMethod".
+            let source = {
+                use agent_screen_model::viewer_keys::Source;
+                match p.string("source").as_deref() {
+                    None => None,
+                    Some("layout") => Some(Source::Layout),
+                    Some("inputMethod") => Some(Source::InputMethod),
+                    Some(_) => {
+                        return Err(ControlError::failed("source is layout or inputMethod"));
+                    }
+                }
+            };
+            match p.string("kind").as_deref() {
+                Some("click") => viewer_input::inject_click(
+                    p.number("x").unwrap_or(0.5),
+                    p.number("y").unwrap_or(0.5),
+                    p.int("key").unwrap_or(0) == 1,
+                    source,
+                ),
+                // `characters` are what the key types, and `ime` what the
+                // input method does with it: "pass", "nothing",
+                // "mark:TEXT", "insert:TEXT" or "insertcommand:TEXT". The
+                // reply says what the key came to.
+                Some("key") => {
+                    let script = match p.string("ime") {
+                        None => None,
+                        Some(ime) => Some(viewer_input::Script::parse(&ime).ok_or_else(|| {
+                            ControlError::failed(
+                                "ime is pass, nothing, mark:TEXT, insert:TEXT or insertcommand:TEXT",
+                            )
+                        })?),
+                    };
+                    // `phase`: "down" or "up" alone, else both; `repeat`:
+                    // the press is a held key's repeat.
+                    use objc2_app_kit::NSEventType;
+                    let kinds: &[NSEventType] = match p.string("phase").as_deref() {
+                        None => &[NSEventType::KeyDown, NSEventType::KeyUp],
+                        Some("down") => &[NSEventType::KeyDown],
+                        Some("up") => &[NSEventType::KeyUp],
+                        Some(_) => return Err(ControlError::failed("phase is down or up")),
+                    };
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
+                    let characters = p.string("characters").unwrap_or_default();
+                    let key = viewer_input::TestKey {
+                        code: p.int("code").unwrap_or(0) as u16,
+                        shift: p.int("shift").unwrap_or(0) == 1,
+                        command: p.int("command").unwrap_or(0) == 1,
+                        characters: &characters,
+                        repeat: p.int("repeat").unwrap_or(0) == 1,
+                    };
+                    viewer_input::inject_key(key, source, script, kinds)
+                    .map(|route| routed = Some(route))
+                }
+                // Shift pressed (`down`: 1) or released.
+                Some("shift") => {
+                    secrecy = Some(secrecy_name(viewer_input::secrecy()));
+                    viewer_input::inject_shift(p.int("down").unwrap_or(0) == 1, source)
+                }
+                // A press, a drag in steps and a release, as a hand on
+                // the trackpad makes them.
+                Some("drag") => {
+                    use objc2_app_kit::NSEventType;
+                    let from = (p.number("x").unwrap_or(0.5), p.number("y").unwrap_or(0.5));
+                    let to = (
+                        p.number("toX").unwrap_or(0.5),
+                        p.number("toY").unwrap_or(0.5),
+                    );
+                    viewer_input::inject_mouse(NSEventType::LeftMouseDown, from.0, from.1)
+                        .map_err(ControlError::failed)?;
+                    for step in 1..=20 {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(16))
+                            .await;
+                        let t = step as f64 / 20.0;
+                        viewer_input::inject_mouse(
+                            NSEventType::LeftMouseDragged,
+                            from.0 + (to.0 - from.0) * t,
+                            from.1 + (to.1 - from.1) * t,
+                        )
+                        .map_err(ControlError::failed)?;
+                    }
+                    viewer_input::inject_mouse(NSEventType::LeftMouseUp, to.0, to.1)
+                }
+                // The input method's calls on the Viewer's view while the
+                // user composes: text marked, or the composition ended.
+                Some(kind @ ("mark" | "commit")) => {
+                    // A frame paints the Viewer's input handler first.
+                    cx.update(|cx| cx.refresh_windows());
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    viewer_input::inject_text_input(
+                        &p.string("text").unwrap_or_default(),
+                        kind == "commit",
+                    )
+                }
+                _ => Err("kind is click, key, shift, drag, mark or commit".into()),
+            }
+            .map_err(ControlError::failed)?;
+            // `secrecy`: what the key was routed by.
+            Ok(json!({ "route": routed, "secrecy": secrecy }))
+        }
+        // Test hook: the front app's focused window reads as unknown, as
+        // when the app doesn't answer accessibility in time.
+        "debugFocusUnknown" if debug_methods() => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Err(ControlError::invalid(
+                    "debugFocusUnknown requires the isolated e2e instance",
+                ));
+            }
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::force_focus_unknown(on);
+            Ok(json!({ "on": on }))
+        }
+        // Test hook: what the last hold of the user's keys during a launch
+        // did (#110): how many events and key downs, how long, and why it
+        // ended. Counts only, never which keys.
+        "debugKeyHold" if debug_methods() => Ok(match crate::mac::key_hold::last() {
+            Some(s) => json!({
+                "events": s.events,
+                "keyDowns": s.key_downs,
+                "ms": s.ms,
+                "end": format!("{:?}", s.end),
+                "sent": s.sent,
+                "discarded": s.discarded,
+            }),
+            None => json!({ "events": null }),
+        }),
+        // Test hook: turn the check for a press's effect beside the user's
+        // window off or on, to time what it costs.
+        "debugPressCheck" if debug_methods() => {
+            let on = p.0.get("on").and_then(Value::as_bool).unwrap_or(true);
+            shared_app::set_press_check(on);
+            Ok(json!({ "on": on }))
+        }
+        // Test hook: the user hands a window over from the Windows menu.
+        "debugHandOver" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            // As the Give menu does, unless `gave` is false: a drag.
+            let gave = p.0.get("gave") != Some(&Value::Bool(false));
+            let window = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            shell
+                .update(cx, |shell, cx| {
+                    shell.hand_over(window.target, Some(window.bounds), id, gave, cx)
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({}))
+        }
+        // Test hook: the user answers the display's Window Request, as the
+        // card's buttons do, once one is open.
+        "debugAnswerWindow" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let give = p.0.get("give") == Some(&Value::Bool(true));
+            for _ in 0..50 {
+                let open = core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .is_some_and(|d| d.requests.is_open(Kind::Window))
+                });
+                if open {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let answered = shell
+                .update(cx, |shell, cx| shell.answer_window(id, give, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "answered": answered }))
+        }
+        // Test hook: the user answers the display's Help Request, as the
+        // card's buttons or the notification's actions do. `answer` is
+        // continue, reply (with `text`), later or takeOver; `via`
+        // notification takes the notification's path, for the request
+        // `requestId` when given, as a notification posted for it carries.
+        "debugAnswerHelp" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let answer = p.string("answer").unwrap_or_default();
+            let text = p.string("text").unwrap_or_default();
+            let via_notification = p.string("via").as_deref() == Some("notification");
+            let request = p.int("requestId").map(|r| r as RequestId);
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            // Typed into the card's field, then Send: the card tells the
+            // Shell, as a click does, so the Shell isn't updating here.
+            if answer == "reply" && !via_notification {
+                let card = shell
+                    .read_with(cx, |shell, _| shell.card_window())
+                    .map_err(|e| ControlError::failed(e.to_string()))?
+                    .ok_or_else(|| ControlError::failed("no Help Card"))?;
+                let sent = card
+                    .update(cx, |card, window, cx| {
+                        card.debug_reply(id, &text, window, cx)
+                    })
+                    .map_err(|e| ControlError::failed(e.to_string()))?;
+                return reply(json!({ "answered": sent }));
+            }
+            let answered = shell
+                .update(cx, |shell, cx| {
+                    shell.debug_answer_help(id, &answer, text, via_notification, request, cx)
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .map_err(ControlError::invalid)?;
+            Ok(json!({ "answered": answered }))
+        }
+        // Test hook: the user takes a window back from the Windows menu.
+        "debugTakeBack" if debug_methods() => {
+            let id = display(&core, &p, false, cx)?;
+            let target = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?
+                .target;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let left = shell
+                .update(cx, |shell, cx| shell.take_back(target, id, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .await;
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            Ok(json!({ "left": left }))
+        }
+        // Test hook: the session that holds the user stand-in stage gives
+        // up a window it launched there, so the window counts as the user's
+        // own, as on a real screen of theirs. The claim stays, so AeroSpace
+        // leaves the window on the stage.
+        #[cfg(debug_assertions)]
+        "debugUserWindow" if debug_methods() => {
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            usable(&core, connection, &p, id, "debugUserWindow", cx)?;
+            if !cg::window_display_role(id).accepts_window_request() {
+                return Err(ControlError::invalid(
+                    "debugUserWindow needs this session's user stand-in stage (debugShow userStage)",
+                ));
+            }
+            let window = p
+                .int("windowId")
+                .ok_or_else(|| ControlError::invalid("windowId is required"))?
+                as u32;
+            let here = off(cx, move || {
+                windows::on_display(id)
+                    .iter()
+                    .any(|w| w.target.window_id == window)
+            })
+            .await;
+            if !here {
+                return Err(ControlError::not_found(
+                    "no window with that id on the stage",
+                ));
+            }
+            // Only a window the claim file holds on the stage: AeroSpace
+            // would take any other for the user's workspace.
+            let claimed = off(cx, move || crate::mac::claims::claim_confirmed(window, id)).await;
+            if !claimed {
+                return Err(ControlError::failed(
+                    "the window's claim for the stage wasn't published",
+                ));
+            }
+            core.update(cx, |c, _| {
+                c.displays.forget_on(id, window);
+                if let Some(d) = c.displays.get_mut(id) {
+                    d.user_made.insert(window);
+                }
+            });
+            Ok(json!({}))
+        }
+        // Test hook: which agent the setup window says loaded the tools.
+        "debugAgentReady" if debug_methods() => {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let agent = shell
+                .read_with(cx, |shell, _| shell.last_agent_ready())
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({ "agent": agent }))
+        }
+        // Test hook: only an Input Loan's focus step on `windowId`, which
+        // takes the front app and gives it back, watched for `watchMs`.
+        "debugLoanFocus" if debug_methods() => {
+            let target = p
+                .int("windowId")
+                .and_then(|w| windows::find(w as u32))
+                .ok_or_else(|| ControlError::not_found("no window with that id"))?
+                .target;
+            let watch = Duration::from_millis(p.int("watchMs").unwrap_or(2000) as u64);
+            Ok(off(cx, move || {
+                crate::mac::real_input::debug_forward(target, watch)
+            })
+            .await)
+        }
+        // Test hook: macOS last named `pid` the front app, as when the user
+        // had just used it, without making it active.
+        "debugFront" if debug_methods() => {
+            crate::mac::input::note_activation(p.int("pid").map(|pid| pid as i32));
+            Ok(json!({}))
+        }
+        // Test hook: the user brought `pid` to the front, as from the Dock:
+        // the displays the reminder of where its windows are named.
+        "debugActivated" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let task = shell
+                .update(cx, |shell, cx| shell.remind_where(pid, false, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
+        }
+        // Test hooks for updates: check the feed now without a window, and
+        // what is waiting to be installed.
+        "debugCheckForUpdates" if debug_methods() => {
+            crate::mac::update::check_in_background();
+            Ok(json!({ "available": crate::mac::update::available() }))
+        }
+        "debugUpdateState" if debug_methods() => Ok(json!({
+            "available": crate::mac::update::available(),
+            "pending": crate::mac::update::pending(),
+        })),
+        // Test hook: the user's left click at a global point, as the global
+        // monitor reports it, such as on an app's Dock icon.
+        "debugUserClick" if debug_methods() => {
+            let at = (p.require("x")?, p.require("y")?);
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let task = shell
+                .update(cx, |shell, cx| shell.user_clicked(at, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            let reminded = task.await;
+            let peek = shell
+                .update(cx, |shell, cx| shell.reminder(cx))
+                .ok()
+                .flatten();
+            Ok(json!({ "reminded": reminded, "peek": peek }))
+        }
+        // Test hook: a key press of the user's that went to `pid`, as the
+        // global key monitor reports one typed into Spotlight.
+        "debugUserKey" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            cx.background_executor()
+                .spawn(async move { crate::mac::catch::user_key_to(pid) })
+                .await;
+            Ok(json!({}))
+        }
+        // A panic on the main thread after the reply, as one in an AppKit
+        // callback: the app aborts.
+        "debugPanic" if debug_methods() => {
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                panic!("debugPanic");
+            })
+            .detach();
+            Ok(json!({}))
+        }
+        "debugQuit" if debug_methods() => {
+            // Quits the way the menu does, after this reply goes out.
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+            Ok(json!({}))
+        }
+        "debugInputObserver" if debug_methods() => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Err(ControlError::invalid(
+                    "input observer tests require the isolated e2e instance",
+                ));
+            }
+            let timeout = match p.string("action").as_deref().unwrap_or("status") {
+                "status" => false,
+                "timeout" => true,
+                _ => return Err(ControlError::invalid("action must be status or timeout")),
+            };
+            Ok(cx.update(|_| {
+                if timeout {
+                    crate::mac::real_input::debug_observer_timeout();
+                }
+                json!({
+                    "watching": crate::mac::real_input::watching(),
+                    "enabled": crate::mac::real_input::observer_enabled(),
+                })
+            }))
+        }
+        // The Help Card's width and its buttons' bounds at the last paint.
+        "debugCard" if debug_methods() => {
+            let (width, buttons) = crate::ui::help_card::painted_buttons();
+            let buttons: Map<String, Value> = buttons
+                .into_iter()
+                .map(|(id, r)| (id.to_string(), json!(r)))
+                .collect();
+            // The reply field, and whether the card has the keyboard.
+            let state = match crate::ui::shell::current()
+                .and_then(|shell| shell.read_with(cx, |shell, _| shell.card_window()).ok())
+                .flatten()
+            {
+                Some(card) => card
+                    .update(cx, |card, window, cx| card.debug_state(window, cx))
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+            Ok(json!({
+                "width": width,
+                "buttons": buttons,
+                "queueHeight": crate::ui::help_card::queue_height(),
+                "key": state.get("key"),
+                "cardKeys": state.get("cardKeys"),
+                "highlighted": state.get("highlighted"),
+                "reply": state.get("reply"),
+            }))
+        }
+        // Which picture the menu bar icon shows: idle, working, asking or setup.
+        "debugIcon" if debug_methods() => {
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let (state, asking_count) = shell
+                .update(cx, |shell, _| (shell.icon_state(), shell.asking_count()))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            Ok(json!({
+                "state": state,
+                "askingCount": asking_count,
+            }))
+        }
+        "debugShow" if debug_methods() => {
+            let surface = p.string("surface").unwrap_or_else(|| "viewer".into());
+            let id = p.int("displayId").unwrap_or(0) as DisplayId;
+            #[cfg(debug_assertions)]
+            if surface == "userStage" {
+                usable(&core, connection, &p, id, "debugShow", cx)?;
+                let shell =
+                    crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+                let selected = shell
+                    .update(cx, |shell, _| shell.stage_display() == Some(id))
+                    .unwrap_or(false);
+                let held = core.read_with(cx, |c, _| c.displays.get(id).is_some());
+                if !held || !selected || !cg::is_agent_screen(id) || !cg::is_online(id) {
+                    return Err(ControlError::invalid(
+                        "userStage requires this session's selected live stage display",
+                    ));
+                }
+                cg::debug_user_stage(id, connection);
+                return reply(json!({}));
+            }
+            if matches!(
+                surface.as_str(),
+                "input-queue"
+                    | "input-queue-approved"
+                    | "input-queue-drags"
+                    | "input-queue-running"
+                    | "input-queue-click"
+                    | "input-queue-menu"
+                    | "input-queue-allow"
+                    | "input-queue-decline"
+                    | "input-bar-stop"
+            ) {
+                if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                    return Err(ControlError::invalid(
+                        "input queue previews require the isolated e2e instance",
+                    ));
+                }
+                usable(&core, connection, &p, id, "debugShow", cx)?;
+                // A new preview's steps replace an earlier preview's.
+                if !matches!(
+                    surface.as_str(),
+                    "input-queue-allow" | "input-queue-decline" | "input-bar-stop"
+                ) {
+                    crate::ui::help_card::preview_steps(Vec::new());
+                }
+            }
+            // The card for a menu item an Electron app needs a real click
+            // for. Its call never waits, so the request never runs.
+            if surface == "input-queue-menu" {
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let item = crate::input_queue::MenuItem {
+                        target: WindowTarget {
+                            pid: 0,
+                            window_id: 0,
+                        },
+                        area: cg::display_bounds(id),
+                        app: p.string("app").unwrap_or_else(|| "Slack".into()),
+                        path: vec![(4, "Go".into()), (1, "Back".into())],
+                    };
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-menu:{id}"),
+                            "Preview a menu item that needs a real click".into(),
+                            Some(crate::input_queue::Plan::MenuItem(item)),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // Drags across a board on the display, `count` of them (1 to
+            // 3, default 3): one request, whose call never waits, so it
+            // never runs, even allowed, and the rest shown after it, then
+            // a click with `presses` when given. `input-queue-running`
+            // allows it and shows the second as running.
+            if matches!(
+                surface.as_str(),
+                "input-queue-drags" | "input-queue-running"
+            ) {
+                let count = p.int("count").unwrap_or(3).clamp(1, 3) as usize;
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let area = cg::display_bounds(id);
+                    // The design's paths, on a 1280 by 800 board.
+                    let paths = [
+                        ((450.0, 179.0), (1094.0, 320.0)),
+                        ((450.0, 269.0), (772.0, 232.0)),
+                        ((260.0, 500.0), (340.0, 500.0)),
+                    ];
+                    let at = |(x, y): (f64, f64)| {
+                        (
+                            area.x + x / 1280.0 * area.width,
+                            area.y + y / 800.0 * area.height,
+                        )
+                    };
+                    let drags = paths.into_iter().take(count).map(|(from, to)| {
+                        crate::input_queue::Plan::Drag(crate::input_queue::Drag {
+                            target: WindowTarget {
+                                pid: 0,
+                                window_id: 0,
+                            },
+                            frame: area,
+                            drop: WindowTarget {
+                                pid: 0,
+                                window_id: 0,
+                            },
+                            drop_frame: area,
+                            area,
+                            from: at(from),
+                            to: at(to),
+                            flags: 0,
+                        })
+                    });
+                    let click = p.int("presses").map(|presses| {
+                        crate::input_queue::Plan::Click(preview_click(
+                            area,
+                            presses,
+                            &p,
+                            c.input_queue.now(),
+                        ))
+                    });
+                    let mut plans = drags.chain(click);
+                    // A session waits on one request at a time, so the
+                    // first is a real request and the rest only show.
+                    let first = plans.next().expect("one preview drag");
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-drag:{id}"),
+                            "Preview a drag that needs the real pointer".into(),
+                            Some(first),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    crate::ui::help_card::preview_steps(plans.map(|plan| (id, plan)).collect());
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // A click with `presses` (1 to 3, default 1) in `app`'s window
+            // `title` (default WeCom, Chats), on a chat list's row. Its
+            // call never waits, so it never runs, even allowed.
+            if surface == "input-queue-click" {
+                let presses = p.int("presses").unwrap_or(1);
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    let plan =
+                        preview_click(cg::display_bounds(id), presses, &p, c.input_queue.now());
+                    let request = c
+                        .input_queue
+                        .submit(
+                            owner,
+                            format!("preview-click:{id}"),
+                            "Preview a click that needs the real pointer".into(),
+                            Some(crate::input_queue::Plan::Click(plan)),
+                        )
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue.detach(request);
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // Allow itself, through the shell, comes after this.
+            if matches!(surface.as_str(), "input-queue" | "input-queue-approved") {
+                core.update(cx, |c, cx| -> Result<(), ControlError> {
+                    let owner = c
+                        .input_queue
+                        .owner(id, connection)
+                        .map_err(ControlError::invalid)?;
+                    c.input_queue
+                        .submit(
+                            owner,
+                            format!("preview:{id}"),
+                            "Preview a queued drag on this display".into(),
+                            None,
+                        )
+                        .map_err(ControlError::invalid)?;
+                    cx.notify();
+                    Ok(())
+                })?;
+            }
+            // A Window Request for no real window, so scripts can look at
+            // the card with any `app` and `title`. Keep answers it.
+            // `holder`, a Display Label, shows the card for a window another
+            // session holds; `place` review or screen says it is on a Review
+            // Display or the user's screen.
+            if surface == "window-request" {
+                let app = p.string("app").unwrap_or_else(|| "TextEdit".into());
+                let title = p.string("title").unwrap_or_default();
+                let target = WindowTarget {
+                    pid: 0,
+                    window_id: 0,
+                };
+                let held = p.string("holder").map(|label| Held {
+                    display: 0,
+                    agent: label.split(" · ").next().unwrap_or_default().to_string(),
+                    label,
+                    place: match p.string("place").as_deref() {
+                        Some("review") => Place::Review,
+                        Some("screen") => Place::UserScreen,
+                        _ => Place::Display,
+                    },
+                    status: None,
+                });
+                let _answer = core
+                    .update(cx, |c, cx| {
+                        let rx =
+                            c.displays
+                                .request_window(id, NamedWindow { target, app, title }, held);
+                        cx.notify();
+                        rx
+                    })
+                    .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
+                cx.background_executor()
+                    .timer(Duration::from_millis(900))
+                    .await;
+                return reply(json!({}));
+            }
+            // `x` and `y`, in global top-left points, open a Give or Take
+            // Back menu there instead of at the pointer.
+            let menu_at = p.number("x").zip(p.number("y"));
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            shell
+                .update(cx, |shell, cx| {
+                    shell.debug_menu_at = menu_at;
+                    let shown = shell.debug_show(&surface, id, cx);
+                    // A surface that opened no menu leaves no point for
+                    // the next real one.
+                    shell.debug_menu_at = None;
+                    shown
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?
+                .map_err(ControlError::invalid)?;
+            cx.background_executor()
+                .timer(Duration::from_millis(900))
+                .await;
+            Ok(json!({}))
+        }
+        other => Err(ControlError::invalid(format!("unknown method {other}"))),
+    };
+    if let Some(id) = acting {
+        crate::mac::catch::agent_acted(id);
+    }
+    result.and_then(reply)
+}
+
+/// Methods that see or drive the display. The rest (ending a display,
+/// asking for help, waiting for control) work without permissions.
+fn needs_permissions(method: &str) -> bool {
+    !matches!(
+        method,
+        "endDisplay"
+            | "requestHelp"
+            | "requestControl"
+            | "withdrawControlRequest"
+            | "waitForControl"
+            | "setDisposition"
+            | "windowAccess"
+            | "listWindows"
+            | "agentReady"
+            | "inputQueue"
+            | "cancelWaitForChange"
+    ) && !method.starts_with("debug")
+}
+
+/// Fail with what the user has to do when a permission is missing, and put
+/// the setup window in front of them once for each state.
+async fn permitted(cx: &mut AsyncApp) -> Result<(), ControlError> {
+    use std::sync::atomic::Ordering;
+    // The permission check's last answer, at most 2 s old. When it says
+    // something is missing, look again off the UI thread: the user may have
+    // just granted it, and the look can cost a window list.
+    let mut missing = crate::mac::permissions::last().missing();
+    if !missing.is_empty() {
+        missing = cx
+            .background_executor()
+            .spawn(async { crate::mac::permissions::status().missing() })
+            .await;
+    }
+    let mut reopen = crate::mac::permissions::NEEDS_REOPEN.load(Ordering::Relaxed);
+    // macOS can apply the grant a moment after the first probe failed: look
+    // again before sending the agent to the user.
+    if missing.is_empty() && reopen {
+        let works = cx
+            .background_executor()
+            .spawn(async { crate::mac::screenshot::can_capture() })
+            .await;
+        if works {
+            crate::mac::permissions::NEEDS_REOPEN.store(false, Ordering::Relaxed);
+            if let Some(shell) = crate::ui::shell::current() {
+                let _ = shell.update(cx, |shell, cx| shell.capture_works(cx));
+            }
+            reopen = false;
+        }
+    }
+    if missing.is_empty() && !reopen {
+        return Ok(());
+    }
+    if let Some(shell) = crate::ui::shell::current() {
+        let state = (missing.clone(), reopen);
+        let _ = shell.update(cx, |shell, cx| shell.setup_for_agent(state, cx));
+    }
+    if missing.is_empty() {
+        return Err(ControlError {
+            code: "permission",
+            message: "The user turned on Screen Recording, and macOS applies it only once Agent Screen reopens. Agent Screen has put its Settings window on the user's screen: tell the user to press Reopen Agent Screen there, then retry.".into(),
+        });
+    }
+    let names: Vec<&str> = missing.iter().map(|p| p.english()).collect();
+    Err(ControlError {
+        code: "permission",
+        message: format!(
+            "Agent Screen is missing the macOS {} permission, and only the user can grant it. \
+             Agent Screen has put its Settings window on the user's screen (also reachable from its \
+             menu bar icon). Tell the user to turn it on there, then retry; until then every call \
+             fails the same way.",
+            names.join(" and ")
+        ),
+    })
+}
+
+/// A display the request's Agent Session may use for `method`: one it
+/// owns, and still live unless the method is about ending. The request
+/// names its session with `sessionKey`, so one connection serves several
+/// sessions (ADR 0016). An MCP server built before that names none; then
+/// it is the last session that called createDisplay on the connection.
+fn usable(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    id: DisplayId,
+    method: &str,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let named = p.string("sessionKey").filter(|k| !k.is_empty());
+    core.read_with(cx, |c, _| {
+        let Some(d) = c.displays.get(id) else {
+            // Gone or never there: the method's own lookup says which.
+            return Ok(());
+        };
+        let mine = named.as_ref().or_else(|| c.sessions.get(&connection));
+        let owner = d.owner.as_ref().map(|o| &o.session_key);
+        if mine.is_none() || owner != mine {
+            return Err(ControlError::not_found(format!(
+                "display {id} belongs to another session; call create_display to get yours"
+            )));
+        }
+        if d.is_ended() && !matches!(method, "endDisplay" | "waitForControl") {
+            return Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)));
+        }
+        Ok(())
+    })
+}
+
+/// A method's result as a reply; `return reply(...)` leaves a method early.
+fn reply(value: Value) -> Reply {
+    Ok(match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    })
+}
+
+// MARK: Methods
+
+async fn create_display(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let session_key = p
+        .string("sessionKey")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ControlError::invalid("sessionKey is required"))?;
+    if core.read_with(cx, |c, _| c.closed.contains(&connection)) {
+        return Err(ControlError::failed("the connection closed"));
+    }
+    core.update(cx, |c, _| {
+        c.sessions.insert(connection, session_key.clone());
+    });
+    let asked = (p.number("width"), p.number("height"));
+    // Another display for the session, beside the ones it has (ADR 0016).
+    let new = p.0.get("new") == Some(&Value::Bool(true));
+    let orphans = orphans_param(p);
+    if !new && let Some(existing) = reuse(core, connection, &session_key, &orphans, asked, cx) {
+        return Ok(existing);
+    }
+    if new && let Err(cap) = core.read_with(cx, |c, _| c.displays.sessions.may_add(&session_key)) {
+        return Err(ControlError::failed(cap.message()));
+    }
+    let width = asked
+        .0
+        .unwrap_or(DEFAULT_SIZE.0)
+        .clamp(640.0, 2560.0)
+        .round();
+    let height = asked
+        .1
+        .unwrap_or(DEFAULT_SIZE.1)
+        .clamp(480.0, 1600.0)
+        .round();
+    let clamped =
+        asked.0.is_some_and(|a| a.round() != width) || asked.1.is_some_and(|a| a.round() != height);
+    // The model numbers a second display's title as it joins.
+    let title = p.string("title").unwrap_or_else(|| "Untitled".into());
+    let owner = Owner {
+        session_key,
+        client: p.string("client").unwrap_or_else(|| "Agent".into()),
+        title,
+        connection,
+    };
+    // Where the user's AeroSpace workspaces are, so the guard can put back
+    // any the new display takes. With ignored-monitors it takes none.
+    // Note where the user's workspaces are while no Agent Display can have
+    // taken one. Whether AeroSpace leaves the new display alone shows only
+    // once it exists.
+    cx.background_executor()
+        .spawn(async move {
+            if !crate::mac::aerospace::ignores_now()
+                && let Some(aerospace) = crate::mac::aerospace::AeroSpace::current()
+            {
+                aerospace.remember_before_first();
+            }
+        })
+        .await;
+    let started = Instant::now();
+    // A spare of this size costs macOS nothing; a new display is a
+    // reconfiguration every app handles, so agents get only so many.
+    // A spare of another size takes this one: a mode change, where a new
+    // display would add one more for every later display change to cost.
+    let spare_ids = core.read_with(cx, |c, _| c.spare_ids());
+    let spare_snap = off(cx, move || Core::probe_spares(&spare_ids)).await;
+    let spare = match core.update(cx, |c, _| c.take_spare_with((width, height), &spare_snap)) {
+        Some((handle, name, resize)) => {
+            let others = core.read_with(cx, |c, _| c.virtual_ids());
+            crate::mac::display::reuse_parked(handle, width as u32, height as u32, resize, others)
+                .await
+                .map(|handle| (handle, name))
+        }
+        None => None,
+    };
+    let (made, name) = match spare {
+        Some((handle, name)) => (Some(handle), name),
+        None => {
+            if let Err(why) = core.update(cx, |c, _| c.budget_allows()) {
+                return Err(ControlError::failed(why));
+            }
+            if let Err(wait) = core.update(cx, |c, _| c.may_make()) {
+                return Err(ControlError::failed(format!(
+                    "Agent Screen made many displays in the last minutes, and each one makes every app on this Mac reconfigure its screens. Keep using the display you have, or call create_display again in {} s.",
+                    wait.as_secs().max(1)
+                )));
+            }
+            core.update(cx, |c, _| c.count_made());
+            // macOS takes 300 to 500 ms to make the display: off the main
+            // thread, so Peek and the Viewer keep drawing meanwhile.
+            let (serial, name) = core.update(cx, |c, _| c.next_name());
+            let others = core.read_with(cx, |c, _| c.virtual_ids());
+            let made = cx
+                .background_executor()
+                .spawn(crate::mac::display::create_parked(
+                    name.clone(),
+                    width as u32,
+                    height as u32,
+                    serial,
+                    others,
+                ))
+                .await;
+            (made, name)
+        }
+    };
+    // The session may have closed, got a display from a parallel call, or
+    // reached its cap from one, while macOS made this one: then this one
+    // goes.
+    let key = owner.session_key.clone();
+    let raced = core.read_with(cx, |c, _| {
+        if c.closed.contains(&connection) {
+            Some(Err(ControlError::failed("the connection closed")))
+        } else if new {
+            c.displays
+                .sessions
+                .may_add(&key)
+                .err()
+                .map(|cap| Err(ControlError::failed(cap.message())))
+        } else {
+            None
+        }
+    });
+    if let Some(answer) = raced {
+        drop(made);
+        return answer;
+    }
+    // A parallel call made the session's display meanwhile: reuse it as a
+    // call after it would, orphans and all.
+    if !new && let Some(existing) = reuse(core, connection, &key, &orphans, asked, cx) {
+        drop(made);
+        return Ok(existing);
+    }
+    let reply = core
+        .update(cx, |c, cx| {
+            let id = c.adopt(made?, name, (width, height), Some(owner), cx)?;
+            adopt_orphans(c, &key, id, &orphans);
+            c.displays.get(id).map(|d| {
+                let mut reply = describe(d, false);
+                if clamped {
+                    reply["note"] = json!(format!(
+                        "sizes run from 640×480 to 2560×1600; made it {width}×{height}"
+                    ));
+                }
+                reply
+            })
+        })
+        .ok_or_else(|| {
+            ControlError::failed(
+                "macOS could not create a virtual display at a verified safe position. No Agent Display was assigned; retry create_display later.",
+            )
+        })?;
+    // Answer once the display is where it stays, so a first screenshot
+    // shows only the display.
+    let id = reply["displayId"].as_u64().unwrap_or_default() as DisplayId;
+    let created = started.elapsed().as_millis();
+    // Windows macOS put back on the display, of apps adopted above: claimed
+    // before AeroSpace takes them for the user's, a second after they show.
+    if !orphans.is_empty() {
+        let started = core.read_with(cx, |c, _| {
+            c.displays
+                .get(id)
+                .map(|d| d.started.clone())
+                .unwrap_or_default()
+        });
+        off(cx, move || {
+            for w in windows::on_display(id) {
+                if started.contains(&w.target.pid) {
+                    crate::mac::claims::claim(w.target.window_id, id);
+                }
+            }
+        })
+        .await;
+    }
+    // Adoption already verified the position; there is no timeout that
+    // can turn a failed parking attempt into a successful reply.
+    // Stock AeroSpace may show one of the user's workspaces on the new
+    // display until the shell's guard moves it back; their windows must
+    // not reach the agent.
+    let tucked = started.elapsed().as_millis();
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    // Read AeroSpace's state now that the display exists: the user may have
+    // started, quit or reconfigured it since Agent Screen last looked.
+    let aerospace_takes = cx
+        .background_executor()
+        .spawn(async move {
+            use crate::mac::aerospace;
+            aerospace::ignoring_with_display().is_some_and(|i| i != aerospace::Ignoring::Yes)
+        })
+        .await;
+    if let Some(screen) = screen.filter(|_| aerospace_takes) {
+        for _ in 0..30 {
+            let clear = cx
+                .background_executor()
+                .spawn({
+                    let screen = screen.clone();
+                    async move {
+                        let Some(aerospace) = crate::mac::aerospace::AeroSpace::current() else {
+                            return true;
+                        };
+                        aerospace
+                            .visible_windows_on(&screen)
+                            .ok()
+                            .is_none_or(|windows| windows.is_empty())
+                    }
+                })
+                .await;
+            if clear {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    }
+    let on_new = off(cx, move || windows::on_display(id)).await;
+    if !on_new.is_empty() {
+        let targets: Vec<WindowTarget> = on_new.iter().map(|w| w.target).collect();
+        let unowned = core.update(cx, |c, _| {
+            c.displays.reconcile_new_display_windows(id, &targets)
+        });
+        if !unowned.is_empty() {
+            off(cx, move || {
+                for w in on_new {
+                    if unowned.contains(&w.target) {
+                        crate::core::evacuate_window_to_user(w.target, &w.app, id, "new display");
+                    }
+                }
+            })
+            .await;
+        }
+    }
+    log::debug!(
+        "createDisplay {id}: created {created} ms, parked {tucked} ms, clear of the user's workspaces {} ms",
+        started.elapsed().as_millis()
+    );
+    Ok(reply)
+}
+
+/// createDisplay's `adoptGroups`: the apps the session started on displays
+/// that ended when the app quit, by the display they were on. An MCP
+/// server built before ADR 0016 sends only `adopt`, bare pids, which go to
+/// the display this call makes or reuses.
+fn orphans_param(p: &Args) -> Vec<Orphans> {
+    let pids = |v: &Value| -> Vec<i32> {
+        v.as_array()
+            .map(|pids| {
+                pids.iter()
+                    .filter_map(Value::as_i64)
+                    .filter_map(|pid| i32::try_from(pid).ok().filter(|p| *p > 0))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // `adoptGroups` names the display each group was on; `adopt` is the
+    // same pids flat, for an app older than ADR 0016 (ADR 0005).
+    if let Some(groups) = p.0.get("adoptGroups").and_then(Value::as_array) {
+        return groups
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|group| Orphans {
+                display: group
+                    .get("display")
+                    .and_then(Value::as_u64)
+                    .and_then(|d| DisplayId::try_from(d).ok())
+                    .unwrap_or_default(),
+                pids: group.get("pids").map(pids).unwrap_or_default(),
+            })
+            .collect();
+    }
+    let bare = p.0.get("adopt").map(pids).unwrap_or_default();
+    if bare.is_empty() {
+        return Vec::new();
+    }
+    vec![Orphans {
+        display: 0,
+        pids: bare,
+    }]
+}
+
+/// Give the session's orphaned apps to its displays (`session::adoption`):
+/// each to the display it was on when that one was made again, otherwise
+/// to `id`. A pid a display already holds, or one no longer running, stays
+/// out. Orphans arrive only from the asking session's own MCP record, so
+/// another session's apps never come here.
+fn adopt_orphans(c: &mut Core, key: &str, id: DisplayId, orphans: &[Orphans]) {
+    if orphans.is_empty() {
+        return;
+    }
+    let live = c.displays.of_session(key);
+    let given = {
+        let displays = &c.displays;
+        agent_screen_model::session::adoption(orphans, &live, id, |pid| {
+            displays.list.iter().any(|d| d.started.contains(&pid))
+                || unsafe { libc::kill(pid, 0) } != 0
+        })
+    };
+    for (display, pid) in given {
+        if let Some(d) = c.displays.get_mut(display) {
+            log::info!("display {display}: adopts app {pid}, started on an earlier connection");
+            d.started.insert(pid);
+        }
+    }
+}
+
+/// createDisplay without `new` for a session with a live display: its
+/// latest, which adopts the session's orphans, with a note naming the
+/// session's displays when it has several. None when it has none.
+fn reuse(
+    core: &Entity<Core>,
+    connection: u64,
+    key: &str,
+    orphans: &[Orphans],
+    asked: (Option<f64>, Option<f64>),
+    cx: &mut AsyncApp,
+) -> Option<Value> {
+    let (mut existing, (w, h)) = core.update(cx, |c, cx| {
+        let now_ms = c.elapsed_ms();
+        let id = c.reuse_session_display(connection, key, now_ms)?;
+        adopt_orphans(c, key, id, orphans);
+        cx.notify();
+        let d = c.displays.get(id)?;
+        Some((describe(d, true), (d.width, d.height)))
+    })?;
+    let mut notes = Vec::new();
+    if asked.0.is_some_and(|a| a.round() != w) || asked.1.is_some_and(|a| a.round() != h) {
+        notes.push(format!(
+            "this session already has a {w}×{h} display, reused as is; end_display first for another size, or pass new: true for another display"
+        ));
+    }
+    let id = existing["displayId"].as_u64().unwrap_or_default() as DisplayId;
+    if let Some(several) = core.read_with(cx, |c, _| session_displays(c, key, id)) {
+        existing["displays"] = several.0;
+        notes.push(several.1);
+    }
+    if !notes.is_empty() {
+        existing["note"] = json!(notes.join(". "));
+    }
+    Some(existing)
+}
+
+/// The session's live displays and a note naming them, when it has more
+/// than one: which one a create_display without `new` reused.
+fn session_displays(c: &Core, key: &str, reused: DisplayId) -> Option<(Value, String)> {
+    let ids = c.displays.of_session(key);
+    if ids.len() < 2 {
+        return None;
+    }
+    let list: Vec<Value> = ids
+        .iter()
+        .filter_map(|&id| c.displays.get(id))
+        .map(|d| json!({ "displayId": d.id, "label": d.label() }))
+        .collect();
+    let named: Vec<String> = ids
+        .iter()
+        .filter_map(|&id| c.displays.get(id))
+        .map(|d| format!("{} ({})", d.id, d.label()))
+        .collect();
+    Some((
+        json!(list),
+        format!(
+            "this session has {} displays: {}. Reused {reused}, the latest; pass new: true for another one, and use each display_id for the display you mean",
+            ids.len(),
+            named.join(", ")
+        ),
+    ))
+}
+
+fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
+    let mut out = json!({
+        "displayId": d.id,
+        "width": d.width as i64,
+        "height": d.height as i64,
+        "scale": shot_scale((d.width, d.height)),
+        "label": d.label(),
+        "reused": reused,
+        // This app takes `new` and `adoptGroups` (ADR 0016). An MCP server
+        // refuses `new` against an app whose reply lacks it.
+        "multiDisplay": true
+    });
+    if let Some(url) = crate::web::preview_url(d.id) {
+        out["preview_url"] = json!(url);
+    }
+    out
+}
+
+fn shot_json(shot: &screenshot::Shot) -> Value {
+    json!({
+        "data": base64::engine::general_purpose::STANDARD.encode(&shot.data),
+        "mimeType": shot.mime_type,
+        "width": shot.width,
+        "height": shot.height
+    })
+}
+
+/// Note the windows the user made in the display's apps, which the kept
+/// catches left alone.
+fn sync_user_made(c: &mut Core, id: DisplayId) {
+    let made: Vec<u32> = c
+        .kept_catches
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .flat_map(|(_, k)| k.skipped())
+        .collect();
+    if let Some(d) = c.displays.get_mut(id) {
+        d.user_made.extend(made);
+    }
+}
+
+/// Windows of the agent's apps left on the user's screen because both the
+/// user and the agent had just acted, or neither, not reported before.
+/// `placeable` says whether place_window takes it: it does for apps the
+/// agent started; others need a handover.
+fn undecided_strays(c: &mut Core, id: DisplayId) -> Vec<Value> {
+    sync_user_made(c, id);
+    let fresh: Vec<u32> = c
+        .kept_catches
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .flat_map(|(_, k)| k.undecided())
+        .chain(
+            c.left_alone
+                .iter()
+                .filter(|(display, _)| *display == id)
+                .map(|(_, w)| *w),
+        )
+        .filter(|w| !c.told.contains(&(id, *w)))
+        .collect();
+    c.left_alone.retain(|(display, _)| *display != id);
+    // Most screenshots have nothing to report: skip the window list.
+    if fresh.is_empty() {
+        return Vec::new();
+    }
+    let Some(d) = c.displays.get(id) else {
+        return Vec::new();
+    };
+    let shown = windows::all();
+    let mut out = Vec::new();
+    for window in fresh {
+        if !c.told.insert((id, window)) {
+            continue;
+        }
+        let Some(w) = shown.iter().find(|w| w.target.window_id == window) else {
+            continue;
+        };
+        if d.returned.contains(&window) || d.user_made.contains(&window) {
+            continue;
+        }
+        // Moved onto an Agent Display meanwhile, by a catch or a handover.
+        if c.displays
+            .list
+            .iter()
+            .any(|a| cg::display_bounds(a.id).contains(w.bounds.mid()))
+        {
+            continue;
+        }
+        out.push(json!({
+            "windowId": window,
+            "app": w.app,
+            "placeable": d.is_stray(w.target, false),
+        }));
+    }
+    out
+}
+
+/// Name in a screenshot's result the windows an action may have opened that
+/// stayed on the user's screen.
+fn add_strayed(core: &Entity<Core>, id: DisplayId, result: &mut Value, cx: &mut AsyncApp) {
+    let strayed = core.update(cx, |c, _| undecided_strays(c, id));
+    if !strayed.is_empty() {
+        result["strayed"] = json!(strayed);
+    }
+    add_given(core, id, result, cx);
+}
+
+/// Name in `given`, once, the windows the user gave from this display to
+/// another Agent Session since its session last heard (ADR 0017).
+fn add_given(
+    core: &Entity<Core>,
+    id: DisplayId,
+    result: &mut Value,
+    cx: &mut AsyncApp,
+) -> Option<Vec<(u32, String)>> {
+    let given = core.update(cx, |c, _| c.displays.given_news(id));
+    if given.is_empty() {
+        return None;
+    }
+    result["given"] = json!(
+        given
+            .iter()
+            .map(|(window, app)| json!({ "windowId": window, "app": app }))
+            .collect::<Vec<_>>()
+    );
+    Some(given)
+}
+
+/// Whether a kept catch on the display left this window alone as nobody's
+/// for sure.
+fn undecided(c: &Core, id: DisplayId, window: u32) -> bool {
+    c.kept_catches
+        .iter()
+        .any(|(display, k)| *display == id && k.undecided().contains(&window))
+}
+
+/// Whether a window that opened late is still the agent's to move: the
+/// user hasn't taken its app back or made it themselves, and the catch
+/// didn't leave it alone.
+fn still_agents(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> bool {
+    core.update(cx, |c, _| {
+        sync_user_made(c, id);
+        !undecided(c, id, target.window_id)
+            && c.displays
+                .get(id)
+                .is_some_and(|d| d.is_stray(target, false))
+    })
+}
+
+/// Catch on display `to` the later windows of apps `pids`, which an ended
+/// display of the session started and handed to `to` (ADR 0016).
+pub fn catch_again(core: Entity<Core>, to: DisplayId, pids: Vec<i32>, cx: &mut App) {
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(to, mtm));
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for pid in pids {
+            let catch = crate::mac::catch::Catch::start(pid, to, screen.clone(), None).await;
+            keep_catch(&core, to, catch, cx);
+        }
+    })
+    .detach();
+}
+
+/// Keep the catch on an app this display's session started, for as long
+/// as the display lives. A running app's catch ends here: its later windows
+/// may be the user's.
+fn keep_catch(
+    core: &Entity<Core>,
+    id: DisplayId,
+    catch: Option<crate::mac::catch::Catch>,
+    cx: &mut AsyncApp,
+) {
+    let Some(catch) = catch else { return };
+    catch.keep();
+    core.update(cx, |c, _| {
+        let ours = c
+            .displays
+            .get(id)
+            .is_some_and(|d| d.started.contains(&catch.pid()));
+        let kept = c.kept_catches.iter().any(|(_, k)| k.pid() == catch.pid());
+        if ours && !kept {
+            c.kept_catches.push((id, catch));
+        }
+    });
+}
+
+/// Windows of the apps launch_app started for this display that sit on no
+/// Agent Display and no display's records, such as one that opened on the
+/// user's screen before its catch was ready.
+async fn strays(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> Vec<windows::Window> {
+    let (displays, spares) = core.read_with(cx, |c, _| {
+        (
+            c.displays.list.iter().map(|d| d.id).collect::<Vec<_>>(),
+            c.spare_ids(),
+        )
+    });
+    // AeroSpace may answer late: off the main thread.
+    let off_displays: Vec<(windows::Window, bool, crate::model::DisplayRole)> =
+        off(cx, move || {
+            let placed = windows::kept_on(&displays);
+            windows::all()
+                .into_iter()
+                .filter(|w| w.layer == 0)
+                .map(|w| {
+                    let held = placed.contains(&w.target.window_id);
+                    let role = if windows::on_any(&w.bounds, &spares) {
+                        crate::model::DisplayRole::User
+                    } else {
+                        windows::display_role(&w)
+                    };
+                    (w, held, role)
+                })
+                .collect()
+        })
+        .await;
+    core.update(cx, |c, _| {
+        let own = c
+            .displays
+            .get(id)
+            .and_then(|d| d.session())
+            .map(|key| c.displays.of_session(key))
+            .unwrap_or_else(|| vec![id]);
+        for &display in &own {
+            sync_user_made(c, display);
+        }
+        // The session's own records count as its strays once off its
+        // displays; another session's records don't (ADR 0016).
+        let recorded: std::collections::HashSet<u32> = c
+            .displays
+            .list
+            .iter()
+            .filter(|d| {
+                d.id != id
+                    && !own.contains(&d.id)
+                    && cg::window_display_role(d.id) == crate::model::DisplayRole::Agent
+            })
+            .flat_map(|d| d.records.keys().copied())
+            .collect();
+        if c.displays.get(id).is_none() {
+            return Vec::new();
+        }
+        off_displays
+            .into_iter()
+            .filter(|(w, held, role)| {
+                c.displays.is_session_stray(
+                    id,
+                    w.target,
+                    recorded.contains(&w.target.window_id),
+                    *role,
+                    *held,
+                )
+            })
+            .map(|(w, _, _)| w)
+            .collect()
+    })
+}
+
+/// Apps' names and bundle ids, looked up once per pid.
+#[derive(Default)]
+struct AppIds(std::collections::HashMap<i32, (Option<String>, Option<String>)>);
+
+impl AppIds {
+    fn of(&mut self, pid: i32) -> &(Option<String>, Option<String>) {
+        self.0
+            .entry(pid)
+            .or_insert_with(|| (app::name(pid), app::bundle_id(pid)))
+    }
+}
+
+/// Whether `w` is the window an agent named for place_window: by id, or
+/// by its app's owner name, name or bundle id (#133).
+fn is_named(
+    w: &windows::Window,
+    wanted: Option<i64>,
+    named: Option<&NamedApp>,
+    ids: &mut AppIds,
+) -> bool {
+    match (wanted, named) {
+        (Some(wanted), _) => w.target.window_id as i64 == wanted,
+        (None, Some(named)) => {
+            named.is_owner(&w.app) || {
+                let (name, bundle_id) = ids.of(w.target.pid);
+                named.is_app(&w.app, name.as_deref(), bundle_id.as_deref())
+            }
+        }
+        (None, None) => false,
+    }
+}
+
+/// Who has each of this app's Agent Displays, and its Display Label, as the
+/// session using display `asking` sees them, read on the main thread for a
+/// `not_found` worked out off it.
+struct Holders(std::collections::HashMap<DisplayId, (Holder, String)>);
+
+impl Holders {
+    fn of(core: &Core, asking: DisplayId) -> Holders {
+        let now_ms = core.elapsed_ms();
+        let session = core.displays.get(asking).and_then(|d| d.session());
+        Holders(
+            core.displays
+                .list
+                .iter()
+                .map(|d| {
+                    let label = core
+                        .displays
+                        .holder_label_at(d.id, now_ms)
+                        .unwrap_or_else(|| d.label());
+                    (d.id, (d.holder(session), label))
+                })
+                .collect(),
+        )
+    }
+
+    /// Who has the Agent Display owning `window_id` at `bounds` under the
+    /// centralized ownership rule (`effective_agent_display`, ADR 0018), and
+    /// its label when known or derivable from a cross-instance `0x5353` serial
+    /// (#189, L10). Blocking.
+    fn at_named(&self, window_id: u32, bounds: &Rect) -> (Holder, Option<String>) {
+        let online = windows::online_display_areas();
+        let recorded = windows::recorded_owner(window_id);
+        let Some((id, _)) =
+            agent_screen_model::arrangement::effective_agent_display(bounds, &online, recorded)
+        else {
+            return (Holder::Other, None);
+        };
+        if let Some((h, label)) = self.0.get(&id) {
+            return (*h, Some(label.clone()));
+        }
+        if cg::is_agent_screen(id) {
+            let serial = cg::serial(id);
+            let label = if serial > 0 {
+                format!("display {id} [serial {serial}, another Agent Screen instance]")
+            } else {
+                format!("display {id} [another Agent Screen instance]")
+            };
+            return (Holder::Other, Some(label));
+        }
+        (Holder::Other, None)
+    }
+}
+
+/// The user's document windows that match and that place_window can bring
+/// out onto a display: minimized, or of a hidden app, where they would
+/// show again on the user's screen (#221). Blocking.
+fn put_away_candidates(
+    wanted: Option<i64>,
+    matcher: Option<&NamedApp>,
+) -> Vec<(windows::Window, Option<String>)> {
+    let mut ids = AppIds::default();
+    let away = windows::put_away(|w| {
+        w.layer == 0
+            && windows::display_role(w).accepts_window_request()
+            && is_named(w, wanted, matcher, &mut ids)
+    });
+    away.into_iter()
+        .filter(|(_, why)| why.comes_out())
+        .map(|(w, _)| {
+            let bundle = ids.of(w.target.pid).1.clone();
+            (w, bundle)
+        })
+        .collect()
+}
+
+/// Why the off-screen windows `away` returned aren't on screen: the most
+/// telling reason among them.
+fn why_off_screen(away: &[(windows::Window, PutAway)]) -> Option<PutAway> {
+    away.iter()
+        .map(|(_, why)| *why)
+        .min_by_key(|why| why.rank())
+}
+
+/// place_window's `not_found` for a window id that is no stray and no
+/// window of the user's on screen: where the window is. It names the app
+/// only for a window on the user's screen. Blocking.
+fn no_such_window(id: i64, holders: &Holders) -> String {
+    let on_screen = windows::all()
+        .into_iter()
+        .find(|w| w.target.window_id as i64 == id);
+    let mut label = None;
+    let sighting = match on_screen {
+        Some(w) if w.layer != 0 && windows::display_role(&w).accepts_window_request() => {
+            WindowSighting::NotDocument { app: w.app }
+        }
+        Some(w) if !windows::display_role(&w).accepts_window_request() => {
+            let (holder, name) = holders.at_named(w.target.window_id, &w.bounds);
+            label = name;
+            WindowSighting::OnAgentDisplay(holder)
+        }
+        // It left the list between the two reads.
+        Some(_) => WindowSighting::OffScreen(PutAway::Unknown),
+        None => match cg::on_screen_windows()
+            .into_iter()
+            .find(|w| w.target.window_id as i64 == id)
+        {
+            // On screen, but a window place_window never offers: a menu,
+            // a floating window above the panel levels, a small one, or
+            // Agent Screen's own.
+            Some(w) => {
+                let window = windows::Window {
+                    target: w.target,
+                    app: w.owner_name,
+                    title: w.title,
+                    bounds: w.bounds,
+                    layer: w.layer,
+                    off_display: false,
+                };
+                if windows::display_role(&window).accepts_window_request() {
+                    WindowSighting::NotDocument { app: window.app }
+                } else {
+                    let (holder, name) = holders.at_named(window.target.window_id, &window.bounds);
+                    label = name;
+                    WindowSighting::OnAgentDisplay(holder)
+                }
+            }
+            None if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
+                let away = windows::put_away(|w| w.target.window_id as i64 == id);
+                WindowSighting::OffScreen(why_off_screen(&away).unwrap_or(PutAway::Unknown))
+            }
+            None => WindowSighting::Gone,
+        },
+    };
+    placement::no_window_named(id, &sighting, label.as_deref())
+}
+
+/// place_window's `not_found` for an app no stray and no window of the
+/// user's on screen matched: why its windows on screen weren't offered,
+/// or what was searched. Blocking.
+fn no_app_window(
+    display: DisplayId,
+    text: &str,
+    named: &NamedApp,
+    found: Option<access::AppId>,
+    holders: &Holders,
+) -> String {
+    let mut ids = AppIds::default();
+    let mine: Vec<windows::Window> = windows::all()
+        .into_iter()
+        .filter(|w| is_named(w, None, Some(named), &mut ids))
+        .collect();
+    let online = windows::online_display_areas();
+    // A document window that matched yet wasn't offered is on an Agent
+    // Display.
+    let documents: Vec<&windows::Window> = mine
+        .iter()
+        .filter(|w| w.layer == 0 && !windows::display_role(w).accepts_window_request())
+        .collect();
+    let mut holder_labels: Option<(String, usize)> = None;
+    let sighting = if let Some(here) = documents.iter().find(|w| {
+        agent_screen_model::arrangement::effective_agent_display(
+            &w.bounds,
+            &online,
+            windows::recorded_owner(w.target.window_id),
+        )
+        .is_some_and(|(owner, _)| owner == display)
+    }) {
+        AppSighting::OnThisDisplay {
+            window_id: here.target.window_id,
+        }
+    } else if let Some(w) = mine
+        .iter()
+        .find(|w| windows::display_role(w).accepts_window_request())
+    {
+        AppSighting::OnlyPanels {
+            name: w.app.clone(),
+        }
+    } else if !mine.is_empty() {
+        let resolved: Vec<(Holder, Option<String>)> = mine
+            .iter()
+            .map(|w| holders.at_named(w.target.window_id, &w.bounds))
+            .collect();
+        holder_labels =
+            placement::join_holder_labels(resolved.iter().filter_map(|(_, l)| l.as_deref()));
+        AppSighting::OnAgentDisplay(Holder::of_all(resolved.into_iter().map(|(h, _)| h)))
+    } else {
+        // A window anywhere, hidden or on another Space, names its app by
+        // its owner name, which the app's own name may not be.
+        let running = found
+            .as_ref()
+            .filter(|f| app::is_running(&f.bundle_id))
+            .map(|f| f.name.clone())
+            .or_else(|| {
+                cg::all_windows()
+                    .into_iter()
+                    .find(|w| named.is_owner(&w.owner_name))
+                    .map(|w| w.owner_name)
+            });
+        // Its windows that exist off screen say why none is on it (#221).
+        let away = running.as_ref().map(|_| {
+            let mut ids = AppIds::default();
+            windows::put_away(|w| w.layer == 0 && is_named(w, None, Some(named), &mut ids))
+        });
+        match (running, found) {
+            (Some(name), _) => match away.as_deref().and_then(why_off_screen) {
+                Some(why) => AppSighting::PutAway { name, why },
+                None => AppSighting::NoWindow { name },
+            },
+            (None, Some(found)) => AppSighting::NotRunning { name: found.name },
+            (None, None) => AppSighting::Unknown,
+        }
+    };
+    placement::no_app_window_named(
+        text,
+        &sighting,
+        holder_labels.as_ref().map(|(s, n)| (s.as_str(), *n)),
+    )
+}
+
+/// Ask the user for one of their windows with a Window Request, and wait
+/// for the answer. Granted, the window goes over as a Handover. `held`:
+/// another Agent Session or a Review Display holds it, the card names the
+/// holder, and Hand Over moves it from there as a Placement (ADR 0017).
+async fn request_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    held: Option<Held>,
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let app = window.app.clone();
+    let mut held = held;
+    // The user consents to the holder the card names. When the window has
+    // moved to another holder by the time they answer, a new card names
+    // that one (ADR 0017).
+    for _ in 0..3 {
+        match ask_window(core, id, window.clone(), held.clone(), timeout, cx).await? {
+            Asked::Done(reply) => return Ok(reply),
+            Asked::Again(now) => {
+                log::info!(
+                    "display {id}: window {} ({app}) is with {} now; asking the user again",
+                    window.target.window_id,
+                    now.label
+                );
+                held = Some(now);
+            }
+        }
+    }
+    Err(ControlError::failed(format!(
+        "the {app} window kept moving between agent sessions while the user decided, so nothing moved. Call place_window again"
+    )))
+}
+
+/// How one Window Request ended for the asker.
+enum Asked {
+    Done(Map<String, Value>),
+    /// The user said Hand Over, but another holder has the window now: ask
+    /// again, naming it.
+    Again(Held),
+}
+
+/// Where a window place_window asked for is when the user answers.
+enum Now {
+    Gone,
+    /// On the asking display already.
+    Here,
+    Held(Held),
+    /// On the user's screen, and no other session holds it.
+    Users(windows::Window),
+    /// On one of the asker's own other displays, or a display no session
+    /// uses.
+    Unheld,
+}
+
+/// Where window `target` is now, as the session of display `id` sees it.
+async fn where_now(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> Now {
+    let (known, spares): (Vec<DisplayId>, Vec<DisplayId>) = core.read_with(cx, |c, _| {
+        (
+            c.displays.list.iter().map(|d| d.id).collect(),
+            c.spare_ids(),
+        )
+    });
+    let window = target.window_id;
+    let (on, found) = off(cx, move || {
+        for o in known {
+            if let Some(w) = windows::on_display(o)
+                .into_iter()
+                .find(|w| w.target.window_id == window)
+            {
+                return (Some(o), Some(w));
+            }
+        }
+        let w = windows::all()
+            .into_iter()
+            .find(|w| w.target.window_id == window)
+            .filter(|w| {
+                windows::display_role(w).accepts_window_request()
+                    || windows::on_any(&w.bounds, &spares)
+            });
+        (None, w)
+    })
+    .await;
+    match (on, found) {
+        (Some(o), _) if o == id => Now::Here,
+        (Some(o), Some(_)) => core
+            .read_with(cx, |c, _| {
+                c.displays.held_by_at(id, target, Some(o), c.elapsed_ms())
+            })
+            .map_or(Now::Unheld, Now::Held),
+        (None, Some(w)) => core
+            .read_with(cx, |c, _| {
+                c.displays.held_by_at(id, target, None, c.elapsed_ms())
+            })
+            .map_or(Now::Users(w), Now::Held),
+        _ => Now::Gone,
+    }
+}
+
+/// After the user's Hand Over: move the window from where it is now. The
+/// holder the card named still has it: a Placement from there. The holder
+/// let it go, as when its display ended and sent a Handover home: it is the
+/// user's again, and goes over as their Handover, keeping its return
+/// location. Another holder has it: ask again.
+async fn after_hand_over(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    app: &str,
+    named: Option<&Held>,
+    cx: &mut AsyncApp,
+) -> Result<Asked, ControlError> {
+    let state = match where_now(core, id, target, cx).await {
+        Now::Here => held::NowState::Here,
+        Now::Held(now) => held::NowState::Held(now),
+        Now::Users(window) => held::NowState::Users(window),
+        Now::Unheld => held::NowState::Unheld,
+        Now::Gone => held::NowState::Gone,
+    };
+    match held::decide_after_hand_over(state, named) {
+        held::HandOverAction::AlreadyHere => Ok(Asked::Done(Map::new())),
+        held::HandOverAction::Transfer(now) => transfer_window(core, &now, id, target, app, cx)
+            .await
+            .map(Asked::Done),
+        held::HandOverAction::AskAgain(now) => Ok(Asked::Again(now)),
+        held::HandOverAction::FromUser(window) => {
+            hand_over(core, id, window, Authority::User, None, cx)
+                .await
+                .map(Asked::Done)
+        }
+        held::HandOverAction::MovedUnheld => Err(ControlError::failed(format!(
+            "the {app} window moved to another display while the user decided, so nothing moved. Call list_windows on your displays, then place_window again"
+        ))),
+        held::HandOverAction::Closed => Err(ControlError::failed(format!(
+            "the {app} window closed while the user decided"
+        ))),
+    }
+}
+
+/// One Window Request, and what came of the user's answer.
+async fn ask_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    held: Option<Held>,
+    timeout: Option<f64>,
+    cx: &mut AsyncApp,
+) -> Result<Asked, ControlError> {
+    let target = window.target;
+    let app = window.app.clone();
+    let named = NamedWindow {
+        target,
+        app: window.app,
+        title: window.title,
+    };
+    let (request, answer) = core
+        .update(cx, |c, cx| {
+            let asked = c.displays.request_window(id, named, held.clone());
+            cx.notify();
+            asked
+        })
+        .ok_or_else(|| ControlError::failed(format!("display {id} has ended")))?;
+    let seconds = timeout.unwrap_or(120.0).clamp(1.0, 600.0);
+    let timer = cx
+        .background_executor()
+        .timer(Duration::from_secs_f64(seconds));
+    let mut answer = answer.fuse();
+    let resolution = futures::select! {
+        resolution = answer => resolution.unwrap_or(Resolution::Ended),
+        _ = FutureExt::fuse(timer) => {
+            let timed_out = core.update(cx, |c, cx| {
+                let timed_out = c.displays.time_out_window(id, request);
+                if timed_out {
+                    cx.notify();
+                }
+                timed_out
+            });
+            // An answer that came with the timer stands.
+            if timed_out {
+                Resolution::TimedOut
+            } else {
+                answer.await.unwrap_or(Resolution::Ended)
+            }
+        }
+    };
+    match (resolution, &held) {
+        (Resolution::HandedOver(_), Some(held)) => {
+            return after_hand_over(core, id, target, &app, Some(held), cx).await;
+        }
+        // The user's window, which another session took while they decided.
+        (Resolution::Claimed, _) => {
+            return after_hand_over(core, id, target, &app, None, cx).await;
+        }
+        (Resolution::HandedOver(_), None) => {}
+        (Resolution::Declined, Some(held)) => {
+            return Err(ControlError::failed(held::declined_message(&app, held)));
+        }
+        (Resolution::Declined, None) => {
+            return Err(ControlError::failed(format!(
+                "the user declined to hand over the {app} window; it stays theirs. Work without it, or launch the app yourself with launch_app"
+            )));
+        }
+        (Resolution::TimedOut, _) => {
+            return Err(ControlError::failed(held::timed_out_message(
+                &app,
+                seconds,
+                held.as_ref(),
+            )));
+        }
+        (Resolution::Replaced, _) => {
+            return Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: you asked for another window"
+            )));
+        }
+        _ => {
+            return Err(ControlError::failed(format!(
+                "your request for the {app} window was withdrawn: the display ended"
+            )));
+        }
+    }
+    // The Handover moves it off the main thread; wait until it is there.
+    for _ in 0..30 {
+        let there = off(cx, move || {
+            windows::on_display(id).iter().any(|w| w.target == target)
+        })
+        .await;
+        if there {
+            return Ok(Asked::Done(Map::from_iter([(
+                "handedOver".into(),
+                Value::Bool(true),
+            )])));
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    Err(ControlError::failed(format!(
+        "the user handed over the {app} window, but it didn't reach the display"
+    )))
+}
+
+/// The window place_window names that another Agent Session holds on its
+/// display, or that waits on a Review Display, with its holder: the first
+/// match, display by display.
+async fn held_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    wanted: Option<i64>,
+    matcher: Option<NamedApp>,
+    cx: &mut AsyncApp,
+) -> Option<(windows::Window, Held)> {
+    let holders: Vec<DisplayId> = core.read_with(cx, |c, _| {
+        let probe = WindowTarget {
+            pid: 0,
+            window_id: 0,
+        };
+        c.displays
+            .list
+            .iter()
+            .filter(|d| c.displays.held_by(id, probe, Some(d.id)).is_some())
+            .map(|d| d.id)
+            .collect()
+    });
+    if holders.is_empty() {
+        return None;
+    }
+    let found = off(cx, move || {
+        let mut ids = AppIds::default();
+        let mut found = Vec::new();
+        for o in holders {
+            for w in windows::on_display(o) {
+                if (wanted.is_some() || w.layer == 0)
+                    && is_named(&w, wanted, matcher.as_ref(), &mut ids)
+                {
+                    found.push((o, w));
+                }
+            }
+        }
+        found
+    })
+    .await;
+    core.read_with(cx, |c, _| {
+        let now_ms = c.elapsed_ms();
+        found.into_iter().find_map(|(on, w)| {
+            let held = c.displays.held_by_at(id, w.target, Some(on), now_ms)?;
+            Some((w, held))
+        })
+    })
+}
+
+/// place_window for a window another session holds (ADR 0017). The user's
+/// words relayed from the conversation move it at once only when they name
+/// the window or its app; otherwise a Window Request naming the holder asks
+/// the user. A Window Authorization never covers it.
+#[allow(clippy::too_many_arguments)]
+async fn take_held(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    held: Held,
+    words: Option<String>,
+    timeout: Option<f64>,
+    asked: FrameRequest,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let target = window.target;
+    let app = window.app.clone();
+    let named = match words.clone() {
+        Some(text) => {
+            let owner = window.app.clone();
+            off(cx, move || {
+                let name = app::name(target.pid).unwrap_or_default();
+                let bundle = app::bundle_id(target.pid).unwrap_or_default();
+                held::names_window(&text, &[&owner, &name, &bundle])
+            })
+            .await
+        }
+        None => false,
+    };
+    let mut reply = match words {
+        Some(text) if named => {
+            core.update(cx, |c, _| {
+                if let Some(access) = c.displays.access_mut(id) {
+                    access.last = Some(Instruction {
+                        action: ChatAction::Place,
+                        text: text.clone(),
+                    });
+                }
+            });
+            log::info!(
+                "display {id}: window {} ({app}) taken from {} on the user's words {text:?}",
+                target.window_id,
+                held.label
+            );
+            let mut reply = transfer_window(core, &held, id, target, &app, cx).await?;
+            reply.insert("by".into(), json!("chat"));
+            reply
+        }
+        _ => request_window(core, id, window, Some(held), timeout, cx).await?,
+    };
+    reply.extend(frame_window(core, id, target, asked, cx).await?);
+    Ok(reply)
+}
+
+/// Move a window another session holds onto display `to`, on the user's
+/// answer or their words: the holder's records let it go and its session
+/// hears it on its next call; a Handover the user gave the holder still
+/// returns to the user (ADR 0017).
+async fn transfer_window(
+    core: &Entity<Core>,
+    held: &Held,
+    to: DisplayId,
+    target: WindowTarget,
+    app: &str,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let from = held.display;
+    let moved = core
+        .update(cx, |c, cx| {
+            cx.notify();
+            c.displays.transfer(from, to, target, app)
+        })
+        .map_err(ControlError::failed)?;
+    let handed_over = moved.record.origin == Origin::HandedOver;
+    if let Err(e) = place_and_hold(target, to, cx).await {
+        core.update(cx, |c, cx| {
+            c.displays.undo_transfer(moved);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "the user gave you the {app} window, but it could not move from {}: {e}",
+            held.label
+        )));
+    }
+    core.update(cx, |c, _| c.displays.finish_transfer(&moved));
+    // The window is the asker's now: the holder's drag in it, held or
+    // queued, stops, as it would act on the window on the asker's display.
+    release_hold_on(from, target.window_id);
+    let stopped = core.update(cx, |c, cx| {
+        let stopped = c.input_queue.window_given(from, target.window_id);
+        cx.notify();
+        stopped
+    });
+    if stopped > 0 {
+        log::info!(
+            "display {from}: {stopped} input request(s) on window {} stopped, the window given away",
+            target.window_id
+        );
+    }
+    log::info!(
+        "window {} ({app}) moved from display {from} ({}) to display {to}, another session's, on the user's word",
+        target.window_id,
+        held.label
+    );
+    guard_placed(core, target, to, cx);
+    let mut reply = Map::from_iter([("takenFrom".into(), json!(held.label))]);
+    if handed_over {
+        reply.insert("handedOver".into(), Value::Bool(true));
+    }
+    Ok(reply)
+}
+
+/// Hand one of the user's windows over on their word or under the
+/// session's Window Access: claimed with the check in one step, checked
+/// again right before it moves, and given up if a revoke, a Takeover, a
+/// Take Back or the display ending came in between.
+async fn hand_over(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: windows::Window,
+    authority: Authority,
+    words: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let target = window.target;
+    let app_name = window.app.clone();
+    // A window off screen, minimized or hidden, comes home where it
+    // would have shown (#221).
+    let bounds = window.bounds;
+    let by = match (&authority, &words) {
+        (Authority::User, _) => "user",
+        (_, Some(_)) => "chat",
+        _ => "grant",
+    };
+    let home = off(cx, move || {
+        crate::dismissal::home_of(target, None)
+            .or_else(|| crate::dismissal::home_of(target, Some(bounds)))
+    })
+    .await;
+    let ticket = core
+        .update(cx, |c, cx| {
+            let ticket = c.displays.hand_over(id, target, &authority, home)?;
+            if let (Some(access), Some(text)) = (c.displays.access_mut(id), words.clone()) {
+                access.last = Some(Instruction {
+                    action: ChatAction::Place,
+                    text,
+                });
+            }
+            cx.notify();
+            Ok::<_, Refusal>(ticket)
+        })
+        .map_err(|r| ControlError::failed(r.message(&app_name)))?;
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    // The last word before the move, on the main thread, where revokes,
+    // Takeovers and Take Backs happen.
+    let confirmed = core.update(cx, |c, _| {
+        let confirmed = c.displays.confirm_hand_over(id, target, &ticket);
+        if confirmed.is_err() {
+            c.displays.abandon_hand_over(id, &ticket);
+        }
+        confirmed
+    });
+    // Read with the confirmation: a Take Back after it bumps the count,
+    // and the move then stays home.
+    let seen = windows::times_returned(target.window_id);
+    if let Err(refusal) = confirmed {
+        core.update(cx, |_, cx| cx.notify());
+        return Err(match refusal {
+            Refusal::Takeover => ControlError::takeover(refusal.message(&app_name)),
+            _ => ControlError::failed(refusal.message(&app_name)),
+        });
+    }
+    log::info!(
+        "display {id}: window {} ({app_name}) handed over by {by}{}",
+        target.window_id,
+        words
+            .as_deref()
+            .map(|w| format!(" on the user's words {w:?}"))
+            .unwrap_or_default()
+    );
+    let placed = off(cx, move || {
+        windows::place_handed_over(target, id, screen.as_deref(), seen)
+    })
+    .await;
+    if let Err(e) = placed {
+        core.update(cx, |c, cx| {
+            c.displays.abandon_hand_over(id, &ticket);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "could not move the {app_name} window: {e}"
+        )));
+    }
+    let landed = core.update(cx, |c, cx| {
+        let landed = c.displays.commit_hand_over(id, &ticket, None);
+        if landed {
+            // The app's late windows are the agent's to have, not to send
+            // back, as after the user's own Hand Over.
+            c.returning
+                .retain(|(d, k)| !(*d == id && k.pid() == target.pid));
+            c.pending_returns.hand_over(id, target.pid);
+        }
+        cx.notify();
+        landed
+    });
+    if !landed {
+        return Err(ControlError::failed(format!(
+            "the user took the {app_name} window back while it moved; it stays theirs"
+        )));
+    }
+    guard_placed(core, target, id, cx);
+    Ok(Map::from_iter([
+        ("handedOver".into(), Value::Bool(true)),
+        ("by".into(), json!(by)),
+    ]))
+}
+
+/// requestControl on the user's word: hand the display back, or take it
+/// over for them. The same actions as the Viewer's buttons.
+fn chat_control(
+    core: &Entity<Core>,
+    id: DisplayId,
+    words: &str,
+    control: Option<&str>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let words = access::user_instruction(words).map_err(ControlError::invalid)?;
+    let to_user = match control {
+        None | Some("agent") => false,
+        Some("user") => true,
+        Some(_) => return Err(ControlError::invalid("control must be agent or user")),
+    };
+    let action = if to_user {
+        ChatAction::Pause
+    } else {
+        ChatAction::HandBack
+    };
+    let changed = core.update(cx, |c, cx| {
+        let changed = if to_user {
+            c.take_over(id, cx)
+        } else {
+            c.hand_back(id, cx)
+        };
+        if let Some(access) = c.displays.access_mut(id) {
+            access.last = Some(Instruction {
+                action,
+                text: words.clone(),
+            });
+        }
+        cx.notify();
+        changed
+    });
+    log::info!(
+        "display {id}: {} on the user's words as the agent relayed them: {words:?} (changed: {changed})",
+        action.as_str()
+    );
+    Ok(json!({
+        "control": if to_user { "user" } else { "agent" },
+        "changed": changed,
+    }))
+}
+
+/// The session's Window Access as the agent and scripts read it from
+/// display `id`, with that display's Handovers and pause.
+fn access_status(c: &Core, id: DisplayId) -> Value {
+    let none = agent_screen_model::access::Access::default();
+    let access = c.displays.access(id).unwrap_or(&none);
+    let Some(d) = c.displays.get(id) else {
+        return json!({ "scope": "none", "apps": [], "paused": false, "excluded": [], "handovers": [], "lastInstruction": null });
+    };
+    let shown = windows::all();
+    let handovers: Vec<Value> = d
+        .handovers()
+        .into_iter()
+        .map(|t| {
+            let w = shown.iter().find(|w| w.target.window_id == t.window_id);
+            json!({
+                "windowId": t.window_id,
+                "app": w.map(|w| w.app.clone()),
+                "title": w.map(|w| w.title.clone()),
+            })
+        })
+        .collect();
+    json!({
+        "scope": access.scope_name(),
+        "apps": access.apps().iter().map(|a| json!({ "bundleId": a.bundle_id, "name": a.name })).collect::<Vec<_>>(),
+        "paused": d.access_paused(),
+        "excluded": access.excluded,
+        "handovers": handovers,
+        "lastInstruction": access.last.as_ref().map(|i| json!({ "action": i.action.as_str(), "text": i.text })),
+    })
+}
+
+/// window_access: grant, revoke, return or status, on the user's word.
+async fn window_access(
+    core: &Entity<Core>,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let id = display(core, p, true, cx)?;
+    let action = p
+        .string("action")
+        .ok_or_else(|| ControlError::invalid("action is required"))?;
+    let words = p
+        .string("userInstruction")
+        .map(|w| access::user_instruction(&w))
+        .transpose()
+        .map_err(ControlError::invalid)?;
+    let all = p.0.get("all") == Some(&Value::Bool(true));
+    let apps: Vec<String> =
+        p.0.get("apps")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+    let needs_words = || {
+        ControlError::invalid(format!(
+            "{action} needs userInstruction: the user's words from the chat"
+        ))
+    };
+    let mut extra = Map::new();
+    match action.as_str() {
+        "status" => {}
+        "grant" => {
+            let words = words.clone().ok_or_else(needs_words)?;
+            let resolved = if all {
+                None
+            } else {
+                if apps.is_empty() {
+                    return Err(ControlError::invalid("grant needs apps or all"));
+                }
+                let names = apps.clone();
+                let found = off(cx, move || {
+                    names
+                        .into_iter()
+                        .map(|n| app::identify(&n).ok_or(n))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                let missing: Vec<String> = found.iter().filter_map(|f| f.clone().err()).collect();
+                if !missing.is_empty() {
+                    return Err(ControlError::not_found(format!(
+                        "no app named {} on this Mac; nothing was granted. Use the app's name as the Dock shows it, or its bundle id",
+                        missing.join(", ")
+                    )));
+                }
+                Some(found.into_iter().filter_map(Result::ok).collect::<Vec<_>>())
+            };
+            let changed = core.update(cx, |c, cx| {
+                let access = c.displays.access_mut(id)?;
+                let before = access.scope.clone();
+                match resolved.clone() {
+                    None => access.grant_all(),
+                    Some(list) => access.grant_apps(list),
+                }
+                access.last = Some(Instruction {
+                    action: ChatAction::Grant,
+                    text: words.clone(),
+                });
+                let changed = access.scope != before;
+                cx.notify();
+                Some(changed)
+            });
+            log::info!(
+                "display {id}: window access granted for {} on the user's words as the agent relayed them: {words:?}",
+                if all {
+                    "all apps".to_string()
+                } else {
+                    apps.join(", ")
+                }
+            );
+            extra.insert("changed".into(), json!(changed.unwrap_or(false)));
+        }
+        "revoke" => {
+            let granted: Vec<(String, Option<String>)> = core.read_with(cx, |c, _| {
+                let access = c.displays.access(id).cloned();
+                apps.iter()
+                    .map(|a| (a.clone(), access.as_ref().and_then(|x| x.granted_id(a))))
+                    .collect()
+            });
+            // Names the grant doesn't hold by name: their bundle ids.
+            let ids: Vec<String> = off(cx, move || {
+                granted
+                    .into_iter()
+                    .map(|(name, id)| {
+                        id.or_else(|| app::identify(&name).map(|a| a.bundle_id))
+                            .unwrap_or(name)
+                    })
+                    .collect()
+            })
+            .await;
+            let changed = core.update(cx, |c, cx| {
+                let access = c
+                    .displays
+                    .access_mut(id)
+                    .ok_or_else(|| ControlError::failed("the display has ended"))?;
+                let changed = access
+                    .revoke((!ids.is_empty()).then_some(ids.as_slice()))
+                    .map_err(ControlError::invalid)?;
+                if let Some(text) = words.clone() {
+                    access.last = Some(Instruction {
+                        action: ChatAction::Revoke,
+                        text,
+                    });
+                }
+                cx.notify();
+                Ok::<_, ControlError>(changed)
+            })?;
+            log::info!("display {id}: window access revoked by the agent (changed: {changed})");
+            extra.insert("changed".into(), json!(changed));
+        }
+        "return" => {
+            let words = words.clone().ok_or_else(needs_words)?;
+            let wanted: Vec<u32> = match p.int("windowId") {
+                Some(w) if !all => vec![w as u32],
+                None if all => core.read_with(cx, |c, _| {
+                    c.displays
+                        .get(id)
+                        .map(|d| d.handovers().iter().map(|t| t.window_id).collect())
+                        .unwrap_or_default()
+                }),
+                _ => {
+                    return Err(ControlError::invalid(
+                        "return needs windowId or all, one of them",
+                    ));
+                }
+            };
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let mut returned = Vec::new();
+            let mut stuck = Vec::new();
+            // One at a time, each after the input queued before it.
+            for window in wanted {
+                let given = core.update(cx, |c, cx| {
+                    let given = c.displays.return_handover(id, window);
+                    if given.is_ok() {
+                        if let Some(access) = c.displays.access_mut(id) {
+                            access.last = Some(Instruction {
+                                action: ChatAction::Return,
+                                text: words.clone(),
+                            });
+                        }
+                        cx.notify();
+                    }
+                    given
+                });
+                let given = match given {
+                    Ok(given) => given,
+                    Err(e) if !all => return Err(ControlError::not_found(e)),
+                    Err(_) => continue,
+                };
+                let task = shell
+                    .update(cx, |shell, cx| {
+                        shell.send_home(given.target, id, Some(given), cx)
+                    })
+                    .map_err(|e| ControlError::failed(e.to_string()))?;
+                if !task.await {
+                    if !all {
+                        return Err(ControlError::failed(format!(
+                            "window {window} didn't leave your display, so it is still a Handover there. Tell the user; return can try again."
+                        )));
+                    }
+                    stuck.push(window);
+                    continue;
+                }
+                log::info!(
+                    "display {id}: window {window} returned on the user's words as the agent relayed them: {words:?}"
+                );
+                returned.push(window);
+            }
+            extra.insert("returned".into(), json!(returned));
+            if !stuck.is_empty() {
+                extra.insert("stuck".into(), json!(stuck));
+                // An older MCP passes this through beside its own note,
+                // which says every window went back.
+                extra.insert(
+                    "warning".into(),
+                    json!("The windows in stuck didn't leave your display and are still Handovers there. Tell the user; return can try again."),
+                );
+            }
+        }
+        other => {
+            return Err(ControlError::invalid(format!(
+                "action must be grant, revoke, return or status, not {other}"
+            )));
+        }
+    }
+    let mut status = core.read_with(cx, |c, _| access_status(c, id));
+    if let Value::Object(map) = &mut status {
+        map.extend(extra);
+    }
+    Ok(status)
+}
+
+/// Apply only an explicit frame request. The callback is the real AX writer
+/// in frame_window and an offline capture in the geometry regression tests.
+fn apply_frame_request(
+    asked: FrameRequest,
+    current: Rect,
+    area: Rect,
+    scale: f64,
+    reserved_top: f64,
+    set: impl FnOnce(Rect) -> Result<(), String>,
+) -> Result<bool, String> {
+    if asked.is_empty() {
+        return Ok(false);
+    }
+    let frame = asked.resolve_with_top_inset(current, area, scale, reserved_top);
+    set(frame)?;
+    Ok(frame != asked.resolve(current, area, scale))
+}
+
+/// Give a window on display `id` the frame the agent asked for, if any, and
+/// say where it ended up, in screenshot pixels: apps hold to their own
+/// minimum and maximum sizes.
+async fn frame_window(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    asked: FrameRequest,
+    cx: &mut AsyncApp,
+) -> Result<Map<String, Value>, ControlError> {
+    let scale = display_scale(core, id, cx);
+    // A window the user took back is theirs: no frame of the agent's
+    // follows it home. A Take Back after this read bumps the count, and
+    // the write in the window's lane then doesn't happen.
+    let taken_back = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .is_none_or(|d| d.returned.contains(&target.window_id))
+    });
+    if taken_back && !asked.is_empty() {
+        return Err(ControlError::failed(
+            "the user took the window back; it stays where they put it",
+        ));
+    }
+    let seen = windows::times_returned(target.window_id);
+    // Use the same main-thread policy as outside_menu_bar, not a second
+    // hard-coded strip height. Empty frame requests still leave it unchanged.
+    let reserved_top = crate::mac::menubar_height(id);
+    let frame = off(cx, move || {
+        let area = cg::display_bounds(id);
+        let now = || windows::find(target.window_id).map(|w| w.bounds);
+        let closed = || "the window closed".to_string();
+        let mut bounds = now().ok_or_else(closed)?;
+        let before = bounds;
+        // The frame written, when the app answered the write with an error.
+        let mut refused = None;
+        let constrained = apply_frame_request(asked, bounds, area, scale, reserved_top, |frame| {
+            windows::write_frame_unless_returned(target.window_id, seen, || {
+                match ax::set_frame_asked(target, frame) {
+                    Err(ax::MoveError::Rejected) => refused = Some(frame),
+                    Err(e) => return Err(format!("could not set the window's frame: {e}")),
+                    Ok(()) => {}
+                }
+                Ok(())
+            })
+        })?;
+        if !asked.is_empty() {
+            // Some apps, Electron's among them, answer a resize a moment
+            // later: wait until two reads agree, up to half a second. An app
+            // that answered with an error may be busy, with writes still
+            // queued while its window stands still, so for it wait up to
+            // 1.5 s while the window still has the frame it had.
+            let reads = if refused.is_some() { 30 } else { 10 };
+            let mut last = None;
+            for _ in 0..reads {
+                std::thread::sleep(Duration::from_millis(50));
+                let read = now().ok_or_else(closed)?;
+                let steady = last == Some(read);
+                last = Some(read);
+                let unchanged = refused.is_some_and(|frame| {
+                    agent_screen_model::placement::frame_write(before, frame, read)
+                        == agent_screen_model::placement::FrameWrite::Unchanged
+                });
+                if steady && !unchanged {
+                    break;
+                }
+            }
+            bounds = last.unwrap_or(bounds);
+            let centre = (
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            );
+            if !area.contains(centre) {
+                return Err(
+                    "the app moved the window off the display after the frame was set".to_string(),
+                );
+            }
+        }
+        // An error from the app says only that some write failed: the frame
+        // the window settled at says what it did (#167).
+        if let Some(frame) = refused {
+            let write = agent_screen_model::placement::frame_write(before, frame, bounds);
+            log::info!(
+                "window {}: the app answered a frame write with an error; {write:?}, at {bounds:?} for {frame:?}",
+                target.window_id
+            );
+            if write == agent_screen_model::placement::FrameWrite::Unchanged {
+                let kept = frame_in_shot(bounds, area, scale);
+                return Err(format!(
+                    "could not set the window's frame: the app rejected the change, and the window kept its frame x {}, y {}, width {}, height {}",
+                    kept.x, kept.y, kept.width, kept.height
+                ));
+            }
+        }
+        Ok::<_, String>((frame_in_shot(bounds, area, scale), constrained))
+    })
+    .await;
+    let (frame, constrained) = frame.map_err(ControlError::failed)?;
+    Ok(Map::from_iter([
+        ("frameConstrained".into(), json!(constrained)),
+        (
+            "window".into(),
+            json!({
+                "x": frame.x as i64,
+                "y": frame.y as i64,
+                "width": frame.width as i64,
+                "height": frame.height as i64,
+            }),
+        ),
+    ]))
+}
+
+/// Move a window onto display `id` and keep it there. AeroSpace can lay
+/// the window out again in the user's workspace right after a display
+/// appears (`windows::kept_on`), and an app can put it back on its own
+/// screen: watch it for 1.5 s and move it back each time. Done once it has
+/// stayed 0.5 s since the last move (#47).
+async fn place_and_hold(
+    target: WindowTarget,
+    id: DisplayId,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    let mut outcome = place(target, id, cx).await;
+    let mut moves = 1;
+    let mut checks = 0;
+    let mut stayed = 0;
+    while outcome.is_ok() && !(checks >= 6 && stayed >= 2) {
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+        checks += 1;
+        if held(target, id, cx).await {
+            stayed += 1;
+            continue;
+        }
+        if moves == 4 {
+            return Err(
+                "it kept going back to the user's screen, moved there by its app or by AeroSpace"
+                    .into(),
+            );
+        }
+        log::info!(
+            "window {} left display {id} after place_window; placing again",
+            target.window_id
+        );
+        moves += 1;
+        stayed = 0;
+        outcome = place(target, id, cx).await;
+    }
+    outcome
+}
+
+/// place_window for a window on `from`, another live display of the same
+/// Agent Session: a Placement between the session's own displays, never a
+/// Window Request. The window's record goes with it, so a Handover stays a
+/// Handover and still goes home when its new display ends (ADR 0016).
+async fn move_between_own(
+    core: &Entity<Core>,
+    from: DisplayId,
+    to: DisplayId,
+    target: WindowTarget,
+    asked: FrameRequest,
+    cx: &mut AsyncApp,
+) -> Reply {
+    if core.read_with(cx, |c, _| c.displays.get(from).is_some_and(|d| d.takeover)) {
+        return Err(ControlError::takeover(format!(
+            "window {} is on your display {from}, which the user is operating. Call wait_for_control on display {from}, or ask the user to hand it back",
+            target.window_id
+        )));
+    }
+    let moved = core
+        .update(cx, |c, cx| {
+            cx.notify();
+            c.displays.move_between(from, to, target, true)
+        })
+        .map_err(ControlError::failed)?;
+    if let Err(e) = place_and_hold(target, to, cx).await {
+        core.update(cx, |c, cx| {
+            c.displays.undo_move(moved);
+            cx.notify();
+        });
+        return Err(ControlError::failed(format!(
+            "could not move window {} from display {from}: {e}",
+            target.window_id
+        )));
+    }
+    log::info!(
+        "window {} moved from display {from} to display {to}, both of one session",
+        target.window_id
+    );
+    guard_placed(core, target, to, cx);
+    let mut reply = frame_window(core, to, target, asked, cx).await?;
+    reply.insert("movedFrom".into(), json!(from));
+    Ok(reply)
+}
+
+/// Record a window Agent Screen put on a display.
+fn claim(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    origin: Origin,
+    cx: &mut AsyncApp,
+) {
+    core.update(cx, |c, cx| {
+        if c.displays.get(id).is_some() {
+            c.displays.claim_on(id, target, origin, None);
+            cx.notify();
+        }
+    });
+}
+
+/// Refuse agent pointer input at `at` on `id` if the visibly topmost window
+/// there is recorded on another display, naming that holder instead of
+/// operating its window or clicking through to a hidden window below (`M2`).
+async fn guard_agent_point(
+    core: &Entity<Core>,
+    id: DisplayId,
+    at: (f64, f64),
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    let Some((target, owner_display)) =
+        off(cx, move || crate::mac::input::foreign_window_at(id, at)).await
+    else {
+        return Ok(());
+    };
+    let holder_label = core.read_with(cx, |c, _| {
+        let now_ms = c.elapsed_ms();
+        c.displays
+            .held_by_at(id, target, Some(owner_display), now_ms)
+            .map(|h| h.agent_label())
+            .or_else(|| c.displays.holder_label_at(owner_display, now_ms))
+    });
+    Err(ControlError::failed(held::foreign_top_window_message(
+        id,
+        owner_display,
+        holder_label.as_deref(),
+    )))
+}
+
+/// Move a window onto a display, off the main thread.
+async fn held(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    cx.background_executor()
+        .spawn(async move { windows::held(target, id, screen.as_deref()) })
+        .await
+}
+
+/// Move a window onto a display for the agent, off the main thread. A
+/// window the user took back stays where it went.
+pub async fn place(target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) -> Result<(), String> {
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    cx.background_executor()
+        .spawn(async move { windows::place_for_agent(target, id, screen.as_deref()) })
+        .await
+}
+
+/// One action on an accessibility element. AX actions reach background apps
+/// without focusing them; clicks go through the input forwarder at the
+/// element's center.
+async fn act(
+    core: &Entity<Core>,
+    id: DisplayId,
+    window: WindowTarget,
+    action: &str,
+    element: &ax::Element,
+    value: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Option<String>, ControlError> {
+    let mut note = None;
+    let bounds = cg::display_bounds(id);
+    // Each AX call blocks until the app answers, up to the 1 s timeout,
+    // and an action that opens a modal holds it all that time.
+    let off_main = async |cx: &mut AsyncApp, work: Box<dyn FnOnce(&ax::Element) -> bool + Send>| {
+        let element = ax::Sendable(element.clone());
+        cx.background_executor()
+            .spawn(async move { work(element.get()) })
+            .await
+    };
+    let frame = {
+        let element = ax::Sendable(element.clone());
+        cx.background_executor()
+            .spawn(async move { ax::frame(element.get()) })
+            .await
+    };
+    let center = frame.map(|f| f.mid()).filter(|c| bounds.contains(*c));
+    let perform = async |name: &'static str, cx: &mut AsyncApp| {
+        if let Some(c) = center {
+            show_pointer(core, id, c, true, cx);
+        }
+        off_main(cx, Box::new(move |e| ax::try_action(e, name))).await
+    };
+    let click = async |button: Button, count: i64, cx: &mut AsyncApp| -> Result<(), ControlError> {
+        let c = center.ok_or_else(|| {
+            ControlError::failed("the element has no visible frame on the display")
+        })?;
+        shared_app::posted_press_allowed(c, "click", cx).await?;
+        show_pointer(core, id, c, true, cx)
+            .click(c, button, count, Default::default())
+            .await;
+        Ok(())
+    };
+    match action {
+        "press" => {
+            if !perform("AXPress", cx).await {
+                click(Button::Left, 1, cx).await?;
+            }
+        }
+        "click" => click(Button::Left, 1, cx).await?,
+        "double_click" => click(Button::Left, 2, cx).await?,
+        "right_click" => click(Button::Right, 1, cx).await?,
+        "show_menu" => {
+            if !perform("AXShowMenu", cx).await {
+                click(Button::Right, 1, cx).await?;
+            }
+        }
+        "focus" => {
+            let focused = off_main(
+                cx,
+                Box::new(|e| {
+                    ax::set_attribute(e, "AXFocused", objc2_core_foundation::CFBoolean::new(true))
+                }),
+            )
+            .await;
+            if !focused {
+                return Err(ControlError::failed("the element cannot take focus"));
+            }
+        }
+        "set_value" => {
+            let value =
+                value.ok_or_else(|| ControlError::invalid("value is required for set_value"))?;
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            let mut access = AxValues {
+                element,
+                window,
+                forwarder,
+                bounds,
+                id,
+                cx,
+            };
+            note = super::values::set_value(&mut access, id, &value).await?;
+        }
+        "insert_text" => {
+            let value =
+                value.ok_or_else(|| ControlError::invalid("value is required for insert_text"))?;
+            // Replacing the selection through accessibility is a paste that
+            // needs no focus and no pasteboard.
+            let set = off_main(
+                cx,
+                Box::new(move |e| {
+                    let before = ax::string_attribute(e, "AXValue");
+                    ax::settable(e, "AXSelectedText")
+                        && ax::set_attribute(
+                            e,
+                            "AXSelectedText",
+                            &objc2_core_foundation::CFString::from_str(&value),
+                        )
+                        && (value.is_empty()
+                            || ax::string_attribute(e, "AXValue").is_none_or(|now| {
+                                Some(&now) != before.as_ref() && now.contains(value.trim())
+                            }))
+                }),
+            )
+            .await;
+            if !set {
+                return Err(ControlError::failed(
+                    "the element takes no inserted text; focus it and type instead",
+                ));
+            }
+        }
+        "increment" | "decrement" => {
+            let name = if action == "increment" {
+                "AXIncrement"
+            } else {
+                "AXDecrement"
+            };
+            let confirmed = off_main(cx, Box::new(move |e| ax::perform(e, name))).await;
+            if !confirmed {
+                return Err(ControlError::failed(format!(
+                    "Accessibility did not confirm {action}. The control may not support it, or the app may have acted before its response timed out. Inspect the current value before retrying; no fallback click was sent."
+                )));
+            }
+        }
+        "scroll_into_view" => {
+            if !perform("AXScrollToVisible", cx).await {
+                return Err(ControlError::failed("the element cannot scroll into view"));
+            }
+        }
+        other => return Err(ControlError::invalid(format!("unknown action {other}"))),
+    }
+    Ok(note)
+}
+
+/// The window an element is in, and its host process. Falls back to the
+/// inspected `fallback` window when the element sits inside an `AXSheet` or a
+/// hosted `.xpc`/`.appex` view whose `AXWindow` is unnumbered or off-screen
+/// (#205).
+fn popup_window(element: &ax::Element, fallback: WindowTarget) -> Option<WindowTarget> {
+    let window_id = ax::enclosing_window_id(element)
+        .or_else(|| ax::element_attribute(element, "AXWindow").and_then(|w| ax::window_id(&w)));
+    if let Some(window_id) = window_id
+        && cg::window_bounds(window_id).is_some()
+        && let Some(pid) = ax::pid_of(element)
+    {
+        if pid != fallback.pid && cg::is_remote_view_service(pid) {
+            return Some(fallback);
+        }
+        return Some(WindowTarget { pid, window_id });
+    }
+    if ax::belongs(element, fallback, false) == Some(true) {
+        return Some(fallback);
+    }
+    None
+}
+
+/// set_value's AX and input calls on one element, each off the main
+/// thread, as an app may take up to the 1 s timeout to answer.
+struct AxValues<'a> {
+    element: &'a ax::Element,
+    window: WindowTarget,
+    forwarder: crate::mac::input::Forwarder,
+    bounds: Rect,
+    id: DisplayId,
+    cx: &'a mut AsyncApp,
+}
+
+impl super::values::ValueAccess for AxValues<'_> {
+    async fn role(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXRole")).await
+    }
+
+    fn stopped(&self) -> bool {
+        self.forwarder.agent_stopped()
+    }
+
+    async fn popup_facts(&mut self) -> super::values::PopupFacts {
+        let item = ax::Sendable(self.element.clone());
+        let win_pid = self.window.pid;
+        off(self.cx, move || {
+            let elem_pid = ax::pid_of(item.get());
+            super::values::PopupFacts {
+                in_web_page: ax::in_web_area(item.get()),
+                engine: elem_pid
+                    .and_then(devtools::engine)
+                    .or_else(|| devtools::engine(win_pid)),
+                cocoa: elem_pid
+                    .and_then(app::is_cocoa)
+                    .or_else(|| app::is_cocoa(win_pid)),
+            }
+        })
+        .await
+    }
+
+    async fn choose_in_page(&mut self, title: &str, shown: &str) -> super::values::PageChoice {
+        use super::values::PageChoice;
+        use devtools::SelectChoice;
+        let item = ax::Sendable(self.element.clone());
+        let fallback = self.window;
+        let title = title.to_owned();
+        let shown = shown.to_owned();
+        let forwarder = self.forwarder.clone();
+        let within = self.bounds;
+        off(self.cx, move || {
+            let Some(target) = popup_window(item.get(), fallback) else {
+                return PageChoice::Unpiped;
+            };
+            let (Some(bounds), Some(frame)) =
+                (cg::window_bounds(target.window_id), ax::frame(item.get()))
+            else {
+                return PageChoice::Unpiped;
+            };
+            let at = frame.mid();
+            if !within.contains(at) {
+                return PageChoice::Unpiped;
+            }
+            match devtools::choose_option(target, bounds, at, &title, &shown, || {
+                forwarder.agent_stopped()
+            }) {
+                SelectChoice::Unpiped => PageChoice::Unpiped,
+                SelectChoice::NotSelect => PageChoice::NotSelect,
+                SelectChoice::Elsewhere => PageChoice::Elsewhere,
+                SelectChoice::Chosen => PageChoice::Chosen,
+                SelectChoice::Already => PageChoice::Already,
+                SelectChoice::Missing { shown, near } => PageChoice::Missing { shown, near },
+                SelectChoice::Disabled => PageChoice::Disabled,
+                SelectChoice::Unknown(why) => PageChoice::Unknown(why),
+                SelectChoice::Stopped => PageChoice::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn type_popup(&mut self, keys: &str) -> super::values::Typed {
+        use super::values::Typed;
+        use crate::mac::input::PopupTyped;
+        let id = self.id;
+        let fallback = self.window;
+        let item = ax::Sendable(self.element.clone());
+        let Some(target) = off(self.cx, move || popup_window(item.get(), fallback)).await else {
+            return Typed::NotSent(ControlError::failed(
+                "Accessibility names no window for the pop-up button, so nothing was typed. Refresh get_window_state and retry",
+            ));
+        };
+        let typed = self
+            .forwarder
+            .choose_closed_popup(
+                target,
+                ax::Sendable(self.element.clone()),
+                keys.to_owned(),
+                self.bounds,
+            )
+            .await;
+        match typed {
+            PopupTyped::Typed => Typed::All,
+            PopupTyped::Stopped(done) => Typed::Stopped(done),
+            PopupTyped::Interrupted(done) => Typed::Interrupted(done),
+            PopupTyped::Slow(done) => Typed::Slow(done),
+            PopupTyped::Gone => Typed::NotSent(ControlError::failed(format!(
+                "the pop-up button's window is no longer on display {id}, so nothing was typed. Call list_windows"
+            ))),
+            PopupTyped::Unfocused => Typed::NotSent(ControlError::failed(
+                "the pop-up button didn't become its app's focused element, so keys could have gone to another control. Nothing was typed and no menu was opened. Refresh get_window_state and retry, or call request_help",
+            )),
+            PopupTyped::Spaced => Typed::NotSent(ControlError::invalid(
+                "Agent Screen never types a space into a closed pop-up. Nothing was sent",
+            )),
+            PopupTyped::Refused => {
+                let app = self
+                    .forwarder
+                    .take_refused()
+                    .await
+                    .map(|r| r.app)
+                    .unwrap_or_else(|| "the app".into());
+                Typed::NotSent(ControlError::failed(format!(
+                    "{app}'s focused window is not on an Agent Display, so keys for the pop-up button could reach the user's window instead of yours on display {id}. Nothing was typed and no menu was opened. Click inside your window once and retry"
+                )))
+            }
+        }
+    }
+
+    async fn set(&mut self, value: &str) -> super::values::Set {
+        use super::values::{Set, unless_stopped};
+        let item = ax::Sendable(self.element.clone());
+        let value = value.to_owned();
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            let stopped = || forwarder.agent_stopped();
+            if stopped() {
+                return Set::Stopped;
+            }
+            if !ax::settable(item.get(), "AXValue") {
+                return Set::NotSettable;
+            }
+            match unless_stopped(stopped, || {
+                ax::set_attribute(
+                    item.get(),
+                    "AXValue",
+                    &objc2_core_foundation::CFString::from_str(&value),
+                )
+            }) {
+                Some(true) => Set::Sent,
+                Some(false) => Set::Refused,
+                None => Set::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn read(&mut self) -> Option<String> {
+        let item = ax::Sendable(self.element.clone());
+        off(self.cx, move || ax::string_attribute(item.get(), "AXValue")).await
+    }
+
+    async fn confirm(&mut self) -> super::values::Confirm {
+        use super::values::{Confirm, unless_stopped};
+        let item = ax::Sendable(self.element.clone());
+        let forwarder = self.forwarder.clone();
+        off(self.cx, move || {
+            if !ax::actions(item.get()).iter().any(|a| a == "AXConfirm") {
+                return Confirm::Unsupported;
+            }
+            match unless_stopped(
+                || forwarder.agent_stopped(),
+                || ax::try_action(item.get(), "AXConfirm"),
+            ) {
+                Some(true) => Confirm::Done,
+                Some(false) => Confirm::Refused,
+                None => Confirm::Stopped,
+            }
+        })
+        .await
+    }
+
+    async fn pause(&mut self, duration: Duration) {
+        self.cx.background_executor().timer(duration).await;
+    }
+}
+
+/// Open an app in the background and place its new window on a display.
+/// A URL with a scheme, or an existing file; `~/` means the home folder.
+fn open_target(text: &str) -> Result<String, ControlError> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        return open_target(&format!("{home}/{rest}"));
+    }
+    if text.starts_with('/') {
+        return if std::path::Path::new(text).exists() {
+            Ok(text.to_string())
+        } else {
+            Err(ControlError::not_found(format!("no file at {text}")))
+        };
+    }
+    let scheme = text.split_once(':').map(|(s, _)| s);
+    if scheme.is_some_and(|s| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    }) {
+        Ok(text.to_string())
+    } else {
+        Err(ControlError::invalid(
+            "open takes a URL such as https://example.com or an absolute file path",
+        ))
+    }
+}
+
+/// Test builds may hold the launch, so a test can start another copy of
+/// the app while it waits (issue #35).
+fn hold_launch_for_tests() {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("AGENTSCREEN_OPEN_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+/// `open -g`: without activating, like OpenConfiguration.activates = false.
+async fn open_in_background(
+    app: std::path::PathBuf,
+    target: Option<String>,
+    hidden: bool,
+    start: &Start,
+    cx: &mut AsyncApp,
+) -> Option<std::sync::mpsc::Receiver<bool>> {
+    let new_instance = start.new_instance();
+    let arguments = start.open_arguments();
+    let environment = start.environment.clone();
+    cx.background_executor()
+        .spawn(async move {
+            hold_launch_for_tests();
+            let mut open = std::process::Command::new("/usr/bin/open");
+            open.arg("-g");
+            if new_instance {
+                open.arg("-n");
+            }
+            for (name, value) in &environment {
+                open.arg("--env").arg(format!("{name}={value}"));
+            }
+            // A starting app draws its first window wherever macOS puts it,
+            // on the user's screen; hidden, it draws nothing until moved.
+            if hidden {
+                open.arg("-j");
+            }
+            match target {
+                Some(target) => open.arg("-a").arg(&app).arg(target),
+                None => open.arg(&app),
+            };
+            open.arg("--args").args(&arguments);
+            // `open` returns once the app has finished starting, a second
+            // or more; the caller watches for the process meanwhile, and
+            // hears whether `open` succeeded when it ends.
+            let mut child = open.spawn().ok()?;
+            let (done, outcome) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let ok = child.wait().is_ok_and(|s| s.success());
+                if !ok {
+                    log::warn!("open failed for {}", app.display());
+                }
+                let _ = done.send(ok);
+            });
+            Some(outcome)
+        })
+        .await
+}
+
+/// Wait, at most 10 s, until the browser window's page has loaded. A
+/// window without a page, as another app's, returns at once.
+async fn wait_for_page(target: WindowTarget, cx: &mut AsyncApp) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let page = cx
+            .background_executor()
+            .spawn(async move { ax::page(target) })
+            .await;
+        let done = match page {
+            ax::Page::Loading => false,
+            ax::Page::NoWindow | ax::Page::Blank => started.elapsed() > Duration::from_secs(3),
+            ax::Page::Loaded | ax::Page::Unknown => true,
+        };
+        if done {
+            log::debug!(
+                "launch: page {page:?} at {} ms",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    log::info!("launch: page still loading after 10 s");
+}
+
+/// Wait until `target`, a running browser's new window made at
+/// `created`, shows the page the agent's URL opened: that URL, or any
+/// address after the one it showed first, as a redirect to https or www
+/// shows. A browser sent a URL with `open` opens it in its key window:
+/// until the new window has it, handing key focus back to the user's
+/// window could make the browser open it there (#110). After 2 s from the
+/// window's start, the URL has gone out and a slow page doesn't need the
+/// user's focus: whether the page came by then. Blocks.
+fn shows_url(target: WindowTarget, url: &str, created: Instant) -> bool {
+    // What the window showed first, as a new tab page, before the URL.
+    let mut first = None;
+    while created.elapsed() < Duration::from_secs(2) {
+        if let Some(shown) = ax::web_url(target) {
+            let first = first.get_or_insert_with(|| shown.clone());
+            if agent_screen_model::launch::same_page(url, &shown) || shown != *first {
+                log::debug!(
+                    "launch: the new window shows {shown:?} at {} ms",
+                    created.elapsed().as_millis()
+                );
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    log::info!("launch: the new window didn't show the agent's page within 2 s");
+    false
+}
+
+/// The user's window of app `pid` that has its key focus, when it is off
+/// the Agent Displays: the one a new window of the agent's takes it from.
+fn user_key_window(pid: i32) -> Option<WindowTarget> {
+    let id = ax::focused_window_id(pid)?;
+    let window = windows::find(id)?;
+    (!crate::mac::input::on_agent_display_at(window.bounds)).then_some(window.target)
+}
+
+/// What `launch_app` did.
+struct Launched {
+    window: Option<windows::Window>,
+    was_running: bool,
+    /// Why there is no window. For an app Agent Screen started:
+    /// `still_starting`, none yet; one it opens soon moves onto the display.
+    /// For a running app: `existing_window`, the file shows in a window it
+    /// had; `still_opening`, the file's window hasn't come yet;
+    /// `just_started`, the user or another session started it moments ago
+    /// and it isn't ready; `no_new_window`, its menus have no New Window;
+    /// `app_busy`, that item is greyed out; `menus_unreadable`, its menus
+    /// can't be read or used.
+    reason: Option<&'static str>,
+    /// The process, when this launch started it.
+    pid: Option<i32>,
+}
+
+/// How long a cold start's windows count as the agent's, and the launch
+/// watches for them (ADR 0007).
+const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;
+
+/// How long a running app may take to make the window Agent Screen asked
+/// for. A window it makes later may be the user's.
+const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
+/// The same, counted from when `open` returns: it returns once the app has
+/// the file.
+const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
+/// However long `open` takes, a running app's turn ends this long after
+/// Agent Screen's request.
+const RUNNING_APP_TURN: Duration = Duration::from_millis(4000);
+
+/// RUNNING_APP_TURN, or in test builds AGENTSCREEN_RUNNING_TURN_MS, which
+/// sends every file down the path of one that opens late.
+fn running_app_turn() -> Duration {
+    std::env::var("AGENTSCREEN_RUNNING_TURN_MS")
+        .ok()
+        .filter(|_| debug_methods())
+        .and_then(|ms| ms.parse().ok())
+        .map_or(RUNNING_APP_TURN, Duration::from_millis)
+}
+
+/// Arguments and environment for a new instance of an app.
+#[derive(Default)]
+struct Start {
+    arguments: Vec<String>,
+    environment: Vec<(String, String)>,
+}
+
+impl Start {
+    fn parse(p: &Args) -> Result<Start, ControlError> {
+        let arguments = match p.0.get("arguments") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| ControlError::invalid("arguments are strings"))
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(ControlError::invalid("arguments is a list of strings")),
+        };
+        let environment = match p.0.get("environment") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Object(map)) => map
+                .iter()
+                .map(|(k, v)| {
+                    v.as_str()
+                        .map(|v| (k.clone(), v.to_string()))
+                        .ok_or_else(|| ControlError::invalid("environment values are strings"))
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => {
+                return Err(ControlError::invalid(
+                    "environment maps variable names to strings",
+                ));
+            }
+        };
+        if environment
+            .iter()
+            .any(|(k, _)| k.is_empty() || k.contains('='))
+        {
+            return Err(ControlError::invalid(
+                "environment names are non-empty, without =",
+            ));
+        }
+        Ok(Start {
+            arguments,
+            environment,
+        })
+    }
+
+    /// What `open` passes after `--args`. A document app that starts
+    /// with nothing to open shows an Open panel, owned by a system service
+    /// and left on the user's screen, instead of a window: ask for an
+    /// untitled document. Only a starting app reads its arguments. Nor
+    /// bring back windows from its last run, unsaved text included, which
+    /// may be the user's. Given arguments, the app gets exactly those:
+    /// Electron takes the first one that isn't a flag for its app folder.
+    fn open_arguments(&self) -> Vec<String> {
+        if self.arguments.is_empty() {
+            [
+                "-NSShowAppCentricOpenPanelInsteadOfUntitledFile",
+                "NO",
+                "-ApplePersistenceIgnoreState",
+                "YES",
+            ]
+            .map(String::from)
+            .to_vec()
+        } else {
+            self.arguments.clone()
+        }
+    }
+
+    /// A running instance would ignore both: a new one starts.
+    fn new_instance(&self) -> bool {
+        !self.arguments.is_empty() || !self.environment.is_empty()
+    }
+}
+
+/// Run `f`, which waits on another process, off the UI thread.
+async fn off<R: Send + 'static>(cx: &AsyncApp, f: impl FnOnce() -> R + Send + 'static) -> R {
+    cx.background_executor().spawn(async move { f() }).await
+}
+
+async fn launch(
+    core: &Entity<Core>,
+    id: DisplayId,
+    name: &str,
+    target: Option<&str>,
+    start: &Start,
+    cx: &mut AsyncApp,
+) -> Result<Launched, ControlError> {
+    let resolving = Instant::now();
+    let asked = name.to_string();
+    let path = off(cx, move || app::resolve(&asked)).await.ok_or_else(|| {
+        ControlError::not_found(format!(
+            "no app named {name}; give its bundle id, or the absolute path of its .app bundle if Launch Services doesn't list it, as for a build under /tmp"
+        ))
+    })?;
+    // A plain file URL is its file, except for a browser, which opens it as
+    // a page: then the URL route gives it a window of its own first. So
+    // does a file path: a running browser opens one as a tab of its front
+    // window, which may be the user's, and makes no window (#168).
+    let browser = match target.filter(|t| t.starts_with("file://") || t.starts_with('/')) {
+        Some(_) => {
+            let path = path.clone();
+            cx.background_executor()
+                .spawn(async move { app::handles_web(&path) })
+                .await
+        }
+        None => false,
+    };
+    let file = file_target(target, browser)?;
+    let target = file.as_deref().or(target);
+    log::debug!(
+        "launch: {name} found in {} ms",
+        resolving.elapsed().as_millis()
+    );
+    // Wait for another session's launch of the same app to finish.
+    let mut free = false;
+    for _ in 0..450 {
+        free = core.update(cx, |c, _| c.launching.insert(path.clone()));
+        if free {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+    if !free {
+        return Err(ControlError::failed(format!(
+            "another session is still launching {name}; try again shortly"
+        )));
+    }
+    // A catch kept on this app would race the launch's own for its window.
+    let pid = off(cx, {
+        let path = path.clone();
+        move || app::running_pid(&path)
+    })
+    .await;
+    let pause = |c: &mut Core, on: bool| {
+        for (_, kept) in &c.kept_catches {
+            if Some(kept.pid()) == pid {
+                kept.pause(on);
+            }
+        }
+    };
+    core.update(cx, |c, _| pause(c, true));
+    let result = launch_now(core, id, name, &path, target, start, cx).await;
+    core.update(cx, |c, _| {
+        pause(c, false);
+        c.launching.remove(&path);
+    });
+    result
+}
+
+async fn launch_now(
+    core: &Entity<Core>,
+    id: DisplayId,
+    name: &str,
+    path: &std::path::Path,
+    target: Option<&str>,
+    start: &Start,
+    cx: &mut AsyncApp,
+) -> Result<Launched, ControlError> {
+    let path = path.to_path_buf();
+    let started = Instant::now();
+    // Windows already on screen, or claimed by any display, aren't new.
+    let mut before: std::collections::HashSet<u32> = off(cx, || {
+        windows::all().iter().map(|w| w.target.window_id).collect()
+    })
+    .await;
+    before.extend(core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .flat_map(|d| d.records.keys().copied())
+            .collect::<Vec<_>>()
+    }));
+    // A new instance is a starting app, whatever else runs from the bundle.
+    let fresh = start.new_instance();
+    let pids = {
+        let path = path.clone();
+        move || app::running_pids(&path)
+    };
+    let instances_before = off(cx, pids.clone()).await;
+    let was_running = !fresh && !instances_before.is_empty();
+    // New windows go straight onto the display, before the user sees them
+    // or AeroSpace files them in the user's workspace.
+    let bounds = cg::display_bounds(id);
+    let screen = MainThreadMarker::new().and_then(|mtm| app::screen_name(id, mtm));
+    // A running app may be the user's: take only the window Agent Screen
+    // opens. A starting app's windows are all Agent Screen's.
+    let limit = was_running.then_some(1);
+    let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
+    let running = off(cx, pids.clone()).await.into_iter().next();
+    let mut catch = match running.filter(|_| !fresh) {
+        Some(pid) => catch_from(pid).await,
+        None => None,
+    };
+
+    // A starting app opens the URL or file in its first window. A running
+    // one opens a file in a window of its own, but a URL as a tab of its
+    // front window, which may be the user's: it gets a new window first,
+    // below, and the URL after.
+    let is_url = target.is_some_and(|t| !t.starts_with('/'));
+    // A running app given a file: its window is the one that shows the
+    // file, whenever it comes, and never one the user opens meanwhile.
+    let document = target
+        .filter(|t| was_running && t.starts_with('/'))
+        .and_then(|t| std::fs::canonicalize(t).ok());
+    let first = (!was_running || !is_url)
+        .then(|| target.map(String::from))
+        .flatten();
+    // Opening a running app with nothing to open only reopens it, and
+    // TextEdit and others answer a reopen with a window of their own, on
+    // the user's screen, besides the one Command-N asks for below.
+    let could_not_open = || ControlError::failed(format!("could not open {name}"));
+    let requested_at = Instant::now();
+    // The new window may take the app's key focus from the user's window
+    // before Agent Screen sees it: note theirs now, to hand it back after.
+    let mut user_window = None;
+    if let Some(pid) = running.filter(|_| !fresh) {
+        core.update(cx, |c, _| c.forwarder(id))
+            .remember_user_window(pid)
+            .await;
+        user_window = off(cx, move || user_key_window(pid)).await;
+    }
+    // A Chromium or Electron app that starts here gets a private DevTools
+    // pipe, so drags in its pages work (ADR 0010). `open` can't hand it
+    // one: Agent Screen starts it. Only a browser takes a URL or file as
+    // an argument; another app given one starts through `open`, without.
+    let piped = !was_running
+        && off(cx, {
+            let (path, given) = (path.clone(), first.is_some());
+            move || devtools::is_chromium(&path) && (!given || app::handles_web(&path))
+        })
+        .await;
+    let mut spawned = None;
+    let opening = if piped {
+        let (path, first) = (path.clone(), first.clone());
+        // A browser opens its windows on the display, never on the user's
+        // screen first (#123).
+        let browser = off(cx, {
+            let path = path.clone();
+            move || app::handles_web(&path)
+        })
+        .await;
+        // Started while a spare display is being made, it would lose
+        // that place: let the spare come first, up to 2 s.
+        for _ in 0..100 {
+            if !browser || !core.read_with(cx, |c, _| c.making_spare()) {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+        let mut arguments = if browser {
+            agent_screen_model::launch::browser_window_switches(bounds)
+        } else {
+            Vec::new()
+        };
+        arguments.extend(start.open_arguments());
+        arguments.extend(first);
+        let environment = start.environment.clone();
+        let started = off(cx, move || {
+            hold_launch_for_tests();
+            devtools::spawn(&path, &arguments, &environment)
+        })
+        .await;
+        match started {
+            Ok(pid) => {
+                spawned = Some(pid);
+                let (done, outcome) = std::sync::mpsc::channel();
+                let _ = done.send(true);
+                Some(outcome)
+            }
+            Err(e) => {
+                log::warn!("launch: couldn't start {name} with a pipe ({e}); opening it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let opening = match opening {
+        Some(o) => Some(o),
+        None if !was_running || first.is_some() => Some(
+            open_in_background(path.clone(), first, !was_running, start, cx)
+                .await
+                .ok_or_else(could_not_open)?,
+        ),
+        None => None,
+    };
+    // How `open` ended: None while it runs, or without one.
+    let mut opened: Option<(bool, Instant)> = None;
+    let poll_open = |opened: &mut Option<(bool, Instant)>| {
+        if opened.is_none()
+            && let Some(Ok(ok)) = opening.as_ref().map(|o| o.try_recv())
+        {
+            *opened = Some((ok, Instant::now()));
+        }
+        matches!(opened, Some((false, _)))
+    };
+    let mut pid = None;
+    // A new process of the bundle may be another tool's, started from a
+    // shell meanwhile (issue #35): the new instance is the one launchd
+    // started with these arguments. One that restarted itself under
+    // another pid matches neither, so the first new one is it after all.
+    let asked = start.open_arguments();
+    let mut other = None;
+    // A new instance of an app that already runs may be one that allows
+    // only one: it hands its launch to the running instance and quits.
+    let single_instance_risk = fresh && !instances_before.is_empty();
+    let quit = |pid: i32| {
+        let pids = pids.clone();
+        move || !pids().contains(&pid)
+    };
+    for _ in 0..200 {
+        // Started here: its pid is known.
+        if spawned.is_some() {
+            pid = spawned;
+            break;
+        }
+        let now = off(cx, pids.clone()).await;
+        pid = if fresh {
+            let new: Vec<i32> = now
+                .into_iter()
+                .filter(|p| !instances_before.contains(p))
+                .collect();
+            other = other.or(new.first().copied());
+            let asked = asked.clone();
+            off(cx, move || {
+                new.into_iter().find(|&p| {
+                    let parent = app::parent_pid(p).unwrap_or(0);
+                    let argv = app::arguments(p).unwrap_or_default();
+                    agent_screen_model::launch::is_opened(parent, &argv, &asked)
+                })
+            })
+            .await
+        } else {
+            now.into_iter().next()
+        };
+        if pid.is_some() {
+            break;
+        }
+        if poll_open(&mut opened) {
+            return Err(could_not_open());
+        }
+        // `open` came back and no new process runs: an app that allows one
+        // instance passed the launch to the running one and quit (#29).
+        if single_instance_risk
+            && other.is_none()
+            && matches!(opened, Some((true, at)) if at.elapsed() > Duration::from_millis(500))
+        {
+            return already_running(core, id, name, &instances_before, cx).await;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(20))
+            .await;
+    }
+    if pid.is_none() && other.is_some() {
+        log::info!("launch: no new instance of {name} matched its launch; taking {other:?}");
+    }
+    let pid = pid
+        .or(other)
+        .ok_or_else(|| ControlError::failed(format!("{name} did not start")))?;
+    if single_instance_risk && off(cx, quit(pid)).await {
+        return already_running(core, id, name, &instances_before, cx).await;
+    }
+    // Two sessions launching an app at once both see it start; it's the
+    // first one's. Its cold start counts from here.
+    let launched_at = Instant::now();
+    if !was_running {
+        let ours = core.update(cx, |c, _| {
+            let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
+            !claimed
+                && c.displays
+                    .get_mut(id)
+                    .is_some_and(|d| d.started.insert(pid))
+        });
+        // Its windows are the agent's for 30 s from now unless the user
+        // acts on it, whenever launch_app answers.
+        if ours {
+            crate::mac::catch::agent_acted_for(id, pid, LATE_WINDOW_WAIT);
+        }
+    }
+    // A starting app takes accessibility observers only once it has set
+    // up; until then, try again, and move any window that beats it.
+    for _ in 0..100 {
+        if catch.is_some() || single_instance_risk && off(cx, quit(pid)).await {
+            break;
+        }
+        catch = catch_from(pid).await;
+        let seen = before.clone();
+        // `open -j` starts an app hidden; one Agent Screen started itself
+        // is hidden as soon as it can be, so its first window doesn't
+        // draw on the user's screen.
+        let hide = spawned.is_some();
+        cx.background_executor()
+            .spawn(async move {
+                if hide && !app::is_hidden(pid) {
+                    app::hide(pid);
+                }
+                for w in windows::all() {
+                    if w.target.pid == pid && w.layer == 0 && !seen.contains(&w.target.window_id) {
+                        let _ = ax::move_into(w.target, bounds);
+                    }
+                }
+            })
+            .await;
+        if catch.is_none() {
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+    }
+    log::debug!(
+        "launch: {name} is pid {pid} at {} ms, catching new windows: {}",
+        started.elapsed().as_millis(),
+        catch.is_some()
+    );
+    if single_instance_risk && off(cx, quit(pid)).await {
+        core.update(cx, |c, _| {
+            if let Some(d) = c.displays.get_mut(id) {
+                d.started.remove(&pid);
+            }
+        });
+        return already_running(core, id, name, &instances_before, cx).await;
+    }
+    // Started hidden: once its windows sit on the display, show them there.
+    if !was_running {
+        for _ in 0..150 {
+            // Browsers show themselves as they start, which draws their
+            // first window on the user's screen: hide them again until it
+            // sits on the display.
+            let moved = off(cx, move || {
+                if !app::is_hidden(pid) {
+                    app::hide(pid);
+                }
+                ax::move_all_into(pid, bounds)
+            })
+            .await;
+            if moved > 0 {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+        }
+        off(cx, move || app::unhide(pid)).await;
+    }
+
+    // A running app opens no window on launch; ask it for a new one through
+    // the menu item that opens one. Without such an item, as in Calculator
+    // or Notes, there is none to give: say so now.
+    let asked_for_window = was_running && (target.is_none() || is_url);
+    // The new window takes the app's key focus from the user's window, in
+    // their front app, until Agent Screen hands it back: hold their keys
+    // meanwhile and send them on to their window after (#110).
+    let mut hold = match user_window {
+        Some(user) if asked_for_window => {
+            off(cx, move || {
+                crate::mac::input::is_front(user.pid)
+                    .then(|| crate::mac::key_hold::start(user))
+                    .flatten()
+            })
+            .await
+        }
+        _ => None,
+    };
+    if asked_for_window {
+        // An app that has just started may not have its menus yet.
+        let mut asked = ax::NewWindow::NotReady;
+        for _ in 0..10 {
+            asked = cx
+                .background_executor()
+                .spawn(async move { ax::press_new_window(pid) })
+                .await;
+            if asked != ax::NewWindow::NotReady {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+        }
+        // Just started and no window yet: its menus may not have the item
+        // yet. Give them up to 3 s.
+        let just_started = || {
+            off(cx, move || {
+                app::launched_within(pid, LATE_WINDOW_WAIT)
+                    && !windows::all()
+                        .iter()
+                        .any(|w| w.target.pid == pid && w.layer == 0)
+            })
+        };
+        // Only this display's own launch has a watch that moves the window.
+        let started_here = core.read_with(cx, |c, _| {
+            c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+        });
+        // This display's own launch answers at once: its watch moves the
+        // window when it comes.
+        if asked == ax::NewWindow::Missing && !started_here && just_started().await {
+            for _ in 0..20 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                asked = cx
+                    .background_executor()
+                    .spawn(async move { ax::press_new_window(pid) })
+                    .await;
+                if asked != ax::NewWindow::Missing {
+                    break;
+                }
+            }
+        }
+        let starting = asked == ax::NewWindow::Missing && just_started().await;
+        let missing = match asked {
+            ax::NewWindow::Pressed => None,
+            ax::NewWindow::Disabled => Some("app_busy"),
+            // The first launch's watch moves its window when it comes.
+            ax::NewWindow::Missing if started_here && starting => Some("still_starting"),
+            // Started by the user or another session moments ago.
+            ax::NewWindow::Missing if starting => Some("just_started"),
+            ax::NewWindow::Missing => Some("no_new_window"),
+            ax::NewWindow::NotReady => Some("menus_unreadable"),
+        };
+        if let Some(reason) = missing {
+            // No window will take the user's focus: what was held goes to
+            // their window, which still has it.
+            if let Some(id) = hold.take().map(|h| h.detach()) {
+                off(cx, move || {
+                    crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
+                })
+                .await;
+            }
+            drop(catch);
+            if is_url {
+                let next = if matches!(reason, "just_started" | "still_starting") {
+                    "wait a few seconds and call launch_app again".to_string()
+                } else {
+                    format!("ask the user to quit {name}, then call launch_app again")
+                };
+                return Err(ControlError::failed(format!(
+                    "{name} is running and can't open a new window now ({reason}), so the URL was not opened; {next}"
+                )));
+            }
+            return Ok(Launched {
+                window: None,
+                was_running,
+                reason: Some(reason),
+                pid: None,
+            });
+        }
+    }
+    let asked_at = Instant::now();
+
+    // A running app may be the user's: its new window is the one the catch
+    // took, never one the user opens meanwhile. A starting app's windows
+    // are all Agent Screen's.
+    // Off the main thread: reading a window's document asks the app, which
+    // may be busy.
+    let find_ours = |taken: Option<u32>| {
+        let (before, document) = (before.clone(), document.clone());
+        async move {
+            windows::all().into_iter().find(|w| {
+                w.target.pid == pid
+                    && w.layer == 0
+                    && !before.contains(&w.target.window_id)
+                    && (!was_running
+                        || taken == Some(w.target.window_id)
+                        || document
+                            .as_deref()
+                            .is_some_and(|d| shows_document(w.target, d)))
+            })
+        }
+    };
+    let mut gave_up = false;
+    // Takes over from `catch` for a file still opening, with no gap between.
+    let mut document_catch = None;
+    // Every 25 ms for 6 s: the caught window is answered within a tick.
+    for tick in 0..240 {
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+        if single_instance_risk && tick % 8 == 0 && off(cx, quit(pid)).await {
+            drop(catch);
+            core.update(cx, |c, _| {
+                if let Some(d) = c.displays.get_mut(id) {
+                    d.started.remove(&pid);
+                }
+            });
+            return already_running(core, id, name, &instances_before, cx).await;
+        }
+        let taken = catch.as_ref().and_then(|c| c.taken());
+        let open_failed = poll_open(&mut opened);
+        // A window already caught is the app's answer; keep it even if
+        // `open` reports a failure, so it isn't left unclaimed.
+        if open_failed && taken.is_none() {
+            return Err(could_not_open());
+        }
+        // A running app had its chance: stop taking its windows, which may
+        // now be the user's.
+        if was_running
+            && taken.is_none()
+            && waited_long_enough(
+                asked_for_window,
+                asked_at,
+                requested_at,
+                opened.map(|(_, at)| at),
+            )
+        {
+            document_catch = match document.clone() {
+                Some(d) => crate::mac::catch::Catch::for_document(pid, id, screen.clone(), d).await,
+                None => None,
+            };
+            log::debug!(
+                "launch: {name} file catch armed: {}",
+                document_catch.is_some()
+            );
+            catch = None;
+            gave_up = true;
+            break;
+        }
+        if let Some(fresh) = cx.background_executor().spawn(find_ours(taken)).await {
+            let found = started.elapsed().as_millis();
+            let detected = Instant::now();
+            // A hold that ended before the window came, on a click or its
+            // time limit, left the window free to take the user's keys:
+            // hold them again until the hand-back.
+            if let Some(user) = user_window
+                && asked_for_window
+                && !hold.as_ref().is_some_and(|h| h.holding())
+            {
+                if let Some(ended) = hold.take() {
+                    ended.detach();
+                }
+                hold = off(cx, move || {
+                    crate::mac::input::is_front(user.pid)
+                        .then(|| crate::mac::key_hold::start(user))
+                        .flatten()
+                })
+                .await;
+                log::debug!(
+                    "launch: keys held again for the late window: {}",
+                    hold.is_some()
+                );
+            }
+            // A running app's new window is its key window from the start,
+            // where the user's typing goes until Agent Screen hands focus
+            // back (#110): send the URL now, before placing the window, so
+            // that comes sooner. The browser opens it in its key window.
+            let opened = match (was_running && is_url).then_some(target).flatten() {
+                Some(target) => {
+                    // Into the new window's address field where there is
+                    // one Agent Screen knows; else the system sends the URL.
+                    let (new_window, url) = (fresh.target, target.to_string());
+                    let in_field = cx
+                        .background_executor()
+                        .spawn(async move { ax::open_in_address_field(new_window, &url) })
+                        .await;
+                    log::debug!("launch: URL through the address field: {in_field}");
+                    Some(
+                        in_field
+                            || match open_in_background(
+                                path.clone(),
+                                Some(target.to_string()),
+                                false,
+                                &Start::default(),
+                                cx,
+                            )
+                            .await
+                            {
+                                Some(outcome) => {
+                                    cx.background_executor()
+                                        .spawn(async move {
+                                            outcome
+                                                .recv_timeout(Duration::from_secs(10))
+                                                .unwrap_or(false)
+                                        })
+                                        .await
+                                }
+                                None => false,
+                            },
+                    )
+                }
+                None => None,
+            };
+            // While the window is placed, watch for the URL, and give the
+            // user's window its key focus back the moment it shows: placing
+            // takes most of a second, all of it with the user typing into
+            // the new window (#110). The focus record is refused in the
+            // front app, so it goes through accessibility, as a click would.
+            let handback = match (opened, target) {
+                (Some(true), Some(url)) => {
+                    let (window, url) = (fresh.target, url.to_string());
+                    let held = hold.take().map(|h| h.detach());
+                    Some(cx.background_executor().spawn(async move {
+                        let shown = shows_url(window, &url, detected);
+                        // The hold makes the user's window key, then sends
+                        // on what it held. Without one going on, focus goes
+                        // back here.
+                        let ran = held.is_some_and(|id| {
+                            crate::mac::key_hold::finish(
+                                id,
+                                agent_screen_model::key_hold::End::HandedBack,
+                            )
+                        });
+                        if !ran
+                            && let Some(user) = user_window
+                            && crate::mac::input::is_front(user.pid)
+                            && ax::focused_window_id(user.pid) == Some(window.window_id)
+                        {
+                            let given = ax::make_main(user);
+                            log::debug!("launch: key focus back to the user's window: {given}");
+                        }
+                        shown
+                    }))
+                }
+                _ => None,
+            };
+            let placed = settle(core, fresh.target, id, cx).await?;
+            log::debug!(
+                "launch: {name} window at {found} ms, placed at {} ms",
+                started.elapsed().as_millis()
+            );
+            // Whether the running app's new window may give its key focus
+            // back to the user's window before the call ends: one asked for
+            // with nothing to open, or one that shows the agent's URL.
+            let mut settled = was_running && target.is_none();
+            if let (Some(opened), Some(target)) = (opened, target) {
+                if !opened {
+                    return Err(ControlError::failed(format!(
+                        "{name} opened a window on the display but not {target}; open it there yourself"
+                    )));
+                }
+                // `open` returns once the URL is sent, not handled; the
+                // hand-back comes within 2 s whether the page does or not.
+                if let Some(task) = handback {
+                    task.await;
+                    settled = true;
+                }
+            }
+            // The new window took the app's key focus from the user's
+            // window, where they may be typing, as in a browser they use
+            // (#110): hand it back now rather than after the page loads.
+            // Otherwise the call's end hands it back, as after any input.
+            if settled {
+                core.update(cx, |c, _| c.forwarder(id)).keys_done().await;
+                if let Some(id) = hold.take().map(|h| h.detach()) {
+                    off(cx, move || {
+                        crate::mac::key_hold::finish(
+                            id,
+                            agent_screen_model::key_hold::End::HandedBack,
+                        )
+                    })
+                    .await;
+                }
+            }
+            // An app started in the background drops the first click on its
+            // window, which only makes the window key: spend it here.
+            if !was_running {
+                core.update(cx, |c, _| c.forwarder(id))
+                    .wake(placed.target, placed.bounds);
+            }
+            // A page's buttons work only once its scripts have run: an
+            // agent clicking straight after would click a dead page.
+            if is_url {
+                wait_for_page(placed.target, cx).await;
+            }
+            keep_catch(core, id, catch, cx);
+            // A starting app's later windows, such as a main window after a
+            // loading one, may come while it is too busy for the catch.
+            if !was_running {
+                let mut seen = before.clone();
+                seen.insert(placed.target.window_id);
+                watch_cold_start(core, id, pid, seen, true, launched_at, screen.clone(), cx);
+            }
+            log::debug!(
+                "launch: {name} answered at {} ms",
+                started.elapsed().as_millis()
+            );
+            return Ok(Launched {
+                window: Some(placed),
+                was_running,
+                reason: None,
+                pid: (!was_running).then_some(pid),
+            });
+        }
+    }
+    keep_catch(core, id, catch, cx);
+    log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
+    if let Some(id) = hold.take().map(|h| h.detach()) {
+        off(cx, move || {
+            crate::mac::key_hold::finish(id, agent_screen_model::key_hold::End::NoWindow)
+        })
+        .await;
+    }
+    // A slow launch can open its window after we stop waiting. Keep watching
+    // so it does not stay on the user's screen: for an app Agent Screen
+    // started, any new window; for a running app, the one showing the file.
+    let core = core.clone();
+    // The app showed the file in a window it had before; otherwise its
+    // window is still to come, and the watcher above moves it.
+    let shown_already = match document.clone() {
+        Some(d) => {
+            let before = before.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    windows::all().iter().any(|w| {
+                        w.target.pid == pid
+                            && before.contains(&w.target.window_id)
+                            && shows_document(w.target, &d)
+                    })
+                })
+                .await
+        }
+        None => false,
+    };
+    let watching = document
+        .clone()
+        .filter(|_| !shown_already)
+        .filter(|d| core.update(cx, |c, _| c.watching.insert((pid, d.clone()))));
+    if let Some(document) = watching {
+        // A catch for the file's window moves it as it appears; the poll
+        // covers an app that names the document only after.
+        let catch = document_catch.take();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            for _ in 0..200 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let taken = catch.as_ref().and_then(|c| c.taken());
+                let (seen, file) = (before.clone(), document.clone());
+                let late = cx
+                    .background_executor()
+                    .spawn(async move {
+                        windows::all().into_iter().find(|w| {
+                            w.target.pid == pid
+                                && w.layer == 0
+                                && !seen.contains(&w.target.window_id)
+                                && (taken == Some(w.target.window_id)
+                                    || shows_document(w.target, &file))
+                        })
+                    })
+                    .await;
+                if let Some(late) = late {
+                    let _ = settle(&core, late.target, id, cx).await;
+                    break;
+                }
+                if !takes_windows(&core, id, cx) {
+                    break;
+                }
+            }
+            drop(catch);
+            core.update(cx, |c, _| c.watching.remove(&(pid, document)));
+        })
+        .detach();
+    } else if !was_running {
+        // The kept catch takes the first window the moment it opens, unless
+        // the user is clicking or typing then; the watch is for an app that
+        // won't take observers yet. The cold start counts from the launch.
+        watch_cold_start(
+            &core,
+            id,
+            pid,
+            before,
+            false,
+            launched_at,
+            screen.clone(),
+            cx,
+        );
+    }
+    // The URL waits for the new window, which never came: opening it now
+    // would add a tab to whatever window the user has in front.
+    if was_running && is_url {
+        return Err(ControlError::failed(format!(
+            "{name} opened no new window, so the URL was not opened; ask the user to quit {name}, then call launch_app again"
+        )));
+    }
+    Ok(Launched {
+        window: None,
+        was_running,
+        pid: (!was_running).then_some(pid),
+        reason: Some(if !was_running {
+            "still_starting"
+        } else if asked_for_window {
+            "no_new_window"
+        } else if shown_already {
+            "existing_window"
+        } else {
+            "still_opening"
+        }),
+    })
+}
+
+/// The answer when the instance a launch started quit at once, as an app
+/// that allows one instance does, passing its arguments to the running one
+/// (#29): that instance's window on the display, or an error that says the
+/// app is already running.
+async fn already_running(
+    core: &Entity<Core>,
+    id: DisplayId,
+    name: &str,
+    running: &[i32],
+    cx: &mut AsyncApp,
+) -> Result<Launched, ControlError> {
+    log::info!(
+        "launch: {name} quit at once; it allows one instance, already running as {running:?}"
+    );
+    let on_display: std::collections::HashSet<u32> = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .map(|d| d.records.keys().copied().collect())
+            .unwrap_or_default()
+    });
+    let running = running.to_vec();
+    let theirs = running.clone();
+    let window = off(cx, move || {
+        windows::on_display(id).into_iter().find(|w| {
+            theirs.contains(&w.target.pid)
+                && w.layer == 0
+                && on_display.contains(&w.target.window_id)
+        })
+    })
+    .await;
+    match window {
+        Some(window) => Ok(Launched {
+            window: Some(window),
+            was_running: true,
+            reason: Some("already_running"),
+            pid: None,
+        }),
+        None => Err(ControlError::failed(format!(
+            "{name} is already running (pid {}) and allows only one instance: the new instance quit at once and passed its arguments to the running one, which has no window on this display. Ask the user to quit {name}, then call launch_app again; or call launch_app without arguments and environment to ask the running app for a new window",
+            running.first().copied().unwrap_or_default()
+        ))),
+    }
+}
+
+/// What a launch opens in place of `target`, if anything: a file URL's file
+/// for an app that isn't a browser, and a file path's URL for a browser,
+/// which opens either as a page. A file URL's file must exist; open_target
+/// checked a path's.
+fn file_target(target: Option<&str>, browser: bool) -> Result<Option<String>, ControlError> {
+    if let Some(path) = target.filter(|t| browser && t.starts_with('/')) {
+        return Ok(Some(agent_screen_model::launch::file_url(path)));
+    }
+    let Some(url) = target.filter(|t| t.starts_with("file://")) else {
+        return Ok(None);
+    };
+    let path = ax::file_url_path(url)
+        .ok_or_else(|| ControlError::invalid(format!("{url} isn't a file URL")))?;
+    if !path.exists() {
+        return Err(ControlError::not_found(format!(
+            "no file at {}",
+            path.display()
+        )));
+    }
+    Ok((!browser).then(|| path.to_string_lossy().into_owned()))
+}
+
+/// Whether a window shows a file, by its AXDocument URL.
+fn shows_document(target: WindowTarget, path: &std::path::Path) -> bool {
+    ax::window_element(target)
+        .and_then(|w| ax::document_path(&w))
+        .is_some_and(|p| p == path)
+}
+
+/// Whether a running app has had its time to make the window Agent Screen
+/// asked for: counted from Command-N, or from when `open` returned, and
+/// never longer than RUNNING_APP_TURN from the request.
+fn waited_long_enough(
+    asked_for_window: bool,
+    asked_at: Instant,
+    requested_at: Instant,
+    opened_at: Option<Instant>,
+) -> bool {
+    if asked_for_window {
+        asked_at.elapsed() > ASKED_WINDOW_WAIT
+    } else {
+        requested_at.elapsed() > running_app_turn()
+            || opened_at.is_some_and(|at| at.elapsed() > OPENED_WINDOW_WAIT)
+    }
+}
+
+/// Place a new window and wait until it is really on the display. A window
+/// manager may not know about a window for a moment after it appears.
+async fn settle(
+    core: &Entity<Core>,
+    mut target: WindowTarget,
+    id: DisplayId,
+    cx: &mut AsyncApp,
+) -> Result<windows::Window, ControlError> {
+    let ended = || ControlError::ended(format!("display {id} has ended"));
+    if !takes_windows(core, id, cx) {
+        return Err(ended());
+    }
+    claim(core, id, target, Origin::Launched, cx);
+    // AeroSpace may take a placed window back to its own layout a moment
+    // later; then look again a while after, and `guard_placed` keeps
+    // looking for 3 s past the answer. Even one that ignores Agent Displays
+    // does: it files a new window that opened on the user's screen in their
+    // workspace, and a layout pass begun before the window moved puts it
+    // back there. Without AeroSpace a window placed is a window held.
+    let aerospace_takes = cx
+        .background_executor()
+        .spawn(async { crate::mac::aerospace::AeroSpace::current().is_some() })
+        .await;
+    let look = if aerospace_takes { 200 } else { 30 };
+    let mut last_error = None;
+    for _ in 0..12 {
+        if !takes_windows(core, id, cx) {
+            return Err(ended());
+        }
+        // An app given a file may close the window it opened first and show
+        // the document in another, as Pages does importing text: follow the
+        // app to that one.
+        if let Some(other) = replacement(core, target, cx).await {
+            log::info!(
+                "window {} closed while placing; following {} of the same app",
+                target.window_id,
+                other.window_id
+            );
+            target = other;
+            claim(core, id, target, Origin::Launched, cx);
+        }
+        if let Err(e) = place(target, id, cx).await {
+            last_error = Some(e);
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(look))
+            .await;
+        if !held(target, id, cx).await {
+            continue;
+        }
+        let on_display = move || {
+            windows::on_display(id)
+                .into_iter()
+                .find(|w| w.target == target)
+        };
+        if let Some(placed) = off(cx, on_display).await {
+            if aerospace_takes {
+                guard_placed(core, target, id, cx);
+            }
+            // The new app's window takes the keys, not the last one clicked.
+            let forwarder = core.update(cx, |c, _| c.forwarder(id));
+            forwarder.focus(target).await;
+            // A window bigger than the display gets pulled inside.
+            let moved = cx
+                .background_executor()
+                .spawn(async move { windows::keep_inside(id) })
+                .await;
+            if moved && let Some(kept) = off(cx, on_display).await {
+                return Ok(kept);
+            }
+            return Ok(placed);
+        }
+    }
+    // Left where it opened, it would sit on the user's screen.
+    let minimized = cx
+        .background_executor()
+        .spawn(async move { ax::minimize(target) })
+        .await;
+    Err(ControlError::failed(format!(
+        "the window opened but could not be placed on the display{}; {}",
+        last_error.map(|e| format!(": {e}")).unwrap_or_default(),
+        if minimized {
+            "it was minimized so it stays off the user's screen"
+        } else {
+            "it may be on the user's screen"
+        }
+    )))
+}
+
+/// Another window of `target`'s app, once `target` has closed: one no
+/// display has, the newest first.
+async fn replacement(
+    core: &Entity<Core>,
+    target: WindowTarget,
+    cx: &mut AsyncApp,
+) -> Option<WindowTarget> {
+    let claimed: std::collections::HashSet<u32> = core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .flat_map(|d| d.records.keys().copied())
+            .collect()
+    });
+    cx.background_executor()
+        .spawn(async move {
+            let all = windows::all();
+            if all.iter().any(|w| w.target == target) || ax::window_element(target).is_some() {
+                return None;
+            }
+            all.into_iter()
+                .filter(|w| {
+                    w.target.pid == target.pid
+                        && w.layer == 0
+                        && !claimed.contains(&w.target.window_id)
+                })
+                .map(|w| w.target)
+                .max_by_key(|t| t.window_id)
+        })
+        .await
+}
+
+/// Watch a window just placed for 3 s more, and place it again if it leaves
+/// the display. AeroSpace files a window that opened on the user's screen in
+/// their workspace, and a layout pass that began before the window moved
+/// puts it back there, a second or more later when the pass is slow. Nothing
+/// moves it again after that, so it would stay on the user's screen. Stops
+/// once the user takes the window back.
+fn guard_placed(core: &Entity<Core>, target: WindowTarget, id: DisplayId, cx: &mut AsyncApp) {
+    let core = core.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        // 3 s of looking, not counting while displays change, up to 10 s.
+        let mut looks = 0;
+        for _ in 0..40 {
+            if looks == 12 {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            // While another display comes or goes, this one moves and its
+            // windows follow a moment apart: the window only seems to have
+            // left. Putting it back then would put it on another display.
+            if cg::displays_changed_within(Duration::from_millis(1000)) {
+                continue;
+            }
+            looks += 1;
+            // Ended, taken back by the user, or closed: no longer ours to keep.
+            // Pause only while the Viewer is actively dragging or watching this
+            // window (`keep_on_display`), not for the entire Takeover (`L5`).
+            let recorded = core.read_with(cx, |c, _| {
+                c.displays
+                    .get(id)
+                    .is_some_and(|d| d.records.contains_key(&target.window_id))
+            });
+            if !recorded
+                || !takes_windows(&core, id, cx)
+                || off(cx, move || windows::find(target.window_id).is_none()).await
+            {
+                return;
+            }
+            if crate::mac::input::viewer_watching_window(target.window_id) {
+                continue;
+            }
+            // Displays move as others come and go, and their windows a
+            // moment apart, so a window may seem to sit on the display next
+            // door. Only one on the user's screen has really left.
+            // AeroSpace that tiles agent displays may still hide it there.
+            let (on_virtual, aerospace_tiles) = off(cx, move || {
+                (
+                    windows::on_virtual_display(target.window_id),
+                    !crate::mac::aerospace::ignores_now()
+                        && crate::mac::aerospace::AeroSpace::current().is_some(),
+                )
+            })
+            .await;
+            if on_virtual && !aerospace_tiles {
+                continue;
+            }
+            if !held(target, id, cx).await {
+                // Taken back while we looked: home is where it goes.
+                let still = core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| {
+                        d.records.contains_key(&target.window_id)
+                            && !d.returned.contains(&target.window_id)
+                    })
+                });
+                if !still {
+                    return;
+                }
+                let now = off(cx, move || {
+                    windows::find(target.window_id).map(|w| (w.app, w.bounds))
+                })
+                .await;
+                log::info!(
+                    "window {} left display {id} after placing, for {now:?}; placing again",
+                    target.window_id,
+                );
+                let _ = place(target, id, cx).await;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Wait for the display to stop changing after an action, then bring back
+/// any window the action grew past the display's edges.
+async fn settle_display(core: &Entity<Core>, id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+    wait_until_still(id, size, cx).await;
+    adopt_opened(core, id, cx).await;
+    let moved = cx
+        .background_executor()
+        .spawn(async move { windows::keep_inside(id) })
+        .await;
+    if moved {
+        wait_until_still(id, size, cx).await;
+    }
+    // Some apps resize after the display looked still: Calculator takes
+    // over 300 ms to switch to Scientific. Look again a little later.
+    let core = core.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        for wait in [400, 800] {
+            cx.background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            adopt_opened(&core, id, cx).await;
+            cx.background_executor()
+                .spawn(async move { windows::keep_inside(id) })
+                .await;
+        }
+    })
+    .detach();
+}
+
+/// Wait until the display stops changing after an action, so the
+/// screenshot shows its result: no new frame for 120 ms, after the first
+/// change, or 500 ms with none; at most 1.5 s.
+/// While agents act, the display streams at 30 fps at thumbnail size, and
+/// ScreenCaptureKit only delivers a frame when something changed.
+/// The small stream that counts a display's changes, at the size it runs.
+fn change_pixels(size: (f64, f64)) -> (u32, u32) {
+    (416, (416.0 * size.1 / size.0) as u32)
+}
+
+/// Before an action: have the display's changes counted, so the stream is
+/// running by the time the screenshot after it waits for the display to
+/// settle. A stream started only then misses changes while it starts.
+fn watch_for_changes(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
+    let Some(streams) = crate::ui::stream::global() else {
+        return;
+    };
+    let size = core
+        .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+        .unwrap_or(DEFAULT_SIZE);
+    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
+    ACTION_BASE.with(|b| b.borrow_mut().insert(id, Instant::now()));
+    keep_counting(id, cx);
+}
+
+/// Keep the display's change count running for a while: the next action
+/// usually follows, and a stream that is already counting sees its change.
+fn keep_counting(id: DisplayId, cx: &mut AsyncApp) {
+    let Some(streams) = crate::ui::stream::global() else {
+        return;
+    };
+    let wanted = Instant::now();
+    AGENT_ACTIVE.with(|a| a.borrow_mut().insert(id, wanted));
+    let streams = streams.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.background_executor()
+            .timer(Duration::from_secs(30))
+            .await;
+        let latest = AGENT_ACTIVE.with(|a| a.borrow().get(&id).copied());
+        if latest == Some(wanted) {
+            AGENT_ACTIVE.with(|a| a.borrow_mut().remove(&id));
+            let _ = streams.update(cx, |s, cx| s.want(id, "agent", 0, (0, 0), cx));
+        }
+    })
+    .detach();
+}
+
+async fn wait_until_still(id: DisplayId, size: (f64, f64), cx: &mut AsyncApp) {
+    let Some(streams) = crate::ui::stream::global() else {
+        cx.background_executor()
+            .timer(Duration::from_millis(350))
+            .await;
+        return;
+    };
+    streams.update(cx, |s, cx| s.want(id, "agent", 30, change_pixels(size), cx));
+    let start = Instant::now();
+    // The stream has been counting since the action, so no change after it
+    // is lost to a stream still starting. An app may draw what an action
+    // did a moment after its first change, as a page that turns red 400 ms
+    // after a click whose counter updates at once (issue #16): so whatever
+    // changed, the wait lasts half a second from the action, then until
+    // the display has been still for 120 ms.
+    let since = ACTION_BASE
+        .with(|b| b.borrow_mut().remove(&id))
+        .filter(|at| at.elapsed() < Duration::from_secs(5))
+        .unwrap_or(start);
+    let mut last = streams.read_with(cx, |s, _| s.changes(id));
+    let mut quiet_since = start;
+    while start.elapsed() < Duration::from_millis(1500) {
+        let now = streams.read_with(cx, |s, _| s.changes(id));
+        if now != last {
+            last = now;
+            quiet_since = Instant::now();
+        } else if quiet_since.elapsed() >= Duration::from_millis(120)
+            && since.elapsed() >= Duration::from_millis(500)
+        {
+            break;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(30))
+            .await;
+    }
+    keep_counting(id, cx);
+}
+
+/// What an agent hears after pressing a menu item of an app built on VS
+/// Code, such as Cursor: with the terminal focused, Edit > Find opened the
+/// terminal's find box (`cargo e2e cursormenu`).
+const VS_CODE_MENU_NOTE: &str = "This app is built on VS Code. It ran this menu item as the item's keyboard shortcut in whatever has focus, not as the menu's own command, because Electron reports a menu item pressed through accessibility as its shortcut. With the terminal, a panel or an input box focused, the result can differ: Edit > Find opened the terminal's find box. Check the window. To run the command itself, open the Command Palette with key cmd+shift+p, type the command's name and press Return.";
+
+/// What an agent hears after pressing an Electron app's menu item.
+const ELECTRON_MENU_NOTE: &str = "This is an Electron app. Electron reports a menu item pressed through accessibility to the app as its keyboard shortcut (event.triggeredByAccelerator is true), and some apps ignore shortcuts while a text field has focus. If the window shows no change, press the item again with real_input: true: once the user allows it, Agent Screen chooses it with a real click on the display's menu bar. Or move focus out of the text field, with a click on an empty part of the window, then press it again.";
+
+thread_local! {
+    /// When each display last settled after an action.
+    static AGENT_ACTIVE: std::cell::RefCell<std::collections::HashMap<DisplayId, std::time::Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// When each display's last action began.
+    static ACTION_BASE: std::cell::RefCell<std::collections::HashMap<DisplayId, Instant>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Screenshot pixels per display point: below 1 on displays whose
+/// screenshot is scaled down.
+fn display_scale(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> f64 {
+    let size = core
+        .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+        .unwrap_or(DEFAULT_SIZE);
+    shot_scale(size)
+}
+
+/// A window's bounds, in display points, as screenshot pixels: the space
+/// the computer tool clicks in.
+fn in_shot(mut window: Value, scale: f64) -> Value {
+    for key in ["x", "y", "width", "height"] {
+        if let Some(n) = window[key].as_f64() {
+            window[key] = json!((n * scale).round() as i64);
+        }
+    }
+    window
+}
+
+/// Where an agent's keys go: posted to the app, or, when it is the user's
+/// front app with their window focused, beside that window (#110).
+enum Gate {
+    Post,
+    Beside(Beside),
+}
+
+async fn keys_gate(
+    forwarder: &crate::mac::input::Forwarder,
+    within: Rect,
+    cx: &mut AsyncApp,
+) -> Result<Gate, ControlError> {
+    let Some(target) = forwarder.keys_target(within).await else {
+        return Err(no_keyboard_target());
+    };
+    match shared_app::front(target, cx).await {
+        // In front with the agent's window focused, as when an app it
+        // started activates itself, keys go to that window: fine.
+        (Front::No | Front::TargetFocused, _) => Ok(Gate::Post),
+        (Front::OtherFocused, Some(focused)) => Ok(Gate::Beside(Beside { target, focused })),
+        _ => {
+            let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
+            Err(shared_app::unknown_focus(&name))
+        }
+    }
+}
+
+/// Keys that go out only as posted events, as a held key or the input
+/// method's: refused beside the user's window.
+async fn keys_allowed(
+    forwarder: &crate::mac::input::Forwarder,
+    within: Rect,
+    cx: &mut AsyncApp,
+) -> Result<(), ControlError> {
+    match keys_gate(forwarder, within, cx).await? {
+        Gate::Post => Ok(()),
+        Gate::Beside(beside) => Err(shared_app::refusal(beside, "the keys")),
+    }
+}
+
+fn forwarder_stopped(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.update(cx, |c, _| c.forwarder(id)).agent_stopped()
+}
+
+/// Keys through the user's input method (ADR 0008). The display says the
+/// agent has the user's keyboard while the keys go in.
+async fn through_input_method(
+    core: &Entity<Core>,
+    id: DisplayId,
+    keys: Vec<KeyChord>,
+    source: Option<String>,
+    cx: &mut AsyncApp,
+) -> Result<Params, ControlError> {
+    let forwarder = core.update(cx, |c, _| c.forwarder(id));
+    let bounds = cg::display_bounds(id);
+    keys_allowed(&forwarder, bounds, cx).await?;
+    let Some(target) = forwarder.keys_target(bounds).await else {
+        forwarder.keys_done().await;
+        return Err(no_keyboard_target());
+    };
+    let borrow = |core: &Entity<Core>, on: bool, cx: &mut AsyncApp| {
+        core.update(cx, |c, cx| {
+            if let Some(display) = c.displays.get_mut(id) {
+                display.keyboard_borrowed = on;
+            }
+            cx.notify();
+        })
+    };
+    borrow(core, true, cx);
+    let total = keys.len();
+    let waker = forwarder.clone();
+    let wake = move || {
+        if let Some(bounds) = cg::window_bounds(target.window_id) {
+            futures::executor::block_on(waker.wake_now(target, bounds));
+        }
+    };
+    let typed = cx
+        .background_executor()
+        .spawn(async move { crate::mac::ime::type_keys(target, &keys, source.as_deref(), wake) })
+        .await;
+    borrow(core, false, cx);
+    forwarder.keys_done().await;
+    match typed {
+        Ok(crate::mac::ime::Typed::All) => Ok(Params::new()),
+        Ok(crate::mac::ime::Typed::Stopped(sent)) => Err(ControlError::failed(format!(
+            "the user touched the keyboard or pointer after {sent} of {total} keys, so the input method stopped and their app is in front again. Take a screenshot, then send the rest once they've stopped."
+        ))),
+        Err(reason) => Err(ControlError::failed(reason)),
+    }
+}
+
+/// Why keys found nowhere to go: their app's focused window was off the
+/// Agent Displays, so they were refused (#120), or no window on the
+/// display takes keys.
+async fn keys_refused(forwarder: &crate::mac::input::Forwarder, id: DisplayId) -> ControlError {
+    match forwarder.take_refused().await {
+        Some(refused) => refused_error(&refused, id),
+        None => no_keyboard_target(),
+    }
+}
+
+fn refused_error(refused: &crate::mac::input::Refused, id: DisplayId) -> ControlError {
+    let app = &refused.app;
+    let focused = match &refused.window {
+        Some(title) if !title.is_empty() => {
+            format!("{app}'s focused window, {title:?}, is not on an Agent Display")
+        }
+        Some(_) => format!("{app}'s focused window is untitled and not on an Agent Display"),
+        None => format!(
+            "Accessibility could not say which window of {app} has focus, and {app} has a window that is not on an Agent Display"
+        ),
+    };
+    ControlError::failed(format!(
+        "{focused}, so keys posted to {app} could reach the user's window instead of yours on display {id}. Agent Screen refused the keys before sending any, and won't bring {app} to the front to fix that. Use act_on_element insert_text or set_value on the field, or click inside your window once and retry."
+    ))
+}
+
+fn no_keyboard_target() -> ControlError {
+    ControlError::not_found(
+        "no window on the display can take keyboard input; launch an app or click a field first",
+    )
+}
+
+/// For 30 s after a cold start, decide each new window of the app that the
+/// catch didn't, by ADR 0007's rule (`new_window::watch`): one the app made
+/// before it took observers, or while too busy to answer Accessibility, as
+/// WeCom's main window, 3.4 s after its loading window, was. Without a kept
+/// catch yet, it tries for one again. A window the app can't describe yet
+/// waits, up to 60 s from the launch. `shown`: launch_app answered with a
+/// window of the app. `launched_at`: when the cold start began.
+#[allow(clippy::too_many_arguments)]
+fn watch_cold_start(
+    core: &Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    mut seen: std::collections::HashSet<u32>,
+    mut shown: bool,
+    launched_at: Instant,
+    screen: Option<String>,
+    cx: &mut AsyncApp,
+) {
+    use agent_screen_model::new_window::{
+        On, Role, Seen, Step, Tick, Watch, retries_catch, step, watch,
+    };
+    let core = core.clone();
+    let bounds = cg::display_bounds(id);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        // Each window the app didn't describe yet: what was known as it
+        // first showed, and when, so the user's input since counts.
+        let mut first_seen: std::collections::HashMap<u32, (Seen, Instant)> = Default::default();
+        for tick in 0u32.. {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let started = takes_windows(&core, id, cx)
+                && core.read_with(cx, |c, _| {
+                    c.displays.get(id).is_some_and(|d| d.started.contains(&pid))
+                });
+            let hidden = off(cx, move || app::is_hidden(pid)).await;
+            // Only asked when it would move the hidden app's windows.
+            let theirs = hidden && !shown && {
+                let users = core.update(cx, |c, _| users_windows(c, id));
+                off(cx, move || {
+                    ax::elements_attribute(&ax::application(pid), "AXWindows")
+                        .iter()
+                        .any(|w| ax::window_id(w).is_some_and(|w| users.contains(&w)))
+                })
+                .await
+            };
+            let now = step(Tick {
+                elapsed: launched_at.elapsed(),
+                started,
+                hidden,
+                shown,
+                theirs,
+                waiting: !first_seen.is_empty(),
+            });
+            match now {
+                Step::Stop => return,
+                Step::GiveUp => {
+                    for window in first_seen.keys() {
+                        log::info!(
+                            "launch: pid {pid} never said what window {window} is; left where it is"
+                        );
+                    }
+                    core.update(cx, |c, _| {
+                        c.left_alone
+                            .extend(first_seen.keys().map(|window| (id, *window)))
+                    });
+                    return;
+                }
+                // Its windows are listed nowhere: move them in, then show.
+                Step::ShowHidden => {
+                    off(cx, move || {
+                        if ax::move_all_into(pid, bounds) > 0 {
+                            app::unhide(pid);
+                        }
+                    })
+                    .await;
+                    continue;
+                }
+                Step::Skip => continue,
+                Step::Look | Step::Resolve => {}
+            }
+            // No catch yet, as for an app that took no observers while it
+            // started: try for one again now and then.
+            let caught = |c: &Core| c.kept_catches.iter().any(|(_, k)| k.pid() == pid);
+            if now == Step::Look && retries_catch(tick) && !core.read_with(cx, |c, _| caught(c)) {
+                let catch = crate::mac::catch::Catch::start(pid, id, screen.clone(), None);
+                keep_catch(&core, id, catch.await, cx);
+            }
+            let others: Vec<Rect> = core.read_with(cx, |c, _| {
+                c.displays
+                    .list
+                    .iter()
+                    .filter(|d| d.id != id)
+                    .map(|d| cg::display_bounds(d.id))
+                    .collect()
+            });
+            let listed = seen.clone();
+            let known = first_seen.clone();
+            // Past the cold start, only the windows seen in it.
+            let only_waiting = now == Step::Resolve;
+            // Every window's facts first, then what each is: asking a busy
+            // app takes up to 1 s a window.
+            let late: Vec<(windows::Window, On, Seen, Instant, Role)> = off(cx, move || {
+                let found: Vec<(windows::Window, On, Seen, Instant)> = windows::all()
+                    .into_iter()
+                    .filter(|w| {
+                        let window = w.target.window_id;
+                        w.target.pid == pid
+                            && w.layer == 0
+                            && !listed.contains(&window)
+                            && (!only_waiting || known.contains_key(&window))
+                    })
+                    .map(|w| {
+                        let mid = w.bounds.mid();
+                        let on = if bounds.contains(mid) {
+                            On::ThisDisplay
+                        } else if others.iter().any(|d| d.contains(mid)) {
+                            On::OtherDisplay
+                        } else {
+                            On::Elsewhere
+                        };
+                        let window = w.target.window_id;
+                        let (facts, sighted) = known.get(&window).copied().unwrap_or_else(|| {
+                            (
+                                crate::mac::catch::seen(id, pid, bounds, Some(window)),
+                                Instant::now(),
+                            )
+                        });
+                        (w, on, facts, sighted)
+                    })
+                    .collect();
+                found
+                    .into_iter()
+                    .map(|(w, on, facts, sighted)| {
+                        let role = crate::mac::catch::role(w.target);
+                        (w, on, facts, sighted, role)
+                    })
+                    .collect()
+            })
+            .await;
+            shown |= !late.is_empty();
+            for (window, on, facts, sighted, role) in late {
+                let target = window.target;
+                // Read right before deciding, as reading roles and settling
+                // other windows take seconds: a window the user clicked
+                // into since it showed isn't the agent's, and a taken-back
+                // app is the user's.
+                let user_since =
+                    off(cx, move || crate::mac::catch::user_acted_since(pid, sighted)).await;
+                let facts = facts.with_user_now(user_since);
+                let decided = !still_agents(&core, id, target, cx);
+                let verdict = watch(on, decided, role, facts);
+                if verdict == Watch::Later {
+                    first_seen.insert(target.window_id, (facts, sighted));
+                    continue;
+                }
+                seen.insert(target.window_id);
+                first_seen.remove(&target.window_id);
+                if !decided && facts.ends_cold_start() {
+                    crate::mac::catch::end_cold_start(id, pid);
+                }
+                match verdict {
+                    Watch::Leave | Watch::Later => {}
+                    // As the catch left it: placed and recorded the way
+                    // launch_app places its window.
+                    Watch::Record => {
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Place => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch; the agent's ({facts:?})",
+                            target.window_id
+                        );
+                        let _ = settle(&core, target, id, cx).await;
+                    }
+                    Watch::Theirs => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch while the user acted on it; theirs",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| {
+                            if let Some(d) = c.displays.get_mut(id) {
+                                d.user_made.insert(target.window_id);
+                            }
+                        });
+                    }
+                    Watch::Undecided => {
+                        log::info!(
+                            "launch: pid {pid} made window {} past its catch ({facts:?}, {role:?}); left where it is",
+                            target.window_id
+                        );
+                        core.update(cx, |c, _| c.left_alone.push((id, target.window_id)));
+                    }
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// The windows of the display's apps that are the user's: made by them,
+/// taken back, or left with them undecided.
+fn users_windows(c: &mut Core, id: DisplayId) -> std::collections::HashSet<u32> {
+    sync_user_made(c, id);
+    let undecided = c
+        .kept_catches
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .flat_map(|(_, k)| k.undecided());
+    let left = c
+        .left_alone
+        .iter()
+        .filter(|(display, _)| *display == id)
+        .map(|(_, w)| *w);
+    let mut theirs: std::collections::HashSet<u32> = undecided.chain(left).collect();
+    if let Some(d) = c.displays.get(id) {
+        theirs.extend(d.user_made.iter().chain(&d.returned).copied());
+    }
+    theirs
+}
+
+/// The display still exists and has not ended, so windows may go onto it.
+fn takes_windows(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| !d.is_ended()))
+}
+
+// MARK: Input Queue
+
+async fn input_queue_action(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    let id = display(core, p, true, cx)?;
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = p
+        .int("requestId")
+        .map(|id| {
+            u64::try_from(id)
+                .ok()
+                .filter(|id| *id != 0)
+                .ok_or_else(|| ControlError::invalid("requestId must be a positive integer"))
+        })
+        .transpose()?;
+    // Checked before any change: done forgets results, so a request id
+    // with it would fail after the session's requests were already gone.
+    let action = Action::parse(
+        &p.string("action").unwrap_or_else(|| "status".into()),
+        request,
+    )
+    .map_err(ControlError::invalid)?;
+    let wait_for = match action {
+        Action::Request => {
+            let operation = p
+                .string("operation")
+                .ok_or_else(|| ControlError::invalid("operation is required"))?;
+            let reason = p
+                .string("reason")
+                .ok_or_else(|| ControlError::invalid("reason is required"))?;
+            Some(
+                core.update(cx, |c, cx| {
+                    let result = c.input_queue.submit(owner.clone(), operation, reason, None);
+                    cx.notify();
+                    result
+                })
+                .map_err(ControlError::invalid)?,
+            )
+        }
+        Action::Withdraw(request) => {
+            core.update(cx, |c, cx| {
+                let result = c.input_queue.withdraw(&owner, request);
+                cx.notify();
+                result
+            })
+            .map_err(ControlError::invalid)?;
+            Some(request)
+        }
+        Action::Done => {
+            core.update(cx, |c, cx| {
+                c.input_queue.done(&owner);
+                cx.notify();
+            });
+            None
+        }
+        Action::Wait(request) => Some(request),
+        Action::Status(request) => request,
+    };
+    if let Some(request) = wait_for {
+        core.read_with(cx, |c, _| c.input_queue.request_for(&owner, request))
+            .map_err(ControlError::invalid)?;
+    }
+    // A wait on a drag makes it runnable again: its result comes back here.
+    if let Action::Wait(request) = action {
+        core.update(cx, |c, _| c.input_queue.attach(request));
+    }
+    let waits = matches!(action, Action::Request | Action::Wait(_));
+    let timeout = if waits {
+        p.number("timeout").unwrap_or(60.0).clamp(0.0, 60.0)
+    } else {
+        0.0
+    };
+    let until = Instant::now() + Duration::from_secs_f64(timeout);
+    loop {
+        let state = core.update(cx, |c, cx| -> Result<(Value, bool), ControlError> {
+            if !c
+                .input_queue
+                .owner(id, connection)
+                .is_ok_and(|current| current == owner)
+            {
+                return Err(ControlError::failed(
+                    "the input request's display lifetime ended; any running drag is stopping. Inspect its result before retrying",
+                ));
+            }
+            let changed = c.input_queue.tick();
+            let paused = c.displays.get(id).is_some_and(|d| d.takeover);
+            let state = c.input_queue.status(&owner, wait_for, paused);
+            let waiting = waits && wait_for.is_some_and(|r| c.input_queue.awaits(r, paused));
+            // A started loan must release its inputs before this call
+            // returns, even if the approval wait's deadline has passed.
+            let running = wait_for.is_some_and(|r| {
+                c.input_queue.queue.request(r).is_some_and(|r| {
+                    matches!(r.status, agent_screen_model::input_queue::Status::Running
+                        | agent_screen_model::input_queue::Status::Stopping(_))
+                })
+            });
+            if waiting && !running
+                && Instant::now() >= until
+                && let Some(r) = wait_for
+            {
+                c.input_queue.detach(r);
+            }
+            if changed {
+                cx.notify();
+            }
+            Ok((state, waiting && (running || Instant::now() < until)))
+        })?;
+        let (state, waiting) = state;
+        if !waiting {
+            return Ok(state);
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+    }
+}
+
+async fn queued_drag(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    path: ((f64, f64), Option<(f64, f64)>),
+    modifiers: crate::keychord::Modifiers,
+    why: &str,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let (from, to) = path;
+    let (target, frame) = off(cx, move || crate::mac::input::real_drag_window_at(from))
+        .await
+        .ok_or_else(|| ControlError::not_found("no window at the drag's start"))?;
+    // The window under the end may be another window of the display, as
+    // when a file goes from Finder onto a web page (ADR 0013, "Drags
+    // between windows").
+    let (drop, drop_frame) = match to {
+        Some(to) => off(cx, move || crate::mac::input::real_drag_window_at(to))
+            .await
+            .ok_or_else(|| ControlError::not_found("no window at the drag's end"))?,
+        None => (target, frame),
+    };
+    let area = cg::display_bounds(id);
+    let point = |p: (f64, f64)| ((p.0 - area.x).round() as i64, (p.1 - area.y).round() as i64);
+    let reason = match to {
+        Some(to) => format!(
+            "Drag from {:?} to {:?} on this display",
+            point(from),
+            point(to)
+        ),
+        None => format!("Begin dragging at {:?} on this display", point(from)),
+    };
+    // A press held across calls would keep the user's button down while the
+    // agent thinks, so only a whole drag runs; a press only asks.
+    let plan = to.map(|to| crate::input_queue::Drag {
+        target,
+        frame,
+        drop,
+        drop_frame,
+        area,
+        from,
+        to,
+        flags: crate::mac::input::flags(modifiers).0,
+    });
+    let operation = format!(
+        "drag:{}:{from:?}:{to:?}:{}",
+        target.window_id,
+        modifier_bits(modifiers)
+    );
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                plan.map(crate::input_queue::Plan::Drag),
+            );
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    match r["state"].as_str() {
+        Some("completed") => {
+            show_pointer(core, id, to.unwrap_or(from), false, cx);
+            reply(json!({
+                "route": "real_input",
+                "requestId": request,
+                "timing": r["timing"],
+                "note": "The drag ran with the user's pointer, which stays on this display until the approval ends. Call input_queue done when you need no more drags with it: the pointer and the user's front app then come back at once, instead of 30 s after your last drag.",
+            }))
+        }
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => {
+            Err(ControlError::failed(format!(
+                "The drag with the user's pointer stopped partway ({}{}); the button was let go. Take a screenshot before retrying. Input queue status: {state}",
+                r["stopReason"].as_str().unwrap_or("stopped"),
+                r["failure"]
+                    .as_str()
+                    .map(|f| format!(": {f}"))
+                    .unwrap_or_default(),
+            )))
+        }
+        _ => Err(ControlError {
+            code: "input_pending",
+            message: format!(
+                "{why} No drag or press was sent. Input queue status: {state}. {}",
+                if plan.is_some() {
+                    "The drag runs with the user's pointer once they allow it and while your call waits: retry the same drag with real_input to wait again, or use input_queue to inspect or withdraw it."
+                } else {
+                    "A press held across calls can't use the user's pointer. Once they allow it, use left_click_drag with real_input for the whole drag."
+                }
+            ),
+        }),
+    }
+}
+
+fn button_name(button: Button) -> &'static str {
+    match button {
+        Button::Left => "left",
+        Button::Right => "right",
+        Button::Middle => "middle",
+    }
+}
+
+/// A click with the user's real pointer, once they allow it (ADR 0013,
+/// "Clicks"). The agent asks after a background click visibly had no
+/// effect; nothing goes out on the background route while the request is
+/// outstanding, so the click never runs twice.
+async fn queued_click(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    at: (f64, f64),
+    click: real_click::Click,
+    modifiers: crate::keychord::Modifiers,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let area = cg::display_bounds(id);
+    let (x, y) = real_click::display_point(at, area);
+    let hit = off(cx, move || {
+        let on_disp = windows::on_display(id);
+        let targets: Vec<WindowTarget> = on_disp.iter().map(|w| w.target).collect();
+        let hit = crate::mac::input::real_click_at(at, &targets)?;
+        let window = on_disp.into_iter().find(|w| w.target == hit.window)?;
+        let frame = window.bounds.offset(area.x, area.y);
+        Some((hit, frame, window.app, window.title))
+    })
+    .await;
+    let Some((hit, frame, app, title)) = hit else {
+        return Err(ControlError::not_found(format!(
+            "no window of yours at ({x}, {y}) on display {id}, so no click was asked for"
+        )));
+    };
+    let target = hit.window;
+    let hit_frame = hit.menu.map_or(frame, |(_, mf)| mf);
+    if !real_click::contained(at, area, hit_frame) {
+        return Err(ControlError::invalid(
+            "the window under that point reaches past your Agent Display, so its click can't use the user's pointer",
+        ));
+    }
+    let ax_pid = hit.ax_pid;
+    // What the agent aimed at, to compare just before the loan clicks: a
+    // list can reorder while the user decides.
+    let (region, look, element) = off(cx, move || {
+        // Chromium and Electron publish their pages' elements only once
+        // asked.
+        if hit.menu.is_none() {
+            crate::mac::ax::ensure_web_tree(target);
+        }
+        let (element, framed) =
+            crate::mac::ax::target_at(ax_pid, at, std::time::Duration::from_secs(1), true);
+        let region = real_click::look_region(at, area, hit_frame, framed);
+        (region, crate::mac::screenshot::samples(id, region), element)
+    })
+    .await;
+    log::info!(
+        "input queue: a real click at ({x}, {y}) will compare element {element:?} and region {region:?}"
+    );
+    let look = look.map_err(|why| {
+        ControlError::failed(format!(
+            "Agent Screen could not capture what is under ({x}, {y}) to check it before the click ({why}). No click was asked for or sent; try again."
+        ))
+    })?;
+    let app = if app.is_empty() {
+        off(cx, move || app::name(target.pid))
+            .await
+            .unwrap_or_else(|| "the app".into())
+    } else {
+        app
+    };
+    let verb = match click.verb() {
+        real_click::Verb::Click => "Click",
+        real_click::Verb::DoubleClick => "Double-click",
+        real_click::Verb::TripleClick => "Triple-click",
+        real_click::Verb::RightClick => "Right-click",
+        real_click::Verb::MiddleClick => "Middle-click",
+    };
+    let reason = format!("{verb} at ({x}, {y}) in {app} with the user's pointer");
+    let plan = crate::input_queue::Click {
+        target,
+        frame,
+        menu: hit.menu,
+        ax_pid,
+        area,
+        at,
+        click,
+        flags: crate::mac::input::flags(modifiers).0,
+        app,
+        title: real_click::short_title(&title, 40),
+        region,
+        look,
+        element: element.map(Box::new),
+        asked_ms: 0,
+    };
+    let operation = real_click::operation(target.window_id, at, click, modifier_bits(modifiers));
+    let token = operation.clone();
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let plan = crate::input_queue::Click {
+                asked_ms: c.input_queue.now(),
+                ..plan
+            };
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                Some(crate::input_queue::Plan::Click(plan)),
+            );
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    let ran = match r["state"].as_str() {
+        Some("completed") => true,
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => false,
+        state_now => {
+            let next = if state_now == Some("declined") {
+                "The user declined: the same click again returns this answer. Use another way, such as act_on_element, or call request_help."
+            } else {
+                "The click runs with the user's pointer once they allow it and while your call waits: make the same click with real_input again to wait again, or use input_queue to inspect or withdraw it."
+            };
+            return Err(ControlError {
+                code: "input_pending",
+                message: format!(
+                    "The {} at ({x}, {y}) waits for the user to allow their pointer. No click was sent, not on the background route either. Input queue status: {state}. {next}",
+                    verb.to_lowercase()
+                ),
+            });
+        }
+    };
+    // The session is done with the user's pointer unless it has more
+    // waiting: the approval ends and their pointer and app come back.
+    let changed = r["failure"].as_str() == Some(real_click::CONTENT_CHANGED);
+    let (waited, refusals) = core.update(cx, |c, cx| {
+        let asked = match c.input_queue.plan(request) {
+            Some(crate::input_queue::Plan::Click(click)) => click.asked_ms,
+            _ => c.input_queue.now(),
+        };
+        let waited = real_click::waited_seconds(asked, c.input_queue.now());
+        let refusals = c
+            .input_queue
+            .content_changed(&owner, changed.then_some(token.as_str()));
+        c.input_queue.loan_done(&owner, request);
+        cx.notify();
+        (waited, refusals)
+    });
+    if ran {
+        show_pointer(core, id, at, true, cx);
+        return reply(json!({
+            "windowId": target.window_id,
+            "route": "real_input",
+            "requestId": request,
+            "waitedSeconds": waited,
+            "timing": r["timing"],
+        }));
+    }
+    if changed && refusals >= 2 {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) changed again while the request waited, {waited} s this time, so that area keeps changing, as a video or an animation does. Asking again would likely end the same way, and asks the user again. Use act_on_element on the element there instead, or call request_help."
+        )));
+    }
+    if changed {
+        return Err(ControlError::failed(format!(
+            "Nothing was clicked: what is under ({x}, {y}) looks different from when you asked, {waited} s ago, so the click could land on something else, such as another row of a list that reordered. Take a new screenshot, find the target again, and ask again with real_input."
+        )));
+    }
+    Err(ControlError::failed(format!(
+        "The {} with the user's pointer stopped ({}{}); every button it pressed was let go. Take a screenshot before retrying. Input queue status: {state}",
+        verb.to_lowercase(),
+        r["stopReason"].as_str().unwrap_or("stopped"),
+        r["failure"]
+            .as_str()
+            .map(|f| format!(": {f}"))
+            .unwrap_or_default(),
+    )))
+}
+
+/// The Input Queue's token for a real click on a menu item: the same press
+/// made again finds its request.
+fn menu_operation(target: WindowTarget, path: &[(usize, String)]) -> String {
+    let path: Vec<String> = path
+        .iter()
+        .map(|(index, title)| format!("{index}={title}"))
+        .collect();
+    format!("menu:{}:{}", target.window_id, path.join("/"))
+}
+
+/// Choose an item of an Electron app's menu bar with a real click, once the
+/// user allows it (ADR 0013, "Menu items of Electron apps"). Nothing goes
+/// through accessibility while the request is outstanding: the item would
+/// run twice, once as a shortcut.
+async fn queued_menu_press(
+    core: &Entity<Core>,
+    connection: u64,
+    id: DisplayId,
+    target: WindowTarget,
+    path: Vec<(usize, String)>,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let area = cg::display_bounds(id);
+    let app = off(cx, move || app::name(target.pid))
+        .await
+        .unwrap_or_else(|| "the app".into());
+    let item = crate::input_queue::MenuItem {
+        target,
+        area,
+        app: app.clone(),
+        path,
+    };
+    let label = agent_screen_model::menu_press::label(&item.titles());
+    let reason = format!("Choose {label} in {app} with a click on its menu");
+    let operation = menu_operation(target, &item.path);
+    let owner = core
+        .read_with(cx, |c, _| c.input_queue.owner(id, connection))
+        .map_err(ControlError::invalid)?;
+    let request = core
+        .update(cx, |c, cx| {
+            let result = c.input_queue.submit(
+                owner.clone(),
+                operation,
+                reason,
+                Some(crate::input_queue::Plan::MenuItem(item)),
+            );
+            cx.notify();
+            result
+        })
+        .map_err(ControlError::invalid)?;
+    let params = json!({ "displayId": id, "action": "wait", "requestId": request, "timeout": 60 });
+    let state = input_queue_action(
+        core,
+        connection,
+        &Args(params.as_object().expect("queue params")),
+        cx,
+    )
+    .await?;
+    let r = &state["requests"][0];
+    let ran = match r["state"].as_str() {
+        Some("completed") => true,
+        Some("stopped") if r["stopReason"] != "Replaced" && r["stopReason"] != "Withdrawn" => false,
+        state_now => {
+            let next = if state_now == Some("declined") {
+                "The user declined: pressing the same item again returns this answer. Press it with real_input: false to send it as the shortcut, or call request_help."
+            } else {
+                "The click runs with the user's pointer once they allow it and while your call waits: press the same item again to wait again, or use input_queue to inspect or withdraw it. To send it as the shortcut instead, withdraw the request and press the item with real_input: false."
+            };
+            return Err(ControlError {
+                code: "input_pending",
+                message: format!(
+                    "{label} needs a real click, as Electron takes an item pressed through accessibility for its shortcut. No click was sent, and the item was not pressed through accessibility either. Input queue status: {state}. {next}"
+                ),
+            });
+        }
+    };
+    // The session is done with the user's pointer unless it has more
+    // waiting: the approval ends and their pointer and app come back.
+    core.update(cx, |c, cx| {
+        c.input_queue.loan_done(&owner, request);
+        cx.notify();
+    });
+    if ran {
+        return reply(json!({
+            "route": "real_input",
+            "requestId": request,
+            "note": format!("Chose {label} with a real click on the display's menu bar, as the user allowed. Electron saw a click, not a shortcut."),
+        }));
+    }
+    Err(ControlError::failed(format!(
+        "Choosing {label} with the user's pointer stopped ({}{}). No key was sent and any menu it opened was closed. Take a screenshot before retrying. Input queue status: {state}",
+        r["stopReason"].as_str().unwrap_or("stopped"),
+        r["failure"]
+            .as_str()
+            .map(|f| format!(": {f}"))
+            .unwrap_or_default(),
+    )))
+}
+
+// MARK: Parameters
+
+fn display(
+    core: &Entity<Core>,
+    p: &Args,
+    live: bool,
+    cx: &mut AsyncApp,
+) -> Result<DisplayId, ControlError> {
+    let id = p
+        .int("displayId")
+        .ok_or_else(|| ControlError::invalid("displayId is required"))? as DisplayId;
+    core.read_with(cx, |c, _| match c.displays.get(id) {
+        None if c.displays.retired.contains(&id) => {
+            Err(ended_error(id, c.displays.closed_by_user.contains(&id)))
+        }
+        None => Err(ControlError::not_found(format!(
+            "display {id} does not exist; call create_display again"
+        ))),
+        Some(d) if live && d.is_ended() => {
+            Err(ended_error(id, d.ended == Some(EndReason::ClosedByUser)))
+        }
+        Some(_) => Ok(id),
+    })
+}
+
+/// A display the Agent Session may send input to right now.
+async fn input_display(
+    core: &Entity<Core>,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<DisplayId, ControlError> {
+    let id = display(core, p, true, cx)?;
+    if core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover)) {
+        return Err(ControlError::takeover(format!(
+            "the user is operating display {id}. Call wait_for_control to wait until they hand it back."
+        )));
+    }
+    // Remember the windows before the action, so the settle after it can
+    // tell which windows the action opened.
+    let before = cx
+        .background_executor()
+        .spawn(async { cg::all_ids() })
+        .await;
+    BEFORE.with(|b| b.borrow_mut().insert(id, (before, Instant::now())));
+    Ok(id)
+}
+
+/// The window on display `id` whose title bar is at a global point, held
+/// there, for an agent's drag.
+async fn title_bar_at(id: DisplayId, at: (f64, f64), cx: &mut AsyncApp) -> Option<Grab> {
+    cx.background_executor()
+        .spawn(async move { Grab::on_display(id, at) })
+        .await
+}
+
+/// Move a held window as far as the pointer moved from the press.
+async fn drag_to(grab: Grab, to: (f64, f64), cx: &mut AsyncApp) -> bool {
+    cx.background_executor()
+        .spawn(async move { grab.drag_to(to) })
+        .await
+}
+
+/// A drag an agent holds on a display across calls, from left_mouse_down
+/// to left_mouse_up, in a web page.
+enum Hold {
+    /// Through the app's DevTools pipe.
+    Pipe(devtools::Drag),
+}
+
+thread_local! {
+    static HOLDS: std::cell::RefCell<std::collections::HashMap<DisplayId, Hold>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The user took the display over: an agent's drag held through a pipe
+/// lets go where it is, as a posted one does.
+pub fn release_hold(id: DisplayId) {
+    if let Some(Hold::Pipe(drag)) = HOLDS.with(|h| h.borrow_mut().remove(&id)) {
+        std::thread::spawn(move || drag.cancel());
+    }
+}
+
+/// The user gave window `window` from display `id` to another session: a
+/// drag the agent holds in it lets go, and a title-bar grab of it ends.
+fn release_hold_on(id: DisplayId, window: u32) {
+    let in_window = HOLDS.with(|h| {
+        h.borrow()
+            .get(&id)
+            .is_some_and(|Hold::Pipe(drag)| drag.window() == window)
+    });
+    if in_window {
+        release_hold(id);
+    }
+    GRAB.with(|g| {
+        let mut grabs = g.borrow_mut();
+        if grabs
+            .get(&id)
+            .is_some_and(|grab| grab.target.window_id == window)
+        {
+            grabs.remove(&id);
+        }
+    });
+}
+
+/// How a drag starting at a global point goes out (ADR 0010).
+async fn web_route(at: (f64, f64), cx: &mut AsyncApp) -> Route {
+    off(cx, move || {
+        devtools::route(crate::mac::input::window_at(at), at)
+    })
+    .await
+}
+
+fn unmapped(why: String) -> ControlError {
+    ControlError::failed(format!(
+        "the app shows a web page there, but Agent Screen couldn't tell which of its pages is under the point ({why}), so nothing was sent. Take a screenshot and try again."
+    ))
+}
+
+fn modifier_bits(m: crate::keychord::Modifiers) -> i64 {
+    agent_screen_model::devtools::modifier_bits(m.alt, m.control, m.command, m.shift)
+}
+
+/// left_click_drag in a web page, through the app's DevTools pipe: a press,
+/// a hold, 20 even steps and a pause before the release, as a posted drag
+/// has. Nothing reaches WindowServer, so the session's button state and
+/// the user's pointer stay theirs.
+async fn pipe_drag(
+    core: &Entity<Core>,
+    id: DisplayId,
+    page: devtools::Page,
+    from: (f64, f64),
+    to: (f64, f64),
+    modifiers: crate::keychord::Modifiers,
+    cx: &mut AsyncApp,
+) -> Reply {
+    if forwarder_stopped(core, id, cx) {
+        return Err(ControlError::takeover(format!(
+            "the user took over display {id}, so the drag was not sent. Call wait_for_control to wait until they hand it back."
+        )));
+    }
+    // Keys go to the window dragged in, as after a posted drag.
+    show_pointer(core, id, from, true, cx)
+        .focus(page.window())
+        .await;
+    let bits = modifier_bits(modifiers);
+    let mut drag = off(cx, move || devtools::Drag::press(page, from, bits))
+        .await
+        .map_err(|e| ControlError::failed(format!("the press didn't reach the page: {e}")))?;
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
+    for at in agent_screen_model::devtools::path(from, to, 20) {
+        if forwarder_stopped(core, id, cx) {
+            let at = drag.at();
+            off(cx, move || drag.cancel()).await;
+            show_pointer(core, id, at, false, cx);
+            return Err(ControlError::takeover(format!(
+                "the user took over display {id} during the drag, which let go short of its target and dropped nothing. Call wait_for_control to wait until they hand it back."
+            )));
+        }
+        let (back, moved) = off(cx, move || {
+            let moved = drag.move_to(at);
+            (drag, moved)
+        })
+        .await;
+        drag = back;
+        if let Err(e) = moved {
+            off(cx, move || drag.cancel()).await;
+            return Err(ControlError::failed(format!(
+                "the drag stopped partway, as a move didn't reach the page: {e}"
+            )));
+        }
+        show_pointer(core, id, at, false, cx);
+        cx.background_executor()
+            .timer(Duration::from_millis(16))
+            .await;
+    }
+    cx.background_executor()
+        .timer(Duration::from_millis(100))
+        .await;
+    off(cx, move || drag.release(to))
+        .await
+        .map_err(|e| ControlError::failed(format!("the release didn't reach the page: {e}")))?;
+    show_pointer(core, id, to, false, cx);
+    reply(json!({ "route": "devtools" }))
+}
+
+thread_local! {
+    static GRAB: std::cell::RefCell<std::collections::HashMap<DisplayId, Grab>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Window ids before each display's latest agent action.
+    static BEFORE: std::cell::RefCell<std::collections::HashMap<DisplayId, (std::collections::HashSet<u32>, Instant)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Windows the latest action opened in an app that has windows on the
+/// display, such as TextEdit's new document after New Document, open where
+/// the app chooses: the user's screen. Bring them to the display. Windows on
+/// any Agent Display, the user's apps and older windows stay where they are.
+async fn adopt_opened(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) {
+    let Some(before) = BEFORE.with(|b| {
+        b.borrow()
+            .get(&id)
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(10))
+            .map(|(ids, _)| ids.clone())
+    }) else {
+        return;
+    };
+    // Most actions open nothing; the id list is cheap to compare.
+    let shown = off(cx, cg::on_screen_ids).await;
+    if shown.is_subset(&before) {
+        return;
+    }
+    let agent_areas: Vec<Rect> = core.read_with(cx, |c, _| {
+        c.displays
+            .list
+            .iter()
+            .filter(|d| !d.is_ended())
+            .map(|d| cg::display_bounds(d.id))
+            .collect()
+    });
+    // The catches' rule: a window the user may have opened stays with
+    // them, as does any window of an app they took back.
+    let theirs = core.update(cx, |c, _| {
+        sync_user_made(c, id);
+        let Some(d) = c.displays.get(id) else {
+            return (Default::default(), Default::default());
+        };
+        let undecided: std::collections::HashSet<u32> = c
+            .kept_catches
+            .iter()
+            .filter(|(display, _)| *display == id)
+            .flat_map(|(_, k)| k.undecided())
+            .collect();
+        (
+            d.released.clone(),
+            d.user_made
+                .iter()
+                .chain(&d.returned)
+                .copied()
+                .chain(undecided)
+                .collect::<std::collections::HashSet<u32>>(),
+        )
+    });
+    let (released, kept_out) = theirs;
+    let opened = cx
+        .background_executor()
+        .spawn(async move {
+            let pids: std::collections::HashSet<i32> = windows::on_display(id)
+                .iter()
+                .map(|w| w.target.pid)
+                .collect();
+            windows::all()
+                .into_iter()
+                .filter(|w| {
+                    pids.contains(&w.target.pid)
+                        && !released.contains(&w.target.pid)
+                        && !kept_out.contains(&w.target.window_id)
+                        && !before.contains(&w.target.window_id)
+                        && w.layer == 0
+                        && !agent_areas.iter().any(|a| a.contains(w.bounds.mid()))
+                })
+                .map(|w| w.target)
+                .partition::<Vec<_>, _>(|w| !crate::mac::catch::user_acted_recently(w.pid))
+        })
+        .await;
+    let (opened, left) = opened;
+    // The user just acted on the app too: leave the window, and tell the
+    // agent on its next screenshot.
+    if !left.is_empty() {
+        core.update(cx, |c, _| {
+            c.left_alone.extend(left.iter().map(|w| (id, w.window_id)))
+        });
+    }
+    for target in left.iter().chain(&opened) {
+        BEFORE.with(|b| {
+            if let Some((ids, _)) = b.borrow_mut().get_mut(&id) {
+                ids.insert(target.window_id);
+            }
+        });
+    }
+    for target in opened {
+        // Seen once is enough: a window that won't move isn't retried.
+        BEFORE.with(|b| {
+            if let Some((ids, _)) = b.borrow_mut().get_mut(&id) {
+                ids.insert(target.window_id);
+            }
+        });
+        if let Err(e) = settle(core, target, id, cx).await {
+            log::info!(
+                "could not bring an opened window to display {id}: {}",
+                e.message
+            );
+        }
+    }
+}
+
+/// The error for a call on an ended display. One the user closed means
+/// they want the agent to stop.
+fn ended_error(id: DisplayId, by_user: bool) -> ControlError {
+    ControlError::ended(if by_user {
+        format!(
+            "the user closed display {id}, so stop working on screen; ask the user before you call create_display again"
+        )
+    } else {
+        format!("display {id} has ended; call create_display for a new one")
+    })
+}
+
+async fn target(
+    core: &Entity<Core>,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<(DisplayId, (f64, f64)), ControlError> {
+    let id = input_display(core, p, cx).await?;
+    Ok((id, global(core, id, p.require("x")?, p.require("y")?, cx)?))
+}
+
+/// Screenshot pixel → global point. Agents aim in the screenshot, which is
+/// scaled down for displays over the image budget.
+fn global(
+    core: &Entity<Core>,
+    id: DisplayId,
+    x: f64,
+    y: f64,
+    cx: &mut AsyncApp,
+) -> Result<(f64, f64), ControlError> {
+    let size = core
+        .read_with(cx, |c, _| c.displays.get(id).map(|d| (d.width, d.height)))
+        .unwrap_or(DEFAULT_SIZE);
+    let scale = shot_scale(size);
+    let (w, h) = ((size.0 * scale).round(), (size.1 * scale).round());
+    // Half-open: x == w is the next display's first column.
+    if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
+        return Err(ControlError::invalid(format!(
+            "({}, {}) is outside the {}×{} screenshot",
+            x as i64, y as i64, w as i64, h as i64
+        )));
+    }
+    let bounds: Rect = cg::display_bounds(id);
+    Ok((bounds.x + x / scale, bounds.y + y / scale))
+}
+
+/// The strip at the top of the display holds the user's menu bar, left out
+/// of screenshots: a click there would reach the user's front app. Main
+/// thread.
+fn outside_menu_bar(id: DisplayId, (_, y): (f64, f64)) -> Result<(), ControlError> {
+    if y - cg::display_bounds(id).y < crate::mac::menubar_height(id) {
+        return Err(ControlError::invalid(
+            "that is the reserved menu bar strip at the top, which belongs to the user's app. \
+             For app menus, press a menubaritem from get_window_state. If a zoomed window's toolbar is here, \
+             use place_window with its window_id and x, y, width, height to move or shrink it below the strip; \
+             read the returned window frame. If those arguments are missing, collect get_diagnostics in this MCP session before restarting its client.",
+        ));
+    }
+    Ok(())
+}
+
+/// Show the Agent Pointer at a global point; returns the display's input queue.
+fn show_pointer(
+    core: &Entity<Core>,
+    id: DisplayId,
+    at: (f64, f64),
+    click: bool,
+    cx: &mut AsyncApp,
+) -> crate::mac::input::Forwarder {
+    let bounds = cg::display_bounds(id);
+    let active_agent = core.read_with(cx, |c, _| {
+        c.displays
+            .get(id)
+            .is_some_and(|d| !d.takeover && !d.is_ended())
+    });
+    crate::mac::recording::pointer(
+        id,
+        (at.0 - bounds.x, at.1 - bounds.y),
+        (bounds.width, bounds.height),
+        click,
+        active_agent,
+    );
+    core.update(cx, |c, cx| {
+        c.displays
+            .point(id, at.0 - bounds.x, at.1 - bounds.y, click);
+        cx.notify();
+        c.forwarder(id)
+    })
+}
+
+async fn window_on(
+    id: DisplayId,
+    p: &Args<'_>,
+    cx: &AsyncApp,
+) -> Result<windows::Window, ControlError> {
+    let window = p
+        .int("windowId")
+        .ok_or_else(|| ControlError::invalid("windowId is required"))?;
+    off(cx, move || windows::on_display(id))
+        .await
+        .into_iter()
+        .find(|w| w.target.window_id as i64 == window)
+        .ok_or_else(|| {
+            ControlError::not_found(format!(
+                "no window {window} on display {id}; see list_windows"
+            ))
+        })
+}
+
+fn modifiers(p: &Args) -> Result<crate::keychord::Modifiers, ControlError> {
+    let names: Vec<String> = match p.0.get("modifiers") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
+    KeyChord::parse_modifiers(&names).map_err(|e| ControlError::invalid(e.to_string()))
+}
+
+/// Optional traversal scope is strict even on the raw control socket.
+fn read_scope(p: &Args<'_>) -> Result<agent_screen_model::tree::Scope, ControlError> {
+    let number = |key: &str| match p.0.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| ControlError::invalid(format!("{key} must be a non-negative integer"))),
+    };
+    Ok(agent_screen_model::tree::Scope {
+        root: number("root")?,
+        max_depth: number("maxDepth")?,
+    })
+}
+
+/// A number retained from this window, checked against its live AX parent
+/// chain. Failure is an invalid root, never a claim that the window closed.
+async fn read_root(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    root: Option<usize>,
+    cx: &mut AsyncApp,
+) -> Result<Option<ax::Sendable>, ControlError> {
+    let Some(number) = root else { return Ok(None) };
+    let element = core.read_with(cx, |c, _| {
+        c.elements.get(&(id, target.window_id)).and_then(|numbers| numbers.get(number)).cloned()
+    }).ok_or_else(|| ControlError::invalid(format!(
+        "root element {number} is unavailable in this window; call get_window_state without root and with a small max_depth to find it"
+    )))?;
+    let retained = ax::Sendable(element.clone());
+    match off(cx, move || ax::belongs(retained.get(), target, false)).await {
+        Some(true) => {}
+        Some(false) => {
+            return Err(ControlError::invalid(format!(
+                "root element {number} no longer belongs to this window; call get_window_state without root to find it again"
+            )));
+        }
+        None => {
+            return Err(ControlError::failed(
+                "the app didn't answer accessibility in time; it may be busy. Nothing was done; try again shortly",
+            ));
+        }
+    }
+    Ok(Some(ax::Sendable(element)))
+}
+
+thread_local! {
+    /// Waits for change by connection and the MCP's wait id: running ones,
+    /// with the way to stop each when its MCP call is cancelled, and cancels
+    /// that came before their wait registered.
+    static WAITS: std::cell::RefCell<std::collections::HashMap<(u64, u64), WaitSlot>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+enum WaitSlot {
+    Running(futures::channel::oneshot::Sender<()>),
+    /// Cancelled before it started, at this time.
+    Cancelled(Instant),
+}
+
+/// Forget early cancels older than this, as for a wait that never came.
+const EARLY_CANCEL: Duration = Duration::from_secs(30);
+
+/// Register a wait: the receiver its cancel fires, or None when the cancel
+/// already came.
+fn register_wait(key: (u64, u64)) -> Option<futures::channel::oneshot::Receiver<()>> {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        waits.retain(
+            |_, slot| !matches!(slot, WaitSlot::Cancelled(at) if at.elapsed() > EARLY_CANCEL),
+        );
+        if matches!(waits.remove(&key), Some(WaitSlot::Cancelled(_))) {
+            return None;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        waits.insert(key, WaitSlot::Running(tx));
+        Some(rx)
+    })
+}
+
+/// Stop a running wait, or remember the cancel for one not started yet.
+fn cancel_wait(key: (u64, u64)) {
+    WAITS.with(|w| {
+        let mut waits = w.borrow_mut();
+        match waits.remove(&key) {
+            Some(WaitSlot::Running(stop)) => {
+                let _ = stop.send(());
+            }
+            _ => {
+                waits.insert(key, WaitSlot::Cancelled(Instant::now()));
+            }
+        }
+    });
+}
+
+/// Takes a running wait out of `WAITS` however it ends.
+struct Waiting(Option<(u64, u64)>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if let Some(key) = self.0 {
+            WAITS.with(|w| {
+                let mut waits = w.borrow_mut();
+                if matches!(waits.get(&key), Some(WaitSlot::Running(_))) {
+                    waits.remove(&key);
+                }
+            });
+        }
+    }
+}
+
+/// wait_for_change: read one window's tree, off the main thread, until a
+/// condition holds against the baseline, the window goes, the display
+/// ends, the connection closes, the MCP cancels the call or the time is
+/// up. The baseline is the tree the agent last got in this scope, which
+/// the MCP sends, or the first read. Reads work in a Takeover, as
+/// windowState's do.
+async fn wait_for_change(
+    core: &Entity<Core>,
+    connection: u64,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Result<Value, ControlError> {
+    use agent_screen_model::watch;
+    let cancelled = || ControlError::failed("the wait was cancelled");
+    // Registered before anything waits, so a cancel can't slip in first.
+    // Without a wait id, from an older MCP, nothing cancels it.
+    let key = p.int("waitId").map(|wait| (connection, wait as u64));
+    let (_never, idle) = futures::channel::oneshot::channel();
+    let mut cancel = match key {
+        Some(key) => register_wait(key).ok_or_else(cancelled)?,
+        None => idle,
+    }
+    .fuse();
+    let _waiting = Waiting(key);
+    let scope = read_scope(p)?;
+    let conditions = watch::Conditions::from_json(p.0.get("conditions").unwrap_or(&Value::Null))
+        .map_err(ControlError::invalid)?;
+    let timeout = watch::timeout(p.number("timeoutSeconds")).map_err(ControlError::invalid)?;
+    let id = display(core, p, true, cx)?;
+    let window = window_on(id, p, cx).await?;
+    let target = window.target;
+    let root = read_root(core, id, target, scope.root, cx).await?;
+    let area = cg::display_bounds(id);
+    let origin = (area.x, area.y);
+    let scale = display_scale(core, id, cx);
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // The agent's tree names numbers of this app run only if it read the
+    // window since the app started.
+    let numbered = core.read_with(cx, |c, _| c.elements.contains_key(&(id, target.window_id)));
+    let baseline = p
+        .string("baseline")
+        .filter(|_| numbered)
+        .map(|tree| watch::Read {
+            tree,
+            truncated: p.0.get("baselineTruncated") == Some(&Value::Bool(true)),
+        });
+    let from_agent = baseline.is_some();
+    let mut watch = watch::Watch::new(conditions, baseline);
+    let mut depth_limited = false;
+    let mut count = None;
+    let mut unanswered = 0;
+    let waited = |started: Instant| (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+    let outcome = loop {
+        let (closed, ended, by_user) = core.read_with(cx, |c, _| {
+            let d = c.displays.get(id);
+            (
+                c.closed.contains(&connection),
+                d.is_none_or(|d| d.is_ended()),
+                c.displays.closed_by_user.contains(&id)
+                    || d.is_some_and(|d| d.ended == Some(EndReason::ClosedByUser)),
+            )
+        });
+        if closed {
+            return Err(ControlError::failed("the connection closed"));
+        }
+        if ended {
+            return Ok(json!({
+                "outcome": "displayEnded",
+                "closedByUser": by_user,
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let window_id = target.window_id;
+        // Off the display and on screen elsewhere, it left; off screen, it
+        // closed, or its app hid or minimized it, which keeps its id.
+        let (here, elsewhere) = off(cx, move || {
+            let here = windows::on_display(id)
+                .iter()
+                .any(|w| w.target.window_id == window_id);
+            (here, !here && cg::on_screen_ids().contains(&window_id))
+        })
+        .await;
+        if !here {
+            return Ok(json!({
+                "outcome": if elsewhere { "windowLeft" } else { "windowClosed" },
+                "waitedSeconds": waited(started),
+            }));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let read_root = root.as_ref().map(|r| ax::Sendable(r.get().clone()));
+        let read_started = Instant::now();
+        let read = cx.background_executor().spawn(async move {
+            ax::snapshot(
+                target,
+                origin,
+                scale,
+                read_root.map(|r| r.0),
+                scope.max_depth,
+            )
+        });
+        // A read still running at the deadline is left to finish alone.
+        let timer = cx.background_executor().timer(remaining.max(watch::POLL));
+        let snapshot = futures::select! {
+            snapshot = FutureExt::fuse(read) => snapshot,
+            _ = FutureExt::fuse(timer) => break "timedOut",
+            _ = cancel => return Err(cancelled()),
+        };
+        let read_time = read_started.elapsed();
+        match snapshot {
+            Ok(snapshot) => {
+                count = Some(snapshot.elements.len());
+                depth_limited |= snapshot.depth_limited;
+                let truncated = snapshot.truncated;
+                let complete = scope.root.is_none() && !truncated && !snapshot.depth_limited;
+                let tree = core.update(cx, |c, _| {
+                    let numbers = c.elements.entry((id, target.window_id)).or_default();
+                    numbers::relabel(
+                        &snapshot.tree,
+                        &numbers.refresh(snapshot.elements, complete),
+                    )
+                });
+                let fired = watch.read(watch::Read { tree, truncated });
+                if !fired.is_empty() {
+                    let names: Vec<&str> = fired.iter().map(|f| f.name()).collect();
+                    let matched: Vec<&String> = fired.iter().flat_map(|f| f.elements()).collect();
+                    return Ok(json!({
+                        "outcome": "fired",
+                        "fired": names,
+                        "matched": matched,
+                        "changes": watch.changes(),
+                        "tree": watch.last().map(|r| &r.tree),
+                        "treeTruncated": truncated,
+                        "elements": count,
+                        "truncated": watch.any_cut(),
+                        "depthLimited": depth_limited,
+                        "baselineFromAgent": from_agent,
+                        "takeover": takeover(core, id, cx),
+                        "waitedSeconds": waited(started),
+                    }));
+                }
+            }
+            Err(ax::SnapshotError::RootUnavailable) => {
+                return Ok(json!({ "outcome": "rootGone", "waitedSeconds": waited(started) }));
+            }
+            // Busy or not answering: try again at the next read.
+            Err(ax::SnapshotError::WindowUnavailable) => unanswered += 1,
+        }
+        if Instant::now() >= deadline {
+            break "timedOut";
+        }
+        let gap = watch::poll_gap(read_time, watch.quiet())
+            .min(deadline.saturating_duration_since(Instant::now()));
+        let timer = cx.background_executor().timer(gap);
+        futures::select! {
+            _ = FutureExt::fuse(timer) => {}
+            _ = cancel => return Err(cancelled()),
+        }
+    };
+    Ok(json!({
+        "outcome": outcome,
+        "changes": watch.changes(),
+        "tree": watch.last().map(|r| &r.tree),
+        "treeTruncated": watch.last().is_some_and(|r| r.truncated),
+        "elements": watch.last().and(count),
+        "unanswered": unanswered,
+        "truncated": watch.any_cut(),
+        "depthLimited": depth_limited,
+        "disappearsAbsent": watch.disappears_absent(),
+        "baselineFromAgent": from_agent,
+        "takeover": takeover(core, id, cx),
+        "waitedSeconds": waited(started),
+    }))
+}
+
+/// Whether the user is operating display `id`.
+fn takeover(core: &Entity<Core>, id: DisplayId, cx: &mut AsyncApp) -> bool {
+    core.read_with(cx, |c, _| c.displays.get(id).is_some_and(|d| d.takeover))
+}
+
+/// Loosely typed request parameters from JSON.
+struct Args<'a>(&'a Params);
+
+impl Args<'_> {
+    fn string(&self, key: &str) -> Option<String> {
+        self.0.get(key)?.as_str().map(String::from)
+    }
+    fn number(&self, key: &str) -> Option<f64> {
+        self.0.get(key)?.as_f64()
+    }
+    fn int(&self, key: &str) -> Option<i64> {
+        let value = self.0.get(key)?;
+        value.as_i64().or_else(|| value.as_f64().map(|f| f as i64))
+    }
+    fn require(&self, key: &str) -> Result<f64, ControlError> {
+        self.number(key)
+            .ok_or_else(|| ControlError::invalid(format!("{key} is required")))
+    }
+}
+
+/// A preview click with `presses` (1 to 3) in `app`'s window `title`
+/// (default WeCom, Chats), on a chat list's row of a display at `area`.
+fn preview_click(
+    area: crate::model::Rect,
+    presses: i64,
+    p: &Args,
+    now: u64,
+) -> crate::input_queue::Click {
+    let click = agent_screen_model::real_click::Click::new(
+        agent_screen_model::real_click::Button::Left,
+        presses.clamp(1, 3),
+    )
+    .expect("one to three presses");
+    crate::input_queue::Click {
+        target: WindowTarget {
+            pid: 0,
+            window_id: 0,
+        },
+        frame: area,
+        menu: None,
+        ax_pid: 0,
+        area,
+        // A row of a sidebar, on a 1280 by 800 board.
+        at: (
+            area.x + 180.0 / 1280.0 * area.width,
+            area.y + 236.0 / 800.0 * area.height,
+        ),
+        click,
+        flags: 0,
+        app: p.string("app").unwrap_or_else(|| "WeCom".into()),
+        title: Some(p.string("title").unwrap_or_else(|| "Chats".into())),
+        region: area,
+        look: Vec::new(),
+        element: None,
+        asked_ms: now,
+    }
+}
+
+/// Test hooks: in debug builds, or with AGENTSCREEN_DEBUG=1 for measuring a
+/// release build.
+/// What the Viewer knows of the target's focus, for debug replies.
+fn secrecy_name(secrecy: agent_screen_model::viewer_keys::Secrecy) -> &'static str {
+    use agent_screen_model::viewer_keys::Secrecy;
+    match secrecy {
+        Secrecy::Unknown => "unknown",
+        Secrecy::Secure => "secure",
+        Secrecy::Open => "open",
+    }
+}
+
+fn debug_methods() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("AGENTSCREEN_DEBUG").is_some_and(|v| v == "1")
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    fn ago(ms: u64) -> Instant {
+        Instant::now() - Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn subtree_socket_scope_rejects_invalid_numbers() {
+        for value in [json!(-1), json!(1.5), json!("2"), json!(true)] {
+            for key in ["root", "maxDepth"] {
+                let mut p = Params::new();
+                p.insert(key.into(), value.clone());
+                assert!(read_scope(&Args(&p)).is_err());
+            }
+        }
+        let p = json!({"root": 0, "maxDepth": 2})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            read_scope(&Args(&p)).unwrap(),
+            agent_screen_model::tree::Scope {
+                root: Some(0),
+                max_depth: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn routes_file_urls() {
+        let dir = std::env::temp_dir().join(format!("agent-screen-route-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a b.html");
+        std::fs::write(&file, "x").unwrap();
+        let url = format!("file://{}", file.to_string_lossy().replace(' ', "%20"));
+        let path = Some(file.to_string_lossy().into_owned());
+        // Not a browser: the path, with or without a fragment or query.
+        assert_eq!(file_target(Some(&url), false).unwrap(), path);
+        assert_eq!(file_target(Some(&format!("{url}#x")), false).unwrap(), path);
+        assert_eq!(
+            file_target(Some(&format!("{url}?q=1")), false).unwrap(),
+            path
+        );
+        // A browser keeps the URL, and gets one for a path (#168).
+        assert_eq!(file_target(Some(&format!("{url}#x")), true).unwrap(), None);
+        assert_eq!(
+            file_target(path.as_deref(), true).unwrap(),
+            Some(agent_screen_model::launch::file_url(
+                path.as_deref().unwrap()
+            ))
+        );
+        // An app that isn't a browser opens the path as it is.
+        assert_eq!(file_target(path.as_deref(), false).unwrap(), None);
+        // Missing files fail for both; other targets pass through.
+        assert!(file_target(Some("file:///no/such/file.html"), true).is_err());
+        assert_eq!(
+            file_target(Some("https://example.com"), false).unwrap(),
+            None
+        );
+        assert_eq!(file_target(None, false).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_file_urls() {
+        assert_eq!(
+            ax::file_url_path("file:///Users/me/My%20Notes/a%C3%A9.txt"),
+            Some(std::path::PathBuf::from("/Users/me/My Notes/aé.txt"))
+        );
+        assert_eq!(
+            ax::file_url_path("file://localhost/tmp/x/"),
+            Some(std::path::PathBuf::from("/tmp/x"))
+        );
+        assert_eq!(ax::file_url_path("https://example.com"), None);
+        // A page's query and fragment aren't part of its file.
+        assert_eq!(
+            ax::file_url_path("file:///tmp/a.html#sec"),
+            Some(std::path::PathBuf::from("/tmp/a.html"))
+        );
+        assert_eq!(
+            ax::file_url_path("file:///tmp/a%2Fb.html?q=1"),
+            Some(std::path::PathBuf::from("/tmp/a/b.html"))
+        );
+    }
+
+    #[test]
+    fn a_running_app_gets_a_short_turn() {
+        // Command-N: 3 s from the key press.
+        assert!(!waited_long_enough(true, ago(1000), ago(1500), None));
+        assert!(waited_long_enough(true, ago(3500), ago(4000), None));
+        // A file: 2 s from when `open` returned...
+        assert!(!waited_long_enough(
+            false,
+            ago(0),
+            ago(1000),
+            Some(ago(500))
+        ));
+        assert!(waited_long_enough(
+            false,
+            ago(0),
+            ago(3000),
+            Some(ago(2500))
+        ));
+        // ...and 4 s from the request at most, even while `open` runs.
+        assert!(!waited_long_enough(false, ago(0), ago(3000), None));
+        assert!(waited_long_enough(false, ago(0), ago(4500), None));
+    }
+}
+
+#[cfg(test)]
+mod frame_request_tests {
+    use super::*;
+
+    #[test]
+    fn actual_frame_writer_receives_usable_geometry_and_no_default_write() {
+        let area = Rect::new(4448.0, -1931.0, 1440.0, 900.0);
+        let scale = shot_scale((1440.0, 900.0));
+        let full = FrameRequest {
+            x: Some(0.0),
+            y: Some(0.0),
+            width: Some(1356.0),
+            height: Some(848.0),
+        };
+        let mut written = None;
+        assert!(
+            apply_frame_request(full, area, area, scale, 33.0, |frame| {
+                written = Some(frame);
+                Ok(())
+            })
+            .unwrap()
+        );
+        let frame = written.unwrap();
+        assert_eq!(frame.y, -1898.0);
+        assert_eq!(frame.height, 867.0);
+        assert_eq!(frame.max_y(), area.max_y());
+        let mut again = None;
+        apply_frame_request(full, frame, area, scale, 33.0, |frame| {
+            again = Some(frame);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            again, written,
+            "repeating the same explicit placement is idempotent"
+        );
+        assert!(
+            !apply_frame_request(
+                FrameRequest::default(),
+                area,
+                area,
+                scale,
+                33.0,
+                |_| panic!("a default placement must not resize a window")
+            )
+            .unwrap()
+        );
+        let ordinary = Rect::new(4500.0, -1800.0, 800.0, 600.0);
+        let partial = FrameRequest {
+            x: Some(80.0),
+            ..Default::default()
+        };
+        assert!(
+            !apply_frame_request(partial, ordinary, area, scale, 33.0, |frame| {
+                assert_eq!(frame.x, area.x + 80.0 / scale);
+                assert_eq!(frame.y, ordinary.y);
+                assert_eq!(frame.width, ordinary.width);
+                assert_eq!(frame.height, ordinary.height);
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert!(
+            !apply_frame_request(full, area, area, scale, 0.0, |frame| {
+                assert_eq!(frame, full.resolve(area, area, scale));
+                Ok(())
+            })
+            .unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_window_refusal_tests {
+    use crate::mac::input::Refused;
+
+    #[test]
+    fn a_refusal_names_the_focused_window_and_what_to_do_instead() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: Some("Notes".into()),
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(
+            message.contains(r#"TextEdit's focused window, "Notes", is not on an Agent Display"#)
+        );
+        assert!(message.contains("refused the keys before sending any"));
+        assert!(message.contains("insert_text or set_value"));
+        assert!(message.contains("display 7"));
+    }
+
+    #[test]
+    fn a_refusal_says_when_accessibility_named_no_window() {
+        let refused = Refused {
+            app: "TextEdit".into(),
+            window: None,
+        };
+        let message = super::refused_error(&refused, 7).message;
+        assert!(message.contains("Accessibility could not say which window of TextEdit has focus"));
+    }
+}

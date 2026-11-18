@@ -15,7 +15,7 @@ tccutil reset Accessibility bobko.aerospace
 open -a AeroSpace
 ```
 
-Then choose **Keep AeroSpace Off Agent Screen's Displays…** in Agent Screen's menu, or add this line to your AeroSpace config yourself:
+Then press **Set Up…** on the AeroSpace row in Agent Screen's Settings, or add this line to your AeroSpace config yourself:
 
 ```toml
 ignored-monitors = ['^Agent Screen']

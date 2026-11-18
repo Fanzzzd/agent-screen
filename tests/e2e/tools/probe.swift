@@ -1,0 +1,331 @@
+// Read-only lookups for the end-to-end tests.
+//
+//   probe windows PID         on-screen windows of PID as JSON lines
+//   probe displays            how many Agent Screen virtual displays are active
+//   probe bounds ID           display ID's global bounds in points
+//   probe idle                seconds since the user last touched a key or the pointer
+//   probe locked              1 while the screen is locked, else 0
+//   probe pixel PNG X Y       the average color of a 5x5 square, "r g b" 0-255
+//   probe span PNG Y R G B    first and last x in row Y within 40 of the color, or nothing
+//   probe strip PNG ROWS      pixels in the top ROWS rows farther than 40 from the top-left one
+//   probe cancelmenu X Y      close the menu at global point X Y through accessibility
+//   probe front               the front app's name
+//   probe frontpid            the front app's pid
+//   probe focused PID         the window number of PID's focused window, as Accessibility names it, or 0
+//   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
+//   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
+//   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
+//   probe main                the main display's size in points, "w h"
+//   probe tap SECONDS OUT     record scroll events at the HID level, listen only
+//   probe bounds ID           a display's frame in global points, "x y w h"
+//   probe units               every online display's unit number, "id unit" per line
+//   probe reconfigurations S  how many display reconfigurations begin within S seconds
+//   probe differ PNG PNG      mean RGB difference of two images, 0-255, below the menu bar
+//   probe video FILE          a video's duration in seconds and its frame size, "s w h"
+//   probe source              the current keyboard input source's id
+import AVFoundation
+import AppKit
+import Carbon
+import CoreGraphics
+import Foundation
+import ImageIO
+
+// The window number of an accessibility window element (HIServices, private).
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ window: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+// Top-level globals start in order, so this one comes before any use.
+var reconfigurations = Set<Int>()
+func reconfigurationBegun(_ slot: Int) { reconfigurations.insert(slot) }
+
+let args = CommandLine.arguments
+let tapStart = Date()
+var tapOut: FileHandle?
+switch args[1] {
+case "windows":
+  let pid = Int32(args[2])!
+  let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as! [[String: Any]]
+  for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid {
+    let b = w[kCGWindowBounds as String] as! [String: Double]
+    print("{\"id\":\(w[kCGWindowNumber as String] as! Int),\"layer\":\(w[kCGWindowLayer as String] as! Int),\"x\":\(b["X"]!),\"y\":\(b["Y"]!),\"width\":\(b["Width"]!),\"height\":\(b["Height"]!)}")
+  }
+case "displays":
+  var ids = [CGDirectDisplayID](repeating: 0, count: 32); var n: UInt32 = 0
+  CGGetActiveDisplayList(32, &ids, &n)
+  print(ids[0..<Int(n)].filter { CGDisplayVendorNumber($0) == 0x5353 }.count)
+case "bounds":
+  // The global bounds of display ID, in points: x y width height.
+  let b = CGDisplayBounds(CGDirectDisplayID(UInt32(args[2])!))
+  print("\(b.origin.x) \(b.origin.y) \(b.size.width) \(b.size.height)")
+case "idle":
+  // Seconds since the user last used the mouse, scroll or keys. Not any
+  // event: a trackpad sends gesture events about once a second while a
+  // finger or palm only rests on it, and the user then never reads idle.
+  let used: [CGEventType] = [
+    .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .mouseMoved,
+    .leftMouseDragged, .rightMouseDragged, .otherMouseDown, .otherMouseUp,
+    .otherMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged,
+  ]
+  print(Int(used.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min()!))
+case "locked":
+  let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+  print((session["CGSSessionScreenIsLocked"] as? Bool ?? false) ? 1 : 0)
+case "pixel":
+  let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
+  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+  let (x, y) = (Int(Double(args[3])!), Int(Double(args[4])!))
+  let ctx = CGContext(data: nil, width: 5, height: 5, bitsPerComponent: 8, bytesPerRow: 20, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+  ctx.draw(image, in: CGRect(x: -x + 2, y: -(image.height - y) + 3, width: image.width, height: image.height))
+  let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+  var sum = [0, 0, 0]
+  for i in 0..<25 { for c in 0..<3 { sum[c] += Int(px[i * 4 + c]) } }
+  print(sum.map { $0 / 25 }.map(String.init).joined(separator: " "))
+case "reconfigurations":
+  // Display reconfigurations over SECONDS: one per configuration WindowServer
+  // begins, whichever displays it touches.
+  _ = NSApplication.shared
+  CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
+    if flags.contains(.beginConfigurationFlag) {
+      // Callbacks of one configuration arrive within a few milliseconds.
+      reconfigurationBegun(Int(Date().timeIntervalSince1970 * 20))
+    }
+  }, nil)
+  // Callbacks come only through the app's event loop.
+  DispatchQueue.main.asyncAfter(deadline: .now() + Double(args[2])!) {
+    print(reconfigurations.count)
+    exit(0)
+  }
+  NSApplication.shared.run()
+case "units":
+  // Every online display, the closet included: "id unit" per line.
+  var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+  var count: UInt32 = 0
+  CGGetOnlineDisplayList(32, &ids, &count)
+  for id in ids[0..<Int(count)] { print("\(id) \(CGDisplayUnitNumber(id))") }
+case "source":
+  let source = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+  print(Unmanaged<CFString>.fromOpaque(TISGetInputSourceProperty(source, kTISPropertyInputSourceID)).takeUnretainedValue())
+case "video":
+  // A video's duration and frame size, read synchronously from the file.
+  let asset = AVURLAsset(url: URL(fileURLWithPath: args[2]))
+  let duration = CMTimeGetSeconds(asset.duration)
+  let size = asset.tracks(withMediaType: .video).first?.naturalSize ?? .zero
+  print(String(format: "%.2f %d %d", duration, Int(size.width), Int(size.height)))
+case "bounds":
+  // A display's frame in global points: x y width height.
+  let b = CGDisplayBounds(CGDirectDisplayID(args[2])!)
+  print("\(b.origin.x) \(b.origin.y) \(b.size.width) \(b.size.height)")
+case "differ":
+  // Mean RGB difference, 0 to 255, of two images scaled to 64 × 40,
+  // leaving out the top 6%: a menu bar there differs between captures.
+  func grid(_ path: String) -> [UInt8] {
+    let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil)!
+    let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+    let ctx = CGContext(data: nil, width: 64, height: 40, bitsPerComponent: 8, bytesPerRow: 256, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: 64, height: 40))
+    // Rows run top down in memory.
+    return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: 64 * 40 * 4)[(64 * 3 * 4)...])
+  }
+  let (a, b) = (grid(args[2]), grid(args[3]))
+  var total = 0, count = 0
+  for i in 0..<a.count where i % 4 != 3 { total += abs(Int(a[i]) - Int(b[i])); count += 1 }
+  print(total / count)
+case "span":
+  let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
+  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+  let y = Int(Double(args[3])!)
+  let want = args[4...6].map { Int($0)! }
+  let ctx = CGContext(data: nil, width: image.width, height: 1, bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+  ctx.draw(image, in: CGRect(x: 0, y: -(image.height - y - 1), width: image.width, height: image.height))
+  let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+  let hits = (0..<image.width).filter { x in (0..<3).allSatisfy { abs(Int(px[x * 4 + $0]) - want[$0]) <= 40 } }
+  if let first = hits.first, let last = hits.last { print(first, last) }
+case "strip":
+  // Pixels of the top rows unlike the corner's color: the menu bar strip of
+  // an agent screenshot is one flat color unless something leaks into it.
+  let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil)!
+  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+  let rows = min(Int(args[3])!, image.height)
+  let ctx = CGContext(data: nil, width: image.width, height: rows, bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+  ctx.draw(image, in: CGRect(x: 0, y: -(image.height - rows), width: image.width, height: image.height))
+  let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+  let corner = (0..<3).map { Int(px[$0]) }
+  var unlike = 0
+  for i in 0..<(image.width * rows) where (0..<3).contains(where: { abs(Int(px[i * 4 + $0]) - corner[$0]) > 40 }) { unlike += 1 }
+  print(unlike)
+case "main":
+  let b = CGDisplayBounds(CGMainDisplayID())
+  print(Int(b.width), Int(b.height))
+case "cancelmenu":
+  // Close the menu at global point X Y through accessibility, as the user's
+  // click elsewhere closes it, without touching the pointer or keyboard.
+  var hit: AXUIElement?
+  AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(args[2])!, Float(args[3])!, &hit)
+  func role(_ e: AXUIElement) -> String {
+    var v: CFTypeRef?
+    AXUIElementCopyAttributeValue(e, "AXRole" as CFString, &v)
+    return (v as? String) ?? ""
+  }
+  var menu = hit
+  while let m = menu, role(m) != "AXMenu" {
+    var parent: CFTypeRef?
+    AXUIElementCopyAttributeValue(m, "AXParent" as CFString, &parent)
+    menu = parent.map { $0 as! AXUIElement }
+  }
+  if let m = menu {
+    print(AXUIElementPerformAction(m, "AXCancel" as CFString) == .success ? "closed" : "refused")
+  } else {
+    print("no menu")
+  }
+case "front":
+  print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
+case "frontpid":
+  print(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+case "close":
+  // Only the window named: a test closes the one it opened in an app the
+  // user also works in, and never theirs.
+  var windows: CFTypeRef?
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  let wanted = CGWindowID(args[3])!
+  AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &windows)
+  var said = "no window"
+  for window in (windows as? [AXUIElement]) ?? [] {
+    var number: CGWindowID = 0
+    guard _AXUIElementGetWindow(window, &number) == .success, number == wanted else { continue }
+    var button: CFTypeRef?
+    said = "refused"
+    if AXUIElementCopyAttributeValue(window, "AXCloseButton" as CFString, &button) == .success,
+      let button, AXUIElementPerformAction(button as! AXUIElement, "AXPress" as CFString) == .success
+    {
+      said = "closed"
+    }
+  }
+  print(said)
+case "focused":
+  var focused: CFTypeRef?
+  var number: CGWindowID = 0
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  AXUIElementSetMessagingTimeout(app, 0.5)
+  if AXUIElementCopyAttributeValue(app, "AXFocusedWindow" as CFString, &focused) == .success,
+    let window = focused
+  {
+    _ = _AXUIElementGetWindow(window as! AXUIElement, &number)
+  }
+  print(number)
+case "openmenus":
+  func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+    var v: CFTypeRef?
+    AXUIElementCopyAttributeValue(e, name as CFString, &v)
+    return v
+  }
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  if let bar = value(app, "AXMenuBar") {
+    for title in (value(bar as! AXUIElement, "AXChildren") as? [AXUIElement]) ?? [] {
+      for menu in (value(title, "AXChildren") as? [AXUIElement]) ?? [] {
+        var origin = CGPoint.zero, size = CGSize.zero
+        if let p = value(menu, "AXPosition") { AXValueGetValue(p as! AXValue, .cgPoint, &origin) }
+        if let s = value(menu, "AXSize") { AXValueGetValue(s as! AXValue, .cgSize, &size) }
+        if size.width > 0 && size.height > 0 {
+          print((value(title, "AXTitle") as? String) ?? "", origin.x, origin.y, size.width, size.height)
+        }
+      }
+    }
+  }
+case "fronts":
+  let say = { (app: NSRunningApplication?) in
+    print(Int(Date().timeIntervalSince1970 * 1000), app?.processIdentifier ?? 0, app?.localizedName ?? "")
+    fflush(stdout)
+  }
+  say(NSWorkspace.shared.frontmostApplication)
+  NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
+    say(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+  }
+  RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
+case "activate":
+  // Bring a process forward, as the user clicking it would.
+  let pid = pid_t(args[2])!
+  NSRunningApplication(processIdentifier: pid)?.activate()
+case "tap":
+  FileManager.default.createFile(atPath: args[3], contents: nil)
+  tapOut = FileHandle(forWritingAtPath: args[3])
+  let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue) | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+  let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .tailAppendEventTap, options: .listenOnly, eventsOfInterest: mask, callback: { _, type, e, _ in
+    let line = String(format: "%.3f type=%d at=(%.0f,%.0f) cont=%lld phase=%lld mom=%lld d1=%lld pd1=%.2f\n",
+      Date().timeIntervalSince(tapStart), type.rawValue, e.location.x, e.location.y,
+      e.getIntegerValueField(.scrollWheelEventIsContinuous), e.getIntegerValueField(.scrollWheelEventScrollPhase),
+      e.getIntegerValueField(.scrollWheelEventMomentumPhase), e.getIntegerValueField(.scrollWheelEventDeltaAxis1),
+      e.getDoubleValueField(.scrollWheelEventPointDeltaAxis1))
+    tapOut?.write(line.data(using: .utf8)!)
+    return Unmanaged.passUnretained(e)
+  }, userInfo: nil)!
+  CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+  CGEvent.tapEnable(tap: tap, enable: true)
+  CFRunLoopRunInMode(.defaultMode, Double(args[2])!, false)
+case "imagesize":
+  guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    exit(1)
+  }
+  print("\(image.width) \(image.height)")
+case "imagediff":
+  func cells(_ path: String) -> [UInt8] {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let ctx = CGContext(data: nil, width: 160, height: 100, bitsPerComponent: 8, bytesPerRow: 640, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+      exit(1)
+    }
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: 160, height: 100))
+    return Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: 160 * 100 * 4))
+  }
+  let (a, b) = (cells(args[2]), cells(args[3]))
+  var changed = 0
+  for px in 0..<(160 * 100) {
+    let dr = abs(Int(a[px * 4]) - Int(b[px * 4]))
+    let dg = abs(Int(a[px * 4 + 1]) - Int(b[px * 4 + 1]))
+    let db = abs(Int(a[px * 4 + 2]) - Int(b[px * 4 + 2]))
+    if max(dr, max(dg, db)) > 20 { changed += 1 }
+  }
+  print(changed)
+case "pixeldiff":
+  func full(_ path: String) -> (Int, Int, [UInt8]) {
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+      exit(1)
+    }
+    ctx.interpolationQuality = .none
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    let bytes = Array(UnsafeBufferPointer(start: ctx.data!.assumingMemoryBound(to: UInt8.self), count: image.width * image.height * 4))
+    return (image.width, image.height, bytes)
+  }
+  let (wa, ha, pa) = full(args[2])
+  let (wb, hb, pb) = full(args[3])
+  guard wa == wb && ha == hb && wa > 0 && ha > 0 else { exit(1) }
+  var changedPixels = 0
+  for px in 0..<(wa * ha) {
+    let dr = abs(Int(pa[px * 4]) - Int(pb[px * 4]))
+    let dg = abs(Int(pa[px * 4 + 1]) - Int(pb[px * 4 + 1]))
+    let db = abs(Int(pa[px * 4 + 2]) - Int(pb[px * 4 + 2]))
+    if max(dr, max(dg, db)) > 20 { changedPixels += 1 }
+  }
+  func luma(_ p: [UInt8], _ px: Int) -> Int {
+    (54 * Int(p[px * 4]) + 183 * Int(p[px * 4 + 1]) + 19 * Int(p[px * 4 + 2])) >> 8
+  }
+  let top = Int(Double(ha) * (40.0 / 1000.0))
+  var settleSamples = 0
+  if ha > top {
+    for gy in 0..<100 {
+      let y = top + (ha - top - 1) * gy / 99
+      for gx in 0..<160 {
+        let x = (wa - 1) * gx / 159
+        let idx = y * wa + x
+        if abs(luma(pa, idx) - luma(pb, idx)) > 24 { settleSamples += 1 }
+      }
+    }
+  }
+  print("\(changedPixels) \(settleSamples)")
+default:
+  print("unknown command \(args[1])"); exit(2)
+}

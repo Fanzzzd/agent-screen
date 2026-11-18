@@ -1,0 +1,112 @@
+//! Peek opened by hovering the menu bar icon closes once the pointer has
+//! left the icon and Peek. The first icon click pins it, and the next
+//! independent click closes it. Hover is reported to the app
+//! the way AppKit and GPUI report it, so the user's pointer is untouched
+//! and this runs at any time. Peek opens on a stage display.
+//!
+//!     AGENTSCREEN_INSTANCE=e2e cargo e2e peekhover
+
+use std::collections::HashSet;
+use std::process::ExitCode;
+
+use agent_screen_tests::{
+    Control, check, debug_pid, instance, json, open_stage, run, start_test_app, stop_test_app,
+    windows_of,
+};
+use anyhow::{Result, bail};
+
+fn main() -> ExitCode {
+    if instance().is_none() {
+        eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
+        return ExitCode::FAILURE;
+    }
+    run(|| {
+        start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
+        let result = test();
+        stop_test_app();
+        result
+    })
+}
+
+fn test() -> Result<()> {
+    let control = Control::connect()?;
+    let Some(pid) = debug_pid() else {
+        bail!("no test app");
+    };
+    // Each call waits 900 ms in the app, longer than Peek's hover delays.
+    let show = |surface: &str, display_id: u64| {
+        control.call(
+            "debugShow",
+            json!({ "surface": surface, "displayId": display_id }),
+        )
+    };
+
+    open_stage(&control)?;
+    let before: HashSet<u64> = windows_of(pid).iter().map(|w| w.id).collect();
+    let peek_shown = || windows_of(pid).iter().any(|w| !before.contains(&w.id));
+
+    show("icon-hover", 1)?;
+    check("hovering the icon opens Peek", peek_shown(), "");
+    show("icon-hover", 0)?;
+    check("leaving the icon closes it", !peek_shown(), "");
+
+    // The pointer goes onto Peek, and Escape closes it there. The pointer
+    // then leaves Peek's spot, which is gone, so nothing reports that.
+    show("icon-hover", 1)?;
+    show("card-hover", 1)?;
+    show("icon-hover", 0)?;
+    check(
+        "moving from the icon into Peek keeps it open",
+        peek_shown(),
+        "",
+    );
+    show("hide", 0)?;
+    check("Escape closes Peek", !peek_shown(), "");
+    show("icon-hover", 1)?;
+    check("hovering the icon opens it again", peek_shown(), "");
+    show("icon-hover", 0)?;
+    check("leaving the icon closes it again", !peek_shown(), "");
+
+    // Hover is transient. The first click pins it; leaving cannot close
+    // the pin. A later independent click closes it and blocks stationary
+    // hover until the pointer exits and enters again.
+    show("icon-hover", 1)?;
+    show("click", 0)?;
+    check(
+        "the first click pins Peek opened by hover",
+        peek_shown(),
+        "",
+    );
+    show("icon-hover", 0)?;
+    show("card-hover", 0)?;
+    check("pinned Peek ignores pointer departure", peek_shown(), "");
+    show("icon-hover", 1)?;
+    show("click", 0)?;
+    check(
+        "the next independent click closes pinned Peek",
+        !peek_shown(),
+        "",
+    );
+    show("card-hover", 0)?;
+    check(
+        "it stays closed under the stationary pointer",
+        !peek_shown(),
+        "",
+    );
+    show("icon-hover", 0)?;
+    show("icon-hover", 1)?;
+    check("hovering after leaving opens it", peek_shown(), "");
+    show("click", 0)?;
+    check("a new hover preview can be pinned again", peek_shown(), "");
+    show("click", 0)?;
+    show("icon-hover", 0)?;
+    show("click", 0)?;
+    check(
+        "a click on the closed icon opens it pinned",
+        peek_shown(),
+        "",
+    );
+    show("click", 0)?;
+    check("the next click closes it", !peek_shown(), "");
+    Ok(())
+}
