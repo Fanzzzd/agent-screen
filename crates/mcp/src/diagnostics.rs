@@ -9,12 +9,13 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
-/// Version of the additive diagnostics control contract, not the MCP protocol.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+/// The control socket protocol this build speaks, not the MCP protocol: 1
+/// before the pipe, 2 with it (ADR 0020).
+pub const CONTROL_PROTOCOL_VERSION: u32 = crate::pipe::PIPE_PROTOCOL_VERSION;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REPLY: u64 = 16 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildIdentity {
     pub package_version: String,
     pub git_revision: Option<String>,

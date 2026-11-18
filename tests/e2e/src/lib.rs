@@ -981,15 +981,23 @@ fn start_sighting() {
     let mark = root().to_string_lossy().into_owned() + "/";
     let overlay = out().join("overlay").to_string_lossy().into_owned();
     let app = debug_app().to_string_lossy().into_owned() + "/";
+    // A `target` that links to a shared target directory runs the sign and
+    // the app from their real paths, which the watcher compares.
+    let real = |path: PathBuf, dir: bool| {
+        std::fs::canonicalize(&path).map_or(String::new(), |p| {
+            p.to_string_lossy().into_owned() + if dir { "/" } else { "" }
+        })
+    };
+    let real_overlay = real(out().join("overlay"), false);
+    let real_app = real(debug_app(), true);
+    let skip: Vec<&String> = [&overlay, &app, &real_overlay, &real_app]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
     let started = tool("sighting").and_then(|watcher| {
         Ok(command(watcher)
-            .args([
-                &std::process::id().to_string(),
-                &since.to_string(),
-                &mark,
-                &overlay,
-                &app,
-            ])
+            .args([&std::process::id().to_string(), &since.to_string(), &mark])
+            .args(skip)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

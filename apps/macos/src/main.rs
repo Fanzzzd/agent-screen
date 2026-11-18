@@ -66,7 +66,7 @@ const USAGE: &str = "Agent Screen gives AI agents their own virtual displays.
 
 Usage:
   AgentScreen               start the menu bar app (open Agent Screen.app instead)
-  AgentScreen mcp           the MCP server, started by an agent client over stdio
+  AgentScreen mcp           the MCP server's pipe into the app, started by an agent client over stdio
   AgentScreen mcp install   register the MCP server with Claude Code and Codex
   AgentScreen colorsync     whether the helper that keeps macOS's display list short is set up
   AgentScreen colorsync setup | remove | reclaim
@@ -170,8 +170,8 @@ fn main() {
         }
         _ => {}
     }
-    // `AgentScreen mcp`: the MCP server a client starts over stdio. It only
-    // talks to the running app through the control socket.
+    // `AgentScreen mcp`: the pipe a client starts over stdio. It forwards
+    // the client's lines to the MCP host in the running app (ADR 0020).
     if std::env::args().nth(1).as_deref() == Some("mcp")
         && std::env::args().nth(2).as_deref() == Some("install")
     {
@@ -208,7 +208,14 @@ fn main() {
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("mcp") {
-        if let Err(error) = agent_screen_mcp::run() {
+        // `--v1` serves the tools in this process, as before the pipe: for
+        // the v1 compatibility test only.
+        let served = if std::env::args().nth(2).as_deref() == Some("--v1") {
+            agent_screen_mcp::run_v1()
+        } else {
+            agent_screen_mcp::run(env!("CARGO_PKG_VERSION"))
+        };
+        if let Err(error) = served {
             eprintln!("Agent Screen mcp: {error}");
             std::process::exit(1);
         }

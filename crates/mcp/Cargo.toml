@@ -4,7 +4,7 @@ version = "0.1.38"
 edition = "2024"
 license = "MIT"
 publish = false
-description = "Agent Screen's MCP server: tools for Agent Sessions, served over stdio, talking to the app's control socket."
+description = "Agent Screen's MCP server: the stdio pipe a client starts, and the MCP host with the tools that the app runs for each pipe."
 
 [lib]
 path = "src/lib.rs"
@@ -20,3 +20,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

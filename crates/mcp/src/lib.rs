@@ -1,192 +1,50 @@
-//! Agent Screen's MCP server. A client (Claude Code, Codex) starts it over
-//! stdio; it serves the tools and forwards them to the menu bar app.
+//! Agent Screen's MCP server. A client (Claude Code, Codex) starts
+//! `AgentScreen mcp` over stdio: the pipe, which forwards to the MCP host in
+//! the menu bar app (ADR 0020).
 
 mod control;
 pub mod diagnostics;
 pub mod endpoint;
+pub mod host;
 pub mod install;
+pub mod ledger;
+pub mod pipe;
 mod session;
 mod tools;
 
-use control::Control;
-use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ResultType, ServerCapabilities,
-};
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
-use serde_json::{Value, json};
-use tools::{Output, text};
+pub use control::AppLink;
+pub use session::ClientEnv;
 
-const INSTRUCTIONS: &[&str] = &[
-    "Agent Screen gives this session its own virtual display for operating GUI apps in the background.",
-    "Use it whenever a task needs a screen: to open, operate or test a Mac app or a web page, click, type into or check something on screen, take a screenshot of an app, or log in to a site.",
-    "Use launch_app where you would use open -a, and these tools where you would use AppleScript, System Events or screencapture, which act on the user's screen. Use open -a only to show the user something on their own screen when they ask for it.",
-    "Call create_display only when a task needs a screen, then launch_app or place_window to put windows on it.",
-    "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
-    "To wait for a window to update after an action, call wait_for_change instead of sleeping and taking another screenshot.",
-    "Mark each window with set_disposition so the user knows what to keep.",
-    "If an action returns input_pending, use input_queue to inspect, wait or withdraw. Queue approval is not completion. Complete drags may use the user's pointer after they allow it; only completed means the drag ran.",
-    "If the user takes over, tools fail with a takeover error: call wait_for_control, or request_control",
-    "to ask them to hand the display back when you need it. For a login or",
-    "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",
-    "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
-    "do it or you cannot. Captcha consent is not approval to create an account.",
-    "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
-    "For an Agent Screen bug, collect get_diagnostics in the failing session before restarting the client,",
-    "then attach the report and reproduction steps to a GitHub bug report. Do not auto-submit or upload user content.",
-];
-
-#[derive(Default)]
-struct AgentScreen {
-    control: std::sync::Arc<Control>,
-    /// Whether the app has heard that this client loaded the tools.
-    announced: std::sync::atomic::AtomicBool,
-}
-
-impl ServerHandler for AgentScreen {
-    fn get_info(&self) -> InitializeResult {
-        let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build());
-        info.server_info = serde_json::from_value(
-            json!({ "name": "agent-screen", "version": env!("CARGO_PKG_VERSION") }),
-        )
-        .expect("implementation info");
-        info.instructions = Some(INSTRUCTIONS.join(" "));
-        info
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        // The menu and setup window show that an agent loaded the tools. A
-        // running app hears it now, one that starts later when it connects.
-        if !self
-            .announced
-            .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            let name = context
-                .peer
-                .peer_info()
-                .map(|info| info.client_info.name.clone());
-            let client = session::pretty_client_name(name.as_deref());
-            let control = self.control.clone();
-            tokio::spawn(async move {
-                control
-                    .greet("agentReady", json!({ "client": client }))
-                    .await;
-            });
-        }
-        // Protocol 2026-07-28 requires resultType on every result, and ttlMs
-        // and cacheScope on lists; rmcp drops them for older clients.
-        let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));
-        // The list is fixed for a build, the same for every user.
-        Ok(ListToolsResult::with_all_items(tools.tools)
-            .with_ttl_ms(3_600_000)
-            .with_cache_scope(CacheScope::Public))
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        let meta = request
-            .meta
-            .as_ref()
-            .map(|m| m.0.0.clone())
-            .unwrap_or_else(|| context.meta.0.0.clone());
-        let client = context
-            .peer
-            .peer_info()
-            .map(|info| info.client_info.name.clone());
-        let session = session::identify(&meta, client.as_deref());
-        let args = request.arguments.unwrap_or_default();
-
-        let ct = context.ct.clone();
-        let cancelled: tools::Cancelled = Box::pin(async move { ct.cancelled().await });
-        let run = tools::run(&request.name, &args, &session, &self.control, cancelled);
-        let outcome = control::SESSION_KEY
-            .scope(session.key.clone(), run)
+/// Run the pipe until the client closes stdin or the parent exits.
+/// Blocking: it runs its own Tokio runtime.
+pub fn run(package_version: &str) -> anyhow::Result<()> {
+    pipe::exit_with_parent();
+    let hello = pipe::Hello::current(package_version);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            // stdout carries the protocol; anything else goes to stderr.
+            pipe::run(tokio::io::stdin(), tokio::io::stdout(), hello, || async {
+                control::connect_starting_app()
+                    .await
+                    .map_err(|error| error.message)
+            })
             .await
-            .map_err(|error| {
-                // The restarted app doesn't know the display: whatever it
-                // says, "not_found", or "locked" before it looks, the
-                // display ended when the app quit. "unavailable": it
-                // hasn't restarted yet.
-                let display = args.get("display_id").and_then(Value::as_i64);
-                match display {
-                    Some(id)
-                        if error.code != "unavailable"
-                            && self.control.ended_with_app(id as u64) =>
-                    {
-                        tools::ended_with_app(id)
-                    }
-                    _ => error,
-                }
-            });
-        let result = match outcome {
-            Ok(Output::Content(content)) => json!({ "content": content }),
-            Ok(Output::Object(object)) => json!({
-                "content": [text(object.to_string())],
-                "structuredContent": object
-            }),
-            // Domain failures go back to the model as tool errors it can act on.
-            Err(error) => json!({ "isError": true, "content": [text(error.to_string())] }),
-        };
-        let mut result = from_json::<CallToolResult>(result);
-        result.result_type = Some(ResultType::COMPLETE);
-        Ok(result.into())
-    }
+        })?;
+    Ok(())
 }
 
-/// rmcp's model types are non-exhaustive; build them from their wire form.
-fn from_json<T: serde::de::DeserializeOwned>(value: Value) -> T {
-    serde_json::from_value(value).expect("valid MCP message")
-}
-
-/// Serve the tools over stdio until the client goes away. Blocking: it runs
-/// its own Tokio runtime.
-pub fn run() -> anyhow::Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(async {
-        // stdout carries the protocol; anything else goes to stderr.
-        let service = AgentScreen::default()
-            .serve(rmcp::transport::stdio())
-            .await?;
-        service.waiting().await?;
-        Ok(())
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_upfront_marker_reaches_the_wire() {
-        let list: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));
-        let wire = serde_json::to_value(&list).unwrap();
-        let create = wire["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "create_display")
-            .unwrap();
-        assert_eq!(create["_meta"]["anthropic/alwaysLoad"], true);
-    }
-
-    #[test]
-    fn instructions_name_the_tasks_and_the_commands_they_replace() {
-        let instructions = INSTRUCTIONS.join(" ");
-        for words in [
-            "web page",
-            "screenshot",
-            "open -a",
-            "AppleScript",
-            "screencapture",
-        ] {
-            assert!(instructions.contains(words), "{words}");
-        }
-    }
+/// Serve the tools in this process over stdio, calling the app with
+/// control protocol v1, as `AgentScreen mcp` did before the pipe. For tests
+/// of v1 compatibility and of the tools against a mock socket; no client
+/// is configured with it.
+pub fn run_v1() -> anyhow::Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(host::serve(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+        host::Client::this_process(),
+        AppLink::Socket,
+        Default::default(),
+    ))
 }
