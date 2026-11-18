@@ -9,11 +9,14 @@
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e agentbrowser
 //!
-//! E2E_BROWSER names the browser: Dia (the default) needs your Dia running,
-//! and the script skips without it. "Google Chrome" needs Chrome not
-//! running: the script starts a stand-in for the user's Chrome on a
-//! throwaway profile, on the display, first. Quits the instances it
-//! started. Makes 1 display.
+//! Chrome by default, which needs Chrome not running: the script starts a
+//! stand-in for the user's Chrome on a throwaway profile, on the display,
+//! first. E2E_BROWSER=Dia with E2E_DIA=1 checks the fallback beside your
+//! running Dia, which refuses a second instance: launch_app opens the
+//! window in your Dia, answers shared, leaves no agents' process, and
+//! moves the profile folder it made to the Trash. That opens a window in
+//! your Dia, on the display, and closes it at the end. Quits the instances
+//! it started. Makes 1 display.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -44,15 +47,15 @@ struct Browser {
 
 fn browser() -> Browser {
     match std::env::var("E2E_BROWSER").as_deref() {
-        Ok("Google Chrome") => Browser {
-            app: "Google Chrome",
-            process: "Google Chrome",
-            bundle_id: "com.google.Chrome",
-        },
-        _ => Browser {
+        Ok("Dia") => Browser {
             app: "Dia",
             process: "Dia",
             bundle_id: "company.thebrowser.dia",
+        },
+        _ => Browser {
+            app: "Google Chrome",
+            process: "Google Chrome",
+            bundle_id: "com.google.Chrome",
         },
     }
 }
@@ -87,8 +90,11 @@ fn main() -> ExitCode {
     }
     let b = browser();
     let stand_in = b.app != "Dia";
+    if !stand_in && std::env::var("E2E_DIA").as_deref() != Ok("1") {
+        skip("E2E_DIA=1 isn't set: the Dia check opens a window in your Dia");
+    }
     if !stand_in && pids(b.process).is_empty() {
-        skip("Dia isn't running: this checks the agents' instance beside yours");
+        skip("Dia isn't running: this checks the fallback beside yours");
     }
     if stand_in && running_headed(b.process) {
         skip("Chrome is running; quit it to test with a stand-in for yours");
@@ -314,6 +320,62 @@ fn posted(reply: &Result<Value>) -> bool {
         .is_ok_and(|v| v.get("route").is_none_or(|r| r != "accessibility"))
 }
 
+/// Dia refuses a second instance: the window opens in the user's Dia, the
+/// answer says shared, no agents' process stays, and the profile folder
+/// the attempt made is in the Trash. Closes the window it opened.
+#[allow(clippy::too_many_arguments)]
+fn shared(
+    b: &Browser,
+    control: &Control,
+    id: u64,
+    launched: &Value,
+    before: &[u32],
+    profile: &Path,
+    log: &Log,
+    from: usize,
+) -> Result<()> {
+    let window = launched["window"]["windowId"].as_u64();
+    let after = pids(b.process);
+    check(
+        "launch_app answers shared with a window, in the user's process",
+        launched["shared"] == json!(true) && window.is_some() && after == before,
+        format!(
+            "{} | before {before:?}, after {after:?}",
+            cut(&launched.to_string(), 400)
+        ),
+    );
+    check(
+        "the agent's page loaded",
+        seen_within(log, from, "loaded", 15_000),
+        format!("{:?}", since(log, from)),
+    );
+    check(
+        "the profile folder the attempt made is gone",
+        !profile.exists(),
+        profile.display().to_string(),
+    );
+    let again = control.call(
+        "launchApp",
+        json!({ "sessionKey": KEY, "displayId": id, "app": b.app }),
+    );
+    check(
+        "a second launch_app doesn't try again and says shared",
+        again.as_ref().is_ok_and(|v| v["shared"] == json!(true))
+            && pids(b.process) == before
+            && !profile.exists(),
+        cut(&said(&again), 400),
+    );
+    let opened = [
+        window,
+        again.ok().and_then(|v| v["window"]["windowId"].as_u64()),
+    ];
+    let user = before.first().map(u32::to_string).unwrap_or_default();
+    for w in opened.into_iter().flatten() {
+        let _ = probe(&["close", &user, &w.to_string()]);
+    }
+    Ok(())
+}
+
 /// Which process a link from another app reaches with two processes of the
 /// bundle running (ADR 0022): `open -g -b` asks LaunchServices, as a link
 /// clicked in another app does. Only with the stand-in, never your Dia.
@@ -378,6 +440,9 @@ fn test(
             json!({ "sessionKey": KEY, "displayId": id, "app": b.app,
                     "open": format!("http://127.0.0.1:{port}/agent") }),
         )?;
+        if !stand_in {
+            return shared(b, &control, id, &launched, &before, profile, log, from);
+        }
         let window = launched["window"]["windowId"]
             .as_u64()
             .with_context(|| format!("no window: {launched}"))?;

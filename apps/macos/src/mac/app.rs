@@ -16,6 +16,16 @@ pub fn is_running(bundle_id: &str) -> bool {
 /// takes tens of milliseconds on a busy Mac; launch_app asks every 20 ms
 /// while an app starts, so this is safe to call off the main thread too.
 pub fn running_pids(bundle: &Path) -> Vec<i32> {
+    processes_of(bundle)
+        .into_iter()
+        // A command-line run of the same binary isn't the app.
+        .filter(|&pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some())
+        .collect()
+}
+
+/// Every process running the bundle's main executable, also one that
+/// hasn't registered as an app yet, as in its first moments.
+pub fn processes_of(bundle: &Path) -> Vec<i32> {
     // Safari's /Applications entry is a link into a cryptex; the running
     // app reports where it really is.
     let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
@@ -25,8 +35,6 @@ pub fn running_pids(bundle: &Path) -> Vec<i32> {
     process_ids()
         .into_iter()
         .filter(|&pid| process_path(pid).as_deref() == Some(executable.as_path()))
-        // A command-line run of the same binary isn't the app.
-        .filter(|&pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some())
         .collect()
 }
 
@@ -439,6 +447,21 @@ fn support_folder() -> Option<std::path::PathBuf> {
 pub fn bundle_id_at(bundle: &Path) -> Option<String> {
     let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
     info_value(&plist, "CFBundleIdentifier")
+}
+
+/// The version of the app at `bundle`, as its build number.
+pub fn bundle_version_at(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    info_value(&plist, "CFBundleVersion")
+}
+
+/// Move `path` to the user's Trash, where they can get it back.
+pub fn trash(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| e.localizedDescription().to_string())
 }
 
 /// The agents' profile folder for the browser at `bundle` (ADR 0022), in

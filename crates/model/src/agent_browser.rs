@@ -54,6 +54,31 @@ pub fn is_agents(argv: &[String], profile: &Path) -> bool {
     argv.contains(&wanted)
 }
 
+/// The file beside the agents' profiles that lists the browsers that
+/// refuse a second instance, one `<bundle id> <version>` per line. Dia
+/// does: its app quits at once when another Dia runs, whatever its
+/// profile. An update may change that, so a new version is tried again.
+pub const REFUSALS: &str = "refuses own instance";
+
+/// Whether `record`, the refusals file, lists this browser's version.
+pub fn refuses(record: &str, bundle_id: &str, version: &str) -> bool {
+    record
+        .lines()
+        .any(|l| l.split_once(' ') == Some((bundle_id, version)))
+}
+
+/// `record` with this browser's version listed, in place of any other
+/// version of it.
+pub fn with_refusal(record: &str, bundle_id: &str, version: &str) -> String {
+    record
+        .lines()
+        .filter(|l| !l.is_empty() && l.split_once(' ').map(|(id, _)| id) != Some(bundle_id))
+        .map(String::from)
+        .chain([format!("{bundle_id} {version}")])
+        .map(|l| l + "\n")
+        .collect()
+}
+
 /// How `launch_app` starts a browser.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -66,14 +91,19 @@ pub enum Plan {
     Start(Vec<String>),
     /// The agents' instance runs as this pid: open the new window there.
     Reuse(i32),
+    /// The browser refuses a second instance, so the window opens in the
+    /// user's process as before, and shares its focus (#110).
+    Shared,
 }
 
 /// `running`: the browser's processes, each with its command line.
+/// `refuses`: the browser is known to refuse a second instance.
 pub fn plan(
     chromium_browser: bool,
     arguments: &[String],
     running: &[(i32, Vec<String>)],
     profile: &Path,
+    refuses: bool,
 ) -> Plan {
     if !chromium_browser || names_profile(arguments) {
         return Plan::AsAsked;
@@ -83,6 +113,9 @@ pub fn plan(
     }
     if running.is_empty() {
         return Plan::AsAsked;
+    }
+    if refuses {
+        return Plan::Shared;
     }
     Plan::Start(switches(profile))
 }
@@ -116,7 +149,7 @@ mod tests {
     #[test]
     fn a_running_user_browser_gets_a_separate_agents_instance() {
         let user = (100, s(&["/Applications/Dia.app/Contents/MacOS/Dia"]));
-        let plan = plan(true, &[], &[user], &profile());
+        let plan = plan(true, &[], &[user], &profile(), false);
         let Plan::Start(switches) = plan else {
             panic!("{plan:?}")
         };
@@ -134,7 +167,7 @@ mod tests {
         argv.extend(switches(&profile()));
         let agents = (200, argv);
         assert_eq!(
-            plan(true, &[], &[user, agents], &profile()),
+            plan(true, &[], &[user, agents], &profile(), false),
             Plan::Reuse(200)
         );
     }
@@ -144,7 +177,7 @@ mod tests {
         let mut argv = s(&["Dia"]);
         argv.extend(switches(&profile()));
         assert_eq!(
-            plan(true, &[], &[(200, argv)], &profile()),
+            plan(true, &[], &[(200, argv)], &profile(), false),
             Plan::Reuse(200)
         );
     }
@@ -157,7 +190,7 @@ mod tests {
             s(&["--user-data-dir", "/tmp/p"]),
         ] {
             assert_eq!(
-                plan(true, &named, std::slice::from_ref(&user), &profile()),
+                plan(true, &named, std::slice::from_ref(&user), &profile(), false),
                 Plan::AsAsked
             );
         }
@@ -165,9 +198,9 @@ mod tests {
 
     #[test]
     fn a_browser_no_one_runs_or_another_app_starts_as_before() {
-        assert_eq!(plan(true, &[], &[], &profile()), Plan::AsAsked);
+        assert_eq!(plan(true, &[], &[], &profile(), false), Plan::AsAsked);
         assert_eq!(
-            plan(false, &[], &[(100, s(&["Safari"]))], &profile()),
+            plan(false, &[], &[(100, s(&["Safari"]))], &profile(), false),
             Plan::AsAsked
         );
     }
@@ -179,5 +212,32 @@ mod tests {
         // A profile folder that only starts with the agents' path.
         let longer = s(&[&format!("--user-data-dir={}-2", profile().display())]);
         assert!(!is_agents(&longer, &profile()));
+    }
+
+    #[test]
+    fn a_browser_that_refuses_a_second_instance_shares_the_users() {
+        let dia = "company.thebrowser.dia";
+        let record = with_refusal("", dia, "1.2.3");
+        assert!(refuses(&record, dia, "1.2.3"));
+        assert!(!refuses(&record, dia, "1.2.4"));
+        assert!(!refuses(&record, "com.google.Chrome", "1.2.3"));
+        let user = (100, s(&["Dia"]));
+        assert_eq!(
+            plan(true, &[], std::slice::from_ref(&user), &profile(), true),
+            Plan::Shared
+        );
+        // No one runs it: it starts as before, on its own profile.
+        assert_eq!(plan(true, &[], &[], &profile(), true), Plan::AsAsked);
+        // A profile the agent named still wins.
+        let named = s(&["--user-data-dir=/tmp/p"]);
+        assert_eq!(plan(true, &named, &[user], &profile(), true), Plan::AsAsked);
+    }
+
+    #[test]
+    fn an_update_replaces_the_refusal_of_an_older_version() {
+        let dia = "company.thebrowser.dia";
+        let record = with_refusal("com.other 9\n", dia, "1.0");
+        let record = with_refusal(&record, dia, "2.0");
+        assert_eq!(record, "com.other 9\ncompany.thebrowser.dia 2.0\n");
     }
 }

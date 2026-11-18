@@ -1633,6 +1633,9 @@ async fn handle_one(
                 }),
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
             };
+            if launched.shared {
+                reply["shared"] = json!(true);
+            }
             // The app this display started, which the MCP server hands to
             // the session's next display if this app quits.
             if let Some(pid) = launched.pid.filter(|pid| {
@@ -5161,6 +5164,9 @@ struct Launched {
     reason: Option<&'static str>,
     /// The process, when this launch started it.
     pid: Option<i32>,
+    /// The window opened in the user's own process of a browser that
+    /// refuses the agents' instance (ADR 0022).
+    shared: bool,
 }
 
 /// How long a cold start's windows count as the agent's, and the launch
@@ -5310,7 +5316,55 @@ fn browser_plan(
         .into_iter()
         .map(|pid| (pid, app::arguments(pid).unwrap_or_default()))
         .collect();
-    (plan(true, arguments, &running, &profile), Some(profile))
+    let refused = refusal(path, &profile).is_some_and(|(_, known)| known);
+    (
+        plan(true, arguments, &running, &profile, refused),
+        Some(profile),
+    )
+}
+
+/// The refusals file beside the agents' profile for the browser at `path`,
+/// and whether it lists this version of the browser (ADR 0022).
+fn refusal(
+    path: &std::path::Path,
+    profile: &std::path::Path,
+) -> Option<(std::path::PathBuf, bool)> {
+    use agent_screen_model::agent_browser::{REFUSALS, refuses};
+    let file = profile.parent()?.join(REFUSALS);
+    let record = std::fs::read_to_string(&file).unwrap_or_default();
+    let known = refuses(
+        &record,
+        &app::bundle_id_at(path)?,
+        &app::bundle_version_at(path).unwrap_or_default(),
+    );
+    Some((file, known))
+}
+
+/// Remember that the browser at `path` refused the agents' instance, so
+/// later launches open in the user's process without trying again. The
+/// profile folder goes to the Trash when this launch made it, since the
+/// browser only wrote its first-run files there.
+fn record_refusal(path: &std::path::Path, profile: &std::path::Path, made_profile: bool) {
+    use agent_screen_model::agent_browser::with_refusal;
+    if let (Some((file, _)), Some(id)) = (refusal(path, profile), app::bundle_id_at(path)) {
+        let version = app::bundle_version_at(path).unwrap_or_default();
+        let record = std::fs::read_to_string(&file).unwrap_or_default();
+        if let Err(e) = std::fs::write(&file, with_refusal(&record, &id, &version)) {
+            log::warn!("launch: couldn't record that {id} refuses a second instance: {e}");
+        }
+    }
+    if made_profile && profile.exists() {
+        match app::trash(profile) {
+            Ok(()) => log::info!(
+                "launch: moved the unused profile {} to the Trash",
+                profile.display()
+            ),
+            Err(e) => log::warn!(
+                "launch: couldn't move {} to the Trash: {e}",
+                profile.display()
+            ),
+        }
+    }
 }
 
 /// Ask the agents' instance for a new window on the display at `bounds`,
@@ -5355,6 +5409,18 @@ fn new_window_in(
             false
         }
     }
+}
+
+/// Whether a process of the browser at `path` runs on the agents' profile.
+async fn agents_run(path: &std::path::Path, profile: &std::path::Path, cx: &AsyncApp) -> bool {
+    let (path, profile) = (path.to_path_buf(), profile.to_path_buf());
+    off(cx, move || {
+        app::processes_of(&path).into_iter().any(|pid| {
+            app::arguments(pid)
+                .is_some_and(|argv| agent_screen_model::agent_browser::is_agents(&argv, &profile))
+        })
+    })
+    .await
 }
 
 /// Run `f`, which waits on another process, off the UI thread.
@@ -5433,12 +5499,17 @@ async fn launch(
         move || browser_plan(&path, &arguments)
     })
     .await;
-    let start = match (plan, profile) {
-        (agent_screen_model::agent_browser::Plan::Start(switches), _) => {
+    use agent_screen_model::agent_browser::Plan;
+    let asked = start;
+    let mut shared = plan == Plan::Shared;
+    let starting = matches!(plan, Plan::Start(_));
+    let made_profile = profile.as_ref().is_some_and(|p| !p.exists());
+    let start = match (plan, profile.clone()) {
+        (Plan::Start(switches), _) => {
             log::info!("launch: {name} runs as the user's; starting the agents' instance");
             start.with_switches(switches)
         }
-        (agent_screen_model::agent_browser::Plan::Reuse(pid), Some(profile)) => Start {
+        (Plan::Reuse(pid), Some(profile)) => Start {
             agents: Some(AgentsInstance { pid, profile }),
             ..start.clone()
         },
@@ -5451,6 +5522,28 @@ async fn launch(
         ))),
         _ => launch_now(core, id, name, &path, target, &start, cx).await,
     };
+    // A browser such as Dia quits at once on any second start, whatever
+    // its profile: the window opens in the user's process, as before.
+    let quit_at_once = match &result {
+        Err(_) => true,
+        Ok(l) => l.reason == Some("already_running"),
+    };
+    let result = match profile.as_deref() {
+        Some(profile) if starting && quit_at_once && !agents_run(&path, profile, cx).await => {
+            log::info!(
+                "launch: {name} refuses a second instance; opening the window in the user's"
+            );
+            off(cx, {
+                let (path, profile) = (path.clone(), profile.to_path_buf());
+                move || record_refusal(&path, &profile, made_profile)
+            })
+            .await;
+            shared = true;
+            launch_now(core, id, name, &path, target, asked, cx).await
+        }
+        _ => result,
+    };
+    let result = result.map(|l| Launched { shared, ..l });
     core.update(cx, |c, _| {
         pause(c, false);
         c.launching.remove(&path);
@@ -5627,9 +5720,15 @@ async fn launch_now(
     // A new instance of an app that already runs may be one that allows
     // only one: it hands its launch to the running instance and quits.
     let single_instance_risk = fresh && !instances_before.is_empty();
+    // A process Agent Screen started is listed as the app only once it
+    // has registered with the system, after its first moments: until it
+    // ends, it hasn't quit.
     let quit = |pid: i32| {
         let pids = pids.clone();
-        move || !pids().contains(&pid)
+        move || match spawned {
+            Some(started) if started == pid => (unsafe { libc::kill(pid, 0) }) != 0,
+            _ => !pids().contains(&pid),
+        }
     };
     for _ in 0..200 {
         // Started here: its pid is known.
@@ -5881,6 +5980,7 @@ async fn launch_now(
                 was_running,
                 reason: Some(reason),
                 pid: None,
+                shared: false,
             });
         }
     }
@@ -6121,6 +6221,7 @@ async fn launch_now(
                 was_running,
                 reason: None,
                 pid: (!was_running).then_some(pid),
+                shared: false,
             });
         }
     }
@@ -6218,6 +6319,7 @@ async fn launch_now(
         window: None,
         was_running,
         pid: (!was_running).then_some(pid),
+        shared: false,
         reason: Some(if !was_running {
             "still_starting"
         } else if asked_for_window {
@@ -6266,6 +6368,7 @@ async fn already_running(
             was_running: true,
             reason: Some("already_running"),
             pid: None,
+            shared: false,
         }),
         None => Err(ControlError::failed(format!(
             "{name} is already running (pid {}) and allows only one instance: the new instance quit at once and passed its arguments to the running one, which has no window on this display. Ask the user to quit {name}, then call launch_app again; or call launch_app without arguments and environment to ask the running app for a new window",
