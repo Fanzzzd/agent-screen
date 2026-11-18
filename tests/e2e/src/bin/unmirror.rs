@@ -1,17 +1,19 @@
 //! A new display macOS mirrors onto the user's screen is unmirrored and
-//! kept, and the next one of that size in that set lands parked (#220).
+//! kept, and the next one of that size lands parked (#220). macOS keeps
+//! one arrangement per set of displays, and each size gets its own serial,
+//! so its own set: sizes in turn don't mirror again.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e unmirror
 //!
-//!     SIZE=1200x800 ...   # a size this set of displays never had
+//!     SIZES=1200x800,1200x800 ...   # sizes, one display each
 //!
-//! Two displays of that size (1280x800 by default), one at a time, the test app restarted between
-//! them so the second is new, not a spare. A sampler reads the user's main
-//! display every 10 ms. Where macOS mirrors a new display, the first one
-//! flashes the user's screen once, for under 2 s (0.8 to 1.6 s on
-//! 2026-11-18), and the second doesn't.
-//! Where it doesn't mirror, neither flashes. No app launches or pointer
-//! input.
+//! One display per size, one at a time, the test app restarted between
+//! them so each is new, not a spare: 1280x800, 1200x800, 1280x800 and
+//! 1200x800 by default. A sampler reads the user's main display every
+//! 10 ms. Where macOS mirrors a new display, one of a size new to the run
+//! flashes the user's screen once, for under 2 s (0.6 to 1.6 s on
+//! 2026-11-18), and one of a size seen before doesn't. Where it doesn't
+//! mirror, none flashes. No app launches or pointer input.
 
 use std::io::{BufRead, BufReader};
 use std::process::{ExitCode, Stdio};
@@ -211,53 +213,68 @@ fn attempt(user: u32, key: &str, size: (u32, u32)) -> Result<Attempt> {
     })
 }
 
-/// `SIZE=WxH`, 1280x800 by default. A size this set never had gets no
-/// stored arrangement, so macOS mirrors its first display.
-fn size() -> (u32, u32) {
-    std::env::var("SIZE")
+/// `SIZES=WxH,WxH,…`, 1280x800, 1200x800, 1280x800, 1200x800 by default:
+/// with one serial for every size, the third and fourth mirrored again, as
+/// at 16:44 on 2026-11-18.
+fn sizes() -> Vec<(u32, u32)> {
+    let parse = |s: &str| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    };
+    std::env::var("SIZES")
         .ok()
-        .and_then(|s| {
-            let (w, h) = s.split_once('x')?;
-            Some((w.parse().ok()?, h.parse().ok()?))
-        })
-        .unwrap_or((1280, 800))
+        .and_then(|s| s.split(',').map(parse).collect::<Option<Vec<_>>>())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![(1280, 800), (1200, 800), (1280, 800), (1200, 800)])
 }
 
 fn test() -> Result<()> {
     let user = main_display()?;
     let before = online()?;
 
-    let size = size();
-    let first = attempt(user, "unmirror-first", size)?;
-    let mirrored = first.lines.iter().any(|l| l.contains(" unmirrored "));
-    check(
-        "the first display is kept",
-        first.kept,
-        format!("{:#?}", first.lines),
-    );
-    // Where the app unmirrored, the sampler must have seen the flash: a
-    // sampler that sees nothing proves nothing.
-    check(
-        "the user's screen flashes once if macOS mirrored, for under 2 s",
-        first.flashes.len() == usize::from(mirrored) && first.flashes.iter().all(|&ms| ms < 2000),
-        format!("flashes {:?} ms, macOS mirrored: {mirrored}", first.flashes),
-    );
-    if !mirrored {
-        println!("note: macOS didn't mirror the first display; its set has a stored arrangement");
+    let mut seen = Vec::new();
+    for (i, size) in sizes().into_iter().enumerate() {
+        let name = format!("unmirror-{}-{}x{}", i + 1, size.0, size.1);
+        let attempt = attempt(user, &name, size)?;
+        let mirrored = attempt.lines.iter().any(|l| l.contains(" unmirrored "));
+        check(
+            &format!("display {} ({}x{}) is kept", i + 1, size.0, size.1),
+            attempt.kept,
+            format!("{:#?}", attempt.lines),
+        );
+        if seen.contains(&size) {
+            check(
+                &format!(
+                    "display {} of a size seen before doesn't flash the user's screen",
+                    i + 1
+                ),
+                attempt.flashes.is_empty() && !mirrored,
+                format!("flashes {:?} ms {:#?}", attempt.flashes, attempt.lines),
+            );
+        } else {
+            // Where the app unmirrored, the sampler must have seen the
+            // flash: a sampler that sees nothing proves nothing.
+            check(
+                &format!(
+                    "display {} flashes the user's screen once if macOS mirrored, for under 2 s",
+                    i + 1
+                ),
+                attempt.flashes.len() == usize::from(mirrored)
+                    && attempt.flashes.iter().all(|&ms| ms < 2000),
+                format!(
+                    "flashes {:?} ms, macOS mirrored: {mirrored}",
+                    attempt.flashes
+                ),
+            );
+            if !mirrored {
+                println!(
+                    "note: macOS didn't mirror display {}; its set has a stored arrangement of that size",
+                    i + 1
+                );
+            }
+        }
+        seen.push(size);
     }
-
-    let second = attempt(user, "unmirror-second", size)?;
-    check(
-        "the second display of that size is kept",
-        second.kept,
-        format!("{:#?}", second.lines),
-    );
-    check(
-        "the second display doesn't flash the user's screen",
-        second.flashes.is_empty() && !second.lines.iter().any(|l| l.contains(" unmirrored ")),
-        format!("flashes {:?} ms {:#?}", second.flashes, second.lines),
-    );
-
     // The test app's displays end with it, a moment later.
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let after = loop {
