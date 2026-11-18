@@ -1,0 +1,10 @@
+2026-11-18 10:32:41.288 created display=82 unit=6 at=1728,-800 size=1280x800 serial=1
+2026-11-18 10:42:26.854 created display=83 unit=7 at=1728,-1600 size=1280x800 serial=2
+2026-11-18 11:35:49.604 created display=85 unit=8 at=1728,-2400 size=1280x800 serial=3
+2026-11-18 13:22:56.056 released display=85 unit=8 at=1728,-2400 size=1280x800 spare unused
+2026-11-18 13:38:12.357 created display=260 unit=8 at=1728,-2400 size=1280x800 serial=3
+2026-11-18 13:52:15.382 released display=82 unit=6 at=1728,-800 size=1280x800 quit
+2026-11-18 13:52:15.384 released display=83 unit=7 at=1728,-1600 size=1280x800 quit
+2026-11-18 13:52:15.385 released display=260 unit=8 at=1728,-2400 size=1280x800 quit
+2026-11-18 13:56:06.780 created display=261 unit=6 at=0,0 size=1280x800 serial=10001
+2026-11-18 13:56:06.781 released display=261 unit=6 at=0,0 size=1280x800 on the user's screen: OnUser { user: 1 }

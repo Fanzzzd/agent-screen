@@ -3,6 +3,9 @@
 
 use super::cg;
 use agent_screen_model::arrangement;
+use agent_screen_model::landing::{
+    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets, UserBefore,
+};
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -29,7 +32,12 @@ unsafe extern "C" {
     fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
     fn CGConfigureDisplayOrigin(config: *mut c_void, display: u32, x: i32, y: i32) -> i32;
     fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
+    fn CGConfigureDisplayMirrorOfDisplay(config: *mut c_void, display: u32, master: u32) -> i32;
 }
+
+/// `CGCompleteDisplayConfiguration` options.
+const FOR_SESSION: u32 = 1;
+const PERMANENTLY: u32 = 2;
 
 pub struct VirtualDisplay {
     pub id: u32,
@@ -164,17 +172,59 @@ impl VirtualDisplay {
     /// stays until another comes, so WindowServer hands that one the next
     /// unit; up to three tries, each with the next free serial, so a retry
     /// leaves no identity that never comes back.
-    pub fn create(name: &str, width: u32, height: u32, serial: Serial) -> Option<Self> {
+    ///
+    /// A display that lands on the user's screen (`landing::landing`, from
+    /// the displays `before` it among `others`, Agent Screen's) has its
+    /// mirror turned off and its arrangement stored (`unmirror`): macOS
+    /// mirrored it with the user's display, which runs at its size
+    /// meanwhile (#220). Where that isn't allowed or doesn't hold, it goes
+    /// at once, its twins with it, and no other is made.
+    pub fn create(
+        name: &str,
+        width: u32,
+        height: u32,
+        serial: Serial,
+        others: &[u32],
+        before: &[arrangement::Screen],
+    ) -> Result<Self, NotMade> {
         let first = serial.1;
         let mut serial = Some(serial);
         let mut twinned: Vec<Self> = Vec::new();
         for _ in 0..3u32 {
+            // The next display, a unit-twin retry's included, would get a
+            // unit number macOS put on the user's screen before.
+            if let Some(why) = creation_refusal() {
+                for twinned in twinned {
+                    crate::lifecycle::note("released", twinned.id, "unit twin");
+                }
+                return Err(NotMade::Refused(why));
+            }
             let lease = serial.take().unwrap_or_else(|| Serial::lease(first));
             let number = lease.get();
-            let mut display = Self::create_once(name, width, height, number)?;
+            let mut display =
+                Self::create_once(name, width, height, number).ok_or(NotMade::MacRefused)?;
             display.serial = Some(lease);
             crate::lifecycle::note("created", display.id, &format!("serial={number}"));
+            twinned.push(display);
+            // Every display of this call: macOS may mirror an earlier one
+            // once a later one comes, as it did display 65 (#220).
+            if let Some(unit) = release_if_on_user(&mut twinned, others, before) {
+                return Err(NotMade::OnUser { unit });
+            }
+            let display = twinned.pop().expect("just pushed");
+            // macOS keeps the resolution last used for a display's serial,
+            // and serials repeat across launches: a display that once ran
+            // at another size comes back at it, maybe at 1x, and shows
+            // blurry. Ask for this size at 2x, once it is clear of the
+            // user's displays: in a mirror set the user's display would
+            // take the size too.
+            settle_mode(display.id, width, height);
             let Some(twin) = cg::unit_twin(display.id) else {
+                twinned.push(display);
+                if let Some(unit) = release_if_on_user(&mut twinned, others, before) {
+                    return Err(NotMade::OnUser { unit });
+                }
+                let display = twinned.pop().expect("just pushed");
                 let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
                 for twinned in twinned {
                     if fillers.len() < MAX_FILLERS && !twins_ours(twinned.id) {
@@ -184,7 +234,7 @@ impl VirtualDisplay {
                         crate::lifecycle::note("released", twinned.id, "unit twin");
                     }
                 }
-                return Some(display);
+                return Ok(display);
             };
             log::warn!(
                 "display {} got the unit number of display {twin}; making another",
@@ -193,7 +243,7 @@ impl VirtualDisplay {
             twinned.push(display);
         }
         // Still twinned: capture refuses it, rather than show the other.
-        twinned.pop()
+        twinned.pop().ok_or(NotMade::MacRefused)
     }
 
     /// Its serial, and the serial's place in its instance's range, from 1.
@@ -256,11 +306,6 @@ impl VirtualDisplay {
             if id == 0 {
                 return None;
             }
-            // macOS keeps the resolution last used for a display's serial,
-            // and serials repeat across launches: a display that once ran
-            // at another size comes back at it, maybe at 1x, and shows
-            // blurry. Ask for this size at 2x.
-            settle_mode(id, width, height);
             super::claims::add_display(id);
             Some(Self {
                 id,
@@ -364,6 +409,549 @@ pub async fn configure<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
     result.await.expect("display thread ended")
 }
 
+/// Why no display came of a creation.
+#[derive(Clone, PartialEq, Debug)]
+pub enum NotMade {
+    /// WindowServer refused the display: nothing changed on screen.
+    MacRefused,
+    /// It got unit number `unit`, landed on the user's screen and went at
+    /// once.
+    OnUser { unit: u32 },
+    /// Parking never verified a safe position, and it went.
+    Unparked,
+    /// None was made, for the reason given to the agent
+    /// (`creation_refusal`).
+    Refused(String),
+}
+
+/// How this process's last new displays ended. Mirrors every instance
+/// recorded come from the shared file at each decision.
+static GUARD: std::sync::Mutex<CreationGuard> = std::sync::Mutex::new(CreationGuard::new());
+
+/// `~/Library/Application Support/Agent Screen/bad-units.json`, one for
+/// every instance: the state it records is WindowServer's.
+fn bad_units_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::Path::new(&home).join("Library/Application Support/Agent Screen/bad-units.json")
+}
+
+/// Run `job` on the shared file's record, holding an exclusive lock on
+/// `bad-units.lock` so instances don't write over each other. A record
+/// `job` returns replaces the file: written beside it, then renamed in.
+fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
+    with_shared(
+        &bad_units_path(),
+        BadUnits::from_json,
+        BadUnits::to_json,
+        job,
+    )
+}
+
+/// `~/Library/Application Support/Agent Screen/arrangements.json`, one for
+/// every instance: the arrangements it records are WindowServer's.
+fn stored_sets_path() -> std::path::PathBuf {
+    bad_units_path().with_file_name("arrangements.json")
+}
+
+/// `with_bad_units` for the sets Agent Screen stored an arrangement for.
+fn with_stored_sets<T>(job: impl FnOnce(StoredSets) -> (T, Option<StoredSets>)) -> T {
+    with_shared(
+        &stored_sets_path(),
+        StoredSets::from_json,
+        StoredSets::to_json,
+        job,
+    )
+}
+
+/// Run `job` on the record in the JSON file at `path`, holding an
+/// exclusive lock on the file's `.lock` sibling. A record `job` returns
+/// replaces the file: written beside it, then renamed in.
+fn with_shared<R: Default, T>(
+    path: &std::path::Path,
+    parse: fn(&serde_json::Value) -> Option<R>,
+    to_json: fn(&R) -> serde_json::Value,
+    job: impl FnOnce(R) -> (T, Option<R>),
+) -> T {
+    use std::os::fd::AsRawFd;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"));
+    let locked = lock
+        .as_ref()
+        .is_ok_and(|f| unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0);
+    if !locked {
+        log::warn!("couldn't lock {}", path.with_extension("lock").display());
+    }
+    let record = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|v| parse(&v))
+        .unwrap_or_default();
+    let (out, write) = job(record);
+    if let Some(record) = write {
+        let temp = path.with_extension(format!("json.{}", std::process::id()));
+        let written = std::fs::write(&temp, to_json(&record).to_string())
+            .and_then(|()| std::fs::rename(&temp, path));
+        if let Err(e) = written {
+            log::warn!("couldn't write {}: {e}", path.display());
+        }
+    }
+    // Dropping the file releases the lock.
+    drop(lock);
+    out
+}
+
+/// The login session's unique id, which a logout or restart changes along
+/// with WindowServer. Empty when CoreGraphics doesn't say: then no record
+/// matches.
+fn session() -> &'static str {
+    static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SESSION.get_or_init(cg::session_uuid)
+}
+
+/// Seconds since this process first asked.
+fn secs() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
+/// The Mac as a decision to make a display reads it now.
+fn now() -> Now<'static> {
+    let units: Vec<u32> = cg::online().into_iter().map(cg::unit_number).collect();
+    Now {
+        next_unit: landing::next_unit(&units),
+        online: units.len(),
+        session: session(),
+        secs: secs(),
+        wall: wall(),
+    }
+}
+
+/// Seconds since 1970.
+fn wall() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Whether new displays are paused because one landed on the user's
+/// screen, for the menu and the "+" button to say so.
+pub fn paused_by_mirror() -> bool {
+    let now = now();
+    with_bad_units(|file| {
+        let guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.paused_by_mirror(&file, &now), None)
+    })
+}
+
+/// The user's Allow New Displays: forget where displays landed on their
+/// screen, in every instance.
+pub fn allow_new_displays() {
+    GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear_bad_units();
+    with_bad_units(|_| ((), Some(BadUnits::new())));
+    crate::lifecycle::line("new displays allowed again by the user");
+}
+
+/// A record that a display landed on the user's screen now, as a test
+/// would see one, in this instance only (`debugShow displays-paused`).
+#[cfg(debug_assertions)]
+pub fn debug_pause_new_displays() {
+    let now = now();
+    GUARD.lock().unwrap_or_else(|e| e.into_inner()).record(
+        Outcome::Mirrored {
+            unit: now.next_unit,
+            online: now.online,
+            at: now.wall,
+        },
+        session(),
+    );
+}
+
+/// Why Agent Screen makes no new display now, for the agent: the last new
+/// display, this instance's or another's, landed on the user's screen
+/// with these displays online or this unit next, or parking failed twice.
+/// None while it may.
+pub fn creation_refusal() -> Option<String> {
+    let now = now();
+    with_bad_units(|file| {
+        let guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.refusal(&file, &now), None)
+    })
+}
+
+fn record(outcome: Outcome) {
+    GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(outcome, session());
+    if let Outcome::Mirrored { unit, online, at } = outcome {
+        crate::lifecycle::line(&format!(
+            "landed on the user's screen: unit {unit} with {online} displays online; no display is made while either repeats, for 30 min"
+        ));
+        // A test's injected landing stays in this instance.
+        if !landing_refused() {
+            with_bad_units(|mut file| {
+                file.add(session(), unit, online, at);
+                ((), Some(file))
+            });
+        }
+    }
+}
+
+/// What to tell the agent about a creation that made no display; None for
+/// the plain failure message.
+fn refusal_after(not_made: &NotMade) -> Option<String> {
+    match not_made {
+        NotMade::Refused(why) => Some(why.clone()),
+        NotMade::OnUser { .. } | NotMade::Unparked | NotMade::MacRefused => creation_refusal(),
+    }
+}
+
+/// Once one display in `made` has landed on the user's screen, turn the
+/// mirror off and keep them all (`unmirror`). Where that isn't allowed or
+/// doesn't hold, release every display in `made`: that one's unit number.
+fn release_if_on_user(
+    made: &mut Vec<VirtualDisplay>,
+    others: &[u32],
+    before: &[arrangement::Screen],
+) -> Option<u32> {
+    let ids: Vec<u32> = made.iter().map(|d| d.id).collect();
+    let (at, landed) = made.iter().enumerate().find_map(|(i, d)| {
+        let mut also = others.to_vec();
+        also.extend(ids.iter().copied().filter(|&o| o != d.id));
+        let landed = landed(d.id, &also, before);
+        landed.takes_user_display().then_some((i, landed))
+    })?;
+    if unmirror(&ids, others, before) {
+        return None;
+    }
+    let on_user = made.remove(at);
+    for other in made.drain(..) {
+        crate::lifecycle::note("released", other.id, "unit twin");
+    }
+    Some(release_on_user(on_user, landed, before))
+}
+
+/// The displays online as WindowServer keys a stored arrangement
+/// (`landing::arrangement_key`), with each display in `before` at the size
+/// it had then: a user display mirroring a new one runs at the new one's
+/// size meanwhile. None when a display has no identity.
+fn arrangement_key(before: &[arrangement::Screen]) -> Option<String> {
+    let now = cg::online()
+        .into_iter()
+        .map(|d| {
+            let b = cg::display_bounds(d);
+            let uuid = super::colorsync::uuid_of(d)?;
+            Some((d, uuid, (b.width as u32, b.height as u32)))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let sizes: Vec<(u32, (u32, u32))> = before
+        .iter()
+        .map(|s| (s.id, (s.rect.width as u32, s.rect.height as u32)))
+        .collect();
+    Some(landing::arrangement_key_before(&now, &sizes))
+}
+
+/// A display mode CoreGraphics gave, released with this.
+struct Mode(*const c_void);
+
+// Only the display worker touches it; CoreGraphics modes are immutable.
+unsafe impl Send for Mode {}
+
+impl Drop for Mode {
+    fn drop(&mut self) {
+        unsafe { CGDisplayModeRelease(self.0) };
+    }
+}
+
+/// The user's displays before the display worker's current creation or
+/// reuse: origin, the display each mirrored, and mode
+/// (`snapshot_users`). `unmirror` puts them back as they were.
+static USERS_BEFORE: std::sync::Mutex<Vec<(UserBefore, Option<Mode>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Take `USERS_BEFORE` from the user displays among `before`.
+fn snapshot_users(before: &[arrangement::Screen]) {
+    let users = before
+        .iter()
+        .filter(|s| s.role == arrangement::Role::User)
+        .map(|s| {
+            let mode = unsafe { CGDisplayCopyDisplayMode(s.id) };
+            let user = UserBefore {
+                id: s.id,
+                origin: (s.rect.x, s.rect.y),
+                mirrors: cg::mirrors(s.id),
+            };
+            (user, (!mode.is_null()).then_some(Mode(mode)))
+        })
+        .collect();
+    *USERS_BEFORE.lock().unwrap_or_else(|e| e.into_inner()) = users;
+}
+
+/// New displays `new` of which one landed on the user's screen, with
+/// Agent Screen's displays `others` and the displays `before` them: take
+/// the new displays out of their mirror set, keep every mirror the user
+/// chose, give the user's displays back their origins and modes
+/// (`USERS_BEFORE`, `landing::unmirror_plan`) and park `new`, in one change
+/// that WindowServer stores for this set of displays
+/// (`landing::OnLanding::Unmirror`). True once every display in `new` is
+/// clear of the user's screen. False for a set Agent Screen stored before
+/// and macOS mirrored anyway, a change WindowServer refused, or a mirror
+/// still on after 8 s: the caller releases.
+fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool {
+    // A test's injected landing has no mirror to turn off: it takes the
+    // release path.
+    if landing_refused() {
+        return false;
+    }
+    let Some(key) = arrangement_key(before) else {
+        log::warn!("displays {new:?}: a display has no identity; releasing");
+        return false;
+    };
+    let decision = with_stored_sets(|stored| match stored.on_landing(&key) {
+        OnLanding::Release => {
+            let mut stored = stored;
+            stored.forget(&key);
+            (OnLanding::Release, Some(stored))
+        }
+        OnLanding::Unmirror => (OnLanding::Unmirror, None),
+    });
+    if decision == OnLanding::Release {
+        crate::lifecycle::line(&format!(
+            "displays {new:?} landed on the user's screen although Agent Screen stored an arrangement for this set; releasing"
+        ));
+        return false;
+    }
+    let started = std::time::Instant::now();
+    let online = cg::online();
+    // The user's displays where they were, Agent Screen's others too; the
+    // new ones wherever macOS put them, for the plan to park.
+    let mut screens: Vec<arrangement::Screen> = before
+        .iter()
+        .filter(|s| online.contains(&s.id))
+        .cloned()
+        .collect();
+    for &d in new {
+        screens.retain(|s| s.id != d);
+        screens.push(arrangement::Screen {
+            id: d,
+            rect: cg::display_bounds(d),
+            role: arrangement::Role::Ours {
+                order: u64::from(cg::serial(d)),
+            },
+        });
+    }
+    let parked = arrangement::plan(&screens);
+    let mirrors_now: Vec<(u32, u32)> = online
+        .iter()
+        .filter_map(|&d| cg::mirrors(d).map(|m| (d, m)))
+        .collect();
+    let users = USERS_BEFORE.lock().unwrap_or_else(|e| e.into_inner());
+    let plan = landing::unmirror_plan(
+        &users.iter().map(|(u, _)| *u).collect::<Vec<_>>(),
+        &mirrors_now,
+        new,
+    );
+    log::info!("displays {new:?}: unmirroring, mirrors {mirrors_now:?}, plan {plan:?}");
+    // One change: the new displays out of their mirror set, the user's own
+    // mirrors kept, the user's displays back at their origins and modes,
+    // the new ones parked, stored for this set of displays. The next time
+    // the set comes, at these sizes, WindowServer applies it, not its
+    // default, which mirrors (#220). WindowServer had already stored the
+    // mirror for the set when it added the display; a change for the
+    // session only would leave that. Split in two, the user's screen came
+    // back no sooner (1.4 s for the session part alone).
+    let completed = unsafe {
+        let mut config = std::ptr::null_mut();
+        if CGBeginDisplayConfiguration(&mut config) != 0 {
+            return false;
+        }
+        for &d in &plan.unmirror {
+            CGConfigureDisplayMirrorOfDisplay(config, d, 0);
+        }
+        for &(d, master) in &plan.remirror {
+            CGConfigureDisplayMirrorOfDisplay(config, d, master);
+        }
+        for &d in &plan.modes {
+            if let Some((_, Some(mode))) = users.iter().find(|(u, _)| u.id == d) {
+                CGConfigureDisplayWithDisplayMode(config, d, mode.0, std::ptr::null());
+            }
+        }
+        for &(d, (x, y)) in plan.origins.iter().chain(&parked) {
+            CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
+        }
+        CGCompleteDisplayConfiguration(config, PERMANENTLY)
+    };
+    drop(users);
+    // A refused change leaves the mirror on: release at once, as 0.1.39.
+    if completed != 0 {
+        log::warn!("displays {new:?}: unmirroring refused ({completed}); releasing");
+        return false;
+    }
+    let stored_ms = started.elapsed().as_millis();
+    let clear = || {
+        new.iter().all(|&d| {
+            let mut also = others.to_vec();
+            also.extend(new.iter().copied().filter(|&o| o != d));
+            !landed(d, &also, before).takes_user_display()
+        })
+    };
+    // The app reads the change late while WindowServer reconfigures: the
+    // user's screen was back 0.8 s after creation on 2026-11-18, and the
+    // app saw it 4 s after.
+    while !clear() && started.elapsed().as_secs() < 8 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let ms = started.elapsed().as_millis();
+    if !clear() {
+        log::warn!("displays {new:?}: still on the user's screen {ms} ms after unmirroring");
+        return false;
+    }
+    let stored = arrangement_key(&[]).unwrap_or(key);
+    with_stored_sets(|mut sets| {
+        sets.stored(&stored, wall());
+        ((), Some(sets))
+    });
+    for &d in new {
+        crate::lifecycle::note(
+            "unmirrored",
+            d,
+            &format!("mirror off and arrangement stored in {stored_ms} ms, seen clear in {ms} ms"),
+        );
+    }
+    true
+}
+
+/// The online displays but the closet, as the arrangement sees them. A
+/// display in a mirror set may be missing from the active list.
+fn online_screens(virtual_ids: &[u32]) -> Vec<arrangement::Screen> {
+    let online: Vec<u32> = cg::online()
+        .into_iter()
+        .filter(|&d| !cg::is_closet(d))
+        .collect();
+    screens(&online, virtual_ids, &[])
+}
+
+/// Where Agent Screen's display `id` landed among the displays `before`
+/// it (`landing::landing`).
+fn landed(id: u32, others: &[u32], before: &[arrangement::Screen]) -> Landing {
+    let mut ids = others.to_vec();
+    ids.push(id);
+    let online: Vec<u32> = cg::online();
+    let mirrored: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&d| cg::in_mirror_set(d))
+        .collect();
+    let landed = landing::landing(id, before, &online_screens(&ids), &mirrored);
+    if landed.takes_user_display() {
+        return landed;
+    }
+    if landing_refused() {
+        return Landing::OnUser {
+            user: cg::main_display(),
+        };
+    }
+    Landing::Clear
+}
+
+/// Release a display that landed on the user's screen, now, and note
+/// whether the user's display got back the size it had `before`. macOS
+/// restores it; Agent Screen doesn't touch the user's display mode. The
+/// display's unit number.
+fn release_on_user(
+    display: VirtualDisplay,
+    landed: Landing,
+    before: &[arrangement::Screen],
+) -> u32 {
+    let id = display.id;
+    let unit = cg::unit_number(id);
+    log::warn!("display {id} landed on the user's screen ({landed:?}); releasing it at once");
+    crate::lifecycle::note("released", id, &format!("on the user's screen: {landed:?}"));
+    drop(display);
+    // WindowServer removes it a moment later; until then the displays
+    // online, which the next decision reads, still count it.
+    let going = std::time::Instant::now();
+    while cg::is_online(id) && going.elapsed().as_secs() < 3 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let user = match landed {
+        Landing::OnUser { user } | Landing::UserResized { user, .. } => user,
+        Landing::Clear => return unit,
+    };
+    let Some(was) = before.iter().find(|s| s.id == user).map(|s| s.rect) else {
+        return unit;
+    };
+    let size = || {
+        let now = cg::display_bounds(user);
+        (now.width, now.height)
+    };
+    let started = std::time::Instant::now();
+    while size() != (was.width, was.height) && started.elapsed().as_secs() < 3 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let (w, h) = size();
+    let back = (w, h) == (was.width, was.height);
+    let state = if back { "back at" } else { "not back at" };
+    // A smaller user display moved the displays right of it; put back
+    // those still off where they were. Another instance's may be parking
+    // meanwhile, and parks its own.
+    if back {
+        let moved: Vec<(u32, (f64, f64))> = before
+            .iter()
+            .filter(|s| s.id != id && s.role != arrangement::Role::Fixed && cg::is_online(s.id))
+            .filter(|s| {
+                let now = cg::display_bounds(s.id);
+                (now.x, now.y) != (s.rect.x, s.rect.y)
+            })
+            .map(|s| (s.id, (s.rect.x, s.rect.y)))
+            .collect();
+        if !moved.is_empty() {
+            log::info!("display {id}: putting back displays macOS moved for it: {moved:?}");
+            put_back(&moved);
+        }
+    }
+    crate::lifecycle::line(&format!(
+        "user display {user} {state} {}x{} {} ms after display {id} went, now {w}x{h}",
+        was.width,
+        was.height,
+        started.elapsed().as_millis()
+    ));
+    unit
+}
+
+/// Move each display to its origin, in one change for this session.
+fn put_back(origins: &[(u32, (f64, f64))]) {
+    unsafe {
+        let mut config = std::ptr::null_mut();
+        if CGBeginDisplayConfiguration(&mut config) == 0 {
+            for &(d, (x, y)) in origins {
+                CGConfigureDisplayOrigin(config, d, x as i32, y as i32);
+            }
+            CGCompleteDisplayConfiguration(config, FOR_SESSION);
+        }
+    }
+}
+
+/// Report a display on the user's screen without one there, in an
+/// isolated debug instance, so a test can take the release path without
+/// resizing the user's screen.
+fn landing_refused() -> bool {
+    knob("AGENTSCREEN_TEST_LANDED_ON_USER").is_some()
+        && std::env::var("AGENTSCREEN_INSTANCE").as_deref() == Ok("e2e")
+}
+
 /// A new display, parked from here as soon as macOS has made it, with the
 /// displays macOS moved for it put back. `others` are the app's other
 /// virtual displays. The main thread isn't involved: each new display
@@ -374,15 +962,35 @@ pub async fn create_parked(
     height: u32,
     serial: Serial,
     others: Vec<u32>,
-) -> Option<VirtualDisplay> {
+) -> Result<VirtualDisplay, Option<String>> {
     // Creation and parking share the display worker. Otherwise two new
     // displays can choose positions from an incomplete set of origins.
     configure(move || {
+        if let Some(why) = creation_refusal() {
+            log::warn!("not making {name}: {why}");
+            return Err(Some(why));
+        }
         let before = origins();
+        let before_screens = online_screens(&others);
+        snapshot_users(&before_screens);
+        let online = cg::online().len();
         let previous_fillers = filler_ids();
-        let made = VirtualDisplay::create(&name, width, height, serial)?;
-        let parked = park_owned(made, others, &before);
-        if parked.is_none() {
+        let made = VirtualDisplay::create(&name, width, height, serial, &others, &before_screens);
+        let parked = made.and_then(|made| park_owned(made, others, &before, &before_screens));
+        match &parked {
+            Ok(_) => record(Outcome::Parked),
+            Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
+                unit: *unit,
+                online,
+                at: wall(),
+            }),
+            Err(NotMade::Unparked) => record(Outcome::Failed {
+                online,
+                secs: secs(),
+            }),
+            Err(NotMade::MacRefused | NotMade::Refused(_)) => {}
+        }
+        if parked.is_err() {
             // A unit-twin retry can retain fillers before it returns its
             // usable target. Failed creation owns those handles too.
             let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -395,7 +1003,7 @@ pub async fn create_parked(
                 crate::lifecycle::note("released", filler.id, "filler from failed creation");
             }
         }
-        parked
+        parked.map_err(|not_made| refusal_after(&not_made))
     })
     .await
 }
@@ -411,26 +1019,62 @@ pub async fn reuse_parked(
 ) -> Option<VirtualDisplay> {
     configure(move || {
         let before = origins();
+        let before_screens = online_screens(&others);
+        snapshot_users(&before_screens);
         if resize && !handle.resize(width, height) {
             crate::lifecycle::note("released", handle.id, "spare could not resize");
             return None;
         }
         let mut ids = others;
         ids.push(handle.id);
+        // With the spare gone, one display fewer is online.
+        let online = cg::online().len().saturating_sub(1);
+        let landed = landed(handle.id, &others_of(&ids, handle.id), &before_screens);
+        if landed.takes_user_display()
+            && !unmirror(&[handle.id], &others_of(&ids, handle.id), &before_screens)
+        {
+            let unit = release_on_user(handle, landed, &before_screens);
+            record(Outcome::Mirrored {
+                unit,
+                online,
+                at: wall(),
+            });
+            return None;
+        }
         if is_tucked(handle.id, &ids) {
+            record(Outcome::Reused);
             return Some(handle);
         }
-        park_owned(handle, ids, &before)
+        let parked = park_owned(handle, ids, &before, &before_screens);
+        match &parked {
+            Ok(_) => record(Outcome::Reused),
+            Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
+                unit: *unit,
+                online,
+                at: wall(),
+            }),
+            Err(_) => {}
+        }
+        parked.ok()
     })
     .await
 }
 
+/// `ids` without `id`.
+fn others_of(ids: &[u32], id: u32) -> Vec<u32> {
+    ids.iter().copied().filter(|&d| d != id).collect()
+}
+
 /// Runs only on the display worker, for a new handle or a resized spare.
+/// macOS may put a display in a mirror set a moment after making it: one
+/// that lands on the user's screen meanwhile is unmirrored once
+/// (`unmirror`), and goes at once if that fails or the mirror comes back.
 fn park_owned(
     made: VirtualDisplay,
     mut ids: Vec<u32>,
     before: &[(u32, (f64, f64))],
-) -> Option<VirtualDisplay> {
+    before_screens: &[arrangement::Screen],
+) -> Result<VirtualDisplay, NotMade> {
     let id = made.id;
     ids.push(id);
     // Include fillers retained during this creation, not just the ones
@@ -439,9 +1083,20 @@ fn park_owned(
     ids.extend(fillers.iter().copied());
     ids.sort_unstable();
     ids.dedup();
+    let mut unmirrored = false;
     for attempt in 0..75 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let landed = landed(id, &others_of(&ids, id), before_screens);
+        if landed.takes_user_display() {
+            // Once: a mirror that comes back goes to the refusal.
+            if !unmirrored && unmirror(&[id], &others_of(&ids, id), before_screens) {
+                unmirrored = true;
+                continue;
+            }
+            let unit = release_on_user(made, landed, before_screens);
+            return Err(NotMade::OnUser { unit });
         }
         crate::core::park_fillers(&ids);
         if tuck_away_restoring(id, &ids, before)
@@ -451,13 +1106,13 @@ fn park_owned(
                 .all(|&f| !cg::is_online(f) || is_tucked(f, &ids))
         {
             crate::lifecycle::note("parked", id, &format!("tries={}", attempt + 1));
-            return Some(made);
+            return Ok(made);
         }
     }
     let why = parking_failure(id, &ids, &fillers, before);
     log::warn!("display {id}: macOS did not verify a safe position ({why}); releasing it");
     crate::lifecycle::note("released", id, &format!("parking failed: {why}"));
-    None
+    Err(NotMade::Unparked)
 }
 
 /// Why the last parking check failed, for the display log: each display
@@ -578,7 +1233,7 @@ pub fn tuck_away_restoring(id: u32, virtual_ids: &[u32], before: &[(u32, (f64, f
                 // For this session only. Made permanent, macOS took a second
                 // longer to finish, 2.3 s against 1.3 s, and still showed the
                 // next display with the serial at its default spot first.
-                CGCompleteDisplayConfiguration(config, 1);
+                CGCompleteDisplayConfiguration(config, FOR_SESSION);
             }
         }
     }
@@ -693,6 +1348,11 @@ fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
             && CGDisplayModeGetHeight(mode) == height
             && CGDisplayModeGetPixelWidth(mode) == width * scale as usize
     };
+    // A display in a mirror set shares its mode with the display it
+    // mirrors: setting it would resize that one (#220).
+    if cg::in_mirror_set(id) {
+        return false;
+    }
     unsafe {
         let current = CGDisplayCopyDisplayMode(id);
         if !current.is_null() {
@@ -729,9 +1389,12 @@ fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
             let mut config = std::ptr::null_mut();
             if CGBeginDisplayConfiguration(&mut config) == 0 {
                 let set = CGConfigureDisplayWithDisplayMode(config, id, mode, std::ptr::null());
-                // kCGConfigurePermanently: macOS remembers it for the
-                // serial, so the next display with it starts right.
-                let done = CGCompleteDisplayConfiguration(config, 2);
+                // kCGConfigureForSession. Made permanent, macOS would store
+                // the whole arrangement for this set of displays, a mirror
+                // that formed meanwhile included, and apply it again after
+                // logout and restart. Each new display asks for its mode
+                // anyway (`settle_mode`).
+                let done = CGCompleteDisplayConfiguration(config, FOR_SESSION);
                 log::debug!("display {id}: mode set {set}, completed {done}");
             }
         }

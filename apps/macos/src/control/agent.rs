@@ -2824,6 +2824,11 @@ async fn create_display(
     let (made, name) = match spare {
         Some((handle, name)) => (Some(handle), name),
         None => {
+            // A new display landed on the user's screen, or parking kept
+            // failing: another try would change the user's screen again.
+            if let Some(why) = crate::mac::display::creation_refusal() {
+                return Err(ControlError::failed(why));
+            }
             if let Err(why) = core.update(cx, |c, _| c.budget_allows()) {
                 return Err(ControlError::failed(why));
             }
@@ -2848,6 +2853,13 @@ async fn create_display(
                     others,
                 ))
                 .await;
+            let made = match made {
+                Ok(made) => Some(made),
+                // A display landed on the user's screen, or would: the
+                // agent hears not to retry.
+                Err(Some(why)) => return Err(ControlError::failed(why)),
+                Err(None) => None,
+            };
             (made, name)
         }
     };
@@ -2893,9 +2905,9 @@ async fn create_display(
             })
         })
         .ok_or_else(|| {
-            ControlError::failed(
-                "macOS could not create a virtual display at a verified safe position. No Agent Display was assigned; retry create_display later.",
-            )
+            ControlError::failed(crate::mac::display::creation_refusal().unwrap_or_else(|| {
+                "macOS could not create a virtual display at a verified safe position. No Agent Display was assigned.".into()
+            }))
         })?;
     // Answer once the display is where it stays, so a first screenshot
     // shows only the display.
