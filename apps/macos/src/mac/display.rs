@@ -490,7 +490,51 @@ fn now() -> Now<'static> {
         online: units.len(),
         session: session(),
         secs: secs(),
+        wall: wall(),
     }
+}
+
+/// Seconds since 1970.
+fn wall() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Whether new displays are paused because one landed on the user's
+/// screen, for the menu and the "+" button to say so.
+pub fn paused_by_mirror() -> bool {
+    let now = now();
+    with_bad_units(|file| {
+        let guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.paused_by_mirror(&file, &now), None)
+    })
+}
+
+/// The user's Allow New Displays: forget where displays landed on their
+/// screen, in every instance.
+pub fn allow_new_displays() {
+    GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear_bad_units();
+    with_bad_units(|_| ((), Some(BadUnits::new())));
+    crate::lifecycle::line("new displays allowed again by the user");
+}
+
+/// A record that a display landed on the user's screen now, as a test
+/// would see one, in this instance only (`debugShow displays-paused`).
+#[cfg(debug_assertions)]
+pub fn debug_pause_new_displays() {
+    let now = now();
+    GUARD.lock().unwrap_or_else(|e| e.into_inner()).record(
+        Outcome::Mirrored {
+            unit: now.next_unit,
+            online: now.online,
+            at: now.wall,
+        },
+        session(),
+    );
 }
 
 /// Why Agent Screen makes no new display now, for the agent: the last new
@@ -510,14 +554,14 @@ fn record(outcome: Outcome) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .record(outcome, session());
-    if let Outcome::Mirrored { unit, online } = outcome {
+    if let Outcome::Mirrored { unit, online, at } = outcome {
         crate::lifecycle::line(&format!(
-            "landed on the user's screen: unit {unit} with {online} displays online; no display is made while either repeats"
+            "landed on the user's screen: unit {unit} with {online} displays online; no display is made while either repeats, for 30 min"
         ));
         // A test's injected landing stays in this instance.
         if !landing_refused() {
             with_bad_units(|mut file| {
-                file.add(session(), unit, online);
+                file.add(session(), unit, online, at);
                 ((), Some(file))
             });
         }
@@ -702,6 +746,7 @@ pub async fn create_parked(
             Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
                 unit: *unit,
                 online,
+                at: wall(),
             }),
             Err(NotMade::Unparked) => record(Outcome::Failed {
                 online,
@@ -750,7 +795,11 @@ pub async fn reuse_parked(
         let landed = landed(handle.id, &others_of(&ids, handle.id), &before_screens);
         if landed.takes_user_display() {
             let unit = release_on_user(handle, landed, &before_screens);
-            record(Outcome::Mirrored { unit, online });
+            record(Outcome::Mirrored {
+                unit,
+                online,
+                at: wall(),
+            });
             return None;
         }
         if is_tucked(handle.id, &ids) {
@@ -763,6 +812,7 @@ pub async fn reuse_parked(
             Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
                 unit: *unit,
                 online,
+                at: wall(),
             }),
             Err(_) => {}
         }
