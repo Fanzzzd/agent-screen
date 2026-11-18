@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.39 (2026-11-18)
+
+### Fixes
+
+- Creating an Agent Display no longer leaves your screen at the wrong resolution for about 10 seconds when macOS mirrors the new display with your main display. On 18 November, macOS put every new virtual display that got a certain unit number on top of the main display, which then switched to the new display's size until that display went, and this lasted across Agent Screen restarts. Agent Screen now releases such a display as soon as macOS makes it and puts back any display that moved. For the next 30 minutes it makes no display that would land the same way, in any instance and across its own restarts, and `create_display` tells the agent not to retry, so sessions no longer resize your screen every few minutes. The menu bar icon's menu shows the pause with Allow New Displays, and + tells you why it made no display. A spare display already made still goes to the next session. Two failed attempts in a row to place a new display out of your way pause new displays for 10 minutes. Display modes Agent Screen sets now last for the login session only, so macOS no longer stores them with your display arrangement.
+
 ## 0.1.38 (2026-11-15)
 
 ### Fixes
