@@ -482,6 +482,7 @@ impl Core {
                 if warm
                     && core.spares.len() < READY
                     && !core.warming
+                    && display::creation_refusal().is_none()
                     && core.budget_allows().is_ok()
                 {
                     core.make_spare(cx);
@@ -512,7 +513,8 @@ impl Core {
                     serial,
                     others,
                 ))
-                .await;
+                .await
+                .ok();
             let _ = this.update(cx, |core, cx| {
                 core.warming = false;
                 let Some(handle) = made else {

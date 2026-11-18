@@ -1,0 +1,8 @@
+2026-11-18 11:55:31.047 app started pid=97739 version=0.1.38
+2026-11-18 11:55:32.821 created display=86 unit=9 at=0,0 size=1280x800 serial=10001
+2026-11-18 11:55:38.826 released display=86 unit=9 at=0,0 size=1280x800 parking failed: tucked=false not restored=[82 (other instance) 1728,-800 -> 1280,-800] untucked fillers=[] online=[86 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 82 other instance 1280,-800 1280x800; 83 other instance 1728,-1600 1280x800; 85 other instance 1728,-2400 1280x800]
+2026-11-18 11:55:39.071 app quit pid=97739
+2026-11-18 11:57:38.912 app started pid=4624 version=0.1.38
+2026-11-18 11:57:39.854 created display=89 unit=9 at=0,0 size=1728x1117 serial=10001
+2026-11-18 11:57:41.536 released display=89 unit=9 at=0,0 size=1728x1117 parking failed: tucked=false not restored=[] untucked fillers=[] online=[89 ours 0,0 1728x1117; 1 user 0,0 1728x1117; 6 closet 1728,1117 2560x1440; 82 other instance 1728,-800 1280x800; 83 other instance 1728,-1600 1280x800; 85 other instance 1728,-2400 1280x800]
+2026-11-18 11:57:41.768 app quit pid=4624

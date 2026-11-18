@@ -2397,15 +2397,17 @@ impl Shell {
                                     executor.timer(grown).await;
                                 }
                                 let (w, h) = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
-                                crate::mac::display::reuse_parked(handle, w, h, resize, others)
-                                    .await
+                                let made =
+                                    crate::mac::display::reuse_parked(handle, w, h, resize, others)
+                                        .await;
+                                (made, false)
                             }
                             Err((serial, others)) => {
                                 // A new display stops every window on the Mac
                                 // from drawing for a moment: start it once the
                                 // waiting tile has grown in.
                                 executor.timer(grown).await;
-                                crate::mac::display::create_parked(
+                                match crate::mac::display::create_parked(
                                     name,
                                     DEFAULT_SIZE.0 as u32,
                                     DEFAULT_SIZE.1 as u32,
@@ -2413,15 +2415,25 @@ impl Shell {
                                     others,
                                 )
                                 .await
+                                {
+                                    Ok(made) => (Some(made), false),
+                                    // Paused: the user hears why below.
+                                    Err(refused) => (None, refused.is_some()),
+                                }
                             }
                         }
                     }
                 })
                 .await;
+            let (made, refused) = made;
             let _ = shell.update(cx, |shell, cx| {
                 shell.creating = shell.creating.saturating_sub(1);
                 let Some(handle) = made else {
-                    beep();
+                    if refused {
+                        shell.explain_paused(cx);
+                    } else {
+                        beep();
+                    }
                     if shell.peek_shown {
                         shell.show_peek(cx);
                     }
@@ -2452,6 +2464,35 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Say why "+" made no display: one landed on the user's screen, with
+    /// Allow New Displays, or parking failed twice. After the current event,
+    /// since the alert runs its own loop.
+    fn explain_paused(&mut self, cx: &mut Context<Self>) {
+        cx.defer(|_| {
+            if crate::mac::display::paused_by_mirror() {
+                let allow = native::confirm(
+                    t("New displays are paused", "已暂停新建显示器"),
+                    t(
+                        "macOS put the last new display on top of your screen and changed your screen's resolution. Agent Screen couldn't keep that mirror off, so it released the display. A display made now would likely do the same. New displays are allowed again within 30 minutes. If you allow them now, your screen may briefly change resolution again.",
+                        "macOS 把上一块新显示器叠在了你的屏幕上，并改变了屏幕分辨率。Agent Screen 未能关闭该镜像，已释放这块显示器。现在新建很可能再次如此。30 分钟内将自动恢复新建。如果现在允许，屏幕分辨率可能再次短暂变化。",
+                    ),
+                    t("Allow New Displays", "允许新建显示器"),
+                );
+                if allow {
+                    crate::mac::display::allow_new_displays();
+                }
+            } else {
+                native::alert(
+                    t("New displays are paused", "已暂停新建显示器"),
+                    t(
+                        "macOS failed twice in a row to place a new display out of your pointer's way. New displays are paused for up to 10 minutes, or until a display ends.",
+                        "macOS 连续两次未能把新显示器放到不挡鼠标的位置。新建显示器已暂停，最长 10 分钟，结束一块显示器后会提前恢复。",
+                    ),
+                );
+            }
+        });
     }
 
     // MARK: Viewer
@@ -2847,6 +2888,14 @@ impl Shell {
             "hide" => self.hide_peek(cx),
             "collapse" => self.close_viewer(cx),
             "create" => self.create_display(cx),
+            // The paused state as a display landing on the user's screen
+            // leaves it, in this instance only, with the menu that says so.
+            #[cfg(debug_assertions)]
+            "displays-paused" => {
+                crate::mac::display::debug_pause_new_displays();
+                self.status_menu(cx);
+            }
+            "allow-displays" => self.menu(MenuAction::AllowNewDisplays, cx),
             "dismiss" => self.dismiss(id, cx),
             // The Dismiss sheet's confirm, with the plan as it stands.
             "dismiss-confirm" => {
@@ -3001,6 +3050,18 @@ impl Shell {
             menu.separator();
         }
         // What to do with displays and their videos, then the app itself.
+        // A display that landed on the user's screen pauses new ones; the
+        // user may allow them sooner than the pause ends.
+        if crate::mac::display::paused_by_mirror() {
+            menu.disabled(t(
+                "New displays paused: macOS put the last one on your screen",
+                "已暂停新建：macOS 把上一块显示器叠在了你的屏幕上",
+            ));
+            menu.action(
+                t("Allow New Displays", "允许新建显示器"),
+                MenuAction::AllowNewDisplays,
+            );
+        }
         let create = menu.action(t("New Display", "新建显示器"), MenuAction::CreateDisplay);
         native::set_key_equivalent(&create, "n", true, false, false, false);
         menu.action(t("Recordings…", "录制回看…"), MenuAction::OpenRecordings);
@@ -3197,6 +3258,7 @@ impl Shell {
     fn menu(&mut self, action: MenuAction, cx: &mut Context<Self>) {
         match action {
             MenuAction::CreateDisplay => self.create_display(cx),
+            MenuAction::AllowNewDisplays => crate::mac::display::allow_new_displays(),
             MenuAction::OpenSettings => self.open_setup(cx),
             MenuAction::OpenRecordings => self.open_recordings(cx),
             MenuAction::ReportProblem => self.report_problem(cx),
