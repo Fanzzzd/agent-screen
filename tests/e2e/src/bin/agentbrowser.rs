@@ -1,5 +1,5 @@
 //! A Chromium browser the user already runs gets the agents' own instance
-//! (#222, ADR 0020). launch_app with no arguments starts a second process
+//! (#222, ADR 0022). launch_app with no arguments starts a second process
 //! of the browser on Agent Screen's profile for agents, with the private
 //! DevTools pipe, and opens its window on the Agent Display, showing
 //! nothing on the user's screen and leaving the user's front app alone. A
@@ -68,7 +68,7 @@ fn front_pid() -> Option<u32> {
     probe(&["frontpid"]).ok()?.trim().parse().ok()
 }
 
-/// The test instance's profile for the agents' instance (ADR 0020).
+/// The test instance's profile for the agents' instance (ADR 0022).
 fn agents_profile(bundle_id: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     Path::new(&home)

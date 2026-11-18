@@ -5181,7 +5181,7 @@ struct Start {
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
     /// The agents' instance of a browser the user runs, which takes the
-    /// new window (ADR 0020).
+    /// new window (ADR 0022).
     agents: Option<AgentsInstance>,
 }
 
@@ -5271,7 +5271,7 @@ impl Start {
 }
 
 /// The agents' own instance of a Chromium browser the user runs (ADR
-/// 0020), running as `pid` on `profile`.
+/// 0022), running as `pid` on `profile`.
 #[derive(Clone)]
 struct AgentsInstance {
     pid: i32,
@@ -5279,7 +5279,7 @@ struct AgentsInstance {
 }
 
 /// How to start the browser at `path`: a Chromium browser the user already
-/// runs gets the agents' instance (ADR 0020).
+/// runs gets the agents' instance (ADR 0022).
 fn browser_plan(
     path: &std::path::Path,
     arguments: &[String],
@@ -5473,7 +5473,7 @@ async fn launch_now(
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
     // The agents' instance of a browser the user runs is the only one this
-    // launch may use (ADR 0020).
+    // launch may use (ADR 0022).
     let only = agents.as_ref().map(|a| a.pid);
     let pids = {
         let path = path.clone();
@@ -5777,7 +5777,7 @@ async fn launch_now(
         let mut asked = ax::NewWindow::NotReady;
         // The agents' instance gets its window, and the URL in it, through
         // its pipe or a second start on its profile, never through its
-        // menus or LaunchServices (ADR 0020).
+        // menus or LaunchServices (ADR 0022).
         if let Some(agents) = agents.clone() {
             let (path, url) = (path.clone(), target.filter(|_| is_url).map(String::from));
             if off(cx, move || {

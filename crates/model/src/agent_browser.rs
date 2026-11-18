@@ -1,5 +1,5 @@
 //! A Chromium browser the user already runs gets a separate instance for
-//! agents (#222, ADR 0020). The agents' windows used to open in the user's
+//! agents (#222, ADR 0022). The agents' windows used to open in the user's
 //! own process. While that process was the user's front app with their
 //! window focused, Agent Screen could post nothing to it (#110), and a
 //! browser's web elements take no accessibility press, so every agent's

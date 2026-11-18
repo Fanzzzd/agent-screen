@@ -441,7 +441,7 @@ pub fn bundle_id_at(bundle: &Path) -> Option<String> {
     info_value(&plist, "CFBundleIdentifier")
 }
 
-/// The agents' profile folder for the browser at `bundle` (ADR 0020), in
+/// The agents' profile folder for the browser at `bundle` (ADR 0022), in
 /// this instance of Agent Screen's own place.
 pub fn agent_browser_profile(bundle: &Path) -> Option<std::path::PathBuf> {
     Some(agent_screen_model::agent_browser::profile_dir(

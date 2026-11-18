@@ -1,7 +1,7 @@
 //! Your Dia in front, and an agent's Dia still works (#222). You keep one of
 //! your Dia windows focused and typing while an agent launches Dia on its
 //! Agent Display. Agent Screen starts the agents' own instance of Dia, a
-//! separate process on its own profile (ADR 0020), so it is never your
+//! separate process on its own profile (ADR 0022), so it is never your
 //! front app: the agent's clicks and keys are posted to it and reach its
 //! page, while your window keeps its focus and every key you type.
 //!
@@ -105,7 +105,7 @@ fn main() -> ExitCode {
     })
 }
 
-/// The test instance's profile for the agents' Dia (ADR 0020).
+/// The test instance's profile for the agents' Dia (ADR 0022).
 fn agents_profile() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     Path::new(&home)
