@@ -3,7 +3,7 @@
 
 use super::cg;
 use agent_screen_model::arrangement;
-use agent_screen_model::landing::{self, CreationGuard, Landing, Outcome};
+use agent_screen_model::landing::{self, BadUnits, CreationGuard, Landing, Now, Outcome};
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -196,14 +196,13 @@ impl VirtualDisplay {
                 Self::create_once(name, width, height, number).ok_or(NotMade::MacRefused)?;
             display.serial = Some(lease);
             crate::lifecycle::note("created", display.id, &format!("serial={number}"));
-            let landed = landed(display.id, others, before);
-            if landed.takes_user_display() {
-                for twinned in twinned {
-                    crate::lifecycle::note("released", twinned.id, "unit twin");
-                }
-                let unit = release_on_user(display, landed, before);
+            twinned.push(display);
+            // Every display of this call: macOS may mirror an earlier one
+            // once a later one comes, as it did display 65 (#220).
+            if let Some(unit) = release_if_on_user(&mut twinned, others, before) {
                 return Err(NotMade::OnUser { unit });
             }
+            let display = twinned.pop().expect("just pushed");
             // macOS keeps the resolution last used for a display's serial,
             // and serials repeat across launches: a display that once ran
             // at another size comes back at it, maybe at 1x, and shows
@@ -212,6 +211,11 @@ impl VirtualDisplay {
             // take the size too.
             settle_mode(display.id, width, height);
             let Some(twin) = cg::unit_twin(display.id) else {
+                twinned.push(display);
+                if let Some(unit) = release_if_on_user(&mut twinned, others, before) {
+                    return Err(NotMade::OnUser { unit });
+                }
+                let display = twinned.pop().expect("just pushed");
                 let mut fillers = FILLERS.lock().unwrap_or_else(|e| e.into_inner());
                 for twinned in twinned {
                     if fillers.len() < MAX_FILLERS && !twins_ours(twinned.id) {
@@ -411,17 +415,9 @@ pub enum NotMade {
     Refused(String),
 }
 
-/// How the app's last new displays ended, with the bad unit numbers the
-/// shared file holds.
-static GUARD: std::sync::LazyLock<std::sync::Mutex<CreationGuard>> =
-    std::sync::LazyLock::new(|| {
-        let bad = std::fs::read(bad_units_path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .and_then(|v| landing::BadUnits::from_json(&v))
-            .unwrap_or_default();
-        std::sync::Mutex::new(CreationGuard::with_bad_units(bad))
-    });
+/// How this process's last new displays ended. Mirrors every instance
+/// recorded come from the shared file at each decision.
+static GUARD: std::sync::Mutex<CreationGuard> = std::sync::Mutex::new(CreationGuard::new());
 
 /// `~/Library/Application Support/Agent Screen/bad-units.json`, one for
 /// every instance: the state it records is WindowServer's.
@@ -430,37 +426,100 @@ fn bad_units_path() -> std::path::PathBuf {
     std::path::Path::new(&home).join("Library/Application Support/Agent Screen/bad-units.json")
 }
 
+/// Run `job` on the shared file's record, holding an exclusive lock on
+/// `bad-units.lock` so instances don't write over each other. A record
+/// `job` returns replaces the file: written beside it, then renamed in.
+fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
+    use std::os::fd::AsRawFd;
+    let path = bad_units_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"));
+    let locked = lock
+        .as_ref()
+        .is_ok_and(|f| unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0);
+    if !locked {
+        log::warn!("couldn't lock {}", path.with_extension("lock").display());
+    }
+    let record = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|v| BadUnits::from_json(&v))
+        .unwrap_or_default();
+    let (out, write) = job(record);
+    if let Some(record) = write {
+        let temp = path.with_extension(format!("json.{}", std::process::id()));
+        let written = std::fs::write(&temp, record.to_json().to_string())
+            .and_then(|()| std::fs::rename(&temp, &path));
+        if let Err(e) = written {
+            log::warn!("couldn't write {}: {e}", path.display());
+        }
+    }
+    // Dropping the file releases the lock.
+    drop(lock);
+    out
+}
+
 /// The login session's unique id, which a logout or restart changes along
-/// with WindowServer. Empty when CoreGraphics doesn't say: then no unit
-/// counts as bad.
+/// with WindowServer. Empty when CoreGraphics doesn't say: then no record
+/// matches.
 fn session() -> &'static str {
     static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SESSION.get_or_init(cg::session_uuid)
 }
 
-/// Why Agent Screen makes no new display now, for the agent: the next one
-/// would get a unit number macOS put on the user's screen, or parking
-/// failed too often. None while it may.
-pub fn creation_refusal() -> Option<String> {
+/// Seconds since this process first asked.
+fn secs() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
+/// The Mac as a decision to make a display reads it now.
+fn now() -> Now<'static> {
     let units: Vec<u32> = cg::online().into_iter().map(cg::unit_number).collect();
-    GUARD
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .refusal(landing::next_unit(&units), session())
+    Now {
+        next_unit: landing::next_unit(&units),
+        online: units.len(),
+        session: session(),
+        secs: secs(),
+    }
+}
+
+/// Why Agent Screen makes no new display now, for the agent: the last new
+/// display, this instance's or another's, landed on the user's screen
+/// with these displays online or this unit next, or parking failed twice.
+/// None while it may.
+pub fn creation_refusal() -> Option<String> {
+    let now = now();
+    with_bad_units(|file| {
+        let guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        (guard.refusal(&file, &now), None)
+    })
 }
 
 fn record(outcome: Outcome) {
-    let mut guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    guard.record(outcome);
-    if let Outcome::Mirrored { unit, .. } = outcome {
-        crate::lifecycle::line(&format!("bad unit {unit}: no new display gets it"));
+    GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(outcome, session());
+    if let Outcome::Mirrored { unit, online } = outcome {
+        crate::lifecycle::line(&format!(
+            "landed on the user's screen: unit {unit} with {online} displays online; no display is made while either repeats"
+        ));
         // A test's injected landing stays in this instance.
         if !landing_refused() {
-            let path = bad_units_path();
-            let text = guard.bad_units().to_json().to_string();
-            if let Err(e) = std::fs::write(&path, text) {
-                log::warn!("couldn't write {}: {e}", path.display());
-            }
+            with_bad_units(|mut file| {
+                file.add(session(), unit, online);
+                ((), Some(file))
+            });
         }
     }
 }
@@ -470,12 +529,29 @@ fn record(outcome: Outcome) {
 fn refusal_after(not_made: &NotMade) -> Option<String> {
     match not_made {
         NotMade::Refused(why) => Some(why.clone()),
-        NotMade::OnUser { unit } => GUARD
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .refusal(*unit, session()),
-        NotMade::Unparked | NotMade::MacRefused => creation_refusal(),
+        NotMade::OnUser { .. } | NotMade::Unparked | NotMade::MacRefused => creation_refusal(),
     }
+}
+
+/// Release every display in `made` once one of them has landed on the
+/// user's screen; that one's unit number.
+fn release_if_on_user(
+    made: &mut Vec<VirtualDisplay>,
+    others: &[u32],
+    before: &[arrangement::Screen],
+) -> Option<u32> {
+    let ids: Vec<u32> = made.iter().map(|d| d.id).collect();
+    let (at, landed) = made.iter().enumerate().find_map(|(i, d)| {
+        let mut also = others.to_vec();
+        also.extend(ids.iter().copied().filter(|&o| o != d.id));
+        let landed = landed(d.id, &also, before);
+        landed.takes_user_display().then_some((i, landed))
+    })?;
+    let on_user = made.remove(at);
+    for other in made.drain(..) {
+        crate::lifecycle::note("released", other.id, "unit twin");
+    }
+    Some(release_on_user(on_user, landed, before))
 }
 
 /// The online displays but the closet, as the arrangement sees them. A
@@ -489,15 +565,21 @@ fn online_screens(virtual_ids: &[u32]) -> Vec<arrangement::Screen> {
 }
 
 /// Where Agent Screen's display `id` landed among the displays `before`
-/// it. One in a mirror set lands on the main display, wherever its frame.
+/// it (`landing::landing`).
 fn landed(id: u32, others: &[u32], before: &[arrangement::Screen]) -> Landing {
     let mut ids = others.to_vec();
     ids.push(id);
-    let landed = landing::landing(id, before, &online_screens(&ids));
+    let online: Vec<u32> = cg::online();
+    let mirrored: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&d| cg::in_mirror_set(d))
+        .collect();
+    let landed = landing::landing(id, before, &online_screens(&ids), &mirrored);
     if landed.takes_user_display() {
         return landed;
     }
-    if cg::in_mirror_set(id) || landing_refused() {
+    if landing_refused() {
         return Landing::OnUser {
             user: cg::main_display(),
         };
@@ -519,6 +601,12 @@ fn release_on_user(
     log::warn!("display {id} landed on the user's screen ({landed:?}); releasing it at once");
     crate::lifecycle::note("released", id, &format!("on the user's screen: {landed:?}"));
     drop(display);
+    // WindowServer removes it a moment later; until then the displays
+    // online, which the next decision reads, still count it.
+    let going = std::time::Instant::now();
+    while cg::is_online(id) && going.elapsed().as_secs() < 3 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let user = match landed {
         Landing::OnUser { user } | Landing::UserResized { user, .. } => user,
         Landing::Clear => return unit,
@@ -537,12 +625,13 @@ fn release_on_user(
     let (w, h) = size();
     let back = (w, h) == (was.width, was.height);
     let state = if back { "back at" } else { "not back at" };
-    // A smaller user display moved the displays right of it, other
-    // instances' included; put back those still off where they were.
+    // A smaller user display moved the displays right of it; put back
+    // those still off where they were. Another instance's may be parking
+    // meanwhile, and parks its own.
     if back {
         let moved: Vec<(u32, (f64, f64))> = before
             .iter()
-            .filter(|s| s.id != id && cg::is_online(s.id))
+            .filter(|s| s.id != id && s.role != arrangement::Role::Fixed && cg::is_online(s.id))
             .filter(|s| {
                 let now = cg::display_bounds(s.id);
                 (now.x, now.y) != (s.rect.x, s.rect.y)
@@ -604,6 +693,7 @@ pub async fn create_parked(
         }
         let before = origins();
         let before_screens = online_screens(&others);
+        let online = cg::online().len();
         let previous_fillers = filler_ids();
         let made = VirtualDisplay::create(&name, width, height, serial, &others, &before_screens);
         let parked = made.and_then(|made| park_owned(made, others, &before, &before_screens));
@@ -611,9 +701,12 @@ pub async fn create_parked(
             Ok(_) => record(Outcome::Parked),
             Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
                 unit: *unit,
-                session: session(),
+                online,
             }),
-            Err(NotMade::Unparked) => record(Outcome::Failed),
+            Err(NotMade::Unparked) => record(Outcome::Failed {
+                online,
+                secs: secs(),
+            }),
             Err(NotMade::MacRefused | NotMade::Refused(_)) => {}
         }
         if parked.is_err() {
@@ -652,24 +745,26 @@ pub async fn reuse_parked(
         }
         let mut ids = others;
         ids.push(handle.id);
+        // With the spare gone, one display fewer is online.
+        let online = cg::online().len().saturating_sub(1);
         let landed = landed(handle.id, &others_of(&ids, handle.id), &before_screens);
         if landed.takes_user_display() {
             let unit = release_on_user(handle, landed, &before_screens);
-            record(Outcome::Mirrored {
-                unit,
-                session: session(),
-            });
+            record(Outcome::Mirrored { unit, online });
             return None;
         }
         if is_tucked(handle.id, &ids) {
+            record(Outcome::Reused);
             return Some(handle);
         }
         let parked = park_owned(handle, ids, &before, &before_screens);
-        if let Err(NotMade::OnUser { unit }) = parked {
-            record(Outcome::Mirrored {
-                unit,
-                session: session(),
-            });
+        match &parked {
+            Ok(_) => record(Outcome::Reused),
+            Err(NotMade::OnUser { unit }) => record(Outcome::Mirrored {
+                unit: *unit,
+                online,
+            }),
+            Err(_) => {}
         }
         parked.ok()
     })
@@ -958,8 +1053,7 @@ fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
             && CGDisplayModeGetPixelWidth(mode) == width * scale as usize
     };
     // A display in a mirror set shares its mode with the display it
-    // mirrors: setting it would resize that one, and kCGConfigurePermanently
-    // would have macOS store the mirror for this set of displays (#220).
+    // mirrors: setting it would resize that one (#220).
     if cg::in_mirror_set(id) {
         return false;
     }
@@ -999,9 +1093,12 @@ fn use_mode(id: u32, width: u32, height: u32, scale: u32) -> bool {
             let mut config = std::ptr::null_mut();
             if CGBeginDisplayConfiguration(&mut config) == 0 {
                 let set = CGConfigureDisplayWithDisplayMode(config, id, mode, std::ptr::null());
-                // kCGConfigurePermanently: macOS remembers it for the
-                // serial, so the next display with it starts right.
-                let done = CGCompleteDisplayConfiguration(config, 2);
+                // kCGConfigureForSession. Made permanent, macOS would store
+                // the whole arrangement for this set of displays, a mirror
+                // that formed meanwhile included, and apply it again after
+                // logout and restart. Each new display asks for its mode
+                // anyway (`settle_mode`).
+                let done = CGCompleteDisplayConfiguration(config, 1);
                 log::debug!("display {id}: mode set {set}, completed {done}");
             }
         }

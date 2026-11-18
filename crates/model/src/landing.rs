@@ -7,10 +7,10 @@
 //! display that got unit 9 did, in both instances and across a restart.
 //! Parking can't fix that, since a display in a mirror set doesn't move.
 //! So a new display that lands over a user display, or whose arrival
-//! changed a user display's size, is released at once. Agent Screen then
-//! makes no display that would get the same unit number while the same
-//! WindowServer runs (`BadUnits`): every retry would resize the user's
-//! screen again.
+//! changed a user display's size to its own, is released at once. Agent
+//! Screen then makes no display while the same number of displays is
+//! online, or that would get the same unit number, in that login session
+//! (`BadUnits`): every retry would resize the user's screen again.
 
 use crate::arrangement::{Role, Screen};
 
@@ -39,8 +39,13 @@ impl Landing {
 }
 
 /// Where display `new` landed, from the displays `before` it was made and
-/// `after`. Clear when `new` isn't among `after`: parking checks that.
-pub fn landing(new: u32, before: &[Screen], after: &[Screen]) -> Landing {
+/// `after`, and the displays now in a mirror set, `mirrored`. Clear when
+/// `new` isn't among `after`: parking checks that.
+///
+/// A user display that changed size counts only when it took the new
+/// display's size or is in a mirror set: the user may change resolution,
+/// close the lid or connect Sidecar meanwhile.
+pub fn landing(new: u32, before: &[Screen], after: &[Screen], mirrored: &[u32]) -> Landing {
     let Some(made) = after.iter().find(|s| s.id == new) else {
         return Landing::Clear;
     };
@@ -50,13 +55,21 @@ pub fn landing(new: u32, before: &[Screen], after: &[Screen]) -> Landing {
     }) {
         return Landing::OnUser { user: user.id };
     }
+    if mirrored.contains(&new) {
+        let user = users()
+            .find(|u| mirrored.contains(&u.id))
+            .or_else(|| users().next())
+            .map_or(0, |u| u.id);
+        return Landing::OnUser { user };
+    }
     for user in users() {
         let Some(was) = before.iter().find(|b| b.id == user.id) else {
             continue;
         };
         let from = (was.rect.width, was.rect.height);
         let to = (user.rect.width, user.rect.height);
-        if from != to {
+        let took_its_size = to == (made.rect.width, made.rect.height);
+        if from != to && (took_its_size || mirrored.contains(&user.id)) {
             return Landing::UserResized {
                 user: user.id,
                 from,
@@ -69,20 +82,36 @@ pub fn landing(new: u32, before: &[Screen], after: &[Screen]) -> Landing {
 
 /// The unit number WindowServer gives the next virtual display: 5 plus
 /// the virtual displays online, the ones numbered 5 or more. Every display
-/// in the #220 logs got that number, the closet's 5 included.
+/// in the #220 logs got that number, the closet's 5 included. Other apps'
+/// virtual displays may shift it, so a mirror also refuses by the number
+/// of displays online (`BadUnits::counts`).
 pub fn next_unit(units_online: &[u32]) -> u32 {
     5 + units_online.iter().filter(|&&u| u >= 5).count() as u32
 }
 
-/// Unit numbers whose displays macOS mirrored onto the user's screen, in
-/// login session `session` (CoreGraphics' unique session UUID). The state
-/// is WindowServer's: it outlived Agent Screen's restart on 2026-11-18, so
-/// the app keeps it in a file all instances share, and drops it in another
-/// session, after a logout or a restart.
+/// What a decision to make a display reads from the Mac.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Now<'a> {
+    /// The unit the next display would get (`next_unit`).
+    pub next_unit: u32,
+    /// Displays online, the closet included.
+    pub online: usize,
+    /// The login session (CoreGraphics' unique session UUID); empty when
+    /// unknown, which matches no record.
+    pub session: &'a str,
+    /// Seconds on a clock that only goes forward.
+    pub secs: u64,
+}
+
+/// Where displays landed on the user's screen in login session `session`:
+/// their unit numbers, and how many displays were online when each was
+/// made. The state is WindowServer's: it outlived Agent Screen's restart on
+/// 2026-11-18, so the app keeps it in a file all instances share.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct BadUnits {
     pub session: String,
     pub units: std::collections::BTreeSet<u32>,
+    pub counts: std::collections::BTreeSet<usize>,
 }
 
 impl BadUnits {
@@ -90,65 +119,107 @@ impl BadUnits {
         Self {
             session: String::new(),
             units: std::collections::BTreeSet::new(),
+            counts: std::collections::BTreeSet::new(),
         }
     }
 
-    /// Unit `unit` landed on the user's screen in session `session`.
-    pub fn add(&mut self, session: &str, unit: u32) {
+    /// A display with unit `unit`, made while `online` displays were
+    /// online, landed on the user's screen in session `session`. Records of
+    /// another session go.
+    pub fn add(&mut self, session: &str, unit: u32, online: usize) {
         if self.session != session {
             *self = Self::new();
             self.session = session.to_string();
         }
         self.units.insert(unit);
+        self.counts.insert(online);
     }
 
-    /// Whether a display numbered `unit` would land on the user's screen
-    /// again, in session `session`.
-    pub fn holds(&self, session: &str, unit: u32) -> bool {
-        !session.is_empty() && self.session == session && self.units.contains(&unit)
+    /// Both records' entries for session `session`.
+    pub fn merged(&self, other: &BadUnits, session: &str) -> BadUnits {
+        let mut out = BadUnits {
+            session: session.to_string(),
+            ..BadUnits::new()
+        };
+        for record in [self, other] {
+            if !session.is_empty() && record.session == session {
+                out.units.extend(record.units.iter().copied());
+                out.counts.extend(record.counts.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// Whether the next display would land on the user's screen again: its
+    /// unit landed there, or a display did with as many displays online.
+    pub fn holds(&self, now: &Now) -> bool {
+        !now.session.is_empty()
+            && self.session == now.session
+            && (self.units.contains(&now.next_unit) || self.counts.contains(&now.online))
     }
 
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "session": self.session, "units": self.units })
+        serde_json::json!({ "session": self.session, "units": self.units, "counts": self.counts })
     }
 
     /// None for anything but what `to_json` writes.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
         let session = value.get("session")?.as_str()?.to_string();
-        let units = value
-            .get("units")?
-            .as_array()?
-            .iter()
-            .map(|u| u.as_u64().and_then(|u| u32::try_from(u).ok()))
+        let numbers = |key: &str| -> Option<Vec<u64>> {
+            value
+                .get(key)?
+                .as_array()?
+                .iter()
+                .map(|u| u.as_u64())
+                .collect()
+        };
+        let units = numbers("units")?
+            .into_iter()
+            .map(|u| u32::try_from(u).ok())
             .collect::<Option<_>>()?;
-        Some(Self { session, units })
+        let counts = numbers("counts")?
+            .into_iter()
+            .map(|c| usize::try_from(c).ok())
+            .collect::<Option<_>>()?;
+        Some(Self {
+            session,
+            units,
+            counts,
+        })
     }
 }
 
-/// How a new display's creation ended.
+/// How a creation, or a spare's reuse, ended.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Outcome<'a> {
-    /// It is parked out of the cursor's way.
+pub enum Outcome {
+    /// A new display is parked out of the cursor's way.
     Parked,
-    /// It got unit number `unit` in login session `session`, landed on a
-    /// user display and was released (`Landing`).
-    Mirrored { unit: u32, session: &'a str },
-    /// Parking never verified a safe position, and it was released. A
-    /// display WindowServer refused to make changed nothing and isn't one.
-    Failed,
+    /// A spare went to a session.
+    Reused,
+    /// A display with unit `unit`, made while `online` displays were
+    /// online, landed on a user display and was released (`Landing`).
+    Mirrored { unit: u32, online: usize },
+    /// Parking never verified a safe position with `online` displays
+    /// online, at `secs`, and the display was released. A display
+    /// WindowServer refused to make changed nothing and isn't one.
+    Failed { online: usize, secs: u64 },
 }
 
-/// Failures in a row, of any kind but `Mirrored`, after which Agent Screen
-/// stops making displays. Each failed attempt moved the other displays.
+/// Parking failures in a row, with the same displays online, after which
+/// Agent Screen stops making displays for `FAILURE_PAUSE_SECS`. Each
+/// failed attempt moved the other displays.
 pub const FAILURES_BEFORE_REFUSAL: u32 = 2;
+pub const FAILURE_PAUSE_SECS: u64 = 600;
 
 /// Whether Agent Screen may make another display, from how the last ones
-/// ended. Bad unit numbers outlive the app (`BadUnits`); failures in a row
-/// last until it restarts.
+/// ended in this process. Mirrors other instances recorded come in as the
+/// shared file's `BadUnits` at each decision.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct CreationGuard {
     bad: BadUnits,
     failures_in_a_row: u32,
+    failed_online: usize,
+    failed_at: u64,
 }
 
 impl CreationGuard {
@@ -156,41 +227,46 @@ impl CreationGuard {
         Self {
             bad: BadUnits::new(),
             failures_in_a_row: 0,
+            failed_online: 0,
+            failed_at: 0,
         }
     }
 
-    /// A guard that knows the bad unit numbers another run recorded.
-    pub fn with_bad_units(bad: BadUnits) -> Self {
-        Self {
-            bad,
-            failures_in_a_row: 0,
-        }
-    }
-
+    /// The mirrors this process saw, test-injected ones included.
     pub fn bad_units(&self) -> &BadUnits {
         &self.bad
     }
 
-    pub fn record(&mut self, outcome: Outcome) {
+    pub fn record(&mut self, outcome: Outcome, session: &str) {
         match outcome {
-            Outcome::Parked => self.failures_in_a_row = 0,
-            Outcome::Mirrored { unit, session } => self.bad.add(session, unit),
-            Outcome::Failed => self.failures_in_a_row += 1,
+            Outcome::Parked | Outcome::Reused => self.failures_in_a_row = 0,
+            Outcome::Mirrored { unit, online } => self.bad.add(session, unit, online),
+            Outcome::Failed { online, secs } => {
+                if online != self.failed_online {
+                    self.failures_in_a_row = 0;
+                }
+                self.failures_in_a_row += 1;
+                self.failed_online = online;
+                self.failed_at = secs;
+            }
         }
     }
 
-    /// Why no new display may be made now, for the agent, when the next one
-    /// would get unit number `next` in login session `session`; None while
-    /// one may.
-    pub fn refusal(&self, next: u32, session: &str) -> Option<String> {
-        if self.bad.holds(session, next) {
-            Some(format!(
-                "Agent Screen made no display: the next one would get unit number {next}, and macOS put the last display with that number on top of the user's screen and changed the screen's resolution. Do not retry create_display. Keep working on a display you already have, or tell the user. Agent Screen makes displays again once the number of displays online changes, or after the user logs out or restarts the Mac."
-            ))
-        } else if self.failures_in_a_row >= FAILURES_BEFORE_REFUSAL {
+    /// Why no new display may be made `now`, for the agent, with `file`
+    /// the mirrors every instance recorded; None while one may.
+    pub fn refusal(&self, file: &BadUnits, now: &Now) -> Option<String> {
+        if self.bad.merged(file, now.session).holds(now) {
             Some(
-                "Agent Screen stopped making new displays: macOS failed twice in a row to place a new display out of the user's way, and each attempt moved the user's displays. Do not retry create_display. Tell the user; quitting and reopening Agent Screen clears this.".into(),
+                "Agent Screen made no display: macOS put the last new display on top of the user's screen and changed the screen's resolution, and the next one would land the same way. Do not retry create_display. Keep working on a display you already have, or tell the user. Agent Screen makes displays again once the number of displays online changes, or in the user's next login session.".into(),
             )
+        } else if self.failures_in_a_row >= FAILURES_BEFORE_REFUSAL
+            && self.failed_online == now.online
+            && now.secs < self.failed_at + FAILURE_PAUSE_SECS
+        {
+            Some(format!(
+                "Agent Screen made no display: macOS failed twice in a row to place a new display out of the user's way, and each attempt moved the user's displays. Do not retry create_display now. Keep working on a display you already have. Agent Screen makes displays again in {} min or once the number of displays online changes.",
+                (self.failed_at + FAILURE_PAUSE_SECS - now.secs).div_ceil(60)
+            ))
         } else {
             None
         }
@@ -216,7 +292,9 @@ mod tests {
         screen(1, Role::User, 0., 0., 1728., 1117.)
     }
 
-    const LOG: &str = include_str!("../testdata/issue-220-displays.log");
+    const MORNING: &str = include_str!("../testdata/issue-220-displays.log");
+    const LIVE_E2E: &str = include_str!("../testdata/issue-220-live-e2e.log");
+    const LIVE_INSTALLED: &str = include_str!("../testdata/issue-220-live-installed.log");
 
     /// `x,y` and `WxH` of a log field like `at=0,0` or `0,0 1280x800`.
     fn rect(at: &str, size: &str) -> Rect {
@@ -269,33 +347,16 @@ mod tests {
     }
 
     #[test]
-    fn every_failed_parking_in_the_log_was_a_display_on_the_users_screen() {
-        let failures: Vec<&str> = LOG
-            .lines()
+    fn every_failed_parking_in_the_logs_was_a_display_on_the_users_screen() {
+        let failures: Vec<&str> = [MORNING, LIVE_E2E, LIVE_INSTALLED]
+            .iter()
+            .flat_map(|log| log.lines())
             .filter(|l| l.contains("parking failed"))
             .collect();
-        assert_eq!(failures.len(), 9);
+        assert_eq!(failures.len(), 9 + 2 + 36);
         for line in failures {
             let new: u32 = field(line, "display=").parse().unwrap();
-            let after = online(line);
-            let landed = landing(new, &[built_in()], &after);
-            assert_eq!(landed, Landing::OnUser { user: 1 }, "{line}");
-        }
-    }
-
-    /// 11:55 to 11:57, after the restart: the e2e instance and the
-    /// installed app each made displays that landed on the built-in. 89
-    /// asked for the built-in's own size, so its mode didn't change.
-    #[test]
-    fn every_failed_parking_of_the_live_repro_was_on_the_users_screen() {
-        let failures: Vec<&str> = include_str!("../testdata/issue-220-live.log")
-            .lines()
-            .filter(|l| l.contains("parking failed"))
-            .collect();
-        assert_eq!(failures.len(), 4);
-        for line in failures {
-            let new: u32 = field(line, "display=").parse().unwrap();
-            let landed = landing(new, &[built_in()], &online(line));
+            let landed = landing(new, &[built_in()], &online(line), &[]);
             assert_eq!(landed, Landing::OnUser { user: 1 }, "{line}");
         }
     }
@@ -305,9 +366,18 @@ mod tests {
         // 09:58:42: display 66 came up at 0,0 while the built-in was still
         // at its own mode.
         let new = screen(66, OURS, 0., 0., 1280., 800.);
-        let landed = landing(66, &[built_in()], &[built_in(), new]);
+        let landed = landing(66, &[built_in()], &[built_in(), new], &[]);
         assert_eq!(landed, Landing::OnUser { user: 1 });
         assert!(landed.takes_user_display());
+    }
+
+    #[test]
+    fn a_new_display_in_a_mirror_set_lands_on_the_user_display_in_it() {
+        let new = screen(9, OURS, 1728., -800., 1280., 800.);
+        assert_eq!(
+            landing(9, &[built_in()], &[built_in(), new], &[9, 1]),
+            Landing::OnUser { user: 1 }
+        );
     }
 
     #[test]
@@ -317,7 +387,7 @@ mod tests {
         let shrunk = screen(1, Role::User, 0., 0., 1280., 800.);
         let new = screen(67, OURS, 1280., 0., 1280., 800.);
         assert_eq!(
-            landing(67, &[built_in()], &[shrunk, new]),
+            landing(67, &[built_in()], &[shrunk, new], &[]),
             Landing::UserResized {
                 user: 1,
                 from: (1728., 1117.),
@@ -327,16 +397,33 @@ mod tests {
     }
 
     #[test]
+    fn a_user_resolution_change_meanwhile_is_not_the_new_displays_doing() {
+        // The user picks 1512x982, or Sidecar reshapes the screens, while
+        // the new display parks off the corner.
+        let changed = screen(1, Role::User, 0., 0., 1512., 982.);
+        let new = screen(9, OURS, 1512., -800., 1280., 800.);
+        assert_eq!(
+            landing(9, &[built_in()], &[changed, new], &[]),
+            Landing::Clear
+        );
+        // The same change with the user display in a mirror set counts.
+        assert!(landing(9, &[built_in()], &[changed, new], &[1]).takes_user_display());
+    }
+
+    #[test]
     fn displays_beside_or_parked_off_the_users_screen_are_clear() {
         // 2026-11-17 15:33:38, and after the restart at 10:32:41.
         for (x, y) in [(-1280., 0.), (1728., -800.), (1728., -1600.), (1728., 0.)] {
             let new = screen(9, OURS, x, y, 1280., 800.);
             assert_eq!(
-                landing(9, &[built_in()], &[built_in(), new]),
+                landing(9, &[built_in()], &[built_in(), new], &[]),
                 Landing::Clear
             );
         }
-        assert_eq!(landing(9, &[built_in()], &[built_in()]), Landing::Clear);
+        assert_eq!(
+            landing(9, &[built_in()], &[built_in()], &[]),
+            Landing::Clear
+        );
     }
 
     #[test]
@@ -344,50 +431,9 @@ mod tests {
         let closet = screen(6, Role::Fixed, 1728., 1117., 2560., 1440.);
         let new = screen(9, OURS, 1728., 1117., 1280., 800.);
         assert_eq!(
-            landing(9, &[built_in(), closet], &[built_in(), closet, new]),
+            landing(9, &[built_in(), closet], &[built_in(), closet, new], &[]),
             Landing::Clear
         );
-    }
-
-    /// Replays the logs' create_display calls under the guard, with one
-    /// login session throughout, as on 2026-11-18. A call starts at a
-    /// `created` line that doesn't follow another (unit-twin retries do);
-    /// its unit is the unit the guard predicts. `app started` is a new
-    /// process: failures reset, bad units come back from the shared file.
-    #[test]
-    fn the_logged_day_puts_one_display_on_the_users_screen_not_thirteen() {
-        const SESSION: &str = "5E5510N";
-        let mut guard = CreationGuard::new();
-        let (mut on_user, mut refused, mut parked) = (0, 0, 0);
-        let live = include_str!("../testdata/issue-220-live.log");
-        let mut previous_created = false;
-        for line in LOG.lines().chain(live.lines()) {
-            if line.contains(" app started ") {
-                guard = CreationGuard::with_bad_units(guard.bad_units().clone());
-            }
-            let is_created = line.contains(" created ");
-            if is_created && !previous_created {
-                let unit: u32 = field(line, "unit=").parse().unwrap();
-                let made = created(line);
-                if guard.refusal(unit, SESSION).is_some() {
-                    refused += 1;
-                } else if landing(made.id, &[built_in()], &[built_in(), made]).takes_user_display()
-                {
-                    on_user += 1;
-                    guard.record(Outcome::Mirrored {
-                        unit,
-                        session: SESSION,
-                    });
-                } else {
-                    parked += 1;
-                    guard.record(Outcome::Parked);
-                }
-            }
-            previous_created = is_created;
-        }
-        // 9 calls on 11-18 before the restart and 4 at 11:55 to 11:57, all
-        // unit 9; 1 on 11-17 and 3 after the restart, units 12 and 6 to 8.
-        assert_eq!((on_user, refused, parked), (1, 12, 4));
     }
 
     #[test]
@@ -400,84 +446,193 @@ mod tests {
         assert_eq!(next_unit(&[0, 5]), 6);
     }
 
+    const SESSION: &str = "5E5510N";
+
+    fn now(units: &[u32], secs: u64) -> Now<'static> {
+        Now {
+            next_unit: next_unit(units),
+            online: units.len(),
+            session: SESSION,
+            secs,
+        }
+    }
+
+    /// Replays the logs' create_display calls of 2026-11-18 under the new
+    /// rules: each instance has its own guard, and mirrors go through one
+    /// shared record, as the app's file. The units online are tracked from
+    /// the logs, and every logged display got the unit `next_unit` gives.
+    /// A call starts at a `created` line that doesn't follow another of its
+    /// instance (unit-twin retries do).
     #[test]
-    fn a_bad_unit_refuses_only_that_unit_with_do_not_retry() {
+    fn the_logged_day_puts_one_display_on_the_users_screen_not_forty_seven() {
+        let mut lines: Vec<(&str, &str)> = MORNING
+            .lines()
+            .filter(|l| l.starts_with("2026-11-18"))
+            .map(|l| ("installed", l))
+            .chain(LIVE_E2E.lines().map(|l| ("e2e", l)))
+            .chain(LIVE_INSTALLED.lines().map(|l| ("installed", l)))
+            .collect();
+        lines.sort_by_key(|&(_, l)| &l[..23]);
+
+        // Built-in 0, closet 5, and displays 38, 39 and 54 (units 8, 9, 11).
+        let mut units: Vec<u32> = vec![0, 5, 8, 9, 11];
+        let mut file = BadUnits::new();
+        let mut guards = [CreationGuard::new(), CreationGuard::new()];
+        let mut previous_created = [false, false];
+        let (mut on_user, mut refused, mut parked) = (0, 0, 0);
+        for (instance, line) in lines {
+            let i = usize::from(instance == "e2e");
+            if line.contains(" app started ") {
+                guards[i] = CreationGuard::new();
+                if instance == "installed" {
+                    // The app's displays ended with it.
+                    units = vec![0, 5];
+                }
+            }
+            let is_created = line.contains(" created ");
+            if is_created && !previous_created[i] {
+                let unit: u32 = field(line, "unit=").parse().unwrap();
+                if line[11..].starts_with("11:55") {
+                    // 82, 83 and 85 since 10:32 and 11:35 (units 6 to 8).
+                    units = vec![0, 5, 6, 7, 8];
+                }
+                let now = now(&units, 0);
+                assert_eq!(now.next_unit, unit, "{line}");
+                let made = created(line);
+                if guards[i].refusal(&file, &now).is_some() {
+                    refused += 1;
+                } else if landing(made.id, &[built_in()], &[built_in(), made], &[])
+                    .takes_user_display()
+                {
+                    on_user += 1;
+                    let outcome = Outcome::Mirrored {
+                        unit,
+                        online: now.online,
+                    };
+                    guards[i].record(outcome, SESSION);
+                    file.add(SESSION, unit, now.online);
+                } else {
+                    parked += 1;
+                    guards[i].record(Outcome::Parked, SESSION);
+                    units.push(unit);
+                }
+            }
+            previous_created[i] = is_created;
+        }
+        // 9 calls before the restart, 2 of the e2e instance and 36 of the
+        // installed app from 11:56 to 12:19, all unit 9; 3 after the
+        // restart, units 6 to 8.
+        assert_eq!((on_user, refused, parked), (1, 46, 3));
+    }
+
+    /// The first display of a call is clear but shares a unit, and the
+    /// retry lands on the user's screen with unit 10, as display 65 did by
+    /// 09:58:26. Once both are gone the next unit is 9 again, which no
+    /// mirror had: the count of displays online still refuses.
+    #[test]
+    fn a_unit_twin_retry_that_lands_on_the_user_refuses_the_next_call() {
+        let units = [0, 5, 8, 9, 11];
         let mut guard = CreationGuard::new();
-        assert_eq!(guard.refusal(9, "A"), None);
-        guard.record(Outcome::Mirrored {
-            unit: 9,
-            session: "A",
-        });
-        let why = guard.refusal(9, "A").unwrap();
+        let twin = screen(64, OURS, -1280., 0., 1280., 800.);
+        assert_eq!(
+            landing(64, &[built_in()], &[built_in(), twin], &[]),
+            Landing::Clear
+        );
+        let retry = screen(65, OURS, 0., 0., 1280., 800.);
+        assert!(landing(65, &[built_in()], &[built_in(), twin, retry], &[]).takes_user_display());
+        guard.record(
+            Outcome::Mirrored {
+                unit: 10,
+                online: units.len(),
+            },
+            SESSION,
+        );
+        let why = guard.refusal(&BadUnits::new(), &now(&units, 0)).unwrap();
         assert!(why.contains("Do not retry create_display"), "{why}");
-        assert!(why.contains("unit number 9"), "{why}");
-        // Once the displays online change, the next unit does too.
-        assert_eq!(guard.refusal(8, "A"), None);
-        assert_eq!(guard.refusal(10, "A"), None);
-        guard.record(Outcome::Parked);
-        assert!(guard.refusal(9, "A").is_some());
+        // A display more or less online: another unit, another count.
+        assert_eq!(
+            guard.refusal(&BadUnits::new(), &now(&[0, 5, 8, 11], 0)),
+            None
+        );
     }
 
     #[test]
-    fn another_login_session_forgets_the_bad_units() {
-        let mut guard = CreationGuard::new();
-        guard.record(Outcome::Mirrored {
-            unit: 9,
-            session: "A",
-        });
-        assert_eq!(guard.refusal(9, "B"), None);
-        guard.record(Outcome::Mirrored {
-            unit: 10,
-            session: "B",
-        });
-        assert_eq!(guard.bad_units().units.iter().collect::<Vec<_>>(), [&10]);
+    fn another_instances_mirror_refuses_through_the_file() {
+        let mut file = BadUnits::new();
+        file.add(SESSION, 9, 5);
+        let guard = CreationGuard::new();
+        assert!(guard.refusal(&file, &now(&[0, 5, 6, 7, 8], 0)).is_some());
+        assert_eq!(guard.refusal(&file, &now(&[0, 5, 6, 7], 0)), None);
+        // Another session's record refuses nothing.
+        let other = Now {
+            session: "another",
+            ..now(&[0, 5, 6, 7, 8], 0)
+        };
+        assert_eq!(guard.refusal(&file, &other), None);
+        let unknown = Now {
+            session: "",
+            ..now(&[0, 5, 6, 7, 8], 0)
+        };
+        assert_eq!(guard.refusal(&file, &unknown), None);
+    }
+
+    #[test]
+    fn a_mirror_in_a_new_session_replaces_the_old_record() {
+        let mut bad = BadUnits::new();
+        bad.add("A", 9, 5);
+        bad.add("B", 10, 6);
+        assert_eq!(bad.units.iter().collect::<Vec<_>>(), [&10]);
+        assert_eq!(bad.counts.iter().collect::<Vec<_>>(), [&6]);
     }
 
     #[test]
     fn bad_units_survive_the_file_and_nothing_else_parses() {
         let mut bad = BadUnits::new();
-        bad.add("A", 9);
+        bad.add(SESSION, 9, 5);
         let back = BadUnits::from_json(&bad.to_json()).unwrap();
         assert_eq!(back, bad);
-        assert!(
-            CreationGuard::with_bad_units(back)
-                .refusal(9, "A")
-                .is_some()
-        );
         assert_eq!(
-            BadUnits::from_json(&serde_json::json!({ "units": [9] })),
+            BadUnits::from_json(&serde_json::json!({ "units": [9], "counts": [5] })),
             None
         );
         assert_eq!(
-            BadUnits::from_json(&serde_json::json!({ "session": "A", "units": ["9"] })),
+            BadUnits::from_json(
+                &serde_json::json!({ "session": "A", "units": ["9"], "counts": [5] })
+            ),
             None
-        );
-        // An unknown session matches no record.
-        assert!(
-            !BadUnits::from_json(&serde_json::json!({ "session": "", "units": [9] }))
-                .unwrap()
-                .holds("", 9)
         );
     }
 
     #[test]
-    fn two_failures_in_a_row_stop_creation_and_a_parked_one_resets_the_count() {
+    fn two_failures_with_the_same_displays_pause_creation_for_ten_minutes() {
+        let units = [0, 5, 6];
         let mut guard = CreationGuard::new();
-        guard.record(Outcome::Failed);
-        assert_eq!(guard.refusal(6, "A"), None);
-        guard.record(Outcome::Parked);
-        guard.record(Outcome::Failed);
-        assert_eq!(guard.refusal(6, "A"), None);
-        guard.record(Outcome::Failed);
-        assert!(
-            guard
-                .refusal(6, "A")
-                .unwrap()
-                .contains("Do not retry create_display")
-        );
-        assert_eq!(
-            CreationGuard::with_bad_units(BadUnits::new()).refusal(6, "A"),
-            None
-        );
+        let failed = |secs| Outcome::Failed {
+            online: units.len(),
+            secs,
+        };
+        let none = BadUnits::new();
+        guard.record(failed(100), SESSION);
+        assert_eq!(guard.refusal(&none, &now(&units, 101)), None);
+        guard.record(failed(110), SESSION);
+        let why = guard.refusal(&none, &now(&units, 111)).unwrap();
+        assert!(why.contains("Do not retry create_display now"), "{why}");
+        assert!(why.contains("in 10 min"), "{why}");
+        // Ten minutes on, or with a display more online, it may try again.
+        assert_eq!(guard.refusal(&none, &now(&units, 710)), None);
+        assert_eq!(guard.refusal(&none, &now(&[0, 5, 6, 7], 111)), None);
+    }
+
+    #[test]
+    fn failures_with_other_displays_online_or_a_reused_spare_start_over() {
+        let mut guard = CreationGuard::new();
+        let none = BadUnits::new();
+        guard.record(Outcome::Failed { online: 3, secs: 0 }, SESSION);
+        guard.record(Outcome::Failed { online: 4, secs: 1 }, SESSION);
+        assert_eq!(guard.refusal(&none, &now(&[0, 5, 6, 7], 2)), None);
+        guard.record(Outcome::Failed { online: 4, secs: 2 }, SESSION);
+        assert!(guard.refusal(&none, &now(&[0, 5, 6, 7], 3)).is_some());
+        guard.record(Outcome::Reused, SESSION);
+        assert_eq!(guard.refusal(&none, &now(&[0, 5, 6, 7], 4)), None);
     }
 }
