@@ -4,8 +4,10 @@
 use super::cg;
 use agent_screen_model::arrangement;
 use agent_screen_model::landing::{
-    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets, UserBefore,
+    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, RecentMirrors, StoredSets,
+    UserBefore,
 };
+use agent_screen_model::model::SerialSizes;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -76,15 +78,36 @@ impl Drop for VirtualDisplay {
 static SERIALS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// A serial held for one display (`lowest_free_serial` says why), and the
-/// first of its instance's range.
+/// A serial held for one display (`lowest_free_serial` and `SerialSizes`
+/// say why), and the first of its instance's range.
 pub struct Serial(u32, u32);
 
+/// `~/Library/Application Support/Agent Screen/serials.json`, or
+/// `serials-<instance>.json`: the size each of the instance's serials was
+/// last leased for (`SerialSizes`).
+fn serial_sizes_path() -> std::path::PathBuf {
+    bad_units_path().with_file_name(match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("serials-{instance}.json"),
+        None => "serials.json".into(),
+    })
+}
+
 impl Serial {
-    /// The lowest serial from `first` no display of this app holds.
-    pub fn lease(first: u32) -> Serial {
+    /// The serial from `first` for a display of `size`, in points, that no
+    /// display of this app holds: the one last leased at that size where
+    /// it can (`SerialSizes::serial_for`).
+    pub fn lease(first: u32, size: (u32, u32)) -> Serial {
         let mut taken = SERIALS.lock().unwrap_or_else(|e| e.into_inner());
-        let serial = agent_screen_model::model::lowest_free_serial(first, &taken);
+        let serial = with_shared(
+            &serial_sizes_path(),
+            SerialSizes::from_json,
+            SerialSizes::to_json,
+            |mut sizes| {
+                let serial = sizes.serial_for(first, &taken, size);
+                sizes.leased(serial, size, wall());
+                (serial, Some(sizes))
+            },
+        );
         taken.insert(serial);
         Serial(serial, first)
     }
@@ -199,7 +222,9 @@ impl VirtualDisplay {
                 }
                 return Err(NotMade::Refused(why));
             }
-            let lease = serial.take().unwrap_or_else(|| Serial::lease(first));
+            let lease = serial
+                .take()
+                .unwrap_or_else(|| Serial::lease(first, (width, height)));
             let number = lease.get();
             let mut display =
                 Self::create_once(name, width, height, number).ok_or(NotMade::MacRefused)?;
@@ -424,19 +449,27 @@ pub enum NotMade {
     Refused(String),
 }
 
-/// How this process's last new displays ended. Mirrors every instance
-/// recorded come from the shared file at each decision.
+/// How this process's last new displays ended. Mirrors this instance
+/// recorded before a restart come from its file at each decision.
 static GUARD: std::sync::Mutex<CreationGuard> = std::sync::Mutex::new(CreationGuard::new());
 
-/// `~/Library/Application Support/Agent Screen/bad-units.json`, one for
-/// every instance: the state it records is WindowServer's.
+/// `~/Library/Application Support/Agent Screen/bad-units.json`, or
+/// `bad-units-<instance>.json`: one per instance, so a test instance's
+/// refusal doesn't refuse the user's agents. Another instance's landing is
+/// unmirrored before it could refuse anything (`unmirror`).
 fn bad_units_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    std::path::Path::new(&home).join("Library/Application Support/Agent Screen/bad-units.json")
+    let name = match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("bad-units-{instance}.json"),
+        None => "bad-units.json".into(),
+    };
+    std::path::Path::new(&home)
+        .join("Library/Application Support/Agent Screen")
+        .join(name)
 }
 
-/// Run `job` on the shared file's record, holding an exclusive lock on
-/// `bad-units.lock` so instances don't write over each other. A record
+/// Run `job` on the instance's file's record, holding an exclusive lock
+/// on its `.lock` sibling. A record
 /// `job` returns replaces the file: written beside it, then renamed in.
 fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
     with_shared(
@@ -450,7 +483,18 @@ fn with_bad_units<T>(job: impl FnOnce(BadUnits) -> (T, Option<BadUnits>)) -> T {
 /// `~/Library/Application Support/Agent Screen/arrangements.json`, one for
 /// every instance: the arrangements it records are WindowServer's.
 fn stored_sets_path() -> std::path::PathBuf {
-    bad_units_path().with_file_name("arrangements.json")
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::Path::new(&home).join("Library/Application Support/Agent Screen/arrangements.json")
+}
+
+/// `~/Library/Application Support/Agent Screen/mirrors.json`, or
+/// `mirrors-<instance>.json`: when this instance's displays landed on the
+/// user's screen lately (`RecentMirrors`).
+fn recent_mirrors_path() -> std::path::PathBuf {
+    bad_units_path().with_file_name(match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("mirrors-{instance}.json"),
+        None => "mirrors.json".into(),
+    })
 }
 
 /// `with_bad_units` for the sets Agent Screen stored an arrangement for.
@@ -553,13 +597,19 @@ pub fn paused_by_mirror() -> bool {
 }
 
 /// The user's Allow New Displays: forget where displays landed on their
-/// screen, in every instance.
+/// screen, in this instance.
 pub fn allow_new_displays() {
     GUARD
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear_bad_units();
     with_bad_units(|_| ((), Some(BadUnits::new())));
+    with_shared(
+        &recent_mirrors_path(),
+        RecentMirrors::from_json,
+        RecentMirrors::to_json,
+        |_| ((), Some(RecentMirrors::new())),
+    );
     crate::lifecycle::line("new displays allowed again by the user");
 }
 
@@ -579,9 +629,9 @@ pub fn debug_pause_new_displays() {
 }
 
 /// Why Agent Screen makes no new display now, for the agent: the last new
-/// display, this instance's or another's, landed on the user's screen
-/// with these displays online or this unit next, or parking failed twice.
-/// None while it may.
+/// display of this instance landed on the user's screen with these
+/// displays online or this unit next, or parking failed twice. None while
+/// it may.
 pub fn creation_refusal() -> Option<String> {
     let now = now();
     with_bad_units(|file| {
@@ -719,7 +769,8 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         log::warn!("displays {new:?}: a display has no identity; releasing");
         return false;
     };
-    let decision = with_stored_sets(|stored| match stored.on_landing(&key) {
+    let now = wall();
+    let set = with_stored_sets(|stored| match stored.on_landing(&key, now) {
         OnLanding::Release => {
             let mut stored = stored;
             stored.forget(&key);
@@ -727,10 +778,28 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         }
         OnLanding::Unmirror => (OnLanding::Unmirror, None),
     });
-    if decision == OnLanding::Release {
+    if set == OnLanding::Release {
         crate::lifecycle::line(&format!(
-            "displays {new:?} landed on the user's screen although Agent Screen stored an arrangement for this set; releasing"
+            "displays {new:?} landed on the user's screen although Agent Screen stored this arrangement less than 30 min ago, or unmirrored this set twice in 30 min; releasing"
         ));
+    }
+    // Every landing counts, a released one too: each flashed the screen.
+    let decision = with_shared(
+        &recent_mirrors_path(),
+        RecentMirrors::from_json,
+        RecentMirrors::to_json,
+        |mut mirrors| {
+            let decision = mirrors.on_landing(set, now);
+            mirrors.landed(now);
+            (decision, Some(mirrors))
+        },
+    );
+    if decision == OnLanding::Release {
+        if set == OnLanding::Unmirror {
+            crate::lifecycle::line(&format!(
+                "displays {new:?} landed on the user's screen, the third of this instance's in 30 min; releasing"
+            ));
+        }
         return false;
     }
     let started = std::time::Instant::now();
