@@ -2413,6 +2413,7 @@ impl Shell {
                                     others,
                                 )
                                 .await
+                                .ok()
                             }
                         }
                     }

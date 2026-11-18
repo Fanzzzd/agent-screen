@@ -1,0 +1,48 @@
+2026-11-17 15:33:38.311 created display=61 unit=12 at=-1280,0 size=1280x800 serial=1
+2026-11-17 15:33:38.959 created display=62 unit=13 at=-1280,0 size=1280x800 serial=2
+2026-11-17 15:33:39.584 created display=63 unit=14 at=-1280,0 size=1280x800 serial=9
+2026-11-17 15:33:39.585 released display=61 unit=12 at=-3840,0 size=1280x800 unit twin
+2026-11-17 15:33:39.585 released display=62 unit=13 at=-2560,0 size=1280x800 unit twin
+2026-11-18 09:58:16.787 created display=64 unit=9 at=0,0 size=1280x1200 serial=1
+2026-11-18 09:58:17.719 created display=65 unit=10 at=-1280,0 size=1280x1200 serial=2
+2026-11-18 09:58:17.719 released display=64 unit=9 at=0,0 size=1280x1200 unit twin
+2026-11-18 09:58:26.661 released display=65 unit=10 at=0,0 size=1280x1200 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[65 ours 0,0 1280x1200; 1 user 0,0 1280x1200; 6 closet 1280,1200 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 09:58:42.297 created display=66 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 09:58:43.124 created display=67 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 09:58:43.124 released display=66 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 09:58:53.983 released display=67 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[67 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:00:00.923 created display=68 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:00:02.713 created display=69 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:00:02.714 released display=68 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:00:13.351 released display=69 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[69 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:00:55.713 created display=70 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:00:56.833 created display=71 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:00:56.833 released display=70 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:01:07.133 released display=71 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[71 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:02:13.668 created display=72 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:02:15.002 created display=73 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:02:15.002 released display=72 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:02:27.041 released display=73 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[73 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:04:41.210 created display=74 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:04:41.917 created display=75 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:04:41.918 released display=74 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:04:52.636 released display=75 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[75 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:08:47.695 created display=76 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:08:48.247 created display=77 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:08:48.247 released display=76 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:08:57.290 released display=77 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[77 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:09:46.728 created display=78 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:09:47.290 created display=79 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:09:47.290 released display=78 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:09:57.238 released display=79 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[79 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:29:55.196 created display=80 unit=9 at=0,0 size=1280x800 serial=1
+2026-11-18 10:29:55.752 created display=81 unit=10 at=1280,0 size=1280x800 serial=2
+2026-11-18 10:29:55.753 released display=80 unit=9 at=0,0 size=1280x800 unit twin
+2026-11-18 10:30:05.424 released display=81 unit=10 at=0,0 size=1280x800 parking failed: tucked=false not restored=[38 (ours) 1728,-900 -> 1280,-900; 39 (ours) 3168,-800 -> 2720,-800; 54 (ours) 4448,-800 -> 4000,-800] untucked fillers=[] online=[81 ours 0,0 1280x800; 1 user 0,0 1280x800; 6 closet 1280,800 2560x1440; 38 ours 1280,-900 1440x900; 39 ours 2720,-800 1280x800; 54 ours 4000,-800 1280x800]
+2026-11-18 10:32:40.393 app started pid=46892 version=0.1.38
+2026-11-18 10:32:41.288 created display=82 unit=6 at=1728,-800 size=1280x800 serial=1
+2026-11-18 10:32:41.288 parked display=82 unit=6 at=1728,-800 size=1280x800 tries=1
+2026-11-18 10:42:26.854 created display=83 unit=7 at=1728,-1600 size=1280x800 serial=2
+2026-11-18 10:42:26.854 parked display=83 unit=7 at=1728,-1600 size=1280x800 tries=1
+2026-11-18 10:42:41.843 created display=84 unit=8 at=1728,-2400 size=1280x800 serial=3
+2026-11-18 10:42:41.843 parked display=84 unit=8 at=1728,-2400 size=1280x800 tries=1
