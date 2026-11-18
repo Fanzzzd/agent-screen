@@ -5176,10 +5176,13 @@ fn running_app_turn() -> Duration {
 }
 
 /// Arguments and environment for a new instance of an app.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Start {
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
+    /// The agents' instance of a browser the user runs, which takes the
+    /// new window (ADR 0020).
+    agents: Option<AgentsInstance>,
 }
 
 impl Start {
@@ -5223,6 +5226,7 @@ impl Start {
         Ok(Start {
             arguments,
             environment,
+            agents: None,
         })
     }
 
@@ -5251,6 +5255,93 @@ impl Start {
     /// A running instance would ignore both: a new one starts.
     fn new_instance(&self) -> bool {
         !self.arguments.is_empty() || !self.environment.is_empty()
+    }
+
+    /// The same start with `switches` ahead of the agent's arguments.
+    fn with_switches(&self, switches: Vec<String>) -> Start {
+        Start {
+            arguments: switches
+                .into_iter()
+                .chain(self.arguments.iter().cloned())
+                .collect(),
+            environment: self.environment.clone(),
+            agents: None,
+        }
+    }
+}
+
+/// The agents' own instance of a Chromium browser the user runs (ADR
+/// 0020), running as `pid` on `profile`.
+#[derive(Clone)]
+struct AgentsInstance {
+    pid: i32,
+    profile: std::path::PathBuf,
+}
+
+/// How to start the browser at `path`: a Chromium browser the user already
+/// runs gets the agents' instance (ADR 0020).
+fn browser_plan(
+    path: &std::path::Path,
+    arguments: &[String],
+) -> (
+    agent_screen_model::agent_browser::Plan,
+    Option<std::path::PathBuf>,
+) {
+    use agent_screen_model::agent_browser::{Plan, plan};
+    let profile = (devtools::is_chromium(path) && app::handles_web(path))
+        .then(|| app::agent_browser_profile(path))
+        .flatten();
+    let Some(profile) = profile else {
+        return (Plan::AsAsked, None);
+    };
+    let running: Vec<(i32, Vec<String>)> = app::running_pids(path)
+        .into_iter()
+        .map(|pid| (pid, app::arguments(pid).unwrap_or_default()))
+        .collect();
+    (plan(true, arguments, &running, &profile), Some(profile))
+}
+
+/// Ask the agents' instance for a new window on the display at `bounds`,
+/// showing `url` if given. Through its DevTools pipe, which makes the
+/// window there; without one, as after Agent Screen restarted, a second
+/// start on the same profile hands its command line to the running
+/// instance and quits, as Chromium does for one profile, and the launch's
+/// catch moves the window. Never through LaunchServices, which may pick
+/// the user's instance of the same app.
+fn new_window_in(
+    path: &std::path::Path,
+    agents: &AgentsInstance,
+    url: Option<&str>,
+    bounds: crate::model::Rect,
+) -> bool {
+    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+    if let Some(channel) = devtools::channel(agents.pid, Duration::from_secs(2)) {
+        match channel.new_window(url.unwrap_or("about:blank"), bounds.inset(margin, margin)) {
+            Ok(()) => return true,
+            Err(e) => log::warn!(
+                "launch: the agents' instance {} made no window through its pipe: {e}",
+                agents.pid
+            ),
+        }
+    }
+    let mut arguments = agent_screen_model::agent_browser::switches(&agents.profile);
+    arguments.push("--new-window".into());
+    arguments.extend(url.map(String::from));
+    match devtools::spawn(path, &arguments, &[]) {
+        Ok(pid) => {
+            log::info!(
+                "launch: asked the agents' instance {} for a new window through pid {pid}",
+                agents.pid
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "launch: couldn't ask the agents' instance {} for a window: {e}",
+                agents.pid
+            );
+            false
+        }
     }
 }
 
@@ -5323,7 +5414,31 @@ async fn launch(
         }
     };
     core.update(cx, |c, _| pause(c, true));
-    let result = launch_now(core, id, name, &path, target, start, cx).await;
+    // Decided while this launch holds the app, so two sessions don't both
+    // start the agents' instance.
+    let (plan, profile) = off(cx, {
+        let (path, arguments) = (path.clone(), start.arguments.clone());
+        move || browser_plan(&path, &arguments)
+    })
+    .await;
+    let start = match (plan, profile) {
+        (agent_screen_model::agent_browser::Plan::Start(switches), _) => {
+            log::info!("launch: {name} runs as the user's; starting the agents' instance");
+            start.with_switches(switches)
+        }
+        (agent_screen_model::agent_browser::Plan::Reuse(pid), Some(profile)) => Start {
+            agents: Some(AgentsInstance { pid, profile }),
+            ..start.clone()
+        },
+        _ => start.clone(),
+    };
+    let result = match &start.agents {
+        Some(agents) if start.new_instance() => Err(ControlError::failed(format!(
+            "the agents' own {name} already runs (pid {}), separate from the user's, and arguments and environment apply only when it starts. Call launch_app without them for a new window in it, or pass --user-data-dir with another folder for a separate instance",
+            agents.pid
+        ))),
+        _ => launch_now(core, id, name, &path, target, &start, cx).await,
+    };
     core.update(cx, |c, _| {
         pause(c, false);
         c.launching.remove(&path);
@@ -5341,6 +5456,7 @@ async fn launch_now(
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
     let path = path.to_path_buf();
+    let agents = start.agents.clone();
     let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
     let mut before: std::collections::HashSet<u32> = off(cx, || {
@@ -5356,9 +5472,18 @@ async fn launch_now(
     }));
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
+    // The agents' instance of a browser the user runs is the only one this
+    // launch may use (ADR 0020).
+    let only = agents.as_ref().map(|a| a.pid);
     let pids = {
         let path = path.clone();
-        move || app::running_pids(&path)
+        move || {
+            let mut pids = app::running_pids(&path);
+            if let Some(only) = only {
+                pids.retain(|&p| p == only);
+            }
+            pids
+        }
     };
     let instances_before = off(cx, pids.clone()).await;
     let was_running = !fresh && !instances_before.is_empty();
@@ -5650,7 +5775,23 @@ async fn launch_now(
     if asked_for_window {
         // An app that has just started may not have its menus yet.
         let mut asked = ax::NewWindow::NotReady;
+        // The agents' instance gets its window, and the URL in it, through
+        // its pipe or a second start on its profile, never through its
+        // menus or LaunchServices (ADR 0020).
+        if let Some(agents) = agents.clone() {
+            let (path, url) = (path.clone(), target.filter(|_| is_url).map(String::from));
+            if off(cx, move || {
+                new_window_in(&path, &agents, url.as_deref(), bounds)
+            })
+            .await
+            {
+                asked = ax::NewWindow::Pressed;
+            }
+        }
         for _ in 0..10 {
+            if agents.is_some() {
+                break;
+            }
             asked = cx
                 .background_executor()
                 .spawn(async move { ax::press_new_window(pid) })
@@ -5828,7 +5969,12 @@ async fn launch_now(
             // where the user's typing goes until Agent Screen hands focus
             // back (#110): send the URL now, before placing the window, so
             // that comes sooner. The browser opens it in its key window.
-            let opened = match (was_running && is_url).then_some(target).flatten() {
+            let opened = match (was_running && is_url && agents.is_none())
+                .then_some(target)
+                .flatten()
+            {
+                // The agents' instance opened the URL in the window itself.
+                None if agents.is_some() && is_url => Some(true),
                 Some(target) => {
                     // Into the new window's address field where there is
                     // one Agent Screen knows; else the system sends the URL.

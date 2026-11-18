@@ -404,6 +404,26 @@ impl Channel {
             .unwrap_or_else(|_| Err(format!("{method} got no answer")))
     }
 
+    /// Open a new browser window showing `url`, at `frame` in global
+    /// points, in the background. Chromium makes it there, so it never
+    /// shows elsewhere first.
+    pub fn new_window(&self, url: &str, frame: Rect) -> Result<(), String> {
+        self.call(
+            "Target.createTarget",
+            json!({
+                "url": url,
+                "newWindow": true,
+                "background": true,
+                "left": frame.x.round() as i64,
+                "top": frame.y.round() as i64,
+                "width": frame.width.round() as i64,
+                "height": frame.height.round() as i64,
+            }),
+            None,
+        )
+        .map(|_| ())
+    }
+
     /// The session attached to a target, attaching once.
     fn session(&self, target: &str) -> Result<String, String> {
         if let Some(s) = self

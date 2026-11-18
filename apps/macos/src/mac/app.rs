@@ -435,6 +435,22 @@ fn support_folder() -> Option<std::path::PathBuf> {
     Some(Path::new(&home).join("Library/Application Support/Agent Screen"))
 }
 
+/// The bundle id in an app bundle's Info.plist.
+pub fn bundle_id_at(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    info_value(&plist, "CFBundleIdentifier")
+}
+
+/// The agents' profile folder for the browser at `bundle` (ADR 0020), in
+/// this instance of Agent Screen's own place.
+pub fn agent_browser_profile(bundle: &Path) -> Option<std::path::PathBuf> {
+    Some(agent_screen_model::agent_browser::profile_dir(
+        &support_folder()?,
+        agent_screen_mcp::endpoint::instance().as_deref(),
+        &bundle_id_at(bundle)?,
+    ))
+}
+
 /// The picture the user chose for Agent Displays, if any: a copy, so moving
 /// or deleting the original changes nothing.
 pub fn custom_wallpaper() -> Option<std::path::PathBuf> {
