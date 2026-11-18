@@ -12,6 +12,16 @@ use crate::model::Rect;
 /// launchd's pid, the parent of an app `open` started.
 pub const LAUNCHD: i32 = 1;
 
+/// Whether a new instance quit, as an app that allows one instance does.
+/// A process Agent Screen started itself isn't listed among the bundle's
+/// running apps until it registers, a few hundred milliseconds in, so it
+/// has quit only once it no longer runs at all. Taking "not listed" for
+/// "quit" left a starting browser without its catch or hide, and its
+/// window came onto the user's screen (#222).
+pub fn has_quit(started_here: bool, runs: bool, listed: bool) -> bool {
+    if started_here { !runs } else { !listed }
+}
+
 /// Whether a process with this parent and `argv` is the instance `open`
 /// started with `asked` after `--args`.
 pub fn is_opened(parent: i32, argv: &[String], asked: &[String]) -> bool {
@@ -147,6 +157,17 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_process_started_here_has_quit_only_once_it_ends() {
+        use super::has_quit;
+        // Started here, running, not registered yet: still starting.
+        assert!(!has_quit(true, true, false));
+        assert!(has_quit(true, false, false));
+        // Started by `open`: its listing decides.
+        assert!(has_quit(false, true, false));
+        assert!(!has_quit(false, true, true));
+    }
+
     use super::*;
 
     /// A Mac with these app bundles, and these in LaunchServices.

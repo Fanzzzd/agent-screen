@@ -5720,14 +5720,15 @@ async fn launch_now(
     // A new instance of an app that already runs may be one that allows
     // only one: it hands its launch to the running instance and quits.
     let single_instance_risk = fresh && !instances_before.is_empty();
-    // A process Agent Screen started is listed as the app only once it
-    // has registered with the system, after its first moments: until it
-    // ends, it hasn't quit.
     let quit = |pid: i32| {
         let pids = pids.clone();
-        move || match spawned {
-            Some(started) if started == pid => (unsafe { libc::kill(pid, 0) }) != 0,
-            _ => !pids().contains(&pid),
+        move || {
+            let here = spawned == Some(pid);
+            agent_screen_model::launch::has_quit(
+                here,
+                here && unsafe { libc::kill(pid, 0) } == 0,
+                !here && pids().contains(&pid),
+            )
         }
     };
     for _ in 0..200 {
