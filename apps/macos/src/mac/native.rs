@@ -101,6 +101,8 @@ pub enum Native {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
     CreateDisplay,
+    /// Forget where displays landed on the user's screen (#220).
+    AllowNewDisplays,
     OpenSettings,
     OpenRecordings,
     ReportProblem,

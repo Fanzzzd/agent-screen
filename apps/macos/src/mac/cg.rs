@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn CGDisplayPixelsWide(display: u32) -> usize;
     fn CGDisplayPixelsHigh(display: u32) -> usize;
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayIsInMirrorSet(display: u32) -> u32;
     fn CGDisplayRegisterReconfigurationCallback(
         callback: extern "C" fn(u32, u32, *mut std::ffi::c_void),
         user_info: *mut std::ffi::c_void,
@@ -81,6 +82,12 @@ pub fn unit_twin(id: DisplayId) -> Option<DisplayId> {
         .iter()
         .copied()
         .find(|&other| other != id && unsafe { CGDisplayUnitNumber(other) } == unit)
+}
+
+/// Whether display `id` is in a mirror set: it mirrors another display,
+/// or another mirrors it.
+pub fn in_mirror_set(id: DisplayId) -> bool {
+    unsafe { CGDisplayIsInMirrorSet(id) != 0 }
 }
 
 /// Whether `id` is among the online displays.
@@ -518,6 +525,22 @@ fn list_raw(
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGSessionCopyCurrentDictionary() -> *mut AnyObject;
+}
+
+/// CoreGraphics' unique id of this login session; a logout or restart
+/// gives the next session another. Empty when it has none.
+pub fn session_uuid() -> String {
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    let Some(session) = (unsafe { Retained::from_raw(raw) }) else {
+        return String::new();
+    };
+    let session: Retained<NSDictionary<NSString, AnyObject>> =
+        unsafe { Retained::cast_unchecked(session) };
+    session
+        .objectForKey(&NSString::from_str("CGSSessionUniqueSessionUUID"))
+        .and_then(|v| v.downcast::<NSString>().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 /// Whether the user's session shows the lock screen. macOS then blocks

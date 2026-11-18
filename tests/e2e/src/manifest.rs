@@ -278,6 +278,7 @@ pub const SCRIPTS: &[Script] = &[
     script("menuchoice", &[Elements], Full, Hook, 1).hands_off(),
     script("menuclosed", &[Elements, Browser], Full, Agent, 1).hands_off(),
     script("menupress", &[Elements, InputQueue], Full, Real, 1).hands_off(),
+    script("mirrorsafe", &[Displays], Full, Agent, 1),
     script("nativeclick", &[ViewerInput], Full, Hook, 2),
     script("oneclick", &[ViewerInput], Core, Real, 2).hands_off(),
     script("openpanel", &[AgentInput, Elements], Full, Agent, 1).hands_off(),
