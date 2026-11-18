@@ -275,6 +275,7 @@ pub const SCRIPTS: &[Script] = &[
     script("launchhere", &[Windows, ViewerInput], Full, Hook, 2).hands_off(),
     script("load", &[Performance], Full, Agent, 12).hands_off().manual(MEASURES),
     script("loanfocus", &[InputQueue, Windows], Full, Hook, 1).hands_off(),
+    script("mcpclients", &[Displays], Full, Agent, 0),
     script("mcporphan", &[Displays], Full, Agent, 0),
     script("mcpv1", &[Displays], Full, Agent, 1),
     script("menuchoice", &[Elements], Full, Hook, 1).hands_off(),

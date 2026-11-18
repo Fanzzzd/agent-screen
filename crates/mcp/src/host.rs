@@ -10,7 +10,7 @@ use crate::session::{self, ClientEnv};
 use crate::tools::{self, Output, text};
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ResultType, ServerCapabilities,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
@@ -120,16 +120,20 @@ impl ServerHandler for Host {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let name = context
-            .peer
-            .peer_info()
-            .map(|info| info.client_info.name.clone());
+        // From initialize, or from the request's own _meta for a client on
+        // protocol 2026-07-28, which sends no initialize.
+        let name = context.client_info().map(|info| info.name);
         self.announce(name.as_deref());
-        // Protocol 2026-07-28 requires resultType on every result, and ttlMs
-        // and cacheScope on lists; rmcp drops them for older clients.
         let tools: ListToolsResult = from_json(json!({ "tools": tools::definitions() }));
+        let list = ListToolsResult::with_all_items(tools.tools);
+        // Protocol 2026-07-28 requires resultType on every result, which rmcp
+        // strips for older clients, and ttlMs and cacheScope on lists, which
+        // it doesn't: an older client gets the list as its version defines it.
+        if !speaks_2026(&context) {
+            return Ok(list);
+        }
         // The list is fixed for a build, the same for every user.
-        Ok(ListToolsResult::with_all_items(tools.tools)
+        Ok(list
             .with_ttl_ms(3_600_000)
             .with_cache_scope(CacheScope::Public))
     }
@@ -144,10 +148,7 @@ impl ServerHandler for Host {
             .as_ref()
             .map(|m| m.0.0.clone())
             .unwrap_or_else(|| context.meta.0.0.clone());
-        let client = context
-            .peer
-            .peer_info()
-            .map(|info| info.client_info.name.clone());
+        let client = context.client_info().map(|info| info.name);
         let session = session::identify(&self.client.env, &meta, client.as_deref());
         let args = request.arguments.unwrap_or_default();
 
@@ -209,6 +210,14 @@ impl Host {
             None => json!({ "status": "none", "control_protocol_version": 1 }),
         }
     }
+}
+
+/// Whether the request is on protocol 2026-07-28 or later, from its own
+/// `_meta` or the version initialize settled on.
+fn speaks_2026(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
 }
 
 /// rmcp's model types are non-exhaustive; build them from their wire form.

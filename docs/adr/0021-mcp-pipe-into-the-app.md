@@ -26,7 +26,7 @@ The note that a display ended because the app quit used to live in the MCP proce
 The first line on a control connection decides its kind:
 
 ```text
-→ {"id": 0, "method": "pipe", "params": {"version": 2, "pid": 123, "parentPid": 45, "cwd": "/w/proj",
+→ {"id": 0, "method": "pipe", "params": {"version": 2, "pid": 123, "connection": "123-9f2c…", "parentPid": 45, "cwd": "/w/proj",
      "env": {"CLAUDE_CODE_SESSION_ID": "…", "CLAUDE_PROJECT_DIR": "/w/proj"},
      "build": {…}, "resumed": false}}
 ← {"id": 0, "result": {"version": 2}}
@@ -35,6 +35,16 @@ The first line on a control connection decides its kind:
 After the reply, both sides send MCP JSON-RPC lines until one closes. Any other first line is a v1 connection: the app-level NDJSON methods of ADR 0005, unchanged. An app that predates version 2 answers `pipe` with `unknown method`; the pipe then answers each client request with an error that asks the user to update Agent Screen.
 
 The pipe's interface to the app is only the hello and the line framing. A new tool, a changed tool or a fix to session detection changes the app alone. Version 3 is for a change to the hello or the framing.
+
+## Sessions
+
+The hello's `connection` is a random id the pipe makes when it starts, kept for its life and sent again on every reconnect. The host picks each tool call's session from the first of these that names one (`crates/mcp/src/session.rs`):
+
+1. The call's `_meta`: Codex's `x-codex-turn-metadata.session_id`, which separates the conversations one Codex process serves.
+2. `CLAUDE_CODE_SESSION_ID` from the hello, only when the client's `clientInfo.name` is `claude-code`. A client started from Claude Code's shell inherits the variable; trusting it there would put two agents in one session.
+3. The connection: `pipe:<connection>`. A client with no hint gets one session per pipe, and a later pipe that reuses a pid gets a new one.
+
+A v1 process sends no hello and keeps its old key, `pid:<pid>`. The host reads the client's name and protocol version from `initialize`, or from each request's `_meta` for a client on MCP 2026-07-28, which sends no `initialize`. rmcp 3.5 negotiates the version. The host adds `ttlMs` and `cacheScope` to `tools/list` only for 2026-07-28 clients, since rmcp does not strip them for older ones. [docs/clients.md](../clients.md) has the setup for each client and what each one gets.
 
 ## Compatibility
 

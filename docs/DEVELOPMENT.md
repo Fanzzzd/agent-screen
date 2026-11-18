@@ -177,6 +177,7 @@ cargo test -p agent-screen-mcp --test element_steps # step actions and subtree s
 cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, compiled without GPUI; no app or input
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
 cargo test -p agent-screen-mcp --test pipe # the pipe's hello carries the client's session to an MCP host, and the pipe ends with its parent; no app
+cargo test -p agent-screen-mcp --test clients # the pipe driven as Claude Code, Codex, Gemini CLI and bare clients: each gets its own session by the rules in docs/clients.md, and each MCP version from 2024-11-05 to 2026-07-28 its own wire shape; no app
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
 cargo test -p agent-screen-model tree # production traversal: shallow discovery beyond a long list, subtree budgets and ancestry guards
@@ -256,6 +257,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alon
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e mcpv1      # an MCP process from before the pipe (`AgentScreen mcp --v1`, control protocol v1) lists the tools, makes a display, takes a screenshot and ends it against this app, beside a pipe's session that can't reach that display (ADR 0021); 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan  # a pipe ends within 5 s of its parent with stdin still open, and the app ends and logs a v1 MCP process whose client exited while one whose client runs stays (ADR 0021); no display, up to 35 s
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients # real MCP clients installed on this Mac (today Cursor's CLI, `cursor-agent`) list the tools through this build's pipe, from a throwaway project and home; skips a client that isn't installed; no display, no model call
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # an active or spare display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change, and the display log records the app start and each display released at quit

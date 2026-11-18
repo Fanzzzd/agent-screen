@@ -60,7 +60,10 @@ impl Hello {
     pub fn current(package_version: &str) -> Self {
         Self {
             version: PIPE_PROTOCOL_VERSION,
-            client: ClientEnv::current(),
+            client: ClientEnv {
+                connection: Some(crate::session::new_connection_id()),
+                ..ClientEnv::current()
+            },
             parent_pid: parent_pid(),
             build: Some(crate::diagnostics::build_identity(package_version)),
             resumed: false,
@@ -488,6 +491,7 @@ mod tests {
             version: PIPE_PROTOCOL_VERSION,
             client: ClientEnv {
                 pid: 77,
+                connection: Some("77-test".into()),
                 cwd: "/w/proj".into(),
                 env: [("CLAUDE_CODE_SESSION_ID".to_string(), "s1".to_string())]
                     .into_iter()
