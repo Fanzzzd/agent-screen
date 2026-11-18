@@ -1,7 +1,7 @@
 //! The app ends an MCP process on its control socket once the client that
 //! started it has exited, and logs it; one whose client still runs stays.
 //! A pipe ends by itself when its parent exits, even with stdin still open
-//! (ADR 0020).
+//! (ADR 0021).
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan
 //!

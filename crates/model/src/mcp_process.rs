@@ -1,4 +1,4 @@
-//! Which MCP processes the app may end (ADR 0020): only orphans, whose
+//! Which MCP processes the app may end (ADR 0021): only orphans, whose
 //! client is gone. A process whose parent still runs is never touched,
 //! however long it has been idle.
 

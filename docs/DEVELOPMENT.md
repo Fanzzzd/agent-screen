@@ -5,7 +5,7 @@
 ```
 apps/macos/        the app: GPUI UI, control socket and the MCP hosts, `AgentScreen mcp`
 apps/website/      agentscreen.app, a Cloudflare Worker with static assets
-crates/mcp/        the pipe (`AgentScreen mcp`) and the MCP host with the tools (rmcp), built into the app binary (ADR 0020)
+crates/mcp/        the pipe (`AgentScreen mcp`) and the MCP host with the tools (rmcp), built into the app binary (ADR 0021)
 crates/model/      domain rules with no OS calls: displays, windows, key chords
 crates/colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
 tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
@@ -254,8 +254,8 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alon
 
 # displays: an Agent Display's life, from creation and parking to spares and review
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
-AGENTSCREEN_INSTANCE=e2e cargo e2e mcpv1      # an MCP process from before the pipe (`AgentScreen mcp --v1`, control protocol v1) lists the tools, makes a display, takes a screenshot and ends it against this app, beside a pipe's session that can't reach that display (ADR 0020); 1 display
-AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan  # a pipe ends within 5 s of its parent with stdin still open, and the app ends and logs a v1 MCP process whose client exited while one whose client runs stays (ADR 0020); no display, up to 35 s
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcpv1      # an MCP process from before the pipe (`AgentScreen mcp --v1`, control protocol v1) lists the tools, makes a display, takes a screenshot and ends it against this app, beside a pipe's session that can't reach that display (ADR 0021); 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan  # a pipe ends within 5 s of its parent with stdin still open, and the app ends and logs a v1 MCP process whose client exited while one whose client runs stays (ADR 0021); no display, up to 35 s
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # an active or spare display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change, and the display log records the app start and each display released at quit

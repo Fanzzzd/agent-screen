@@ -1,5 +1,5 @@
 //! The MCP host: Agent Screen's MCP server for one client connection, with
-//! its tools and session detection. The app runs one per pipe (ADR 0020);
+//! its tools and session detection. The app runs one per pipe (ADR 0021);
 //! `AgentScreen mcp --v1` runs one over stdio, as MCP processes before the
 //! pipe did.
 

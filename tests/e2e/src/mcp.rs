@@ -238,7 +238,7 @@ impl McpClient {
 
     /// Start this build's MCP server as a v1 process, the way `AgentScreen
     /// mcp` ran before the pipe: the tools in the process, calling the app
-    /// with control protocol v1 (ADR 0020).
+    /// with control protocol v1 (ADR 0021).
     pub fn start_v1(env: &[(&str, &str)]) -> Result<McpClient> {
         if locked() {
             skip("the screen is locked");

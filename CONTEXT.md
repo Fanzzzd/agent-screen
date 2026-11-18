@@ -25,7 +25,7 @@ One run of one agent (a Claude Code or Codex conversation, for example) connecte
 _Avoid_: agent, client, worker
 
 **Pipe**:
-The `AgentScreen mcp` process an agent's client starts for one Agent Session. It tells the app who the client is and forwards the session's MCP messages; the tools run in the app, so an update reaches every session at its next call. It ends when its client closes it or exits (ADR 0020).
+The `AgentScreen mcp` process an agent's client starts for one Agent Session. It tells the app who the client is and forwards the session's MCP messages; the tools run in the app, so an update reaches every session at its next call. It ends when its client closes it or exits (ADR 0021).
 _Avoid_: MCP server (the tools, in the app), proxy, bridge
 
 **Viewer**:

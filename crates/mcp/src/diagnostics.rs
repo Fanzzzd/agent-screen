@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
 /// The control socket protocol this build speaks, not the MCP protocol: 1
-/// before the pipe, 2 with it (ADR 0020).
+/// before the pipe, 2 with it (ADR 0021).
 pub const CONTROL_PROTOCOL_VERSION: u32 = crate::pipe::PIPE_PROTOCOL_VERSION;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REPLY: u64 = 16 * 1024;

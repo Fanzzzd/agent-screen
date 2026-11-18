@@ -1,4 +1,4 @@
-//! `AgentScreen mcp`: the pipe between one MCP client and the app (ADR 0020).
+//! `AgentScreen mcp`: the pipe between one MCP client and the app (ADR 0021).
 //!
 //! It tells the app once per connection what only it can see, the client's
 //! environment and its own pid, then forwards JSON-RPC lines both ways. The
@@ -398,7 +398,7 @@ pub fn parent_pid() -> u32 {
 }
 
 /// End this process when the parent it started under exits, even if stdin
-/// stays open in another process (ADR 0020).
+/// stays open in another process (ADR 0021).
 pub fn exit_with_parent() {
     let parent = parent_pid();
     // Already adopted by launchd or init: no client to wait for.

@@ -34,7 +34,7 @@ For a shared browser's refused keys, record whether the error reports a differen
 
 ## Read the identity correctly
 
-- **`collector: "mcp"`** identifies the MCP server serving this tool call. This is the report to collect from the failing session. Since the pipe (ADR 0020) the MCP server runs in the app, so `local` is the app's build, and **`pipe`** gives the build of the session's `AgentScreen mcp` with `control_protocol_version: 2`. `pipe.status: "none"` means an MCP process from before the pipe serves the session itself, and `local` is that process's build.
+- **`collector: "mcp"`** identifies the MCP server serving this tool call. This is the report to collect from the failing session. Since the pipe (ADR 0021) the MCP server runs in the app, so `local` is the app's build, and **`pipe`** gives the build of the session's `AgentScreen mcp` with `control_protocol_version: 2`. `pipe.status: "none"` means an MCP process from before the pipe serves the session itself, and `local` is that process's build.
 - **`collector: "cli"`** identifies only the CLI process you just invoked. Its `mcp_status` is `not_collected`. Starting a new CLI cannot prove what an older MCP has loaded.
 - **`app.identity`** comes from compiled metadata in the app that answered the read-only request. A legacy app that rejects the method has no verified identity in the report.
 - **`package_version`** is the Cargo package version compiled into that process. `git_revision` is its full source revision, when available. `dirty: true` means the build had local changes. Missing git metadata is `null`, including source archives. The report records the Cargo profile and target too. It contains no build timestamp or executable-file checksum.

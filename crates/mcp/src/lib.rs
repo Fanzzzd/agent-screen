@@ -1,6 +1,6 @@
 //! Agent Screen's MCP server. A client (Claude Code, Codex) starts
 //! `AgentScreen mcp` over stdio: the pipe, which forwards to the MCP host in
-//! the menu bar app (ADR 0020).
+//! the menu bar app (ADR 0021).
 
 mod control;
 pub mod diagnostics;

@@ -1,7 +1,7 @@
 //! Who is calling: enough to find or label the session's Agent Display.
 //!
 //! The app identifies the session from what the pipe saw in the client's
-//! environment (ADR 0020), so nothing here reads this process's own.
+//! environment (ADR 0021), so nothing here reads this process's own.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

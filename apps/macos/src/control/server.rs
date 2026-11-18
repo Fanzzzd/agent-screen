@@ -2,7 +2,7 @@
 //! only the current user can open (mode 0600).
 //!
 //! A connection whose first line is a pipe's hello carries MCP JSON-RPC
-//! from then on, served by an MCP host on this thread (ADR 0020). Any
+//! from then on, served by an MCP host on this thread (ADR 0021). Any
 //! other connection is v1: app-level requests, from an MCP process older
 //! than the pipe or from an MCP host here, in process.
 //!
@@ -166,7 +166,7 @@ pub fn start() -> anyhow::Result<mpsc::UnboundedReceiver<Event>> {
 }
 
 /// End the MCP processes on the socket whose client exited, and log each
-/// (ADR 0020). A process whose parent still runs is never touched.
+/// (ADR 0021). A process whose parent still runs is never touched.
 fn sweep_orphans(shared: &Shared) {
     let peers: Vec<(u64, i32)> = shared
         .peers

@@ -171,7 +171,7 @@ fn main() {
         _ => {}
     }
     // `AgentScreen mcp`: the pipe a client starts over stdio. It forwards
-    // the client's lines to the MCP host in the running app (ADR 0020).
+    // the client's lines to the MCP host in the running app (ADR 0021).
     if std::env::args().nth(1).as_deref() == Some("mcp")
         && std::env::args().nth(2).as_deref() == Some("install")
     {

@@ -14,7 +14,7 @@ Release builds embed Sparkle 2, the update framework most Mac apps outside the A
 Installing replaces the app and restarts it. A restart ends every Agent Display and the agents' work on them (ADR 0004), so an update never installs in the middle of that work.
 
 - Sparkle checks once a day and downloads in the background (`SUAutomaticallyUpdate`), showing nothing.
-- Agent Screen takes the install from Sparkle. It runs it once no Agent Display has been open for two checks 30 s apart. Agents' MCP servers reconnect after the restart; since ADR 0020 their pipes reconnect and the new app serves their tools.
+- Agent Screen takes the install from Sparkle. It runs it once no Agent Display has been open for two checks 30 s apart. Agents' MCP servers reconnect after the restart; since ADR 0021 their pipes reconnect and the new app serves their tools.
 - Meanwhile the status menu offers **Restart to Update to x.y.z…**. With Agent Displays open, it says how many the restart ends and asks first.
 - Quitting installs it too.
 - **Check for Updates…** in the status menu shows Sparkle's own window. Its Install and Relaunch asks the same question when Agent Displays are open.

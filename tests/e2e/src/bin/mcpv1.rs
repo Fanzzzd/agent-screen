@@ -1,5 +1,5 @@
 //! An MCP process from before the pipe keeps working against this app until
-//! its client restarts (ADR 0020). `AgentScreen mcp --v1` serves the tools
+//! its client restarts (ADR 0021). `AgentScreen mcp --v1` serves the tools
 //! in its own process and calls the app with control protocol v1, as every
 //! `AgentScreen mcp` up to 0.1.38 did. It lists the tools, makes a display,
 //! takes a screenshot of it and ends it, while a pipe's session works

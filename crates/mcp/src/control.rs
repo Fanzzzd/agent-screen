@@ -11,7 +11,7 @@
 //! the session's display stops taking input when the MCP server goes away.
 //!
 //! The MCP server runs in the app and reaches it through an in-process
-//! stream; a v1 process (ADR 0020) reaches it through the control socket.
+//! stream; a v1 process (ADR 0021) reaches it through the control socket.
 
 use crate::endpoint::{self, Reader, Writer};
 use crate::ledger::Ledger;

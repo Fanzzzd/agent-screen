@@ -5,7 +5,7 @@
 //! Entries belong to a run. A v1 process counts a run per control
 //! connection, since each new connection is a new app. The app counts two:
 //! the previous app run, read from its file at start, and its own, which it
-//! writes back on every change (ADR 0020).
+//! writes back on every change (ADR 0021).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
