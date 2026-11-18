@@ -2475,8 +2475,8 @@ impl Shell {
                 let allow = native::confirm(
                     t("New displays are paused", "已暂停新建显示器"),
                     t(
-                        "macOS put the last new display on top of your screen and changed your screen's resolution, so Agent Screen released it. A display made now would likely do the same. New displays are allowed again within 30 minutes. If you allow them now, your screen may briefly change resolution again.",
-                        "macOS 把上一块新显示器叠在了你的屏幕上，并改变了屏幕分辨率，Agent Screen 已将其释放。现在新建很可能再次如此。30 分钟内将自动恢复新建。如果现在允许，屏幕分辨率可能再次短暂变化。",
+                        "macOS put the last new display on top of your screen and changed your screen's resolution. Agent Screen couldn't keep that mirror off, so it released the display. A display made now would likely do the same. New displays are allowed again within 30 minutes. If you allow them now, your screen may briefly change resolution again.",
+                        "macOS 把上一块新显示器叠在了你的屏幕上，并改变了屏幕分辨率。Agent Screen 未能关闭该镜像，已释放这块显示器。现在新建很可能再次如此。30 分钟内将自动恢复新建。如果现在允许，屏幕分辨率可能再次短暂变化。",
                     ),
                     t("Allow New Displays", "允许新建显示器"),
                 );

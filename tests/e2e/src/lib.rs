@@ -979,8 +979,11 @@ fn start_sighting() {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
     let mark = root().to_string_lossy().into_owned() + "/";
-    let overlay = out().join("overlay").to_string_lossy().into_owned();
-    let app = debug_app().to_string_lossy().into_owned() + "/";
+    // The watcher compares real executable paths: a `target` that is a
+    // symlink, as in a worktree sharing another's build, would hide neither.
+    let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let overlay = real(out().join("overlay")).to_string_lossy().into_owned();
+    let app = real(debug_app()).to_string_lossy().into_owned() + "/";
     let started = tool("sighting").and_then(|watcher| {
         Ok(command(watcher)
             .args([
