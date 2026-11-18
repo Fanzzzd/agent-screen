@@ -1,0 +1,47 @@
+# Extended arrangements stored in /Library/Preferences/com.apple.windowserver.displays.plist on 2026-11-18,
+# for sets of the built-in display, AeroSpace's closet and Agent Displays only.
+# One per line: each display, named for its role or Agent Screen serial in place of its UUID, and its size in points.
+# Keys sort as the app's do (landing::arrangement_key); the names sort differently from UUIDs, so lines are re-sorted.
+builtin@1728x1117 closet@2560x1440
+builtin@1728x1117 closet@2560x1440 serial1@1280x800 serial2@1280x800 serial3@1280x800
+builtin@1728x1117 closet@2560x1440 serial1@1280x800 serial2@1280x800
+builtin@1728x1117 closet@2560x1440 serial1@1280x800
+builtin@1728x1117 closet@2560x1440 serial6@1280x800
+builtin@1728x1117 closet@2560x1440 serial4@1280x800 serial6@1280x800
+builtin@1728x1117 closet@2560x1440 serial3@1440x900 serial4@1280x800 serial6@1280x800
+builtin@1728x1117 closet@2560x1440 serial3@1440x900 serial4@1280x800 serial5@1280x800
+builtin@1728x1117 closet@1728x1117 serial1@1280x800 serial5@1280x800
+builtin@1728x1117 closet@1728x1117 serial10002@1100x700 serial1@1280x800 serial5@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1280x800 serial1@1280x800 serial5@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117 serial10002@1280x600
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117
+builtin@1728x1117 closet@1728x1117 serial10002@1280x800
+builtin@1728x1117 closet@1728x1117 serial10002@1280x800 serial10003@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117 serial10002@1280x800 serial10003@1280x800
+builtin@1728x1117 closet@1728x1117 serial2@1280x800
+builtin@1728x1117 closet@1728x1117 serial3@1280x800
+builtin@1728x1117 closet@1728x1117 serial3@1280x800 serial4@1280x800
+builtin@1728x1117 closet@1728x1117 serial1@1280x800 serial4@1440x1000
+builtin@1728x1117 closet@1728x1117 serial10001@640x1600 serial1@1280x900 serial2@1280x900
+builtin@1728x1117 closet@1728x1117 serial1@1400x900 serial3@1280x800 serial4@1280x800
+builtin@1728x1117 closet@1728x1117 serial4@1280x800
+builtin@1728x1117 closet@1728x1117 serial2@1280x900 serial4@1280x800
+builtin@1728x1117 closet@1728x1117 serial2@1280x900 serial3@1280x800 serial4@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117 serial10002@1280x600 serial1@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117 serial1@1280x800
+builtin@1728x1117 closet@1728x1117 serial2@1400x900 serial3@1280x800
+builtin@1728x1117 closet@1728x1117 serial10002@1280x600 serial2@1400x900 serial3@1280x800
+builtin@1728x1117 closet@1728x1117 serial10001@1728x1117 serial2@1400x900 serial3@1280x800
+builtin@1728x1117 closet@1728x1117 serial10003@900x600 serial1@1280x800 serial2@1280x800
+builtin@1728x1117 closet@1728x1117 serial1@900x600 serial2@1280x800 serial4@1440x900
+builtin@1728x1117 closet@1728x1117 serial1@1440x900 serial3@1280x800
+builtin@1728x1117 closet@1728x1117 serial10002@1100x700 serial10003@1100x700 serial1@1600x1000
+builtin@1728x1117 closet@1728x1117 serial10003@1100x700
+builtin@1728x1117 closet@1728x1117 serial10001@1100x700 serial10003@1100x700
+builtin@1728x1117 closet@1728x1117 serial10002@1100x700 serial10003@1100x700 serial2@800x600
+builtin@1728x1117 closet@1728x1117 serial10001@1100x700 serial10002@1100x700 serial2@800x600
+builtin@1728x1117 closet@1728x1117 serial10002@1100x700 serial2@800x600
+builtin@1728x1117 closet@1728x1117 serial10001@1100x700 serial2@800x600
+builtin@1728x1117 closet@2560x1440 serial10002@1280x800 serial1@1280x800 serial2@1100x700
+builtin@1728x1117 closet@2560x1440 serial10003@1280x800 serial1@1280x800
+builtin@1728x1117 closet@2560x1440 serial10002@1280x800 serial1@1280x800
