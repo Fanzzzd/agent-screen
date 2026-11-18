@@ -4,7 +4,8 @@
 use super::cg;
 use agent_screen_model::arrangement;
 use agent_screen_model::landing::{
-    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, StoredSets, UserBefore,
+    self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, RecentMirrors, StoredSets,
+    UserBefore,
 };
 use agent_screen_model::model::SerialSizes;
 use objc2::msg_send;
@@ -486,6 +487,16 @@ fn stored_sets_path() -> std::path::PathBuf {
     std::path::Path::new(&home).join("Library/Application Support/Agent Screen/arrangements.json")
 }
 
+/// `~/Library/Application Support/Agent Screen/mirrors.json`, or
+/// `mirrors-<instance>.json`: when this instance's displays landed on the
+/// user's screen lately (`RecentMirrors`).
+fn recent_mirrors_path() -> std::path::PathBuf {
+    bad_units_path().with_file_name(match agent_screen_mcp::endpoint::instance() {
+        Some(instance) => format!("mirrors-{instance}.json"),
+        None => "mirrors.json".into(),
+    })
+}
+
 /// `with_bad_units` for the sets Agent Screen stored an arrangement for.
 fn with_stored_sets<T>(job: impl FnOnce(StoredSets) -> (T, Option<StoredSets>)) -> T {
     with_shared(
@@ -593,6 +604,12 @@ pub fn allow_new_displays() {
         .unwrap_or_else(|e| e.into_inner())
         .clear_bad_units();
     with_bad_units(|_| ((), Some(BadUnits::new())));
+    with_shared(
+        &recent_mirrors_path(),
+        RecentMirrors::from_json,
+        RecentMirrors::to_json,
+        |_| ((), Some(RecentMirrors::new())),
+    );
     crate::lifecycle::line("new displays allowed again by the user");
 }
 
@@ -752,7 +769,8 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         log::warn!("displays {new:?}: a display has no identity; releasing");
         return false;
     };
-    let decision = with_stored_sets(|stored| match stored.on_landing(&key, wall()) {
+    let now = wall();
+    let set = with_stored_sets(|stored| match stored.on_landing(&key, now) {
         OnLanding::Release => {
             let mut stored = stored;
             stored.forget(&key);
@@ -760,10 +778,28 @@ fn unmirror(new: &[u32], others: &[u32], before: &[arrangement::Screen]) -> bool
         }
         OnLanding::Unmirror => (OnLanding::Unmirror, None),
     });
-    if decision == OnLanding::Release {
+    if set == OnLanding::Release {
         crate::lifecycle::line(&format!(
-            "displays {new:?} landed on the user's screen although Agent Screen stored this arrangement less than 30 min ago; releasing"
+            "displays {new:?} landed on the user's screen although Agent Screen stored this arrangement less than 30 min ago, or unmirrored this set twice in 30 min; releasing"
         ));
+    }
+    // Every landing counts, a released one too: each flashed the screen.
+    let decision = with_shared(
+        &recent_mirrors_path(),
+        RecentMirrors::from_json,
+        RecentMirrors::to_json,
+        |mut mirrors| {
+            let decision = mirrors.on_landing(set, now);
+            mirrors.landed(now);
+            (decision, Some(mirrors))
+        },
+    );
+    if decision == OnLanding::Release {
+        if set == OnLanding::Unmirror {
+            crate::lifecycle::line(&format!(
+                "displays {new:?} landed on the user's screen, the third of this instance's in 30 min; releasing"
+            ));
+        }
         return false;
     }
     let started = std::time::Instant::now();

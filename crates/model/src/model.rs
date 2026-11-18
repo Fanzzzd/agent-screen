@@ -619,7 +619,9 @@ impl SerialSizes {
     /// The serial for a new display of `size` from `first`, none of
     /// `taken`: a free one last leased at this size; else one never
     /// leased; else the one leased longest ago, which costs that size its
-    /// arrangement; past `SIZE_SLOTS` held at once, the lowest free.
+    /// arrangement, unless a display of this size is held already, as a
+    /// second spare of the default size would be; else, as past
+    /// `SIZE_SLOTS` held at once, the lowest free past the slots.
     pub fn serial_for(
         &self,
         first: u32,
@@ -634,11 +636,15 @@ impl SerialSizes {
             .find(|s| self.serials.get(s).is_some_and(|&(z, _)| z == size))
             .or_else(|| free.iter().copied().find(|s| !self.serials.contains_key(s)))
             .or_else(|| {
+                let held = taken
+                    .iter()
+                    .any(|s| self.serials.get(s).is_some_and(|&(z, _)| z == size));
                 free.iter()
                     .copied()
+                    .filter(|_| !held)
                     .min_by_key(|s| self.serials.get(s).map_or(0, |&(_, t)| t))
             })
-            .unwrap_or_else(|| lowest_free_serial(first, taken))
+            .unwrap_or_else(|| lowest_free_serial(first + SIZE_SLOTS, taken))
     }
 
     /// `serial` was leased for `size` at `at`.
@@ -1815,6 +1821,10 @@ mod tests {
             lease(&mut sizes, (w, 800), 10 + u64::from(i), &[]);
         }
         assert_eq!(lease(&mut sizes, (999, 999), 100, &[]), a);
+        // A second display of a size held already takes no other size's
+        // serial: one past the slots.
+        let held = sizes.serial_for(10_001, &taken(&[a]), (999, 999));
+        assert_eq!(held, 10_001 + super::SIZE_SLOTS);
         // Past the slots held at once: the lowest free, as before.
         let all: Vec<u32> = (10_001..10_001 + super::SIZE_SLOTS).collect();
         assert_eq!(

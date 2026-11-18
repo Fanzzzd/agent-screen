@@ -482,6 +482,63 @@ pub const FRESH_STORE_SECS: u64 = BAD_UNIT_SECS;
 /// would flash the user's screen at every creation.
 pub const UNMIRRORS_PER_SET: usize = 2;
 
+/// Displays landing on the user's screen in one instance within
+/// `FRESH_STORE_SECS`, at any sets and sizes, the last of which is released
+/// (`RecentMirrors`): each is a flash of the user's screen, and each size
+/// has its own serial, so its own set, which `UNMIRRORS_PER_SET` counts
+/// apart.
+pub const MIRRORS_PER_INSTANCE: usize = 3;
+
+/// When displays of this instance landed on the user's screen (seconds
+/// since 1970), unmirrored or released, within `FRESH_STORE_SECS`. Kept
+/// apart from `StoredSets`, so forgetting a set doesn't reset it.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct RecentMirrors {
+    pub times: Vec<u64>,
+}
+
+impl RecentMirrors {
+    pub const fn new() -> Self {
+        Self { times: Vec::new() }
+    }
+
+    /// The set's decision `set` for a landing at `now`, made a release when
+    /// this landing is the instance's `MIRRORS_PER_INSTANCE`th in the window.
+    pub fn on_landing(&self, set: OnLanding, now: u64) -> OnLanding {
+        let recent = self
+            .times
+            .iter()
+            .filter(|&&t| now < t + FRESH_STORE_SECS)
+            .count();
+        if recent + 1 >= MIRRORS_PER_INSTANCE {
+            OnLanding::Release
+        } else {
+            set
+        }
+    }
+
+    /// A display landed on the user's screen at `at`.
+    pub fn landed(&mut self, at: u64) {
+        self.times.retain(|&t| at < t + FRESH_STORE_SECS);
+        self.times.push(at);
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "mirrors": self.times })
+    }
+
+    /// None for anything but what `to_json` writes.
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let times = value
+            .get("mirrors")?
+            .as_array()?
+            .iter()
+            .map(serde_json::Value::as_u64)
+            .collect::<Option<_>>()?;
+        Some(Self { times })
+    }
+}
+
 /// The arrangement Agent Screen last stored for a set, and when it
 /// unmirrored the set (seconds since 1970), the last time last.
 #[derive(Clone, PartialEq, Debug)]
@@ -1066,13 +1123,9 @@ mod tests {
 
     /// The names the fixture gives the displays of these serials in place
     /// of their UUIDs.
-    fn uuid_of_serial(serial: u32) -> &'static str {
+    fn uuid_of_serial(serial: u32) -> String {
         match serial {
-            1 => "serial1",
-            2 => "serial2",
-            3 => "serial3",
-            10001 => "serial10001",
-            10002 => "serial10002",
+            1..=3 | 10_001..=10_016 => format!("serial{serial}"),
             _ => panic!("serial {serial}"),
         }
     }
@@ -1148,6 +1201,7 @@ mod tests {
         releases: Vec<String>,
         refused: usize,
         refused_until: u64,
+        mirrors: RecentMirrors,
     }
 
     impl Replay {
@@ -1161,6 +1215,7 @@ mod tests {
                 releases: Vec::new(),
                 refused: 0,
                 refused_until: 0,
+                mirrors: RecentMirrors::new(),
             }
         }
 
@@ -1185,9 +1240,14 @@ mod tests {
             let mirrors = windowserver_mirrors(&self.store, &key);
             if mirrors {
                 self.flashes.push(key.clone());
-                if self.stored.on_landing(&key, at) == OnLanding::Release {
+                let set = self.stored.on_landing(&key, at);
+                let decision = self.mirrors.on_landing(set, at);
+                self.mirrors.landed(at);
+                if decision == OnLanding::Release {
                     self.releases.push(key.clone());
-                    self.stored.forget(&key);
+                    if set == OnLanding::Release {
+                        self.stored.forget(&key);
+                    }
                     self.refused_until = at + BAD_UNIT_SECS;
                     return true;
                 }
@@ -1317,14 +1377,20 @@ mod tests {
     /// Agents asking for 1280x800 and 1600x1000 in turn, one display at a
     /// time, with nothing else of Agent Screen's online, `serial` choosing
     /// each display's serial; what each creation did.
-    fn alternate(mut serial: impl FnMut((u32, u32), u64) -> u32) -> (Vec<bool>, Replay) {
+    fn alternate(serial: impl FnMut((u32, u32), u64) -> u32) -> (Vec<bool>, Replay) {
+        in_turn(&[(1280, 800), (1600, 1000)].repeat(4), serial)
+    }
+
+    /// Displays of `sizes`, one a minute and one at a time, with nothing
+    /// else of Agent Screen's online, `serial` choosing each display's
+    /// serial; whether each mirrored.
+    fn in_turn(
+        sizes: &[(u32, u32)],
+        mut serial: impl FnMut((u32, u32), u64) -> u32,
+    ) -> (Vec<bool>, Replay) {
         let mut replay = Replay::new(store_of(&["builtin@1728x1117 closet@2560x1440"]));
         let mut mirrored = Vec::new();
-        for (i, (w, h)) in [(1280, 800), (1600, 1000)]
-            .repeat(4)
-            .into_iter()
-            .enumerate()
-        {
+        for (i, &(w, h)) in sizes.iter().enumerate() {
             let at = 60 * i as u64;
             let line = format!(
                 "2026-11-18 15:{:02}:00.000 created display={} unit=6 at=0,0 size={w}x{h} serial={}",
@@ -1336,6 +1402,72 @@ mod tests {
             replay.ours.retain(|&(d, _, _)| d != 300 + i as u32);
         }
         (mirrored, replay)
+    }
+
+    /// Leases serials as the app does, from the e2e instance's first.
+    fn per_size() -> impl FnMut((u32, u32), u64) -> u32 {
+        let mut sizes = crate::model::SerialSizes::default();
+        move |size, at| {
+            let serial = sizes.serial_for(10_001, &Default::default(), size);
+            sizes.leased(serial, size, at);
+            serial
+        }
+    }
+
+    #[test]
+    fn ten_new_sizes_in_a_row_flash_at_most_three_times() {
+        // Each size its own serial, so its own set: only the instance's
+        // count stops the flashes. The third landing is released, and the
+        // refusal after it stops the rest.
+        let sizes: Vec<(u32, u32)> = (0..10).map(|i| (1000 + 40 * i, 700)).collect();
+        let (mirrored, replay) = in_turn(&sizes, per_size());
+        assert!(
+            replay.flashes.len() <= MIRRORS_PER_INSTANCE,
+            "{:?}",
+            replay.flashes
+        );
+        assert_eq!(
+            mirrored,
+            [
+                true, true, true, false, false, false, false, false, false, false
+            ]
+        );
+        assert_eq!(replay.releases.len(), 1);
+        assert_eq!(replay.refused, 7);
+    }
+
+    #[test]
+    fn forgetting_a_set_keeps_the_instances_count() {
+        let mut stored = StoredSets::new();
+        let mut mirrors = RecentMirrors::new();
+        let mut land = |stored: &mut StoredSets, key: &str, at: u64| {
+            let set = stored.on_landing(key, at);
+            let decision = mirrors.on_landing(set, at);
+            mirrors.landed(at);
+            match (set, decision) {
+                (OnLanding::Release, _) => stored.forget(key),
+                (_, OnLanding::Unmirror) => stored.stored(key, at),
+                _ => {}
+            }
+            decision
+        };
+        let a = "builtin@1728x1117 serial10001@1280x800";
+        let b = "builtin@1728x1117 serial10002@1600x1000";
+        let c = "builtin@1728x1117 serial10003@1100x700";
+        assert_eq!(land(&mut stored, a, 0), OnLanding::Unmirror);
+        // The set's own rule releases a second; its set is forgotten.
+        assert_eq!(land(&mut stored, a, 10), OnLanding::Release);
+        assert!(!stored.sets.contains_key(&display_set(a)));
+        // The instance still counts both: a third set is released too.
+        assert_eq!(land(&mut stored, c, 20), OnLanding::Release);
+        // 30 minutes after, the instance may unmirror again.
+        assert_eq!(
+            land(&mut stored, b, 20 + FRESH_STORE_SECS),
+            OnLanding::Unmirror
+        );
+        let back = RecentMirrors::from_json(&mirrors.to_json()).unwrap();
+        assert_eq!(back, mirrors);
+        assert_eq!(RecentMirrors::from_json(&serde_json::json!({})), None);
     }
 
     #[test]
@@ -1351,12 +1483,7 @@ mod tests {
 
         // A serial per size: each size's set is stored once and lands
         // parked from then on.
-        let mut sizes = crate::model::SerialSizes::default();
-        let (mirrored, replay) = alternate(|size, at| {
-            let serial = sizes.serial_for(10_001, &Default::default(), size);
-            sizes.leased(serial, size, at);
-            serial
-        });
+        let (mirrored, replay) = alternate(per_size());
         assert_eq!(
             mirrored,
             [true, true, false, false, false, false, false, false]

@@ -18,8 +18,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Serial slots whose identities reclaim keeps, per instance: serials are
-/// reused lowest first, and a record macOS makes anew has all 39 names.
+/// Serial slots whose identities reclaim keeps, per instance: a record
+/// macOS makes anew has all 39 names. Each display size keeps one of the
+/// first `SIZE_SLOTS` (8, `model::SerialSizes`); the rest go to displays
+/// held at once past those.
 pub const KEPT_SLOTS: u32 = 16;
 
 #[link(name = "ColorSync", kind = "framework")]
