@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_screen_tests::{
-    Control, Value, check, cut, instance, json, out, probe, quit_profile, run, running_headed,
-    sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, Value, capture, check, cut, instance, json, out, probe, quit_profile, run,
+    running_headed, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -314,6 +314,32 @@ fn posted(reply: &Result<Value>) -> bool {
         .is_ok_and(|v| v.get("route").is_none_or(|r| r != "accessibility"))
 }
 
+/// Which process a link from another app reaches with two processes of the
+/// bundle running (ADR 0022): `open -g -b` asks LaunchServices, as a link
+/// clicked in another app does. Only with the stand-in, never your Dia.
+/// Prints the answer: it is a measurement, not a rule.
+fn links(b: &Browser, port: u16, user: &[u32], agents: Option<u32>) -> Result<()> {
+    let count = |pid: u32| windows_of(pid).iter().filter(|f| f.layer == 0).count();
+    let user_before: usize = user.iter().map(|&p| count(p)).sum();
+    let agents_before = agents.map_or(0, count);
+    sh_lenient(
+        "/usr/bin/open",
+        &[
+            "-g",
+            "-b",
+            b.bundle_id,
+            &format!("http://127.0.0.1:{port}/link"),
+        ],
+    );
+    sleep_ms(3000);
+    let user_after: usize = user.iter().map(|&p| count(p)).sum();
+    let agents_after = agents.map_or(0, count);
+    println!(
+        "a link through LaunchServices: the user's process windows {user_before} -> {user_after}, the agents' {agents_before} -> {agents_after}"
+    );
+    Ok(())
+}
+
 fn test(
     b: &Browser,
     stand_in: bool,
@@ -387,6 +413,10 @@ fn test(
             front_pid() == front,
             format!("{front:?} -> {:?}", front_pid()),
         );
+        // For a look at what a fresh profile shows first, such as onboarding.
+        if let Ok(file) = capture("agentbrowser-first", display) {
+            println!("the display after the first launch: {}", file.display());
+        }
 
         let state = control.call(
             "windowState",
@@ -460,6 +490,12 @@ fn test(
             outside.is_empty(),
             format!("{outside:?}"),
         );
+        if let Ok(file) = capture("agentbrowser-second", display) {
+            println!("the display after the second launch: {}", file.display());
+        }
+        if stand_in {
+            links(b, port, &before, new.first().copied())?;
+        }
         Ok(())
     })();
     let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
