@@ -883,14 +883,14 @@ mod tests {
     const STORED_LOG: &str = include_str!("../testdata/issue-220-stored.log");
     const STORED_ARRANGEMENTS: &str = include_str!("../testdata/issue-220-stored-arrangements.txt");
 
-    /// The UUID prefixes macOS gave the serials of 2026-11-18, from
-    /// `identities.json`.
+    /// The names the fixture gives the displays of these serials in place
+    /// of their UUIDs.
     fn uuid_of_serial(serial: u32) -> &'static str {
         match serial {
-            1 => "6F12C085",
-            2 => "EF2D1F05",
-            3 => "9F27CE56",
-            10001 => "3839858E",
+            1 => "serial1",
+            2 => "serial2",
+            3 => "serial3",
+            10001 => "serial10001",
             _ => panic!("serial {serial}"),
         }
     }
@@ -898,8 +898,8 @@ mod tests {
     /// The built-in display and AeroSpace's closet, at their sizes that day.
     fn fixed_displays() -> Vec<(String, (u32, u32))> {
         vec![
-            ("37D8832A".to_string(), (1728, 1117)),
-            ("B8132C2E".to_string(), (2560, 1440)),
+            ("builtin".to_string(), (1728, 1117)),
+            ("closet".to_string(), (2560, 1440)),
         ]
     }
 
@@ -918,22 +918,22 @@ mod tests {
     #[test]
     fn the_arrangement_key_is_every_display_and_its_size_in_any_order() {
         let a = arrangement_key(&[
-            ("B8132C2E".into(), (2560, 1440)),
-            ("37D8832A".into(), (1728, 1117)),
-            ("6F12C085".into(), (1280, 800)),
+            ("closet".into(), (2560, 1440)),
+            ("builtin".into(), (1728, 1117)),
+            ("serial1".into(), (1280, 800)),
         ]);
         let b = arrangement_key(&[
-            ("6F12C085".into(), (1280, 800)),
-            ("37D8832A".into(), (1728, 1117)),
-            ("B8132C2E".into(), (2560, 1440)),
+            ("serial1".into(), (1280, 800)),
+            ("builtin".into(), (1728, 1117)),
+            ("closet".into(), (2560, 1440)),
         ]);
         assert_eq!(a, b);
-        assert_eq!(a, "37D8832A@1728x1117 6F12C085@1280x800 B8132C2E@2560x1440");
+        assert_eq!(a, "builtin@1728x1117 closet@2560x1440 serial1@1280x800");
         // The same displays at another size are another stored arrangement.
         let resized = arrangement_key(&[
-            ("37D8832A".into(), (1728, 1117)),
-            ("6F12C085".into(), (1280, 1200)),
-            ("B8132C2E".into(), (2560, 1440)),
+            ("builtin".into(), (1728, 1117)),
+            ("serial1".into(), (1280, 1200)),
+            ("closet".into(), (2560, 1440)),
         ]);
         assert_ne!(a, resized);
     }
@@ -1021,7 +1021,7 @@ mod tests {
         // 10:32, 10:42, 11:35 and 13:38 from stored arrangements; 13:56 once.
         assert_eq!(replay.parked_from_store, 4);
         assert_eq!(replay.flashes.len(), 1);
-        assert!(replay.flashes[0].contains("3839858E@1280x800"));
+        assert!(replay.flashes[0].contains("serial10001@1280x800"));
 
         // The same call again, once display 261 has gone: no flash.
         replay.line(
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn a_stored_set_that_mirrors_again_goes_back_to_the_refusal() {
-        let key = "37D8832A@1728x1117 3839858E@1280x800 B8132C2E@2560x1440";
+        let key = "builtin@1728x1117 serial10001@1280x800 closet@2560x1440";
         let mut stored = StoredSets::new();
         assert_eq!(stored.on_landing(key), OnLanding::Unmirror);
         stored.stored(key, 100);
