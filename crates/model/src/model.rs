@@ -598,6 +598,84 @@ pub fn lowest_free_serial(first: u32, taken: &std::collections::BTreeSet<u32>) -
         .expect("a free serial")
 }
 
+/// Serials from an instance's first that each keep one display size
+/// (`SerialSizes`), within the ones ColorSync reclaim keeps (16).
+pub const SIZE_SLOTS: u32 = 8;
+
+/// The size each serial of an instance was last leased for, in points,
+/// with when (seconds since 1970). WindowServer keeps one stored
+/// arrangement per set of display identities, and a serial is part of a
+/// display's identity: a serial leased at one size, then another, has its
+/// set's arrangement replaced each time, and macOS mirrors the next
+/// display of the first size again (#220). One serial per size keeps each
+/// size's arrangement, at the cost of a ColorSync record per size (at
+/// most `SIZE_SLOTS`).
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct SerialSizes {
+    pub serials: BTreeMap<u32, ((u32, u32), u64)>,
+}
+
+impl SerialSizes {
+    /// The serial for a new display of `size` from `first`, none of
+    /// `taken`: a free one last leased at this size; else one never
+    /// leased; else the one leased longest ago, which costs that size its
+    /// arrangement, unless a display of this size is held already, as a
+    /// second spare of the default size would be; else, as past
+    /// `SIZE_SLOTS` held at once, the lowest free past the slots.
+    pub fn serial_for(
+        &self,
+        first: u32,
+        taken: &std::collections::BTreeSet<u32>,
+        size: (u32, u32),
+    ) -> u32 {
+        let free: Vec<u32> = (first..first + SIZE_SLOTS)
+            .filter(|s| !taken.contains(s))
+            .collect();
+        free.iter()
+            .copied()
+            .find(|s| self.serials.get(s).is_some_and(|&(z, _)| z == size))
+            .or_else(|| free.iter().copied().find(|s| !self.serials.contains_key(s)))
+            .or_else(|| {
+                let held = taken
+                    .iter()
+                    .any(|s| self.serials.get(s).is_some_and(|&(z, _)| z == size));
+                free.iter()
+                    .copied()
+                    .filter(|_| !held)
+                    .min_by_key(|s| self.serials.get(s).map_or(0, |&(_, t)| t))
+            })
+            .unwrap_or_else(|| lowest_free_serial(first + SIZE_SLOTS, taken))
+    }
+
+    /// `serial` was leased for `size` at `at`.
+    pub fn leased(&mut self, serial: u32, size: (u32, u32), at: u64) {
+        self.serials.insert(serial, (size, at));
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let rows: Vec<[u64; 4]> = self
+            .serials
+            .iter()
+            .map(|(&s, &((w, h), t))| [s.into(), w.into(), h.into(), t])
+            .collect();
+        serde_json::json!({ "serials": rows })
+    }
+
+    /// None for anything but what `to_json` writes.
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let mut out = Self::default();
+        for row in value.get("serials")?.as_array()? {
+            let n = |i: usize| -> Option<u32> { row.get(i)?.as_u64()?.try_into().ok() };
+            let at = row.get(3)?.as_u64()?;
+            if row.as_array()?.len() != 4 {
+                return None;
+            }
+            out.serials.insert(n(0)?, ((n(1)?, n(2)?), at));
+        }
+        Some(out)
+    }
+}
+
 /// A window frame place_window asked for, in screenshot pixels from the
 /// display's top-left corner. A part left out keeps the window's own.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -1717,6 +1795,48 @@ mod tests {
         );
         let below = Rect::new(100.0, 200.0, 400.0, 300.0);
         assert_eq!(below.kept_inside(&area), below);
+    }
+
+    #[test]
+    fn each_size_keeps_its_serial_so_its_arrangement_stays_stored() {
+        let taken = |s: &[u32]| s.iter().copied().collect();
+        let mut sizes = super::SerialSizes::default();
+        let lease = |sizes: &mut super::SerialSizes, size, at, held: &[u32]| {
+            let serial = sizes.serial_for(10_001, &taken(held), size);
+            sizes.leased(serial, size, at);
+            serial
+        };
+        // 1280, 1600, 1280, 1600, one at a time, as agents asked on
+        // 2026-11-18: each size gets its serial and keeps it.
+        let a = lease(&mut sizes, (1280, 800), 1, &[]);
+        let b = lease(&mut sizes, (1600, 1000), 2, &[]);
+        assert_eq!((a, b), (10_001, 10_002));
+        assert_eq!(lease(&mut sizes, (1280, 800), 3, &[]), a);
+        assert_eq!(lease(&mut sizes, (1600, 1000), 4, &[]), b);
+        // Two of one size at once: the second takes a fresh serial.
+        assert_eq!(lease(&mut sizes, (1280, 800), 5, &[a]), 10_003);
+        // Once every slot has a size, a new size takes the one leased
+        // longest ago.
+        for (i, w) in (0..super::SIZE_SLOTS - 3).zip(2000u32..) {
+            lease(&mut sizes, (w, 800), 10 + u64::from(i), &[]);
+        }
+        assert_eq!(lease(&mut sizes, (999, 999), 100, &[]), a);
+        // A second display of a size held already takes no other size's
+        // serial: one past the slots.
+        let held = sizes.serial_for(10_001, &taken(&[a]), (999, 999));
+        assert_eq!(held, 10_001 + super::SIZE_SLOTS);
+        // Past the slots held at once: the lowest free, as before.
+        let all: Vec<u32> = (10_001..10_001 + super::SIZE_SLOTS).collect();
+        assert_eq!(
+            lease(&mut sizes, (1280, 800), 101, &all),
+            10_001 + super::SIZE_SLOTS
+        );
+        let back = super::SerialSizes::from_json(&sizes.to_json()).unwrap();
+        assert_eq!(back, sizes);
+        assert_eq!(
+            super::SerialSizes::from_json(&serde_json::json!({"serials": [[1, 2]]})),
+            None
+        );
     }
 
     #[test]

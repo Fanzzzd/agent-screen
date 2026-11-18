@@ -2832,7 +2832,7 @@ async fn create_display(
             core.update(cx, |c, _| c.count_made());
             // macOS takes 300 to 500 ms to make the display: off the main
             // thread, so Peek and the Viewer keep drawing meanwhile.
-            let (serial, name) = core.update(cx, |c, _| c.next_name());
+            let (serial, name) = core.update(cx, |c, _| c.next_name((width as u32, height as u32)));
             let others = core.read_with(cx, |c, _| c.virtual_ids());
             let made = cx
                 .background_executor()

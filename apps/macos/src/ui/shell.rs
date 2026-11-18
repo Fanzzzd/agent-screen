@@ -2376,7 +2376,8 @@ impl Shell {
                         (Ok((handle, resize, others)), name)
                     }
                     None => {
-                        let (serial, name) = shell.core.update(cx, |core, _| core.next_name());
+                        let size = (DEFAULT_SIZE.0 as u32, DEFAULT_SIZE.1 as u32);
+                        let (serial, name) = shell.core.update(cx, |core, _| core.next_name(size));
                         let others = shell.core.read(cx).virtual_ids();
                         (Err((serial, others)), name)
                     }
