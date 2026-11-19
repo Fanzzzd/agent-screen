@@ -375,28 +375,39 @@ fn link(b: &Browser, port: u16, log: &Log, n: u32) -> Option<String> {
     None
 }
 
-/// The user's front app, sampled through the whole launch: a new window of
-/// the agents' instance must never make it front, not even for a moment.
+/// The user's front app, sampled every 50 ms through every launch: a new
+/// window of the agents' instance must never make it front, not even for a
+/// moment. Each time another app was front, from when to when, in ms since
+/// the watch began.
+/// Another front app, from when to when, in ms.
+type Fronts = Arc<Mutex<Vec<(Option<u32>, u128, u128)>>>;
+
 struct FrontWatch {
     stop: Arc<AtomicBool>,
-    seen: Arc<Mutex<Vec<Option<u32>>>>,
+    seen: Fronts,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl FrontWatch {
     fn start(front: Option<u32>) -> FrontWatch {
         let stop = Arc::new(AtomicBool::new(false));
-        let seen: Arc<Mutex<Vec<Option<u32>>>> = Arc::default();
+        let seen: Fronts = Arc::default();
         let (s, v) = (stop.clone(), seen.clone());
         let thread = std::thread::spawn(move || {
+            let began = Instant::now();
+            let mut last = front;
             while !s.load(Ordering::SeqCst) {
                 let now = front_pid();
+                let at = began.elapsed().as_millis();
+                let mut v = v.lock().unwrap_or_else(|e| e.into_inner());
                 if now != front {
-                    let mut v = v.lock().unwrap_or_else(|e| e.into_inner());
-                    if v.last() != Some(&now) {
-                        v.push(now);
+                    match v.last_mut() {
+                        Some((pid, _, until)) if *pid == now && last == now => *until = at,
+                        _ => v.push((now, at, at)),
                     }
                 }
+                last = now;
+                drop(v);
                 sleep_ms(50);
             }
         });
@@ -408,12 +419,17 @@ impl FrontWatch {
     }
 
     /// The other front apps it saw, in order.
-    fn finish(mut self) -> Vec<Option<u32>> {
+    fn finish(mut self) -> Vec<String> {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(pid, from, until)| format!("{pid:?} from {from} to {until} ms"))
+            .collect()
     }
 }
 
@@ -659,7 +675,15 @@ fn test(
     // links. The sighting watch fails the script if a window reached your
     // screen meanwhile.
     stop_test_app();
-    let left = profile_pids(profile);
+    // Chromium takes a moment to quit after Agent Screen asks.
+    let mut left = profile_pids(profile);
+    for _ in 0..50 {
+        if left.is_empty() {
+            break;
+        }
+        sleep_ms(100);
+        left = profile_pids(profile);
+    }
     check(
         "Agent Screen quit the agents' instance as it quit",
         left.is_empty(),

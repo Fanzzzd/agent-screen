@@ -32,6 +32,9 @@ pub enum NewPage {
     /// Into a window that was open already, as a tab: Dia ignores
     /// `newWindow`. Its window's frame, in global points.
     Tab { target: String, bounds: Rect },
+    /// Nowhere: the browser keeps its pages in windows Chromium gives no
+    /// frame for, as Dia does, and made one that never shows, now closed.
+    Frameless,
     /// The browser didn't say.
     Unknown,
 }
@@ -325,6 +328,33 @@ pub fn close_agents_window(target: WindowTarget) -> bool {
     channel(target.pid, Duration::from_secs(1)).is_some_and(|c| c.close_window_at(frame) > 0)
 }
 
+/// Quit the agents' browser instance `pid`: through its pipe, then, if it
+/// still runs after 1 s, with SIGTERM, and after 2 s more with SIGKILL, as
+/// Dia takes longer to quit than a display takes to go. It is Agent
+/// Screen's own child, on the agents' profile.
+pub fn quit_agents(pid: i32) -> bool {
+    let ended = |ms: u64| {
+        (0..ms / 100).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            (unsafe { libc::kill(pid, 0) }) != 0
+        })
+    };
+    // Hidden first: Dia moves a window it closes to the middle of the main
+    // screen, where the user would see it. Hiding activates nothing.
+    super::app::hide(pid);
+    let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
+    let gone = ended(1000)
+        || unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        || ended(2000)
+        || unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        || ended(1000);
+    log::info!(
+        "devtools: quit the agents' browser instance {pid}: asked through its pipe {closed}, ended {gone}"
+    );
+    agents().remove(&pid);
+    gone
+}
+
 /// Quit each agents' browser instance that has no window left, or every one
 /// when `all`, as Agent Screen quits: left running, it would take the
 /// user's Dock click, `open -a` and links once the user's own browser
@@ -340,13 +370,7 @@ pub fn end_agents(all: bool) {
         let idle = started.elapsed() > AGENTS_START
             && !windows.iter().any(|w| w.target.pid == pid && w.layer == 0);
         if all || idle {
-            let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
-            log::info!(
-                "devtools: quit the agents' browser instance {pid} through its pipe: {closed}"
-            );
-            if closed {
-                agents().remove(&pid);
-            }
+            quit_agents(pid);
         }
     }
 }
@@ -507,6 +531,17 @@ impl Channel {
         let Some((id, bounds)) = self.window_of(&target) else {
             return Ok(NewPage::Unknown);
         };
+        // Dia answers a new window with one of no size that never shows,
+        // and keeps its pages in its own windows, which the pipe can't
+        // open: the launch opens the page in its window on the display.
+        if bounds.width == 0.0 && bounds.height == 0.0 {
+            self.close_target(&target);
+            log::info!(
+                "devtools: pid {} gave window {id} no frame; the page goes into its open window",
+                self.pid
+            );
+            return Ok(NewPage::Frameless);
+        }
         let existed = before.contains(&id);
         log::info!(
             "devtools: pid {} opened target {target} in window {id} at {bounds:?}, which existed before: {existed}",
@@ -517,6 +552,42 @@ impl Channel {
         } else {
             NewPage::Window { target }
         })
+    }
+
+    /// Load `url` in the visible page of the window on `display`, in global
+    /// points, for a browser that gives its windows no frame (Dia): each
+    /// page says whether it is visible and where its window is.
+    pub fn navigate_visible_page(&self, display: Rect, url: &str) -> Result<(), String> {
+        let targets = self.call("Target.getTargets", json!({}), None)?;
+        let pages: Vec<String> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str().map(String::from))
+            .collect();
+        let shown = pages
+            .iter()
+            .find_map(|target| {
+                let session = self.session(target).ok()?;
+                let seen = self
+                    .call(
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": "[document.visibilityState, screenX + outerWidth / 2, screenY + outerHeight / 2]",
+                            "returnByValue": true,
+                        }),
+                        Some(&session),
+                    )
+                    .ok()?;
+                let v = &seen["result"]["value"];
+                let visible = v[0] == "visible";
+                let mid = (v[1].as_f64()?, v[2].as_f64()?);
+                (visible && display.contains(mid)).then_some(session)
+            })
+            .ok_or_else(|| format!("none of its {} pages is visible on this display", pages.len()))?;
+        self.call("Page.navigate", json!({ "url": url }), Some(&shown))
+            .map(|_| ())
     }
 
     /// Quit the browser, as its own Quit command would.

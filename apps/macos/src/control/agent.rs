@@ -5389,11 +5389,24 @@ fn record_refusal(path: &std::path::Path, profile: &std::path::Path, made_profil
 /// into a window that was open already, as Dia puts it, which then is on
 /// this display. A tab in a window elsewhere, such as another agent's
 /// display, is closed, and so is the launch.
+/// Where the page the agents' instance's pipe opened for a launch went.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageWindow {
+    /// A new window, which Chromium gives a frame.
+    New,
+    /// A tab in a window it had open on this display, with a frame.
+    Open,
+    /// None: the browser keeps its pages in windows Chromium gives no
+    /// frame for, as Dia does. The page goes into the agents' window on this
+    /// display through its address field.
+    Frameless,
+}
+
 fn new_window_in(
     agents: &AgentsInstance,
     url: Option<&str>,
     bounds: crate::model::Rect,
-) -> Result<(String, bool), String> {
+) -> Result<(String, PageWindow), String> {
     use agent_screen_model::agent_browser::{TabLanding, tab_landing};
     let margin = agent_screen_model::launch::WINDOW_MARGIN;
     let channel = devtools::channel(agents.pid, Duration::from_secs(2)).ok_or_else(|| {
@@ -5403,12 +5416,13 @@ fn new_window_in(
         )
     })?;
     match channel.new_window(url.unwrap_or("about:blank"), bounds.inset(margin, margin)) {
-        Ok(devtools::NewPage::Window { target }) => Ok((target, false)),
+        Ok(devtools::NewPage::Window { target }) => Ok((target, PageWindow::New)),
+        Ok(devtools::NewPage::Frameless) => Ok((String::new(), PageWindow::Frameless)),
         Ok(devtools::NewPage::Tab {
             target,
             bounds: window,
         }) => match tab_landing(window, bounds) {
-            TabLanding::ThisDisplay => Ok((target, true)),
+            TabLanding::ThisDisplay => Ok((target, PageWindow::Open)),
             TabLanding::Elsewhere => {
                 channel.close_target(&target);
                 Err("opened the page as a tab in its window on another display, not in a new window, and the tab was closed; open the page in your window on this display with computer, or call launch_app again".into())
@@ -6004,7 +6018,7 @@ async fn launch_now(
     };
     // The page the agents' instance's pipe opened for this launch, and
     // whether it went into a window on the display that was open already.
-    let mut pipe_page: Option<(String, bool)> = None;
+    let mut pipe_page: Option<(String, PageWindow)> = None;
     if asked_for_window {
         // An app that has just started may not have its menus yet.
         let mut asked = ax::NewWindow::NotReady;
@@ -6012,8 +6026,39 @@ async fn launch_now(
         // its pipe, never through its menus or LaunchServices (ADR 0022).
         if let Some(agents) = agents.clone() {
             let url = target.filter(|_| is_url).map(String::from);
-            let opened = off(cx, move || new_window_in(&agents, url.as_deref(), bounds)).await;
+            let url_for_page = url.clone();
+            let opened = {
+                let agents = agents.clone();
+                off(cx, move || new_window_in(&agents, url.as_deref(), bounds)).await
+            };
             let failed = match opened {
+                Ok((_, PageWindow::Frameless)) => {
+                    // Into the agents' window on this display, through the
+                    // page it shows.
+                    let (only, url) = (agents.pid, url_for_page.clone());
+                    let into = off(cx, move || {
+                        let window = windows::on_display(id)
+                            .into_iter()
+                            .find(|w| w.target.pid == only && w.layer == 0)
+                            .ok_or("keeps its pages in its own windows, which its pipe can't open, and has no window on this display; call launch_app again once its window is here".to_string())?;
+                        if let Some(url) = url {
+                            devtools::channel(only, Duration::from_secs(1))
+                                .ok_or("doesn't answer on its pipe".to_string())?
+                                .navigate_visible_page(bounds, &url)
+                                .map_err(|e| format!("couldn't open the page in its window on this display: {e}"))?;
+                        }
+                        Ok::<_, String>(window.target.window_id)
+                    })
+                    .await;
+                    match into {
+                        Ok(_) => {
+                            asked = ax::NewWindow::Pressed;
+                            pipe_page = Some((String::new(), PageWindow::Frameless));
+                            None
+                        }
+                        Err(e) => Some(e),
+                    }
+                }
                 Ok(page) => {
                     asked = ax::NewWindow::Pressed;
                     pipe_page = Some(page);
@@ -6129,6 +6174,7 @@ async fn launch_now(
     // may be busy.
     let find_ours = |taken: Option<u32>| {
         let (before, document, page) = (before.clone(), document.clone(), pipe_page.clone());
+        let url = target.filter(|_| is_url).map(String::from);
         async move {
             // The frame of the window that shows the pipe's page now, read
             // beside the system's list so a window being moved still matches.
@@ -6137,18 +6183,31 @@ async fn launch_now(
                     .window_of(target)
                     .map(|(_, frame)| frame)
             });
-            let in_open_window = page.as_ref().is_some_and(|(_, tab)| *tab);
+            let kind = page.as_ref().map(|(_, kind)| *kind);
+            // Whether `w` is the window that shows the pipe's page.
+            let page_window =
+                |w: &windows::Window| match kind? {
+                    PageWindow::New | PageWindow::Open => Some(page_frame.is_some_and(|f| {
+                        agent_screen_model::agent_browser::same_frame(f, w.bounds)
+                    })),
+                    // Found by the page it shows, on this display.
+                    PageWindow::Frameless => Some(
+                        bounds.contains(w.bounds.mid())
+                            && url.as_deref().is_none_or(|url| {
+                                ax::web_url(w.target).is_some_and(|shown| {
+                                    agent_screen_model::launch::same_page(url, &shown)
+                                })
+                            }),
+                    ),
+                };
+            let in_open_window = matches!(kind, Some(PageWindow::Open | PageWindow::Frameless));
             windows::all().into_iter().find(|w| {
                 w.target.pid == pid
                     && w.layer == 0
                     && (in_open_window || !before.contains(&w.target.window_id))
                     && agent_screen_model::launch::answers_launch(
                         was_running,
-                        page.as_ref().map(|_| {
-                            page_frame.is_some_and(|f| {
-                                agent_screen_model::agent_browser::same_frame(f, w.bounds)
-                            })
-                        }),
+                        page_window(w),
                         taken == Some(w.target.window_id),
                         // Asked only when nothing else decides: it asks the app.
                         || {
