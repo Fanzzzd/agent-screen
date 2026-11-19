@@ -282,6 +282,11 @@ pub fn app_state(target: WindowTarget, leaving: Option<Rect>) -> AppState {
     let pid = target.pid;
     let on = cg::on_screen_ids();
     let listed = ax::windows_minimized(pid);
+    let displays: Vec<Rect> = cg::active_displays()
+        .into_iter()
+        .filter(|d| !cg::is_closet(*d))
+        .map(cg::display_bounds)
+        .collect();
     let others = cg::windows_of(pid)
         .into_iter()
         .filter(|w| w.target.window_id != target.window_id)
@@ -289,6 +294,7 @@ pub fn app_state(target: WindowTarget, leaving: Option<Rect>) -> AppState {
             let id = w.target.window_id;
             let on_screen = on.contains(&id);
             let beside = on_screen && leaving.is_some_and(|d| d.contains(w.bounds.mid()));
+            let menu_extra = bring_out::is_menu_extra(w.layer, w.bounds, &displays);
             let minimized = listed.iter().find(|(l, _)| *l == id).map(|(_, m)| *m);
             OtherWindow {
                 on_screen,
@@ -301,6 +307,7 @@ pub fn app_state(target: WindowTarget, leaving: Option<Rect>) -> AppState {
                     cg::space_count(id)
                 },
                 beside,
+                menu_extra,
             }
         })
         .collect();
@@ -356,7 +363,8 @@ pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<Rect, Strin
     out.map(|()| home)
 }
 
-/// The steps of `bring_out`, each recorded in `reached` once done.
+/// The steps of `bring_out`, each recorded in `reached` before it is
+/// tried: an app may apply one after its call failed or timed out.
 fn bring_out_steps(
     target: WindowTarget,
     window: &AXUIElement,
@@ -364,20 +372,17 @@ fn bring_out_steps(
     reached: &mut Option<Step>,
 ) -> Result<(), String> {
     let pid = target.pid;
-    super::app::hide(pid);
-    // Even one that hides late is shown again on the way back.
     *reached = Some(Step::HidApp);
+    super::app::hide(pid);
     if !wait_for(|| super::app::is_hidden(pid)) {
         return Err("its app didn't hide, so taking it out of the Dock would show".into());
     }
+    *reached = Some(Step::LeftDock);
     if !ax::set_minimized(window, false) || !wait_for(|| !ax::is_minimized(window)) {
         return Err("the app didn't take it out of the Dock".into());
     }
-    *reached = Some(Step::LeftDock);
-    let moved = ax::move_element_into(window, bounds);
-    // Even a move that failed may have changed the frame.
     *reached = Some(Step::Moved);
-    moved.map_err(|e| e.to_string())?;
+    ax::move_element_into(window, bounds).map_err(|e| e.to_string())?;
     // The app shows it wherever it is: read it back while hidden.
     let frame = ax::frame(window);
     if !frame.is_some_and(|f| bounds.contains(f.mid())) {
@@ -405,7 +410,14 @@ pub fn put_back(target: WindowTarget, home: Rect) -> Result<(), String> {
         .ok_or("its window is gone, or on a Space Accessibility can't reach")?;
     let leaving = super::claims::display_of(target.window_id).map(cg::display_bounds);
     let state = app_state(target, leaving);
-    let undo = bring_out::put_back(&state);
+    let mut undo = bring_out::put_back(&state);
+    // The last read before the app hides: the user may have switched to it.
+    if undo.first() == Some(&Undo::HideApp) && super::app::is_active(target.pid) {
+        undo = bring_out::put_back(&AppState {
+            active: true,
+            ..state.clone()
+        });
+    }
     log::info!(
         "putting window {} back in the Dock: {undo:?}; app hidden {}, in front {}, other windows {:?}",
         target.window_id,
@@ -430,14 +442,7 @@ fn run_undo(target: WindowTarget, window: &AXUIElement, home: Rect, undo: &[Undo
                 super::app::hide(pid);
                 wait_for(|| super::app::is_hidden(pid))
             }
-            Undo::RestoreFrame => {
-                let set = ax::set_frame(target, home).is_ok();
-                // Off the display again, it is no longer claimed there.
-                if super::claims::display_of(target.window_id).is_some() {
-                    super::claims::release_once_off(target.window_id, set);
-                }
-                set
-            }
+            Undo::RestoreFrame => ax::set_frame(target, home).is_ok(),
             Undo::Minimize => {
                 ax::set_minimized(window, true) && wait_for(|| ax::is_minimized(window))
             }
@@ -449,6 +454,11 @@ fn run_undo(target: WindowTarget, window: &AXUIElement, home: Rect, undo: &[Undo
         if !done {
             log::warn!("window {}: {step:?} didn't take", target.window_id);
         }
+    }
+    // In the Dock it is on no display, and the window list gives a
+    // minimized window no frame to see it leave by: its claim goes now.
+    if ax::is_minimized(window) && super::claims::display_of(target.window_id).is_some() {
+        super::claims::release(target.window_id);
     }
 }
 

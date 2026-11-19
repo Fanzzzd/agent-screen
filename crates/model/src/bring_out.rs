@@ -13,7 +13,25 @@
 //! Every step after the first change can be undone, and a failure undoes
 //! them, so the window is left in the Dock, with the user.
 
+use crate::model::Rect;
 use crate::placement::PutAway;
+
+/// The window server's layer for status items (`kCGStatusWindowLevel`).
+pub const STATUS_LAYER: i64 = 25;
+/// The menu bar's height at most, notched displays included, in points.
+const MENU_BAR_HEIGHT: f64 = 44.0;
+
+/// Whether a window at `layer` with `frame` is a menu bar extra: a status
+/// item in some display's menu bar, which stays when its app hides.
+pub fn is_menu_extra(layer: i64, frame: Rect, displays: &[Rect]) -> bool {
+    layer == STATUS_LAYER
+        && displays.iter().any(|d| {
+            frame.x >= d.x
+                && frame.max_x() <= d.max_x()
+                && frame.y >= d.y
+                && frame.max_y() <= d.y + MENU_BAR_HEIGHT
+        })
+}
 
 /// Another window of the app than the one coming out, as macOS reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +48,8 @@ pub struct OtherWindow {
     /// On screen on the Agent Display the window is leaving, as a text
     /// field's input indicator beside it: not on the user's screens.
     pub beside: bool,
+    /// A menu bar extra ([`is_menu_extra`]): hiding the app leaves it.
+    pub menu_extra: bool,
 }
 
 impl OtherWindow {
@@ -37,7 +57,7 @@ impl OtherWindow {
     /// it, now or on another Space. Only a minimized window, or one the app
     /// keeps out of sight on no Space, would not; anything unclear would.
     pub fn would_vanish(self) -> bool {
-        if self.on_screen && self.beside {
+        if self.menu_extra || (self.on_screen && self.beside) {
             return false;
         }
         if self.on_screen {
@@ -120,18 +140,35 @@ pub fn may_bring_out(minimized: bool, app: &AppState) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// The steps that bring a minimized window out, in order. Each is done
-/// once the one before it is.
+/// The steps that bring a minimized window out, in order. Each is
+/// recorded as reached before it is tried: an app that misses
+/// Accessibility's timeout, as one in App Nap while hidden, may still
+/// apply the change later, so a failed step is undone with the rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
-    /// The app hid.
+    /// The app hides.
     HidApp,
-    /// The window left the Dock, still hidden with its app.
+    /// The window leaves the Dock, still hidden with its app.
     LeftDock,
-    /// It moved onto the display, and its frame there was read back.
+    /// It moves onto the display, and its frame there is read back.
     Moved,
-    /// The app showed again, and the window is on the display.
+    /// The app shows again, and the window is on the display.
     Shown,
+}
+
+impl Step {
+    /// Every step, in the order they are tried.
+    pub const ORDER: [Step; 4] = [Step::HidApp, Step::LeftDock, Step::Moved, Step::Shown];
+
+    /// What undoes this step alone, up to the move.
+    fn inverse(self) -> Option<Undo> {
+        match self {
+            Step::HidApp => Some(Undo::ShowApp),
+            Step::LeftDock => Some(Undo::Minimize),
+            Step::Moved => Some(Undo::RestoreFrame),
+            Step::Shown => None,
+        }
+    }
 }
 
 /// One action that puts the window back where the user left it.
@@ -151,22 +188,25 @@ pub enum Undo {
 pub fn undo(reached: Option<Step>, app: &AppState) -> Vec<Undo> {
     match reached {
         None => vec![],
-        Some(Step::HidApp) => vec![Undo::ShowApp],
-        Some(Step::LeftDock) => vec![Undo::Minimize, Undo::ShowApp],
-        Some(Step::Moved) => vec![Undo::RestoreFrame, Undo::Minimize, Undo::ShowApp],
         Some(Step::Shown) => put_back(app),
+        // Each step's inverse, the last first.
+        Some(last) => Step::ORDER
+            .iter()
+            .filter(|s| **s <= last)
+            .rev()
+            .filter_map(|s| s.inverse())
+            .collect(),
     }
 }
 
 /// How a window brought out of the Dock goes back there: at its old frame,
-/// minimized. Hidden with its app, it doesn't play the Dock's animation;
-/// an app that may not hide now, being in front or showing other windows,
-/// plays it, which leaves the window with the user all the same. An app
-/// the user hid since keeps hiding it.
+/// minimized. Hidden with its app, it doesn't play the Dock's animation.
+/// An app that may not hide now, being in front or showing other windows,
+/// plays it from the Agent Display, the window minimized before its frame
+/// goes back so it never stands on the user's screen; it is left with the
+/// user all the same. An app the user hid since keeps hiding it.
 pub fn put_back(app: &AppState) -> Vec<Undo> {
-    if app.hidden {
-        vec![Undo::RestoreFrame, Undo::Minimize]
-    } else if app.may_hide() {
+    if !app.hidden && app.may_hide() {
         vec![
             Undo::HideApp,
             Undo::RestoreFrame,
@@ -174,7 +214,7 @@ pub fn put_back(app: &AppState) -> Vec<Undo> {
             Undo::ShowApp,
         ]
     } else {
-        vec![Undo::RestoreFrame, Undo::Minimize]
+        vec![Undo::Minimize, Undo::RestoreFrame]
     }
 }
 
@@ -199,6 +239,7 @@ mod tests {
             minimized,
             spaces,
             beside: false,
+            menu_extra: false,
         }
     }
 
@@ -224,6 +265,53 @@ mod tests {
         // window, on no Space.
         assert!(!other(false, true, true, 1).would_vanish());
         assert!(!other(false, false, false, 0).would_vanish());
+    }
+
+    #[test]
+    fn a_menu_bar_icon_stays_when_its_app_hides_so_it_refuses_nothing() {
+        let main = Rect::new(0.0, 0.0, 1728.0, 1117.0);
+        let side = Rect::new(1728.0, -400.0, 2560.0, 1440.0);
+        let displays = [main, side];
+        // A status item in either display's menu bar, notch height included.
+        assert!(is_menu_extra(
+            25,
+            Rect::new(1500.0, 0.0, 28.0, 24.0),
+            &displays
+        ));
+        assert!(is_menu_extra(
+            25,
+            Rect::new(1400.0, 0.0, 30.0, 37.0),
+            &displays
+        ));
+        assert!(is_menu_extra(
+            25,
+            Rect::new(3800.0, -400.0, 28.0, 24.0),
+            &displays
+        ));
+        // The same layer elsewhere is a panel the user sees, or one kept out
+        // of sight off every display: hiding the app takes it.
+        assert!(!is_menu_extra(
+            25,
+            Rect::new(200.0, 300.0, 30.0, 30.0),
+            &displays
+        ));
+        assert!(!is_menu_extra(
+            25,
+            Rect::new(-30000.0, -30000.0, 30.0, 30.0),
+            &displays
+        ));
+        // In the menu bar at another layer: a window like any other.
+        assert!(!is_menu_extra(
+            0,
+            Rect::new(1500.0, 0.0, 28.0, 24.0),
+            &displays
+        ));
+        let icon = OtherWindow {
+            menu_extra: true,
+            ..other(true, false, false, 1)
+        };
+        assert!(!icon.would_vanish());
+        assert_eq!(may_bring_out(true, &app(false, false, vec![icon])), Ok(()));
     }
 
     #[test]
@@ -297,6 +385,29 @@ mod tests {
     }
 
     #[test]
+    fn a_step_that_failed_or_timed_out_is_undone_with_every_one_before_it() {
+        let background = app(false, false, vec![]);
+        for (i, step) in Step::ORDER.iter().enumerate() {
+            let undo = undo(Some(*step), &background);
+            for earlier in &Step::ORDER[..=i] {
+                if let Some(inverse) = earlier.inverse() {
+                    assert!(undo.contains(&inverse), "{step:?} misses {inverse:?}");
+                }
+            }
+            // The app shows last, the window minimized before it does.
+            if let Some(show) = undo.iter().position(|u| *u == Undo::ShowApp) {
+                assert_eq!(show, undo.len() - 1, "{step:?}: {undo:?}");
+            }
+        }
+        // Taking it out of the Dock timed out, yet the app may still do it:
+        // the window goes back in before the app shows.
+        assert_eq!(
+            undo(Some(Step::LeftDock), &background),
+            vec![Undo::Minimize, Undo::ShowApp]
+        );
+    }
+
+    #[test]
     fn a_window_goes_back_to_the_dock_hidden_with_its_app_when_it_may_hide() {
         assert_eq!(
             put_back(&app(false, false, vec![other(false, false, false, 0)])),
@@ -318,17 +429,19 @@ mod tests {
             put_back(&app(false, false, vec![indicator]))[0],
             Undo::HideApp
         );
-        // In front, or showing another window now: back to the Dock in view.
+        // In front, or showing another window now: into the Dock from the
+        // Agent Display, then its frame goes back, so it never stands on
+        // the user's screen.
         for now in [
             app(false, true, vec![]),
             app(false, false, vec![other(true, true, false, 1)]),
         ] {
-            assert_eq!(put_back(&now), vec![Undo::RestoreFrame, Undo::Minimize]);
+            assert_eq!(put_back(&now), vec![Undo::Minimize, Undo::RestoreFrame]);
         }
         // The user hid the app since: it stays hidden.
         assert_eq!(
             put_back(&app(true, false, vec![])),
-            vec![Undo::RestoreFrame, Undo::Minimize]
+            vec![Undo::Minimize, Undo::RestoreFrame]
         );
     }
 
