@@ -587,11 +587,15 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             });
             TIDIED.with(|t| t.set(true));
             if plans.is_empty() {
+                // Left running, the agents' browser would take the user's
+                // Dock click and links (ADR 0022).
+                crate::mac::devtools::end_agents(true);
                 return false;
             }
             let main = main_screen_name();
             std::thread::spawn(move || {
                 dismissal::execute(&plans, main.as_deref());
+                crate::mac::devtools::end_agents(true);
                 native::reply_terminate();
             });
             true
@@ -610,6 +614,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                 .collect();
             if !plans.is_empty() && !TIDIED.with(Cell::get) {
                 dismissal::execute(&plans, main_screen_name().as_deref());
+            }
+            if !TIDIED.with(Cell::get) {
+                crate::mac::devtools::end_agents(true);
             }
             crate::mac::claims::delete();
             crate::web::delete_state();
@@ -4431,7 +4438,8 @@ impl Shell {
             .collect();
         // An app the agent started brings itself to the front, as Electron
         // does: no one to tell, unless the user just used it.
-        let agents = core.displays.list.iter().any(|d| d.started.contains(&pid));
+        let agents = crate::mac::devtools::is_agents(pid)
+            || core.displays.list.iter().any(|d| d.started.contains(&pid));
         let recent = !peek_intent::reminder_due(
             self.reminded
                 .get(&pid)
@@ -4627,13 +4635,14 @@ impl Shell {
         let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
             return;
         };
-        let agents = self
-            .core
-            .read(cx)
-            .displays
-            .list
-            .iter()
-            .any(|d| d.started.contains(&pid));
+        let agents = crate::mac::devtools::is_agents(pid)
+            || self
+                .core
+                .read(cx)
+                .displays
+                .list
+                .iter()
+                .any(|d| d.started.contains(&pid));
         if !agents || crate::mac::ime::holding(pid) {
             return;
         }

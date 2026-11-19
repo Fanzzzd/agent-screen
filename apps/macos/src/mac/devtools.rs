@@ -23,6 +23,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+/// Where a page the pipe asked for went.
+#[derive(Debug)]
+pub enum NewPage {
+    /// Into a new window, which the launch's catch takes: the window that
+    /// shows `target`.
+    Window { target: String },
+    /// Into a window that was open already, as a tab: Dia ignores
+    /// `newWindow`. Its window's frame, in global points.
+    Tab { target: String, bounds: Rect },
+    /// The browser didn't say.
+    Unknown,
+}
+
 /// Whether the app at `bundle` is built on Chromium: Chrome, Edge, Brave,
 /// Arc and every Electron or CEF app ship Chromium's resources in a
 /// framework of their own.
@@ -279,6 +292,72 @@ fn channels() -> std::sync::MutexGuard<'static, HashMap<i32, Arc<Channel>>> {
 
 /// The app's pipe, once it answers on it; waits up to `wait` for a pipe
 /// still starting.
+/// The pids of the agents' own browser instances (ADR 0022), shared by
+/// every session, with when each started.
+fn agents() -> std::sync::MutexGuard<'static, HashMap<i32, Instant>> {
+    static AGENTS: std::sync::LazyLock<Mutex<HashMap<i32, Instant>>> =
+        std::sync::LazyLock::new(Default::default);
+    AGENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A starting instance has no window yet: it isn't idle.
+const AGENTS_START: Duration = Duration::from_secs(30);
+
+/// Note that `pid` is an agents' browser instance Agent Screen started.
+pub fn mark_agents(pid: i32) {
+    agents().insert(pid, Instant::now());
+}
+
+/// Whether `pid` is an agents' browser instance Agent Screen started.
+pub fn is_agents(pid: i32) -> bool {
+    agents().contains_key(&pid)
+}
+
+/// Close the agents' window `target` through its instance's pipe: Dia's
+/// close button takes no accessibility press. Whether it asked.
+pub fn close_agents_window(target: WindowTarget) -> bool {
+    if !is_agents(target.pid) {
+        return false;
+    }
+    let Some(frame) = super::windows::find(target.window_id).map(|w| w.bounds) else {
+        return false;
+    };
+    channel(target.pid, Duration::from_secs(1)).is_some_and(|c| c.close_window_at(frame) > 0)
+}
+
+/// Quit each agents' browser instance that has no window left, or every one
+/// when `all`, as Agent Screen quits: left running, it would take the
+/// user's Dock click, `open -a` and links once the user's own browser
+/// isn't running, since macOS hands those to any running instance.
+pub fn end_agents(all: bool) {
+    let pids: Vec<(i32, Instant)> = agents().iter().map(|(p, at)| (*p, *at)).collect();
+    let windows = super::windows::all();
+    for (pid, started) in pids {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            agents().remove(&pid);
+            continue;
+        }
+        let idle = started.elapsed() > AGENTS_START
+            && !windows.iter().any(|w| w.target.pid == pid && w.layer == 0);
+        if all || idle {
+            let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
+            log::info!(
+                "devtools: quit the agents' browser instance {pid} through its pipe: {closed}"
+            );
+            if closed {
+                agents().remove(&pid);
+            }
+        }
+    }
+}
+
+/// Whether Agent Screen holds a live pipe to `pid`.
+pub fn has_pipe(pid: i32) -> bool {
+    channels()
+        .get(&pid)
+        .is_some_and(|c| *c.state.lock().unwrap_or_else(|e| e.into_inner()) != State::Dead)
+}
+
 pub fn channel(pid: i32, wait: Duration) -> Option<Arc<Channel>> {
     let channel = channels().get(&pid).cloned()?;
     let started = Instant::now();
@@ -407,8 +486,9 @@ impl Channel {
     /// Open a new browser window showing `url`, at `frame` in global
     /// points, in the background. Chromium makes it there, so it never
     /// shows elsewhere first.
-    pub fn new_window(&self, url: &str, frame: Rect) -> Result<(), String> {
-        self.call(
+    pub fn new_window(&self, url: &str, frame: Rect) -> Result<NewPage, String> {
+        let before = self.page_windows();
+        let created = self.call(
             "Target.createTarget",
             json!({
                 "url": url,
@@ -420,16 +500,122 @@ impl Channel {
                 "height": frame.height.round() as i64,
             }),
             None,
-        )
-        .map(|_| ())
+        )?;
+        let Some(target) = created["targetId"].as_str().map(String::from) else {
+            return Ok(NewPage::Unknown);
+        };
+        let Some((id, bounds)) = self.window_of(&target) else {
+            return Ok(NewPage::Unknown);
+        };
+        let existed = before.contains(&id);
+        log::info!(
+            "devtools: pid {} opened target {target} in window {id} at {bounds:?}, which existed before: {existed}",
+            self.pid
+        );
+        Ok(if existed {
+            NewPage::Tab { target, bounds }
+        } else {
+            NewPage::Window { target }
+        })
     }
 
-    /// Set every browser window of this process to `frame`, in global
-    /// points, through Chromium: Dia ignores `--window-size` and keeps its
-    /// first window at the size of the main screen. How many it set.
-    pub fn fit_windows(&self, frame: Rect) -> usize {
+    /// Quit the browser, as its own Quit command would.
+    pub fn close_browser(&self) -> bool {
+        self.call("Browser.close", json!({}), None).is_ok()
+    }
+
+    /// Close the pages of the browser window whose frame, in global points,
+    /// is `frame`. How many it closed.
+    pub fn close_window_at(&self, frame: Rect) -> usize {
         let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
             return 0;
+        };
+        targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter(|id| {
+                self.window_of(id).is_some_and(|(_, bounds)| {
+                    agent_screen_model::agent_browser::same_frame(bounds, frame)
+                })
+            })
+            .filter(|id| self.close_target(id))
+            .count()
+    }
+
+    /// The browser window that shows target `id`, and its frame in global
+    /// points.
+    pub fn window_of(&self, id: &str) -> Option<(i64, Rect)> {
+        let window = self
+            .call(
+                "Browser.getWindowForTarget",
+                json!({ "targetId": id }),
+                None,
+            )
+            .ok()?;
+        let b = &window["bounds"];
+        Some((
+            window["windowId"].as_i64()?,
+            Rect::new(
+                b["left"].as_f64()?,
+                b["top"].as_f64()?,
+                b["width"].as_f64()?,
+                b["height"].as_f64()?,
+            ),
+        ))
+    }
+
+    /// Set the browser window whose frame is `current` to `frame`, both in
+    /// global points, through Chromium: Dia ignores `--window-size` and
+    /// keeps its first window at the size of the main screen. Only that
+    /// window: the instance is shared by every session.
+    pub fn fit_window(&self, current: Rect, frame: Rect) -> bool {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return false;
+        };
+        let window = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter_map(|id| self.window_of(id))
+            .find(|(_, bounds)| agent_screen_model::agent_browser::same_frame(*bounds, current))
+            .map(|(id, _)| id);
+        let Some(id) = window else {
+            return false;
+        };
+        // A maximized or full-screen window takes no frame until normal.
+        let _ = self.call(
+            "Browser.setWindowBounds",
+            json!({ "windowId": id, "bounds": { "windowState": "normal" } }),
+            None,
+        );
+        self.call(
+            "Browser.setWindowBounds",
+            json!({ "windowId": id, "bounds": {
+                "left": frame.x.round() as i64,
+                "top": frame.y.round() as i64,
+                "width": frame.width.round() as i64,
+                "height": frame.height.round() as i64,
+            } }),
+            None,
+        )
+        .is_ok()
+    }
+
+    /// Close a page target, such as a tab opened in the wrong window.
+    pub fn close_target(&self, target: &str) -> bool {
+        self.call("Target.closeTarget", json!({ "targetId": target }), None)
+            .is_ok()
+    }
+
+    /// The browser window ids of this process's pages.
+    fn page_windows(&self) -> Vec<i64> {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return Vec::new();
         };
         let mut windows: Vec<i64> = targets["targetInfos"]
             .as_array()
@@ -437,40 +623,11 @@ impl Channel {
             .flatten()
             .filter(|t| t["type"] == "page")
             .filter_map(|t| t["targetId"].as_str())
-            .filter_map(|id| {
-                self.call(
-                    "Browser.getWindowForTarget",
-                    json!({ "targetId": id }),
-                    None,
-                )
-                .ok()?["windowId"]
-                    .as_i64()
-            })
+            .filter_map(|id| self.window_of(id).map(|(id, _)| id))
             .collect();
         windows.sort_unstable();
         windows.dedup();
         windows
-            .into_iter()
-            .filter(|&id| {
-                // A maximized or full-screen window takes no frame until normal.
-                let _ = self.call(
-                    "Browser.setWindowBounds",
-                    json!({ "windowId": id, "bounds": { "windowState": "normal" } }),
-                    None,
-                );
-                self.call(
-                    "Browser.setWindowBounds",
-                    json!({ "windowId": id, "bounds": {
-                        "left": frame.x.round() as i64,
-                        "top": frame.y.round() as i64,
-                        "width": frame.width.round() as i64,
-                        "height": frame.height.round() as i64,
-                    } }),
-                    None,
-                )
-                .is_ok()
-            })
-            .count()
     }
 
     /// The session attached to a target, attaching once.

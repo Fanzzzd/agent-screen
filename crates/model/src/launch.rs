@@ -22,14 +22,23 @@ pub fn has_quit(started_here: bool, runs: bool, listed: bool) -> bool {
     if started_here { !runs } else { !listed }
 }
 
-/// Whether a new window of the launched app answers the launch. A starting
-/// app's are all its. So are those of the agents' own browser instance
-/// (ADR 0022), which no one else uses: its window may be placed first by
-/// the watch on its earlier launch, before this launch's catch takes it.
-/// A running app's is only the one the catch took, or the one showing the
-/// file asked for.
-pub fn answers_launch(was_running: bool, agents_own: bool, caught: bool, shows_file: bool) -> bool {
-    !was_running || agents_own || caught || shows_file
+/// Whether a new window of the launched app answers the launch. A window
+/// the agents' own browser instance opened for a page asked through its
+/// pipe (ADR 0022) answers only when it is that page's window: the instance
+/// is shared by every session, and another session's page may open a
+/// window meanwhile. A starting app's windows are all its. A running app's
+/// is only the one the catch took, or the one showing the file asked for,
+/// which is asked of the app only when nothing else decides.
+pub fn answers_launch(
+    was_running: bool,
+    pipe_page: Option<bool>,
+    caught: bool,
+    shows_file: impl FnOnce() -> bool,
+) -> bool {
+    match pipe_page {
+        Some(is_page_window) => is_page_window,
+        None => !was_running || caught || shows_file(),
+    }
 }
 
 /// Whether a process with this parent and `argv` is the instance `open`
@@ -168,16 +177,19 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn any_new_window_of_the_agents_instance_answers_its_launch() {
+    fn only_the_pages_window_answers_a_launch_through_the_pipe() {
         use super::answers_launch;
+        let asked = || panic!("the file is asked of the app only when nothing else decides");
         // The user's running app: only the window the launch caught.
-        assert!(!answers_launch(true, false, false, false));
-        assert!(answers_launch(true, false, true, false));
-        assert!(answers_launch(true, false, false, true));
-        // The agents' instance, running: any new window, caught or not.
-        assert!(answers_launch(true, true, false, false));
+        assert!(!answers_launch(true, None, false, || false));
+        assert!(answers_launch(true, None, true, asked));
+        assert!(answers_launch(true, None, false, || true));
+        // The agents' instance, asked through its pipe: the page's window
+        // only, even one the catch took.
+        assert!(answers_launch(true, Some(true), false, asked));
+        assert!(!answers_launch(true, Some(false), true, asked));
         // A starting app: any new window.
-        assert!(answers_launch(false, false, false, false));
+        assert!(answers_launch(false, None, false, asked));
     }
 
     #[test]

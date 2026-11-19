@@ -35,6 +35,10 @@
 //!
 //!     E2E_DIA=1 AGENTSCREEN_INSTANCE=e2e cargo e2e diafocused
 //!
+//! E2E_BROWSER="Google Chrome" with E2E_CHROME=1 checks the same with your
+//! own Chrome in front, the case #222 reported: open /user in one of your
+//! Chrome windows instead.
+//!
 //! Makes 1 display.
 
 use std::io::{BufRead, BufReader, Write};
@@ -51,6 +55,30 @@ use agent_screen_tests::{
 use anyhow::{Context, Result, bail};
 
 const KEY: &str = "diafocused";
+
+/// The browser you keep in front.
+struct Browser {
+    app: &'static str,
+    bundle_id: &'static str,
+    /// The switch that lets the script start a second process of your
+    /// browser.
+    gate: &'static str,
+}
+
+fn browser() -> Browser {
+    match std::env::var("E2E_BROWSER").as_deref() {
+        Ok("Google Chrome") => Browser {
+            app: "Google Chrome",
+            bundle_id: "com.google.Chrome",
+            gate: "E2E_CHROME",
+        },
+        _ => Browser {
+            app: "Dia",
+            bundle_id: "company.thebrowser.dia",
+            gate: "E2E_DIA",
+        },
+    }
+}
 /// The agent's text: you won't type it, so it in your box means the agent's
 /// text reached your window.
 const TOKEN: &str = "dfq4k";
@@ -65,13 +93,18 @@ fn main() -> ExitCode {
         eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
-    if std::env::var("E2E_DIA").as_deref() != Ok("1") {
-        skip(
-            "Dia is your own browser: set E2E_DIA=1 and keep a Dia window of yours in front while it runs",
-        );
+    let b = browser();
+    if std::env::var(b.gate).as_deref() != Ok("1") {
+        skip(&format!(
+            "{} is your own browser: set {}=1 and keep a window of yours in front while it runs",
+            b.app, b.gate
+        ));
     }
-    let Some(pid) = dia_pids().first().copied() else {
-        skip("Dia isn't running: open it and keep one of its windows in front");
+    let Some(pid) = browser_pids(b.app).first().copied() else {
+        skip(&format!(
+            "{} isn't running: open it and keep one of its windows in front",
+            b.app
+        ));
     };
     let log: Log = Arc::default();
     let port = match serve(log.clone()) {
@@ -81,16 +114,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let profile = agents_profile();
+    let profile = agents_profile(b.bundle_id);
     run(|| {
         let user_url = format!("http://127.0.0.1:{port}/user");
         println!(
-            "open {user_url} in one of your Dia windows, click its text box and keep Dia in front until the script ends"
+            "open {user_url} in one of your {app} windows, click its text box and keep {app} in front until the script ends",
+            app = b.app
         );
         sign_step(&format!(
-            "Dia: open {user_url}, click its box, keep Dia in front"
+            "{app}: open {user_url}, click its box, keep {app} in front",
+            app = b.app
         ));
-        let typer = start_hidtype();
+        let typer = start_hidtype(b.bundle_id);
         // A refusal fails the test and records nothing, never opening the
         // agent's window in your Dia.
         start_test_app(&[
@@ -100,11 +135,11 @@ fn main() -> ExitCode {
         let control = Control::connect()?;
         let made = control.call(
             "createDisplay",
-            json!({ "sessionKey": KEY, "title": "Dia focused", "width": 1280, "height": 800 }),
+            json!({ "sessionKey": KEY, "title": "Browser focused", "width": 1280, "height": 800 }),
         )?;
         let id = made["displayId"].clone();
-        let result =
-            wait_for_user(&log, pid).and_then(|()| test(&control, &id, pid, port, &log, &profile));
+        let result = wait_for_user(&log, pid)
+            .and_then(|()| test(&control, &id, &b, pid, port, &log, &profile));
         stop_hidtype(typer);
         // The agents' Dia goes before its display: a display that goes
         // first hands its windows to your screen.
@@ -115,8 +150,8 @@ fn main() -> ExitCode {
     })
 }
 
-/// The test instance's profile for the agents' Dia (ADR 0022).
-fn agents_profile() -> PathBuf {
+/// The test instance's profile for the agents' instance (ADR 0022).
+fn agents_profile(bundle_id: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     Path::new(&home)
         .join("Library/Application Support/Agent Screen")
@@ -124,24 +159,24 @@ fn agents_profile() -> PathBuf {
             "Browser Profiles ({})",
             instance().unwrap_or_default()
         ))
-        .join("company.thebrowser.dia")
+        .join(bundle_id)
 }
 
-fn dia_pids() -> Vec<i32> {
-    sh_lenient("/usr/bin/pgrep", &["-x", "Dia"])
+fn browser_pids(process: &str) -> Vec<i32> {
+    sh_lenient("/usr/bin/pgrep", &["-x", process])
         .lines()
         .filter_map(|l| l.trim().parse().ok())
         .collect()
 }
 
-fn start_hidtype() -> Option<std::process::Child> {
+fn start_hidtype(bundle_id: &str) -> Option<std::process::Child> {
     if !Path::new(HIDTYPE).exists() {
-        println!("no {HIDTYPE}: type in your Dia window yourself for the whole run");
+        println!("no {HIDTYPE}: type in your browser window yourself for the whole run");
         return None;
     }
     let _ = std::fs::remove_file(HIDTYPE_STOP);
     std::process::Command::new(HIDTYPE)
-        .arg("600")
+        .args(["600", bundle_id])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .ok()
@@ -377,6 +412,7 @@ fn posted(reply: &Result<Value>) -> bool {
 fn test(
     control: &Control,
     id: &Value,
+    b: &Browser,
     user_pid: i32,
     port: u16,
     log: &Log,
@@ -389,30 +425,33 @@ fn test(
     // instance's pipe after.
     let started = control.call(
         "launchApp",
-        json!({ "sessionKey": KEY, "displayId": id, "app": "Dia" }),
+        json!({ "sessionKey": KEY, "displayId": id, "app": b.app }),
     )?;
     started["window"]["windowId"]
         .as_u64()
         .with_context(|| format!("no window: {started}"))?;
     let launched = control.call(
         "launchApp",
-        json!({ "sessionKey": KEY, "displayId": id, "app": "Dia",
+        json!({ "sessionKey": KEY, "displayId": id, "app": b.app,
                 "open": format!("http://127.0.0.1:{port}/agent") }),
     )?;
     let window = launched["window"]["windowId"]
         .as_u64()
         .with_context(|| format!("no window: {launched}"))?;
-    let agents: Vec<i32> = dia_pids().into_iter().filter(|&p| p != user_pid).collect();
+    let agents: Vec<i32> = browser_pids(b.app)
+        .into_iter()
+        .filter(|&p| p != user_pid)
+        .collect();
     let args = agents
         .first()
         .map(|p| sh_lenient("/bin/ps", &["-o", "args=", "-p", &p.to_string()]))
         .unwrap_or_default();
     check(
-        "launch_app started the agents' own Dia, on its own profile, with the pipe",
+        "launch_app started the agents' own instance, on its own profile, with the pipe",
         agents.len() == 1
             && args.contains(&profile.display().to_string())
             && args.contains("--remote-debugging-pipe"),
-        format!("other Dia pids {agents:?}: {}", cut(&args, 300)),
+        format!("other {} pids {agents:?}: {}", b.app, cut(&args, 300)),
     );
     check(
         "the agent's page loaded",
@@ -420,7 +459,7 @@ fn test(
         format!("{:?}", events(log, "agent", from)),
     );
     check(
-        "Dia is still your front app, with your window focused",
+        "your browser is still your front app, with your window focused",
         front_pid() == Some(user_pid) && focused_window(user_pid) == user_window,
         format!(
             "front {:?}, focused {} (was {user_window})",
@@ -491,7 +530,7 @@ fn test(
         ),
     );
     check(
-        "Dia is still your front app",
+        "your browser is still your front app",
         front_pid() == Some(user_pid),
         format!("front {:?}", front_pid()),
     );

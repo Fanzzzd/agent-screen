@@ -2,21 +2,24 @@
 //! (#222, ADR 0022). launch_app with no arguments starts a second process
 //! of the browser on Agent Screen's profile for agents, with the private
 //! DevTools pipe, and opens its window on the Agent Display, showing
-//! nothing on the user's screen and leaving the user's front app alone. A
-//! click, typed text and a click on a submit button reach its page as
-//! posted input. A second launch_app opens a new window in the same
-//! instance, on the display. Touches no window of the user's browser.
+//! nothing on the user's screen and leaving the user's front app in front
+//! through every launch, sampled every 50 ms. A click, typed text and a
+//! click on a submit button reach its page as posted input. Another
+//! launch_app opens its page through the pipe in the same instance, on the
+//! display. A link from another app reaches the user's instance, not the
+//! agents'. As Agent Screen quits, it closes the agents' windows and quits
+//! the instance. Touches no window of the user's browser.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e agentbrowser
 //!
 //! Chrome by default, which needs Chrome not running: the script starts a
 //! stand-in for the user's Chrome on a throwaway profile, on the display,
 //! first. E2E_BROWSER=Dia with E2E_DIA=1 checks the same beside your
-//! running Dia, whose windows it never touches: the first launch passes no
-//! URL, the page opens through the agents' instance after, and the test
-//! app runs with the shared fallback off, so a refusal fails the test,
-//! records nothing and opens nothing in your Dia. Quits the instances it
-//! started. Makes 1 display.
+//! running Dia, whose windows it never touches, and sends it no link: the
+//! first launch passes no URL, the page opens through the agents' instance
+//! after, and the test app runs with the shared fallback off, so a refusal
+//! fails the test, records nothing and opens nothing in your Dia. Makes 1
+//! display.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -27,8 +30,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_screen_tests::{
-    Control, Value, capture, check, cut, instance, json, out, probe, quit_profile, run,
-    running_headed, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, windows_of,
+    Control, Value, capture, check, cut, instance, json, out, probe, profile_pids, quit_profile,
+    run, running_headed, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -165,10 +168,27 @@ fn answer(mut stream: TcpStream, log: &Log) -> Result<()> {
     let mut first = String::new();
     reader.read_line(&mut first)?;
     let mut line = String::new();
+    // Only the agents' profile has the cookie the agent page sets: a link
+    // that carries it reached the agents' instance.
+    let mut agents_cookie = false;
     while reader.read_line(&mut line)? > 2 {
+        if line.to_ascii_lowercase().starts_with("cookie:") && line.contains("who=agents") {
+            agents_cookie = true;
+        }
         line.clear();
     }
     let path = first.split_whitespace().nth(1).unwrap_or("/");
+    if let Some(n) = path.strip_prefix("/link?n=") {
+        let reached = if agents_cookie { "agents" } else { "user" };
+        log.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("link {n} {reached}"));
+    }
+    let cookie = if path.starts_with("/agent") {
+        "Set-Cookie: who=agents; Path=/; Max-Age=600\r\n"
+    } else {
+        ""
+    };
     let body = match path.split_once('?') {
         Some(("/log", query)) => {
             let event = query.strip_prefix("e=").unwrap_or_default();
@@ -182,7 +202,7 @@ fn answer(mut stream: TcpStream, log: &Log) -> Result<()> {
     };
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{cookie}Connection: close\r\n\r\n{body}",
         body.len()
     )?;
     Ok(())
@@ -325,30 +345,76 @@ fn posted(reply: &Result<Value>) -> bool {
         .is_ok_and(|v| v.get("route").is_none_or(|r| r != "accessibility"))
 }
 
-/// Which process a link from another app reaches with two processes of the
-/// bundle running (ADR 0022): `open -g -b` asks LaunchServices, as a link
-/// clicked in another app does. Only with the stand-in, never your Dia.
-/// Prints the answer: it is a measurement, not a rule.
-fn links(b: &Browser, port: u16, user: &[u32], agents: Option<u32>) -> Result<()> {
-    let count = |pid: u32| windows_of(pid).iter().filter(|f| f.layer == 0).count();
-    let user_before: usize = user.iter().map(|&p| count(p)).sum();
-    let agents_before = agents.map_or(0, count);
+/// Where a link from another app goes: `open -g -b` asks LaunchServices,
+/// as a link clicked in another app does, without activating anything.
+/// Only with the stand-in, never your Dia. `n` names the link in the log;
+/// the answer is "agents" when it carried the agents' profile's cookie,
+/// "user" when it reached the stand-in.
+fn link(b: &Browser, port: u16, log: &Log, n: u32) -> Option<String> {
+    let from = mark(log);
     sh_lenient(
         "/usr/bin/open",
         &[
             "-g",
             "-b",
             b.bundle_id,
-            &format!("http://127.0.0.1:{port}/link"),
+            &format!("http://127.0.0.1:{port}/link?n={n}"),
         ],
     );
-    sleep_ms(3000);
-    let user_after: usize = user.iter().map(|&p| count(p)).sum();
-    let agents_after = agents.map_or(0, count);
-    println!(
-        "a link through LaunchServices: the user's process windows {user_before} -> {user_after}, the agents' {agents_before} -> {agents_after}"
-    );
-    Ok(())
+    let prefix = format!("link {n} ");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if let Some(e) = since(log, from)
+            .into_iter()
+            .find(|e| e.starts_with(&prefix))
+        {
+            return Some(e[prefix.len()..].to_string());
+        }
+        sleep_ms(100);
+    }
+    None
+}
+
+/// The user's front app, sampled through the whole launch: a new window of
+/// the agents' instance must never make it front, not even for a moment.
+struct FrontWatch {
+    stop: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<Option<u32>>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FrontWatch {
+    fn start(front: Option<u32>) -> FrontWatch {
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen: Arc<Mutex<Vec<Option<u32>>>> = Arc::default();
+        let (s, v) = (stop.clone(), seen.clone());
+        let thread = std::thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                let now = front_pid();
+                if now != front {
+                    let mut v = v.lock().unwrap_or_else(|e| e.into_inner());
+                    if v.last() != Some(&now) {
+                        v.push(now);
+                    }
+                }
+                sleep_ms(50);
+            }
+        });
+        FrontWatch {
+            stop,
+            seen,
+            thread: Some(thread),
+        }
+    }
+
+    /// The other front apps it saw, in order.
+    fn finish(mut self) -> Vec<Option<u32>> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
 }
 
 fn test(
@@ -382,7 +448,19 @@ fn test(
         let before = pids(b.process);
         let front = front_pid();
         println!("{} before: {before:?}, front pid {front:?}", b.process);
+        if stand_in {
+            // LaunchServices hands a link to the running instance whatever
+            // its profile: the reason the agents' instance must not outlive
+            // its displays.
+            let reached = link(b, port, log, 1);
+            check(
+                "with one instance running, on its own profile, a link from another app reaches it",
+                reached.as_deref() == Some("user") && pids(b.process) == before,
+                format!("{reached:?}, pids {before:?} -> {:?}", pids(b.process)),
+            );
+        }
         let watcher = Watcher::start(b.process, before.clone(), display);
+        let fronts = FrontWatch::start(front);
         let from = mark(log);
         let url = format!("http://127.0.0.1:{port}/agent");
         // The user's own windows, which must stay as they are.
@@ -449,12 +527,15 @@ fn test(
                 .as_u64()
                 .with_context(|| format!("no window: {paged}"))?;
             let frames = new.first().map(|&p| windows_of(p)).unwrap_or_default();
+            // Dia may put the page in its open window as a tab.
             check(
-                "a second launch_app opens the page in a new window of the same agents' instance",
-                window != first
-                    && pids(b.process) == after
-                    && frames.iter().any(|f| f.id == window),
-                format!("{} | its windows {frames:?}", cut(&paged.to_string(), 400)),
+                "a second launch_app opens the page in the same agents' instance, on the display",
+                pids(b.process) == after && frames.iter().any(|f| f.id == window),
+                format!(
+                    "{} window | {} | its windows {frames:?}",
+                    if window == first { "the same" } else { "a new" },
+                    cut(&paged.to_string(), 400)
+                ),
             );
             window
         };
@@ -535,10 +616,8 @@ fn test(
         let still = pids(b.process);
         let frames = new.first().map(|&p| windows_of(p)).unwrap_or_default();
         check(
-            "a second launch_app opens a new window in the same agents' instance",
-            second.is_some_and(|w| w != window)
-                && still.len() == after.len()
-                && frames.iter().any(|f| second.is_some_and(|w| f.id == w)),
+            "another launch_app opens a window, or a tab in the open one, in the same agents' instance",
+            still.len() == after.len() && frames.iter().any(|f| second.is_some_and(|w| f.id == w)),
             format!(
                 "{} | pids {still:?} | its windows {frames:?}",
                 cut(&said(&again), 400)
@@ -550,20 +629,41 @@ fn test(
             outside.is_empty(),
             format!("{outside:?}"),
         );
+        let others = fronts.finish();
+        check(
+            "the user's front app stayed in front through every launch",
+            others.is_empty(),
+            format!("front {front:?}, then {others:?}"),
+        );
         if let Ok(file) = capture("agentbrowser-second", display) {
             println!("the display after the second launch: {}", file.display());
         }
         if stand_in {
-            links(b, port, &before, new.first().copied())?;
+            let reached = link(b, port, log, 2);
+            check(
+                "with the agents' instance beside the user's, a link from another app reaches the user's",
+                reached.as_deref() == Some("user") && pids(b.process) == after,
+                format!("{reached:?}, pids {after:?} -> {:?}", pids(b.process)),
+            );
         }
         Ok(())
     })();
-    // The agents' instance and the stand-in go before their display: a
-    // display that goes first hands their windows to your screen.
-    quit_profile(profile);
+    // The stand-in goes before its display: a display that goes first hands
+    // its windows to your screen.
     if stand_in {
         quit_profile(user_profile);
     }
     let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
+    // Agent Screen closes the agents' windows through the pipe as it quits,
+    // then quits the instance, so it never takes the user's Dock click or
+    // links. The sighting watch fails the script if a window reached your
+    // screen meanwhile.
+    stop_test_app();
+    let left = profile_pids(profile);
+    check(
+        "Agent Screen quit the agents' instance as it quit",
+        left.is_empty(),
+        format!("still running: {left:?}"),
+    );
     result
 }

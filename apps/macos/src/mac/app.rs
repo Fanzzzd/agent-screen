@@ -445,6 +445,12 @@ pub fn hide(pid: i32) {
     }
 }
 
+/// Ask an app to quit, as its Quit command would, without activating it.
+pub fn terminate(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.terminate())
+}
+
 /// Show a hidden app without activating it. An app that made itself an
 /// accessory after it started hidden, as Electron development builds that
 /// open windows in the background do, ignores `unhide`; it takes the

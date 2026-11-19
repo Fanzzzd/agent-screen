@@ -110,7 +110,10 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
         .filter(|i| i.fate == Fate::Close)
         .map(|i| i.target)
         .filter(|&target| {
-            let pressed = ax::close(target).is_ok();
+            // The agents' browser instance closes its pages through its
+            // pipe: Dia's close button takes no accessibility press.
+            let pressed =
+                crate::mac::devtools::close_agents_window(target) || ax::close(target).is_ok();
             if !pressed {
                 log::warn!("window {} has no close button that works", target.window_id);
             }
