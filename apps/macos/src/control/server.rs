@@ -728,13 +728,20 @@ mod tests {
             };
             let _ = close.send(true);
             // A call still running opens a connection and sends at once:
-            // the line and the close are both there when it is read.
+            // the line and the close are both there when it is read. The
+            // host may also end the connection before the line goes, and
+            // then the write finds the pipe broken; either way nothing may
+            // be served.
             for _ in 0..20 {
                 let (reader, mut writer) = open();
-                writer
+                match writer
                     .write_all(b"{\"id\":1,\"method\":\"listDisplays\"}\n")
                     .await
-                    .unwrap();
+                {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(error) => panic!("the write failed: {error}"),
+                }
                 let mut lines = BufReader::new(reader).lines();
                 let end = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
                 assert_eq!(end.expect("the connection ends").unwrap(), None);
