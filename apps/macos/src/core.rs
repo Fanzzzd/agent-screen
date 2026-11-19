@@ -1272,8 +1272,8 @@ impl Core {
             self.pending_returns.remove_display(id);
             self.told.retain(|(display, _)| *display != id);
             self.left_alone.retain(|(display, _)| *display != id);
-            // The agents' browser instance goes with its last window, so it
-            // never takes the user's Dock click or links (ADR 0022).
+            // The agents' browser instance goes once its last page has, so
+            // it never takes the user's Dock click or links (ADR 0022).
             cx.background_executor()
                 .spawn(async { crate::mac::devtools::end_agents(false) })
                 .detach();

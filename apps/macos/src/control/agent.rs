@@ -2270,6 +2270,15 @@ async fn handle_one(
                 .flatten();
             Ok(json!({ "reminded": reminded, "peek": peek }))
         }
+        // Test hook: what Agent Screen would do now if the agents' browser
+        // instance `pid` came to the front by another app, from the user's
+        // latest input, without doing it (ADR 0022).
+        "debugAgentsActivated" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let agents = devtools::is_agents(pid);
+            let decided = off(cx, move || devtools::on_agents_activated(pid)).await;
+            Ok(json!({ "agents": agents, "decision": format!("{decided:?}") }))
+        }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
         "debugUserKey" if debug_methods() => {
@@ -5844,8 +5853,13 @@ async fn launch_now(
         match started {
             Ok(pid) => {
                 spawned = Some(pid);
-                if start.agents_start {
-                    devtools::mark_agents(pid);
+                if start.agents_start
+                    && let Some(profile) = start
+                        .arguments
+                        .iter()
+                        .find(|a| a.starts_with("--user-data-dir="))
+                {
+                    devtools::mark_agents(pid, profile);
                 }
                 if let Some(url) = first_page {
                     let margin = agent_screen_model::launch::WINDOW_MARGIN;

@@ -295,25 +295,50 @@ fn channels() -> std::sync::MutexGuard<'static, HashMap<i32, Arc<Channel>>> {
 
 /// The app's pipe, once it answers on it; waits up to `wait` for a pipe
 /// still starting.
-/// The pids of the agents' own browser instances (ADR 0022), shared by
-/// every session, with when each started.
-fn agents() -> std::sync::MutexGuard<'static, HashMap<i32, Instant>> {
-    static AGENTS: std::sync::LazyLock<Mutex<HashMap<i32, Instant>>> =
+/// The agents' own browser instances (ADR 0022), shared by every session:
+/// each pid with when it started and its `--user-data-dir=` argument.
+fn agents() -> std::sync::MutexGuard<'static, HashMap<i32, (Instant, String)>> {
+    static AGENTS: std::sync::LazyLock<Mutex<HashMap<i32, (Instant, String)>>> =
         std::sync::LazyLock::new(Default::default);
     AGENTS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A starting instance has no window yet: it isn't idle.
-const AGENTS_START: Duration = Duration::from_secs(30);
-
-/// Note that `pid` is an agents' browser instance Agent Screen started.
-pub fn mark_agents(pid: i32) {
-    agents().insert(pid, Instant::now());
+/// Note that `pid` is an agents' browser instance Agent Screen started with
+/// `profile_argument`, its `--user-data-dir=` switch. A watch quits it once
+/// its pipe counts no page.
+pub fn mark_agents(pid: i32, profile_argument: &str) {
+    agents().insert(pid, (Instant::now(), profile_argument.to_string()));
+    static WATCH: std::sync::Once = std::sync::Once::new();
+    WATCH.call_once(|| {
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                end_agents(false);
+            }
+        });
+    });
 }
 
 /// Whether `pid` is an agents' browser instance Agent Screen started.
 pub fn is_agents(pid: i32) -> bool {
     agents().contains_key(&pid)
+}
+
+/// Whether any agents' browser instance Agent Screen started may run.
+pub fn any_agents() -> bool {
+    !agents().is_empty()
+}
+
+/// Whether `pid` still is that instance: a pid can be reused after a crash.
+fn still_agents(pid: i32) -> bool {
+    let Some(argument) = agents().get(&pid).map(|(_, a)| a.clone()) else {
+        return false;
+    };
+    let ours = super::app::arguments(pid).is_some_and(|argv| argv.contains(&argument));
+    if !ours {
+        agents().remove(&pid);
+    }
+    ours
 }
 
 /// Close the agents' window `target` through its instance's pipe: Dia's
@@ -328,11 +353,14 @@ pub fn close_agents_window(target: WindowTarget) -> bool {
     channel(target.pid, Duration::from_secs(1)).is_some_and(|c| c.close_window_at(frame) > 0)
 }
 
-/// Quit the agents' browser instance `pid`: through its pipe, then, if it
-/// still runs after 1 s, with SIGTERM, and after 2 s more with SIGKILL, as
-/// Dia takes longer to quit than a display takes to go. It is Agent
-/// Screen's own child, on the agents' profile.
+/// Quit the agents' browser instance `pid`: hidden first, through its pipe,
+/// then, if it still runs after 1 s, with SIGTERM, and after 2 s more with
+/// SIGKILL. It is Agent Screen's own child, on the agents' profile, checked
+/// by its command line before any signal.
 pub fn quit_agents(pid: i32) -> bool {
+    if !still_agents(pid) {
+        return false;
+    }
     let ended = |ms: u64| {
         (0..ms / 100).any(|_| {
             std::thread::sleep(Duration::from_millis(100));
@@ -350,9 +378,9 @@ pub fn quit_agents(pid: i32) -> bool {
     }
     let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
     let gone = ended(1000)
-        || unsafe { libc::kill(pid, libc::SIGTERM) } != 0
+        || (unsafe { libc::kill(pid, libc::SIGTERM) }) != 0
         || ended(2000)
-        || unsafe { libc::kill(pid, libc::SIGKILL) } != 0
+        || (unsafe { libc::kill(pid, libc::SIGKILL) }) != 0
         || ended(1000);
     log::info!(
         "devtools: quit the agents' browser instance {pid}: asked through its pipe {closed}, ended {gone}"
@@ -361,63 +389,55 @@ pub fn quit_agents(pid: i32) -> bool {
     gone
 }
 
-/// Start the user's own browser of the agents' instance `pid`, on its
-/// default profile, when it isn't running: the agents' instance came to the
-/// front by the user's Dock click, `open -a` or a link, which macOS hands to
-/// any running instance. Started directly, since LaunchServices would hand
-/// it to the agents' instance again. Whether it started one.
-pub fn start_users_browser(pid: i32, user_used_agents_window: bool) -> bool {
+/// What to do now that the agents' instance `pid` came to the front by
+/// something other than Agent Screen, from the user's latest input.
+pub fn on_agents_activated(pid: i32) -> agent_screen_model::agent_browser::AgentsActivated {
+    let users_running = super::app::bundle_of(pid).is_some_and(|bundle| {
+        super::app::running_pids(&bundle)
+            .iter()
+            .any(|&p| !is_agents(p))
+    });
+    agent_screen_model::agent_browser::agents_activated(
+        super::catch::user_used_recently(pid),
+        super::catch::user_pressed_opener_recently(),
+        users_running,
+    )
+}
+
+/// Start the user's own browser of the agents' instance `pid`, a new
+/// instance on its normal profile, through LaunchServices. A plain launch
+/// would hand it to the agents' instance again. Whether it asked.
+pub fn start_users_browser(pid: i32) -> bool {
     let Some(bundle) = super::app::bundle_of(pid) else {
         return false;
     };
-    let users_running = super::app::running_pids(&bundle)
-        .iter()
-        .any(|&p| !is_agents(p));
-    if !agent_screen_model::agent_browser::starts_users_browser(
-        users_running,
-        user_used_agents_window,
-    ) {
-        return false;
-    }
-    let Some(executable) = super::app::main_executable(&bundle) else {
-        return false;
-    };
-    match std::process::Command::new(&executable)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(mut child) => {
-            log::info!(
-                "devtools: the agents' instance {pid} came to the front by another app; started the user's own browser as {}",
-                child.id()
-            );
-            std::thread::spawn(move || child.wait());
-            true
-        }
-        Err(e) => {
-            log::warn!("devtools: couldn't start the user's own browser: {e}");
-            false
-        }
-    }
+    super::app::open_new_instance(&bundle);
+    log::info!(
+        "devtools: the user launched their browser and the agents' instance {pid} got it; opening theirs: {}",
+        bundle.display()
+    );
+    true
 }
 
-/// Quit each agents' browser instance that has no window left, or every one
-/// when `all`, as Agent Screen quits: left running, it would take the
-/// user's Dock click, `open -a` and links once the user's own browser
-/// isn't running, since macOS hands those to any running instance.
+/// Quit each agents' browser instance that has nothing left, as its pipe
+/// counts pages, or every one when `all`, as Agent Screen quits: left
+/// running, it would take the user's Dock click, `open -a` and links once
+/// the user's own browser isn't running, since macOS hands those to any
+/// running instance.
 pub fn end_agents(all: bool) {
-    let pids: Vec<(i32, Instant)> = agents().iter().map(|(p, at)| (*p, *at)).collect();
-    let windows = super::windows::all();
+    let pids: Vec<(i32, Instant)> = agents().iter().map(|(p, (at, _))| (*p, *at)).collect();
     for (pid, started) in pids {
         if unsafe { libc::kill(pid, 0) } != 0 {
             agents().remove(&pid);
             continue;
         }
-        let idle = started.elapsed() > AGENTS_START
-            && !windows.iter().any(|w| w.target.pid == pid && w.layer == 0);
-        if all || idle {
+        let idle = || {
+            agent_screen_model::agent_browser::idle(
+                started.elapsed().as_secs(),
+                channel(pid, Duration::from_secs(1)).and_then(|c| c.page_count()),
+            )
+        };
+        if all || idle() {
             quit_agents(pid);
         }
     }
@@ -637,6 +657,18 @@ impl Channel {
             .ok_or_else(|| format!("none of its {} pages is visible on this display", pages.len()))?;
         self.call("Page.navigate", json!({ "url": url }), Some(&shown))
             .map(|_| ())
+    }
+
+    /// How many page targets the browser has: its tabs, across its windows.
+    pub fn page_count(&self) -> Option<usize> {
+        let targets = self.call("Target.getTargets", json!({}), None).ok()?;
+        Some(
+            targets["targetInfos"]
+                .as_array()?
+                .iter()
+                .filter(|t| t["type"] == "page")
+                .count(),
+        )
     }
 
     /// Quit the browser, as its own Quit command would.

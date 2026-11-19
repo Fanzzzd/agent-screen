@@ -194,14 +194,50 @@ pub fn plan(
     }
 }
 
-/// Whether the user's own browser starts when the agents' instance comes to
-/// the front by something other than Agent Screen, such as the user's Dock
-/// click, `open -a` or a link: macOS hands those to any running instance of
-/// the bundle, and with the user's own not running, the agents' got it. The
-/// front goes back either way, so the agents' profile never takes the
-/// user's typing; with the user's own running, macOS would have picked it.
-pub fn starts_users_browser(users_running: bool, user_used_agents_window: bool) -> bool {
-    !users_running && !user_used_agents_window
+/// What Agent Screen does when the agents' instance comes to the front by
+/// something other than Agent Screen (ADR 0022).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentsActivated {
+    /// The user is using its window, in the Viewer: theirs to use.
+    Leave,
+    /// Give the front back, so the agents' profile never takes the user's
+    /// typing. Without positive evidence of a user's launch, as when the
+    /// instance brings itself forward for a popup, nothing more.
+    GiveBack,
+    /// Give the front back and start the user's own browser: the user just
+    /// pressed the Dock (Launchpad included), Spotlight, Finder or another
+    /// launcher, which is how they open an app, and macOS handed that to
+    /// the agents' instance because the user's own isn't running.
+    GiveBackAndStartUsers,
+}
+
+/// `used_its_window`: the user's last input went to the instance's own
+/// window. `opener_pressed`: their last input, just before, went to an app
+/// that opens apps. `users_running`: the user's own instance runs, which
+/// macOS would have picked for their launch.
+pub fn agents_activated(
+    used_its_window: bool,
+    opener_pressed: bool,
+    users_running: bool,
+) -> AgentsActivated {
+    if used_its_window {
+        AgentsActivated::Leave
+    } else if opener_pressed && !users_running {
+        AgentsActivated::GiveBackAndStartUsers
+    } else {
+        AgentsActivated::GiveBack
+    }
+}
+
+/// A starting instance has no window yet for this long: it isn't idle.
+pub const START_SECS: u64 = 30;
+
+/// Whether the agents' instance, `age_secs` old, with `pages` page targets
+/// as its pipe counts them (None when it doesn't answer), has nothing left
+/// and quits. Counted through the pipe, a window the user minimized, hid
+/// or moved to another Space still counts.
+pub fn idle(age_secs: u64, pages: Option<usize>) -> bool {
+    age_secs > START_SECS && pages == Some(0)
 }
 
 /// The switch that starts Chromium without its startup window.
@@ -371,52 +407,38 @@ mod tests {
     }
 
     #[test]
-    fn a_dock_click_that_reached_the_agents_instance_starts_the_users() {
-        assert!(starts_users_browser(false, false));
-        assert!(!starts_users_browser(true, false));
-        // The user clicked the agents' window, in the Viewer: theirs to use.
-        assert!(!starts_users_browser(false, true));
+    fn a_launch_from_an_opener_that_reached_the_agents_instance_starts_the_users() {
+        // A Dock, Spotlight or Finder press just before, the user's own
+        // browser not running: their intent was to open the browser.
+        assert_eq!(
+            agents_activated(false, true, false),
+            AgentsActivated::GiveBackAndStartUsers
+        );
     }
 
     #[test]
-    fn only_a_browser_verified_on_a_display_gets_the_agents_instance() {
-        assert!(verified("com.google.Chrome"));
-        assert!(!verified("company.thebrowser.dia"));
-        assert!(!verified("com.brave.Browser"));
-        let user = (100, s(&["Dia"]));
-        let mut argv = s(&["Dia"]);
-        argv.extend(switches(&profile()));
-        // Dia, with the user's running: the user's process, shared.
+    fn a_self_activation_only_gives_the_front_back() {
+        // No opener input, as for a popup the agents' instance shows by
+        // itself: the user's browser never starts unasked.
         assert_eq!(
-            plan(
-                true,
-                false,
-                &[],
-                std::slice::from_ref(&user),
-                &[],
-                &profile(),
-                false
-            ),
-            Plan::Shared
+            agents_activated(false, false, false),
+            AgentsActivated::GiveBack
         );
-        // Not even an agents' instance left from before is used.
+        // The user's own runs: macOS would have picked it for their launch.
         assert_eq!(
-            plan(
-                true,
-                false,
-                &[],
-                &[user, (200, argv)],
-                &[200],
-                &profile(),
-                false
-            ),
-            Plan::Shared
+            agents_activated(false, true, true),
+            AgentsActivated::GiveBack
         );
-        // No one runs it: as asked.
-        assert_eq!(
-            plan(true, false, &[], &[], &[], &profile(), false),
-            Plan::AsAsked
-        );
+        // The user clicked the agents' window, in the Viewer.
+        assert_eq!(agents_activated(true, true, false), AgentsActivated::Leave);
+    }
+
+    #[test]
+    fn the_agents_instance_is_idle_once_its_pipe_counts_no_page() {
+        assert!(idle(31, Some(0)));
+        assert!(!idle(31, Some(1)));
+        assert!(!idle(5, Some(0)));
+        assert!(!idle(31, None));
     }
 
     #[test]

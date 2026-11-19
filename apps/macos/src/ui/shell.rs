@@ -587,10 +587,17 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             });
             TIDIED.with(|t| t.set(true));
             if plans.is_empty() {
+                if !crate::mac::devtools::any_agents() {
+                    return false;
+                }
                 // Left running, the agents' browser would take the user's
-                // Dock click and links (ADR 0022).
-                crate::mac::devtools::end_agents(true);
-                return false;
+                // Dock click and links (ADR 0022). Off the main thread: it
+                // may take seconds to quit.
+                std::thread::spawn(|| {
+                    crate::mac::devtools::end_agents(true);
+                    native::reply_terminate();
+                });
+                return true;
             }
             let main = main_screen_name();
             std::thread::spawn(move || {
@@ -4648,18 +4655,25 @@ impl Shell {
         }
         cx.background_executor()
             .spawn(async move {
-                let used = crate::mac::catch::user_acted_recently(pid);
-                // The agents' browser instance, brought forward by the user's
-                // Dock click or a link: the front goes back, and the user's
-                // own browser starts when it isn't running (ADR 0022).
-                if crate::mac::devtools::is_agents(pid) && !used {
+                // The agents' browser instance (ADR 0022): the user's launch
+                // from the Dock or a launcher that macOS handed it starts
+                // the user's own browser; anything else only gives the
+                // front back.
+                if crate::mac::devtools::is_agents(pid) {
+                    use agent_screen_model::agent_browser::AgentsActivated;
+                    let decided = crate::mac::devtools::on_agents_activated(pid);
                     log::info!(
-                        "pid {pid}, the agents' browser instance, came to the front; giving the front back to pid {previous}"
+                        "pid {pid}, the agents' browser instance, came to the front: {decided:?}"
                     );
-                    crate::mac::ime::return_front(previous);
-                    crate::mac::devtools::start_users_browser(pid, used);
+                    if decided != AgentsActivated::Leave {
+                        crate::mac::ime::return_front(previous);
+                    }
+                    if decided == AgentsActivated::GiveBackAndStartUsers {
+                        crate::mac::devtools::start_users_browser(pid);
+                    }
                     return;
                 }
+                let used = crate::mac::catch::user_acted_recently(pid);
                 if used {
                     return;
                 }

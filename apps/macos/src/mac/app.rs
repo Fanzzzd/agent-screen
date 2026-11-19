@@ -644,6 +644,23 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
     })
 }
 
+/// Start a new process of the app at `bundle` through LaunchServices, as
+/// a Dock click would, on its default profile. LaunchServices starts it, so
+/// it is its own responsible process and inherits none of Agent Screen's
+/// privacy grants.
+pub fn open_new_instance(bundle: &Path) {
+    let url =
+        objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+    let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
+    configuration.setCreatesNewApplicationInstance(true);
+    configuration.setAddsToRecentItems(false);
+    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
+        &url,
+        &configuration,
+        None,
+    );
+}
+
 /// The Dock's pid.
 pub fn dock_pid() -> Option<i32> {
     NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(

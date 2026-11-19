@@ -442,6 +442,48 @@ impl FrontWatch {
     }
 }
 
+/// What Agent Screen would do if the agents' instance came to the front by
+/// another app (ADR 0022), asked without doing it, so the user's own
+/// browser never starts here. With no input of the user's, it only gives
+/// the front back. Right after a key press to the Dock, the user meant to
+/// open the browser: once the stand-in for theirs has quit, Agent Screen
+/// starts theirs.
+fn activated(control: &Control, pid: u32, stand_in: bool) {
+    let decision = |control: &Control| {
+        control
+            .call("debugAgentsActivated", json!({ "pid": pid }))
+            .map(|v| v["decision"].as_str().unwrap_or("").to_string())
+            .unwrap_or_else(|e| format!("{e:#}"))
+    };
+    let alone = decision(control);
+    check(
+        "the agents' instance coming to the front by itself only gets the front given back",
+        alone == "GiveBack",
+        alone,
+    );
+    let dock: Option<i64> = sh_lenient("/usr/bin/pgrep", &["-x", "Dock"])
+        .lines()
+        .next()
+        .and_then(|p| p.trim().parse().ok());
+    let Some(dock) = dock else {
+        check("the Dock runs", false, "no Dock pid");
+        return;
+    };
+    let _ = control.call("debugUserKey", json!({ "pid": dock }));
+    let opened = decision(control);
+    // With the user's own browser running, theirs already has the launch.
+    let expected = if stand_in {
+        "GiveBackAndStartUsers"
+    } else {
+        "GiveBack"
+    };
+    check(
+        "the agents' instance coming to the front right after the user used the Dock starts the user's own browser",
+        opened == expected,
+        format!("{opened}, expected {expected}"),
+    );
+}
+
 fn test(
     b: &Browser,
     stand_in: bool,
@@ -456,6 +498,7 @@ fn test(
         json!({ "sessionKey": KEY, "title": "Agent browser", "width": 1280, "height": 800 }),
     )?;
     let id = made["displayId"].as_u64().context("display id")?;
+    let agents = std::cell::Cell::new(None::<u32>);
     let result = (|| -> Result<()> {
         let display = bounds(id)?;
         if stand_in {
@@ -520,6 +563,7 @@ fn test(
             .copied()
             .filter(|p| !before.contains(p))
             .collect();
+        agents.set(new.first().copied());
         let args = new
             .first()
             .map(|p| sh_lenient("/bin/ps", &["-o", "args=", "-p", &p.to_string()]))
@@ -677,6 +721,11 @@ fn test(
     // its windows to your screen.
     if stand_in {
         quit_profile(user_profile);
+    }
+    if result.is_ok()
+        && let Some(pid) = agents.get()
+    {
+        activated(&control, pid, stand_in);
     }
     let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
     // Agent Screen closes the agents' windows through the pipe as it quits,
