@@ -1,5 +1,6 @@
-//! The MCP server on its own, for development. The app ships the same
-//! server as `AgentScreen mcp`.
+//! The MCP pipe on its own, for development. The app ships the same pipe
+//! as `AgentScreen mcp`; `--v1` serves the tools in this process instead,
+//! as MCP processes before the pipe did.
 
 fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
@@ -24,7 +25,8 @@ fn main() -> anyhow::Result<()> {
             print!("{}", agent_screen_mcp::diagnostics::CLI_USAGE);
             Ok(())
         }
-        None => agent_screen_mcp::run(),
+        None => agent_screen_mcp::run(env!("CARGO_PKG_VERSION")),
+        Some("--v1") => agent_screen_mcp::run_v1(),
         Some(other) => anyhow::bail!("unknown argument {other}"),
     }
 }

@@ -19,7 +19,7 @@ agent-screen-model = { path = "../../crates/model" }
 serde_json = "1"
 anyhow = "1"
 base64 = "0.22"
-tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 log = "0.4"
 regex = "1"
 agent-screen-mcp = { path = "../../crates/mcp" }

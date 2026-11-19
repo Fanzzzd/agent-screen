@@ -779,7 +779,7 @@ pub async fn run(
             // A display ended by the app quitting hands its apps on, so
             // their windows, now on the user's screen, are strays here.
             // Only this session's, by the display they were on.
-            let orphans = control.orphans(&session.key);
+            let orphans = control.ledger().orphans(&session.key);
             let groups = orphans.as_ref().map(|groups| {
                 groups
                     .iter()
@@ -811,7 +811,7 @@ pub async fn run(
                 .await?;
             let reused = reply.get("reused").and_then(Value::as_bool) == Some(true);
             if let Some(id) = reply.get("displayId").and_then(Value::as_u64) {
-                control.made_display(id, &session.key, reused);
+                control.ledger().made_display(id, &session.key, reused);
             }
             if let Some(error) = needs_newer_app(new, &reply) {
                 return Err(error);
@@ -1062,7 +1062,7 @@ pub async fn run(
                 )
                 .await?;
             if let Some(pid) = reply.get("pid").and_then(Value::as_i64) {
-                control.started_app(display as u64, pid);
+                control.ledger().started_app(display as u64, pid);
             }
             Ok(Output::Object(launch_output(&Value::Object(reply))))
         }

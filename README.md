@@ -72,7 +72,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
    "/Applications/Agent Screen.app/Contents/MacOS/AgentScreen" mcp install
    ```
 
-   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. It also writes the Agent Screen skill (step 4) to `~/.claude/skills/agent-screen` and `~/.codex/skills/agent-screen`. Each update of the app brings those copies up to its version. Running it again is safe. For any other MCP client, such as Gemini CLI or OpenCode, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`.
+   This registers the MCP server with Claude Code for all projects and adds it to `~/.codex/config.toml`. It also writes the Agent Screen skill (step 4) to `~/.claude/skills/agent-screen` and `~/.codex/skills/agent-screen`. Each update of the app brings those copies up to its version. Running it again is safe. For any other MCP client, such as Cursor, Gemini CLI, OpenCode, Claude Desktop, VS Code or Zed, add a stdio server with the command `/Applications/Agent Screen.app/Contents/MacOS/AgentScreen` and the argument `mcp`. [docs/clients.md](docs/clients.md) has the config for each client, and how Agent Screen keeps each client's sessions apart.
 
 4. The Agent Screen skill makes agents use their display without being told. Step 3 installs it for Claude Code and Codex. Claude Code loads MCP tools only when it searches for them, so without the skill it often opens apps with `open -a` or AppleScript on your screen instead. The skill tells it when a task needs a screen: opening, operating or testing a Mac app or a web page, clicking or filling in something on screen, a screenshot of an app, a login to a site.
 
@@ -92,7 +92,7 @@ Built-in computer use drives your real mouse and keyboard, so you stop working w
 
    Or copy [skills/agent-screen](skills/agent-screen) into the agent's skills folder, such as `~/.agents/skills`. For an agent without skills, paste [docs/agents/AGENTS.md](docs/agents/AGENTS.md) into the project's `AGENTS.md` or `CLAUDE.md`. The skill is that file with a description on top.
 
-Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent. If Agent Screen isn't running, the first tool call starts it.
+Then ask your agent something like "Use Agent Screen to open Calculator on your own display and work out 12 × 34." Start a new session after connecting, so the agent loads the tools. Once it has, Settings and the menu name the agent. If Agent Screen isn't running, it starts when the agent's client connects.
 
 ## Agent tools
 
@@ -107,7 +107,7 @@ Then ask your agent something like "Use Agent Screen to open Calculator on your 
 | `set_disposition`                            | Keep or close a window when the user closes the display.                                                                                                                                   |
 | `wait_for_control`, `request_help`           | Wait out a Takeover, or ask the user to step in; the answer says whether they took over, let you continue, gave a window, or replied.                                                      |
 | `input_queue` | Inspect, wait for, withdraw or finish this session's approval requests in the shared queue. Only `completed` means a queued drag ran; approval alone is not completion. |
-| `get_diagnostics` | Collect this MCP process's compiled build identity and the responding app's identity, without starting the app or creating a display. |
+| `get_diagnostics` | Collect the compiled build identity of the app and of this session's `AgentScreen mcp`, without starting the app or creating a display. |
 | `request_control`                            | During a Takeover, ask the user to hand the display back. With `user_instruction`, relay their explicit chat instruction to hand it back, or with `control: "user"` to pause. |
 | `window_access` | Grant, inspect or revoke session window authorization, or return handed-over windows. Grant and return require the user's explicit `user_instruction`. |
 
@@ -163,7 +163,8 @@ For a bug, collect diagnostics in the failing session and follow [Reporting bugs
 
 - **The agent has no Agent Screen tools.** Start a new session after connecting; a running session doesn't load new MCP servers. `claude mcp get agent-screen` shows whether Claude Code has it.
 - **Tools fail with a permissions error after an update.** macOS ties the grants to the app's signature. The menu, which opens when you right-click the menu bar icon, then shows **Finish Setup: Allow …**. Choose it, and in each list it opens switch Agent Screen off and on.
-- **Tools say Agent Screen isn't running.** The first tool call starts it. If that fails, open `/Applications/Agent Screen.app` once yourself.
+- **Tools say Agent Screen isn't running.** The agent's client starts it when it connects, and the next tool call starts it again if it quit. If that fails, open `/Applications/Agent Screen.app` once yourself.
+- **An agent's tools act like an older version after an update.** The tools run in the app, so every session uses the updated app from its next call. A session started before version 0.1.39 keeps the MCP process it started with, which still works, until you restart its MCP connection (`/mcp` in Claude Code) or start a new session.
 - **The agent says you closed its display.** Closing a display from Peek or the Viewer tells its agent to stop and ask you before it makes another. Tell it to go on, and it creates a new one.
 - **An agent's typing fails and names a window of yours.** When an app you use also has a window on an Agent Display, keys sent to the app reach whichever of its windows has focus. Agent Screen first gives the agent's window focus, with the app still in the background. If it can't, it sends no keys and tells the agent which window has focus, so the agent can set the field's text through accessibility instead.
 - **The Mac stutters with many agent displays.** On every display change macOS reads its color records of every display ever connected, once per display online, and retries every 5 s until a read finishes within 50 ms. Turn on **Smooth Display Changes** in Agent Screen's Settings (or run `AgentScreen colorsync setup`). It asks for your administrator password once and installs a small tool that Agent Screen runs as root, through `sudo`, after displays change and every 30 minutes. The tool removes the records of displays that aren't connected and hold only what macOS made for them, and keeps display names in English and your languages, which makes the reads about five times faster. Profiles you chose for a display stay, and macOS makes a record again when you plug that display in. `AgentScreen colorsync remove` takes the tool away. Without it, Agent Screen refuses a new display when the reads would take too long.

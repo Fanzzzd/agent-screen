@@ -6,11 +6,15 @@
 //! ← {"id": 1, "error": {"code": "not_found", "message": "..."}}
 //! ```
 //!
-//! The connection opens on the first call and stays open for the life of this
-//! process. The app treats its closing as the end of the Agent Session, so the
-//! session's display stops taking input when the MCP server exits.
+//! The connection opens on the first call and stays open for the life of the
+//! MCP server. The app treats its closing as the end of the Agent Session, so
+//! the session's display stops taking input when the MCP server goes away.
+//!
+//! The MCP server runs in the app and reaches it through an in-process
+//! stream; a v1 process (ADR 0021) reaches it through the control socket.
 
 use crate::endpoint::{self, Reader, Writer};
+use crate::ledger::Ledger;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,22 +60,57 @@ struct Connection {
     open: Arc<AtomicBool>,
 }
 
+/// How `Control` reaches the app.
+#[derive(Clone, Default)]
+pub enum AppLink {
+    /// The control socket, starting the app when it isn't running: a v1
+    /// MCP process.
+    #[default]
+    Socket,
+    /// The app's own connection handler, in the app's process: the MCP host.
+    /// Each call opens one connection.
+    InProcess(Arc<dyn Fn() -> (Reader, Writer) + Send + Sync>),
+}
+
+impl AppLink {
+    async fn connect(&self, start: bool) -> Result<(Reader, Writer), ControlError> {
+        match self {
+            AppLink::InProcess(open) => Ok(open()),
+            AppLink::Socket => match endpoint::connect().await {
+                Ok(ends) => Ok(ends),
+                // The app isn't running: start it, as the user would, and
+                // wait for its socket.
+                #[cfg(target_os = "macos")]
+                Err(first) if start => start_app(first).await,
+                #[cfg(not(target_os = "macos"))]
+                Err(error) if start => Err(ControlError::new(
+                    "unavailable",
+                    format!(
+                        "The Agent Screen app is not running ({error}). Ask the user to start it."
+                    ),
+                )),
+                Err(error) => Err(closed(&error.to_string())),
+            },
+        }
+    }
+}
+
+/// The control socket, starting the app when it isn't running.
+pub(crate) async fn connect_starting_app() -> Result<(Reader, Writer), ControlError> {
+    AppLink::Socket.connect(true).await
+}
+
 #[derive(Default)]
 pub struct Control {
+    link: AppLink,
     connection: Mutex<Option<Arc<Connection>>>,
     next_id: AtomicU64,
     /// Sent first on every connection, so an app that starts or restarts
     /// later still hears it.
     greeting: std::sync::Mutex<Option<(String, Value)>>,
-    /// Connections opened so far. The app ends its displays when it quits,
-    /// so one made on an earlier connection is gone.
-    connections: AtomicU64,
-    /// Displays this process made, by id and the connection each was made
-    /// on: the session each was made for, and the apps launch_app started
-    /// there. One process can serve several sessions (Codex names its
-    /// session per call), so each display keeps its session key, and an id
-    /// the app gives again after a restart is another display.
-    made: std::sync::Mutex<HashMap<(u64, u64), Made>>,
+    /// The displays sessions made here and the apps they started, for a
+    /// display that ended when the app quit.
+    ledger: Arc<Ledger>,
     /// The last element tree each window sent, by display, window and read scope, for
     /// act_on_element's changes and wait_for_change, and whether its read
     /// stopped at the element budget.
@@ -99,15 +138,19 @@ fn with_session(mut params: Value) -> Value {
     params
 }
 
-#[derive(Default)]
-struct Made {
-    session: String,
-    started: Vec<i64>,
-    /// Its apps were handed to a later display.
-    adopted: bool,
-}
-
 impl Control {
+    pub fn new(link: AppLink, ledger: Arc<Ledger>) -> Self {
+        Self {
+            link,
+            ledger,
+            ..Self::default()
+        }
+    }
+
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
     /// Keep a window's latest tree, and whether its read was truncated;
     /// the tree before it, if any.
     pub fn swap_tree(
@@ -138,67 +181,6 @@ impl Control {
             .unwrap()
             .get(&(display, window, scope))
             .cloned()
-    }
-
-    /// Note a display session `session` made, or reused when `reused`, on
-    /// the current connection. A display made anew, or one the app handed
-    /// to another session under an old id, starts with no apps: its old
-    /// apps were another display's, maybe another session's (ADR 0016).
-    pub fn made_display(&self, id: u64, session: &str, reused: bool) {
-        let connection = self.connections.load(Ordering::Relaxed);
-        let mut made = self.made.lock().unwrap();
-        let entry = made.entry((id, connection)).or_default();
-        if !reused || entry.session != session {
-            *entry = Made {
-                session: session.into(),
-                ..Made::default()
-            };
-        }
-    }
-
-    /// Note an app launch_app started for a display.
-    pub fn started_app(&self, display: u64, pid: i64) {
-        let connection = self.connections.load(Ordering::Relaxed);
-        if let Some(made) = self.made.lock().unwrap().get_mut(&(display, connection)) {
-            made.started.push(pid);
-        }
-    }
-
-    /// Whether a display this process made ended when the app quit: made
-    /// on an earlier connection, and not made again under its id since.
-    pub fn ended_with_app(&self, id: u64) -> bool {
-        let connection = self.connections.load(Ordering::Relaxed);
-        let made = self.made.lock().unwrap();
-        !made.contains_key(&(id, connection))
-            && made.keys().any(|&(d, c)| d == id && c < connection)
-    }
-
-    /// The apps session `session` started on displays that ended when the
-    /// app quit, by the display they were on, taken once, for its next
-    /// create_display to adopt. Never another session's: an app one agent
-    /// launched once went onto another agent's display (ADR 0016).
-    pub fn orphans(&self, session: &str) -> Option<Vec<(u64, Vec<i64>)>> {
-        let connection = self.connections.load(Ordering::Relaxed);
-        let mut made = self.made.lock().unwrap();
-        let mut any = false;
-        let mut groups = Vec::new();
-        let mut keys: Vec<(u64, u64)> = made
-            .keys()
-            .filter(|&&(_, c)| c < connection)
-            .copied()
-            .collect();
-        keys.sort();
-        for key in keys {
-            let Some(m) = made.get_mut(&key) else {
-                continue;
-            };
-            if m.session == session && !m.adopted {
-                m.adopted = true;
-                any = true;
-                groups.push((key.0, std::mem::take(&mut m.started)));
-            }
-        }
-        any.then_some(groups)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Object, ControlError> {
@@ -291,40 +273,20 @@ impl Control {
     }
 
     async fn open_running(&self) -> Option<Arc<Connection>> {
-        let mut slot = self.connection.lock().await;
-        if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
-            return Some(connection.clone());
-        }
-        let (reader, writer) = endpoint::connect().await.ok()?;
-        self.connections.fetch_add(1, Ordering::Relaxed);
-        let connection = attach(reader, writer);
-        self.send_greeting(&connection).await;
-        *slot = Some(connection.clone());
-        Some(connection)
+        self.open_with(false).await.ok()
     }
 
     async fn open(&self) -> Result<Arc<Connection>, ControlError> {
+        self.open_with(true).await
+    }
+
+    async fn open_with(&self, start: bool) -> Result<Arc<Connection>, ControlError> {
         let mut slot = self.connection.lock().await;
         if let Some(connection) = slot.as_ref().filter(|c| c.open.load(Ordering::Relaxed)) {
             return Ok(connection.clone());
         }
-        let (reader, writer) = match endpoint::connect().await {
-            Ok(ends) => ends,
-            // The app isn't running: start it, as the user would, and wait
-            // for its socket.
-            #[cfg(target_os = "macos")]
-            Err(first) => start_app(first).await?,
-            #[cfg(not(target_os = "macos"))]
-            Err(error) => {
-                return Err(ControlError::new(
-                    "unavailable",
-                    format!(
-                        "The Agent Screen app is not running ({error}). Ask the user to start it."
-                    ),
-                ));
-            }
-        };
-        self.connections.fetch_add(1, Ordering::Relaxed);
+        let (reader, writer) = self.link.connect(start).await?;
+        self.ledger.connected();
         let connection = attach(reader, writer);
         self.send_greeting(&connection).await;
         *slot = Some(connection.clone());
@@ -437,12 +399,6 @@ fn closed(detail: &str) -> ControlError {
 mod tests {
     use super::*;
 
-    /// What a restart does to the counter: the next call opens a new
-    /// connection.
-    fn reconnect(control: &Control) {
-        control.connections.fetch_add(1, Ordering::Relaxed);
-    }
-
     #[test]
     fn change_baselines_are_separate_for_roots_and_traversal_depths() {
         let control = Control::default();
@@ -469,79 +425,6 @@ mod tests {
             control.swap_tree(7, 8, full, "new full".into(), false),
             Some("full".into())
         );
-    }
-
-    #[test]
-    fn a_display_ends_with_the_connection_it_was_made_on() {
-        let control = Control::default();
-        reconnect(&control);
-        control.made_display(7, "a", false);
-        assert!(!control.ended_with_app(7));
-        reconnect(&control);
-        assert!(control.ended_with_app(7));
-        // Not this session's: the app's own answer stands.
-        assert!(!control.ended_with_app(8));
-        // The restarted app gave the id to a new display.
-        control.made_display(7, "a", false);
-        assert!(!control.ended_with_app(7));
-    }
-
-    #[test]
-    fn the_next_display_adopts_the_apps_started_on_ended_ones_once() {
-        let control = Control::default();
-        reconnect(&control);
-        assert_eq!(control.orphans("a"), None);
-        control.made_display(7, "a", false);
-        control.started_app(7, 100);
-        control.started_app(7, 101);
-        // An app for a display this process didn't make isn't kept.
-        control.started_app(9, 102);
-        assert_eq!(control.orphans("a"), None);
-        reconnect(&control);
-        assert_eq!(control.orphans("a"), Some(vec![(7, vec![100, 101])]));
-        assert_eq!(control.orphans("a"), None);
-        // A display with no apps still says the app quit.
-        control.made_display(8, "a", false);
-        reconnect(&control);
-        assert_eq!(control.orphans("a"), Some(vec![(8, vec![])]));
-    }
-
-    #[test]
-    fn a_session_adopts_only_its_own_apps_by_the_display_they_were_on() {
-        let control = Control::default();
-        reconnect(&control);
-        control.made_display(7, "a", false);
-        control.started_app(7, 100);
-        control.made_display(8, "a", false);
-        control.started_app(8, 101);
-        control.made_display(9, "b", false);
-        control.started_app(9, 200);
-        reconnect(&control);
-        // The app gave id 9 to session a's new display: b's apps stay b's.
-        control.made_display(9, "a", false);
-        assert_eq!(
-            control.orphans("a"),
-            Some(vec![(7, vec![100]), (8, vec![101])])
-        );
-        assert_eq!(control.orphans("b"), Some(vec![(9, vec![200])]));
-        assert_eq!(control.orphans("c"), None);
-    }
-
-    #[test]
-    fn a_display_id_made_again_forgets_the_apps_of_the_display_before() {
-        let control = Control::default();
-        reconnect(&control);
-        control.made_display(7, "a", false);
-        control.started_app(7, 100);
-        // Reused by its own session: the apps stay.
-        control.made_display(7, "a", true);
-        control.started_app(7, 101);
-        // Session a ended it; the app handed the spare back to b as 7.
-        control.made_display(7, "b", false);
-        control.started_app(7, 200);
-        reconnect(&control);
-        assert_eq!(control.orphans("a"), None);
-        assert_eq!(control.orphans("b"), Some(vec![(7, vec![200])]));
     }
 
     #[tokio::test]

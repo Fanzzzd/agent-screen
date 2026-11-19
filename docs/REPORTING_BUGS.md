@@ -34,20 +34,20 @@ For a shared browser's refused keys, record whether the error reports a differen
 
 ## Read the identity correctly
 
-- **`collector: "mcp"`** identifies the MCP process serving this tool call. This is the report to collect from the failing session.
+- **`collector: "mcp"`** identifies the MCP server serving this tool call. This is the report to collect from the failing session. Since the pipe (ADR 0021) the MCP server runs in the app, so `local` is the app's build, and **`pipe`** gives the build of the session's `AgentScreen mcp` with `control_protocol_version: 2`. `pipe.status: "none"` means an MCP process from before the pipe serves the session itself, and `local` is that process's build.
 - **`collector: "cli"`** identifies only the CLI process you just invoked. Its `mcp_status` is `not_collected`. Starting a new CLI cannot prove what an older MCP has loaded.
 - **`app.identity`** comes from compiled metadata in the app that answered the read-only request. A legacy app that rejects the method has no verified identity in the report.
 - **`package_version`** is the Cargo package version compiled into that process. `git_revision` is its full source revision, when available. `dirty: true` means the build had local changes. Missing git metadata is `null`, including source archives. The report records the Cargo profile and target too. It contains no build timestamp or executable-file checksum.
 - **`bundle_version`** is `null`, with `bundle_version_status: "not_collected"`. A bundle's on-disk Info.plist can change after the process starts. It cannot reliably identify the loaded process. Historical bundle versions may also differ from Cargo package versions.
 - **`comparison`** compares the collector with the responding app. `different` means their known metadata differs. `unknown` includes missing metadata and dirty builds whose equality cannot be proven. `same_source_metadata` means complete clean source metadata agrees. It does not assert byte-identical executables or prove that a fix works.
 
-`report_schema_version` versions this report. `control_protocol_version` versions the additive diagnostics control contract, not the negotiated MCP protocol. OS name and process architecture are included. Add the macOS product version yourself. Instances are `default`, `dev`, `e2e`, or `custom_redacted`; custom names stay private.
+`report_schema_version` versions this report. `control_protocol_version` versions the control socket protocol, not the negotiated MCP protocol: 1 for builds before the pipe, 2 with it. OS name and process architecture are included. Add the macOS product version yourself. Instances are `default`, `dev`, `e2e`, or `custom_redacted`; custom names stay private.
 
 The checkout's current Git HEAD describes source on disk. It does not identify a running app or MCP. Likewise, a hash of an executable at `current_exe` describes the file now at that path. An MCP process may still have an older, replaced executable mapped in memory. Diagnostics uses that process's compiled constants and does not label an on-disk hash as a loaded MCP hash.
 
 ## Stale clients and unverified fixes
 
-Updating or replacing Agent Screen does not update an MCP process that is already running. Collect `get_diagnostics` in the failing session before restarting it. If it lacks the tool, record that fact and the identity as unknown. A new CLI report cannot fill that gap.
+Since the pipe, updating Agent Screen updates the tools of every session at its next call, because they run in the app. An MCP process from an older build does not update: it keeps running its own tools until its client restarts it. Collect `get_diagnostics` in the failing session before restarting it. If it lacks the tool, record that fact and the identity as unknown. A new CLI report cannot fill that gap.
 
 When the session's work is safe to end, use your MCP client's controls to restart that connection or start a new client session. Reconnect to the intended Agent Screen registration, then collect `get_diagnostics` again. Ending a session can leave its display waiting for review. Diagnostics never restarts the client for you and never reconnects or stops unrelated sessions.
 

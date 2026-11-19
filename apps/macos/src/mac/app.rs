@@ -85,7 +85,7 @@ fn process_ids() -> Vec<i32> {
 }
 
 /// The executable a process runs.
-fn process_path(pid: i32) -> Option<PathBuf> {
+pub fn process_path(pid: i32) -> Option<PathBuf> {
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length =
         unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
@@ -110,6 +110,70 @@ pub fn parent_pid(pid: i32) -> Option<i32> {
         )
     };
     (read == size).then_some(info.pbi_ppid as i32)
+}
+
+/// An audit token's eight words; word 7 is the pid version, which macOS
+/// changes whenever it gives the pid to a new process.
+type AuditToken = [u32; 8];
+
+unsafe extern "C" {
+    fn task_name_for_pid(
+        target: libc::mach_port_t,
+        pid: libc::c_int,
+        name: *mut libc::mach_port_t,
+    ) -> libc::kern_return_t;
+    fn mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
+}
+
+/// `task_info` flavor for a task's audit token.
+const TASK_AUDIT_TOKEN: libc::task_flavor_t = 15;
+
+/// The pid version of the process that has `pid` now, one of this user's.
+// libc marks its mach calls deprecated in favour of the mach2 crate.
+#[allow(deprecated)]
+pub fn pid_version(pid: i32) -> Option<u32> {
+    let mut name: libc::mach_port_t = 0;
+    // SAFETY: task_name_for_pid writes one port name; it is released below.
+    let found = unsafe { task_name_for_pid(libc::mach_task_self(), pid, &mut name) };
+    if found != libc::KERN_SUCCESS {
+        return None;
+    }
+    let mut token: AuditToken = [0; 8];
+    let mut count = 8 as libc::mach_msg_type_number_t;
+    // SAFETY: task_info writes at most `count` words into `token`.
+    let read = unsafe {
+        libc::task_info(
+            name,
+            TASK_AUDIT_TOKEN,
+            token.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    unsafe {
+        mach_port_deallocate(libc::mach_task_self(), name);
+    }
+    (read == libc::KERN_SUCCESS && token[5] as i32 == pid).then_some(token[7])
+}
+
+/// The pid version of the process that opened Unix socket `fd`'s other
+/// end, from its audit token when it connected.
+pub fn peer_pid_version(fd: std::os::fd::RawFd) -> Option<u32> {
+    let mut token: AuditToken = [0; 8];
+    let mut size = std::mem::size_of::<AuditToken>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `size` bytes into `token`.
+    let read = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            token.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    (read == 0 && size as usize == std::mem::size_of::<AuditToken>()).then_some(token[7])
 }
 
 /// A process's arguments, its own path first.
