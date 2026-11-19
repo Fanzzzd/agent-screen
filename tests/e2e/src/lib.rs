@@ -787,9 +787,12 @@ pub fn kill_ours(path: impl AsRef<Path>) {
         .status();
 }
 
-/// The executable of the app `name`.app this checkout builds in `out()`.
+/// The executable of the app `name`.app this checkout builds in `out()`,
+/// by its real path, which process listings show: `target` may link to a
+/// shared target directory.
 pub fn our_binary(name: &str) -> PathBuf {
-    out().join(format!("{name}.app/Contents/MacOS/{name}"))
+    let path = out().join(format!("{name}.app/Contents/MacOS/{name}"));
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// Quit the browser running on the throwaway profile `dir`, and no other
