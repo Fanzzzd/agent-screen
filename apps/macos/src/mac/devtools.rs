@@ -721,6 +721,12 @@ impl Channel {
             .map(|_| ())
     }
 
+    /// A command for a test, in the page `target` when given.
+    pub fn raw(&self, method: &str, params: Value, target: Option<&str>) -> Answer {
+        let session = target.map(|t| self.session(t)).transpose()?;
+        self.call(method, params, session.as_deref())
+    }
+
     /// How many page targets the browser has: its tabs, across its windows.
     pub fn page_count(&self) -> Option<usize> {
         let targets = self.call("Target.getTargets", json!({}), None).ok()?;

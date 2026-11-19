@@ -2299,6 +2299,23 @@ async fn handle_one(
             let decided = off(cx, move || devtools::on_agents_activated(pid)).await;
             Ok(json!({ "agents": agents, "decision": format!("{decided:?}") }))
         }
+        // Test hook: a DevTools command through Agent Screen's pipe to
+        // `pid`, in the page `target` when given, for verifying a browser
+        // (ADR 0022).
+        "debugDevtools" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let method = p.string("method").unwrap_or_default();
+            let params = p.0.get("params").cloned().unwrap_or(json!({}));
+            let target = p.string("target");
+            off(cx, move || {
+                let channel = devtools::channel(pid, Duration::from_secs(2))
+                    .ok_or_else(|| format!("pid {pid} has no pipe"))?;
+                channel.raw(&method, params, target.as_deref())
+            })
+            .await
+            .map(|result| json!({ "result": result }))
+            .map_err(ControlError::failed)
+        }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
         "debugUserKey" if debug_methods() => {
@@ -5124,6 +5141,13 @@ fn open_target(text: &str) -> Result<String, ControlError> {
 /// Test builds may turn off the fallback for a browser that refuses the
 /// agents' instance (ADR 0022), so a test beside the user's own browser
 /// fails there, records nothing and never opens a window in theirs.
+/// Test builds may treat the browser `bundle_id` as verified, to verify it
+/// on a display (ADR 0022).
+fn verifying_for_tests(bundle_id: &str) -> bool {
+    cfg!(debug_assertions)
+        && std::env::var("AGENTSCREEN_VERIFY_BROWSER").as_deref() == Ok(bundle_id)
+}
+
 fn no_shared_fallback_for_tests() -> bool {
     cfg!(debug_assertions) && std::env::var("AGENTSCREEN_NO_SHARED_FALLBACK").as_deref() == Ok("1")
 }
@@ -5433,8 +5457,9 @@ fn browser_plan(
     (
         plan(
             true,
-            app::bundle_id_at(path)
-                .is_some_and(|id| agent_screen_model::agent_browser::verified(&id)),
+            app::bundle_id_at(path).is_some_and(|id| {
+                agent_screen_model::agent_browser::verified(&id) || verifying_for_tests(&id)
+            }),
             arguments,
             &running,
             &piped,
