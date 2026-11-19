@@ -14,7 +14,8 @@
 //!
 //! Chrome by default, which needs Chrome not running: the script starts a
 //! stand-in for the user's Chrome on a throwaway profile, on the display,
-//! first. E2E_BROWSER=Dia with E2E_DIA=1 checks the same beside your
+//! first. Only a browser on `agent_browser::VERIFIED` runs; Dia isn't yet
+//! and skips. Once verified, E2E_BROWSER=Dia with E2E_DIA=1 checks the same beside your
 //! running Dia, whose windows it never touches, and sends it no link: the
 //! first launch passes no URL, the page opens through the agents' instance
 //! after, and the test app runs with the shared fallback off, so a refusal
@@ -93,6 +94,14 @@ fn main() -> ExitCode {
     }
     let b = browser();
     let stand_in = b.app != "Dia";
+    // Only a browser verified for it gets the agents' instance (ADR 0022);
+    // Dia isn't yet, and would open in your own process.
+    if !agent_screen_model::agent_browser::verified(b.bundle_id) {
+        skip(&format!(
+            "{} isn't on agent_browser::VERIFIED: it keeps the shared behavior, which this script doesn't cover",
+            b.app
+        ));
+    }
     if !stand_in && std::env::var("E2E_DIA").as_deref() != Ok("1") {
         skip("E2E_DIA=1 isn't set: the Dia check starts a second Dia beside yours");
     }

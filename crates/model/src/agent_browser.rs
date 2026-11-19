@@ -139,11 +139,30 @@ pub enum Plan {
     Shared,
 }
 
+/// The browsers whose agents' instance has been verified on a display
+/// (ADR 0022): it starts beside the user's without taking the front, its
+/// windows come through the pipe onto the display, posted input reaches its
+/// pages, and it quits with nothing on the user's screen. Google Chrome
+/// passed `agentbrowser` on 2026-11-19. Dia did not yet: its windows made
+/// through the pipe never show, and it moves a window it closes to the
+/// middle of the main screen. Any other Chromium browser keeps the
+/// behavior from before ADR 0022 until it is verified.
+pub const VERIFIED: [&str; 1] = ["com.google.Chrome"];
+
+/// Whether the browser `bundle_id` gets the agents' own instance.
+pub fn verified(bundle_id: &str) -> bool {
+    VERIFIED.contains(&bundle_id)
+}
+
+/// `verified`: the browser is on [`VERIFIED`]. One that isn't opens the
+/// agents' windows in the user's process when the user runs it, as before
+/// ADR 0022, and starts as asked when no one does.
 /// `running`: the browser's processes, each with its command line.
 /// `piped`: the pids Agent Screen holds a DevTools pipe to.
 /// `refuses`: the browser is known to refuse a second instance.
 pub fn plan(
     chromium_browser: bool,
+    verified: bool,
     arguments: &[String],
     running: &[(i32, Vec<String>)],
     piped: &[i32],
@@ -152,6 +171,13 @@ pub fn plan(
 ) -> Plan {
     if !chromium_browser || names_profile(arguments) {
         return Plan::AsAsked;
+    }
+    if !verified {
+        return if running.is_empty() {
+            Plan::AsAsked
+        } else {
+            Plan::Shared
+        };
     }
     if let Some((pid, _)) = running.iter().find(|(_, argv)| is_agents(argv, profile)) {
         return if piped.contains(pid) {
@@ -250,7 +276,7 @@ mod tests {
     #[test]
     fn a_running_user_browser_gets_a_separate_agents_instance() {
         let user = (100, s(&["/Applications/Dia.app/Contents/MacOS/Dia"]));
-        let plan = plan(true, &[], &[user], &[], &profile(), false);
+        let plan = plan(true, true, &[], &[user], &[], &profile(), false);
         let Plan::Start(switches) = plan else {
             panic!("{plan:?}")
         };
@@ -270,6 +296,7 @@ mod tests {
         assert_eq!(
             plan(
                 true,
+                true,
                 &[],
                 &[user.clone(), agents.clone()],
                 &[200],
@@ -280,7 +307,7 @@ mod tests {
         );
         // Left from an earlier run of Agent Screen, with no pipe to it.
         assert_eq!(
-            plan(true, &[], &[user, agents], &[], &profile(), false),
+            plan(true, true, &[], &[user, agents], &[], &profile(), false),
             Plan::Replace(200)
         );
     }
@@ -290,7 +317,7 @@ mod tests {
         let mut argv = s(&["Dia"]);
         argv.extend(switches(&profile()));
         assert_eq!(
-            plan(true, &[], &[(200, argv)], &[200], &profile(), false),
+            plan(true, true, &[], &[(200, argv)], &[200], &profile(), false),
             Plan::Reuse(200)
         );
     }
@@ -304,6 +331,7 @@ mod tests {
         ] {
             assert_eq!(
                 plan(
+                    true,
                     true,
                     &named,
                     std::slice::from_ref(&user),
@@ -319,11 +347,19 @@ mod tests {
     #[test]
     fn a_browser_no_one_runs_starts_on_the_agents_profile() {
         assert_eq!(
-            plan(true, &[], &[], &[], &profile(), false),
+            plan(true, true, &[], &[], &[], &profile(), false),
             Plan::Start(switches(&profile()))
         );
         assert_eq!(
-            plan(false, &[], &[(100, s(&["Safari"]))], &[], &profile(), false),
+            plan(
+                false,
+                true,
+                &[],
+                &[(100, s(&["Safari"]))],
+                &[],
+                &profile(),
+                false
+            ),
             Plan::AsAsked
         );
     }
@@ -340,6 +376,47 @@ mod tests {
         assert!(!starts_users_browser(true, false));
         // The user clicked the agents' window, in the Viewer: theirs to use.
         assert!(!starts_users_browser(false, true));
+    }
+
+    #[test]
+    fn only_a_browser_verified_on_a_display_gets_the_agents_instance() {
+        assert!(verified("com.google.Chrome"));
+        assert!(!verified("company.thebrowser.dia"));
+        assert!(!verified("com.brave.Browser"));
+        let user = (100, s(&["Dia"]));
+        let mut argv = s(&["Dia"]);
+        argv.extend(switches(&profile()));
+        // Dia, with the user's running: the user's process, shared.
+        assert_eq!(
+            plan(
+                true,
+                false,
+                &[],
+                std::slice::from_ref(&user),
+                &[],
+                &profile(),
+                false
+            ),
+            Plan::Shared
+        );
+        // Not even an agents' instance left from before is used.
+        assert_eq!(
+            plan(
+                true,
+                false,
+                &[],
+                &[user, (200, argv)],
+                &[200],
+                &profile(),
+                false
+            ),
+            Plan::Shared
+        );
+        // No one runs it: as asked.
+        assert_eq!(
+            plan(true, false, &[], &[], &[], &profile(), false),
+            Plan::AsAsked
+        );
     }
 
     #[test]
@@ -384,6 +461,7 @@ mod tests {
         assert_eq!(
             plan(
                 true,
+                true,
                 &[],
                 std::slice::from_ref(&user),
                 &[],
@@ -393,11 +471,14 @@ mod tests {
             Plan::Shared
         );
         // No one runs it: it starts as before, on its own profile.
-        assert_eq!(plan(true, &[], &[], &[], &profile(), true), Plan::AsAsked);
+        assert_eq!(
+            plan(true, true, &[], &[], &[], &profile(), true),
+            Plan::AsAsked
+        );
         // A profile the agent named still wins.
         let named = s(&["--user-data-dir=/tmp/p"]);
         assert_eq!(
-            plan(true, &named, &[user], &[], &profile(), true),
+            plan(true, true, &named, &[user], &[], &profile(), true),
             Plan::AsAsked
         );
     }

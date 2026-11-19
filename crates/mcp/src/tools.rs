@@ -476,7 +476,7 @@ pub fn definitions() -> Vec<Value> {
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
                 "the app starts with them, as a development build needs, and its windows go on the display.",
                 "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
-                "A Chromium browser, such as Chrome or Dia, starts as a separate instance for agents, whether or not the user runs it, on a profile of its own that keeps its sign-ins between sessions; later launches open their pages in it. Every agent session shares that profile and its sign-ins, and it has none of the user's. It never becomes the user's front app, and it has the pipe. It quits once no Agent Display holds its windows. A browser that allows only one instance opens in the user's own process instead, and the result has shared: true and a note.",
+                "Google Chrome starts as a separate instance for agents, whether or not the user runs it, on a profile of its own that keeps its sign-ins between sessions; later launches open their pages in it. Every agent session shares that profile and its sign-ins, and it has none of the user's. It never becomes the user's front app, and it has the pipe. It quits once no Agent Display holds its windows. Another Chromium browser the user runs, such as Dia, opens in the user's own process, and the result has shared: true and a note.",
                 "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance of a browser the user doesn't run.",
                 "A fresh profile has separate sign-ins; it does not reuse the user's existing login session. Ask before making a separate profile or signing in.",
             ],
@@ -2207,7 +2207,7 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
 /// do next. `wasRunning` says whether the app was already running.
 /// launch_app's note for a window in the user's own process of a browser
 /// that refuses a separate instance for agents (ADR 0022).
-const SHARED_BROWSER: &str = "This window opened in the user's own browser process: this browser allows only one instance, so it can't get a separate one for agents. While the user works in another window of this browser, your clicks and keys here go through accessibility only, which most web pages ignore, so your work in this window may stop until the user switches to another app. For long unattended web work, launch a browser that gets its own instance for agents, such as Google Chrome.";
+const SHARED_BROWSER: &str = "This window opened in the user's own browser process: Agent Screen runs a separate instance for agents only for browsers verified to work that way, such as Google Chrome. While the user works in another window of this browser, your clicks and keys here go through accessibility only, which most web pages ignore, so your work in this window may stop until the user switches to another app. For long unattended web work, launch Google Chrome.";
 
 fn launch_output(reply: &Value) -> Value {
     let mut out = launch_reason(reply);

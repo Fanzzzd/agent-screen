@@ -5334,7 +5334,16 @@ fn browser_plan(
         .collect();
     let refused = refusal(path, &profile).is_some_and(|(_, known)| known);
     (
-        plan(true, arguments, &running, &piped, &profile, refused),
+        plan(
+            true,
+            app::bundle_id_at(path)
+                .is_some_and(|id| agent_screen_model::agent_browser::verified(&id)),
+            arguments,
+            &running,
+            &piped,
+            &profile,
+            refused,
+        ),
         Some(profile),
     )
 }
@@ -5598,6 +5607,16 @@ async fn launch(
     };
     let asked = start;
     let mut shared = plan == Plan::Shared;
+    // Beside the user's own browser, a test never opens a window in it.
+    if shared && no_shared_fallback_for_tests() {
+        core.update(cx, |c, _| {
+            pause(c, false);
+            c.launching.remove(&path);
+        });
+        return Err(ControlError::failed(format!(
+            "{name} would open in the user's own process, and the shared fallback is off for this test"
+        )));
+    }
     let starting = matches!(plan, Plan::Start(_));
     let made_profile = profile.as_ref().is_some_and(|p| !p.exists());
     let start = match (plan, profile.clone()) {

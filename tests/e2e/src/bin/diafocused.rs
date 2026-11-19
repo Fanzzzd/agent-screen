@@ -94,6 +94,12 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let b = browser();
+    if !agent_screen_model::agent_browser::verified(b.bundle_id) {
+        skip(&format!(
+            "{} isn't on agent_browser::VERIFIED: it keeps the shared behavior (ADR 0022); run with E2E_BROWSER=\"Google Chrome\" E2E_CHROME=1",
+            b.app
+        ));
+    }
     if std::env::var(b.gate).as_deref() != Ok("1") {
         skip(&format!(
             "{} is your own browser: set {}=1 and keep a window of yours in front while it runs",
