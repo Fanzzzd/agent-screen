@@ -1487,6 +1487,15 @@ pub fn is_minimized(window: &AXUIElement) -> bool {
         .unwrap_or(false)
 }
 
+/// The windows Accessibility lists for `pid`, by id, and whether each is
+/// minimized. Blocking.
+pub fn windows_minimized(pid: i32) -> Vec<(u32, bool)> {
+    elements_attribute(&application(pid), "AXWindows")
+        .iter()
+        .filter_map(|w| window_id(w).map(|id| (id, is_minimized(w))))
+        .collect()
+}
+
 /// Minimize a window element, or bring it back from the Dock.
 pub fn set_minimized(window: &AXUIElement, minimized: bool) -> bool {
     set_attribute(window, "AXMinimized", CFBoolean::new(minimized))

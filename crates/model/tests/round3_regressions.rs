@@ -232,6 +232,7 @@ fn r3_recorded_owners_sink_syncs_automatically_on_return_handover_and_all_mutati
     let home = Home {
         frame: Rect::new(100.0, 100.0, 600.0, 400.0),
         workspace: None,
+        minimized: false,
     };
     d.claim_on(7, w, Origin::HandedOver, Some(home));
     assert_eq!(sink.read().unwrap().get(&91).copied(), Some(7));

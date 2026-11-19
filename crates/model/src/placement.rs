@@ -45,8 +45,8 @@ impl NamedApp {
 }
 
 /// Why a window that exists isn't on screen (#221). place_window brings a
-/// minimized window, or one of a hidden app, out onto the display itself
-/// when it may take the window; the user has to bring the others up.
+/// minimized window out onto the display itself when it may take the
+/// window; the user has to bring the others up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PutAway {
     /// Minimized to the Dock.
@@ -78,9 +78,11 @@ impl PutAway {
         }
     }
 
-    /// Whether place_window can bring it out without the user.
+    /// Whether place_window can bring it out without the user: only a
+    /// minimized window. Showing a hidden app would bring all its windows
+    /// back onto the user's screen (`bring_out`).
     pub fn comes_out(self) -> bool {
-        matches!(self, PutAway::Minimized | PutAway::Hidden)
+        matches!(self, PutAway::Minimized)
     }
 
     /// The more telling of two answers for an app's windows: one place_window
@@ -167,7 +169,7 @@ pub fn no_window_named(id: i64, sighting: &WindowSighting, holder_label: Option<
             "window {id} is minimized to the Dock, and place_window couldn't bring it out. Ask the user to click it in the Dock, then call place_window again"
         ),
         WindowSighting::OffScreen(PutAway::Hidden) => format!(
-            "window {id}'s app is hidden, and place_window couldn't show the window. Ask the user to show the app, then call place_window again"
+            "window {id}'s app is hidden, and showing it would bring all its windows back onto the user's screen. Ask the user to show the app, then call place_window again"
         ),
         WindowSighting::OffScreen(PutAway::Closed) => format!(
             "window {id} is closed: its app keeps it out of sight. Ask the user to open it, as a click on the app's Dock icon does for a chat app's main window, then call place_window again"
@@ -295,7 +297,7 @@ pub fn no_app_window_named(
             name,
             why: PutAway::Hidden,
         } => format!(
-            "{name} is hidden, and place_window couldn't show its window. Ask the user to show {name}, then call place_window again"
+            "{name} is hidden, and showing it would bring all its windows back onto the user's screen. Ask the user to show {name}, then call place_window again"
         ),
         AppSighting::PutAway {
             name,
@@ -479,7 +481,7 @@ mod tests {
         assert_eq!(PutAway::of(false, false, false, 0), Closed);
         assert_eq!(PutAway::of(false, false, true, 0), Closed);
         assert_eq!(PutAway::of(false, false, false, -1), Unknown);
-        assert!(Minimized.comes_out() && Hidden.comes_out());
+        assert!(Minimized.comes_out() && !Hidden.comes_out());
         assert!(!OtherSpace.comes_out() && !Closed.comes_out() && !Unknown.comes_out());
         assert!(Minimized.rank() < OtherSpace.rank() && OtherSpace.rank() < Closed.rank());
     }

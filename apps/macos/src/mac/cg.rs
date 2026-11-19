@@ -276,6 +276,11 @@ pub fn all_windows() -> Vec<WindowInfo> {
     )
 }
 
+/// Every window of `pid`, at any level and any size, on screen or not.
+pub fn windows_of(pid: i32) -> Vec<WindowInfo> {
+    window_list_where(CGWindowListOption::OptionAll, 0, |p, _, _| p == pid)
+}
+
 /// Windows that draw another app's panel out of process, as the file Open
 /// and Save panels do. The app owns an empty window in front; WindowServer
 /// sends input to this one, which it lists as off screen, at the same

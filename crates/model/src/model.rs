@@ -206,6 +206,8 @@ pub struct Home {
     pub frame: Rect,
     /// The AeroSpace workspace, when AeroSpace manages the window.
     pub workspace: Option<String>,
+    /// The user had it minimized to the Dock: it goes back there (#221).
+    pub minimized: bool,
 }
 
 /// What a take-back changed on a display, for [`Display::give_back_failed`]
@@ -2223,6 +2225,7 @@ mod tests {
         let home = Home {
             frame: Rect::new(10.0, 20.0, 300.0, 200.0),
             workspace: Some("2".into()),
+            minimized: false,
         };
         assert_eq!(
             d.hand_over(7, users(1), &Authority::Once, Some(home.clone()))
@@ -2302,6 +2305,7 @@ mod tests {
         let home = Home {
             frame: Rect::new(10.0, 20.0, 300.0, 200.0),
             workspace: Some("2".into()),
+            minimized: false,
         };
         assert!(
             d.hand_over(7, users(1), &Authority::Once, Some(home.clone()))
@@ -2461,6 +2465,7 @@ mod tests {
         let home = Home {
             frame: Rect::new(1.0, 2.0, 3.0, 4.0),
             workspace: None,
+            minimized: false,
         };
         let placed = WindowTarget {
             pid: 6,
@@ -2948,6 +2953,7 @@ mod tests {
         let home = Home {
             frame: Rect::new(1.0, 2.0, 300.0, 200.0),
             workspace: None,
+            minimized: false,
         };
         assert!(
             d.hand_over(7, users(1), &Authority::Once, Some(home.clone()))

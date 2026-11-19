@@ -41,8 +41,21 @@ final class Pin: NSTextField {
   override func accessibilitySubrole() -> NSAccessibility.Subrole? { .secureTextField }
 }
 
+/// A window that, once pinned, keeps its frame whatever asks to move it,
+/// as an app that refuses Accessibility's moves does.
+final class PinnedWindow: NSWindow {
+  var pinned = false
+  override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+    if !pinned { super.setFrame(frameRect, display: flag) }
+  }
+  override func setFrameOrigin(_ point: NSPoint) {
+    if !pinned { super.setFrameOrigin(point) }
+  }
+}
+
 final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
   var window: NSWindow!
+  var second: NSWindow?
   let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
   let usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
   let usr2 = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
@@ -58,8 +71,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
   func applicationDidFinishLaunching(_ note: Notification) {
     awake = ProcessInfo.processInfo.beginActivity(
       options: [.userInitiated, .latencyCritical], reason: "moves its focus on time for tests")
-    window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
-                      styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    window = PinnedWindow(contentRect: NSRect(x: 200, y: 200, width: 600, height: 300),
+                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.title = "Field"
     if ProcessInfo.processInfo.environment["FIELD_AWAY"] == "minimize" {
       window.styleMask.insert(.miniaturizable)
@@ -140,25 +153,43 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     // keeps a chat app (#221), and never shows on a screen. The app hides
     // before the window comes in; "minimize" then minimizes the window to
     // the Dock FIELD_AWAY_MS later (default 300) and shows the app again,
-    // without activating it. 1.5 s after that it writes "minimized
-    // hidden" (1 or 0 each) to $FIELD_OUT.away.
+    // without activating it. From 1.5 s after that it writes "minimized
+    // hidden" (1 or 0 each) to $FIELD_OUT.away, and the window's frame to
+    // $FIELD_OUT.awayframe, every 100 ms. FIELD_SECOND=1 adds a second
+    // window of 30 by 30 points at the status bar's level, outside every
+    // display, where nobody sees it. FIELD_PIN=1 pins the window's frame
+    // once it is minimized.
     let away = env["FIELD_AWAY"]
     if away == "minimize" || away == "hide" {
       NSApp.hide(nil)
     }
     window.makeKeyAndOrderFront(nil)
+    if env["FIELD_SECOND"] == "1" {
+      let second = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 30, height: 30),
+                            styleMask: [.borderless], backing: .buffered, defer: false)
+      second.level = .statusBar
+      second.isReleasedWhenClosed = false
+      second.orderFrontRegardless()
+      self.second = second
+    }
     Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.save() }
     let awayDelay = (Double(env["FIELD_AWAY_MS"] ?? "") ?? 300) / 1000
     if away == "minimize" {
       DispatchQueue.main.asyncAfter(deadline: .now() + awayDelay) { [unowned self] in
         self.window.miniaturize(nil)
+        if env["FIELD_PIN"] == "1" { (self.window as? PinnedWindow)?.pinned = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.unhideWithoutActivation() }
       }
     }
     if away == "minimize" || away == "hide", let out = env["FIELD_OUT"] {
       DispatchQueue.main.asyncAfter(deadline: .now() + awayDelay + 1.5) { [unowned self] in
-        let state = "\(self.window.isMiniaturized ? 1 : 0) \(NSApp.isHidden ? 1 : 0)"
-        try? state.write(toFile: out + ".away", atomically: true, encoding: .utf8)
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [unowned self] _ in
+          let state = "\(self.window.isMiniaturized ? 1 : 0) \(NSApp.isHidden ? 1 : 0)"
+          try? state.write(toFile: out + ".away", atomically: true, encoding: .utf8)
+          let f = self.window.frame
+          let frame = "\(Int(f.minX)) \(Int(f.minY)) \(Int(f.width)) \(Int(f.height))"
+          try? frame.write(toFile: out + ".awayframe", atomically: true, encoding: .utf8)
+        }.fire()
       }
     }
     // FIELD_REOPEN=ms: close the window after ms and open a new one, titled
