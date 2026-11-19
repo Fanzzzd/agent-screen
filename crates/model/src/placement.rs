@@ -44,6 +44,60 @@ impl NamedApp {
     }
 }
 
+/// Why a window that exists isn't on screen (#221). place_window brings a
+/// minimized window out onto the display itself when it may take the
+/// window; the user has to bring the others up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PutAway {
+    /// Minimized to the Dock.
+    Minimized,
+    /// Its app is hidden.
+    Hidden,
+    /// Its app keeps it out of sight, on no Space: a closed main window
+    /// that a click on the Dock icon brings back.
+    Closed,
+    /// On another macOS Space.
+    OtherSpace,
+    /// Closed or on another Space: macOS didn't say which.
+    Unknown,
+}
+
+impl PutAway {
+    /// What a window off screen is, from what Accessibility and the window
+    /// server say: whether Accessibility lists it with the app's windows,
+    /// whether it says the window is minimized and the app hidden, and how
+    /// many Spaces hold it, -1 when unknown. A window Accessibility doesn't
+    /// list can't be brought out, whatever else is true of it.
+    pub fn of(listed: bool, minimized: bool, app_hidden: bool, spaces: i32) -> PutAway {
+        match (listed, spaces) {
+            (true, _) if app_hidden => PutAway::Hidden,
+            (true, _) if minimized => PutAway::Minimized,
+            (_, 0) => PutAway::Closed,
+            (_, n) if n > 0 => PutAway::OtherSpace,
+            _ => PutAway::Unknown,
+        }
+    }
+
+    /// Whether place_window can bring it out without the user: only a
+    /// minimized window. Showing a hidden app would bring all its windows
+    /// back onto the user's screen (`bring_out`).
+    pub fn comes_out(self) -> bool {
+        matches!(self, PutAway::Minimized)
+    }
+
+    /// The more telling of two answers for an app's windows: one place_window
+    /// could bring out, then another Space, then a closed window.
+    pub fn rank(self) -> u8 {
+        match self {
+            PutAway::Minimized => 0,
+            PutAway::Hidden => 1,
+            PutAway::OtherSpace => 2,
+            PutAway::Closed => 3,
+            PutAway::Unknown => 4,
+        }
+    }
+}
+
 /// What became of a window an agent asked for by id that isn't one of its
 /// strays or a window of the user's on screen. Only a window on the user's
 /// screen is named: the agent may have guessed the id of a hidden window
@@ -52,9 +106,8 @@ impl NamedApp {
 pub enum WindowSighting {
     /// No window has that id.
     Gone,
-    /// It exists, but not on screen: minimized, hidden, closed to the
-    /// Dock, or on another macOS Space.
-    OffScreen,
+    /// It exists, but not on screen.
+    OffScreen(PutAway),
     /// On the user's screen, but a panel, dialog or menu rather than a
     /// document window.
     NotDocument { app: String },
@@ -112,8 +165,20 @@ pub fn no_window_named(id: i64, sighting: &WindowSighting, holder_label: Option<
         WindowSighting::Gone => format!(
             "no window has id {id}: it closed, or the id is from another list. Call list_windows with strays: true, or place_window with the app's name"
         ),
-        WindowSighting::OffScreen => format!(
-            "window {id} isn't on screen: it is minimized, hidden or on another macOS Space. Ask the user to bring it up, then call place_window again"
+        WindowSighting::OffScreen(PutAway::Minimized) => format!(
+            "window {id} is minimized to the Dock, and place_window couldn't bring it out. Ask the user to click it in the Dock, then call place_window again"
+        ),
+        WindowSighting::OffScreen(PutAway::Hidden) => format!(
+            "window {id}'s app is hidden, and showing it would bring all its windows back onto the user's screen. Ask the user to show the app, then call place_window again"
+        ),
+        WindowSighting::OffScreen(PutAway::Closed) => format!(
+            "window {id} is closed: its app keeps it out of sight. Ask the user to open it, as a click on the app's Dock icon does for a chat app's main window, then call place_window again"
+        ),
+        WindowSighting::OffScreen(PutAway::OtherSpace) => format!(
+            "window {id} is on another macOS Space, and Agent Screen doesn't switch the user's Space. Ask the user to move it to the Space they are on, then call place_window again"
+        ),
+        WindowSighting::OffScreen(PutAway::Unknown) => format!(
+            "window {id} isn't on screen: it is closed or on another macOS Space. Ask the user to bring it up, then call place_window again"
         ),
         WindowSighting::NotDocument { app } => format!(
             "window {id} ({app}) is a panel or dialog; place_window moves document windows. Place the {app} window it belongs to"
@@ -155,8 +220,11 @@ pub enum AppSighting {
     Unknown,
     /// Installed, not running.
     NotRunning { name: String },
-    /// Running, with no window on screen.
+    /// Running, with no window at all.
     NoWindow { name: String },
+    /// Running, with windows that exist but aren't on screen: the most
+    /// telling reason among them.
+    PutAway { name: String, why: PutAway },
     /// Its only windows on screen are panels and dialogs.
     OnlyPanels { name: String },
     /// Its document window is on this display already.
@@ -212,8 +280,36 @@ pub fn no_app_window_named(
         AppSighting::NotRunning { name } => format!(
             "{name} isn't running. Start it with launch_app, which opens its window on the display"
         ),
-        AppSighting::NoWindow { name } => format!(
-            "{name} is running, but none of its windows is on screen: they are closed, minimized, hidden or on another macOS Space. Ask the user to open or bring up its window, then call place_window again. An app whose only window was closed, as a chat app's main window, reopens it when the user clicks its Dock icon; launch_app opens no window in a running app whose menus have no New Window"
+        AppSighting::NoWindow { name }
+        | AppSighting::PutAway {
+            name,
+            why: PutAway::Closed,
+        } => format!(
+            "{name} is running, but its window is closed. Ask the user to open it, then call place_window again. An app whose only window was closed, as a chat app's main window, reopens it when the user clicks its Dock icon; launch_app opens no window in a running app whose menus have no New Window"
+        ),
+        AppSighting::PutAway {
+            name,
+            why: PutAway::Minimized,
+        } => format!(
+            "{name}'s window is minimized to the Dock, and place_window couldn't bring it out. Ask the user to click it in the Dock, then call place_window again"
+        ),
+        AppSighting::PutAway {
+            name,
+            why: PutAway::Hidden,
+        } => format!(
+            "{name} is hidden, and showing it would bring all its windows back onto the user's screen. Ask the user to show {name}, then call place_window again"
+        ),
+        AppSighting::PutAway {
+            name,
+            why: PutAway::OtherSpace,
+        } => format!(
+            "{name}'s windows are on another macOS Space, and Agent Screen doesn't switch the user's Space. Ask the user to move one to the Space they are on, then call place_window again"
+        ),
+        AppSighting::PutAway {
+            name,
+            why: PutAway::Unknown,
+        } => format!(
+            "{name} is running, but none of its windows is on screen: they are closed or on another macOS Space. Ask the user to open or bring up its window, then call place_window again. An app whose only window was closed, as a chat app's main window, reopens it when the user clicks its Dock icon; launch_app opens no window in a running app whose menus have no New Window"
         ),
         AppSighting::OnlyPanels { name } => format!(
             "{name}'s only windows on the user's screen are panels or dialogs; place_window moves document windows. Ask the user to open its main window"
@@ -374,6 +470,23 @@ mod tests {
     }
 
     #[test]
+    fn a_window_off_screen_is_named_for_why_it_is() {
+        use PutAway::*;
+        // Accessibility lists a minimized window, and a hidden app's.
+        assert_eq!(PutAway::of(true, true, false, 1), Minimized);
+        assert_eq!(PutAway::of(true, true, true, 1), Hidden);
+        assert_eq!(PutAway::of(true, false, true, -1), Hidden);
+        // It doesn't list one on another Space, or one the app ordered out.
+        assert_eq!(PutAway::of(false, false, false, 1), OtherSpace);
+        assert_eq!(PutAway::of(false, false, false, 0), Closed);
+        assert_eq!(PutAway::of(false, false, true, 0), Closed);
+        assert_eq!(PutAway::of(false, false, false, -1), Unknown);
+        assert!(Minimized.comes_out() && !Hidden.comes_out());
+        assert!(!OtherSpace.comes_out() && !Closed.comes_out() && !Unknown.comes_out());
+        assert!(Minimized.rank() < OtherSpace.rank() && OtherSpace.rank() < Closed.rank());
+    }
+
+    #[test]
     fn each_not_found_says_what_was_searched_or_where_the_window_is() {
         let unknown = no_app_window("WeWork", &AppSighting::Unknown);
         assert!(unknown.contains("\"WeWork\"") && unknown.contains("bundle id"));
@@ -386,6 +499,12 @@ mod tests {
         assert!(closed.starts_with("企业微信 is running"));
         // #162: how a closed main window comes back.
         assert!(closed.contains("Dock icon") && closed.contains("launch_app"));
+        let away = |why| no_app_window("企业微信", &AppSighting::PutAway { name: name(), why });
+        assert_eq!(away(PutAway::Closed), closed);
+        assert!(away(PutAway::Minimized).contains("minimized to the Dock"));
+        assert!(away(PutAway::Hidden).contains("is hidden"));
+        assert!(away(PutAway::OtherSpace).contains("another macOS Space"));
+        assert!(!away(PutAway::OtherSpace).contains("minimized"));
         let panels = no_app_window("企业微信", &AppSighting::OnlyPanels { name: name() });
         assert!(panels.contains("panels or dialogs") && !panels.contains("none of its windows"));
         assert!(
@@ -397,10 +516,12 @@ mod tests {
                 .contains("launch_app")
         );
         assert!(no_window(7, &WindowSighting::Gone).starts_with("no window has id 7"));
-        assert_eq!(
-            no_window(7, &WindowSighting::OffScreen),
-            "window 7 isn't on screen: it is minimized, hidden or on another macOS Space. Ask the user to bring it up, then call place_window again"
+        assert!(no_window(7, &WindowSighting::OffScreen(PutAway::Minimized)).contains("Dock"));
+        assert!(
+            no_window(7, &WindowSighting::OffScreen(PutAway::OtherSpace))
+                .contains("another macOS Space")
         );
+        assert!(no_window(7, &WindowSighting::OffScreen(PutAway::Closed)).contains("is closed"));
         let other = no_window(7, &WindowSighting::OnAgentDisplay(Holder::OtherSession));
         assert!(other.starts_with("window 7 is on another Agent Display"));
         assert!(

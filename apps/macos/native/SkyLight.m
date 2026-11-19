@@ -170,3 +170,21 @@ bool SSMakeSelfFront(CGWindowID windowID) {
     // 0x200: user generated.
     return setFront(&own, windowID, 0x200) == 0;
 }
+
+// How many Spaces hold `windowID`, -1 if SkyLight can't say. A window the
+// app ordered out, as a closed main window it keeps, is on none; a window
+// on another Space is on one the user isn't looking at.
+int SSWindowSpaceCount(CGWindowID windowID) {
+    SSResolve();
+    typedef CFArrayRef (*CopySpacesFn)(uint32_t, int32_t, CFArrayRef);
+    CopySpacesFn copySpaces = (CopySpacesFn)dlsym(RTLD_DEFAULT, "SLSCopySpacesForWindows");
+    if (copySpaces == NULL || SS.mainConnectionID == NULL) return -1;
+    NSArray *windows = @[@(windowID)];
+    // 0x7: the current Spaces, the others, and the user's.
+    CFArrayRef spaces = copySpaces(SS.mainConnectionID(), 0x7, (__bridge CFArrayRef)windows);
+    if (spaces == NULL) return -1;
+    int count = (int)CFArrayGetCount(spaces);
+    CFRelease(spaces);
+    return count;
+}
+

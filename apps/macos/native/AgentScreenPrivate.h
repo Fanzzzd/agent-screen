@@ -70,4 +70,7 @@ int SSFrontPid(void);
 /// _AXUIElementGetWindow: the CGWindowID behind an AX window element.
 bool SSAXWindowID(AXUIElementRef element, CGWindowID *outWindowID);
 
+/// SLSCopySpacesForWindows: how many Spaces hold a window, -1 if unknown.
+int SSWindowSpaceCount(CGWindowID windowID);
+
 NS_ASSUME_NONNULL_END

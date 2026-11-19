@@ -209,6 +209,17 @@ pub fn all_ids() -> std::collections::HashSet<u32> {
     window_ids(CGWindowListOption::OptionAll)
 }
 
+unsafe extern "C" {
+    /// SLSCopySpacesForWindows, through the shim.
+    fn SSWindowSpaceCount(window: u32) -> i32;
+}
+
+/// How many Spaces hold a window, -1 when SkyLight can't say: none for one
+/// its app ordered out, as a closed main window it keeps (#221).
+pub fn space_count(window: u32) -> i32 {
+    unsafe { SSWindowSpaceCount(window) }
+}
+
 /// Ids of the on-screen windows, without their descriptions: a fraction of
 /// the cost of `on_screen_windows`, for telling new windows from old.
 pub fn on_screen_ids() -> std::collections::HashSet<u32> {
@@ -263,6 +274,11 @@ pub fn all_windows() -> Vec<WindowInfo> {
         0,
         |_, layer, b| layer == 0 && b.width > 40.0 && b.height > 40.0,
     )
+}
+
+/// Every window of `pid`, at any level and any size, on screen or not.
+pub fn windows_of(pid: i32) -> Vec<WindowInfo> {
+    window_list_where(CGWindowListOption::OptionAll, 0, |p, _, _| p == pid)
 }
 
 /// Windows that draw another app's panel out of process, as the file Open

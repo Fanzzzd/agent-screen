@@ -1476,7 +1476,29 @@ impl std::fmt::Display for MoveError {
 /// Fit the window inside `bounds` with a 40 pt margin, centered.
 /// Minimize a window: what's left when it can't go where it belongs.
 pub fn minimize(target: WindowTarget) -> bool {
-    window_element(target).is_some_and(|w| set_attribute(&w, "AXMinimized", CFBoolean::new(true)))
+    window_element(target).is_some_and(|w| set_minimized(&w, true))
+}
+
+/// Whether a window element is minimized to the Dock.
+pub fn is_minimized(window: &AXUIElement) -> bool {
+    unsafe { window.set_messaging_timeout(0.25) };
+    attribute(window, "AXMinimized")
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// The windows Accessibility lists for `pid`, by id, and whether each is
+/// minimized. Blocking.
+pub fn windows_minimized(pid: i32) -> Vec<(u32, bool)> {
+    elements_attribute(&application(pid), "AXWindows")
+        .iter()
+        .filter_map(|w| window_id(w).map(|id| (id, is_minimized(w))))
+        .collect()
+}
+
+/// Minimize a window element, or bring it back from the Dock.
+pub fn set_minimized(window: &AXUIElement, minimized: bool) -> bool {
+    set_attribute(window, "AXMinimized", CFBoolean::new(minimized))
 }
 
 pub fn move_into(target: WindowTarget, bounds: Rect) -> Result<(), MoveError> {

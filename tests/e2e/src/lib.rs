@@ -1656,6 +1656,73 @@ pub fn watch_flash<T>(app: &str, work: impl FnOnce() -> Result<T>) -> Result<(Fl
     Ok((seen, done))
 }
 
+/// What tools/shown.swift captured of one process on one display: the
+/// frames it got, and how many held any of the process's pixels.
+#[derive(Debug, Deserialize)]
+pub struct Shown {
+    pub display: u64,
+    pub frames: i64,
+    pub shown: i64,
+    pub first: Option<i64>,
+    pub last: Option<i64>,
+    pub saved: Option<String>,
+}
+
+/// Capture what process `pid` draws on the user's displays, and on the
+/// `extra` displays, while `work` runs: pixels at 60 fps, so a minimize
+/// or restore animation counts though the window list doesn't place the
+/// window there. `name` names the saved first frame of each display.
+pub fn watch_shown<T>(
+    name: &str,
+    pid: u64,
+    extra: &[u64],
+    work: impl FnOnce() -> Result<T>,
+) -> Result<(Vec<Shown>, T)> {
+    let prefix = out().join(name).to_string_lossy().into_owned();
+    let mut args = vec![pid.to_string(), prefix];
+    args.extend(extra.iter().map(u64::to_string));
+    // ScreenCaptureKit leaves a display out of its list now and then while
+    // displays change: try again, and fail rather than prove nothing.
+    let mut tries = 0;
+    let mut watcher = loop {
+        tries += 1;
+        let mut watcher = command(tool("shown")?)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("starting shown")?;
+        // Its captures run once it says so on stderr.
+        let mut err = std::io::BufReader::new(watcher.stderr.take().context("shown's stderr")?);
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut err, &mut line)?;
+        if line.trim() == "ready" {
+            break watcher;
+        }
+        let _ = watcher.kill();
+        let _ = watcher.wait();
+        if tries == 3 {
+            bail!("shown: {}", line.trim());
+        }
+        println!("     shown: {}; trying again", line.trim());
+        sleep_ms(500);
+    };
+    // Frames already on screen arrive first: let them pass.
+    sleep_ms(300);
+    let done = work();
+    // The animation may run on after the call answers.
+    sleep_ms(800);
+    drop(watcher.stdin.take());
+    let out = watcher.wait_with_output()?;
+    let done = done?;
+    let seen = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    Ok((seen, done))
+}
+
 fn support() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
         .join("Library/Application Support/Agent Screen")

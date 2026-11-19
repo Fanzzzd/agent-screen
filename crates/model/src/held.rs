@@ -642,6 +642,7 @@ mod tests {
         Home {
             frame: Rect::new(10.0, 20.0, 900.0, 700.0),
             workspace: Some("2".into()),
+            minimized: false,
         }
     }
 

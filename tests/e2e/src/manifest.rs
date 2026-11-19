@@ -238,6 +238,7 @@ pub const SCRIPTS: &[Script] = &[
     script("appwhere", &[Peek, WindowAccess], Full, Hook, 1).hands_off(),
     script("arrangement", &[Displays], Full, Agent, 2),
     script("asksave", &[Displays, Windows], Full, Hook, 1),
+    script("awaywindow", &[WindowAccess, Windows], Full, Agent, 1).hands_off(),
     script("barleak", &[Screenshots], Full, Agent, 1),
     script("browsers", &[Browser, AgentInput], Full, Agent, 1).hands_off(),
     script("changecost", &[Performance, Displays], Full, Agent, 1).manual(MEASURES),

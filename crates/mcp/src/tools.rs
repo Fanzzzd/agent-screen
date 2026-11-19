@@ -438,6 +438,10 @@ pub fn definitions() -> Vec<Value> {
                 "their answer, up to timeout_seconds. Handed over, the window is on the display as a Handover; turned down, it stays",
                 "theirs. When the user told you in this chat to take that window, pass their words as user_instruction: it goes",
                 "over as a Handover at once, without asking again. Under window_access granted for its app, it does too.",
+                "A window the user minimized to the Dock comes out onto the display the same way, unseen, while its app is in the",
+                "background with no other window to see; the result names it (windowId, title, fromDock), and it goes back into the",
+                "Dock when it returns. A window of an app the user hid, a closed one, or one on another macOS Space, the user has to",
+                "bring up: the error says which.",
                 "Start GUI apps with launch_app rather than open, so their windows come to the display without asking.",
                 "A window on another of this session's displays moves to this one at once, never asking the user, and keeps what it was there.",
                 "A window another agent session is using, or one on a display waiting for review, is never yours to take: Agent Screen asks the user,",
@@ -1318,6 +1322,12 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
     let mut out = json!({ "placed": true });
     if reply.get("handedOver") == Some(&Value::Bool(true)) {
         out["handedOver"] = json!(true);
+    }
+    // Which of the app's windows came, and whether from the Dock (#221).
+    for key in ["windowId", "title", "fromDock"] {
+        if let Some(value) = reply.get(key) {
+            out[key] = value.clone();
+        }
     }
     // From another of the session's displays (ADR 0016).
     if let Some(from) = reply.get("movedFrom") {
@@ -2640,6 +2650,18 @@ mod tests {
                 .unwrap()
                 .contains("Claude Code · task B was using")
         );
+        // A handed-over window says which it is, and whether it came from
+        // the Dock (#221).
+        let handed = place_output(
+            json!({ "handedOver": true, "windowId": 72281, "title": "Field", "fromDock": true, "by": "chat" })
+                .as_object()
+                .unwrap(),
+            &[("x", None), ("y", None), ("width", None), ("height", None)],
+        );
+        assert_eq!(handed["windowId"], 72281);
+        assert_eq!(handed["title"], "Field");
+        assert_eq!(handed["fromDock"], true);
+        assert!(handed.get("by").is_none());
         // A plain place has no frame to compare.
         assert_eq!(
             place_output(

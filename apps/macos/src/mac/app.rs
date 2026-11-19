@@ -430,6 +430,12 @@ pub fn is_hidden(pid: i32) -> bool {
         .is_some_and(|app| app.isHidden())
 }
 
+/// Whether an app is the active one, whose menus the menu bar shows.
+pub fn is_active(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.isActive())
+}
+
 /// Hide an app, as Command-H would, without touching the front app.
 pub fn hide(pid: i32) {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {

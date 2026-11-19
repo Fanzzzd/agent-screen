@@ -230,6 +230,255 @@ pub fn all() -> Vec<Window> {
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, RwLock};
 
+use agent_screen_model::bring_out::{self, AppState, OtherWindow, Refusal, Step, Undo};
+use agent_screen_model::placement::PutAway;
+use objc2_application_services::AXUIElement;
+
+/// Other apps' document windows that exist but aren't on screen, that
+/// `keep` takes, with why each is off screen (#221). Global bounds: where
+/// each shows when it comes back. Blocking: a few Accessibility reads for
+/// each window `keep` takes.
+pub fn put_away(mut keep: impl FnMut(&Window) -> bool) -> Vec<(Window, PutAway)> {
+    let own = std::process::id() as i32;
+    let on = cg::on_screen_ids();
+    cg::all_windows()
+        .into_iter()
+        .filter(|w| w.target.pid != own && !on.contains(&w.target.window_id))
+        .map(|w| Window {
+            target: w.target,
+            app: w.owner_name,
+            title: w.title,
+            bounds: w.bounds,
+            layer: w.layer,
+            off_display: false,
+        })
+        .filter(|w| keep(w))
+        .map(|w| {
+            let why = why_away(w.target);
+            (w, why)
+        })
+        .collect()
+}
+
+/// Why a window that exists isn't on screen. Blocking.
+pub fn why_away(target: WindowTarget) -> PutAway {
+    let element = ax::window_element(target);
+    let minimized = element.as_ref().is_some_and(|w| ax::is_minimized(w));
+    PutAway::of(
+        element.is_some(),
+        minimized,
+        super::app::is_hidden(target.pid),
+        cg::space_count(target.window_id),
+    )
+}
+
+/// The app of `target` as the rules for bringing a window out read it
+/// (`agent_screen_model::bring_out`): whether it is hidden or in front,
+/// and every other window of it, at any level and size. `leaving`, the
+/// bounds of the Agent Display the window is on, when it goes back: a
+/// window on screen there is beside it, not on the user's screens.
+/// Blocking.
+pub fn app_state(target: WindowTarget, leaving: Option<Rect>) -> AppState {
+    let pid = target.pid;
+    let on = cg::on_screen_ids();
+    let listed = ax::windows_minimized(pid);
+    let displays: Vec<Rect> = cg::active_displays()
+        .into_iter()
+        .filter(|d| !cg::is_closet(*d))
+        .map(cg::display_bounds)
+        .collect();
+    let others = cg::windows_of(pid)
+        .into_iter()
+        .filter(|w| w.target.window_id != target.window_id)
+        .map(|w| {
+            let id = w.target.window_id;
+            let on_screen = on.contains(&id);
+            let beside = on_screen && leaving.is_some_and(|d| d.contains(w.bounds.mid()));
+            let menu_extra = bring_out::is_menu_extra(w.layer, w.bounds, &displays);
+            let minimized = listed.iter().find(|(l, _)| *l == id).map(|(_, m)| *m);
+            OtherWindow {
+                on_screen,
+                listed: minimized.is_some(),
+                minimized: minimized.unwrap_or(false),
+                // Asked only when nothing else tells.
+                spaces: if on_screen || minimized.is_some() {
+                    1
+                } else {
+                    cg::space_count(id)
+                },
+                beside,
+                menu_extra,
+            }
+        })
+        .collect();
+    AppState {
+        hidden: super::app::is_hidden(pid),
+        active: super::app::is_active(pid),
+        others,
+    }
+}
+
+/// Bring a window the user minimized out onto `display` without drawing
+/// it on their screen (#221): its app hides, the window leaves the Dock and
+/// moves onto the display while hidden, its frame there is read back, and
+/// the app shows again. A window that left the Dock while its app was
+/// hidden doesn't come back when the app shows; a raise puts it on the
+/// display, and activates nothing. Refused, with nothing changed, unless
+/// `bring_out::may_bring_out` allows it; a failure after the app hid
+/// undoes every step. The frame it had in the Dock, to put it back there.
+/// Blocking.
+pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<Rect, String> {
+    let bounds = cg::display_bounds(display);
+    let pid = target.pid;
+    let window = ax::window_element(target).ok_or(
+        "its window is on another macOS Space, or closed, where Accessibility can't reach it",
+    )?;
+    let minimized = ax::is_minimized(&window);
+    let state = app_state(target, None);
+    log::info!(
+        "bringing out window {} of pid {pid}: minimized {minimized}, app hidden {}, in front {}, other windows {:?}",
+        target.window_id,
+        state.hidden,
+        state.active,
+        state.others
+    );
+    bring_out::may_bring_out(minimized, &state).map_err(|r| r.reason().to_string())?;
+    let home = ax::frame(&window).ok_or("Accessibility doesn't give its frame")?;
+    // The last read before the app hides: the user may have switched to it.
+    if super::app::is_active(pid) {
+        return Err(Refusal::AppInFront.reason().into());
+    }
+    let mut reached = None;
+    let out = bring_out_steps(target, &window, bounds, &mut reached);
+    if let Err(error) = &out {
+        log::info!(
+            "bring_out: window {} failed after {reached:?}: {error}; undoing",
+            target.window_id
+        );
+        // Once shown, it is on the display.
+        let leaving = (reached == Some(Step::Shown)).then_some(bounds);
+        let undo = bring_out::undo(reached, &app_state(target, leaving));
+        run_undo(target, &window, home, &undo);
+    }
+    out.map(|()| home)
+}
+
+/// The steps of `bring_out`, each recorded in `reached` before it is
+/// tried: an app may apply one after its call failed or timed out.
+fn bring_out_steps(
+    target: WindowTarget,
+    window: &AXUIElement,
+    bounds: Rect,
+    reached: &mut Option<Step>,
+) -> Result<(), String> {
+    let pid = target.pid;
+    *reached = Some(Step::HidApp);
+    super::app::hide(pid);
+    if !wait_for(|| super::app::is_hidden(pid)) {
+        return Err("its app didn't hide, so taking it out of the Dock would show".into());
+    }
+    *reached = Some(Step::LeftDock);
+    if !ax::set_minimized(window, false) || !wait_for(|| !ax::is_minimized(window)) {
+        return Err("the app didn't take it out of the Dock".into());
+    }
+    *reached = Some(Step::Moved);
+    ax::move_element_into(window, bounds).map_err(|e| e.to_string())?;
+    // The app shows it wherever it is: read it back while hidden.
+    let frame = ax::frame(window);
+    if !frame.is_some_and(|f| bounds.contains(f.mid())) {
+        return Err(format!(
+            "it didn't move onto the display; Accessibility says its frame is {frame:?}"
+        ));
+    }
+    super::app::unhide(pid);
+    *reached = Some(Step::Shown);
+    let on_screen = || cg::on_screen_ids().contains(&target.window_id);
+    if !wait_for_ms(300, on_screen) {
+        ax::perform(window, "AXRaise");
+    }
+    if !wait_for(on_screen) {
+        return Err("it didn't come back on screen".into());
+    }
+    Ok(())
+}
+
+/// Put a window `bring_out` took out of the Dock back there, at `home`,
+/// its frame there: hidden with its app when the app may hide
+/// (`bring_out::put_back`). Blocking.
+pub fn put_back(target: WindowTarget, home: Rect) -> Result<(), String> {
+    let window = ax::window_element(target)
+        .ok_or("its window is gone, or on a Space Accessibility can't reach")?;
+    let leaving = super::claims::display_of(target.window_id).map(cg::display_bounds);
+    let state = app_state(target, leaving);
+    let mut undo = bring_out::put_back(&state);
+    // The last read before the app hides: the user may have switched to it.
+    if undo.first() == Some(&Undo::HideApp) && super::app::is_active(target.pid) {
+        undo = bring_out::put_back(&AppState {
+            active: true,
+            ..state.clone()
+        });
+    }
+    log::info!(
+        "putting window {} back in the Dock: {undo:?}; app hidden {}, in front {}, other windows {:?}",
+        target.window_id,
+        state.hidden,
+        state.active,
+        state.others
+    );
+    run_undo(target, &window, home, &undo);
+    if !ax::is_minimized(&window) {
+        return Err("it didn't go back into the Dock".into());
+    }
+    Ok(())
+}
+
+/// Do each of `undo` in turn, on through any that fails: each leaves the
+/// window nearer where the user left it. Blocking.
+fn run_undo(target: WindowTarget, window: &AXUIElement, home: Rect, undo: &[Undo]) {
+    let pid = target.pid;
+    for step in undo {
+        let done = match step {
+            Undo::HideApp => {
+                super::app::hide(pid);
+                wait_for(|| super::app::is_hidden(pid))
+            }
+            Undo::RestoreFrame => ax::set_frame(target, home).is_ok(),
+            Undo::Minimize => {
+                ax::set_minimized(window, true) && wait_for(|| ax::is_minimized(window))
+            }
+            Undo::ShowApp => {
+                super::app::unhide(pid);
+                true
+            }
+        };
+        if !done {
+            log::warn!("window {}: {step:?} didn't take", target.window_id);
+        }
+    }
+    // In the Dock it is on no display, and the window list gives a
+    // minimized window no frame to see it leave by: its claim goes now.
+    if ax::is_minimized(window) && super::claims::display_of(target.window_id).is_some() {
+        super::claims::release(target.window_id);
+    }
+}
+
+/// Whether `done` came true within 2 s, checked every 20 ms. Blocking.
+fn wait_for(done: impl FnMut() -> bool) -> bool {
+    wait_for_ms(2000, done)
+}
+
+/// Whether `done` came true within `ms`, checked every 20 ms. Blocking.
+fn wait_for_ms(ms: u64, mut done: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(ms) {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    done()
+}
+
 /// Active window-to-display ownership snapshot bound directly to
 /// `Core::displays` (`Displays::bind_recorded_owners`, L3), so every
 /// `windows::on_display`, `counts`, dismissal, spare, and input-routing check
@@ -649,7 +898,24 @@ pub fn place_handed_over(
     seen: u64,
 ) -> Result<(), String> {
     LANES.unless_returned_since(target.window_id, seen, true, || {
-        place(target, display, screen_name)
+        // Minimized: it comes out onto the display, and goes back to the
+        // Dock if it can't be placed there.
+        let docked = if cg::on_screen_ids().contains(&target.window_id) {
+            None
+        } else {
+            Some(bring_out(target, display)?)
+        };
+        let placed = place(target, display, screen_name);
+        if let (Err(error), Some(home)) = (&placed, docked) {
+            log::info!(
+                "window {} not placed ({error}); back to the Dock",
+                target.window_id
+            );
+            if let Err(e) = put_back(target, home) {
+                log::warn!("window {}: {e}", target.window_id);
+            }
+        }
+        placed
     })
 }
 

@@ -6,6 +6,7 @@
 pub mod access;
 pub mod alerts;
 pub mod arrangement;
+pub mod bring_out;
 pub mod budget;
 pub mod card;
 pub mod claims;

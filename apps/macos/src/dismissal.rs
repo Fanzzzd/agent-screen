@@ -166,6 +166,22 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
     // AeroSpace leaves an unclaimed window its app keeps on one where it is,
     // and the user would never see it again.
     let window = target.window_id;
+    // One the user had minimized goes back to the Dock (#221).
+    if let Some(home) = home.filter(|h| h.minimized) {
+        match windows::put_back(target, home.frame) {
+            // Back in the Dock, put_back released its claim.
+            Ok(())
+                if claims::display_of(window).is_none()
+                    || claims::release_once_off(window, true) =>
+            {
+                return true;
+            }
+            Ok(()) => log::warn!("window {window} went back to the Dock but stays claimed"),
+            Err(error) => {
+                log::warn!("could not put window {window} back in the Dock: {error}")
+            }
+        }
+    }
     if let Some(home) = home {
         if let Some(workspace) = &home.workspace
             && let Some(aerospace) = AeroSpace::current()
@@ -241,12 +257,18 @@ fn stage_home(
 }
 
 /// Where a window is now, for a Handover: its frame and AeroSpace
-/// workspace. Blocking.
+/// workspace, and whether it is minimized. Blocking.
 pub fn home_of(target: WindowTarget, frame: Option<Rect>) -> Option<Home> {
     let frame = frame.or_else(|| windows::find(target.window_id).map(|w| w.bounds))?;
     let workspace =
         AeroSpace::current().and_then(|a| a.workspace_of(target.window_id).ok().flatten());
-    Some(Home { frame, workspace })
+    let minimized = !cg::on_screen_ids().contains(&target.window_id)
+        && ax::window_element(target).is_some_and(|w| ax::is_minimized(&w));
+    Some(Home {
+        frame,
+        workspace,
+        minimized,
+    })
 }
 
 #[cfg(test)]
@@ -257,6 +279,7 @@ mod stage_tests {
         Home {
             frame: Rect::new(x, y, 600.0, 332.0),
             workspace: Some("2".into()),
+            minimized: false,
         }
     }
 

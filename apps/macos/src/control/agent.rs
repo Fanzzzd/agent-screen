@@ -16,9 +16,10 @@ use crate::model::{
 };
 use crate::numbers;
 use agent_screen_model::access::{self, Authority, ChatAction, Instruction, Refusal};
+use agent_screen_model::bring_out::Refusal as BringOutRefusal;
 use agent_screen_model::held::{self, Held, Place};
 use agent_screen_model::input_queue::Action;
-use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, WindowSighting};
+use agent_screen_model::placement::{self, AppSighting, Holder, NamedApp, PutAway, WindowSighting};
 use agent_screen_model::real_click;
 use agent_screen_model::request::{
     Answer, HelpAsked, Kind, NamedWindow, RequestId, Resolution, Woken,
@@ -1195,7 +1196,7 @@ async fn handle_one(
                 // The user's windows that match, front to back, with their
                 // apps' bundle ids, which Window Access goes by.
                 let spares = core.read_with(cx, |c, _| c.spare_ids());
-                let candidates: Vec<(windows::Window, Option<String>)> = off(cx, {
+                let mut candidates: Vec<(windows::Window, Option<String>)> = off(cx, {
                     let matcher = matcher.clone();
                     move || {
                         let mut ids = AppIds::default();
@@ -1222,6 +1223,25 @@ async fn handle_one(
                     {
                         return take_held(&core, id, theirs, held, words, timeout, asked, cx).await;
                     }
+                    // One the user minimized, or whose app they hid: the
+                    // same consent brings it out onto the display (#221).
+                    let away = off(cx, {
+                        let matcher = matcher.clone();
+                        move || put_away_candidates(wanted, matcher.as_ref())
+                    })
+                    .await;
+                    candidates = match away {
+                        Ok(away) => away,
+                        Err(refusal) => {
+                            let name = app.clone().unwrap_or_else(|| "the".into());
+                            return Err(ControlError::not_found(format!(
+                                "could not bring the {name} window out: {}",
+                                refusal.reason()
+                            )));
+                        }
+                    };
+                }
+                if candidates.is_empty() {
                     let text = app.clone().unwrap_or_default();
                     let holders = core.read_with(cx, |c, _| Holders::of(c, id));
                     let message = off(cx, move || match (wanted, named) {
@@ -3461,6 +3481,52 @@ impl Holders {
     }
 }
 
+/// The user's document windows that match and that place_window can bring
+/// out onto a display: minimized ones, where they would show again on the
+/// user's screen (#221), the oldest first. Those whose app may not hide
+/// unseen are left out; when that leaves none, why. Blocking.
+fn put_away_candidates(
+    wanted: Option<i64>,
+    matcher: Option<&NamedApp>,
+) -> Result<Vec<(windows::Window, Option<String>)>, BringOutRefusal> {
+    let mut ids = AppIds::default();
+    let away = windows::put_away(|w| {
+        w.layer == 0
+            && windows::display_role(w).accepts_window_request()
+            && is_named(w, wanted, matcher, &mut ids)
+    });
+    let keys: Vec<(u32, PutAway)> = away
+        .iter()
+        .map(|(w, why)| (w.target.window_id, *why))
+        .collect();
+    let mut refused = None;
+    let mut states: std::collections::HashMap<i32, Result<(), BringOutRefusal>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for i in agent_screen_model::bring_out::preference(&keys) {
+        let w = &away[i].0;
+        let allowed = *states.entry(w.target.pid).or_insert_with(|| {
+            agent_screen_model::bring_out::may_bring_out(true, &windows::app_state(w.target, None))
+        });
+        match allowed {
+            Ok(()) => out.push((w.clone(), ids.of(w.target.pid).1.clone())),
+            Err(refusal) => refused = refused.or(Some(refusal)),
+        }
+    }
+    match refused {
+        Some(refusal) if out.is_empty() => Err(refusal),
+        _ => Ok(out),
+    }
+}
+
+/// Why the off-screen windows `away` returned aren't on screen: the most
+/// telling reason among them.
+fn why_off_screen(away: &[(windows::Window, PutAway)]) -> Option<PutAway> {
+    away.iter()
+        .map(|(_, why)| *why)
+        .min_by_key(|why| why.rank())
+}
+
 /// place_window's `not_found` for a window id that is no stray and no
 /// window of the user's on screen: where the window is. It names the app
 /// only for a window on the user's screen. Blocking.
@@ -3479,7 +3545,7 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
             WindowSighting::OnAgentDisplay(holder)
         }
         // It left the list between the two reads.
-        Some(_) => WindowSighting::OffScreen,
+        Some(_) => WindowSighting::OffScreen(PutAway::Unknown),
         None => match cg::on_screen_windows()
             .into_iter()
             .find(|w| w.target.window_id as i64 == id)
@@ -3505,7 +3571,8 @@ fn no_such_window(id: i64, holders: &Holders) -> String {
                 }
             }
             None if u32::try_from(id).is_ok_and(|i| cg::all_ids().contains(&i)) => {
-                WindowSighting::OffScreen
+                let away = windows::put_away(|w| w.target.window_id as i64 == id);
+                WindowSighting::OffScreen(why_off_screen(&away).unwrap_or(PutAway::Unknown))
             }
             None => WindowSighting::Gone,
         },
@@ -3575,8 +3642,16 @@ fn no_app_window(
                     .find(|w| named.is_owner(&w.owner_name))
                     .map(|w| w.owner_name)
             });
+        // Its windows that exist off screen say why none is on it (#221).
+        let away = running.as_ref().map(|_| {
+            let mut ids = AppIds::default();
+            windows::put_away(|w| w.layer == 0 && is_named(w, None, Some(named), &mut ids))
+        });
         match (running, found) {
-            (Some(name), _) => AppSighting::NoWindow { name },
+            (Some(name), _) => match away.as_deref().and_then(why_off_screen) {
+                Some(why) => AppSighting::PutAway { name, why },
+                None => AppSighting::NoWindow { name },
+            },
             (None, Some(found)) => AppSighting::NotRunning { name: found.name },
             (None, None) => AppSighting::Unknown,
         }
@@ -4010,12 +4085,21 @@ async fn hand_over(
 ) -> Result<Map<String, Value>, ControlError> {
     let target = window.target;
     let app_name = window.app.clone();
+    let title = window.title.clone();
+    // A window off screen, minimized, comes home where it would have
+    // shown, and back into the Dock (#221).
+    let bounds = window.bounds;
     let by = match (&authority, &words) {
         (Authority::User, _) => "user",
         (_, Some(_)) => "chat",
         _ => "grant",
     };
-    let home = off(cx, move || crate::dismissal::home_of(target, None)).await;
+    let home = off(cx, move || {
+        crate::dismissal::home_of(target, None)
+            .or_else(|| crate::dismissal::home_of(target, Some(bounds)))
+    })
+    .await;
+    let from_dock = home.as_ref().is_some_and(|h| h.minimized);
     let ticket = core
         .update(cx, |c, cx| {
             let ticket = c.displays.hand_over(id, target, &authority, home)?;
@@ -4091,6 +4175,10 @@ async fn hand_over(
     Ok(Map::from_iter([
         ("handedOver".into(), Value::Bool(true)),
         ("by".into(), json!(by)),
+        // Which of the app's windows came, and from where.
+        ("windowId".into(), json!(target.window_id)),
+        ("title".into(), json!(title)),
+        ("fromDock".into(), json!(from_dock)),
     ]))
 }
 
