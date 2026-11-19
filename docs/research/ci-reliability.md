@@ -111,7 +111,23 @@ Notarization stays off pull requests.
 
 ## Results
 
-Filled in from #238's runs.
+CI runs on #238, all green; later runs are linked in #238. Wall time is from the run's start to its last job's end. Runs 1 and 2 restored main's existing cache. Run 3 missed it because its runner image had Rust 1.100.0 installed besides the pinned 1.98.1, and rust-cache hashes every installed toolchain into the key. Commit 05bc593 uninstalls every toolchain but the pinned one before the cache step, which changed the key, so runs 4 and 5 built cold: a pull request cannot save a cache, and main has not saved one under the new key yet.
+
+| Run | Commit | Cache | macOS job queued | Clippy + tests | Wall |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1 [44581347596](https://github.com/Fanzzzd/agent-screen/actions/runs/44581347596) | 7ca0ea8 | warm | 0.0 min | 2.8 min | 3.9 min |
+| 2 [44582221116](https://github.com/Fanzzzd/agent-screen/actions/runs/44582221116) | 0e42f5b | warm | 5.0 min | 2.3 min | 8.0 min |
+| 3 [44583786209](https://github.com/Fanzzzd/agent-screen/actions/runs/44583786209) | 816a4b7 | missed, image toolchain | 0.0 min | 10.6 min | 10.9 min |
+| 4 [44586289383](https://github.com/Fanzzzd/agent-screen/actions/runs/44586289383) | 05bc593 | cold, new key | 0.0 min | 15.4 min | 15.9 min |
+| 5 [44589315857](https://github.com/Fanzzzd/agent-screen/actions/runs/44589315857) | 3fd8521 | cold, new key | 0.0 min | 14.5 min | 15.0 min |
+
+What the cache saves: clippy and the tests took 2.3 to 2.8 minutes warm and 10.6 to 15.4 minutes cold on the same runner type. Before this change Release always ran cold: its checks took 15.6 minutes. After merge, Release restores main's cache, so its checks should take about as long as CI's warm run.
+
+The Linux job took 1.6 to 2.1 minutes, cold, because a pull request cannot save its cache.
+
+Expected effect on failures, an estimate from the November rates and not yet measured: a pull request now runs one macOS job instead of three. With 7.9% of macOS jobs unassigned, the chance that a pull request run hits one falls from about 22% to about 8%. In the measured runs, 13% of first attempts (26 of 199) hit one, since unassigned jobs clustered in the same runs. The automatic rerun handles most of the rest: a second attempt hit an unassigned job again in 4 of 26 runs. Measure again after a few weeks on main.
+
+The `BrokenPipe` race reproduced in CI on a throwaway branch: the old test with a 50 ms delay before its write failed with `Kind(BrokenPipe)` ([44581461017](https://github.com/Fanzzzd/agent-screen/actions/runs/44581461017)), and the fixed test with the same delay passed ([44585960871](https://github.com/Fanzzzd/agent-screen/actions/runs/44585960871)).
 
 ## Every failed job attempt
 
