@@ -274,17 +274,21 @@ pub fn why_away(target: WindowTarget) -> PutAway {
 
 /// The app of `target` as the rules for bringing a window out read it
 /// (`agent_screen_model::bring_out`): whether it is hidden or in front,
-/// and every other window of it, at any level and size. Blocking.
-pub fn app_state(target: WindowTarget) -> AppState {
+/// and every other window of it, at any level and size. `leaving`, the
+/// bounds of the Agent Display the window is on, when it goes back: a
+/// window on screen there is beside it, not on the user's screens.
+/// Blocking.
+pub fn app_state(target: WindowTarget, leaving: Option<Rect>) -> AppState {
     let pid = target.pid;
     let on = cg::on_screen_ids();
     let listed = ax::windows_minimized(pid);
     let others = cg::windows_of(pid)
         .into_iter()
-        .map(|w| w.target.window_id)
-        .filter(|id| *id != target.window_id)
-        .map(|id| {
+        .filter(|w| w.target.window_id != target.window_id)
+        .map(|w| {
+            let id = w.target.window_id;
             let on_screen = on.contains(&id);
+            let beside = on_screen && leaving.is_some_and(|d| d.contains(w.bounds.mid()));
             let minimized = listed.iter().find(|(l, _)| *l == id).map(|(_, m)| *m);
             OtherWindow {
                 on_screen,
@@ -296,6 +300,7 @@ pub fn app_state(target: WindowTarget) -> AppState {
                 } else {
                     cg::space_count(id)
                 },
+                beside,
             }
         })
         .collect();
@@ -322,7 +327,7 @@ pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<Rect, Strin
         "its window is on another macOS Space, or closed, where Accessibility can't reach it",
     )?;
     let minimized = ax::is_minimized(&window);
-    let state = app_state(target);
+    let state = app_state(target, None);
     log::info!(
         "bringing out window {} of pid {pid}: minimized {minimized}, app hidden {}, in front {}, other windows {:?}",
         target.window_id,
@@ -343,7 +348,9 @@ pub fn bring_out(target: WindowTarget, display: DisplayId) -> Result<Rect, Strin
             "bring_out: window {} failed after {reached:?}: {error}; undoing",
             target.window_id
         );
-        let undo = bring_out::undo(reached, &app_state(target));
+        // Once shown, it is on the display.
+        let leaving = (reached == Some(Step::Shown)).then_some(bounds);
+        let undo = bring_out::undo(reached, &app_state(target, leaving));
         run_undo(target, &window, home, &undo);
     }
     out.map(|()| home)
@@ -396,10 +403,15 @@ fn bring_out_steps(
 pub fn put_back(target: WindowTarget, home: Rect) -> Result<(), String> {
     let window = ax::window_element(target)
         .ok_or("its window is gone, or on a Space Accessibility can't reach")?;
-    let undo = bring_out::put_back(&app_state(target));
+    let leaving = super::claims::display_of(target.window_id).map(cg::display_bounds);
+    let state = app_state(target, leaving);
+    let undo = bring_out::put_back(&state);
     log::info!(
-        "putting window {} back in the Dock: {undo:?}",
-        target.window_id
+        "putting window {} back in the Dock: {undo:?}; app hidden {}, in front {}, other windows {:?}",
+        target.window_id,
+        state.hidden,
+        state.active,
+        state.others
     );
     run_undo(target, &window, home, &undo);
     if !ax::is_minimized(&window) {

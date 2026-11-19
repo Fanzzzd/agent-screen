@@ -3506,7 +3506,7 @@ fn put_away_candidates(
     for i in agent_screen_model::bring_out::preference(&keys) {
         let w = &away[i].0;
         let allowed = *states.entry(w.target.pid).or_insert_with(|| {
-            agent_screen_model::bring_out::may_bring_out(true, &windows::app_state(w.target))
+            agent_screen_model::bring_out::may_bring_out(true, &windows::app_state(w.target, None))
         });
         match allowed {
             Ok(()) => out.push((w.clone(), ids.of(w.target.pid).1.clone())),

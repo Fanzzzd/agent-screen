@@ -169,7 +169,13 @@ pub fn give_back(target: WindowTarget, home: Option<&Home>, main_name: Option<&s
     // One the user had minimized goes back to the Dock (#221).
     if let Some(home) = home.filter(|h| h.minimized) {
         match windows::put_back(target, home.frame) {
-            Ok(()) if claims::release_once_off(window, true) => return true,
+            // Its frame restored off the display, put_back released it.
+            Ok(())
+                if claims::display_of(window).is_none()
+                    || claims::release_once_off(window, true) =>
+            {
+                return true;
+            }
             Ok(()) => log::warn!("window {window} went back to the Dock but stays claimed"),
             Err(error) => {
                 log::warn!("could not put window {window} back in the Dock: {error}")

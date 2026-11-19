@@ -27,6 +27,9 @@ pub struct OtherWindow {
     pub minimized: bool,
     /// How many Spaces hold it; -1 when unknown.
     pub spaces: i32,
+    /// On screen on the Agent Display the window is leaving, as a text
+    /// field's input indicator beside it: not on the user's screens.
+    pub beside: bool,
 }
 
 impl OtherWindow {
@@ -34,6 +37,9 @@ impl OtherWindow {
     /// it, now or on another Space. Only a minimized window, or one the app
     /// keeps out of sight on no Space, would not; anything unclear would.
     pub fn would_vanish(self) -> bool {
+        if self.on_screen && self.beside {
+            return false;
+        }
         if self.on_screen {
             return true;
         }
@@ -192,6 +198,7 @@ mod tests {
             listed,
             minimized,
             spaces,
+            beside: false,
         }
     }
 
@@ -299,6 +306,17 @@ mod tests {
                 Undo::Minimize,
                 Undo::ShowApp
             ]
+        );
+        // Beside it on the Agent Display it leaves, such as a text field's
+        // input indicator: nothing on the user's screens hides.
+        let indicator = OtherWindow {
+            beside: true,
+            ..other(true, true, false, 1)
+        };
+        assert!(!indicator.would_vanish());
+        assert_eq!(
+            put_back(&app(false, false, vec![indicator]))[0],
+            Undo::HideApp
         );
         // In front, or showing another window now: back to the Dock in view.
         for now in [

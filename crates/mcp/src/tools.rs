@@ -1323,6 +1323,12 @@ fn place_output(reply: &Object, asked: &[(&str, Option<f64>); 4]) -> Value {
     if reply.get("handedOver") == Some(&Value::Bool(true)) {
         out["handedOver"] = json!(true);
     }
+    // Which of the app's windows came, and whether from the Dock (#221).
+    for key in ["windowId", "title", "fromDock"] {
+        if let Some(value) = reply.get(key) {
+            out[key] = value.clone();
+        }
+    }
     // From another of the session's displays (ADR 0016).
     if let Some(from) = reply.get("movedFrom") {
         out["moved_from"] = from.clone();
@@ -2644,6 +2650,18 @@ mod tests {
                 .unwrap()
                 .contains("Claude Code · task B was using")
         );
+        // A handed-over window says which it is, and whether it came from
+        // the Dock (#221).
+        let handed = place_output(
+            json!({ "handedOver": true, "windowId": 72281, "title": "Field", "fromDock": true, "by": "chat" })
+                .as_object()
+                .unwrap(),
+            &[("x", None), ("y", None), ("width", None), ("height", None)],
+        );
+        assert_eq!(handed["windowId"], 72281);
+        assert_eq!(handed["title"], "Field");
+        assert_eq!(handed["fromDock"], true);
+        assert!(handed.get("by").is_none());
         // A plain place has no frame to compare.
         assert_eq!(
             place_output(
