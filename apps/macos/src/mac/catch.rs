@@ -167,6 +167,29 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
+/// Whether an agent drove `pid` just now, by its own input to it or to a
+/// display that shows a window of it.
+pub fn agent_drove(pid: i32) -> bool {
+    let now = std::time::Instant::now();
+    let driven: Vec<(DisplayId, Option<i32>)> = ACTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, _, until)| now < *until)
+        .map(|(d, p, _)| (*d, *p))
+        .collect();
+    if driven.iter().any(|(_, p)| *p == Some(pid)) {
+        return true;
+    }
+    let shown = windows::all();
+    driven.iter().filter(|(_, p)| p.is_none()).any(|(d, _)| {
+        let area = super::cg::display_bounds(*d);
+        shown
+            .iter()
+            .any(|w| w.target.pid == pid && area.contains(w.bounds.mid()))
+    })
+}
+
 /// Whether another Agent Display that shows a window of `pid` was driven
 /// just now: that session may have made the new window as well.
 fn others_acted_recently(display: DisplayId, pid: i32) -> bool {

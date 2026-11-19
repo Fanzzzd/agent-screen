@@ -651,20 +651,48 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
 }
 
 /// Start a new process of the app at `bundle` through LaunchServices, as
-/// a Dock click would, on its default profile. LaunchServices starts it, so
-/// it is its own responsible process and inherits none of Agent Screen's
-/// privacy grants.
-pub fn open_new_instance(bundle: &Path) {
-    let url =
+/// a Dock click would, on its default profile, opening `url` when given,
+/// with `arguments`. LaunchServices starts it, so it is its own
+/// responsible process and inherits none of Agent Screen's privacy grants.
+pub fn open_new_instance(bundle: &Path, url: Option<&str>, arguments: &[String]) {
+    let app =
         objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
     let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
     configuration.setCreatesNewApplicationInstance(true);
     configuration.setAddsToRecentItems(false);
-    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
-        &url,
-        &configuration,
-        None,
-    );
+    let workspace = NSWorkspace::sharedWorkspace();
+    if !arguments.is_empty() {
+        // A test's headless stand-in: it takes the URL as an argument, as
+        // it may not answer the open event, and never takes the front.
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(String::as_str)
+            .chain(url)
+            .map(NSString::from_str)
+            .collect();
+        configuration.setArguments(&objc2_foundation::NSArray::from_retained_slice(&arguments));
+        configuration.setActivates(false);
+        workspace.openApplicationAtURL_configuration_completionHandler(&app, &configuration, None);
+        return;
+    }
+    match url.and_then(|u| objc2_foundation::NSURL::URLWithString(&NSString::from_str(u))) {
+        Some(url) => {
+            let urls = objc2_foundation::NSArray::from_retained_slice(&[url]);
+            workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+                &urls,
+                &app,
+                &configuration,
+                None,
+            );
+        }
+        None => {
+            workspace.openApplicationAtURL_configuration_completionHandler(
+                &app,
+                &configuration,
+                None,
+            );
+        }
+    }
 }
 
 /// The Dock's pid.

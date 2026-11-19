@@ -2299,6 +2299,23 @@ async fn handle_one(
             let decided = off(cx, move || devtools::on_agents_activated(pid)).await;
             Ok(json!({ "agents": agents, "decision": format!("{decided:?}") }))
         }
+        // Test hook: a DevTools command through Agent Screen's pipe to
+        // `pid`, in the page `target` when given, for verifying a browser
+        // (ADR 0022).
+        "debugDevtools" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let method = p.string("method").unwrap_or_default();
+            let params = p.0.get("params").cloned().unwrap_or(json!({}));
+            let target = p.string("target");
+            off(cx, move || {
+                let channel = devtools::channel(pid, Duration::from_secs(2))
+                    .ok_or_else(|| format!("pid {pid} has no pipe"))?;
+                channel.raw(&method, params, target.as_deref())
+            })
+            .await
+            .map(|result| json!({ "result": result }))
+            .map_err(ControlError::failed)
+        }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
         "debugUserKey" if debug_methods() => {

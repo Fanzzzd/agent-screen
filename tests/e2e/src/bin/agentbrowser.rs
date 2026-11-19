@@ -124,9 +124,19 @@ fn main() -> ExitCode {
     run(|| {
         // Beside your Dia, a refusal fails the test and records nothing,
         // never opening the window in your Dia.
+        // A link Agent Screen forwards to "your" browser starts a headless
+        // stand-in on its profile, never your own Chrome (#235).
+        let users_args = json!([
+            format!("--user-data-dir={}", user_profile.display()),
+            "--headless=new",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ])
+        .to_string();
         start_test_app(&[
             ("AGENTSCREEN_LANG", "en"),
             ("AGENTSCREEN_NO_SHARED_FALLBACK", "1"),
+            ("AGENTSCREEN_USERS_BROWSER_ARGS", &users_args),
         ])?;
         let result = test(&b, stand_in, port, &log, &profile, &user_profile);
         quit_profile(&profile);
@@ -484,6 +494,53 @@ fn activated(control: &Control, pid: u32, stand_in: bool) {
     );
 }
 
+/// With only the agents' instance running, a link from another app reaches
+/// it; Agent Screen closes its page there and opens it in the user's own
+/// browser, here a headless stand-in on the stand-in's profile (#235).
+fn forwarded(control: &Control, b: &Browser, port: u16, log: &Log, pid: u32) {
+    let from = mark(log);
+    sh_lenient(
+        "/usr/bin/open",
+        &[
+            "-g",
+            "-b",
+            b.bundle_id,
+            &format!("http://127.0.0.1:{port}/link?n=3"),
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut reached = Vec::new();
+    while Instant::now() < deadline && !reached.iter().any(|r| r == "link 3 user") {
+        reached = since(log, from)
+            .into_iter()
+            .filter(|e| e.starts_with("link 3 "))
+            .collect();
+        sleep_ms(100);
+    }
+    sleep_ms(1000);
+    let pages: Vec<String> = control
+        .call(
+            "debugDevtools",
+            json!({ "pid": pid, "method": "Target.getTargets" }),
+        )
+        .ok()
+        .and_then(|v| {
+            v["result"]["targetInfos"].as_array().map(|t| {
+                t.iter()
+                    .filter(|t| t["type"] == "page")
+                    .filter_map(|t| t["url"].as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let stays = pages.iter().any(|u| u.contains("/link?n=3"));
+    check(
+        "with only the agents' instance running, a link from another app opens in the user's browser and no page of it stays in the agents' instance",
+        reached.iter().any(|r| r == "link 3 user") && !stays,
+        format!("reached {reached:?}, agents' pages {pages:?}"),
+    );
+}
+
 fn test(
     b: &Browser,
     stand_in: bool,
@@ -726,6 +783,10 @@ fn test(
         && let Some(pid) = agents.get()
     {
         activated(&control, pid, stand_in);
+        if stand_in {
+            forwarded(&control, b, port, log, pid);
+            quit_profile(user_profile);
+        }
     }
     let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
     // Agent Screen closes the agents' windows through the pipe as it quits,

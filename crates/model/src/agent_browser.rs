@@ -251,6 +251,40 @@ pub fn front_to_return(
     previous.filter(|&p| p != pid && (p != own || agents_instance))
 }
 
+/// What Agent Screen does with a page that appears in the agents' instance
+/// (#235).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewPage {
+    /// The agent's page, or nothing to move.
+    Keep,
+    /// No address yet: decide once it has one.
+    Wait,
+    /// A link macOS handed the agents' instance, as the user clicked it in
+    /// another app: it opens in the user's own browser instead.
+    Forward,
+}
+
+/// `opener`: a page opened it, as a link with a target or `window.open`.
+/// `through_pipe`: Agent Screen was opening a page through its pipe.
+/// `agent_acted`: the agent posted input to the instance just now, as
+/// Command-T or a Command-click. A page with none of those came from
+/// outside, through LaunchServices: a link, a file opened in Finder or
+/// `open <url>`.
+pub fn new_page(opener: bool, through_pipe: bool, agent_acted: bool, url: &str) -> NewPage {
+    if opener || through_pipe || agent_acted {
+        return NewPage::Keep;
+    }
+    let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    match scheme.as_deref() {
+        None | Some("about") if url.is_empty() || url == "about:blank" => NewPage::Wait,
+        Some("http" | "https" | "file") => NewPage::Forward,
+        _ => NewPage::Keep,
+    }
+}
+
+/// How long a page with no address yet may still be a link.
+pub const LINK_SECS: u64 = 3;
+
 /// Who may use the agents' instance: launches that open a window in it,
 /// and the quit once it is idle. A quit never starts while a launch holds
 /// the instance, and a launch waits for a quit that started to end, so a
@@ -545,6 +579,32 @@ mod tests {
         assert!(!using.hold());
         using.end_quit();
         assert!(using.hold());
+    }
+
+    #[test]
+    fn only_a_page_from_outside_with_a_web_address_is_forwarded() {
+        use NewPage::*;
+        assert_eq!(
+            new_page(false, false, false, "https://example.com/a"),
+            Forward
+        );
+        assert_eq!(
+            new_page(false, false, false, "file:///Users/x/a.html"),
+            Forward
+        );
+        assert_eq!(new_page(false, false, false, ""), Wait);
+        assert_eq!(new_page(false, false, false, "about:blank"), Wait);
+        // The agent's own pages: a target link, a page Agent Screen opens,
+        // and Command-T or a Command-click.
+        assert_eq!(new_page(true, false, false, "https://example.com"), Keep);
+        assert_eq!(new_page(false, true, false, "https://example.com"), Keep);
+        assert_eq!(new_page(false, false, true, "https://example.com"), Keep);
+        // A new tab page, settings or an extension's page isn't a link.
+        assert_eq!(new_page(false, false, false, "chrome://newtab/"), Keep);
+        assert_eq!(
+            new_page(false, false, false, "chrome-extension://abc/x.html"),
+            Keep
+        );
     }
 
     #[test]
