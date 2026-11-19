@@ -823,7 +823,8 @@ mod tests {
             let (_lines, mut writer) = connect(&shared);
             send(&mut writer, json!({ "id": 1, "method": "listDisplays" })).await;
             assert!(until(|| fake.ended.lock().unwrap().contains(&me)).await);
-            assert!(shared.peers.lock().unwrap().is_empty());
+            // The sweep ends the process before it drops the peer.
+            assert!(until(|| shared.peers.lock().unwrap().is_empty()).await);
 
             // The same peer, read again with another command line or with
             // its pid given to another process, stays.
