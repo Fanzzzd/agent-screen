@@ -76,6 +76,13 @@ jobs:
             echo "::warning::The app changed without a changeset. If users will notice, run \`knope document-change\`."
           fi
 
+      # As in the macOS job below.
+      - name: Keep only the pinned toolchain
+        run: |
+          pinned="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list --quiet | while read -r toolchain; do
+            [[ "$toolchain" == "$pinned" ]] || rustup toolchain uninstall "$toolchain"
+          done
       # The model crate holds the rules with no OS calls (CLAUDE.md); a
       # Linux build keeps it that way.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -96,6 +103,15 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - run: rustup show active-toolchain
+      # rust-cache hashes every installed toolchain into its key, and runner
+      # images differ in theirs (1.100.0 appeared on some in November and
+      # missed the cache). Keep only the pinned one.
+      - name: Keep only the pinned toolchain
+        run: |
+          pinned="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list --quiet | while read -r toolchain; do
+            [[ "$toolchain" == "$pinned" ]] || rustup toolchain uninstall "$toolchain"
+          done
       # Only main saves: the repository's 10 GB of cache held pull request
       # caches that pushed main's out. release.yml restores this one too.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3

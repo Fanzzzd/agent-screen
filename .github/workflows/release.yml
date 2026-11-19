@@ -99,6 +99,14 @@ jobs:
           security list-keychains -d user -s "$keychain" "${existing[@]}"
           security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application"
 
+      - run: rustup show active-toolchain
+      # The cache key must match CI's: see ci.yml.
+      - name: Keep only the pinned toolchain
+        run: |
+          pinned="$(rustup show active-toolchain | cut -d' ' -f1)"
+          rustup toolchain list --quiet | while read -r toolchain; do
+            [[ "$toolchain" == "$pinned" ]] || rustup toolchain uninstall "$toolchain"
+          done
       # CI on main saves this cache; a release only reads it.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
