@@ -13,15 +13,18 @@
 //! 10 ms. Where macOS mirrors a new display, one of a size new to the run
 //! flashes the user's screen once, for under 2 s (0.6 to 1.6 s on
 //! 2026-11-18), and one of a size seen before doesn't. Where it doesn't
-//! mirror, none flashes. No app launches or pointer input.
+//! mirror, none flashes. The app has WindowServer extend onto a new
+//! display while it makes one (`connect_policy`), so none mirrors;
+//! `AGENTSCREEN_KEEP_CONNECT_POLICY=1` turns that off, to test the
+//! unmirror. No app launches or pointer input.
 
 use std::io::{BufRead, BufReader};
 use std::process::{ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 
 use agent_screen_tests::{
-    Control, check, instance, json, listening, now_ms, run, sh, skip, sleep_ms, start_test_app,
-    stop_test_app,
+    Control, check, debug_pid, instance, json, listening, now_ms, run, sh, sh_lenient, skip,
+    sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -185,6 +188,26 @@ fn attempt(user: u32, key: &str, size: (u32, u32)) -> Result<Attempt> {
     start_test_app(&[])?;
     let sampler = Sampler::start(user)?;
     let control = Control::connect()?;
+    // `SAMPLE=1`: every thread of the test app, while it makes the display.
+    let sampling = (std::env::var("SAMPLE").as_deref() == Ok("1"))
+        .then(debug_pid)
+        .flatten()
+        .and_then(|pid| {
+            std::process::Command::new("/usr/bin/sample")
+                .args([&pid.to_string(), "8", "1", "-mayDie", "-file"])
+                .arg(format!("/tmp/unmirror-{key}.sample.txt"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()
+        });
+    if sampling.is_some() {
+        // sample takes a moment to attach.
+        sleep_ms(1500);
+    }
+    let log_from = sh_lenient("/bin/date", &["+%Y-%m-%d %H:%M:%S"])
+        .trim()
+        .to_string();
     let from = display_log().len();
     let reply = control.send(
         "createDisplay",
@@ -205,6 +228,31 @@ fn attempt(user: u32, key: &str, size: (u32, u32)) -> Result<Attempt> {
         println!("{key}: {line}");
     }
     println!("{key}: user display samples {samples:?}");
+    if let Some(mut sampling) = sampling {
+        let _ = sampling.wait();
+        println!("{key}: sample in /tmp/unmirror-{key}.sample.txt");
+    }
+    // loginwindow logs each display's mode as it sees it: the user's
+    // display inactive while mirrored, then active at its own mode.
+    let modes = sh_lenient(
+        "/usr/bin/log",
+        &[
+            "show",
+            "--style",
+            "compact",
+            "--start",
+            &log_from,
+            "--predicate",
+            &format!(
+                "process == \"loginwindow\" AND eventMessage CONTAINS \"Display 0x{user:08x}: Mode\""
+            ),
+        ],
+    );
+    for line in modes.lines().filter(|l| l.contains("Mode")) {
+        let at = line.get(..23).unwrap_or(line);
+        let what = line.find("Display 0x").map_or(line, |i| &line[i..]);
+        println!("{key}: loginwindow {at} {what}");
+    }
     stop_test_app();
     Ok(Attempt {
         kept: reply.result.is_some() && !lines.iter().any(|l| l.contains(" released ")),
@@ -242,7 +290,23 @@ fn test() -> Result<()> {
             attempt.kept,
             format!("{:#?}", attempt.lines),
         );
-        if seen.contains(&size) {
+        let extended = attempt
+            .lines
+            .iter()
+            .any(|l| l.contains("new displays extend"));
+        if extended {
+            // WindowServer extends onto it: the user's screen keeps its
+            // mode. Another app making a display meanwhile, the user's own
+            // Agent Screen too, shows here as a flash.
+            check(
+                &format!(
+                    "display {} doesn't flash the user's screen: new displays extend",
+                    i + 1
+                ),
+                attempt.flashes.is_empty() && !mirrored,
+                format!("flashes {:?} ms {:#?}", attempt.flashes, attempt.lines),
+            );
+        } else if seen.contains(&size) {
             check(
                 &format!(
                     "display {} of a size seen before doesn't flash the user's screen",

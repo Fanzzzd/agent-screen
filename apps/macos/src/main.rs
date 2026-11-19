@@ -239,6 +239,8 @@ fn main() {
         mac::claims::delete();
         web::delete_state();
     }));
+    // An app that died making a display left new displays extending.
+    mac::display::restore_connect_policy();
     log::debug!("language: {:?}", i18n::lang());
     // An update brings a newer skill: the copies `mcp install` wrote follow.
     std::thread::spawn(|| {

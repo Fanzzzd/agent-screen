@@ -3,6 +3,7 @@
 
 use super::cg;
 use agent_screen_model::arrangement;
+use agent_screen_model::connect_policy::PolicyHold;
 use agent_screen_model::landing::{
     self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, RecentMirrors, StoredSets,
     UserBefore,
@@ -210,6 +211,9 @@ impl VirtualDisplay {
         others: &[u32],
         before: &[arrangement::Screen],
     ) -> Result<Self, NotMade> {
+        // No mirror to flash the user's screen: WindowServer extends onto
+        // a new display with no stored arrangement until this returns.
+        let _extend = extend_new_displays();
         let first = serial.1;
         let mut serial = Some(serial);
         let mut twinned: Vec<Self> = Vec::new();
@@ -447,6 +451,151 @@ pub enum NotMade {
     /// None was made, for the reason given to the agent
     /// (`creation_refusal`).
     Refused(String),
+}
+
+/// SkyLight's calls for WindowServer's default with a new display
+/// (`connect_policy`), looked up once. SkyLight has no public header:
+/// `SLSSetTVConnectDefaultPolicy` writes the `TVConnectPolicy` preference
+/// and sends it to WindowServer, which reads it in
+/// `apply_default_configuration` when a set of displays has no stored
+/// arrangement.
+struct PolicyCalls {
+    main_connection: unsafe extern "C" fn() -> i32,
+    get: unsafe extern "C" fn(i32, *mut i32) -> i32,
+    set: unsafe extern "C" fn(i32, i32) -> i32,
+}
+
+fn policy_calls() -> Option<&'static PolicyCalls> {
+    static CALLS: std::sync::OnceLock<Option<PolicyCalls>> = std::sync::OnceLock::new();
+    CALLS
+        .get_or_init(|| unsafe {
+            let path = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
+            let lib = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY);
+            if lib.is_null() {
+                return None;
+            }
+            let find = |name: &std::ffi::CStr| {
+                let f = libc::dlsym(lib, name.as_ptr());
+                (!f.is_null()).then_some(f)
+            };
+            Some(PolicyCalls {
+                main_connection: std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(
+                    find(c"SLSMainConnectionID")?,
+                ),
+                get: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, *mut i32) -> i32>(
+                    find(c"SLSGetTVConnectDefaultPolicy")?,
+                ),
+                set: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, i32) -> i32>(
+                    find(c"SLSSetTVConnectDefaultPolicy")?,
+                ),
+            })
+        })
+        .as_ref()
+}
+
+/// The policy now. None when SkyLight doesn't say.
+fn read_policy() -> Option<i32> {
+    let calls = policy_calls()?;
+    let mut policy = -1;
+    let error = unsafe { (calls.get)((calls.main_connection)(), &mut policy) };
+    (error == 0 && policy >= 0).then_some(policy)
+}
+
+/// Set the policy; true when SkyLight took it and it reads back.
+fn write_policy(policy: i32) -> bool {
+    let Some(calls) = policy_calls() else {
+        return false;
+    };
+    let error = unsafe { (calls.set)((calls.main_connection)(), policy) };
+    error == 0 && read_policy() == Some(policy)
+}
+
+/// `~/Library/Application Support/Agent Screen/connect-policy.json`, one
+/// for every instance: they share WindowServer's policy.
+fn connect_policy_path() -> std::path::PathBuf {
+    stored_sets_path().with_file_name("connect-policy.json")
+}
+
+fn alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
+}
+
+/// Run `job` on the shared `PolicyHold` with the policy now. Nothing when
+/// SkyLight can't read the policy.
+fn with_policy_hold<T: Default>(job: impl FnOnce(&mut PolicyHold, i32) -> T) -> T {
+    with_shared(
+        &connect_policy_path(),
+        PolicyHold::from_json,
+        PolicyHold::to_json,
+        |mut hold| match read_policy() {
+            Some(current) => {
+                let out = job(&mut hold, current);
+                (out, Some(hold))
+            }
+            None => (T::default(), None),
+        },
+    )
+}
+
+/// Sets the policy back when dropped (`extend_new_displays`).
+pub struct Extending(bool);
+
+/// Have WindowServer extend the desktop onto a new display, not mirror the
+/// user's displays onto it, until the returned value drops (#220). The
+/// user's policy comes back then, unless they changed it meanwhile.
+/// `AGENTSCREEN_KEEP_CONNECT_POLICY` leaves it, for a test of the unmirror.
+pub fn extend_new_displays() -> Extending {
+    if std::env::var_os("AGENTSCREEN_KEEP_CONNECT_POLICY").is_some() {
+        return Extending(false);
+    }
+    let me = std::process::id();
+    let held = with_policy_hold(|hold, current| match hold.begin(current, me, alive) {
+        Some(policy) if write_policy(policy) => {
+            crate::lifecycle::line(&format!(
+                "new displays extend: TV connect policy {policy}, was {current}"
+            ));
+            true
+        }
+        Some(policy) => {
+            log::warn!("couldn't set the TV connect policy to {policy}");
+            // Nothing to restore: end() finds the value unchanged.
+            hold.end(current, Some(me), alive);
+            false
+        }
+        None => !hold.is_empty(),
+    });
+    Extending(held)
+}
+
+impl Drop for Extending {
+    fn drop(&mut self) {
+        if self.0 {
+            end_policy_hold(Some(std::process::id()));
+        }
+    }
+}
+
+/// Set back the policy a process that died while holding it left
+/// (`connect_policy`). At start-up.
+pub fn restore_connect_policy() {
+    if connect_policy_path().exists() {
+        end_policy_hold(None);
+    }
+}
+
+fn end_policy_hold(me: Option<u32>) {
+    with_policy_hold(|hold, current| {
+        if let Some(policy) = hold.end(current, me, alive) {
+            if write_policy(policy) {
+                crate::lifecycle::line(&format!("TV connect policy back to {policy}"));
+            } else {
+                log::warn!("couldn't set the TV connect policy back to {policy}");
+            }
+        }
+    });
 }
 
 /// How this process's last new displays ended. Mirrors this instance
