@@ -1,5 +1,6 @@
 # Publishes a release when a "chore(release): Agent Screen x.y.z" pull
-# request from prepare-release.yml merges: checks, signs and builds the
+# request from prepare-release.yml merges: checks the Apple credentials
+# first, then checks, signs and builds the
 # DMG, has knope tag v<version> and publish the GitHub release with the
 # CHANGELOG.md section and the DMG, then points the Homebrew tap at it.
 #
@@ -8,7 +9,7 @@
 # current version instead, skipping what's already done: to finish a
 # release that failed partway.
 #
-# Secrets:
+# Secrets, in the `release` environment, which only main may use:
 # - DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD: the Developer ID
 #   Application certificate and its private key.
 # - APP_STORE_CONNECT_KEY_P8, APP_STORE_CONNECT_KEY_ID,
@@ -21,9 +22,12 @@
 #   (ADR 0012).
 name: Release
 
+# The merged release pull request is a push to main whose squashed commit
+# starts with its title, as prepare-release.yml tells it apart. A push,
+# unlike the pull request's own event, runs on refs/heads/main, which the
+# environment's branch rule matches.
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -35,31 +39,45 @@ on:
 permissions:
   contents: write
 
-concurrency: release
+# One release at a time. Other pushes to main skip at once and get a group
+# of their own, so they never replace a release waiting its turn.
+concurrency:
+  group: >-
+    ${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ')) && 'release' || format('release-skip-{0}', github.run_id) }}
 
 jobs:
   build:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged && github.head_ref == 'release')
+      startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ')
     runs-on: macos-26
+    environment: release
+    # 23 minutes cold in November, with notarization waiting on Apple.
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
+
+      # Before the slow steps: in November four release attempts failed
+      # when notarytool refused the credentials, each after 11 to 16
+      # minutes of checks.
+      - name: Check the release credentials
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: .github/scripts/check-release-credentials.sh
 
       - name: Version
         id: version
         run: echo "version=$(awk -F'"' '/^version/ { print $2; exit }' apps/macos/Cargo.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
 
       - name: Import the Developer ID certificate
         env:
@@ -81,6 +99,17 @@ jobs:
           security list-keychains -d user -s "$keychain" "${existing[@]}"
           security find-identity -v -p codesigning "$keychain" | grep -F "Developer ID Application"
 
+      # CI on main saves this cache; a release only reads it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust
+          save-if: false
+      - name: Check
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
       - name: Build and notarize the DMG and cask
         env:
           KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
@@ -97,7 +126,7 @@ jobs:
           test -s target/appcast.xml
 
       - name: Keep the DMG and cask
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
           path: |
@@ -116,15 +145,17 @@ jobs:
     needs: build
     if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
           path: target
-      - uses: knope-dev/action@v2.1.2
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         with:
           version: 0.23.0
 
