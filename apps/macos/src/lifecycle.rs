@@ -41,6 +41,27 @@ pub fn note(event: &str, id: DisplayId, detail: &str) {
     append(&line);
 }
 
+/// The last `max` lines about any of `displays`, oldest first, for a bug
+/// report, which redacts them (ADR 0024).
+pub fn lines_about(displays: &[DisplayId], max: usize) -> Vec<String> {
+    if displays.is_empty() {
+        return Vec::new();
+    }
+    let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return Vec::new();
+    };
+    let marks: Vec<String> = displays.iter().map(|id| format!("display={id} ")).collect();
+    let mut lines: Vec<String> = text
+        .lines()
+        .rev()
+        .filter(|line| marks.iter().any(|m| line.contains(m.as_str())))
+        .take(max)
+        .map(String::from)
+        .collect();
+    lines.reverse();
+    lines
+}
+
 /// The folder the log lives in.
 pub fn folder() -> Option<PathBuf> {
     path()?.parent().map(PathBuf::from)

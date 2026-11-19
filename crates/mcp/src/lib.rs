@@ -10,6 +10,7 @@ pub mod install;
 pub mod ledger;
 pub mod pipe;
 pub mod process;
+pub mod report;
 mod session;
 mod tools;
 

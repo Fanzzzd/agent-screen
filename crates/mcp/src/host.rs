@@ -34,8 +34,9 @@ const INSTRUCTIONS: &[&str] = &[
     "immediately before you solve it, then solve it when you can. Call request_help if they prefer to",
     "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
-    "For an Agent Screen bug, collect get_diagnostics in the failing session before restarting the client,",
-    "then attach the report and reproduction steps to a GitHub bug report. Do not auto-submit or upload user content.",
+    "When an Agent Screen tool fails or misbehaves, report it with report_issue in that session, before restarting the client:",
+    "it adds the version and diagnostics, removes the user's content and checks GitHub for a known issue or a fix.",
+    "Never put user content in a report. get_diagnostics stays for a report a person files by hand.",
 ];
 
 /// Who the host serves: the client's environment, and the pipe's hello when
@@ -152,6 +153,39 @@ impl ServerHandler for Host {
         let session = session::identify(&self.client.env, &meta, client.as_deref());
         let args = request.arguments.unwrap_or_default();
 
+        if request.name == "report_issue" {
+            let client = context.client_info().map(|info| crate::report::ClientInfo {
+                name: Some(info.name),
+                version: Some(info.version),
+            });
+            let (github, sender) = (crate::report::GitHub::new(), crate::report::sender());
+            let mut diagnostics = crate::diagnostics::collect(
+                crate::diagnostics::Collector::Mcp,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            .to_json();
+            diagnostics["pipe"] = self.pipe_report();
+            let run = crate::report::run(
+                &args,
+                &session,
+                &self.control,
+                client.unwrap_or_default(),
+                diagnostics,
+                &github,
+                sender.as_ref(),
+            );
+            let result = match control::SESSION_KEY.scope(session.key.clone(), run).await {
+                Ok(object) => json!({
+                    "content": [text(object.to_string())],
+                    "structuredContent": object
+                }),
+                Err(error) => json!({ "isError": true, "content": [text(error.to_string())] }),
+            };
+            let mut result = from_json::<CallToolResult>(result);
+            result.result_type = Some(ResultType::COMPLETE);
+            return Ok(result.into());
+        }
         let ct = context.ct.clone();
         let cancelled: tools::Cancelled = Box::pin(async move { ct.cancelled().await });
         let run = tools::run(&request.name, &args, &session, &self.control, cancelled);

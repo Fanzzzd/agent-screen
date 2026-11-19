@@ -54,6 +54,8 @@ pub struct Setup {
     pub pinned: Vec<String>,
     /// The picture the user chose for Agent Displays.
     pub wallpaper: Option<PathBuf>,
+    /// Whether agents may report Agent Screen bugs (ADR 0024).
+    pub reports_on: bool,
     icon: Arc<gpui::Image>,
 }
 
@@ -83,6 +85,7 @@ impl Setup {
             aerospace: None,
             pinned: Vec::new(),
             wallpaper: None,
+            reports_on: true,
             icon,
         }
     }
@@ -189,7 +192,10 @@ impl Render for Setup {
             .child(section(t("Permissions", "权限"), permissions, &theme))
             .child(section(
                 t("Agents", "Agent"),
-                vec![self.agent_row(&theme).into_any_element()],
+                vec![
+                    self.agent_row(&theme).into_any_element(),
+                    self.reports_row(&theme).into_any_element(),
+                ],
                 &theme,
             ))
             .child(section(
@@ -642,6 +648,47 @@ impl Setup {
         item(
             badge("icons/plus.svg", color, loaded),
             t("Claude Code and Codex", "Claude Code 和 Codex").into(),
+            detail.into(),
+            None,
+            action,
+            theme,
+        )
+    }
+
+    /// Agents' bug reports: on, after the user's OK on the card, or off.
+    fn reports_row(&self, theme: &Theme) -> impl IntoElement {
+        let on = self.reports_on;
+        let detail = if on {
+            t(
+                "Agents report Agent Screen bugs on GitHub after your OK, without window titles, typed text, links or paths",
+                "agent 经你确认后在 GitHub 报告 Agent Screen 的问题，不含窗口标题、输入的文字、链接和路径",
+            )
+        } else {
+            t(
+                "Off. Agents only show you their report",
+                "已关闭。agent 只把报告交给你",
+            )
+        };
+        let action = button(
+            "setup-reports",
+            if on {
+                t("Turn Off", "关闭")
+            } else {
+                t("Turn On", "开启")
+            }
+            .into(),
+            None,
+            theme,
+            |_| native::send(Native::Menu(MenuAction::ToggleReports)),
+        )
+        .into_any_element();
+        item(
+            badge(
+                "icons/alert.svg",
+                if on { green() } else { theme.secondary },
+                on,
+            ),
+            t("Bug Reports", "问题报告").into(),
             detail.into(),
             None,
             action,

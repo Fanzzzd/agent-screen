@@ -1667,6 +1667,75 @@ async fn handle_one(
             }
             Ok(reply)
         }
+        // What only the app knows for an agent's bug report (ADR 0024):
+        // the setting, the macOS version, whether AeroSpace runs, the
+        // titles of windows on the session's displays and their Display
+        // Labels' task titles, which the report removes, and the display
+        // log's lines about them.
+        "reportContext" => {
+            let key = p.string("sessionKey").unwrap_or_default();
+            let (ids, labels) = core.read_with(cx, |c, _| {
+                let ids = c.displays.of_session(&key);
+                let labels: Vec<String> = ids
+                    .iter()
+                    .filter_map(|&id| c.displays.get(id))
+                    .filter_map(|d| d.owner.as_ref().map(|o| o.title.clone()))
+                    .collect();
+                (ids, labels)
+            });
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let (automatic, aerospace) = shell
+                .update(cx, |shell, _| {
+                    (shell.reports.automatic, shell.aerospace_running())
+                })
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            let (titles, log) = cx
+                .background_executor()
+                .spawn(async move {
+                    let titles: Vec<String> = ids
+                        .iter()
+                        .flat_map(|&id| crate::mac::windows::on_display(id))
+                        .map(|w| w.title)
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    (titles, crate::lifecycle::lines_about(&ids, 30))
+                })
+                .await;
+            Ok(json!({
+                "automatic": automatic,
+                "macos": crate::reports::macos_version(),
+                "aerospace": aerospace,
+                "titles": titles,
+                "private": labels,
+                "log": log,
+            }))
+        }
+        // An agent's redacted bug report, for the menu bar (ADR 0024).
+        "fileReport" => {
+            let filing = agent_screen_model::report::Filing {
+                agent: p.string("agent").unwrap_or_else(|| "An agent".into()),
+                title: p
+                    .string("title")
+                    .ok_or_else(|| ControlError::invalid("title is required"))?,
+                fingerprint: p.string("fingerprint").unwrap_or_default(),
+                url: p
+                    .string("url")
+                    .filter(|u| u.starts_with("https://github.com/"))
+                    .ok_or_else(|| ControlError::invalid("url must be a GitHub form"))?,
+            };
+            let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
+            let filed = shell
+                .update(cx, |shell, cx| shell.file_report(filing, cx))
+                .map_err(|e| ControlError::failed(e.to_string()))?;
+            use agent_screen_model::report::Filed;
+            Ok(match filed {
+                Filed::Off => json!({ "status": "off" }),
+                Filed::Open(_) => json!({ "status": "opened" }),
+                Filed::Waiting(id) => json!({ "status": "waiting", "report": id }),
+                Filed::Again(earlier) => json!({ "status": "again", "url": earlier.url }),
+                Filed::TooMany => json!({ "status": "too_many" }),
+            })
+        }
         // The MCP server of an agent session listed the tools.
         "agentReady" => {
             let client = p.string("client").unwrap_or_else(|| "An agent".into());
@@ -2369,7 +2438,11 @@ async fn handle_one(
                     .unwrap_or(Value::Null),
                 None => Value::Null,
             };
+            let report = crate::ui::shell::current()
+                .and_then(|shell| shell.read_with(cx, |shell, _| shell.debug_reports()).ok())
+                .unwrap_or(Value::Null);
             Ok(json!({
+                "report": report,
                 "width": width,
                 "buttons": buttons,
                 "queueHeight": crate::ui::help_card::queue_height(),
@@ -2664,6 +2737,8 @@ fn needs_permissions(method: &str) -> bool {
             | "windowAccess"
             | "listWindows"
             | "agentReady"
+            | "reportContext"
+            | "fileReport"
             | "inputQueue"
             | "cancelWaitForChange"
     ) && !method.starts_with("debug")

@@ -124,13 +124,58 @@ pub fn definitions() -> Vec<Value> {
             "Collect bug report diagnostics",
             &[
                 "Collect compiled build metadata for THIS MCP process and the responding Agent Screen app.",
-                "On a bug, collect this in the failing session and attach the report to a GitHub bug report.",
+                "For a report a person files by hand: collect this in the failing session and attach it to a GitHub bug report.",
+                "To report an Agent Screen bug yourself, call report_issue, which includes this report.",
                 "Works before create_display and preserves ongoing sessions. Does not start the app, send input,",
                 "change settings, restart clients, submit an issue or upload user content.",
                 "Missing or legacy apps and unknown builds are reported explicitly. See docs/REPORTING_BUGS.md.",
             ],
             object(json!({}), &[]),
             READ_ONLY,
+        ),
+        tool(
+            "report_issue",
+            "Report an Agent Screen bug",
+            &[
+                "Report a bug in Agent Screen itself: one of its tools failed, hung or did something other than its description says.",
+                "Not for bugs in the app you operate, and not for your own mistakes. Call it once per failure, in the session where it happened.",
+                "Agent Screen adds its version and build revision, the macOS version, your client's name and version, this session's diagnostics and its display-log lines.",
+                "Before anything leaves the Mac it removes window titles, typed text, links, file paths, email addresses and pictures: do not put user content in the fields.",
+                "It checks GitHub's public issues first: a known open issue comes back as duplicate with its number, and a bug fixed in a newer release",
+                "comes back as fixed_in_newer_release, so you ask the user to update. Otherwise it opens the prefilled bug report form in the user's browser,",
+                "after their one-time OK in the menu bar, for them to submit. The result shows the report exactly as it is sent, and the status:",
+                "waiting_for_consent, opened, duplicate, fixed_in_newer_release, already_reported, too_many or off. Tell the user what happened.",
+            ],
+            object(
+                json!({
+                    "title": { "type": "string", "description": "One line naming the failure, such as \"computer left_click on a Safari tab does nothing\"." },
+                    "steps": {
+                        "type": "array",
+                        "description": "What you did, in order: Agent Screen tool calls as {tool, arguments, result}, or sentences. Arguments keep only handles, coordinates and actions; text, titles and paths are removed.",
+                        "items": {
+                            "anyOf": [
+                                { "type": "string" },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool": { "type": "string" },
+                                        "arguments": { "type": "object" },
+                                        "result": { "type": "string", "description": "What the call returned, shortened." }
+                                    },
+                                    "required": ["tool"]
+                                }
+                            ]
+                        }
+                    },
+                    "expected": { "type": "string", "description": "What you expected to happen." },
+                    "actual": { "type": "string", "description": "What happened instead." },
+                    "reproducible": { "type": "string", "enum": ["always", "sometimes", "once", "unknown"], "description": "Whether doing it again fails again. Default unknown." },
+                    "tool": { "type": "string", "description": "The Agent Screen tool that failed, such as computer." },
+                    "error": { "type": "string", "description": "The error text that tool returned, exactly. Reports with the same tool and error count as the same failure." }
+                }),
+                &["title", "expected", "actual"],
+            ),
+            PLAIN,
         ),
         always_load(tool(
             "create_display",
@@ -2730,9 +2775,9 @@ mod tests {
     }
 
     #[test]
-    fn seventeen_tools_with_object_schemas() {
+    fn eighteen_tools_with_object_schemas() {
         let tools = definitions();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         let diagnostics = tools
             .iter()
             .find(|t| t["name"] == "get_diagnostics")

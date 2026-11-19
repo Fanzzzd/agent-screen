@@ -92,4 +92,4 @@ The app answers each client in the MCP version the client asks for, from 2024-11
 ## What the tests cover
 
 - `cargo test -p agent-screen-mcp --test clients` drives the real `AgentScreen mcp` binary as Claude Code (its variable), Codex (per-call `_meta`, with Claude Code's variable inherited), Gemini CLI started from Claude Code's shell, and two bare 2026-07-28 clients with no hint. Each lists the tools and calls one, and the test checks every session key the app hears. It also checks each protocol version's handshake and wire shape.
-- `AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients` runs the real clients installed on the Mac against the test app: today Cursor's CLI lists the 17 tools. Clients with no command that lists one server's tools without a model call, or whose listing command also starts the user's other servers, are not run there.
+- `AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients` runs the real clients installed on the Mac against the test app: today Cursor's CLI lists the 18 tools. Clients with no command that lists one server's tools without a model call, or whose listing command also starts the user's other servers, are not run there.

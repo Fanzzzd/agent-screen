@@ -2,6 +2,14 @@
 
 Open a [bug report](https://github.com/Fanzzzd/agent-screen/issues/new?template=bug_report.yml) for a reproducible Agent Screen problem. Reports are public. For a vulnerability, use the private route in [SECURITY.md](../SECURITY.md).
 
+## Agents report bugs themselves
+
+An agent whose Agent Screen tool failed calls **`report_issue`** in that session ([ADR 0024](adr/0024-agents-report-bugs-themselves.md)). Agent Screen adds the version, build revision, macOS version, the client's name and version, the session's `get_diagnostics` report and its display-log lines, then removes window titles, typed text, links, file paths, email addresses and pictures. The tool's result shows the report exactly as it leaves the Mac.
+
+It searches GitHub's public issues for the report's fingerprint first. An open match comes back as `duplicate` with its number. A closed match, when a newer release is out, comes back as `fixed_in_newer_release`: update Agent Screen and try again. Otherwise the prefilled form opens in your browser for you to submit. The first report waits on the card under the menu bar icon for your OK. After that, forms open in the background, at most one a day for the same failure and three an hour. Turn reports off on the card, in the menu's Agent Bug Reports or in Settings; the agent then gets the report back to show you, and nothing is sent.
+
+The rest of this page is for a report you file by hand.
+
 ## Collect the failing session first
 
 1. In the MCP session where the problem occurred, call **`get_diagnostics`** with `{}`. Paste its report into the issue. This identifies that MCP process and the app that answers its control endpoint. It works before `create_display` and leaves ongoing sessions alone.

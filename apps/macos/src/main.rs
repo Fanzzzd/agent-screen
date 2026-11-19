@@ -12,6 +12,7 @@ mod input_queue;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod mac;
+mod reports;
 mod ui;
 mod web;
 

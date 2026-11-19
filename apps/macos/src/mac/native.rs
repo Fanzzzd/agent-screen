@@ -106,6 +106,12 @@ pub enum MenuAction {
     OpenSettings,
     OpenRecordings,
     ReportProblem,
+    /// Open a bug report an agent filed, newest first (ADR 0024).
+    OpenReported {
+        index: usize,
+    },
+    /// Turn agents' bug reports on or off.
+    ToggleReports,
     CheckForUpdates,
     /// Install the downloaded update and restart.
     InstallUpdate,

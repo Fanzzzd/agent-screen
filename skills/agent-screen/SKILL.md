@@ -29,7 +29,7 @@ Use either toolset on windows that are on your display:
 
 ## While you work
 
-For an Agent Screen bug or an unverified fix, collect `get_diagnostics` in the failing session and follow [Reporting bugs](https://github.com/Fanzzzd/agent-screen/blob/main/docs/REPORTING_BUGS.md).
+When an Agent Screen tool fails or misbehaves, report it with `report_issue` in the failing session, before restarting the client. Give the tool calls, the exact error, what you expected and what happened, with no user content; Agent Screen adds the versions and diagnostics, removes the user's data, and checks GitHub for a known issue or a fix. Tell the user the result: a waiting report needs their OK in the menu bar, a duplicate names the issue, and a fixed bug means asking them to update. For an unverified fix or a report a person files by hand, collect `get_diagnostics` and follow [Reporting bugs](https://github.com/Fanzzzd/agent-screen/blob/main/docs/REPORTING_BUGS.md).
 
 - After each window's purpose is clear, call `set_disposition`: `keep` for results the user should see, `close` for scratch windows. Your session can end without warning.
 - A `takeover` error means the user is operating the display: call `wait_for_control`. When you need the display back to go on, call `request_control` with a short reason. Repeating a pending request waits without another notification. If the user explicitly tells you to continue in the conversation, call `request_control` with their words as `user_instruction`. If they tell you to pause, pass their words and `control: "user"`. Only an explicit hand-back ends a Takeover; silence and timeouts keep it.
