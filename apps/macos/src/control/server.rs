@@ -90,8 +90,11 @@ pub fn socket_path() -> PathBuf {
     path
 }
 
-/// A socket peer that said it is an MCP server: a pipe's hello or a v1
-/// request. Only these are swept.
+/// A socket peer that sent a first line: a pipe's hello, or anything else,
+/// taken as a v1 request. A peer that sends nothing, as another launch of
+/// the app checking the socket, is never one. Being a peer doesn't get a
+/// process ended: the sweep's checks of its parent, command line and pid
+/// version do the protecting.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Peer {
     pid: i32,
@@ -432,9 +435,13 @@ async fn serve<R, W>(
             line = first;
         } else {
             let read = match closed.as_mut() {
+                // The close first: a call still running after the pipe
+                // ended may open a connection and send at once, and the
+                // app must not serve it.
                 Some(closed) => tokio::select! {
-                    read = reader.read_line(&mut line) => read,
+                    biased;
                     _ = closed.wait_for(|c| *c) => break,
+                    read = reader.read_line(&mut line) => read,
                 },
                 None => reader.read_line(&mut line).await,
             };
@@ -707,6 +714,38 @@ mod tests {
             .await;
             assert!(closed.is_ok(), "the app never heard the session's connection close");
             assert!(gone.elapsed() < Duration::from_secs(1), "closed after {:?}", gone.elapsed());
+        });
+    }
+
+    #[test]
+    fn a_connection_the_host_opens_after_its_pipe_ended_serves_nothing() {
+        runtime().block_on(async {
+            let fake = Arc::new(Fake::default());
+            let (shared, mut events) = shared(&fake, Ledger::default());
+            let (close, closed) = tokio::sync::watch::channel(false);
+            let AppLink::InProcess(open) = in_process(shared.clone(), closed) else {
+                panic!("not in process");
+            };
+            let _ = close.send(true);
+            // A call still running opens a connection and sends at once:
+            // the line and the close are both there when it is read.
+            for _ in 0..20 {
+                let (reader, mut writer) = open();
+                writer
+                    .write_all(b"{\"id\":1,\"method\":\"listDisplays\"}\n")
+                    .await
+                    .unwrap();
+                let mut lines = BufReader::new(reader).lines();
+                let end = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+                assert_eq!(end.expect("the connection ends").unwrap(), None);
+                let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+                    .await
+                    .expect("an event")
+                    .expect("open");
+                if let Event::Request { method, .. } = event {
+                    panic!("served {method} after the pipe ended");
+                }
+            }
         });
     }
 
