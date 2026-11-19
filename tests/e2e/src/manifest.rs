@@ -233,6 +233,7 @@ const NEEDS_APP: &str = "it needs a debug build already running, and starts none
 /// Every script, by name.
 #[rustfmt::skip]
 pub const SCRIPTS: &[Script] = &[
+    script("agentbrowser", &[Browser, AgentInput], Full, Agent, 1),
     script("agentshots", &[Screenshots], Core, Agent, 1),
     script("alerts", &[Windows], Full, Hook, 1).hands_off(),
     script("appwhere", &[Peek, WindowAccess], Full, Hook, 1).hands_off(),
@@ -253,6 +254,9 @@ pub const SCRIPTS: &[Script] = &[
     script("cursormenu", &[Elements], Full, Agent, 1),
     script("demo", &[], Full, Hook, 3)
         .manual("it records the README's demo and writes docs/media/demo.gif"),
+    script("diafocused", &[AgentInput, Browser], Full, Agent, 1).manual(
+        "it needs your own browser in front: run it with E2E_BROWSER=\"Google Chrome\" E2E_CHROME=1 while a Chrome window of yours has focus; Dia skips until it is verified",
+    ),
     script("diashared", &[AgentInput, Browser], Full, Agent, 1).manual(
         "it drives your own Dia: run it with E2E_DIA=1 while you type in another Dia window",
     ),

@@ -1653,6 +1653,9 @@ async fn handle_one(
                 }),
                 None => json!({ "wasRunning": launched.was_running, "reason": launched.reason }),
             };
+            if launched.shared {
+                reply["shared"] = json!(true);
+            }
             // The app this display started, which the MCP server hands to
             // the session's next display if this app quits.
             if let Some(pid) = launched.pid.filter(|pid| {
@@ -2286,6 +2289,15 @@ async fn handle_one(
                 .ok()
                 .flatten();
             Ok(json!({ "reminded": reminded, "peek": peek }))
+        }
+        // Test hook: what Agent Screen would do now if the agents' browser
+        // instance `pid` came to the front by another app, from the user's
+        // latest input, without doing it (ADR 0022).
+        "debugAgentsActivated" if debug_methods() => {
+            let pid = p.int("pid").unwrap_or(0) as i32;
+            let agents = devtools::is_agents(pid);
+            let decided = off(cx, move || devtools::on_agents_activated(pid)).await;
+            Ok(json!({ "agents": agents, "decision": format!("{decided:?}") }))
         }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
@@ -5109,6 +5121,13 @@ fn open_target(text: &str) -> Result<String, ControlError> {
     }
 }
 
+/// Test builds may turn off the fallback for a browser that refuses the
+/// agents' instance (ADR 0022), so a test beside the user's own browser
+/// fails there, records nothing and never opens a window in theirs.
+fn no_shared_fallback_for_tests() -> bool {
+    cfg!(debug_assertions) && std::env::var("AGENTSCREEN_NO_SHARED_FALLBACK").as_deref() == Ok("1")
+}
+
 /// Test builds may hold the launch, so a test can start another copy of
 /// the app while it waits (issue #35).
 fn hold_launch_for_tests() {
@@ -5249,6 +5268,9 @@ struct Launched {
     reason: Option<&'static str>,
     /// The process, when this launch started it.
     pid: Option<i32>,
+    /// The window opened in the user's own process of a browser that
+    /// refuses the agents' instance (ADR 0022).
+    shared: bool,
 }
 
 /// How long a cold start's windows count as the agent's, and the launch
@@ -5276,10 +5298,16 @@ fn running_app_turn() -> Duration {
 }
 
 /// Arguments and environment for a new instance of an app.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Start {
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
+    /// The agents' instance of a browser the user runs, which takes the
+    /// new window (ADR 0022).
+    agents: Option<AgentsInstance>,
+    /// This start is the agents' instance's (ADR 0022), shared by every
+    /// session: no display holds it as an app it started.
+    agents_start: bool,
 }
 
 impl Start {
@@ -5323,6 +5351,8 @@ impl Start {
         Ok(Start {
             arguments,
             environment,
+            agents: None,
+            agents_start: false,
         })
     }
 
@@ -5352,6 +5382,218 @@ impl Start {
     fn new_instance(&self) -> bool {
         !self.arguments.is_empty() || !self.environment.is_empty()
     }
+
+    /// The same start with `switches` ahead of the agent's arguments.
+    fn with_switches(&self, switches: Vec<String>) -> Start {
+        Start {
+            arguments: switches
+                .into_iter()
+                .chain(self.arguments.iter().cloned())
+                .collect(),
+            environment: self.environment.clone(),
+            agents: None,
+            agents_start: false,
+        }
+    }
+}
+
+/// The agents' own instance of a Chromium browser (ADR 0022), running as
+/// `pid` with Agent Screen's pipe.
+#[derive(Clone)]
+struct AgentsInstance {
+    pid: i32,
+}
+
+/// How to start the browser at `path`: a Chromium browser the user already
+/// runs gets the agents' instance (ADR 0022).
+fn browser_plan(
+    path: &std::path::Path,
+    arguments: &[String],
+) -> (
+    agent_screen_model::agent_browser::Plan,
+    Option<std::path::PathBuf>,
+) {
+    use agent_screen_model::agent_browser::{Plan, plan};
+    let profile = (devtools::is_chromium(path) && app::handles_web(path))
+        .then(|| app::agent_browser_profile(path))
+        .flatten();
+    let Some(profile) = profile else {
+        return (Plan::AsAsked, None);
+    };
+    let running: Vec<(i32, Vec<String>)> = app::running_pids(path)
+        .into_iter()
+        .map(|pid| (pid, app::arguments(pid).unwrap_or_default()))
+        .collect();
+    let piped: Vec<i32> = running
+        .iter()
+        .map(|(pid, _)| *pid)
+        .filter(|&pid| devtools::has_pipe(pid))
+        .collect();
+    let refused = refusal(path, &profile).is_some_and(|(_, known)| known);
+    (
+        plan(
+            true,
+            app::bundle_id_at(path)
+                .is_some_and(|id| agent_screen_model::agent_browser::verified(&id)),
+            arguments,
+            &running,
+            &piped,
+            &profile,
+            refused,
+        ),
+        Some(profile),
+    )
+}
+
+/// The refusals file beside the agents' profile for the browser at `path`,
+/// and whether it lists this version of the browser (ADR 0022).
+fn refusal(
+    path: &std::path::Path,
+    profile: &std::path::Path,
+) -> Option<(std::path::PathBuf, bool)> {
+    use agent_screen_model::agent_browser::{REFUSALS, refuses};
+    let file = profile.parent()?.join(REFUSALS);
+    let record = std::fs::read_to_string(&file).unwrap_or_default();
+    let known = refuses(
+        &record,
+        &app::bundle_id_at(path)?,
+        &app::bundle_version_at(path).unwrap_or_default(),
+    );
+    Some((file, known))
+}
+
+/// Remember that the browser at `path` refused the agents' instance, so
+/// later launches open in the user's process without trying again. The
+/// profile folder goes to the Trash when this launch made it, since the
+/// browser only wrote its first-run files there.
+fn record_refusal(path: &std::path::Path, profile: &std::path::Path, made_profile: bool) {
+    use agent_screen_model::agent_browser::with_refusal;
+    if let (Some((file, _)), Some(id)) = (refusal(path, profile), app::bundle_id_at(path)) {
+        let version = app::bundle_version_at(path).unwrap_or_default();
+        let record = std::fs::read_to_string(&file).unwrap_or_default();
+        if let Err(e) = std::fs::write(&file, with_refusal(&record, &id, &version)) {
+            log::warn!("launch: couldn't record that {id} refuses a second instance: {e}");
+        }
+    }
+    if made_profile && profile.exists() {
+        match app::trash(profile) {
+            Ok(()) => log::info!(
+                "launch: moved the unused profile {} to the Trash",
+                profile.display()
+            ),
+            Err(e) => log::warn!(
+                "launch: couldn't move {} to the Trash: {e}",
+                profile.display()
+            ),
+        }
+    }
+}
+
+/// Ask the agents' instance for a new window on the display at `bounds`,
+/// showing `url` if given, through its DevTools pipe, which opens it
+/// without activating the browser. The page's target, and whether it went
+/// into a window that was open already, as Dia puts it, which then is on
+/// this display. A tab in a window elsewhere, such as another agent's
+/// display, is closed, and so is the launch.
+/// Where the page the agents' instance's pipe opened for a launch went.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PageWindow {
+    /// A new window, which Chromium gives a frame.
+    New,
+    /// A tab in a window it had open on this display, with a frame.
+    Open,
+    /// None: the browser keeps its pages in windows Chromium gives no
+    /// frame for, as Dia does. The page goes into the agents' window on this
+    /// display through its address field.
+    Frameless,
+}
+
+fn new_window_in(
+    agents: &AgentsInstance,
+    url: Option<&str>,
+    bounds: crate::model::Rect,
+) -> Result<(String, PageWindow), String> {
+    use agent_screen_model::agent_browser::{TabLanding, tab_landing};
+    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+    let channel = devtools::channel(agents.pid, Duration::from_secs(2)).ok_or_else(|| {
+        format!(
+            "(pid {}) doesn't answer on its pipe; call launch_app again",
+            agents.pid
+        )
+    })?;
+    match channel.new_window(url.unwrap_or("about:blank"), bounds.inset(margin, margin)) {
+        Ok(devtools::NewPage::Window { target }) => Ok((target, PageWindow::New)),
+        Ok(devtools::NewPage::Frameless) => Ok((String::new(), PageWindow::Frameless)),
+        Ok(devtools::NewPage::Tab {
+            target,
+            bounds: window,
+        }) => match tab_landing(window, bounds) {
+            TabLanding::ThisDisplay => Ok((target, PageWindow::Open)),
+            TabLanding::Elsewhere => {
+                channel.close_target(&target);
+                Err("opened the page as a tab in its window on another display, not in a new window, and the tab was closed; open the page in your window on this display with computer, or call launch_app again".into())
+            }
+        },
+        Ok(devtools::NewPage::Unknown) => Err("didn't say where it opened the page".into()),
+        Err(e) => Err(format!("made no window through its pipe: {e}")),
+    }
+}
+
+/// The launch's window, fitted to display `id` through the agents'
+/// instance's pipe when it reaches past the display.
+async fn fit_agents_window(launched: Launched, id: DisplayId, cx: &AsyncApp) -> Launched {
+    let Some(window) = launched.window.clone() else {
+        return launched;
+    };
+    let display = cg::display_bounds(id);
+    let size = (window.bounds.width, window.bounds.height);
+    if !agent_screen_model::agent_browser::overflows(size, (display.width, display.height)) {
+        return launched;
+    }
+    let (target, current) = (window.target, window.bounds);
+    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+    let fitted = off(cx, move || {
+        let set = devtools::channel(target.pid, Duration::from_secs(2))
+            .is_some_and(|c| c.fit_window(current, display.inset(margin, margin)));
+        log::info!(
+            "launch: window {} of the agents' instance was {}x{}, past the display; fitted through its pipe: {set}",
+            target.window_id,
+            size.0,
+            size.1
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        windows::on_display(id).into_iter().find(|w| w.target == target)
+    })
+    .await;
+    Launched {
+        window: fitted.or(Some(window)),
+        ..launched
+    }
+}
+
+/// Whether a process of the browser at `path` runs on a profile other than
+/// the agents', as the user's does.
+async fn users_run(path: &std::path::Path, profile: &std::path::Path, cx: &AsyncApp) -> bool {
+    let (path, profile) = (path.to_path_buf(), profile.to_path_buf());
+    off(cx, move || {
+        app::running_pids(&path).into_iter().any(|pid| {
+            !app::arguments(pid)
+                .is_some_and(|argv| agent_screen_model::agent_browser::is_agents(&argv, &profile))
+        })
+    })
+    .await
+}
+
+/// Whether a process of the browser at `path` runs on the agents' profile.
+async fn agents_run(path: &std::path::Path, profile: &std::path::Path, cx: &AsyncApp) -> bool {
+    let (path, profile) = (path.to_path_buf(), profile.to_path_buf());
+    off(cx, move || {
+        app::processes_of(&path).into_iter().any(|pid| {
+            app::arguments(pid)
+                .is_some_and(|argv| agent_screen_model::agent_browser::is_agents(&argv, &profile))
+        })
+    })
+    .await
 }
 
 /// Run `f`, which waits on another process, off the UI thread.
@@ -5409,21 +5651,146 @@ async fn launch(
             "another session is still launching {name}; try again shortly"
         )));
     }
-    // A catch kept on this app would race the launch's own for its window.
-    let pid = off(cx, {
+    // A catch kept on this app would race the launch's own for its window:
+    // on every process of it, since the user's browser and the agents'
+    // instance run from one bundle.
+    let pids = off(cx, {
         let path = path.clone();
-        move || app::running_pid(&path)
+        move || app::processes_of(&path)
     })
     .await;
     let pause = |c: &mut Core, on: bool| {
         for (_, kept) in &c.kept_catches {
-            if Some(kept.pid()) == pid {
+            if pids.contains(&kept.pid()) {
                 kept.pause(on);
             }
         }
     };
     core.update(cx, |c, _| pause(c, true));
-    let result = launch_now(core, id, name, &path, target, start, cx).await;
+    // The idle quit never closes the agents' instance while this launch
+    // may open a window in it; a quit that started ends first, so the plan
+    // below finds the instance gone.
+    let _hold = off(cx, {
+        let path = path.clone();
+        move || devtools::is_chromium(&path).then(devtools::hold_agents)
+    })
+    .await;
+    // Decided while this launch holds the app, so two sessions don't both
+    // start the agents' instance.
+    let (plan, profile) = off(cx, {
+        let (path, arguments) = (path.clone(), start.arguments.clone());
+        move || browser_plan(&path, &arguments)
+    })
+    .await;
+    use agent_screen_model::agent_browser::{Plan, was_refused, without_debugging_port};
+    // One left from an earlier run of Agent Screen has no pipe, the only
+    // way to open its window without activating it: it quits, and a new one
+    // starts.
+    let plan = match (plan, profile.clone()) {
+        (Plan::Replace(old), Some(profile)) => {
+            log::info!("launch: the agents' {name} {old} has no pipe; quitting it to start anew");
+            let gone = off(cx, move || {
+                app::terminate(old);
+                (0..50).any(|_| {
+                    std::thread::sleep(Duration::from_millis(100));
+                    (unsafe { libc::kill(old, 0) }) != 0
+                })
+            })
+            .await;
+            if !gone {
+                core.update(cx, |c, _| {
+                    pause(c, false);
+                    c.launching.remove(&path);
+                });
+                return Err(ControlError::failed(format!(
+                    "the agents' own {name} (pid {old}), left from an earlier run of Agent Screen, didn't quit within 5 s; ask the user to quit it, then call launch_app again"
+                )));
+            }
+            Plan::Start(agent_screen_model::agent_browser::switches(&profile))
+        }
+        (plan, _) => plan,
+    };
+    let asked = start;
+    let mut shared = plan == Plan::Shared;
+    // Beside the user's own browser, a test never opens a window in it.
+    if shared && no_shared_fallback_for_tests() {
+        core.update(cx, |c, _| {
+            pause(c, false);
+            c.launching.remove(&path);
+        });
+        return Err(ControlError::failed(format!(
+            "{name} would open in the user's own process, and the shared fallback is off for this test"
+        )));
+    }
+    let starting = matches!(plan, Plan::Start(_));
+    let made_profile = profile.as_ref().is_some_and(|p| !p.exists());
+    let start = match (plan, profile.clone()) {
+        (Plan::Start(switches), _) => {
+            log::info!("launch: starting the agents' instance of {name}");
+            let mut start = Start {
+                arguments: without_debugging_port(&start.arguments),
+                ..start.clone()
+            }
+            .with_switches(switches);
+            start.agents_start = true;
+            start
+        }
+        (Plan::Reuse(pid), Some(_)) => Start {
+            agents: Some(AgentsInstance { pid }),
+            ..start.clone()
+        },
+        _ => start.clone(),
+    };
+    let result = match &start.agents {
+        Some(agents) if start.new_instance() => Err(ControlError::failed(format!(
+            "the agents' own {name} already runs (pid {}), separate from the user's, and arguments and environment apply only when it starts. Call launch_app without them for a new window in it, or pass --user-data-dir with another folder for a separate instance",
+            agents.pid
+        ))),
+        _ => launch_now(core, id, name, &path, target, &start, cx).await,
+    };
+    // A browser such as one that allows one instance quits at once on a
+    // second start, whatever its profile, while the user's keeps running.
+    // Only that is a refusal: a timeout or a crash is not remembered.
+    let quit_at_once = matches!(&result, Ok(l) if l.reason == Some("already_running"));
+    let refused = starting
+        && was_refused(
+            quit_at_once,
+            match profile.as_deref() {
+                Some(profile) => users_run(&path, profile, cx).await,
+                None => false,
+            },
+        );
+    let result = match profile.as_deref() {
+        Some(_) if refused && no_shared_fallback_for_tests() => {
+            log::info!(
+                "launch: {name} refused the agents' instance; the fallback is off for this test"
+            );
+            Err(ControlError::failed(format!(
+                "{name} quit at once beside the user's: it refused the agents' instance, and the shared fallback is off for this test"
+            )))
+        }
+        Some(profile) if refused && !agents_run(&path, profile, cx).await => {
+            log::info!(
+                "launch: {name} refuses a second instance; opening the window in the user's"
+            );
+            off(cx, {
+                let (path, profile) = (path.clone(), profile.to_path_buf());
+                move || record_refusal(&path, &profile, made_profile)
+            })
+            .await;
+            shared = true;
+            launch_now(core, id, name, &path, target, asked, cx).await
+        }
+        _ => result,
+    };
+    let result = result.map(|l| Launched { shared, ..l });
+    // The agents' instance's window, too big for the display, as Dia's
+    // first one is: fit it through Chromium, which Dia follows.
+    let agents_window = starting || start.agents.is_some();
+    let result = match result {
+        Ok(l) if agents_window && !shared => Ok(fit_agents_window(l, id, cx).await),
+        other => other,
+    };
     core.update(cx, |c, _| {
         pause(c, false);
         c.launching.remove(&path);
@@ -5441,6 +5808,7 @@ async fn launch_now(
     cx: &mut AsyncApp,
 ) -> Result<Launched, ControlError> {
     let path = path.to_path_buf();
+    let agents = start.agents.clone();
     let started = Instant::now();
     // Windows already on screen, or claimed by any display, aren't new.
     let mut before: std::collections::HashSet<u32> = off(cx, || {
@@ -5456,9 +5824,18 @@ async fn launch_now(
     }));
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
+    // The agents' instance of a browser the user runs is the only one this
+    // launch may use (ADR 0022).
+    let only = agents.as_ref().map(|a| a.pid);
     let pids = {
         let path = path.clone();
-        move || app::running_pids(&path)
+        move || {
+            let mut pids = app::running_pids(&path);
+            if let Some(only) = only {
+                pids.retain(|&p| p == only);
+            }
+            pids
+        }
     };
     let instances_before = off(cx, pids.clone()).await;
     let was_running = !fresh && !instances_before.is_empty();
@@ -5471,7 +5848,10 @@ async fn launch_now(
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
     let running = off(cx, pids.clone()).await.into_iter().next();
-    let mut catch = match running.filter(|_| !fresh) {
+    // The agents' running instance is shared by every session: its window
+    // is the one its pipe made for this page, found below, and a catch
+    // could take another session's window first.
+    let mut catch = match running.filter(|_| !fresh && agents.is_none()) {
         Some(pid) => catch_from(pid).await,
         None => None,
     };
@@ -5539,7 +5919,27 @@ async fn launch_now(
             Vec::new()
         };
         arguments.extend(start.open_arguments());
-        arguments.extend(first);
+        // The agents' instance shows no window as it starts: Chromium shows
+        // its startup window with activation, which takes the user's front
+        // app. Its first window comes through the pipe, which opens windows
+        // without activating it (ADR 0022). A browser that keeps its pages
+        // in windows of its own, as Dia, opens its startup window without
+        // activation and makes none through the pipe.
+        let through_pipe = start.agents_start && {
+            let path = path.clone();
+            off(cx, move || {
+                app::bundle_id_at(&path)
+                    .is_none_or(|id| agent_screen_model::agent_browser::pipe_makes_windows(&id))
+            })
+            .await
+        };
+        let first_page = if through_pipe {
+            arguments.push(agent_screen_model::agent_browser::NO_STARTUP_WINDOW.into());
+            Some(first.clone().unwrap_or_else(|| "about:blank".into()))
+        } else {
+            arguments.extend(first);
+            None
+        };
         let environment = start.environment.clone();
         let started = off(cx, move || {
             hold_launch_for_tests();
@@ -5549,6 +5949,28 @@ async fn launch_now(
         match started {
             Ok(pid) => {
                 spawned = Some(pid);
+                if start.agents_start
+                    && let Some(profile) = start
+                        .arguments
+                        .iter()
+                        .find(|a| a.starts_with("--user-data-dir="))
+                {
+                    devtools::mark_agents(pid, profile);
+                }
+                if let Some(url) = first_page {
+                    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+                    let frame = bounds.inset(margin, margin);
+                    cx.background_executor()
+                        .spawn(async move {
+                            let made = devtools::channel(pid, Duration::from_secs(15))
+                                .ok_or_else(|| "no pipe within 15 s".to_string())
+                                .and_then(|c| c.new_window(&url, frame));
+                            log::info!(
+                                "launch: the agents' instance {pid}'s first window through its pipe: {made:?}"
+                            );
+                        })
+                        .detach();
+                }
                 let (done, outcome) = std::sync::mpsc::channel();
                 let _ = done.send(true);
                 Some(outcome)
@@ -5592,7 +6014,14 @@ async fn launch_now(
     let single_instance_risk = fresh && !instances_before.is_empty();
     let quit = |pid: i32| {
         let pids = pids.clone();
-        move || !pids().contains(&pid)
+        move || {
+            let here = spawned == Some(pid);
+            agent_screen_model::launch::has_quit(
+                here,
+                here && unsafe { libc::kill(pid, 0) } == 0,
+                !here && pids().contains(&pid),
+            )
+        }
     };
     for _ in 0..200 {
         // Started here: its pid is known.
@@ -5650,13 +6079,16 @@ async fn launch_now(
     // first one's. Its cold start counts from here.
     let launched_at = Instant::now();
     if !was_running {
-        let ours = core.update(cx, |c, _| {
-            let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
-            !claimed
-                && c.displays
-                    .get_mut(id)
-                    .is_some_and(|d| d.started.insert(pid))
-        });
+        // The agents' instance is every session's: no display holds it,
+        // keeps a catch on it, or hands it to the session's next display.
+        let ours = start.agents_start
+            || core.update(cx, |c, _| {
+                let claimed = c.displays.list.iter().any(|d| d.started.contains(&pid));
+                !claimed
+                    && c.displays
+                        .get_mut(id)
+                        .is_some_and(|d| d.started.insert(pid))
+            });
         // Its windows are the agent's for 30 s from now unless the user
         // acts on it, whenever launch_app answers.
         if ours {
@@ -5747,10 +6179,74 @@ async fn launch_now(
         }
         _ => None,
     };
+    // The page the agents' instance's pipe opened for this launch, and
+    // whether it went into a window on the display that was open already.
+    let mut pipe_page: Option<(String, PageWindow)> = None;
     if asked_for_window {
         // An app that has just started may not have its menus yet.
         let mut asked = ax::NewWindow::NotReady;
+        // The agents' instance gets its window, and the URL in it, through
+        // its pipe, never through its menus or LaunchServices (ADR 0022).
+        if let Some(agents) = agents.clone() {
+            let url = target.filter(|_| is_url).map(String::from);
+            let url_for_page = url.clone();
+            let opened = {
+                let agents = agents.clone();
+                off(cx, move || new_window_in(&agents, url.as_deref(), bounds)).await
+            };
+            let failed = match opened {
+                Ok((_, PageWindow::Frameless)) => {
+                    // Into the agents' window on this display, through the
+                    // page it shows.
+                    let (only, url) = (agents.pid, url_for_page.clone());
+                    let into = off(cx, move || {
+                        let window = windows::on_display(id)
+                            .into_iter()
+                            .find(|w| w.target.pid == only && w.layer == 0)
+                            .ok_or("keeps its pages in its own windows, which its pipe can't open, and has no window on this display; call launch_app again once its window is here".to_string())?;
+                        if let Some(url) = url {
+                            devtools::channel(only, Duration::from_secs(1))
+                                .ok_or("doesn't answer on its pipe".to_string())?
+                                .navigate_visible_page(bounds, &url)
+                                .map_err(|e| format!("couldn't open the page in its window on this display: {e}"))?;
+                        }
+                        Ok::<_, String>(window.target.window_id)
+                    })
+                    .await;
+                    match into {
+                        Ok(_) => {
+                            asked = ax::NewWindow::Pressed;
+                            pipe_page = Some((String::new(), PageWindow::Frameless));
+                            None
+                        }
+                        Err(e) => Some(e),
+                    }
+                }
+                Ok(page) => {
+                    asked = ax::NewWindow::Pressed;
+                    pipe_page = Some(page);
+                    None
+                }
+                Err(e) => Some(e),
+            };
+            if let Some(e) = failed {
+                if let Some(id) = hold.take().map(|h| h.detach()) {
+                    off(cx, move || {
+                        crate::mac::key_hold::finish(
+                            id,
+                            agent_screen_model::key_hold::End::NoWindow,
+                        )
+                    })
+                    .await;
+                }
+                drop(catch);
+                return Err(ControlError::failed(format!("the agents' {name} {e}")));
+            }
+        }
         for _ in 0..10 {
+            if agents.is_some() {
+                break;
+            }
             asked = cx
                 .background_executor()
                 .spawn(async move { ax::press_new_window(pid) })
@@ -5828,6 +6324,7 @@ async fn launch_now(
                 was_running,
                 reason: Some(reason),
                 pid: None,
+                shared: false,
             });
         }
     }
@@ -5839,17 +6336,49 @@ async fn launch_now(
     // Off the main thread: reading a window's document asks the app, which
     // may be busy.
     let find_ours = |taken: Option<u32>| {
-        let (before, document) = (before.clone(), document.clone());
+        let (before, document, page) = (before.clone(), document.clone(), pipe_page.clone());
+        let url = target.filter(|_| is_url).map(String::from);
         async move {
+            // The frame of the window that shows the pipe's page now, read
+            // beside the system's list so a window being moved still matches.
+            let page_frame = page.as_ref().and_then(|(target, _)| {
+                devtools::channel(pid, Duration::from_secs(1))?
+                    .window_of(target)
+                    .map(|(_, frame)| frame)
+            });
+            let kind = page.as_ref().map(|(_, kind)| *kind);
+            // Whether `w` is the window that shows the pipe's page.
+            let page_window =
+                |w: &windows::Window| match kind? {
+                    PageWindow::New | PageWindow::Open => Some(page_frame.is_some_and(|f| {
+                        agent_screen_model::agent_browser::same_frame(f, w.bounds)
+                    })),
+                    // Found by the page it shows, on this display.
+                    PageWindow::Frameless => Some(
+                        bounds.contains(w.bounds.mid())
+                            && url.as_deref().is_none_or(|url| {
+                                ax::web_url(w.target).is_some_and(|shown| {
+                                    agent_screen_model::launch::same_page(url, &shown)
+                                })
+                            }),
+                    ),
+                };
+            let in_open_window = matches!(kind, Some(PageWindow::Open | PageWindow::Frameless));
             windows::all().into_iter().find(|w| {
                 w.target.pid == pid
                     && w.layer == 0
-                    && !before.contains(&w.target.window_id)
-                    && (!was_running
-                        || taken == Some(w.target.window_id)
-                        || document
-                            .as_deref()
-                            .is_some_and(|d| shows_document(w.target, d)))
+                    && (in_open_window || !before.contains(&w.target.window_id))
+                    && agent_screen_model::launch::answers_launch(
+                        was_running,
+                        page_window(w),
+                        taken == Some(w.target.window_id),
+                        // Asked only when nothing else decides: it asks the app.
+                        || {
+                            document
+                                .as_deref()
+                                .is_some_and(|d| shows_document(w.target, d))
+                        },
+                    )
             })
         }
     };
@@ -5928,7 +6457,12 @@ async fn launch_now(
             // where the user's typing goes until Agent Screen hands focus
             // back (#110): send the URL now, before placing the window, so
             // that comes sooner. The browser opens it in its key window.
-            let opened = match (was_running && is_url).then_some(target).flatten() {
+            let opened = match (was_running && is_url && agents.is_none())
+                .then_some(target)
+                .flatten()
+            {
+                // The agents' instance opened the URL in the window itself.
+                None if agents.is_some() && is_url => Some(true),
                 Some(target) => {
                     // Into the new window's address field where there is
                     // one Agent Screen knows; else the system sends the URL.
@@ -6049,7 +6583,7 @@ async fn launch_now(
             keep_catch(core, id, catch, cx);
             // A starting app's later windows, such as a main window after a
             // loading one, may come while it is too busy for the catch.
-            if !was_running {
+            if !was_running && !start.agents_start {
                 let mut seen = before.clone();
                 seen.insert(placed.target.window_id);
                 watch_cold_start(core, id, pid, seen, true, launched_at, screen.clone(), cx);
@@ -6063,6 +6597,7 @@ async fn launch_now(
                 was_running,
                 reason: None,
                 pid: (!was_running).then_some(pid),
+                shared: false,
             });
         }
     }
@@ -6160,6 +6695,7 @@ async fn launch_now(
         window: None,
         was_running,
         pid: (!was_running).then_some(pid),
+        shared: false,
         reason: Some(if !was_running {
             "still_starting"
         } else if asked_for_window {
@@ -6208,6 +6744,7 @@ async fn already_running(
             was_running: true,
             reason: Some("already_running"),
             pid: None,
+            shared: false,
         }),
         None => Err(ControlError::failed(format!(
             "{name} is already running (pid {}) and allows only one instance: the new instance quit at once and passed its arguments to the running one, which has no window on this display. Ask the user to quit {name}, then call launch_app again; or call launch_app without arguments and environment to ask the running app for a new window",

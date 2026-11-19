@@ -4,6 +4,7 @@
 //! Nothing here touches the OS.
 
 pub mod access;
+pub mod agent_browser;
 pub mod alerts;
 pub mod arrangement;
 pub mod bring_out;

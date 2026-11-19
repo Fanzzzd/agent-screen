@@ -587,11 +587,22 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
             });
             TIDIED.with(|t| t.set(true));
             if plans.is_empty() {
-                return false;
+                if !crate::mac::devtools::any_agents() {
+                    return false;
+                }
+                // Left running, the agents' browser would take the user's
+                // Dock click and links (ADR 0022). Off the main thread: it
+                // may take seconds to quit.
+                std::thread::spawn(|| {
+                    crate::mac::devtools::end_agents(true);
+                    native::reply_terminate();
+                });
+                return true;
             }
             let main = main_screen_name();
             std::thread::spawn(move || {
                 dismissal::execute(&plans, main.as_deref());
+                crate::mac::devtools::end_agents(true);
                 native::reply_terminate();
             });
             true
@@ -610,6 +621,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
                 .collect();
             if !plans.is_empty() && !TIDIED.with(Cell::get) {
                 dismissal::execute(&plans, main_screen_name().as_deref());
+            }
+            if !TIDIED.with(Cell::get) {
+                crate::mac::devtools::end_agents(true);
             }
             crate::mac::claims::delete();
             crate::web::delete_state();
@@ -4431,7 +4445,8 @@ impl Shell {
             .collect();
         // An app the agent started brings itself to the front, as Electron
         // does: no one to tell, unless the user just used it.
-        let agents = core.displays.list.iter().any(|d| d.started.contains(&pid));
+        let agents = crate::mac::devtools::is_agents(pid)
+            || core.displays.list.iter().any(|d| d.started.contains(&pid));
         let recent = !peek_intent::reminder_due(
             self.reminded
                 .get(&pid)
@@ -4624,22 +4639,48 @@ impl Shell {
         }
         self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
-        let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
+        let instance = crate::mac::devtools::is_agents(pid);
+        // Over Agent Screen, as after a Viewer click (#41), only the agents'
+        // browser instance gives the front back: the user's next keys would
+        // go to the agents' profile.
+        let Some(previous) =
+            agent_screen_model::agent_browser::front_to_return(previous, own, pid, instance)
+        else {
             return;
         };
-        let agents = self
-            .core
-            .read(cx)
-            .displays
-            .list
-            .iter()
-            .any(|d| d.started.contains(&pid));
+        let agents = instance
+            || self
+                .core
+                .read(cx)
+                .displays
+                .list
+                .iter()
+                .any(|d| d.started.contains(&pid));
         if !agents || crate::mac::ime::holding(pid) {
             return;
         }
         cx.background_executor()
             .spawn(async move {
-                if crate::mac::catch::user_acted_recently(pid) {
+                // The agents' browser instance (ADR 0022): the user's launch
+                // from the Dock or a launcher that macOS handed it starts
+                // the user's own browser; anything else only gives the
+                // front back.
+                if crate::mac::devtools::is_agents(pid) {
+                    use agent_screen_model::agent_browser::AgentsActivated;
+                    let decided = crate::mac::devtools::on_agents_activated(pid);
+                    log::info!(
+                        "pid {pid}, the agents' browser instance, came to the front: {decided:?}"
+                    );
+                    if decided != AgentsActivated::Leave {
+                        crate::mac::ime::return_front(previous);
+                    }
+                    if decided == AgentsActivated::GiveBackAndStartUsers {
+                        crate::mac::devtools::start_users_browser(pid);
+                    }
+                    return;
+                }
+                let used = crate::mac::catch::user_acted_recently(pid);
+                if used {
                     return;
                 }
                 log::info!(

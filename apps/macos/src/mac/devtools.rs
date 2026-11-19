@@ -23,6 +23,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+/// Where a page the pipe asked for went.
+#[derive(Debug)]
+pub enum NewPage {
+    /// Into a new window, which the launch's catch takes: the window that
+    /// shows `target`.
+    Window { target: String },
+    /// Into a window that was open already, as a tab: Dia ignores
+    /// `newWindow`. Its window's frame, in global points.
+    Tab { target: String, bounds: Rect },
+    /// Nowhere: the browser keeps its pages in windows Chromium gives no
+    /// frame for, as Dia does, and made one that never shows, now closed.
+    Frameless,
+    /// The browser didn't say.
+    Unknown,
+}
+
 /// Whether the app at `bundle` is built on Chromium: Chrome, Edge, Brave,
 /// Arc and every Electron or CEF app ship Chromium's resources in a
 /// framework of their own.
@@ -277,6 +293,223 @@ fn channels() -> std::sync::MutexGuard<'static, HashMap<i32, Arc<Channel>>> {
     CHANNELS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The agents' own browser instances (ADR 0022), shared by every session:
+/// each pid with when it started and its `--user-data-dir=` argument.
+fn agents() -> std::sync::MutexGuard<'static, HashMap<i32, (Instant, String)>> {
+    static AGENTS: std::sync::LazyLock<Mutex<HashMap<i32, (Instant, String)>>> =
+        std::sync::LazyLock::new(Default::default);
+    AGENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Launches and quits of the agents' instances (ADR 0022).
+static USE: Mutex<agent_screen_model::agent_browser::AgentsUse> =
+    Mutex::new(agent_screen_model::agent_browser::AgentsUse::new());
+static USE_CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+
+fn using() -> std::sync::MutexGuard<'static, agent_screen_model::agent_browser::AgentsUse> {
+    USE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A launch's hold on the agents' instances: no idle quit starts until it
+/// drops.
+pub struct AgentsHold(());
+
+impl Drop for AgentsHold {
+    fn drop(&mut self) {
+        using().release();
+        USE_CHANGED.notify_all();
+    }
+}
+
+/// Hold the agents' instances for a launch that may open a window in one.
+/// Waits for a quit that started to end, up to 10 s, so the launch then
+/// finds the instance gone and starts a new one.
+pub fn hold_agents() -> AgentsHold {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut state = using();
+    while !state.hold() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warn!(
+                "devtools: a quit of the agents' browser still runs after 10 s; launching anyway"
+            );
+            state.force_hold();
+            break;
+        }
+        state = USE_CHANGED
+            .wait_timeout(state, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    AgentsHold(())
+}
+
+/// Run `quit` unless a launch holds the agents' instances, or anyway with
+/// `force`. Whether it ran.
+fn quitting<T>(force: bool, quit: impl FnOnce() -> T) -> Option<T> {
+    if !using().begin_quit(force) {
+        return None;
+    }
+    let done = quit();
+    using().end_quit();
+    USE_CHANGED.notify_all();
+    Some(done)
+}
+
+/// Note that `pid` is an agents' browser instance Agent Screen started with
+/// `profile_argument`, its `--user-data-dir=` switch. A watch quits it once
+/// its pipe counts no page.
+pub fn mark_agents(pid: i32, profile_argument: &str) {
+    agents().insert(pid, (Instant::now(), profile_argument.to_string()));
+    static WATCH: std::sync::Once = std::sync::Once::new();
+    WATCH.call_once(|| {
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                end_agents(false);
+            }
+        });
+    });
+}
+
+/// Whether `pid` is an agents' browser instance Agent Screen started.
+pub fn is_agents(pid: i32) -> bool {
+    agents().contains_key(&pid)
+}
+
+/// Whether any agents' browser instance Agent Screen started may run.
+pub fn any_agents() -> bool {
+    !agents().is_empty()
+}
+
+/// Whether `pid` still is that instance: a pid can be reused after a crash.
+fn still_agents(pid: i32) -> bool {
+    let Some(argument) = agents().get(&pid).map(|(_, a)| a.clone()) else {
+        return false;
+    };
+    let ours = super::app::arguments(pid).is_some_and(|argv| argv.contains(&argument));
+    if !ours {
+        agents().remove(&pid);
+    }
+    ours
+}
+
+/// Close the agents' window `target` through its instance's pipe: Dia's
+/// close button takes no accessibility press. Whether it asked.
+pub fn close_agents_window(target: WindowTarget) -> bool {
+    if !is_agents(target.pid) {
+        return false;
+    }
+    let Some(frame) = super::windows::find(target.window_id).map(|w| w.bounds) else {
+        return false;
+    };
+    channel(target.pid, Duration::from_secs(1)).is_some_and(|c| c.close_window_at(frame) > 0)
+}
+
+/// Quit the agents' browser instance `pid`: hidden first, through its pipe,
+/// then, if it still runs after 1 s, with SIGTERM, and after 2 s more with
+/// SIGKILL. It is Agent Screen's own child, on the agents' profile, checked
+/// by its command line before any signal.
+/// Skipped while a launch holds the agents' instances, which may be
+/// opening a window in this one.
+pub fn quit_agents(pid: i32) -> bool {
+    quitting(false, || quit_now(pid)).unwrap_or(false)
+}
+
+fn quit_now(pid: i32) -> bool {
+    if !still_agents(pid) {
+        return false;
+    }
+    let ended = |ms: u64| {
+        (0..ms / 100).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            (unsafe { libc::kill(pid, 0) }) != 0
+        })
+    };
+    // Hidden first: Dia moves a window it closes to the middle of the main
+    // screen, where the user would see it. Hiding activates nothing.
+    super::app::hide(pid);
+    for _ in 0..10 {
+        if super::app::is_hidden(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
+    let gone = ended(1000)
+        || (unsafe { libc::kill(pid, libc::SIGTERM) }) != 0
+        || ended(2000)
+        || (unsafe { libc::kill(pid, libc::SIGKILL) }) != 0
+        || ended(1000);
+    log::info!(
+        "devtools: quit the agents' browser instance {pid}: asked through its pipe {closed}, ended {gone}"
+    );
+    agents().remove(&pid);
+    gone
+}
+
+/// What to do now that the agents' instance `pid` came to the front by
+/// something other than Agent Screen, from the user's latest input.
+pub fn on_agents_activated(pid: i32) -> agent_screen_model::agent_browser::AgentsActivated {
+    let users_running = super::app::bundle_of(pid).is_some_and(|bundle| {
+        super::app::running_pids(&bundle)
+            .iter()
+            .any(|&p| !is_agents(p))
+    });
+    agent_screen_model::agent_browser::agents_activated(
+        &super::catch::recent_presses(pid),
+        users_running,
+    )
+}
+
+/// Start the user's own browser of the agents' instance `pid`, a new
+/// instance on its normal profile, through LaunchServices. A plain launch
+/// would hand it to the agents' instance again. Whether it asked.
+pub fn start_users_browser(pid: i32) -> bool {
+    let Some(bundle) = super::app::bundle_of(pid) else {
+        return false;
+    };
+    super::app::open_new_instance(&bundle);
+    log::info!(
+        "devtools: the user launched their browser and the agents' instance {pid} got it; opening theirs: {}",
+        bundle.display()
+    );
+    true
+}
+
+/// Quit each agents' browser instance that has nothing left, as its pipe
+/// counts pages, or every one when `all`, as Agent Screen quits: left
+/// running, it would take the user's Dock click, `open -a` and links once
+/// the user's own browser isn't running, since macOS hands those to any
+/// running instance.
+pub fn end_agents(all: bool) {
+    let pids: Vec<(i32, Instant)> = agents().iter().map(|(p, (at, _))| (*p, *at)).collect();
+    for (pid, started) in pids {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            agents().remove(&pid);
+            continue;
+        }
+        let idle = || {
+            agent_screen_model::agent_browser::idle(
+                started.elapsed().as_secs(),
+                channel(pid, Duration::from_secs(1)).and_then(|c| c.page_count()),
+            )
+        };
+        // A launch that takes the instance after the count keeps it: the
+        // quit doesn't start while the launch holds it.
+        if all || idle() {
+            quitting(all, || quit_now(pid));
+        }
+    }
+}
+
+/// Whether Agent Screen holds a live pipe to `pid`.
+pub fn has_pipe(pid: i32) -> bool {
+    channels()
+        .get(&pid)
+        .is_some_and(|c| *c.state.lock().unwrap_or_else(|e| e.into_inner()) != State::Dead)
+}
+
 /// The app's pipe, once it answers on it; waits up to `wait` for a pipe
 /// still starting.
 pub fn channel(pid: i32, wait: Duration) -> Option<Arc<Channel>> {
@@ -402,6 +635,213 @@ impl Channel {
         self.send(method, params, session)
             .recv_timeout(Duration::from_secs(3))
             .unwrap_or_else(|_| Err(format!("{method} got no answer")))
+    }
+
+    /// Open a new browser window showing `url`, at `frame` in global
+    /// points, in the background. Chromium makes it there, so it never
+    /// shows elsewhere first.
+    pub fn new_window(&self, url: &str, frame: Rect) -> Result<NewPage, String> {
+        let before = self.page_windows();
+        let created = self.call(
+            "Target.createTarget",
+            json!({
+                "url": url,
+                "newWindow": true,
+                "background": true,
+                "left": frame.x.round() as i64,
+                "top": frame.y.round() as i64,
+                "width": frame.width.round() as i64,
+                "height": frame.height.round() as i64,
+            }),
+            None,
+        )?;
+        let Some(target) = created["targetId"].as_str().map(String::from) else {
+            return Ok(NewPage::Unknown);
+        };
+        let Some((id, bounds)) = self.window_of(&target) else {
+            return Ok(NewPage::Unknown);
+        };
+        // Dia answers a new window with one of no size that never shows,
+        // and keeps its pages in its own windows, which the pipe can't
+        // open: the launch opens the page in its window on the display.
+        if bounds.width == 0.0 && bounds.height == 0.0 {
+            self.close_target(&target);
+            log::info!(
+                "devtools: pid {} gave window {id} no frame; the page goes into its open window",
+                self.pid
+            );
+            return Ok(NewPage::Frameless);
+        }
+        let existed = before.contains(&id);
+        log::info!(
+            "devtools: pid {} opened target {target} in window {id} at {bounds:?}, which existed before: {existed}",
+            self.pid
+        );
+        Ok(if existed {
+            NewPage::Tab { target, bounds }
+        } else {
+            NewPage::Window { target }
+        })
+    }
+
+    /// Load `url` in the visible page of the window on `display`, in global
+    /// points, for a browser that gives its windows no frame (Dia): each
+    /// page says whether it is visible and where its window is.
+    pub fn navigate_visible_page(&self, display: Rect, url: &str) -> Result<(), String> {
+        let targets = self.call("Target.getTargets", json!({}), None)?;
+        let pages: Vec<String> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str().map(String::from))
+            .collect();
+        let shown = pages
+            .iter()
+            .find_map(|target| {
+                let session = self.session(target).ok()?;
+                let seen = self
+                    .call(
+                        "Runtime.evaluate",
+                        json!({
+                            "expression": "[document.visibilityState, screenX + outerWidth / 2, screenY + outerHeight / 2]",
+                            "returnByValue": true,
+                        }),
+                        Some(&session),
+                    )
+                    .ok()?;
+                let v = &seen["result"]["value"];
+                log::info!("devtools: pid {} page {target} says {v}", self.pid);
+                let visible = v[0] == "visible";
+                let mid = (v[1].as_f64()?, v[2].as_f64()?);
+                (visible && display.contains(mid)).then_some(session)
+            })
+            .ok_or_else(|| format!("none of its {} pages is visible on this display", pages.len()))?;
+        self.call("Page.navigate", json!({ "url": url }), Some(&shown))
+            .map(|_| ())
+    }
+
+    /// How many page targets the browser has: its tabs, across its windows.
+    pub fn page_count(&self) -> Option<usize> {
+        let targets = self.call("Target.getTargets", json!({}), None).ok()?;
+        Some(
+            targets["targetInfos"]
+                .as_array()?
+                .iter()
+                .filter(|t| t["type"] == "page")
+                .count(),
+        )
+    }
+
+    /// Quit the browser, as its own Quit command would.
+    pub fn close_browser(&self) -> bool {
+        self.call("Browser.close", json!({}), None).is_ok()
+    }
+
+    /// Close the pages of the browser window whose frame, in global points,
+    /// is `frame`. How many it closed.
+    pub fn close_window_at(&self, frame: Rect) -> usize {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return 0;
+        };
+        targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter(|id| {
+                self.window_of(id).is_some_and(|(_, bounds)| {
+                    agent_screen_model::agent_browser::same_frame(bounds, frame)
+                })
+            })
+            .filter(|id| self.close_target(id))
+            .count()
+    }
+
+    /// The browser window that shows target `id`, and its frame in global
+    /// points.
+    pub fn window_of(&self, id: &str) -> Option<(i64, Rect)> {
+        let window = self
+            .call(
+                "Browser.getWindowForTarget",
+                json!({ "targetId": id }),
+                None,
+            )
+            .ok()?;
+        let b = &window["bounds"];
+        Some((
+            window["windowId"].as_i64()?,
+            Rect::new(
+                b["left"].as_f64()?,
+                b["top"].as_f64()?,
+                b["width"].as_f64()?,
+                b["height"].as_f64()?,
+            ),
+        ))
+    }
+
+    /// Set the browser window whose frame is `current` to `frame`, both in
+    /// global points, through Chromium: Dia ignores `--window-size` and
+    /// keeps its first window at the size of the main screen. Only that
+    /// window: the instance is shared by every session.
+    pub fn fit_window(&self, current: Rect, frame: Rect) -> bool {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return false;
+        };
+        let window = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter_map(|id| self.window_of(id))
+            .find(|(_, bounds)| agent_screen_model::agent_browser::same_frame(*bounds, current))
+            .map(|(id, _)| id);
+        let Some(id) = window else {
+            return false;
+        };
+        // A maximized or full-screen window takes no frame until normal.
+        let _ = self.call(
+            "Browser.setWindowBounds",
+            json!({ "windowId": id, "bounds": { "windowState": "normal" } }),
+            None,
+        );
+        self.call(
+            "Browser.setWindowBounds",
+            json!({ "windowId": id, "bounds": {
+                "left": frame.x.round() as i64,
+                "top": frame.y.round() as i64,
+                "width": frame.width.round() as i64,
+                "height": frame.height.round() as i64,
+            } }),
+            None,
+        )
+        .is_ok()
+    }
+
+    /// Close a page target, such as a tab opened in the wrong window.
+    pub fn close_target(&self, target: &str) -> bool {
+        self.call("Target.closeTarget", json!({ "targetId": target }), None)
+            .is_ok()
+    }
+
+    /// The browser window ids of this process's pages.
+    fn page_windows(&self) -> Vec<i64> {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return Vec::new();
+        };
+        let mut windows: Vec<i64> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter_map(|id| self.window_of(id).map(|(id, _)| id))
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
     }
 
     /// The session attached to a target, attaching once.

@@ -16,6 +16,16 @@ pub fn is_running(bundle_id: &str) -> bool {
 /// takes tens of milliseconds on a busy Mac; launch_app asks every 20 ms
 /// while an app starts, so this is safe to call off the main thread too.
 pub fn running_pids(bundle: &Path) -> Vec<i32> {
+    processes_of(bundle)
+        .into_iter()
+        // A command-line run of the same binary isn't the app.
+        .filter(|&pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some())
+        .collect()
+}
+
+/// Every process running the bundle's main executable, also one that
+/// hasn't registered as an app yet, as in its first moments.
+pub fn processes_of(bundle: &Path) -> Vec<i32> {
     // Safari's /Applications entry is a link into a cryptex; the running
     // app reports where it really is.
     let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
@@ -25,8 +35,6 @@ pub fn running_pids(bundle: &Path) -> Vec<i32> {
     process_ids()
         .into_iter()
         .filter(|&pid| process_path(pid).as_deref() == Some(executable.as_path()))
-        // A command-line run of the same binary isn't the app.
-        .filter(|&pid| NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some())
         .collect()
 }
 
@@ -443,6 +451,12 @@ pub fn hide(pid: i32) {
     }
 }
 
+/// Ask an app to quit, as its Quit command would, without activating it.
+pub fn terminate(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.terminate())
+}
+
 /// Show a hidden app without activating it. An app that made itself an
 /// accessory after it started hidden, as Electron development builds that
 /// open windows in the background do, ignores `unhide`; it takes the
@@ -503,6 +517,37 @@ impl agent_screen_model::launch::AppLookup for Mac {
 fn support_folder() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(Path::new(&home).join("Library/Application Support/Agent Screen"))
+}
+
+/// The bundle id in an app bundle's Info.plist.
+pub fn bundle_id_at(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    info_value(&plist, "CFBundleIdentifier")
+}
+
+/// The version of the app at `bundle`, as its build number.
+pub fn bundle_version_at(bundle: &Path) -> Option<String> {
+    let plist = std::fs::read(bundle.join("Contents/Info.plist")).ok()?;
+    info_value(&plist, "CFBundleVersion")
+}
+
+/// Move `path` to the user's Trash, where they can get it back.
+pub fn trash(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| e.localizedDescription().to_string())
+}
+
+/// The agents' profile folder for the browser at `bundle` (ADR 0022), in
+/// this instance of Agent Screen's own place.
+pub fn agent_browser_profile(bundle: &Path) -> Option<std::path::PathBuf> {
+    Some(agent_screen_model::agent_browser::profile_dir(
+        &support_folder()?,
+        agent_screen_mcp::endpoint::instance().as_deref(),
+        &bundle_id_at(bundle)?,
+    ))
 }
 
 /// The picture the user chose for Agent Displays, if any: a copy, so moving
@@ -603,6 +648,23 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
         let number = number.downcast::<NSNumber>().ok()?;
         (number.unsignedIntValue() == display).then(|| screen.localizedName().to_string())
     })
+}
+
+/// Start a new process of the app at `bundle` through LaunchServices, as
+/// a Dock click would, on its default profile. LaunchServices starts it, so
+/// it is its own responsible process and inherits none of Agent Screen's
+/// privacy grants.
+pub fn open_new_instance(bundle: &Path) {
+    let url =
+        objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+    let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
+    configuration.setCreatesNewApplicationInstance(true);
+    configuration.setAddsToRecentItems(false);
+    NSWorkspace::sharedWorkspace().openApplicationAtURL_configuration_completionHandler(
+        &url,
+        &configuration,
+        None,
+    );
 }
 
 /// The Dock's pid.

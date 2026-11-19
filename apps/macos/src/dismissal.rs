@@ -110,13 +110,48 @@ pub fn execute(items: &[Item], main_name: Option<&str>) -> Vec<WindowTarget> {
         .filter(|i| i.fate == Fate::Close)
         .map(|i| i.target)
         .filter(|&target| {
-            let pressed = ax::close(target).is_ok();
+            // The agents' browser instance closes its pages through its
+            // pipe: Dia's close button takes no accessibility press.
+            // A press on one the pipe couldn't close would move it to the
+            // user's screen; the instance quits below instead.
+            let pressed = crate::mac::devtools::close_agents_window(target)
+                || (!crate::mac::devtools::is_agents(target.pid) && ax::close(target).is_ok());
             if !pressed {
                 log::warn!("window {} has no close button that works", target.window_id);
             }
             pressed
         })
         .collect();
+    // An agents' browser window the pipe couldn't close, as Dia's, whose
+    // windows Chromium gives no frame: the instance quits when it has no
+    // window beyond these, since a window left on a display that goes lands
+    // on the user's screen.
+    let shut: Vec<WindowTarget> = items
+        .iter()
+        .filter(|i| i.fate == Fate::Close)
+        .map(|i| i.target)
+        .collect();
+    let mut quit = Vec::new();
+    for t in &shut {
+        if crate::mac::devtools::is_agents(t.pid)
+            && !quit.contains(&t.pid)
+            && windows::all().iter().all(|w| {
+                w.target.pid != t.pid
+                    || w.layer != 0
+                    || shut.iter().any(|s| s.window_id == w.target.window_id)
+            })
+        {
+            quit.push(t.pid);
+        }
+    }
+    for pid in quit {
+        if windows::all()
+            .iter()
+            .any(|w| w.target.pid == pid && w.layer == 0)
+        {
+            crate::mac::devtools::quit_agents(pid);
+        }
+    }
     for item in items.iter().filter(|i| i.fate == Fate::GiveBack) {
         give_back(item.target, item.home.as_ref(), main_name);
     }

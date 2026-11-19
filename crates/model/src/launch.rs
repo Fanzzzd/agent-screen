@@ -12,6 +12,35 @@ use crate::model::Rect;
 /// launchd's pid, the parent of an app `open` started.
 pub const LAUNCHD: i32 = 1;
 
+/// Whether a new instance quit, as an app that allows one instance does.
+/// A process Agent Screen started itself isn't listed among the bundle's
+/// running apps until it registers, a few hundred milliseconds in, so it
+/// has quit only once it no longer runs at all. Taking "not listed" for
+/// "quit" left a starting browser without its catch or hide, and its
+/// window came onto the user's screen (#222).
+pub fn has_quit(started_here: bool, runs: bool, listed: bool) -> bool {
+    if started_here { !runs } else { !listed }
+}
+
+/// Whether a new window of the launched app answers the launch. A window
+/// the agents' own browser instance opened for a page asked through its
+/// pipe (ADR 0022) answers only when it is that page's window: the instance
+/// is shared by every session, and another session's page may open a
+/// window meanwhile. A starting app's windows are all its. A running app's
+/// is only the one the catch took, or the one showing the file asked for,
+/// which is asked of the app only when nothing else decides.
+pub fn answers_launch(
+    was_running: bool,
+    pipe_page: Option<bool>,
+    caught: bool,
+    shows_file: impl FnOnce() -> bool,
+) -> bool {
+    match pipe_page {
+        Some(is_page_window) => is_page_window,
+        None => !was_running || caught || shows_file(),
+    }
+}
+
 /// Whether a process with this parent and `argv` is the instance `open`
 /// started with `asked` after `--args`.
 pub fn is_opened(parent: i32, argv: &[String], asked: &[String]) -> bool {
@@ -147,6 +176,33 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_pages_window_answers_a_launch_through_the_pipe() {
+        use super::answers_launch;
+        let asked = || panic!("the file is asked of the app only when nothing else decides");
+        // The user's running app: only the window the launch caught.
+        assert!(!answers_launch(true, None, false, || false));
+        assert!(answers_launch(true, None, true, asked));
+        assert!(answers_launch(true, None, false, || true));
+        // The agents' instance, asked through its pipe: the page's window
+        // only, even one the catch took.
+        assert!(answers_launch(true, Some(true), false, asked));
+        assert!(!answers_launch(true, Some(false), true, asked));
+        // A starting app: any new window.
+        assert!(answers_launch(false, None, false, asked));
+    }
+
+    #[test]
+    fn a_process_started_here_has_quit_only_once_it_ends() {
+        use super::has_quit;
+        // Started here, running, not registered yet: still starting.
+        assert!(!has_quit(true, true, false));
+        assert!(has_quit(true, false, false));
+        // Started by `open`: its listing decides.
+        assert!(has_quit(false, true, false));
+        assert!(!has_quit(false, true, true));
+    }
+
     use super::*;
 
     /// A Mac with these app bundles, and these in LaunchServices.

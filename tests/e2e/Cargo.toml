@@ -10,6 +10,7 @@ description = "Scripts that drive a running Agent Screen through its control soc
 path = "src/lib.rs"
 
 [dependencies]
+agent-screen-model = { path = "../../crates/model" }
 anyhow = "1"
 libc = "0.2"
 base64 = "0.22"

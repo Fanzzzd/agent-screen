@@ -480,7 +480,8 @@ pub fn definitions() -> Vec<Value> {
                 "With open, the app opens that URL or file in the window. With arguments or environment, a new instance of",
                 "the app starts with them, as a development build needs, and its windows go on the display.",
                 "A Chromium or Electron app that starts here gets a private DevTools pipe, so drags in its web pages work.",
-                "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance.",
+                "Google Chrome starts as a separate instance for agents, whether or not the user runs it, on a profile of its own that keeps its sign-ins between sessions; later launches open their pages in it. Every agent session shares that profile and its sign-ins, and it has none of the user's. It never becomes the user's front app, and it has the pipe. It quits once no Agent Display holds its windows. Another Chromium browser the user runs, such as Dia, opens in the user's own process, and the result has shared: true and a note.",
+                "A browser's default profile takes none: pass arguments such as --user-data-dir=/tmp/profile for a new instance of a browser the user doesn't run.",
                 "A fresh profile has separate sign-ins; it does not reuse the user's existing login session. Ask before making a separate profile or signing in.",
             ],
             object(
@@ -2214,7 +2215,23 @@ async fn computer(a: &Args<'_>, control: &Control) -> Result<Vec<Value>, Control
 
 /// What launch_app returns: the window, or why there is none and what to
 /// do next. `wasRunning` says whether the app was already running.
+/// launch_app's note for a window in the user's own process of a browser
+/// that refuses a separate instance for agents (ADR 0022).
+const SHARED_BROWSER: &str = "This window opened in the user's own browser process: Agent Screen runs a separate instance for agents only for browsers verified to work that way, such as Google Chrome. While the user works in another window of this browser, your clicks and keys here go through accessibility only, which most web pages ignore, so your work in this window may stop until the user switches to another app. For long unattended web work, launch Google Chrome.";
+
 fn launch_output(reply: &Value) -> Value {
+    let mut out = launch_reason(reply);
+    if reply.get("shared") == Some(&Value::Bool(true)) {
+        out["shared"] = json!(true);
+        out["note"] = json!(match out.get("note").and_then(Value::as_str) {
+            Some(note) => format!("{note} {SHARED_BROWSER}"),
+            None => SHARED_BROWSER.to_string(),
+        });
+    }
+    out
+}
+
+fn launch_reason(reply: &Value) -> Value {
     let was_running = reply
         .get("wasRunning")
         .cloned()
@@ -2703,6 +2720,13 @@ mod tests {
             assert!(none["wasRunning"].is_boolean());
             assert!(none["note"].as_str().unwrap().len() > 40, "{reason}");
         }
+        let shared = launch_output(&json!({
+            "window": { "windowId": 9 }, "wasRunning": true, "shared": true,
+        }));
+        assert_eq!(shared["shared"], true);
+        let note = shared["note"].as_str().unwrap();
+        assert!(note.contains("user's own browser") && note.contains("Google Chrome"));
+        assert!(placed.get("shared").is_none());
     }
 
     #[test]

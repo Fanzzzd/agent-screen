@@ -795,19 +795,59 @@ pub fn our_binary(name: &str) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// Quit the browser running on the throwaway profile `dir`, and no other
-/// copy of it.
+/// Quit every browser process on the profile folder `dir`: TERM, then KILL
+/// after 5 s, as a throwaway profile's browser has nothing to save. The
+/// processes are found by their exact `--user-data-dir=` argument, never
+/// by a pattern, so a folder such as `Browser Profiles (e2e)` matches. A
+/// process still running after that fails the script.
 pub fn quit_profile(dir: &Path) {
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-TERM", "-f"])
-        .arg(dir)
-        .status();
-    for _ in 0..50 {
-        if sh_lenient("/usr/bin/pgrep", &["-f", &dir.to_string_lossy()]).is_empty() {
-            return;
+    let gone = |signal: libc::c_int| {
+        for pid in profile_pids(dir) {
+            unsafe { libc::kill(pid, signal) };
         }
-        sleep_ms(100);
+        for _ in 0..50 {
+            if profile_pids(dir).is_empty() {
+                return true;
+            }
+            sleep_ms(100);
+        }
+        false
+    };
+    if profile_pids(dir).is_empty() || gone(libc::SIGTERM) || gone(libc::SIGKILL) {
+        return;
     }
+    check(
+        &format!("the browser on {} quit", dir.display()),
+        false,
+        format!("still running: {:?}", profile_pids(dir)),
+    );
+}
+
+/// The processes whose command line has `--user-data-dir=<dir>` as a whole
+/// argument.
+pub fn profile_pids(dir: &Path) -> Vec<i32> {
+    let listing = sh_lenient("/bin/ps", &["-axww", "-o", "pid=,command="]);
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            names_profile(command, dir)
+                .then(|| pid.parse().ok())
+                .flatten()
+        })
+        .filter(|&pid: &i32| pid != std::process::id() as i32)
+        .collect()
+}
+
+/// Whether the command line `command`, as `ps` prints it, passes
+/// `--user-data-dir=<dir>` as a whole argument.
+fn names_profile(command: &str, dir: &Path) -> bool {
+    let wanted = format!("--user-data-dir={}", dir.display());
+    command.match_indices(&wanted).any(|(at, _)| {
+        let before = command[..at].chars().next_back();
+        let after = command[at + wanted.len()..].chars().next();
+        before.is_none_or(|c| c == ' ') && after.is_none_or(|c| c == ' ')
+    })
 }
 
 /// The screen is locked: it shows no windows, can't be captured and takes
@@ -1752,5 +1792,37 @@ pub fn put_back_wallpaper(saved: Option<(std::path::PathBuf, Vec<u8>)>) {
     let _ = std::fs::remove_file(support().join("wallpaper-recording.png"));
     if let Some((path, bytes)) = saved {
         let _ = std::fs::write(path, bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_profile;
+    use std::path::Path;
+
+    #[test]
+    fn a_profile_with_parentheses_and_spaces_matches_only_as_a_whole_argument() {
+        let dir = Path::new("/U/Agent Screen/Browser Profiles (e2e)/com.google.Chrome");
+        let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+        let agents = format!(
+            "{chrome} --remote-debugging-pipe --user-data-dir={} --no-first-run",
+            dir.display()
+        );
+        assert!(names_profile(&agents, dir));
+        assert!(names_profile(
+            &format!("{chrome} --user-data-dir={}", dir.display()),
+            dir
+        ));
+        assert!(!names_profile(
+            &format!("{chrome} --user-data-dir={}2", dir.display()),
+            dir
+        ));
+        assert!(!names_profile(chrome, dir));
+        assert!(!names_profile(
+            &format!(
+                "{chrome} --user-data-dir=/U/Agent Screen/Browser Profiles e2e/com.google.Chrome"
+            ),
+            dir
+        ));
     }
 }

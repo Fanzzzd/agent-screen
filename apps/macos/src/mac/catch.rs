@@ -206,9 +206,22 @@ pub fn user_acted_since(pid: i32, since: std::time::Instant) -> bool {
     user_acted_where(pid, |at| at >= since, false)
 }
 
-/// `openers`: input to Finder, the Dock, a launcher, or to nothing known,
-/// counts too.
-fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers: bool) -> bool {
+/// Where the user's presses just now went, oldest first, as the agents'
+/// browser instance `pid` comes to the front (ADR 0022).
+pub fn recent_presses(pid: i32) -> Vec<agent_screen_model::agent_browser::Press> {
+    use agent_screen_model::agent_browser::Press;
+    recent_targets(|at| at.elapsed() < ACTION_WINDOW)
+        .into_iter()
+        .map(|to| match to {
+            Some(p) if p == pid => Press::ItsWindow,
+            Some(p) if super::app::opens_things(p) => Press::Opener,
+            _ => Press::Other,
+        })
+        .collect()
+}
+
+/// The apps the user's presses `when` went to, None where not known.
+fn recent_targets(when: impl Fn(std::time::Instant) -> bool) -> Vec<Option<i32>> {
     let input: Vec<Towards> = USER_INPUT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -217,11 +230,12 @@ fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers
         .map(|(_, towards)| *towards)
         .collect();
     if input.is_empty() {
-        return false;
+        return Vec::new();
     }
     let shown = super::cg::on_screen_windows();
-    input.into_iter().any(|towards| {
-        let to = match towards {
+    input
+        .into_iter()
+        .map(|towards| match towards {
             Towards::App(p) => Some(p),
             Towards::Window(id, front) => shown
                 .iter()
@@ -229,11 +243,16 @@ fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers
                 .map(|w| w.target.pid)
                 .or(front),
             Towards::Unknown => None,
-        };
-        match to {
-            Some(p) => p == pid || (openers && super::app::opens_things(p)),
-            None => openers,
-        }
+        })
+        .collect()
+}
+
+/// `openers`: input to Finder, the Dock, a launcher, or to nothing known,
+/// counts too.
+fn user_acted_where(pid: i32, when: impl Fn(std::time::Instant) -> bool, openers: bool) -> bool {
+    recent_targets(when).into_iter().any(|to| match to {
+        Some(p) => p == pid || (openers && super::app::opens_things(p)),
+        None => openers,
     })
 }
 
