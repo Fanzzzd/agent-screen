@@ -3,6 +3,9 @@
 
 use super::cg;
 use agent_screen_model::arrangement;
+use agent_screen_model::connect_policy::{
+    self, EXTEND, Extend, Holder, PolicyHold, PolicySystem, Release,
+};
 use agent_screen_model::landing::{
     self, BadUnits, CreationGuard, Landing, Now, OnLanding, Outcome, RecentMirrors, StoredSets,
     UserBefore,
@@ -54,20 +57,37 @@ pub struct VirtualDisplay {
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         super::claims::remove_display(self.id);
+        let id = self.id;
+        // With another Agent Display staying, the displays left are a set
+        // macOS may never have seen, one with no stored arrangement: it
+        // would mirror them as it does a new display. Without one, they
+        // are the user's own set, arranged before.
+        let extend = self.handle.is_some()
+            && cg::online()
+                .into_iter()
+                .any(|d| d != id && cg::is_agent_screen(d));
+        let extend = extend.then(extend_new_displays);
         drop(self.handle.take());
         // WindowServer removes the display a moment later. Its serial waits
         // for that: a display with it now would be refused, or share its
-        // identity with the one going.
-        let Some(serial) = self.serial.take() else {
+        // identity with the one going. The policy comes back once it has
+        // gone, or after 3 s.
+        let serial = self.serial.take();
+        if serial.is_none() && extend.is_none() {
             return;
-        };
-        let id = self.id;
+        }
         std::thread::spawn(move || {
-            let mut wait = std::time::Duration::from_millis(100);
+            let started = std::time::Instant::now();
+            let mut extend = extend;
+            let mut wait = std::time::Duration::from_millis(50);
             while cg::is_online(id) {
+                if started.elapsed() > std::time::Duration::from_secs(3) {
+                    drop(extend.take());
+                }
                 std::thread::sleep(wait);
                 wait = (wait * 2).min(std::time::Duration::from_secs(5));
             }
+            drop(extend);
             drop(serial);
         });
     }
@@ -210,6 +230,9 @@ impl VirtualDisplay {
         others: &[u32],
         before: &[arrangement::Screen],
     ) -> Result<Self, NotMade> {
+        // No mirror to flash the user's screen: WindowServer extends onto
+        // a new display with no stored arrangement until this returns.
+        let _extend = extend_new_displays();
         let first = serial.1;
         let mut serial = Some(serial);
         let mut twinned: Vec<Self> = Vec::new();
@@ -447,6 +470,258 @@ pub enum NotMade {
     /// None was made, for the reason given to the agent
     /// (`creation_refusal`).
     Refused(String),
+}
+
+/// SkyLight's calls for WindowServer's default with a new set of displays
+/// (`connect_policy`), looked up once. SkyLight has no public header:
+/// `SLSSetTVConnectDefaultPolicy` writes the `TVConnectPolicy` preference
+/// and sends it to WindowServer, which reads it in
+/// `apply_default_configuration` when a set of displays has no stored
+/// arrangement.
+struct PolicyCalls {
+    main_connection: unsafe extern "C" fn() -> i32,
+    get: unsafe extern "C" fn(i32, *mut i32) -> i32,
+    set: unsafe extern "C" fn(i32, i32) -> i32,
+}
+
+fn policy_calls() -> Option<&'static PolicyCalls> {
+    static CALLS: std::sync::OnceLock<Option<PolicyCalls>> = std::sync::OnceLock::new();
+    CALLS
+        .get_or_init(|| unsafe {
+            let path = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
+            let lib = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY);
+            if lib.is_null() {
+                return None;
+            }
+            let find = |name: &std::ffi::CStr| {
+                let f = libc::dlsym(lib, name.as_ptr());
+                (!f.is_null()).then_some(f)
+            };
+            Some(PolicyCalls {
+                main_connection: std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> i32>(
+                    find(c"SLSMainConnectionID")?,
+                ),
+                get: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, *mut i32) -> i32>(
+                    find(c"SLSGetTVConnectDefaultPolicy")?,
+                ),
+                set: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(i32, i32) -> i32>(
+                    find(c"SLSSetTVConnectDefaultPolicy")?,
+                ),
+            })
+        })
+        .as_ref()
+}
+
+/// `connect-policy.json` and the policy itself, for `connect_policy`'s
+/// `extend` and `release`.
+struct MacPolicy {
+    path: std::path::PathBuf,
+    session: String,
+}
+
+impl PolicySystem for MacPolicy {
+    fn read(&mut self) -> Option<i32> {
+        let calls = policy_calls()?;
+        let mut policy = -1;
+        let error = unsafe { (calls.get)((calls.main_connection)(), &mut policy) };
+        (error == 0 && policy >= 0).then_some(policy)
+    }
+
+    fn set(&mut self, policy: i32) -> bool {
+        let Some(calls) = policy_calls() else {
+            return false;
+        };
+        unsafe { (calls.set)((calls.main_connection)(), policy) == 0 }
+    }
+
+    fn save(&mut self, hold: &PolicyHold) -> bool {
+        if hold.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            };
+        }
+        let temp = self
+            .path
+            .with_extension(format!("json.{}", std::process::id()));
+        let written = std::fs::write(&temp, hold.to_json().to_string())
+            .and_then(|()| std::fs::rename(&temp, &self.path));
+        if let Err(e) = &written {
+            log::warn!("couldn't write {}: {e}", self.path.display());
+        }
+        written.is_ok()
+    }
+
+    fn alive(&self, holder: &Holder) -> bool {
+        holder.session == self.session
+            && i32::try_from(holder.pid)
+                .ok()
+                .and_then(started_us)
+                .is_some_and(|started| started == holder.started_us)
+    }
+}
+
+/// When process `pid` started, in microseconds since 1970. None for a
+/// process that isn't running.
+fn started_us(pid: i32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let got =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (got == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+/// This process as a holder of the policy.
+fn this_holder() -> Option<Holder> {
+    let pid = std::process::id();
+    Some(Holder {
+        pid,
+        started_us: started_us(i32::try_from(pid).ok()?)?,
+        session: cg::session_uuid(),
+        instance: agent_screen_mcp::endpoint::instance().unwrap_or_default(),
+    })
+}
+
+/// `~/Library/Application Support/Agent Screen/connect-policy.json`, one
+/// for every instance: they share WindowServer's policy.
+fn connect_policy_path() -> std::path::PathBuf {
+    stored_sets_path().with_file_name("connect-policy.json")
+}
+
+/// Run `job` on the record, holding an exclusive lock on its `.lock`
+/// sibling; nothing without the lock, and with `wait` false nothing while
+/// another holds it.
+fn with_policy<T>(wait: bool, job: impl FnOnce(&mut PolicyHold, &mut MacPolicy) -> T) -> Option<T> {
+    use std::os::fd::AsRawFd;
+    let path = connect_policy_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .ok()?;
+    let how = if wait {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_EX | libc::LOCK_NB
+    };
+    if unsafe { libc::flock(lock.as_raw_fd(), how) } != 0 {
+        log::warn!("couldn't lock {}", path.with_extension("lock").display());
+        return None;
+    }
+    let mut hold = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|v| PolicyHold::from_json(&v))
+        .unwrap_or_default();
+    let mut system = MacPolicy {
+        path,
+        session: cg::session_uuid(),
+    };
+    let out = job(&mut hold, &mut system);
+    // Dropping the file releases the lock.
+    drop(lock);
+    Some(out)
+}
+
+/// How many `Extending` of this process are live. The record holds the
+/// process once, from the first to the last: a display released while
+/// another is made holds it too.
+static HOLDS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+/// Sets the policy back when dropped, with the process's last one
+/// (`extend_new_displays`).
+pub struct Extending(bool);
+
+/// Have WindowServer extend the desktop onto a new set of displays, not
+/// mirror the user's displays onto it, until the returned value drops
+/// (#220). The user's policy comes back then, unless they changed it
+/// meanwhile. `AGENTSCREEN_KEEP_CONNECT_POLICY` leaves it, for a test of
+/// the unmirror.
+pub fn extend_new_displays() -> Extending {
+    if std::env::var_os("AGENTSCREEN_KEEP_CONNECT_POLICY").is_some() {
+        return Extending(false);
+    }
+    let mut holds = HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+    if *holds > 0 {
+        *holds += 1;
+        return Extending(true);
+    }
+    let Some(me) = this_holder() else {
+        return Extending(false);
+    };
+    let extended = with_policy(true, |hold, system| {
+        connect_policy::extend(hold, &me, system)
+    });
+    match extended {
+        Some(Extend::Set { was }) => crate::lifecycle::line(&format!(
+            "new displays extend: TV connect policy {EXTEND}, was {was}"
+        )),
+        Some(Extend::Unconfirmed { was }) => {
+            log::warn!("TV connect policy {EXTEND} not confirmed, was {was}; held anyway")
+        }
+        Some(Extend::Unsaved) => log::warn!("couldn't record the TV connect policy; left as it is"),
+        _ => {}
+    }
+    let held = extended.is_some_and(Extend::held);
+    if held {
+        *holds = 1;
+    }
+    Extending(held)
+}
+
+impl Drop for Extending {
+    fn drop(&mut self) {
+        if !self.0 {
+            return;
+        }
+        let mut holds = HOLDS.lock().unwrap_or_else(|e| e.into_inner());
+        *holds = holds.saturating_sub(1);
+        if *holds == 0
+            && let Some(me) = this_holder()
+        {
+            end_policy_hold(Some(&me), true);
+        }
+    }
+}
+
+/// Set back the policy a process that died while holding it left
+/// (`connect_policy`). At start-up.
+pub fn restore_connect_policy() {
+    if connect_policy_path().exists() {
+        end_policy_hold(None, true);
+    }
+}
+
+/// From the panic hook: a panic that aborts drops no `Extending`. Never
+/// waits for the lock, since the panic may have come while this process
+/// held it. What this misses, and an abort or kill, the next start or the
+/// next display restores.
+pub fn restore_connect_policy_after_panic() {
+    let holding = HOLDS.try_lock().is_ok_and(|holds| *holds > 0);
+    if holding && let Some(me) = this_holder() {
+        end_policy_hold(Some(&me), false);
+    }
+}
+
+fn end_policy_hold(me: Option<&Holder>, wait: bool) {
+    match with_policy(wait, |hold, system| {
+        connect_policy::release(hold, me, system)
+    }) {
+        Some(Release::Restored(policy)) => {
+            crate::lifecycle::line(&format!("TV connect policy back to {policy}"))
+        }
+        Some(Release::RestoreFailed(policy)) => {
+            log::warn!("couldn't set the TV connect policy back to {policy}; next start retries")
+        }
+        Some(Release::Unread | Release::Unsaved) | None => {
+            log::warn!("couldn't release the TV connect policy; next start retries")
+        }
+        Some(Release::StillHeld | Release::Nothing) => {}
+    }
 }
 
 /// How this process's last new displays ended. Mirrors this instance
@@ -1090,7 +1365,14 @@ pub async fn reuse_parked(
         let before = origins();
         let before_screens = online_screens(&others);
         snapshot_users(&before_screens);
-        if resize && !handle.resize(width, height) {
+        // Another size is another set of displays, maybe one with no
+        // stored arrangement: it would mirror as a new display does.
+        if resize
+            && !{
+                let _extend = extend_new_displays();
+                handle.resize(width, height)
+            }
+        {
             crate::lifecycle::note("released", handle.id, "spare could not resize");
             return None;
         }
