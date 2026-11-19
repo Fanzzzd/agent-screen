@@ -34,6 +34,7 @@ impl Fixture {
     fn child(&self) -> Client {
         Client(
             Command::new(env!("CARGO_BIN_EXE_agent-screen-mcp"))
+                .arg("--v1")
                 .env("HOME", &self.0)
                 .env("XDG_RUNTIME_DIR", &self.0)
                 .env("AGENTSCREEN_INSTANCE", "steps")

@@ -88,7 +88,9 @@ async fn cli_and_current_mcp_share_reports_without_creating_a_display() {
         }
     });
     let cli_report = cli(fixture.command()).await;
+    // The MCP server in this process, as a v1 process runs it.
     let mut command = fixture.command();
+    command.arg("--v1");
     let mcp_report = tokio::task::spawn_blocking(move || {
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut input = child.stdin.take().unwrap();
@@ -204,6 +206,7 @@ async fn legacy_and_timeout_diagnostics_leave_the_existing_mcp_transport_open() 
         assert_eq!(session_lines.next_line().await.unwrap(), None);
     });
     let mut command = fixture.command();
+    command.arg("--v1");
     tokio::task::spawn_blocking(move || {
         let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut input = child.stdin.take().unwrap();

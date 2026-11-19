@@ -233,8 +233,35 @@ impl McpClient {
                 vec!["mcp".to_string()],
             ),
         };
-        let mut server = crate::command(&command)
-            .args(&args)
+        Self::spawn(&command, &args, env, &client_name)
+    }
+
+    /// Start this build's MCP server as a v1 process, the way `AgentScreen
+    /// mcp` ran before the pipe: the tools in the process, calling the app
+    /// with control protocol v1 (ADR 0021).
+    pub fn start_v1(env: &[(&str, &str)]) -> Result<McpClient> {
+        if locked() {
+            skip("the screen is locked");
+        }
+        wait_for_app()?;
+        let command = format!("{}/Contents/MacOS/AgentScreen", debug_app().display());
+        let args = ["mcp".to_string(), "--v1".to_string()];
+        Self::spawn(&command, &args, env, "smoke-v1")
+    }
+
+    /// The server's pid.
+    pub fn pid(&self) -> u32 {
+        self.server.lock().unwrap().id()
+    }
+
+    fn spawn(
+        command: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+        client_name: &str,
+    ) -> Result<McpClient> {
+        let mut server = crate::command(command)
+            .args(args)
             .env("CLAUDE_PROJECT_DIR", "/tmp/smoke")
             .envs(env.iter().copied())
             .stdin(Stdio::piped())

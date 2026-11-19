@@ -24,6 +24,10 @@ _Avoid_: Ended Display, finished display, orphaned display, dead display
 One run of one agent (a Claude Code or Codex conversation, for example) connected to Agent Screen. Most sessions have one Agent Display or none; one that asks gets up to four at once, and calls its displays by their handles. Its Window Authorization covers all of them, and a window on one of its displays is its own on the others (ADR 0016). When its last control connection closes without another open connection for the same session key, Agent Screen waits a 2-second Disconnect Grace for a reconnecting client to rebind its displays on any tool call before ending them.
 _Avoid_: agent, client, worker
 
+**Pipe**:
+The `AgentScreen mcp` process an agent's client starts for one Agent Session. It tells the app who the client is and forwards the session's MCP messages; the tools run in the app, so an update reaches every session at its next call. It ends when its client closes it or exits (ADR 0021).
+_Avoid_: MCP server (the tools, in the app), proxy, bridge
+
 **Viewer**:
 The floating panel that shows one Agent Display live and lets the user operate it.
 _Avoid_: control panel, popup, window
