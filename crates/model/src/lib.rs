@@ -17,6 +17,7 @@ pub mod key_window;
 pub mod keychord;
 pub mod landing;
 pub mod launch;
+pub mod mcp_process;
 pub mod menu_press;
 pub mod model;
 pub mod new_window;

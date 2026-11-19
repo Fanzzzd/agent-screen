@@ -101,6 +101,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("crates/model/src/key_window.rs", &[AgentInput]),
     ("crates/model/src/keychord.rs", &[AgentInput]),
     ("crates/model/src/launch.rs", &[Windows]),
+    ("crates/model/src/mcp_process.rs", &[Displays]),
     ("crates/model/src/menu_press.rs", &[Elements, InputQueue]),
     ("crates/model/src/new_window.rs", &[Windows]),
     ("crates/model/src/numbers.rs", &[Elements]),

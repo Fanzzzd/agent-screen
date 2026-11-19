@@ -81,6 +81,15 @@ pub fn web_state_path_for(base: &std::path::Path, instance: Option<&str>) -> std
     }
 }
 
+/// The app's display ledger (`crate::ledger`), named per instance like
+/// `socket_path`.
+pub fn ledger_path() -> std::path::PathBuf {
+    match instance() {
+        Some(instance) => state_dir().join(format!("ledger-{instance}.json")),
+        None => state_dir().join("ledger.json"),
+    }
+}
+
 pub fn parse_web_port(contents: &str) -> Option<u16> {
     let value: serde_json::Value = serde_json::from_str(contents).ok()?;
     let port = value.get("port")?.as_u64()?;

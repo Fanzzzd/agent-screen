@@ -3,9 +3,9 @@
 ## Layout
 
 ```
-apps/macos/        the app: GPUI UI, control socket, `AgentScreen mcp`
+apps/macos/        the app: GPUI UI, control socket and the MCP hosts, `AgentScreen mcp`
 apps/website/      agentscreen.app, a Cloudflare Worker with static assets
-crates/mcp/        the MCP server (rmcp), built into the app binary
+crates/mcp/        the pipe (`AgentScreen mcp`) and the MCP host with the tools (rmcp), built into the app binary (ADR 0021)
 crates/model/      domain rules with no OS calls: displays, windows, key chords
 crates/colorsync/  the root helper that keeps ColorSync's display registry short (ADR 0009)
 tests/e2e/         MCP scripts, user-side e2e tests and the README demo recorder
@@ -177,6 +177,9 @@ cargo test -p agent-screen-mcp --test diagnostics # CLI/MCP over an isolated end
 cargo test -p agent-screen-mcp --test element_steps # step actions and subtree schema, socket forwarding, validation and scoped changes; no app or input
 cargo test -p agent-screen-mcp --test queue_adapter # actual app coordinator, compiled without GPUI; no app or input
 cargo test -p agent-screen-mcp --test input_queue_protocol # queue/drag MCP statuses and no fallback after input_pending; mock socket only
+cargo test -p agent-screen-mcp --test pipe # the pipe's hello carries the client's session to an MCP host, and the pipe ends with its parent; no app
+cargo test -p agent-screen-mcp --test clients # the pipe driven as Claude Code, Codex, Gemini CLI and bare clients: each gets its own session by the rules in docs/clients.md, and each MCP version from 2024-11-05 to 2026-07-28 its own wire shape; no app
+cargo test -p agent-screen --bin AgentScreen control::server # the app's socket side with macOS faked: a pipe gets a host whose connections close with it, adoption skips a reused pid, the orphan sweep ends only an MCP peer launchd adopted that is still the same process, and another user is refused; no app
 cargo test -p agent-screen-model input_queue # lifecycle, FIFO, withdrawal, approval generations and expiry
 cargo test -p agent-screen-model substitute # slider direction inference and numeric guards
 cargo test -p agent-screen-model tree # production traversal: shallow discovery beyond a long list, subtree budgets and ancestry guards
@@ -254,6 +257,9 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e loanfocus   # an Input Loan's focus step alon
 
 # displays: an Agent Display's life, from creation and parking to spares and review
 AGENTSCREEN_INSTANCE=e2e cargo e2e restart    # after the app aborts, the agent hears it quit and can place its windows back (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcpv1      # an MCP process from before the pipe (`AgentScreen mcp --v1`, control protocol v1) lists the tools, makes a display, takes a screenshot and ends it against this app, beside a pipe's session that can't reach that display (ADR 0021); 1 display
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcporphan  # a pipe ends within 5 s of its parent with stdin still open, and the app ends and logs a v1 MCP process whose client exited while one whose client runs stays (ADR 0021); no display, up to 35 s
+AGENTSCREEN_INSTANCE=e2e cargo e2e mcpclients # real MCP clients installed on this Mac (today Cursor's CLI, `cursor-agent`) list the tools through this build's pipe, from a throwaway project and home; skips a client that isn't installed; no display, no model call
 AGENTSCREEN_INSTANCE=e2e cargo e2e lastapp    # the only app on a display quits, and the display stays: a screenshot and the next launch_app on it work (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e holdmode       # an active or spare display macOS switches to 800×600 by itself is back at the size it was made with, and the display log says so; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e spares         # an ended display comes back as the next one, with no display change, and the display log records the app start and each display released at quit
@@ -391,7 +397,7 @@ for i in $(seq 10); do AGENTSCREEN_INSTANCE=e2e cargo e2e robust | tail -1; done
 
 `cargo e2e run` posts real pointer events, so it borrows your cursor. It starts 3 s after you stop using the mouse and keyboard, with no Agent Display open (`E2E_IDLE_SECS` changes the 3 s, `E2E_NOW=1` skips the wait). The sign shows what it waits for from the first moment, so you know it is about to begin. A script that sees your mouse or keyboard while it runs says so on the sign and in its result, since a failure may come from that. It puts the cursor, the front app, the AeroSpace workspace and the installed Agent Screen back. Name cases to run some (`cargo e2e run focus`): `scroll`, `strip`, `focus`, `permissions`. `focus` puts a stand-in app with a text field in front and checks that it stays the key window while an agent types: losing it ends the user's input method session. The permission case runs a copy under the bundle id `app.agentscreen.e2e-ungranted`, so it starts with no grants and never touches yours; what it checks ends where only a person can flip the switch. Captures go to `target/e2e`. `probe tap` (`tests/e2e/tools/probe.swift`) records real trackpad events for `hid replay`, which is how `tests/e2e/fixtures/trackpad.log` was made.
 
-The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`; `AGENTSCREEN_MCP="<binary> [args]"` picks another server. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
+The scripts start `target/Agent Screen Dev.app/Contents/MacOS/AgentScreen mcp`, the pipe, and the test app serves the tools; `AGENTSCREEN_MCP="<binary> [args]"` picks another server, and `McpClient::start_v1` starts `AgentScreen mcp --v1`, which serves them in its own process as before the pipe. Quit Calculator after `smoke`: it marks the window to keep, and quitting the app would hand it back to your screen.
 
 ### Recording playback and pointer timelines
 
