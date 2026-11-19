@@ -293,14 +293,67 @@ fn channels() -> std::sync::MutexGuard<'static, HashMap<i32, Arc<Channel>>> {
     CHANNELS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The app's pipe, once it answers on it; waits up to `wait` for a pipe
-/// still starting.
 /// The agents' own browser instances (ADR 0022), shared by every session:
 /// each pid with when it started and its `--user-data-dir=` argument.
 fn agents() -> std::sync::MutexGuard<'static, HashMap<i32, (Instant, String)>> {
     static AGENTS: std::sync::LazyLock<Mutex<HashMap<i32, (Instant, String)>>> =
         std::sync::LazyLock::new(Default::default);
     AGENTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Launches and quits of the agents' instances (ADR 0022).
+static USE: Mutex<agent_screen_model::agent_browser::AgentsUse> =
+    Mutex::new(agent_screen_model::agent_browser::AgentsUse::new());
+static USE_CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+
+fn using() -> std::sync::MutexGuard<'static, agent_screen_model::agent_browser::AgentsUse> {
+    USE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A launch's hold on the agents' instances: no idle quit starts until it
+/// drops.
+pub struct AgentsHold(());
+
+impl Drop for AgentsHold {
+    fn drop(&mut self) {
+        using().release();
+        USE_CHANGED.notify_all();
+    }
+}
+
+/// Hold the agents' instances for a launch that may open a window in one.
+/// Waits for a quit that started to end, up to 10 s, so the launch then
+/// finds the instance gone and starts a new one.
+pub fn hold_agents() -> AgentsHold {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut state = using();
+    while !state.hold() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warn!(
+                "devtools: a quit of the agents' browser still runs after 10 s; launching anyway"
+            );
+            state.force_hold();
+            break;
+        }
+        state = USE_CHANGED
+            .wait_timeout(state, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    AgentsHold(())
+}
+
+/// Run `quit` unless a launch holds the agents' instances, or anyway with
+/// `force`. Whether it ran.
+fn quitting<T>(force: bool, quit: impl FnOnce() -> T) -> Option<T> {
+    if !using().begin_quit(force) {
+        return None;
+    }
+    let done = quit();
+    using().end_quit();
+    USE_CHANGED.notify_all();
+    Some(done)
 }
 
 /// Note that `pid` is an agents' browser instance Agent Screen started with
@@ -357,7 +410,13 @@ pub fn close_agents_window(target: WindowTarget) -> bool {
 /// then, if it still runs after 1 s, with SIGTERM, and after 2 s more with
 /// SIGKILL. It is Agent Screen's own child, on the agents' profile, checked
 /// by its command line before any signal.
+/// Skipped while a launch holds the agents' instances, which may be
+/// opening a window in this one.
 pub fn quit_agents(pid: i32) -> bool {
+    quitting(false, || quit_now(pid)).unwrap_or(false)
+}
+
+fn quit_now(pid: i32) -> bool {
     if !still_agents(pid) {
         return false;
     }
@@ -398,8 +457,7 @@ pub fn on_agents_activated(pid: i32) -> agent_screen_model::agent_browser::Agent
             .any(|&p| !is_agents(p))
     });
     agent_screen_model::agent_browser::agents_activated(
-        super::catch::user_used_recently(pid),
-        super::catch::user_pressed_opener_recently(),
+        &super::catch::recent_presses(pid),
         users_running,
     )
 }
@@ -437,8 +495,10 @@ pub fn end_agents(all: bool) {
                 channel(pid, Duration::from_secs(1)).and_then(|c| c.page_count()),
             )
         };
+        // A launch that takes the instance after the count keeps it: the
+        // quit doesn't start while the launch holds it.
         if all || idle() {
-            quit_agents(pid);
+            quitting(all, || quit_now(pid));
         }
     }
 }
@@ -450,6 +510,8 @@ pub fn has_pipe(pid: i32) -> bool {
         .is_some_and(|c| *c.state.lock().unwrap_or_else(|e| e.into_inner()) != State::Dead)
 }
 
+/// The app's pipe, once it answers on it; waits up to `wait` for a pipe
+/// still starting.
 pub fn channel(pid: i32, wait: Duration) -> Option<Arc<Channel>> {
     let channel = channels().get(&pid).cloned()?;
     let started = Instant::now();

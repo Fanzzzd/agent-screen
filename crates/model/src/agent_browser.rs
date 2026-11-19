@@ -211,21 +211,95 @@ pub enum AgentsActivated {
     GiveBackAndStartUsers,
 }
 
-/// `used_its_window`: the user's last input went to the instance's own
-/// window. `opener_pressed`: their last input, just before, went to an app
-/// that opens apps. `users_running`: the user's own instance runs, which
-/// macOS would have picked for their launch.
-pub fn agents_activated(
-    used_its_window: bool,
-    opener_pressed: bool,
-    users_running: bool,
-) -> AgentsActivated {
-    if used_its_window {
-        AgentsActivated::Leave
-    } else if opener_pressed && !users_running {
-        AgentsActivated::GiveBackAndStartUsers
-    } else {
-        AgentsActivated::GiveBack
+/// Where one of the user's presses went, as the agents' instance comes to
+/// the front.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// To one of the instance's own windows, in the Viewer.
+    ItsWindow,
+    /// To an app that opens apps: the Dock (Launchpad included),
+    /// Spotlight, Finder, Raycast or Alfred.
+    Opener,
+    /// Anywhere else, or nowhere known.
+    Other,
+}
+
+/// `recent`: the user's presses just before, oldest first. Only the last
+/// one counts: a Dock click followed by typing elsewhere was no launch.
+/// `users_running`: the user's own instance runs, which macOS would have
+/// picked for their launch.
+pub fn agents_activated(recent: &[Press], users_running: bool) -> AgentsActivated {
+    match recent.last() {
+        Some(Press::ItsWindow) => AgentsActivated::Leave,
+        Some(Press::Opener) if !users_running => AgentsActivated::GiveBackAndStartUsers,
+        _ => AgentsActivated::GiveBack,
+    }
+}
+
+/// The app to give the front back to when `pid` came to the front by
+/// itself after `previous`, if any. Agent Screen is `own`. An app an agent
+/// started that comes forward over Agent Screen, as the user works in the
+/// Viewer, stays (#41). The agents' browser instance never does: the
+/// user's next keys would go to the agents' profile, so Agent Screen takes
+/// the front back for itself too.
+pub fn front_to_return(
+    previous: Option<i32>,
+    own: i32,
+    pid: i32,
+    agents_instance: bool,
+) -> Option<i32> {
+    previous.filter(|&p| p != pid && (p != own || agents_instance))
+}
+
+/// Who may use the agents' instance: launches that open a window in it,
+/// and the quit once it is idle. A quit never starts while a launch holds
+/// the instance, and a launch waits for a quit that started to end, so a
+/// window being opened is never closed with the instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgentsUse {
+    holds: usize,
+    quitting: usize,
+}
+
+impl AgentsUse {
+    pub const fn new() -> Self {
+        AgentsUse {
+            holds: 0,
+            quitting: 0,
+        }
+    }
+
+    /// A launch takes the instance. False while a quit runs: wait for it.
+    pub fn hold(&mut self) -> bool {
+        if self.quitting > 0 {
+            return false;
+        }
+        self.holds += 1;
+        true
+    }
+
+    /// A launch takes the instance even while a quit runs, after waiting
+    /// long enough for it.
+    pub fn force_hold(&mut self) {
+        self.holds += 1;
+    }
+
+    pub fn release(&mut self) {
+        self.holds = self.holds.saturating_sub(1);
+    }
+
+    /// A quit starts, unless a launch holds the instance. `force`, as
+    /// Agent Screen quits, starts it anyway.
+    pub fn begin_quit(&mut self, force: bool) -> bool {
+        if self.holds > 0 && !force {
+            return false;
+        }
+        self.quitting += 1;
+        true
+    }
+
+    pub fn end_quit(&mut self) {
+        self.quitting = self.quitting.saturating_sub(1);
     }
 }
 
@@ -411,26 +485,66 @@ mod tests {
         // A Dock, Spotlight or Finder press just before, the user's own
         // browser not running: their intent was to open the browser.
         assert_eq!(
-            agents_activated(false, true, false),
+            agents_activated(&[Press::Opener], false),
             AgentsActivated::GiveBackAndStartUsers
         );
     }
 
     #[test]
     fn a_self_activation_only_gives_the_front_back() {
-        // No opener input, as for a popup the agents' instance shows by
+        // No input, as for a popup the agents' instance shows by
         // itself: the user's browser never starts unasked.
-        assert_eq!(
-            agents_activated(false, false, false),
-            AgentsActivated::GiveBack
-        );
+        assert_eq!(agents_activated(&[], false), AgentsActivated::GiveBack);
         // The user's own runs: macOS would have picked it for their launch.
         assert_eq!(
-            agents_activated(false, true, true),
+            agents_activated(&[Press::Opener], true),
             AgentsActivated::GiveBack
         );
         // The user clicked the agents' window, in the Viewer.
-        assert_eq!(agents_activated(true, true, false), AgentsActivated::Leave);
+        assert_eq!(
+            agents_activated(&[Press::ItsWindow], false),
+            AgentsActivated::Leave
+        );
+    }
+
+    #[test]
+    fn only_the_users_last_press_decides_the_agents_activation() {
+        use AgentsActivated::*;
+        use Press::*;
+        assert_eq!(
+            agents_activated(&[Other, Opener], false),
+            GiveBackAndStartUsers
+        );
+        assert_eq!(agents_activated(&[Opener, Other], false), GiveBack);
+        assert_eq!(agents_activated(&[Opener, ItsWindow], false), Leave);
+        assert_eq!(
+            agents_activated(&[ItsWindow, Opener], false),
+            GiveBackAndStartUsers
+        );
+    }
+
+    #[test]
+    fn the_agents_instance_over_agent_screen_gives_the_front_back_to_it() {
+        let (own, pid, user) = (10, 20, 30);
+        assert_eq!(front_to_return(Some(own), own, pid, true), Some(own));
+        assert_eq!(front_to_return(Some(own), own, pid, false), None);
+        assert_eq!(front_to_return(Some(user), own, pid, false), Some(user));
+        assert_eq!(front_to_return(Some(pid), own, pid, true), None);
+        assert_eq!(front_to_return(None, own, pid, true), None);
+    }
+
+    #[test]
+    fn a_launch_holding_the_agents_instance_keeps_the_idle_quit_off() {
+        let mut using = AgentsUse::default();
+        assert!(using.hold());
+        assert!(!using.begin_quit(false));
+        assert!(using.begin_quit(true));
+        using.end_quit();
+        using.release();
+        assert!(using.begin_quit(false));
+        assert!(!using.hold());
+        using.end_quit();
+        assert!(using.hold());
     }
 
     #[test]

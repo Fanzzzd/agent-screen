@@ -4639,10 +4639,16 @@ impl Shell {
         }
         self.remind_where(pid, false, cx).detach();
         let own = std::process::id() as i32;
-        let Some(previous) = previous.filter(|&p| p != own && p != pid) else {
+        let instance = crate::mac::devtools::is_agents(pid);
+        // Over Agent Screen, as after a Viewer click (#41), only the agents'
+        // browser instance gives the front back: the user's next keys would
+        // go to the agents' profile.
+        let Some(previous) =
+            agent_screen_model::agent_browser::front_to_return(previous, own, pid, instance)
+        else {
             return;
         };
-        let agents = crate::mac::devtools::is_agents(pid)
+        let agents = instance
             || self
                 .core
                 .read(cx)

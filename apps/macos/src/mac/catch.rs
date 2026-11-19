@@ -206,20 +206,18 @@ pub fn user_acted_since(pid: i32, since: std::time::Instant) -> bool {
     user_acted_where(pid, |at| at >= since, false)
 }
 
-/// Whether the user pressed something in `pid` itself just now, a key to
-/// it or a click on one of its windows. Finder, the Dock and launchers
-/// don't count.
-pub fn user_used_recently(pid: i32) -> bool {
-    user_acted_where(pid, |at| at.elapsed() < ACTION_WINDOW, false)
-}
-
-/// Whether the user just pressed something in Finder, the Dock (Launchpad
-/// included), Spotlight or another launcher: how they open an app. Input
-/// whose target isn't known doesn't count.
-pub fn user_pressed_opener_recently() -> bool {
+/// Where the user's presses just now went, oldest first, as the agents'
+/// browser instance `pid` comes to the front (ADR 0022).
+pub fn recent_presses(pid: i32) -> Vec<agent_screen_model::agent_browser::Press> {
+    use agent_screen_model::agent_browser::Press;
     recent_targets(|at| at.elapsed() < ACTION_WINDOW)
         .into_iter()
-        .any(|to| to.is_some_and(super::app::opens_things))
+        .map(|to| match to {
+            Some(p) if p == pid => Press::ItsWindow,
+            Some(p) if super::app::opens_things(p) => Press::Opener,
+            _ => Press::Other,
+        })
+        .collect()
 }
 
 /// The apps the user's presses `when` went to, None where not known.

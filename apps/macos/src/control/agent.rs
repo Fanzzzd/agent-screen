@@ -5579,6 +5579,14 @@ async fn launch(
         }
     };
     core.update(cx, |c, _| pause(c, true));
+    // The idle quit never closes the agents' instance while this launch
+    // may open a window in it; a quit that started ends first, so the plan
+    // below finds the instance gone.
+    let _hold = off(cx, {
+        let path = path.clone();
+        move || devtools::is_chromium(&path).then(devtools::hold_agents)
+    })
+    .await;
     // Decided while this launch holds the app, so two sessions don't both
     // start the agents' instance.
     let (plan, profile) = off(cx, {
