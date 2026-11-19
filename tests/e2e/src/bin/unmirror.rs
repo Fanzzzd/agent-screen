@@ -276,6 +276,22 @@ fn sizes() -> Vec<(u32, u32)> {
         .unwrap_or_else(|| vec![(1280, 800), (1200, 800), (1280, 800), (1200, 800)])
 }
 
+/// WindowServer's `TVConnectPolicy` for this user and host, as macOS
+/// reads it: 1 mirrors a new set of displays, 0 extends. None when unset.
+fn connect_policy() -> Option<String> {
+    let out = sh_lenient(
+        "/usr/bin/defaults",
+        &[
+            "-currentHost",
+            "read",
+            "com.apple.windowserver.displays",
+            "TVConnectPolicy",
+        ],
+    );
+    let out = out.trim();
+    out.parse::<i32>().is_ok().then(|| out.to_string())
+}
+
 fn test() -> Result<()> {
     let user = main_display()?;
     let before = online()?;
@@ -283,7 +299,17 @@ fn test() -> Result<()> {
     let mut seen = Vec::new();
     for (i, size) in sizes().into_iter().enumerate() {
         let name = format!("unmirror-{}-{}x{}", i + 1, size.0, size.1);
+        let policy_before = connect_policy();
         let attempt = attempt(user, &name, size)?;
+        // The app sets the policy back before it answers createDisplay.
+        check(
+            &format!(
+                "display {}: the TV connect policy reads its old value after",
+                i + 1
+            ),
+            connect_policy() == policy_before,
+            format!("before {policy_before:?}, after {:?}", connect_policy()),
+        );
         let mirrored = attempt.lines.iter().any(|l| l.contains(" unmirrored "));
         check(
             &format!("display {} ({}x{}) is kept", i + 1, size.0, size.1),

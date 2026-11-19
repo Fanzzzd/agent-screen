@@ -243,6 +243,7 @@ fn main() {
             std::backtrace::Backtrace::force_capture()
         ));
         report(info);
+        mac::display::restore_connect_policy_after_panic();
         mac::claims::delete();
         web::delete_state();
     }));
