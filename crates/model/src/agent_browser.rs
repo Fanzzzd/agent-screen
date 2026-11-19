@@ -168,6 +168,33 @@ pub fn plan(
     }
 }
 
+/// Whether the user's own browser starts when the agents' instance comes to
+/// the front by something other than Agent Screen, such as the user's Dock
+/// click, `open -a` or a link: macOS hands those to any running instance of
+/// the bundle, and with the user's own not running, the agents' got it. The
+/// front goes back either way, so the agents' profile never takes the
+/// user's typing; with the user's own running, macOS would have picked it.
+pub fn starts_users_browser(users_running: bool, user_used_agents_window: bool) -> bool {
+    !users_running && !user_used_agents_window
+}
+
+/// The switch that starts Chromium without its startup window.
+pub const NO_STARTUP_WINDOW: &str = "--no-startup-window";
+
+/// Browsers that keep their pages in windows of their own, which Chromium
+/// gives no frame: measured on 2026-11-19, Dia answers a new window through
+/// the pipe with one of no size that never shows, and opens its startup
+/// window without taking the front.
+const OWN_WINDOWS: [&str; 1] = ["company.thebrowser.dia"];
+
+/// Whether the browser `bundle_id` opens a real window when its pipe asks:
+/// then the agents' instance starts with no window and gets its first one
+/// through the pipe, since Chromium shows its startup window with
+/// activation.
+pub fn pipe_makes_windows(bundle_id: &str) -> bool {
+    !OWN_WINDOWS.contains(&bundle_id)
+}
+
 /// Whether a start of the agents' instance was refused, as a browser that
 /// allows one instance refuses: the new process quit at once while the
 /// user's kept running. Any other failure, such as a timeout or a crash,
@@ -299,6 +326,20 @@ mod tests {
             plan(false, &[], &[(100, s(&["Safari"]))], &[], &profile(), false),
             Plan::AsAsked
         );
+    }
+
+    #[test]
+    fn dia_keeps_its_own_windows_and_chrome_takes_them_through_the_pipe() {
+        assert!(!pipe_makes_windows("company.thebrowser.dia"));
+        assert!(pipe_makes_windows("com.google.Chrome"));
+    }
+
+    #[test]
+    fn a_dock_click_that_reached_the_agents_instance_starts_the_users() {
+        assert!(starts_users_browser(false, false));
+        assert!(!starts_users_browser(true, false));
+        // The user clicked the agents' window, in the Viewer: theirs to use.
+        assert!(!starts_users_browser(false, true));
     }
 
     #[test]

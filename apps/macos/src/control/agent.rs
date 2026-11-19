@@ -5795,7 +5795,27 @@ async fn launch_now(
             Vec::new()
         };
         arguments.extend(start.open_arguments());
-        arguments.extend(first);
+        // The agents' instance shows no window as it starts: Chromium shows
+        // its startup window with activation, which takes the user's front
+        // app. Its first window comes through the pipe, which opens windows
+        // without activating it (ADR 0022). A browser that keeps its pages
+        // in windows of its own, as Dia, opens its startup window without
+        // activation and makes none through the pipe.
+        let through_pipe = start.agents_start && {
+            let path = path.clone();
+            off(cx, move || {
+                app::bundle_id_at(&path)
+                    .is_none_or(|id| agent_screen_model::agent_browser::pipe_makes_windows(&id))
+            })
+            .await
+        };
+        let first_page = if through_pipe {
+            arguments.push(agent_screen_model::agent_browser::NO_STARTUP_WINDOW.into());
+            Some(first.clone().unwrap_or_else(|| "about:blank".into()))
+        } else {
+            arguments.extend(first);
+            None
+        };
         let environment = start.environment.clone();
         let started = off(cx, move || {
             hold_launch_for_tests();
@@ -5807,6 +5827,20 @@ async fn launch_now(
                 spawned = Some(pid);
                 if start.agents_start {
                     devtools::mark_agents(pid);
+                }
+                if let Some(url) = first_page {
+                    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+                    let frame = bounds.inset(margin, margin);
+                    cx.background_executor()
+                        .spawn(async move {
+                            let made = devtools::channel(pid, Duration::from_secs(15))
+                                .ok_or_else(|| "no pipe within 15 s".to_string())
+                                .and_then(|c| c.new_window(&url, frame));
+                            log::info!(
+                                "launch: the agents' instance {pid}'s first window through its pipe: {made:?}"
+                            );
+                        })
+                        .detach();
                 }
                 let (done, outcome) = std::sync::mpsc::channel();
                 let _ = done.send(true);

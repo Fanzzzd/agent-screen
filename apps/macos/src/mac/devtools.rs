@@ -342,6 +342,12 @@ pub fn quit_agents(pid: i32) -> bool {
     // Hidden first: Dia moves a window it closes to the middle of the main
     // screen, where the user would see it. Hiding activates nothing.
     super::app::hide(pid);
+    for _ in 0..10 {
+        if super::app::is_hidden(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_browser());
     let gone = ended(1000)
         || unsafe { libc::kill(pid, libc::SIGTERM) } != 0
@@ -353,6 +359,48 @@ pub fn quit_agents(pid: i32) -> bool {
     );
     agents().remove(&pid);
     gone
+}
+
+/// Start the user's own browser of the agents' instance `pid`, on its
+/// default profile, when it isn't running: the agents' instance came to the
+/// front by the user's Dock click, `open -a` or a link, which macOS hands to
+/// any running instance. Started directly, since LaunchServices would hand
+/// it to the agents' instance again. Whether it started one.
+pub fn start_users_browser(pid: i32, user_used_agents_window: bool) -> bool {
+    let Some(bundle) = super::app::bundle_of(pid) else {
+        return false;
+    };
+    let users_running = super::app::running_pids(&bundle)
+        .iter()
+        .any(|&p| !is_agents(p));
+    if !agent_screen_model::agent_browser::starts_users_browser(
+        users_running,
+        user_used_agents_window,
+    ) {
+        return false;
+    }
+    let Some(executable) = super::app::main_executable(&bundle) else {
+        return false;
+    };
+    match std::process::Command::new(&executable)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            log::info!(
+                "devtools: the agents' instance {pid} came to the front by another app; started the user's own browser as {}",
+                child.id()
+            );
+            std::thread::spawn(move || child.wait());
+            true
+        }
+        Err(e) => {
+            log::warn!("devtools: couldn't start the user's own browser: {e}");
+            false
+        }
+    }
 }
 
 /// Quit each agents' browser instance that has no window left, or every one
@@ -581,6 +629,7 @@ impl Channel {
                     )
                     .ok()?;
                 let v = &seen["result"]["value"];
+                log::info!("devtools: pid {} page {target} says {v}", self.pid);
                 let visible = v[0] == "visible";
                 let mid = (v[1].as_f64()?, v[2].as_f64()?);
                 (visible && display.contains(mid)).then_some(session)

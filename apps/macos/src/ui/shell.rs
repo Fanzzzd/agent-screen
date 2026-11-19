@@ -4648,7 +4648,19 @@ impl Shell {
         }
         cx.background_executor()
             .spawn(async move {
-                if crate::mac::catch::user_acted_recently(pid) {
+                let used = crate::mac::catch::user_acted_recently(pid);
+                // The agents' browser instance, brought forward by the user's
+                // Dock click or a link: the front goes back, and the user's
+                // own browser starts when it isn't running (ADR 0022).
+                if crate::mac::devtools::is_agents(pid) && !used {
+                    log::info!(
+                        "pid {pid}, the agents' browser instance, came to the front; giving the front back to pid {previous}"
+                    );
+                    crate::mac::ime::return_front(previous);
+                    crate::mac::devtools::start_users_browser(pid, used);
+                    return;
+                }
+                if used {
                     return;
                 }
                 log::info!(
