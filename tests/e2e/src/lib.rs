@@ -805,6 +805,18 @@ pub fn quit_profile(dir: &Path) {
         }
         sleep_ms(100);
     }
+    // Still running after 5 s: a throwaway profile's browser has nothing
+    // to save.
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-KILL", "-f"])
+        .arg(dir)
+        .status();
+    for _ in 0..20 {
+        if sh_lenient("/usr/bin/pgrep", &["-f", &dir.to_string_lossy()]).is_empty() {
+            return;
+        }
+        sleep_ms(100);
+    }
 }
 
 /// The screen is locked: it shows no windows, can't be captured and takes

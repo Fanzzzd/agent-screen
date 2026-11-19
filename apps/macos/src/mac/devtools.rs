@@ -424,6 +424,55 @@ impl Channel {
         .map(|_| ())
     }
 
+    /// Set every browser window of this process to `frame`, in global
+    /// points, through Chromium: Dia ignores `--window-size` and keeps its
+    /// first window at the size of the main screen. How many it set.
+    pub fn fit_windows(&self, frame: Rect) -> usize {
+        let Ok(targets) = self.call("Target.getTargets", json!({}), None) else {
+            return 0;
+        };
+        let mut windows: Vec<i64> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page")
+            .filter_map(|t| t["targetId"].as_str())
+            .filter_map(|id| {
+                self.call(
+                    "Browser.getWindowForTarget",
+                    json!({ "targetId": id }),
+                    None,
+                )
+                .ok()?["windowId"]
+                    .as_i64()
+            })
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+            .into_iter()
+            .filter(|&id| {
+                // A maximized or full-screen window takes no frame until normal.
+                let _ = self.call(
+                    "Browser.setWindowBounds",
+                    json!({ "windowId": id, "bounds": { "windowState": "normal" } }),
+                    None,
+                );
+                self.call(
+                    "Browser.setWindowBounds",
+                    json!({ "windowId": id, "bounds": {
+                        "left": frame.x.round() as i64,
+                        "top": frame.y.round() as i64,
+                        "width": frame.width.round() as i64,
+                        "height": frame.height.round() as i64,
+                    } }),
+                    None,
+                )
+                .is_ok()
+            })
+            .count()
+    }
+
     /// The session attached to a target, attaching once.
     fn session(&self, target: &str) -> Result<String, String> {
         if let Some(s) = self

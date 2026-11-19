@@ -5418,6 +5418,38 @@ fn new_window_in(
     }
 }
 
+/// The launch's window, fitted to display `id` through the agents'
+/// instance's pipe when it reaches past the display.
+async fn fit_agents_window(launched: Launched, id: DisplayId, cx: &AsyncApp) -> Launched {
+    let Some(window) = launched.window.clone() else {
+        return launched;
+    };
+    let display = cg::display_bounds(id);
+    let size = (window.bounds.width, window.bounds.height);
+    if !agent_screen_model::agent_browser::overflows(size, (display.width, display.height)) {
+        return launched;
+    }
+    let target = window.target;
+    let margin = agent_screen_model::launch::WINDOW_MARGIN;
+    let fitted = off(cx, move || {
+        let set = devtools::channel(target.pid, Duration::from_secs(2))
+            .map_or(0, |c| c.fit_windows(display.inset(margin, margin)));
+        log::info!(
+            "launch: window {} of the agents' instance was {}x{}, past the display; fitted {set} through its pipe",
+            target.window_id,
+            size.0,
+            size.1
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        windows::on_display(id).into_iter().find(|w| w.target == target)
+    })
+    .await;
+    Launched {
+        window: fitted.or(Some(window)),
+        ..launched
+    }
+}
+
 /// Whether a process of the browser at `path` runs on the agents' profile.
 async fn agents_run(path: &std::path::Path, profile: &std::path::Path, cx: &AsyncApp) -> bool {
     let (path, profile) = (path.to_path_buf(), profile.to_path_buf());
@@ -5559,6 +5591,13 @@ async fn launch(
         _ => result,
     };
     let result = result.map(|l| Launched { shared, ..l });
+    // The agents' instance's window, too big for the display, as Dia's
+    // first one is: fit it through Chromium, which Dia follows.
+    let agents_window = starting || start.agents.is_some();
+    let result = match result {
+        Ok(l) if agents_window && !shared => Ok(fit_agents_window(l, id, cx).await),
+        other => other,
+    };
     core.update(cx, |c, _| {
         pause(c, false);
         c.launching.remove(&path);
@@ -6007,6 +6046,7 @@ async fn launch_now(
     // are all Agent Screen's.
     // Off the main thread: reading a window's document asks the app, which
     // may be busy.
+    let agents_own = agents.is_some();
     let find_ours = |taken: Option<u32>| {
         let (before, document) = (before.clone(), document.clone());
         async move {
@@ -6014,11 +6054,18 @@ async fn launch_now(
                 w.target.pid == pid
                     && w.layer == 0
                     && !before.contains(&w.target.window_id)
-                    && (!was_running
-                        || taken == Some(w.target.window_id)
-                        || document
-                            .as_deref()
-                            .is_some_and(|d| shows_document(w.target, d)))
+                    && agent_screen_model::launch::answers_launch(
+                        was_running,
+                        agents_own,
+                        taken == Some(w.target.window_id),
+                        // Read only when nothing else decides: it asks the app.
+                        !was_running
+                            || agents_own
+                            || taken == Some(w.target.window_id)
+                            || document
+                                .as_deref()
+                                .is_some_and(|d| shows_document(w.target, d)),
+                    )
             })
         }
     };

@@ -79,6 +79,13 @@ pub fn with_refusal(record: &str, bundle_id: &str, version: &str) -> String {
         .collect()
 }
 
+/// Whether a window of `size` reaches past a display of `display`, both
+/// width and height in points. Dia's first window takes the main screen's
+/// size whatever `--window-size` says.
+pub fn overflows(size: (f64, f64), display: (f64, f64)) -> bool {
+    size.0 > display.0 + 0.5 || size.1 > display.1 + 0.5
+}
+
 /// How `launch_app` starts a browser.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
@@ -231,6 +238,14 @@ mod tests {
         // A profile the agent named still wins.
         let named = s(&["--user-data-dir=/tmp/p"]);
         assert_eq!(plan(true, &named, &[user], &profile(), true), Plan::AsAsked);
+    }
+
+    #[test]
+    fn a_window_the_size_of_the_main_screen_overflows_the_display() {
+        assert!(overflows((1728.0, 1084.0), (1280.0, 800.0)));
+        assert!(overflows((1200.0, 801.0), (1280.0, 800.0)));
+        assert!(!overflows((1200.0, 720.0), (1280.0, 800.0)));
+        assert!(!overflows((1280.0, 800.0), (1280.0, 800.0)));
     }
 
     #[test]

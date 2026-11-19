@@ -18,7 +18,7 @@ The agents' profile is `~/Library/Application Support/Agent Screen/Browser Profi
 
 Status: proposed. Dia accepts a second instance. On 2026-11-19, with the user's Dia running, `agentbrowser` with `E2E_BROWSER=Dia` started Dia on the agents' profile with the pipe. The process kept running beside the user's, answered on its pipe, and its first window was caught onto the display. A first run on 2026-11-18 had reported that Dia quit at once. That report was false: Agent Screen took a process it had just started for gone because the bundle's list of running apps didn't show it yet. A started process now counts as quit only once it ends.
 
-Open on Dia: its first window came 1728 by 1084 points, ignoring `--window-size`. The second `launch_app`, with a URL, asked through the pipe, and Dia made window 67837, but the launch didn't take it as its window and answered that Dia opened no new window. When the display ended before the test quit Dia, its windows showed on the user's screen for 32 ms.
+Found on Dia, with changes not yet run on a display. Its first window came 1728 by 1084 points, the main screen's size, ignoring `--window-size`: when the agents' window reaches past the display, Agent Screen now also sets its frame through Chromium (`Browser.setWindowBounds`). The second `launch_app`, with a URL, asked through the pipe and Dia made window 67837, but the watch on the first launch placed it before the second launch's catch took it, and the launch answered that Dia opened no new window: every new window of the agents' instance now answers its launch (`launch::answers_launch`). When the test ended the display before quitting Dia, Dia's windows showed on the user's screen for 32 ms: the tests now quit the agents' instance first.
 
 ## Not yet verified
 

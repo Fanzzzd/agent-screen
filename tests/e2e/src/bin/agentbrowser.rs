@@ -558,6 +558,12 @@ fn test(
         }
         Ok(())
     })();
+    // The agents' instance and the stand-in go before their display: a
+    // display that goes first hands their windows to your screen.
+    quit_profile(profile);
+    if stand_in {
+        quit_profile(user_profile);
+    }
     let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
     result
 }
