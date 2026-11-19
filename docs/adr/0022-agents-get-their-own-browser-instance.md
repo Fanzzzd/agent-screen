@@ -16,7 +16,9 @@ The agents' profile is `~/Library/Application Support/Agent Screen/Browser Profi
 
 ## Measured
 
-Status: proposed. On 2026-11-18, with Agent Screen 0.1.41 and the user's Dia running, `agentbrowser` started Dia on the agents' profile with the pipe, and `launch_app` answered that Dia quit at once and allows one instance. That answer is in doubt. Agent Screen decided it within milliseconds of starting the process, by listing the bundle's running apps, and a process Agent Screen starts itself isn't listed as an app until it registers. The same check misfired on Chrome, which does run a second instance. Dia had written 128 files into the profile, including `User Data/Default`, which suggests it kept running. A started process now counts as quit only once it ends, and Dia needs another run.
+Status: proposed. Dia accepts a second instance. On 2026-11-19, with the user's Dia running, `agentbrowser` with `E2E_BROWSER=Dia` started Dia on the agents' profile with the pipe. The process kept running beside the user's, answered on its pipe, and its first window was caught onto the display. A first run on 2026-11-18 had reported that Dia quit at once. That report was false: Agent Screen took a process it had just started for gone because the bundle's list of running apps didn't show it yet. A started process now counts as quit only once it ends.
+
+Open on Dia: its first window came 1728 by 1084 points, ignoring `--window-size`. The second `launch_app`, with a URL, asked through the pipe, and Dia made window 67837, but the launch didn't take it as its window and answered that Dia opened no new window. When the display ended before the test quit Dia, its windows showed on the user's screen for 32 ms.
 
 ## Not yet verified
 

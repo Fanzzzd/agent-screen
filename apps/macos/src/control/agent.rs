@@ -5024,6 +5024,13 @@ fn open_target(text: &str) -> Result<String, ControlError> {
     }
 }
 
+/// Test builds may turn off the fallback for a browser that refuses the
+/// agents' instance (ADR 0022), so a test beside the user's own browser
+/// fails there, records nothing and never opens a window in theirs.
+fn no_shared_fallback_for_tests() -> bool {
+    cfg!(debug_assertions) && std::env::var("AGENTSCREEN_NO_SHARED_FALLBACK").as_deref() == Ok("1")
+}
+
 /// Test builds may hold the launch, so a test can start another copy of
 /// the app while it waits (issue #35).
 fn hold_launch_for_tests() {
@@ -5529,6 +5536,14 @@ async fn launch(
         Ok(l) => l.reason == Some("already_running"),
     };
     let result = match profile.as_deref() {
+        Some(_) if starting && quit_at_once && no_shared_fallback_for_tests() => {
+            log::info!(
+                "launch: {name} refused the agents' instance; the fallback is off for this test"
+            );
+            Err(ControlError::failed(format!(
+                "{name} quit at once beside the user's: it refused the agents' instance, and the shared fallback is off for this test"
+            )))
+        }
         Some(profile) if starting && quit_at_once && !agents_run(&path, profile, cx).await => {
             log::info!(
                 "launch: {name} refuses a second instance; opening the window in the user's"
