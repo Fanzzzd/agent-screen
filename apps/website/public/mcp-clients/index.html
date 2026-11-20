@@ -109,7 +109,7 @@
           <div class="code-bar"><span>Claude Code + Codex</span><button class="copy" type="button" data-copy="&quot;/Applications/Agent Screen.app/Contents/MacOS/AgentScreen&quot; mcp install">Copy</button></div>
           <pre><code>"/Applications/<wbr>Agent Screen.app/<wbr>Contents/<wbr>MacOS/<wbr>AgentScreen" mcp install</code></pre>
         </div>
-        <p>In <code>v0.1.41</code>, if Agent Screen is not already open, the agent's first tool call starts it automatically (the upcoming release on <code>main</code> starts it as soon as the client connects). Start a new session or restart your client after editing its MCP configuration.</p>
+        <p>If Agent Screen is not running, it starts when the agent's client connects. Start a new session or restart your client after editing its MCP configuration.</p>
       </section>
 
       <section id="clients">
@@ -224,11 +224,11 @@ args = ["mcp"]</code></pre>
 
       <section id="sessions">
         <h2>How Agent Screen keeps client sessions apart</h2>
-        <p>Each Agent Session owns its displays, Window Authorization, and Help Requests. In <code>v0.1.41</code>, Agent Screen identifies a tool call's session from the first matching source:</p>
+        <p>Each Agent Session owns its displays, Window Authorization, and Help Requests. Agent Screen picks a tool call's session from the first of these that names one:</p>
         <ol>
-          <li><strong>Claude Code session variable:</strong> Claude Code passes <code>CLAUDE_CODE_SESSION_ID</code> to stdio servers. (The upcoming release on <code>main</code> checks Codex metadata first and scopes <code>CLAUDE_CODE_SESSION_ID</code> strictly to clients identifying as <code>claude-code</code>, so a child client launched from a Claude Code shell gets its own session.)</li>
-          <li><strong>Codex per-call metadata:</strong> Codex sends <code>x-codex-turn-metadata</code> on each tool call, so multiple Codex conversations sharing one server process stay on separate displays.</li>
-          <li><strong>Per-process connection:</strong> Clients that send no session hint (such as Cursor, Gemini CLI, OpenCode, Zed, VS Code, and Claude Desktop) get one session per started <code>AgentScreen mcp</code> process. Note that Claude Desktop launches one MCP server process at startup, so its conversations share that session.</li>
+          <li><strong>The call's own <code>_meta</code>:</strong> Codex sends <code>x-codex-turn-metadata</code> on each tool call, so one Codex process serving several conversations keeps them apart.</li>
+          <li><strong>Claude Code session variable:</strong> Claude Code passes <code>CLAUDE_CODE_SESSION_ID</code> to stdio servers. It counts only when the client identifies as Claude Code (<code>claude-code</code>), so another client started from Claude Code's shell still gets its own session.</li>
+          <li><strong>Per-process connection:</strong> Clients that give no hint (such as Cursor, Gemini CLI, OpenCode, Zed, VS Code, and Claude Desktop) get one session per <code>AgentScreen mcp</code> process they start. Two processes never share a session. Note that Claude Desktop launches its servers at startup, so its conversations share that session.</li>
         </ol>
         <p>When a client restarts or closes its MCP process, Agent Screen waits a 2-second grace period so reconnecting clients can rebind their displays before closing empty displays or marking remaining windows for review.</p>
       </section>
