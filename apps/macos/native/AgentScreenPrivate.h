@@ -65,6 +65,9 @@ bool SSEventSetIntegerField(CGEventRef event, uint32_t field, int64_t value);
 /// Spaces: defocus the current front process, then focus the target window.
 bool SSFocusWithoutRaise(pid_t pid, CGWindowID windowID);
 bool SSMakeSelfFront(CGWindowID windowID);
+/// Make `pid` WindowServer's front process with `windowID` its key window,
+/// as the user's click on that window would: the front hold's hand-back.
+bool SSSetFrontProcess(pid_t pid, CGWindowID windowID);
 int SSFrontPid(void);
 
 /// _AXUIElementGetWindow: the CGWindowID behind an AX window element.

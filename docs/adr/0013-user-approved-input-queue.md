@@ -84,6 +84,8 @@ Amended 2026-11-20 for issue #219. When an app on an Agent Display is the user's
 - A click checks, just before it runs, that the same window is under its point and that the region around the point looks as it did, as a queued real click does. Otherwise nothing is sent and the agent is told to look again.
 - If the app comes back to the front between that check and the send, the action is refused again before anything goes out, and the request waits again.
 - After 30 seconds the display's card and the Viewer header say that the agent waits for the user to leave the app, and the menu bar icon counts it. No notification.
+- Beside that line, on the display's tile in Peek and in the Viewer header, "Let the agent continue" runs the waiting actions now, without the user leaving the app (the front hold). Agent Screen makes itself WindowServer's front process with the pressed window as its key window, and waits up to 200 ms for that. The waiting requests then see their app out of front and run through the background route, each handing the app's focus back to the user's window, as when the user leaves the app. Agent Screen then gives the app the front back with the user's window key (`_SLPSSetFrontProcessWithOptions`, falling back to an activation) and checks both. The press is the user's own, so taking the front for it is not taking their focus: the front goes back to the app they were in, within the 2 seconds the actions may take.
+- During the hold, the keys the user types are held at the tap and go to their window once it is back in front and key. A key typed or a mouse button pressed ends the hold: nothing more starts, and what is left waits again. After a press the front stays where the user put it.
 
 ## Sheets, remote views and open pop-up menus
 

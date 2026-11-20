@@ -26,12 +26,16 @@
 //! comes back, with your app staying in front (sampled every 10 ms), and
 //! a withdrawn key never runs. Switching back to the harness then lands in
 //! its user window. A queued double click runs the same way, and one whose
-//! control changed while it waited is not sent. Then, with your front app
-//! back, the same harness takes posted keys as before.
+//! control changed while it waited is not sent. With the harness in front
+//! again, a real click on Let the agent continue, beside the Viewer's
+//! waiting line, runs a queued key at once, and the harness is back in
+//! front with its user window key. Then, with your front app back, the
+//! same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //! Puts a window and the front on your main screen for about half a
-//! minute; keep your hands off the keyboard, which would type into it.
+//! minute, and clicks the Viewer once with the real pointer; keep your
+//! hands off the keyboard and mouse.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e sharedbrowser
 //!
@@ -40,8 +44,8 @@
 use std::process::ExitCode;
 
 use agent_screen_tests::{
-    Control, Value, allow_on_your_screen, check, cut, fixture, fronts_during, instance, json, out,
-    probe, raised, restore, run, sh_lenient, skip, sleep_ms, snapshot, start_test_app,
+    Control, Value, allow_on_your_screen, check, cut, fixture, fronts_during, hid, instance, json,
+    out, probe, raised, restore, run, sh_lenient, skip, sleep_ms, snapshot, start_test_app,
     stop_test_app, taken_back, tool, wait_for_idle,
 };
 use anyhow::{Context, Result, bail};
@@ -1252,7 +1256,93 @@ fn queued(
         back == "pair user",
         format!("focused window: {back}"),
     );
-    queued_clicks(control, id, window_id, log, pid, your_front)
+    queued_clicks(control, id, window_id, log, pid, your_front)?;
+    held(control, id, log, pid)
+}
+
+/// "Let the agent continue" (ADR 0013, the front hold): with the harness
+/// in front and its user window key, a queued key runs at once when the
+/// user presses the button beside the Viewer's waiting line, a real click.
+/// Agent Screen holds the front for that moment: the key reaches the
+/// agent's page, the user's page sees none of it, and the harness is back
+/// in front with its user window key.
+fn held(control: &Control, id: &Value, log: &std::path::Path, pid: &str) -> Result<()> {
+    control.call("debugFrontWait", json!({ "ms": 1500 }))?;
+    control.call("debugShow", json!({ "surface": "viewer", "displayId": id }))?;
+    sleep_ms(1200);
+    if !harness_in_front(pid, log) {
+        bail!(
+            "the harness didn't come back to the front with its user window key: front {}",
+            front_app()
+        );
+    }
+    let from = lines(log, 0).len();
+    let pending = key(control, id, "v");
+    let n = request_number(&pending);
+    check(
+        "with the Viewer open, a key beside the user's window still answers input_pending",
+        said(&pending).contains("input_pending") && n.is_some(),
+        cut(&said(&pending), 300),
+    );
+    sleep_ms(300);
+    let viewer = control.call("debugViewer", json!({}))?;
+    let frame = rect(&viewer["frame"]);
+    let button = rect(&viewer["letContinue"]);
+    check(
+        "the Viewer header shows Let the agent continue beside the waiting line",
+        frame.is_some() && button.is_some(),
+        viewer.to_string(),
+    );
+    let (Some(frame), Some(button), Some(n)) = (frame, button, n) else {
+        return Ok(());
+    };
+    let x = frame[0] + button[0] + button[2] / 2.0;
+    let y = frame[1] + button[1] + button[3] / 2.0;
+    println!("     actual HID click Let the agent continue at ({x}, {y})");
+    let (_, fronts) = fronts_during(4, None, || {
+        let clicked = hid(&["click", &x.to_string(), &y.to_string()]);
+        sleep_ms(2500);
+        clicked
+    })?;
+    let seen = lines(log, from);
+    println!("     fronts: {fronts:?}");
+    check(
+        "the press runs the queued key in the agent's page, and the user's page sees nothing",
+        agent_key(&seen, "v") && user_input(&seen).is_empty(),
+        format!("{seen:?}"),
+    );
+    let last_focus = seen
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("win user") || l.starts_with("win agent"))
+        .cloned();
+    check(
+        "the harness is back in front with its user window key",
+        front_app() == "Electron" && focused_window(pid) == "pair user",
+        format!(
+            "front {}, focused {}, last focus line {last_focus:?}",
+            front_app(),
+            focused_window(pid)
+        ),
+    );
+    let waited = control.call(
+        "inputQueue",
+        json!({ "sessionKey": KEY, "displayId": id, "action": "wait", "requestId": n }),
+    );
+    check(
+        "input_queue wait then reads the key's result, which names the press",
+        said(&waited).contains("Let the agent continue"),
+        cut(&said(&waited), 600),
+    );
+    let hold = control.call("debugKeyHold", json!({}))?;
+    println!("     key hold: {hold}");
+    Ok(())
+}
+
+/// A rect from a debug answer: [x, y, width, height].
+fn rect(v: &Value) -> Option<[f64; 4]> {
+    let at = |i: usize| v.get(i).and_then(Value::as_f64);
+    Some([at(0)?, at(1)?, at(2)?, at(3)?])
 }
 
 /// Bring the harness back to the front, as the user switching back to it,

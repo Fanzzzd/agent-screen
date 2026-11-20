@@ -95,6 +95,14 @@ impl Hold {
         )
     }
 
+    /// Whether it holds a key the user typed.
+    pub fn typed(&self) -> bool {
+        matches!(
+            &*STATE.lock().unwrap_or_else(|e| e.into_inner()),
+            State::Holding { id, hold, .. } if *id == self.id && hold.typed()
+        )
+    }
+
     /// Its id, for a caller that ends it with `finish` itself.
     pub fn detach(self) -> u64 {
         let id = self.id;
@@ -120,6 +128,12 @@ impl Drop for Hold {
 /// Input still draining from an ended hold is held by the new one, behind
 /// what went out before it.
 pub fn start(user: WindowTarget) -> Option<Hold> {
+    start_with(user, None)
+}
+
+/// As `start`, holding the input bound for `also` too: Agent Screen, while
+/// it stands in front of the user's app during a front hold.
+pub fn start_with(user: WindowTarget, also: Option<i32>) -> Option<Hold> {
     let app = user.pid;
     let tap = TAP.get_or_init(install).as_ref()?;
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -130,7 +144,10 @@ pub fn start(user: WindowTarget) -> Option<Hold> {
         }
         *state = State::Holding {
             id,
-            hold: KeyHold::new(app),
+            hold: match also {
+                Some(other) => KeyHold::new(app).also(other),
+                None => KeyHold::new(app),
+            },
             started: Instant::now(),
             user,
             ending: false,

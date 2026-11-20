@@ -72,6 +72,20 @@ pub struct InputQueue {
     /// reads it.
     driven: BTreeSet<RequestId>,
     outcomes: BTreeMap<RequestId, Outcome>,
+    /// The front hold going on, if any (`agent_screen_model::front_hold`).
+    hold: Option<Hold>,
+    /// How long a front request waits before its display's card says so:
+    /// `WAITING_LINE_MS`, shorter in scripts (`debugFrontWait`).
+    line_ms: u64,
+}
+
+/// A front hold: Agent Screen stands in front of app `app` while the
+/// actions waiting on it run.
+#[derive(Clone, Copy, Debug)]
+pub struct Hold {
+    pub app: i32,
+    /// It ends: no more actions start, those running finish.
+    pub ending: bool,
 }
 
 /// What a front request's background run came to: the reply's result, or
@@ -213,6 +227,8 @@ impl Default for InputQueue {
             previews: BTreeSet::new(),
             driven: BTreeSet::new(),
             outcomes: BTreeMap::new(),
+            hold: None,
+            line_ms: WAITING_LINE_MS,
         }
     }
 }
@@ -307,6 +323,68 @@ impl InputQueue {
         Ok(id)
     }
 
+    /// The app front request `id` waits on, the one on display `display`
+    /// first: the app a front hold takes the front from.
+    pub fn waits_on(&self, display: DisplayId) -> Option<i32> {
+        let mut fronts: Vec<_> = self.queue.fronts().collect();
+        fronts.sort_by_key(|r| r.owner.display != display);
+        fronts
+            .into_iter()
+            .filter_map(|r| self.fronts.get(&r.id))
+            .map(|f| f.pid)
+            .find(|&pid| pid > 0)
+    }
+
+    /// Front requests on app `app` still waiting or running, on displays
+    /// `counted` takes.
+    pub fn pending_on(&self, app: i32, counted: impl Fn(DisplayId) -> bool) -> usize {
+        self.queue
+            .requests()
+            .filter(|r| r.front && matches!(r.status, Status::Queued | Status::Running))
+            .filter(|r| counted(r.owner.display))
+            .filter(|r| self.fronts.get(&r.id).is_some_and(|f| f.pid == app))
+            .count()
+    }
+
+    /// Front requests on app `app` running now.
+    pub fn running_on(&self, app: i32) -> usize {
+        self.queue
+            .requests()
+            .filter(|r| r.front && r.status == Status::Running)
+            .filter(|r| self.fronts.get(&r.id).is_some_and(|f| f.pid == app))
+            .count()
+    }
+
+    /// A front hold of app `app` starts; false while another goes on.
+    pub fn start_hold(&mut self, app: i32) -> bool {
+        if self.hold.is_some() {
+            return false;
+        }
+        self.hold = Some(Hold { app, ending: false });
+        true
+    }
+
+    /// The hold ends: actions waiting on its app wait again.
+    pub fn end_hold(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.ending = true;
+        }
+    }
+
+    pub fn clear_hold(&mut self) {
+        self.hold = None;
+    }
+
+    pub fn hold(&self) -> Option<Hold> {
+        self.hold
+    }
+
+    /// Whether a front request on app `app` may start now: not while a
+    /// hold of that app ends.
+    pub fn may_start(&self, app: i32) -> bool {
+        !self.hold.is_some_and(|h| h.ending && h.app == app)
+    }
+
     /// What front request `id` does.
     pub fn front(&self, id: RequestId) -> Option<&Front> {
         self.fronts.get(&id)
@@ -366,6 +444,12 @@ impl InputQueue {
         self.tick();
     }
 
+    /// Test hook (`debugFrontWait`): show the waiting line after `ms`, 0
+    /// for `WAITING_LINE_MS`.
+    pub fn set_line_ms_for_tests(&mut self, ms: u64) {
+        self.line_ms = if ms == 0 { WAITING_LINE_MS } else { ms };
+    }
+
     /// The app a front request of `display` has waited on for at least
     /// `WAITING_LINE_MS`, for the display's card: a quiet line, with no
     /// notification. The agent's next action replaces the request, and the
@@ -377,7 +461,7 @@ impl InputQueue {
             .filter(|r| {
                 r.owner.display == display
                     && (self.previews.contains(&r.id)
-                        || now.saturating_sub(r.times.asked) >= WAITING_LINE_MS)
+                        || now.saturating_sub(r.times.asked) >= self.line_ms)
             })
             .find_map(|r| Some(self.fronts.get(&r.id)?.app.clone()))
     }

@@ -121,6 +121,9 @@ pub fn sent_on_discard(kind: Kind) -> bool {
 #[derive(Debug)]
 pub struct KeyHold<E> {
     app: i32,
+    /// Another app whose input is held too: Agent Screen during a front
+    /// hold, while it stands in front of `app`.
+    also: Option<i32>,
     held: Vec<(Kind, E)>,
     /// Presses held, by kind and code, whose releases are held with them.
     pressed: Vec<(bool, i64)>,
@@ -132,6 +135,7 @@ impl<E> KeyHold<E> {
     pub fn new(app: i32) -> Self {
         KeyHold {
             app,
+            also: None,
             held: Vec::new(),
             pressed: Vec::new(),
             open: true,
@@ -139,8 +143,19 @@ impl<E> KeyHold<E> {
         }
     }
 
+    /// Hold the input bound for `other` too.
+    pub fn also(mut self, other: i32) -> Self {
+        self.also = Some(other);
+        self
+    }
+
     pub fn app(&self) -> i32 {
         self.app
+    }
+
+    /// Whether it holds any key down.
+    pub fn typed(&self) -> bool {
+        self.held.iter().any(|(kind, _)| *kind == Kind::KeyDown)
     }
 
     pub fn is_open(&self) -> bool {
@@ -155,7 +170,8 @@ impl<E> KeyHold<E> {
     /// `Pass` it comes back to go on its way.
     pub fn see(&mut self, seen: Seen, event: E) -> (Verdict, Option<E>) {
         // Input for another app goes there, as the user means it to.
-        if !self.open || seen.ours || seen.kind == Kind::Other || seen.front != self.app {
+        let bound = seen.front == self.app || Some(seen.front) == self.also;
+        if !self.open || seen.ours || seen.kind == Kind::Other || !bound {
             return (Verdict::Pass, Some(event));
         }
         let press = (seen.kind.mouse(), seen.code);
@@ -260,6 +276,25 @@ mod tests {
             (Verdict::Pass, Some("replayed"))
         );
         assert!(hold.is_open());
+    }
+
+    #[test]
+    fn a_front_hold_holds_keys_for_agent_screen_in_front_of_the_app() {
+        let mut hold = KeyHold::new(7).also(8);
+        let to_agent_screen = Seen {
+            front: 8,
+            ..seen(Kind::KeyDown, 1)
+        };
+        assert!(!hold.typed());
+        assert_eq!(hold.see(to_agent_screen, "a"), (Verdict::Hold, None));
+        assert_eq!(hold.see(seen(Kind::KeyDown, 2), "b"), (Verdict::Hold, None));
+        let elsewhere = Seen {
+            front: 9,
+            ..seen(Kind::KeyDown, 3)
+        };
+        assert_eq!(hold.see(elsewhere, "c"), (Verdict::Pass, Some("c")));
+        assert!(hold.typed());
+        assert_eq!(kinds(hold.release(End::HandedBack)), vec!["a", "b"]);
     }
 
     #[test]

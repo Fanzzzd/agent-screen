@@ -51,6 +51,9 @@ thread_local! {
     /// The header's menu buttons' bounds in the window, from the last
     /// paint, so each menu drops from its button.
     static MENU_BUTTONS: Cell<[Option<Bounds<Pixels>>; 2]> = const { Cell::new([None; 2]) };
+    /// The header's "Let the agent continue" button, from the last paint
+    /// that showed it, for `debugViewer`.
+    static LET_CONTINUE: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
     /// The display image within the screen area, from the last paint:
     /// left and top offsets and width, in window points.
     static IMAGE: Cell<Option<(f32, f32, f32)>> = const { Cell::new(None) };
@@ -190,8 +193,10 @@ impl Render for Viewer {
         let Some(display) = core.displays.get(id) else {
             return div().size_full().into_any_element();
         };
-        let status = Status::of(display, self.count, &theme)
-            .waiting_for(display.agent_name(), core.input_queue.waiting_line(id));
+        let line = core.input_queue.waiting_line(id);
+        let status = Status::of(display, self.count, &theme);
+        let waiting = line.is_some() && status.kind == Kind::Agent;
+        let status = status.waiting_for(display.agent_name(), line);
         let label = display.label();
         let agent = display.agent_name().to_string();
         // The Help Request's steps, for the user to follow while in control.
@@ -252,6 +257,7 @@ impl Render for Viewer {
             crate::mac::recording::is_recording(id),
             status_line,
             status.kind,
+            waiting,
             &agent,
             &theme,
             &self.shell,
@@ -444,6 +450,7 @@ fn header(
     recording: bool,
     status: gpui::AnyElement,
     kind: Kind,
+    waiting: bool,
     agent: &str,
     theme: &Theme,
     shell: &WeakEntity<Shell>,
@@ -506,6 +513,38 @@ fn header(
                 )
                 .child(status),
         )
+        // The agent waits for the user to leave an app: they may let it
+        // continue now instead (`control::front_hold`).
+        .when(!waiting, |d| {
+            LET_CONTINUE.with(|b| b.set(None));
+            d
+        })
+        .when(waiting, |d| {
+            let shell = shell.clone();
+            d.child(
+                button(
+                    "let-continue",
+                    t("Let the agent continue", "让 Agent 继续").to_string(),
+                    Some("icons/play.svg"),
+                    Some(theme.accent),
+                    theme,
+                    |_| {},
+                )
+                .on_click(move |_, window, cx| {
+                    super::shell::let_continue(&shell, id, window, cx);
+                })
+                .child(
+                    canvas(
+                        |bounds, _, _| LET_CONTINUE.with(|b| b.set(Some(bounds))),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+            )
+        })
         .when_some(primary, |d, (title, icon, color)| {
             d.child(button("primary", title, icon, color, theme, move |cx| {
                 tell(&primary_shell, cx, move |shell, cx| shell.primary(id, cx))
@@ -555,6 +594,12 @@ fn header(
             theme,
             move |cx| tell(&close_shell, cx, |shell, cx| shell.close_viewer(cx)),
         ))
+}
+
+/// Where the header's "Let the agent continue" button was at the last
+/// paint, while it shows.
+pub fn let_continue_button() -> Option<Bounds<Pixels>> {
+    LET_CONTINUE.with(Cell::get)
 }
 
 /// The header's two menus: the user's windows to give the agent, and the
@@ -654,7 +699,7 @@ fn button(
     prominent: Option<Hsla>,
     theme: &Theme,
     action: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     // Tinted buttons rest a little faded and light up on hover.
     let (bg, hover, fg) = match prominent {
         Some(color) => (color.opacity(0.88), color, gpui::white()),

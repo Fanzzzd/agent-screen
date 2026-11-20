@@ -99,6 +99,11 @@ pub(super) async fn handle(
             }
             let ms = p.int("ms").unwrap_or(0).max(0) as u64;
             super::front_queue::set_wait_for_tests(ms);
+            // The waiting line shows as soon as the call answers.
+            core.update(cx, |c, cx| {
+                c.input_queue.set_line_ms_for_tests(ms);
+                cx.notify();
+            });
             Ok(json!({ "ms": ms }))
         }
         // Test hook: what the last hold of the user's keys during a launch
@@ -279,9 +284,20 @@ fn debug_viewer(cx: &mut AsyncApp) -> Result<Value, ControlError> {
             f64::from(b.size.height),
         ]
     });
+    let let_continue = crate::ui::viewer::let_continue_button().map(|b| {
+        [
+            f64::from(b.origin.x),
+            f64::from(b.origin.y),
+            f64::from(b.size.width),
+            f64::from(b.size.height),
+        ]
+    });
     Ok(json!({
         "frame": frame,
         "image": image,
+        // The header's Let the agent continue button, likewise, while a
+        // waiting line shows.
+        "letContinue": let_continue,
         "key": key,
         // The input method's marked text in the Viewer, and the
         // target's caret, where it shows, in points from the
