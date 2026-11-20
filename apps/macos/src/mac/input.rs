@@ -1698,7 +1698,23 @@ impl Worker {
             // Not in the middle of another display's keys to the app.
             let _held = AppKeys::hold(window.pid);
             let now = super::ax::focused_window_id(window.pid);
-            match hand_back(window.window_id, now, now.is_some_and(on_agent_display)) {
+            // The window the agent's keys and clicks went to, in that app.
+            let agent = self
+                .focused
+                .filter(|f| f.pid == window.pid && f.window_id != window.window_id);
+            let agent_main = agent
+                .filter(|f| on_agent_display(f.window_id))
+                .and_then(super::ax::is_main)
+                .unwrap_or(false);
+            log::debug!(
+                "input: hand-back to {window:?}: focused {now:?}, agent's window {agent:?} main {agent_main}"
+            );
+            match hand_back(
+                window.window_id,
+                now,
+                now.is_some_and(on_agent_display),
+                agent_main,
+            ) {
                 // Still the user's, as when an action that will take it is
                 // still running: keep it for that action's hand-back. Or
                 // the app didn't answer in time, as under load: try again

@@ -411,8 +411,18 @@ pub enum HandBack {
     Restore,
 }
 
-pub fn hand_back(user: u32, focused: Option<u32>, focused_on_agent_display: bool) -> HandBack {
+/// `agent_main`: the agent's window, on its Agent Display, says it is the
+/// app's main window. Chromium apps such as Dia keep naming the user's
+/// window as focused after a click made the agent's window key, so that
+/// counts as the agent's window having focus.
+pub fn hand_back(
+    user: u32,
+    focused: Option<u32>,
+    focused_on_agent_display: bool,
+    agent_main: bool,
+) -> HandBack {
     match focused {
+        Some(id) if id == user && agent_main => HandBack::Restore,
         Some(id) if id == user => HandBack::Keep,
         None => HandBack::Retry,
         Some(_) if focused_on_agent_display => HandBack::Restore,
@@ -769,9 +779,17 @@ mod tests {
 
     #[test]
     fn focus_goes_back_only_from_the_agents_window() {
-        assert_eq!(hand_back(7, Some(9), true), HandBack::Restore);
-        assert_eq!(hand_back(7, Some(7), false), HandBack::Keep);
-        assert_eq!(hand_back(7, None, false), HandBack::Retry);
-        assert_eq!(hand_back(7, Some(8), false), HandBack::Leave);
+        assert_eq!(hand_back(7, Some(9), true, false), HandBack::Restore);
+        assert_eq!(hand_back(7, Some(7), false, false), HandBack::Keep);
+        assert_eq!(hand_back(7, None, false, false), HandBack::Retry);
+        assert_eq!(hand_back(7, Some(8), false, false), HandBack::Leave);
+    }
+
+    #[test]
+    fn a_chromium_app_naming_the_users_window_while_the_agents_is_main_gets_it_back() {
+        assert_eq!(hand_back(7, Some(7), false, true), HandBack::Restore);
+        // A window the user picked since stays theirs.
+        assert_eq!(hand_back(7, Some(8), false, true), HandBack::Leave);
+        assert_eq!(hand_back(7, None, false, true), HandBack::Retry);
     }
 }
