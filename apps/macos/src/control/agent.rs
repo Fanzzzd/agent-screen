@@ -8174,13 +8174,7 @@ async fn wait_for_change(
         let window_id = target.window_id;
         // Off the display and on screen elsewhere, it left; off screen, it
         // closed, or its app hid or minimized it, which keeps its id.
-        let (here, elsewhere) = off(cx, move || {
-            let here = windows::on_display(id)
-                .iter()
-                .any(|w| w.target.window_id == window_id);
-            (here, !here && cg::on_screen_ids().contains(&window_id))
-        })
-        .await;
+        let (here, elsewhere) = off(cx, move || windows::window_presence(id, window_id)).await;
         if !here {
             return Ok(json!({
                 "outcome": if elsewhere { "windowLeft" } else { "windowClosed" },

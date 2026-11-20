@@ -475,6 +475,22 @@ pub fn on_screen_frames_with_desktop() -> Vec<(u32, i64, Rect)> {
     out
 }
 
+/// Pid, layer and bounds of a single on-screen window (`OptionOnScreenOnly`),
+/// without allocating a vector or reading owner/title strings.
+pub fn on_screen_window_frame(target_id: u32) -> Option<(i32, i64, Rect)> {
+    let mut found = None;
+    list_raw(
+        CGWindowListOption::OptionOnScreenOnly,
+        0,
+        |pid, window_id, layer, bounds, _| {
+            if found.is_none() && window_id == target_id {
+                found = Some((pid, layer, bounds));
+            }
+        },
+    );
+    found
+}
+
 mod cf {
     use std::ffi::c_void;
     pub type Ref = *const c_void;
