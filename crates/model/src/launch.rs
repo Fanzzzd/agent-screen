@@ -323,7 +323,8 @@ pub fn keep_undescribed(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listed {
     pub window: u32,
-    /// The app had it before the launch asked.
+    /// The app had it before the launch asked, on screen or not:
+    /// minimized, hidden or on another Space.
     pub before: bool,
     /// An Agent Display holds it.
     pub claimed: bool,
@@ -641,6 +642,14 @@ mod tests {
         assert_eq!(undescribed_window(Some(2), &[old]), None);
         // Without it: the one new window, none of the app's earlier ones.
         assert_eq!(undescribed_window(None, &[old, new(2)]), Some(2));
+        // The user's minimized window, or one on another Space, was there
+        // before the launch though off screen: never the new one.
+        let minimized = Listed {
+            before: true,
+            ..new(4)
+        };
+        assert_eq!(undescribed_window(None, &[minimized]), None);
+        assert_eq!(undescribed_window(None, &[minimized, new(2)]), Some(2));
         assert_eq!(undescribed_window(None, &[old]), None);
         // Another session's window on its display isn't counted.
         assert_eq!(

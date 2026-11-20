@@ -4772,12 +4772,24 @@ fn find_undescribed(
     }
 }
 
+/// Whether the user pressed something in app `pid` since the launch asked
+/// at `asked_at`, or acted towards it just now (ADR 0007): then a window
+/// it made is left where it is, as it may be theirs.
+fn user_acted_in(pid: i32, asked_at: Instant) -> bool {
+    crate::mac::catch::user_acted_since(pid, asked_at)
+        || crate::mac::catch::user_acted_recently(pid)
+}
+
 /// Move the window app `pid` made that it couldn't describe before the
 /// launch gave up onto display `id` once the app says it is a window,
 /// within `UNDESCRIBED_ADOPT`. `window` by its number, or else found on the
 /// first tick the app answers while no launch of it runs, as the one new
-/// window not in `before`. Not if the user acts in the app first, nor once
-/// it is gone or isn't surely the one: then it stays where it is (ADR 0007).
+/// window not in `before`, which holds all the app had when the launch
+/// asked at `asked_at`, on screen or not. Not if the user has acted in the
+/// app since, nor once it is gone or isn't surely the one: then it stays
+/// where it is (ADR 0007). Once it is placed, `user_window` gets its key
+/// focus back.
+#[allow(clippy::too_many_arguments)]
 fn adopt_undescribed(
     core: Entity<Core>,
     id: DisplayId,
@@ -4785,6 +4797,8 @@ fn adopt_undescribed(
     path: std::path::PathBuf,
     window: Option<u32>,
     before: std::collections::HashSet<u32>,
+    asked_at: Instant,
+    user_window: Option<WindowTarget>,
     cx: &mut AsyncApp,
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
@@ -4794,7 +4808,7 @@ fn adopt_undescribed(
             cx.background_executor()
                 .timer(Duration::from_millis(250))
                 .await;
-            if crate::mac::catch::user_acted_recently(pid) {
+            if user_acted_in(pid, asked_at) {
                 log::info!(
                     "launch: the user acted in pid {pid} before its window {window:?} could be described; left where it is"
                 );
@@ -4819,6 +4833,13 @@ fn adopt_undescribed(
                     if !described {
                         continue;
                     }
+                    // The look may have waited on the app.
+                    if user_acted_in(pid, asked_at) {
+                        log::info!(
+                            "launch: the user acted in pid {pid} as its window {found} was described; left where it is"
+                        );
+                        return;
+                    }
                     let target = WindowTarget {
                         pid,
                         window_id: found,
@@ -4827,7 +4848,12 @@ fn adopt_undescribed(
                     if placed.is_ok() {
                         // Placing it made it key; the user's window gets
                         // its key focus back.
+                        // The agent's keys since the launch used up the
+                        // note of it.
                         let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                        if let Some(user) = user_window {
+                            forwarder.remember_window(user).await;
+                        }
                         forwarder.keys_done().await;
                     }
                     log::info!(
@@ -5820,6 +5846,11 @@ async fn launch_now(
             .flat_map(|d| d.records.keys().copied())
             .collect::<Vec<_>>()
     }));
+    // Every window then, minimized, hidden and on other Spaces too, as the
+    // app's own list names them: a busy app's undescribed window is a new
+    // one (#270), never the user's minimized one.
+    let mut all_before = off(cx, cg::all_ids).await;
+    all_before.extend(before.iter().copied());
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
     // The agents' instance of a browser the user runs is the only one this
@@ -6221,7 +6252,7 @@ async fn launch_now(
             && !passed_undescribed
             && let Some(kept) = catch.as_ref().and_then(|c| c.undescribed())
         {
-            let before = before.clone();
+            let before = all_before.clone();
             match off(cx, move || find_undescribed(pid, kept, &before)).await {
                 Undescribed::Busy if asked_at.elapsed() < UNDESCRIBED_WAIT => continue,
                 // A busy app lists the window only once it answers.
@@ -6235,9 +6266,7 @@ async fn launch_now(
                     );
                     passed_undescribed = true;
                 }
-                Undescribed::Window { id: window, .. }
-                    if crate::mac::catch::user_acted_recently(pid) =>
-                {
+                Undescribed::Window { id: window, .. } if user_acted_in(pid, asked_at) => {
                     log::info!(
                         "launch: {name} window {window} came while the user acted in the app; left where it is"
                     );
@@ -6406,7 +6435,9 @@ async fn launch_now(
             pid,
             path.clone(),
             window,
-            before.clone(),
+            all_before.clone(),
+            asked_at,
+            user_window,
             cx,
         );
         return Err(ControlError::failed(format!(
