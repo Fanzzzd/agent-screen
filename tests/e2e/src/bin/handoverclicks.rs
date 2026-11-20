@@ -9,8 +9,10 @@
 //! window, which Chromium shows with activation, keeps it hidden from the
 //! moment it checks in, and opens the fixture's window in the background
 //! through a pipe only the script holds. Started with `open -j`, or with
-//! its startup window, it took the user's front app. The window is handed
-//! over with `place_window` and the user's words. The fixture listens at
+//! its startup window, it took the user's front app. Then it shows again,
+//! without coming to the front, on your main screen for the moment until
+//! the window is handed over with `place_window` and the user's words, as
+//! the user hands over a window they see. The fixture listens at
 //! its root for pointer, mouse, click, focus and key events, as React
 //! does, and logs each with `isTrusted`, `pointerType`, `detail` and its
 //! target:
@@ -44,8 +46,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use agent_screen_tests::{
-    Control, Value, check, cut, instance, json, out, probe, profile_pids, quit_profile, run,
-    running_headed, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app,
+    Control, Value, allow_on_your_screen, check, cut, instance, json, out, probe, profile_pids,
+    quit_profile, run, running_headed, sh_lenient, skip, sleep_ms, start_test_app, stop_test_app,
 };
 use anyhow::{Context, Result};
 
@@ -428,8 +430,8 @@ fn test(port: u16, log: &Log) -> Result<()> {
         }
         let (pid, window_id) = window.context("the stand-in Chrome showed no window")?;
         stand_in.set(pid);
-        // Once its window exists, hidden, stop hiding it: the handover
-        // shows it on the display.
+        // Once its window exists, hidden, stop hiding it; it shows again
+        // just before the handover.
         sleep_ms(500);
         let _ = hider.kill();
         let _ = hider.wait();
@@ -443,6 +445,18 @@ fn test(port: u16, log: &Log) -> Result<()> {
                 "the user's front app was away for {gone} ms while the stand-in started; stopped"
             );
         }
+        // The user hands over a window they see: shown again, without
+        // coming to the front, on their screen until the handover moves it.
+        allow_on_your_screen(
+            "Google Chrome",
+            3000,
+            "the stand-in's window is the user's own browser window, on their screen until they hand it over",
+        );
+        let shown = probe(&["unhide", &pid.to_string()]).unwrap_or_default();
+        anyhow::ensure!(
+            shown.trim() == "shown",
+            "the stand-in Chrome didn't show again: {shown}"
+        );
         let placed = control.call(
             "placeWindow",
             json!({ "sessionKey": KEY, "displayId": id, "windowId": window_id,
