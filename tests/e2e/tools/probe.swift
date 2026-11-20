@@ -245,6 +245,18 @@ case "focused":
     _ = _AXUIElementGetWindow(window as! AXUIElement, &number)
   }
   print(number)
+case "mainwindow":
+  // The app's main window, as Accessibility names it, 0 for none.
+  var main: CFTypeRef?
+  var number: CGWindowID = 0
+  let app = AXUIElementCreateApplication(pid_t(args[2])!)
+  AXUIElementSetMessagingTimeout(app, 0.5)
+  if AXUIElementCopyAttributeValue(app, "AXMainWindow" as CFString, &main) == .success,
+    let window = main
+  {
+    _ = _AXUIElementGetWindow(window as! AXUIElement, &number)
+  }
+  print(number)
 case "openmenus":
   func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
     var v: CFTypeRef?

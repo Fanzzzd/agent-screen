@@ -12,7 +12,9 @@
 //! would reach your window. The script then brings back the app you had in
 //! front, as you leaving Dia, and the same call again runs the key in the
 //! agent's page. Meanwhile your app stays in front and Dia's windows stay
-//! below it, sampled every 10 ms. Then the script brings Dia forward again,
+//! below it, sampled every 10 ms. After the key, your window must be Dia's
+//! main window again, since Dia keeps naming it focused even while the
+//! agent's window is key. Then the script brings Dia forward again,
 //! without raising a window, and Dia's focused window must be yours. At the
 //! end it gives the front back to your app and closes only the window it
 //! opened, on the display.
@@ -214,6 +216,20 @@ fn test(
         format!("{rose:?} | {fronts:?}"),
     );
 
+    // The key made the agent's window key and main in Dia, which still
+    // names your window as focused. The hand-back must make yours main
+    // again, or Dia comes forward into the agent's window.
+    sleep_ms(500);
+    let main = main_window(dia);
+    check(
+        "after the key, your window is Dia's main window again, not the agent's",
+        main == user_window,
+        format!(
+            "main {main}, focused {}, yours {user_window}, the agent's {window:?}",
+            focused_window(dia)
+        ),
+    );
+
     // You switch back to Dia.
     sh_lenient(
         "/usr/bin/osascript",
@@ -255,6 +271,14 @@ fn front_pid() -> Option<i32> {
 /// Dia's focused window, as Accessibility names it, 0 for none.
 fn focused_window(pid: i32) -> u64 {
     probe(&["focused", &pid.to_string()])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Dia's main window, as Accessibility names it, 0 for none.
+fn main_window(pid: i32) -> u64 {
+    probe(&["mainwindow", &pid.to_string()])
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
