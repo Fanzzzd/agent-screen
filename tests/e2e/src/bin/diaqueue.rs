@@ -5,9 +5,10 @@
 //!
 //! Dia is your own browser, so the script skips unless E2E_DIA=1. It never
 //! closes, moves or navigates a window of yours, and you don't need to
-//! touch the Mac. It brings Dia to the front, where your window has focus,
-//! and opens its agent page in a new Dia window on the Agent Display with
-//! `launch_app`. A plain key there waits in the Input Queue, since it
+//! touch the Mac. Started from Dia, it uses Finder as the app you leave
+//! Dia for, and gives Dia the front back at the end. It brings Dia to the
+//! front, where your window has focus, and opens its agent page in a new
+//! Dia window on the Agent Display with `launch_app`. A plain key there waits in the Input Queue, since it
 //! would reach your window. The script then brings back the app you had in
 //! front, as you leaving Dia, and the same call again runs the key in the
 //! agent's page. Meanwhile your app stays in front and Dia's windows stay
@@ -67,10 +68,14 @@ fn main() -> ExitCode {
         }
     };
     run(|| {
-        let yours = front_pid().context("no front app")?;
-        if yours == dia {
-            bail!("Dia is already in front; start the script from another app");
-        }
+        // The app you were in comes back at the end. With Dia in front,
+        // Finder stands in for the app you'd leave Dia for.
+        let original = front_pid().context("no front app")?;
+        let yours = if original == dia {
+            finder_pid().context("Dia is in front and Finder isn't running")?
+        } else {
+            original
+        };
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
         let control = Control::connect()?;
         control.call("debugFrontWait", json!({ "ms": 1500 }))?;
@@ -81,10 +86,10 @@ fn main() -> ExitCode {
         let id = made["displayId"].clone();
         let mut opened = None;
         let result = test(&control, &id, dia, yours, port, &log, &mut opened);
-        // Your app back in front, then only the script's window closes,
-        // on the display.
-        if front_pid() != Some(yours) {
-            let _ = probe(&["activate", &yours.to_string()]);
+        // The app you were in back in front, then only the script's window
+        // closes, on the display.
+        if front_pid() != Some(original) {
+            let _ = probe(&["activate", &original.to_string()]);
             sleep_ms(500);
         }
         if let Some(window) = opened {
@@ -99,9 +104,9 @@ fn main() -> ExitCode {
         let _ = control.call("endDisplay", json!({ "sessionKey": KEY, "displayId": id }));
         stop_test_app();
         check(
-            "your app is in front again",
-            front_pid() == Some(yours),
-            format!("front {:?}, yours {yours}", front_pid()),
+            "the app you were in is in front again",
+            front_pid() == Some(original),
+            format!("front {:?}, yours {original}", front_pid()),
         );
         result
     })
@@ -231,6 +236,13 @@ fn test(
 
 fn dia_pid() -> Option<i32> {
     sh_lenient("/usr/bin/pgrep", &["-x", "Dia"])
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+}
+
+fn finder_pid() -> Option<i32> {
+    sh_lenient("/usr/bin/pgrep", &["-x", "Finder"])
         .lines()
         .next()
         .and_then(|l| l.trim().parse().ok())
