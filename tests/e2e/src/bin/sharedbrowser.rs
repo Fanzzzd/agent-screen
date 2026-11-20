@@ -23,7 +23,8 @@
 //! which has no accessibility route there, waits in the Input Queue
 //! (#219): the call answers input_pending, the same call again or
 //! `input_queue wait` runs it in the agent's page once your front app
-//! comes back, and a withdrawn key never runs. Then, with your front app
+//! comes back, with your app staying in front (sampled every 10 ms), and
+//! a withdrawn key never runs. Then, with your front app
 //! back, the same harness takes posted keys as before.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
@@ -1138,10 +1139,19 @@ fn queued(
 
     // The real wait, so the call outlasts the user's leaving.
     control.call("debugFrontWait", json!({ "ms": 0 }))?;
-    let left = leave_after(your_front, 1000);
-    let repeated = key(control, id, "x");
-    let _ = left.join();
+    let (repeated, fronts) = fronts_during(4, || {
+        let left = leave_after(your_front, 1000);
+        let repeated = key(control, id, "x");
+        let _ = left.join();
+        repeated
+    })?;
     let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    check(
+        "your app stays in front while the queued key runs",
+        taken.is_empty(),
+        format!("harness in front again {taken:?} | fronts {fronts:?}"),
+    );
     let keys = seen
         .iter()
         .filter(|l| l.starts_with("pair agent keydown"))
@@ -1178,11 +1188,20 @@ fn queued(
     );
     let Some(n3) = n3 else { return Ok(()) };
     control.call("debugFrontWait", json!({ "ms": 0 }))?;
-    let left = leave_after(your_front, 1000);
-    let waited = queue("wait", n3);
-    let _ = left.join();
+    let (waited, fronts) = fronts_during(4, || {
+        let left = leave_after(your_front, 1000);
+        let waited = queue("wait", n3);
+        let _ = left.join();
+        waited
+    })?;
     sleep_ms(300);
     let seen = lines(log, from);
+    let taken = taken_back(&fronts, pid);
+    check(
+        "your app stays in front while the waited key runs",
+        taken.is_empty(),
+        format!("harness in front again {taken:?} | fronts {fronts:?}"),
+    );
     check(
         "input_queue wait runs it once your app is in front, and says completed",
         waited
@@ -1193,4 +1212,35 @@ fn queued(
         format!("{} | log {seen:?}", cut(&said(&waited), 600)),
     );
     Ok(())
+}
+
+/// The front app's changes while `act` runs, from `probe fronts`, polled
+/// every 10 ms: "epoch-ms pid name" per line.
+fn fronts_during<T>(seconds: u64, act: impl FnOnce() -> T) -> Result<(T, Vec<String>)> {
+    let fronts = std::process::Command::new(tool("probe")?)
+        .args(["fronts", &seconds.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    sleep_ms(200);
+    let result = act();
+    let output = fronts.wait_with_output()?;
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(String::from)
+        .collect();
+    Ok((result, lines))
+}
+
+/// The harness came back to the front after another app had it: lines of
+/// `fronts` naming pid `harness` after one that doesn't.
+fn taken_back(fronts: &[String], harness: &str) -> Vec<String> {
+    let is_harness = |l: &String| l.split_whitespace().nth(1) == Some(harness);
+    let Some(left) = fronts.iter().position(|l| !is_harness(l)) else {
+        return Vec::new();
+    };
+    fronts[left..]
+        .iter()
+        .filter(|l| is_harness(l))
+        .cloned()
+        .collect()
 }
