@@ -299,22 +299,57 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
 }
 
 /// Whether a catch keeps a window its app couldn't describe as it showed,
-/// as a busy app's (#270), for the launch to take once the app describes
-/// it, and how many windows the catch may take after. Only a launch's own
-/// catch keeps one: not kept past the launch, not returning windows to the
-/// user, not waiting for a file, and with a window still to take. The
-/// window it keeps uses that up, so the next window the app makes, such as
-/// the user's Command-N, stays where it opens.
+/// as a busy running app's (#270), for the launch to take once the app
+/// describes it, and how many windows the catch may take after. Only a
+/// launch's own catch on a running app keeps one: not kept past the
+/// launch, not returning windows to the user, not waiting for a file, and
+/// with a window still to take. A catch on an app the launch starts takes
+/// any number of windows (`left` None); its launch watches the app start
+/// instead. The window kept uses up the one, so the next window the app
+/// makes, such as the user's Command-N, stays where it opens.
 pub fn keep_undescribed(
     kept: bool,
     returning: bool,
     for_document: bool,
     left: Option<usize>,
 ) -> (bool, Option<usize>) {
-    if kept || returning || for_document || left == Some(0) {
-        return (false, left);
+    match left {
+        Some(n) if n > 0 && !kept && !returning && !for_document => (true, Some(n - 1)),
+        _ => (false, left),
     }
-    (true, left.map(|n| n - 1))
+}
+
+/// A window of the app, as accessibility lists it once the app answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub window: u32,
+    /// The app had it before the launch asked.
+    pub before: bool,
+    /// An Agent Display holds it.
+    pub claimed: bool,
+    pub on_agent_display: bool,
+}
+
+/// Which listed window is the one the busy app made for the launch (#270)
+/// but couldn't describe then: `known`, by the number the app gave as it
+/// showed, or else the one new window. Never a window an Agent Display
+/// holds or shows, and, without its number, none when several are new: one
+/// may be the user's, opened from a link in another app. The caller looks
+/// only while no other launch of the app runs, whose window it could be.
+pub fn undescribed_window(known: Option<u32>, listed: &[Listed]) -> Option<u32> {
+    let free = |l: &&Listed| !l.claimed && !l.on_agent_display;
+    if let Some(known) = known {
+        return listed
+            .iter()
+            .filter(free)
+            .find(|l| l.window == known)
+            .map(|l| l.window);
+    }
+    let mut new = listed.iter().filter(free).filter(|l| !l.before);
+    match (new.next(), new.next()) {
+        (Some(l), None) => Some(l.window),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -549,7 +584,8 @@ mod tests {
             keep_undescribed(false, false, false, Some(1)),
             (true, Some(0))
         );
-        assert_eq!(keep_undescribed(false, false, false, None), (true, None));
+        // An app the launch starts: its launch watches it start.
+        assert_eq!(keep_undescribed(false, false, false, None), (false, None));
         assert_eq!(
             keep_undescribed(false, false, false, Some(0)),
             (false, Some(0))
@@ -576,6 +612,43 @@ mod tests {
             keep_undescribed(false, false, false, left),
             (false, Some(0))
         );
+    }
+
+    #[test]
+    fn a_busy_apps_window_is_taken_only_when_nothing_else_could_be_it() {
+        let new = |window| Listed {
+            window,
+            before: false,
+            claimed: false,
+            on_agent_display: false,
+        };
+        let old = Listed {
+            before: true,
+            ..new(1)
+        };
+        // Its number known: that window, unless a display has it.
+        assert_eq!(undescribed_window(Some(2), &[old, new(2), new(3)]), Some(2));
+        let shown = Listed {
+            on_agent_display: true,
+            ..new(2)
+        };
+        assert_eq!(undescribed_window(Some(2), &[shown]), None);
+        let claimed = Listed {
+            claimed: true,
+            ..new(2)
+        };
+        assert_eq!(undescribed_window(Some(2), &[claimed]), None);
+        assert_eq!(undescribed_window(Some(2), &[old]), None);
+        // Without it: the one new window, none of the app's earlier ones.
+        assert_eq!(undescribed_window(None, &[old, new(2)]), Some(2));
+        assert_eq!(undescribed_window(None, &[old]), None);
+        // Another session's window on its display isn't counted.
+        assert_eq!(
+            undescribed_window(None, &[old, shown, claimed, new(3)]),
+            Some(3)
+        );
+        // Two new, as the user's from a link in another app: neither.
+        assert_eq!(undescribed_window(None, &[new(2), new(3)]), None);
     }
 
     fn menu_item(title: &str, shortcut: Option<&str>) -> MenuEntry {
