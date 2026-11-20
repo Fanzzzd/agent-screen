@@ -1397,12 +1397,34 @@ pub fn frame(window: &NSWindow) -> NSRect {
     window.frame()
 }
 
+type ScreenEntry = (u32, NSRect, NSRect);
+type ScreensCache = Option<(u64, Vec<ScreenEntry>)>;
+
+thread_local! {
+    /// Cached `NSScreen::screens` result keyed by `cg::display_change_stamp()`,
+    /// cleared on `NSApplicationDidChangeScreenParametersNotification`.
+    static SCREENS_CACHE: RefCell<ScreensCache> = const { RefCell::new(None) };
+}
+
+pub fn forget_screens() {
+    SCREENS_CACHE.with(|c| *c.borrow_mut() = None);
+}
+
 /// Every screen: display id, frame and visible frame, Cocoa coordinates.
 pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Vec::new();
     };
-    objc2_app_kit::NSScreen::screens(mtm)
+    let stamp = crate::mac::cg::display_change_stamp();
+    if let Some(cached) = SCREENS_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(s, _)| *s == stamp)
+            .map(|(_, list)| list.clone())
+    }) {
+        return cached;
+    }
+    let list: Vec<(u32, NSRect, NSRect)> = objc2_app_kit::NSScreen::screens(mtm)
         .iter()
         .filter_map(|screen| {
             let number = screen
@@ -1418,7 +1440,9 @@ pub fn screens() -> Vec<(u32, NSRect, NSRect)> {
                 screen.visibleFrame(),
             ))
         })
-        .collect()
+        .collect();
+    SCREENS_CACHE.with(|c| *c.borrow_mut() = Some((stamp, list.clone())));
+    list
 }
 
 /// Menu bar heights measured since the screens last changed. Measuring asks
@@ -1542,6 +1566,8 @@ pub fn watch_screens() {
     let center = objc2_foundation::NSNotificationCenter::defaultCenter();
     let block = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
         forget_menu_bars();
+        forget_screens();
+        crate::mac::app::forget_screen_names();
         send(Native::ScreensChanged)
     });
     let observer = unsafe {
@@ -1558,6 +1584,8 @@ pub fn watch_screens() {
     // display with no screen parameter change after it: look again then.
     let again = RcBlock::new(|_: NonNull<objc2_foundation::NSNotification>| {
         log::info!("the screens woke or unlocked; streams are checked");
+        forget_screens();
+        crate::mac::app::forget_screen_names();
         send(Native::ScreensChanged)
     });
     let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();

@@ -10,9 +10,7 @@ use crate::model::{Rect, WindowTarget};
 use agent_screen_model::menu_press;
 use agent_screen_model::real_click::{self, Event};
 use objc2_app_kit::NSEvent;
-use objc2_core_foundation::{
-    CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CGPoint, kCFRunLoopCommonModes,
-};
+use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, CGPoint, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType, CGMouseButton,
@@ -112,56 +110,72 @@ pub fn is_ours(event: &NSEvent) -> bool {
     })
 }
 
-thread_local! {
-    // Keep the listen-only tap and its main-run-loop source alive.
-    static WATCH: std::cell::RefCell<Option<(CFRetained<CFMachPort>, CFRetained<CFRunLoopSource>)>> = const { std::cell::RefCell::new(None) };
+struct SendablePort(CFRetained<CFMachPort>);
+// SAFETY: `CFMachPort` is thread-safe for `CGEventTapEnable` and
+// `CGEventTapIsEnabled`. The port is retained here for the life of the app.
+unsafe impl Send for SendablePort {}
+
+static TAP: std::sync::Mutex<Option<SendablePort>> = std::sync::Mutex::new(None);
+static RECOVERING: AtomicBool = AtomicBool::new(false);
+
+fn notify_user_took_input() {
+    dispatch2::DispatchQueue::main().exec_async(|| native::send(Native::UserTookInput));
 }
 
 fn observer_disabled() {
     WATCHING.store(false, Ordering::SeqCst);
     if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
-        native::send(Native::UserTookInput);
+        notify_user_took_input();
     }
 }
 
-/// Actual tap health, read on the main thread where the tap is retained.
+/// Actual tap health.
 pub fn observer_enabled() -> bool {
-    WATCH.with(|watch| {
-        watch
-            .borrow()
-            .as_ref()
-            .is_some_and(|(tap, _)| CGEvent::tap_is_enabled(tap))
-    })
+    let tap = TAP.lock().unwrap_or_else(|e| e.into_inner());
+    tap.as_ref().is_some_and(|p| CGEvent::tap_is_enabled(&p.0))
 }
 
 /// Recover only after the shell has revoked the old grant and finished
-/// releasing its inputs. This restores observation, never permission.
+/// releasing its inputs. Runs off the main thread so WindowServer event-tap
+/// IPC never stalls the UI thread. This restores observation, never permission.
 pub fn recover_observer() {
     if watching() {
         return;
     }
-    let enabled = WATCH.with(|watch| {
-        let watch = watch.borrow();
-        let Some((tap, _)) = watch.as_ref() else {
-            return false;
-        };
-        CGEvent::tap_enable(tap, true);
-        CGEvent::tap_is_enabled(tap)
-    });
-    WATCHING.store(enabled, Ordering::SeqCst);
-    if enabled {
-        log::info!("input queue: input observer recovered; a new approval is required");
+    let has_tap = TAP.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+    if !has_tap {
+        return;
     }
+    if RECOVERING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("agent-screen-tap-recover".into())
+        .spawn(|| {
+            let enabled = {
+                let tap = TAP.lock().unwrap_or_else(|e| e.into_inner());
+                match tap.as_ref() {
+                    Some(p) => {
+                        CGEvent::tap_enable(&p.0, true);
+                        CGEvent::tap_is_enabled(&p.0)
+                    }
+                    None => false,
+                }
+            };
+            WATCHING.store(enabled, Ordering::SeqCst);
+            if enabled {
+                log::info!("input queue: input observer recovered; a new approval is required");
+            }
+            RECOVERING.store(false, Ordering::Release);
+        });
 }
 
 /// E2E-only control hook: disable the real tap and take its timeout path.
 /// The control handler gates this behind debug_methods and the e2e instance.
 pub fn debug_observer_timeout() {
-    WATCH.with(|watch| {
-        if let Some((tap, _)) = watch.borrow().as_ref() {
-            CGEvent::tap_enable(tap, false);
-        }
-    });
+    if let Some(p) = TAP.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        CGEvent::tap_enable(&p.0, false);
+    }
     observer_disabled();
 }
 
@@ -188,13 +202,16 @@ pub fn user_event(kind: CGEventType) {
         None => {}
     }
     if ARMED.load(Ordering::SeqCst) && !TOUCHED.swap(true, Ordering::SeqCst) {
-        native::send(Native::UserTookInput);
+        notify_user_took_input();
     }
 }
 
 /// Observe HID events before AppKit manufactures pointer moves when a
 /// window opens under the cursor. ListenOnly neither suppresses nor
-/// changes an event. Failure to create the tap leaves execution disabled.
+/// changes an event. Runs on its own run loop thread so user mouse moves
+/// never wake the main UI thread and main-thread stalls never time out the
+/// tap. Waits until registration finishes so taps installed later still
+/// run ahead of this one. Failure to create the tap leaves execution disabled.
 pub fn watch() {
     unsafe extern "C-unwind" fn seen(
         _proxy: CGEventTapProxy,
@@ -237,30 +254,44 @@ pub fn watch() {
         CGEventType::FlagsChanged,
     ];
     let mask = kinds.iter().fold(0, |mask, kind| mask | (1_u64 << kind.0));
-    let Some(tap) = (unsafe {
-        CGEvent::tap_create(
-            CGEventTapLocation::HIDEventTap,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::ListenOnly,
-            mask,
-            Some(seen),
-            std::ptr::null_mut(),
-        )
-    }) else {
-        log::warn!("input queue: input observer unavailable; real input is disabled");
-        return;
-    };
-    let Some(source) = CFMachPort::new_run_loop_source(None, Some(&tap), 0) else {
-        return;
-    };
-    let Some(run_loop) = CFRunLoop::main() else {
-        return;
-    };
-    run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
-    CGEvent::tap_enable(&tap, true);
-    let enabled = CGEvent::tap_is_enabled(&tap);
-    WATCH.with(|watch| *watch.borrow_mut() = Some((tap, source)));
-    WATCHING.store(enabled, Ordering::SeqCst);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let spawned = thread::Builder::new()
+        .name("agent-screen-input-watch".into())
+        .spawn(move || {
+            let Some(tap) = (unsafe {
+                CGEvent::tap_create(
+                    CGEventTapLocation::HIDEventTap,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::ListenOnly,
+                    mask,
+                    Some(seen),
+                    std::ptr::null_mut(),
+                )
+            }) else {
+                log::warn!("input queue: input observer unavailable; real input is disabled");
+                let _ = ready_tx.send(());
+                return;
+            };
+            let Some(source) = CFMachPort::new_run_loop_source(None, Some(&tap), 0) else {
+                let _ = ready_tx.send(());
+                return;
+            };
+            let Some(run_loop) = CFRunLoop::current() else {
+                let _ = ready_tx.send(());
+                return;
+            };
+            run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+            CGEvent::tap_enable(&tap, true);
+            let enabled = CGEvent::tap_is_enabled(&tap);
+            *TAP.lock().unwrap_or_else(|e| e.into_inner()) = Some(SendablePort(tap));
+            WATCHING.store(enabled, Ordering::SeqCst);
+            let _ = ready_tx.send(());
+            CFRunLoop::run();
+            drop(source);
+        });
+    if spawned.is_ok() {
+        let _ = ready_rx.recv();
+    }
 }
 
 /// The pointer, front app and its focused window at grant start, to put
