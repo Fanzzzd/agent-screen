@@ -420,7 +420,6 @@ async fn handle_one(
         "click" => {
             let (id, point) = target(&core, &p, cx).await?;
             outside_menu_bar(id, point)?;
-            guard_agent_point(&core, id, point, cx).await?;
             let button = Button::parse(p.string("button").as_deref().unwrap_or("left"))
                 .ok_or_else(|| {
                     ControlError::invalid(format!(
@@ -434,6 +433,7 @@ async fn handle_one(
             // the user's pointer (ADR 0013, "Clicks"). Nothing goes out on
             // the background route meanwhile.
             if p.0.get("realInput") == Some(&Value::Bool(true)) {
+                guard_agent_point(&core, id, point, cx).await?;
                 // The menu a real right click opens would close when the
                 // user's front app comes back.
                 // So would a Control-held left click's.
@@ -451,10 +451,18 @@ async fn handle_one(
                     })?;
                 return queued_click(&core, connection, id, point, click, modifiers, cx).await;
             }
-            // A window of the user's front app, beside the window they
-            // work in: a posted click would make it key and take their
-            // typing (#110).
-            if let Some((target, _)) = off(cx, move || crate::mac::input::window_at(point)).await {
+            // Check foreign-display ownership and find the top window in one
+            // window-list pass. A window of the user's front app, beside the
+            // window they work in: a posted click would make it key and take
+            // their typing (#110).
+            let checked = off(cx, move || crate::mac::input::click_check_at(id, point)).await;
+            let hit_window = match checked {
+                Err((target, owner_display)) => {
+                    return Err(foreign_point_error(&core, id, target, owner_display, cx));
+                }
+                Ok(window) => window,
+            };
+            if let Some((target, _)) = hit_window {
                 let plain = modifiers == Default::default();
                 let left = button == Button::Left;
                 let (front, focused) = shared_app::front(target, cx).await;
@@ -4847,6 +4855,16 @@ async fn guard_agent_point(
     else {
         return Ok(());
     };
+    Err(foreign_point_error(core, id, target, owner_display, cx))
+}
+
+fn foreign_point_error(
+    core: &Entity<Core>,
+    id: DisplayId,
+    target: WindowTarget,
+    owner_display: DisplayId,
+    cx: &AsyncApp,
+) -> ControlError {
     let holder_label = core.read_with(cx, |c, _| {
         let now_ms = c.elapsed_ms();
         c.displays
@@ -4854,11 +4872,11 @@ async fn guard_agent_point(
             .map(|h| h.agent_label())
             .or_else(|| c.displays.holder_label_at(owner_display, now_ms))
     });
-    Err(ControlError::failed(held::foreign_top_window_message(
+    ControlError::failed(held::foreign_top_window_message(
         id,
         owner_display,
         holder_label.as_deref(),
-    )))
+    ))
 }
 
 /// Move a window onto a display, off the main thread.
