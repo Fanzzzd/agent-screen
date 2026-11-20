@@ -368,7 +368,8 @@ impl ReparkState {
         self.planned_in_pass.retain(|_, (d, _, _)| *d != id);
     }
 
-    pub fn parked_rect(&self, id: DisplayId) -> Option<Rect> {
+    #[cfg(test)]
+    fn parked_rect(&self, id: DisplayId) -> Option<Rect> {
         self.parked_rects.get(&id).copied()
     }
 
@@ -616,23 +617,6 @@ fn window_shifts_with_owner(
         }
     }
     shifts
-}
-
-/// Target global frames for windows whose Agent Display moved from `old_rect`
-/// to `new_rect`. Membership is evaluated against both explicit placement or
-/// handover records (`recorded_owner`) and the pre-move snapshot of all
-/// displays (`moved`'s `old_rect`s plus `stationary_areas`), so a chain move
-/// (`A: R1 -> R2`, `B: R2 -> R3`) shifts `A`'s windows to `R2` and `B`'s
-/// windows to `R3` without mixing them up.
-pub fn window_shifts(
-    moved: &[(DisplayId, Rect, Rect)],
-    stationary_areas: &[Rect],
-    windows: &[(WindowTarget, Rect, Option<DisplayId>)],
-) -> Vec<(WindowTarget, Rect)> {
-    window_shifts_with_owner(moved, stationary_areas, windows)
-        .into_iter()
-        .map(|(target, _, next)| (target, next))
-        .collect()
 }
 
 /// A parking attempt succeeds once display `id`, one of Agent Screen's,
@@ -1140,14 +1124,17 @@ mod tests {
             Rect::new(1900., 100., 900., 700.),
             None,
         );
-        let shifts = window_shifts(
+        let shifts: Vec<_> = window_shifts_with_owner(
             &[(379, old_d1, new_d1), (381, old_d2, new_d2)],
             &[
                 Rect::new(0., 0., 1728., 1117.),
                 Rect::new(1728., 0., 2560., 1440.),
             ],
             &[user_win, w1, w2],
-        );
+        )
+        .into_iter()
+        .map(|(target, _, next)| (target, next))
+        .collect();
         assert_eq!(
             shifts,
             vec![
@@ -1315,11 +1302,14 @@ mod tests {
         };
         let bounds = Rect::new(5250., -700., 800., 500.);
         assert!(old_b.contains(bounds.mid()));
-        let shifts = window_shifts(
+        let shifts: Vec<_> = window_shifts_with_owner(
             &[(379, old_a, new_a), (381, old_b, new_b)],
             &[user_rect],
             &[(w, bounds, Some(379))],
-        );
+        )
+        .into_iter()
+        .map(|(target, _, next)| (target, next))
+        .collect();
         assert_eq!(shifts, vec![(w, Rect::new(5650., -700., 800., 500.))]);
     }
 

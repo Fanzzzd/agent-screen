@@ -116,18 +116,6 @@ impl PreviewTokens {
         token
     }
 
-    pub fn update_label(&mut self, display: DisplayId, label: impl Into<String>) {
-        if let Some((_, entry)) = self.by_display.get_mut(&display) {
-            entry.label = label.into();
-        }
-    }
-
-    pub fn update_size(&mut self, display: DisplayId, size: (u32, u32)) {
-        if let Some((_, entry)) = self.by_display.get_mut(&display) {
-            entry.size = size;
-        }
-    }
-
     pub fn expire(&mut self, display: DisplayId) -> bool {
         let Some((token, _)) = self.by_display.remove(&display) else {
             return false;
