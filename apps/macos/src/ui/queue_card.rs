@@ -1106,7 +1106,9 @@ fn waiting_row(core: &Core, theme: &Theme, shell: &WeakEntity<Shell>) -> Option<
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    // Two lines, so the app's name shows beside the button.
+                    .line_clamp(2)
+                    .text_ellipsis()
                     .text_size(px(12.))
                     .text_color(theme.label)
                     .child(text),
