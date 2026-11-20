@@ -948,22 +948,6 @@ impl<H> Displays<H> {
             .map(|d| d.id)
     }
 
-    /// Reconcile geometric display `geom_display` with any active Placement,
-    /// Handover, Launch or Found record while `window` sits on a virtual
-    /// display (`on_virtual`).
-    pub fn effective_display_of(
-        &self,
-        window: WindowId,
-        geom_display: Option<DisplayId>,
-        on_virtual: bool,
-    ) -> Option<DisplayId> {
-        crate::arrangement::resolve_display_owner(
-            geom_display,
-            on_virtual,
-            self.recorded_display_of(window),
-        )
-    }
-
     /// Snapshot of active recorded window owners (`window_id -> DisplayId`) so
     /// off-thread window queries and repark shifts honor Placement and Handover
     /// records while displays reconfigure (#204). Shares the exact tie-break of

@@ -96,11 +96,6 @@ pub fn parse_web_port(contents: &str) -> Option<u16> {
     u16::try_from(port).ok().filter(|&p| p > 0)
 }
 
-pub fn web_port() -> Option<u16> {
-    let contents = std::fs::read_to_string(web_state_path()).ok()?;
-    parse_web_port(&contents)
-}
-
 /// The pipe, named per user. The app creates it with a security
 /// descriptor that admits only that user.
 #[cfg(windows)]

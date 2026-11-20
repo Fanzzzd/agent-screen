@@ -7,15 +7,6 @@
 
 use crate::model::Rect;
 
-/// The `computer` actions that are one complete click.
-pub const CLICK_ACTIONS: [&str; 5] = [
-    "left_click",
-    "right_click",
-    "middle_click",
-    "double_click",
-    "triple_click",
-];
-
 /// How long a loan holds each press, and waits after each release, in ms.
 pub const HOLD_MS: u64 = 50;
 pub const GAP_MS: u64 = 40;
@@ -424,7 +415,13 @@ mod tests {
 
     #[test]
     fn left_clicks_take_real_input_and_others_do_not() {
-        for action in CLICK_ACTIONS {
+        for action in [
+            "left_click",
+            "right_click",
+            "middle_click",
+            "double_click",
+            "triple_click",
+        ] {
             assert!(Click::of_action(action).is_some(), "{action}");
         }
         for action in ["left_click", "double_click", "triple_click"] {

@@ -280,11 +280,6 @@ impl CreationGuard {
         }
     }
 
-    /// The mirrors this process saw, test-injected ones included.
-    pub fn bad_units(&self) -> &BadUnits {
-        &self.bad
-    }
-
     /// The user allowed new displays again.
     pub fn clear_bad_units(&mut self) {
         self.bad = BadUnits::new();
