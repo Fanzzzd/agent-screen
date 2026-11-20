@@ -28,44 +28,107 @@ pub struct Shot {
 /// milliseconds, more than a capture; status items come and go rarely.
 /// The last listing, when it was made, the ids of the windows on screen
 /// then, and the display change stamp then.
-type Listing = (
-    Arc<SCShareableContent>,
-    Instant,
-    std::collections::HashSet<u32>,
-    u64,
-);
-static CONTENT: Mutex<Option<Listing>> = Mutex::new(None);
+struct Listing<T> {
+    content: Arc<T>,
+    at: Instant,
+    ids: std::collections::HashSet<u32>,
+    stamp: u64,
+}
+
+struct CacheState<T> {
+    listing: Option<Listing<T>>,
+    generation: u64,
+}
+
+impl<T> CacheState<T> {
+    const fn new() -> Self {
+        Self {
+            listing: None,
+            generation: 0,
+        }
+    }
+}
+
+/// Cache for `SCShareableContent` that never holds its lock across the
+/// blocking `fetch` IPC. `forget()` bumps `generation` so an in-flight fetch
+/// started before invalidation cannot store a stale listing back into the cache.
+struct ContentCache<T> {
+    state: Mutex<CacheState<T>>,
+}
+
+impl<T> ContentCache<T> {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(CacheState::new()),
+        }
+    }
+
+    fn get_or_fetch<E>(
+        &self,
+        ids: Option<std::collections::HashSet<u32>>,
+        stamp: u64,
+        load_ids: impl FnOnce() -> std::collections::HashSet<u32>,
+        fetch: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Arc<T>, E> {
+        let generation = {
+            let cache = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = &cache.listing {
+                let current = entry.stamp == stamp
+                    && match &ids {
+                        Some(now) => now == &entry.ids,
+                        None => entry.at.elapsed() < CONTENT_AGE,
+                    };
+                if current {
+                    return Ok(entry.content.clone());
+                }
+            }
+            cache.generation
+        };
+        let ids = ids.unwrap_or_else(load_ids);
+        let content = Arc::new(fetch()?);
+        let mut cache = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.generation == generation {
+            cache.listing = Some(Listing {
+                content: content.clone(),
+                at: Instant::now(),
+                ids,
+                stamp,
+            });
+        }
+        Ok(content)
+    }
+
+    fn forget(&self) {
+        let mut cache = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        cache.listing = None;
+        cache.generation = cache.generation.wrapping_add(1);
+    }
+}
+
+static CONTENT: ContentCache<SCShareableContent> = ContentCache::new();
 const CONTENT_AGE: Duration = Duration::from_secs(2);
 
 /// What ScreenCaptureKit can capture. A listing takes ScreenCaptureKit about
 /// 20 ms; a fresh one is only needed once a window has come or gone, which
 /// the window server's list of ids, at well under a millisecond, tells.
 fn content(fresh: bool) -> Result<Arc<SCShareableContent>, String> {
-    let mut cache = CONTENT.lock().unwrap();
     let ids = fresh.then(super::cg::on_screen_ids);
+    content_with_ids(ids)
+}
+
+fn content_with_ids(
+    ids: Option<std::collections::HashSet<u32>>,
+) -> Result<Arc<SCShareableContent>, String> {
     // A listing from before a display change describes displays as they
     // were: a stream built from it after an unlock can show another
     // display (FB17797423).
     let stamp = super::cg::display_change_stamp();
-    if let Some((content, at, then, changes)) = &*cache {
-        let current = *changes == stamp
-            && match &ids {
-                Some(now) => now == then,
-                None => at.elapsed() < CONTENT_AGE,
-            };
-        if current {
-            return Ok(content.clone());
-        }
-    }
-    let ids = ids.unwrap_or_else(super::cg::on_screen_ids);
-    let content = Arc::new(
+    CONTENT.get_or_fetch(ids, stamp, super::cg::on_screen_ids, || {
         SCShareableContent::create()
             .with_on_screen_windows_only(true)
             .get()
-            .map_err(|e| format!("could not list displays: {e}"))?,
-    );
-    *cache = Some((content.clone(), Instant::now(), ids, stamp));
-    Ok(content)
+            .map_err(|e| format!("could not list displays: {e}"))
+    })
 }
 
 /// Whether ScreenCaptureKit lets this process list the screen. Blocking.
@@ -77,7 +140,7 @@ pub fn can_capture() -> bool {
 /// Drop the kept listing: the next one is made anew. A window that moved
 /// keeps its id, so a capture that failed may have used its old place.
 fn forget() {
-    *CONTENT.lock().unwrap() = None;
+    CONTENT.forget();
 }
 
 /// What a display shows, without the menu bar macOS draws on it: that bar,
@@ -101,12 +164,12 @@ fn filter_counting(
         return Err("macOS mixes this display up with another one right now, so Agent Screen won't capture it".into());
     }
     let area = super::cg::display_bounds(id);
-    // Where windows are now, from the window server. A listing is kept
-    // while the set of window ids stays the same, and its frames go stale:
-    // Control Centre moves the same status item windows from display to
-    // display, so after an app on this one quit they sat in its strip while
-    // the listing still had them on the user's screen (#38).
-    let frames = super::cg::on_screen_frames();
+    // Where windows are now, from the window server. Include desktop elements
+    // so the same single WindowServer call supplies both frames and the exact
+    // on-screen id set `content_with_ids` compares against (wallpaper windows
+    // sit below layer 0 and are excluded by the `layer >= 24` and `0..1000`
+    // filters below).
+    let frames = super::cg::on_screen_frames_with_desktop();
     let across = |f: crate::model::Rect| {
         f.x < area.max_x() && f.max_x() > area.x && f.y < area.max_y() && f.max_y() > area.y
     };
@@ -125,7 +188,9 @@ fn filter_counting(
         })
         .map(|&(window_id, _, _)| window_id)
         .collect();
-    let mut content = content(fresh)?;
+    let screen_ids: Option<std::collections::HashSet<u32>> =
+        fresh.then(|| frames.iter().map(|&(window_id, _, _)| window_id).collect());
+    let mut content = content_with_ids(screen_ids.clone())?;
     let mut windows = content.windows();
     // A bar window the listing doesn't have yet can't be left out: list anew.
     let all_listed = |windows: &[SCWindow]| {
@@ -137,7 +202,9 @@ fn filter_counting(
     };
     if !all_listed(&windows) {
         forget();
-        content = self::content(true)?;
+        let retry_ids = screen_ids
+            .unwrap_or_else(|| frames.iter().map(|&(window_id, _, _)| window_id).collect());
+        content = content_with_ids(Some(retry_ids))?;
         windows = content.windows();
         if !all_listed(&windows) {
             log::debug!("display {id}: a menu bar window is not in the listing yet");
@@ -626,4 +693,148 @@ fn encode_raw(
         width,
         height,
     })
+}
+
+#[cfg(test)]
+mod content_cache_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Barrier;
+
+    fn set(ids: &[u32]) -> HashSet<u32> {
+        ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn content_cache_reuses_entry_when_ids_and_stamp_match() {
+        let cache = ContentCache::new();
+        let mut fetches = 0usize;
+        let a = cache
+            .get_or_fetch(
+                Some(set(&[1, 2])),
+                10,
+                || unreachable!(),
+                || -> Result<usize, ()> {
+                    fetches += 1;
+                    Ok(fetches)
+                },
+            )
+            .unwrap();
+        let b = cache
+            .get_or_fetch(
+                Some(set(&[1, 2])),
+                10,
+                || unreachable!(),
+                || -> Result<usize, ()> {
+                    fetches += 1;
+                    Ok(fetches)
+                },
+            )
+            .unwrap();
+        assert_eq!(*a, 1);
+        assert_eq!(*b, 1);
+        assert_eq!(fetches, 1);
+
+        // Changed window id set triggers refresh.
+        let c = cache
+            .get_or_fetch(
+                Some(set(&[1, 2, 3])),
+                10,
+                || unreachable!(),
+                || -> Result<usize, ()> {
+                    fetches += 1;
+                    Ok(fetches)
+                },
+            )
+            .unwrap();
+        assert_eq!(*c, 2);
+
+        // Changed display stamp triggers refresh even when ids match.
+        let d = cache
+            .get_or_fetch(
+                Some(set(&[1, 2, 3])),
+                11,
+                || unreachable!(),
+                || -> Result<usize, ()> {
+                    fetches += 1;
+                    Ok(fetches)
+                },
+            )
+            .unwrap();
+        assert_eq!(*d, 3);
+    }
+
+    #[test]
+    fn content_cache_does_not_hold_lock_during_fetch_and_discards_stale_after_forget() {
+        let cache = Arc::new(ContentCache::new());
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+
+        let c1 = Arc::clone(&cache);
+        let e1 = Arc::clone(&entered);
+        let r1 = Arc::clone(&release);
+        let slow = std::thread::spawn(move || {
+            c1.get_or_fetch(
+                Some(set(&[1])),
+                1,
+                || unreachable!(),
+                || -> Result<&'static str, ()> {
+                    e1.wait();
+                    r1.wait();
+                    Ok("stale")
+                },
+            )
+            .unwrap()
+        });
+
+        // Wait until `slow` is inside `fetch()`.
+        entered.wait();
+        // `forget()` and a newer fetch must complete immediately without blocking on `slow`.
+        let start = Instant::now();
+        cache.forget();
+        let fresh = cache
+            .get_or_fetch(
+                Some(set(&[1])),
+                1,
+                || unreachable!(),
+                || -> Result<&'static str, ()> { Ok("fresh") },
+            )
+            .unwrap();
+        assert_eq!(*fresh, "fresh");
+        assert!(start.elapsed() < Duration::from_millis(50));
+
+        // Let `slow` finish; its stale result must not overwrite `"fresh"`.
+        release.wait();
+        assert_eq!(*slow.join().unwrap(), "stale");
+        let after = cache
+            .get_or_fetch(
+                Some(set(&[1])),
+                1,
+                || unreachable!(),
+                || -> Result<&'static str, ()> { Ok("unexpected") },
+            )
+            .unwrap();
+        assert_eq!(*after, "fresh");
+    }
+
+    #[test]
+    fn frames_with_desktop_matches_on_screen_ids_set() {
+        // Both query `OptionOnScreenOnly`, so their sets only differ if a
+        // window opened or closed between the two calls.
+        let from_frames: HashSet<u32> = super::super::cg::on_screen_frames_with_desktop()
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        let from_ids = super::super::cg::on_screen_ids();
+        assert!(!from_frames.is_empty());
+        assert!(!from_ids.is_empty());
+        // Overlap should be nearly 100% (allowing at most transient window churn).
+        let overlap = from_frames.intersection(&from_ids).count();
+        assert!(
+            overlap * 10 >= from_ids.len() * 8,
+            "expected high overlap between on_screen_frames_with_desktop ({}) and on_screen_ids ({}), got {overlap}",
+            from_frames.len(),
+            from_ids.len()
+        );
+    }
 }
