@@ -126,16 +126,20 @@ fn filter_counting(
         .map(|&(window_id, _, _)| window_id)
         .collect();
     let mut content = content(fresh)?;
+    let mut windows = content.windows();
     // A bar window the listing doesn't have yet can't be left out: list anew.
-    let listed = |content: &SCShareableContent| {
-        let ids: std::collections::HashSet<u32> =
-            content.windows().iter().map(|w| w.window_id()).collect();
+    let all_listed = |windows: &[SCWindow]| {
+        if in_bar.is_empty() {
+            return true;
+        }
+        let ids: std::collections::HashSet<u32> = windows.iter().map(|w| w.window_id()).collect();
         in_bar.iter().all(|w| ids.contains(w))
     };
-    if !listed(&content) {
+    if !all_listed(&windows) {
         forget();
         content = self::content(true)?;
-        if !listed(&content) {
+        windows = content.windows();
+        if !all_listed(&windows) {
             log::debug!("display {id}: a menu bar window is not in the listing yet");
         }
     }
@@ -144,8 +148,7 @@ fn filter_counting(
         .into_iter()
         .find(|d| d.display_id() == id)
         .ok_or("display is not capturable yet; retry in a moment")?;
-    let bar: Vec<SCWindow> = content
-        .windows()
+    let bar: Vec<SCWindow> = windows
         .into_iter()
         .filter(|w| {
             // The wallpaper and desktop icons sit below every normal level,
@@ -371,19 +374,17 @@ pub fn window(target: WindowTarget, size: (f64, f64)) -> Result<Shot, String> {
     let started = std::time::Instant::now();
     // The list shared with display screenshots: while displays record,
     // each listing waits seconds on ScreenCaptureKit.
-    let mut content = content(false)?;
-    if !content
-        .windows()
-        .iter()
-        .any(|w| w.window_id() == target.window_id)
-    {
-        content = self::content(true)?;
-    }
-    let window = content
-        .windows()
-        .into_iter()
-        .find(|w| w.window_id() == target.window_id)
-        .ok_or("the window is not capturable; is Screen Recording granted?")?;
+    let find = |content: &SCShareableContent| {
+        content
+            .windows()
+            .into_iter()
+            .find(|w| w.window_id() == target.window_id)
+    };
+    let window = match find(&*content(false)?) {
+        Some(window) => window,
+        None => find(&*self::content(true)?)
+            .ok_or("the window is not capturable; is Screen Recording granted?")?,
+    };
     let listed = started.elapsed();
     let filter = SCContentFilter::create()
         .with_window(&window)
@@ -590,12 +591,15 @@ fn encode_raw(
     };
     let data = NSMutableData::new();
     let kind = NSString::from_str(kind);
-    let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_retained_objects(
-        &[&*NSString::from_str(
-            "kCGImageDestinationLossyCompressionQuality",
-        )],
-        &[Retained::into_super(Retained::into_super(NSNumber::new_f64(0.8))).into()],
-    );
+    let options: Option<Retained<NSDictionary<NSString, AnyObject>>> = (format == Format::Jpeg)
+        .then(|| {
+            NSDictionary::from_retained_objects(
+                &[&*NSString::from_str(
+                    "kCGImageDestinationLossyCompressionQuality",
+                )],
+                &[Retained::into_super(Retained::into_super(NSNumber::new_f64(0.8))).into()],
+            )
+        });
     unsafe {
         let destination = CGImageDestinationCreateWithData(
             Retained::as_ptr(&data).cast(),
@@ -606,11 +610,9 @@ fn encode_raw(
         if destination.is_null() {
             return Err("could not encode the screenshot".into());
         }
-        let properties = if format == Format::Jpeg {
-            Retained::as_ptr(&options).cast()
-        } else {
-            std::ptr::null()
-        };
+        let properties = options
+            .as_ref()
+            .map_or(std::ptr::null(), |o| Retained::as_ptr(o).cast());
         CGImageDestinationAddImage(destination, image, properties);
         let ok = CGImageDestinationFinalize(destination);
         CFRelease(destination);

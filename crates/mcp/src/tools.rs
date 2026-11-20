@@ -1124,6 +1124,7 @@ pub async fn run(
                 a.require_int("display_id")?,
                 a.require_int("window_id")?,
                 scope,
+                true,
             )
             .await?;
             Ok(Output::Content(state.content(depth)))
@@ -1270,7 +1271,7 @@ pub async fn run(
             // A legacy app ignores unknown parameters. Confirm support and
             // the root before even an action with an early text/menu reply.
             if scope.root.is_some() {
-                window_state_reply(control, display, window, scope).await?;
+                window_state_reply(control, display, window, scope, false).await?;
             }
             let reply = control
                 .call(
@@ -1313,50 +1314,55 @@ pub async fn run(
                 (output, _) => output,
             };
             // The window state shows the action's result once the display
-            // stops changing.
+            // stops changing. Skip the window picture when result is "none".
             control
                 .call("settle", json!({ "displayId": display }))
                 .await?;
-            noted(match window_state(control, display, window, scope).await {
-                // The action ran: a stale or busy root afterward must not
-                // read as a failure the agent would retry.
-                Err(error)
-                    if scope.root.is_some() && error.code != "not_found" && result == "none" =>
-                {
-                    Ok(Output::Content(vec![text("Done.")]))
-                }
-                Err(error) if scope.root.is_some() && error.code != "not_found" => {
-                    Ok(Output::Content(vec![text(format!(
-                        "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
-                        error.message
-                    ))]))
-                }
-                // OK, Save or Close took its own window away: that is the
-                // action working, so show what is on the display now. A
-                // window the user gave to another session says so itself.
-                Err(error)
-                    if error.code == "not_found"
-                        && !error.message.contains("to another agent session") =>
-                {
-                    let list = control
-                        .call("listWindows", json!({ "displayId": display }))
-                        .await?;
-                    let shot = control
-                        .call("screenshot", json!({ "displayId": display }))
-                        .await?;
-                    let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
-                    Ok(Output::Content(vec![
-                        text(closed_window_text(window, &list, &shot)),
-                        image(&get("data"), &get("mimeType")),
-                    ]))
-                }
-                Err(error) => Err(error),
-                Ok(state) => Ok(Output::Content(match result.as_str() {
-                    "none" => vec![text(format!("Done.{}", state.strayed))],
-                    "changes" => state.changes(depth),
-                    _ => state.content(depth),
-                })),
-            })
+            let need_image = result != "none";
+            noted(
+                match window_state(control, display, window, scope, need_image).await {
+                    // The action ran: a stale or busy root afterward must not
+                    // read as a failure the agent would retry.
+                    Err(error)
+                        if scope.root.is_some()
+                            && error.code != "not_found"
+                            && result == "none" =>
+                    {
+                        Ok(Output::Content(vec![text("Done.")]))
+                    }
+                    Err(error) if scope.root.is_some() && error.code != "not_found" => {
+                        Ok(Output::Content(vec![text(format!(
+                            "Done. The action ran, but its requested subtree could not be read afterward: {}. Call get_window_state without root to find the current tree.",
+                            error.message
+                        ))]))
+                    }
+                    // OK, Save or Close took its own window away: that is the
+                    // action working, so show what is on the display now. A
+                    // window the user gave to another session says so itself.
+                    Err(error)
+                        if error.code == "not_found"
+                            && !error.message.contains("to another agent session") =>
+                    {
+                        let list = control
+                            .call("listWindows", json!({ "displayId": display }))
+                            .await?;
+                        let shot = control
+                            .call("screenshot", json!({ "displayId": display }))
+                            .await?;
+                        let get = |key: &str| shot.get(key).cloned().unwrap_or(Value::Null);
+                        Ok(Output::Content(vec![
+                            text(closed_window_text(window, &list, &shot)),
+                            image(&get("data"), &get("mimeType")),
+                        ]))
+                    }
+                    Err(error) => Err(error),
+                    Ok(state) => Ok(Output::Content(match result.as_str() {
+                        "none" => vec![text(format!("Done.{}", state.strayed))],
+                        "changes" => state.changes(depth),
+                        _ => state.content(depth),
+                    })),
+                },
+            )
         }
         "computer" => computer(&a, control).await.map(Output::Content),
         other => Err(ControlError::invalid(format!("unknown tool {other}"))),
@@ -1941,13 +1947,18 @@ async fn window_state_reply(
     display: i64,
     window: i64,
     scope: Scope,
+    image: bool,
 ) -> Result<Object, ControlError> {
-    let state = control
-        .call(
-            "windowState",
-            json!({ "displayId": display, "windowId": window, "root": scope.root, "maxDepth": scope.max_depth }),
-        )
-        .await?;
+    let mut params = json!({
+        "displayId": display,
+        "windowId": window,
+        "root": scope.root,
+        "maxDepth": scope.max_depth
+    });
+    if !image {
+        params["image"] = json!(false);
+    }
+    let state = control.call("windowState", params).await?;
     if scope.root.is_some() && state.get("root") != Some(&json!(scope.root)) {
         return Err(ControlError::new(
             "failed",
@@ -1962,8 +1973,9 @@ async fn window_state(
     display: i64,
     window: i64,
     scope: Scope,
+    want_image: bool,
 ) -> Result<WindowState, ControlError> {
-    let state = window_state_reply(control, display, window, scope).await?;
+    let state = window_state_reply(control, display, window, scope, want_image).await?;
     let get = |key: &str| state.get(key).cloned().unwrap_or(Value::Null);
     let truncated = if get("truncated") == Value::Bool(true) {
         " (truncated)"
