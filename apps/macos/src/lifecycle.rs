@@ -47,7 +47,8 @@ pub fn lines_about(displays: &[DisplayId], max: usize) -> Vec<String> {
     if displays.is_empty() {
         return Vec::new();
     }
-    let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+    // The last 256 KB: the log grows for as long as the app runs.
+    let Some(text) = path().and_then(|p| tail(&p, 256 * 1024)) else {
         return Vec::new();
     };
     let marks: Vec<String> = displays.iter().map(|id| format!("display={id} ")).collect();
@@ -60,6 +61,22 @@ pub fn lines_about(displays: &[DisplayId], max: usize) -> Vec<String> {
         .collect();
     lines.reverse();
     lines
+}
+
+/// The last `max` bytes of a file, from the first whole line in them.
+fn tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Some(match (start > 0, text.split_once('\n')) {
+        (true, Some((_, rest))) => rest.to_string(),
+        _ => text,
+    })
 }
 
 /// The folder the log lives in.

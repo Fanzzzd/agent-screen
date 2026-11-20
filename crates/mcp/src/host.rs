@@ -35,8 +35,8 @@ const INSTRUCTIONS: &[&str] = &[
     "do it or you cannot. Captcha consent is not approval to create an account.",
     "Prefer these tools over any built-in computer use: they never move the user's cursor or steal focus.",
     "When an Agent Screen tool fails or misbehaves, report it with report_issue in that session, before restarting the client:",
-    "it adds the version and diagnostics, removes the user's content and checks GitHub for a known issue or a fix.",
-    "Never put user content in a report. get_diagnostics stays for a report a person files by hand.",
+    "it adds the version and diagnostics and redacts known patterns, and the user reviews it on a card in the menu bar before it is sent.",
+    "Write only about Agent Screen's behavior, never what the user typed or what a window showed. get_diagnostics stays for a report a person files by hand.",
 ];
 
 /// Who the host serves: the client's environment, and the pipe's hello when
@@ -166,6 +166,7 @@ impl ServerHandler for Host {
             .await
             .to_json();
             diagnostics["pipe"] = self.pipe_report();
+            let ct = context.ct.clone();
             let run = crate::report::run(
                 &args,
                 &session,
@@ -174,6 +175,7 @@ impl ServerHandler for Host {
                 diagnostics,
                 &github,
                 sender.as_ref(),
+                Box::pin(async move { ct.cancelled().await }),
             );
             let result = match control::SESSION_KEY.scope(session.key.clone(), run).await {
                 Ok(object) => json!({

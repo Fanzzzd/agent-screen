@@ -3,9 +3,11 @@
 //! repository's bug report form; the duplicate and "already fixed" checks;
 //! and the menu bar's queue of reports waiting for the user's consent.
 //!
-//! Reports are public. Redaction keeps Agent Screen's own data and drops
-//! what could come from the user's apps: window titles, typed text, links,
-//! file paths, email addresses and pictures.
+//! Reports are public. Redaction replaces the user's data it can recognize:
+//! known names and window titles, quoted text, links, host names,
+//! addresses, paths, file names, email addresses, keys and encoded data.
+//! Tool-call arguments keep only Agent Screen's own values. Free text it
+//! can't recognize stays, so the user reviews a report before it is sent.
 
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
@@ -32,6 +34,9 @@ pub const PATH: &str = "[path]";
 pub const EMAIL: &str = "[email]";
 pub const DATA: &str = "[data]";
 pub const REMOVED: &str = "[removed]";
+pub const HOST: &str = "[host]";
+pub const FILE: &str = "[file]";
+pub const SECRET: &str = "[secret]";
 
 /// Words quoted text may keep: Agent Screen's own error codes, tool
 /// actions and argument names. The caller adds the tool names.
@@ -103,18 +108,15 @@ const KEEP_KEYS: &[&str] = &[
     "request_id",
 ];
 
-/// Common top-level domains, for bare host names such as `example.com`.
-const TLDS: &[&str] = &[
-    "com", "org", "net", "io", "dev", "app", "ai", "co", "cn", "me", "edu", "gov", "uk", "de",
-    "jp", "fr", "ru", "in", "us", "info", "biz", "xyz", "tv", "so", "sh", "cc", "hk", "tw", "kr",
-];
-
 /// Removes the user's data from what an agent wrote.
 pub struct Redactor {
     /// Text the app knows is the user's, longest first, with its marker:
     /// window titles on the session's displays, and the Display Label's
     /// task title, the project folder and the account name.
     secrets: Vec<(String, &'static str)>,
+    /// The user's name, a word at a time, lowercase: matched as whole
+    /// words in any case.
+    names: Vec<String>,
     /// Words quoted text may keep, on top of `VOCABULARY`.
     words: Vec<String>,
 }
@@ -128,9 +130,21 @@ impl Redactor {
     ) -> Self {
         Self {
             secrets: Vec::new(),
+            names: Vec::new(),
             words: words.into_iter().collect(),
         }
         .with(titles, TITLE)
+    }
+
+    /// The user's full name: the whole name, and each word of three
+    /// letters or more as a word of its own.
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.names.extend(
+            name.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.chars().count() >= 3)
+                .map(str::to_lowercase),
+        );
+        self.with([name.to_string()], PRIVATE)
     }
 
     /// Other text that is the user's: a task title, a folder, a name.
@@ -155,7 +169,10 @@ impl Redactor {
     fn known_word(&self, word: &str) -> bool {
         VOCABULARY.contains(&word)
             || self.words.iter().any(|w| w == word)
-            || [TITLE, PRIVATE, TEXT, LINK, PATH, EMAIL, DATA, REMOVED].contains(&word)
+            || [
+                TITLE, PRIVATE, TEXT, LINK, PATH, EMAIL, DATA, REMOVED, HOST, FILE, SECRET,
+            ]
+            .contains(&word)
     }
 
     /// Free text from the agent or a log line, with the user's data
@@ -167,10 +184,38 @@ impl Redactor {
         for (secret, marker) in &self.secrets {
             out = out.replace(secret.as_str(), marker);
         }
+        let out = self.name_words(&out);
         let out = self.quotes(&out);
         // Markers stay readable when an agent quoted one.
         out.replace(&format!("\"{TITLE}\""), TITLE)
             .replace(&format!("\"{PRIVATE}\""), PRIVATE)
+    }
+
+    /// The user's name, word by word, in any case: "alice" and "Alice's".
+    fn name_words(&self, input: &str) -> String {
+        if self.names.is_empty() {
+            return input.to_string();
+        }
+        let mut out = String::with_capacity(input.len());
+        let mut word = String::new();
+        let push = |word: &mut String, out: &mut String| {
+            if self.names.contains(&word.to_lowercase()) {
+                out.push_str(PRIVATE);
+            } else {
+                out.push_str(word);
+            }
+            word.clear();
+        };
+        for c in input.chars() {
+            if c.is_alphanumeric() {
+                word.push(c);
+            } else {
+                push(&mut word, &mut out);
+                out.push(c);
+            }
+        }
+        push(&mut word, &mut out);
+        out
     }
 
     /// Quoted text, which is how agents write what they typed or what a
@@ -266,29 +311,61 @@ fn plain(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_+.-".contains(&b))
 }
 
-/// Links, paths, email addresses and encoded data, a whitespace-separated
-/// token at a time.
+/// Links, host names, addresses, paths, file names, email addresses,
+/// secrets and encoded data, a whitespace-separated token at a time. The
+/// token after "Bearer" or "Basic" is a secret.
 fn tokens(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut token = String::new();
+    let mut after_scheme = false;
+    let flush = |token: &str, out: &mut String, after_scheme: &mut bool| {
+        if token.is_empty() {
+            return;
+        }
+        out.push_str(&if *after_scheme {
+            wrap(token, |_| Some(SECRET))
+        } else {
+            token_marker(token)
+        });
+        let lower = token
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+            .to_ascii_lowercase();
+        *after_scheme = lower == "bearer"
+            || lower == "basic"
+            || token.ends_with([':', '=']) && SECRET_KEYS.contains(&lower.as_str());
+    };
     for c in input.chars() {
         if c.is_whitespace() {
-            out.push_str(&token_marker(&token));
+            flush(&token, &mut out, &mut after_scheme);
             token.clear();
             out.push(c);
         } else {
             token.push(c);
         }
     }
-    out.push_str(&token_marker(&token));
+    flush(&token, &mut out, &mut after_scheme);
     out
 }
 
 fn token_marker(token: &str) -> String {
-    if token.is_empty() {
-        return String::new();
+    // `password=…`, `token: …`: the key stays, the value goes.
+    if let Some((key, value)) = token.split_once(['=', ':'])
+        && !value.is_empty()
+        && SECRET_KEYS.contains(
+            &key.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+                .to_ascii_lowercase()
+                .as_str(),
+        )
+    {
+        let cut = key.len() + 1;
+        return format!("{}{}", &token[..cut], wrap(&token[cut..], |_| Some(SECRET)));
     }
-    // Punctuation around a token stays: "(see /Users/x/a.txt)." keeps "(" and ").".
+    wrap(token, classify)
+}
+
+/// The token's core, without the punctuation around it, replaced by its
+/// marker: "(see /Users/x/a.txt)." keeps "(" and ").".
+fn wrap(token: &str, marker: impl Fn(&str) -> Option<&'static str>) -> String {
     let start = token
         .char_indices()
         .find(|(_, c)| !"([{<\"'`“‘「".contains(*c))
@@ -300,17 +377,85 @@ fn token_marker(token: &str) -> String {
         .map_or(start, |(i, c)| i + c.len_utf8())
         .max(start);
     let (lead, core, tail) = (&token[..start], &token[start..end], &token[end..]);
-    let marker = classify(core);
-    match marker {
+    if core.is_empty() {
+        return token.to_string();
+    }
+    match marker(core) {
         Some(marker) => format!("{lead}{marker}{tail}"),
         None => token.to_string(),
     }
 }
 
+/// Keys whose value is a secret, as in `password=…`.
+const SECRET_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "client_secret",
+    "api_key",
+    "apikey",
+    "access_key",
+    "secret_key",
+    "private_key",
+    "authorization",
+    "cookie",
+    "signature",
+];
+
+/// How secrets start: GitHub, OpenAI and Anthropic, Slack, AWS, GitLab,
+/// npm, Stripe and Google keys.
+const SECRET_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "sk-",
+    "sk_",
+    "pk_live_",
+    "rk_live_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "xapp-",
+    "glpat-",
+    "npm_",
+    "AIza",
+    "ya29.",
+];
+
+/// Paths that are words: "and/or".
+const SLASH_WORDS: &[&str] = &[
+    "and/or",
+    "n/a",
+    "i/o",
+    "w/o",
+    "yes/no",
+    "on/off",
+    "read/write",
+    "true/false",
+];
+
+/// File name extensions, for `report.pdf`: anything else after a dot is a
+/// host name.
+const EXTENSIONS: &[&str] = &[
+    "txt", "md", "rtf", "pdf", "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx", "key",
+    "numbers", "pages", "png", "jpg", "jpeg", "gif", "heic", "webp", "svg", "tif", "tiff", "bmp",
+    "mov", "mp4", "m4a", "mp3", "wav", "zip", "tar", "gz", "tgz", "rar", "7z", "dmg", "pkg", "app",
+    "json", "yaml", "yml", "toml", "xml", "html", "htm", "css", "js", "mjs", "ts", "tsx", "jsx",
+    "rs", "py", "rb", "go", "java", "kt", "swift", "c", "h", "cpp", "hpp", "m", "mm", "sh", "zsh",
+    "log", "plist", "db", "sqlite", "sql", "ini", "conf", "cfg", "env", "pem", "p12", "crt", "cer",
+    "ics", "vcf", "eml", "epub", "sketch", "fig", "psd", "ai", "lock", "bak", "tmp",
+];
+
 fn classify(core: &str) -> Option<&'static str> {
-    if core.is_empty() {
-        return None;
-    }
     let lower = core.to_ascii_lowercase();
     if lower.starts_with("data:") {
         return Some(DATA);
@@ -321,27 +466,74 @@ fn classify(core: &str) -> Option<&'static str> {
     if email(core) {
         return Some(EMAIL);
     }
-    let unix = (core.starts_with('/')
-        || core.starts_with("~/")
-        || core.starts_with("./")
-        || core.starts_with("../"))
-        && core[1..].contains('/');
+    if secret(core) {
+        return Some(SECRET);
+    }
     let windows =
         core.len() > 3 && core.as_bytes()[0].is_ascii_alphabetic() && &core[1..3] == ":\\";
-    if unix || windows || core.starts_with("~/") {
+    if core.starts_with('/') && core.len() > 1
+        || core.starts_with('~')
+        || core.starts_with("./")
+        || core.starts_with("../")
+        || windows
+        || core.contains('\\')
+    {
         return Some(PATH);
     }
-    if host(&lower) {
-        return Some(LINK);
-    }
-    if core.len() >= 64
-        && core
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"+/=_-".contains(&b))
+    // `Documents/taxes/2025.pdf`: a slash between words. "1/2" stays.
+    if core.contains('/')
+        && !SLASH_WORDS.contains(&lower.as_str())
+        && core.split('/').filter(|part| !part.is_empty()).count() >= 2
+        && core.chars().any(char::is_alphabetic)
     {
+        return Some(PATH);
+    }
+    if address(&lower) {
+        return Some(HOST);
+    }
+    if let Some(last) = dotted(&lower) {
+        return Some(if EXTENSIONS.contains(&last) {
+            FILE
+        } else {
+            HOST
+        });
+    }
+    if lower == "localhost" || lower.starts_with("localhost:") {
+        return Some(HOST);
+    }
+    // Encoded data or a key: 64 such characters, or 32 that mix letters
+    // and digits.
+    let encoded = core
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"+/=_-".contains(&b));
+    let mixed =
+        core.bytes().any(|b| b.is_ascii_digit()) && core.bytes().any(|b| b.is_ascii_alphabetic());
+    if encoded && (core.len() >= 64 || core.len() >= 32 && mixed) {
         return Some(DATA);
     }
     None
+}
+
+/// A key or token by its shape: a known prefix, an AWS access key id, a
+/// JSON Web Token.
+fn secret(core: &str) -> bool {
+    if SECRET_PREFIXES
+        .iter()
+        .any(|p| core.len() > p.len() && core.starts_with(p))
+    {
+        return true;
+    }
+    let aws = (core.starts_with("AKIA") || core.starts_with("ASIA"))
+        && core.len() >= 16
+        && core[4..]
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    let jwt = core.starts_with("eyJ")
+        && core.split('.').count() >= 2
+        && core
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.=".contains(&b));
+    aws || jwt
 }
 
 fn email(s: &str) -> bool {
@@ -351,17 +543,44 @@ fn email(s: &str) -> bool {
     !user.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
 }
 
-/// `example.com` or `docs.example.com/page`: a dotted name ending in a
-/// common top-level domain.
-fn host(lower: &str) -> bool {
-    let name = lower.split('/').next().unwrap_or_default();
-    let name = name.split(':').next().unwrap_or_default();
-    let labels: Vec<&str> = name.split('.').collect();
-    labels.len() >= 2
-        && labels
+/// An IP address, with or without a port: `192.168.1.5:8080`, `fe80::1`.
+fn address(lower: &str) -> bool {
+    let v4 = lower.split(':').next().unwrap_or_default();
+    let parts: Vec<&str> = v4.split('.').collect();
+    if parts.len() == 4
+        && parts
             .iter()
-            .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-        && TLDS.contains(labels.last().unwrap())
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return true;
+    }
+    // IPv6: hex groups and colons, with "::" or at least five groups, so a
+    // time such as 12:30:45 stays.
+    let groups = lower.split(':').count();
+    lower.len() >= 3
+        && lower
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.' || b == b'%')
+        && (lower.contains("::") || groups >= 5)
+        && lower.bytes().any(|b| b.is_ascii_hexdigit())
+}
+
+/// `example.com`, `Alices-MacBook-Pro.local`, `report.pdf`, or
+/// `docs.example.com:8080/page`: dotted labels ending in letters. Its last
+/// label, lowercase. Versions such as 0.1.41 and "e.g." are not names.
+fn dotted(lower: &str) -> Option<&str> {
+    let name = lower.split(['/', ':', '?', '#']).next().unwrap_or_default();
+    let labels: Vec<&str> = name.split('.').collect();
+    let last = *labels.last()?;
+    (labels.len() >= 2
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        && last.bytes().all(|b| b.is_ascii_alphabetic())
+        && (last.len() >= 2 || labels[0].len() >= 2 && EXTENSIONS.contains(&last)))
+    .then_some(last)
 }
 
 fn cap(text: &str, max: usize) -> String {
@@ -449,36 +668,42 @@ fn optional(args: &Map<String, Value>, key: &str) -> Result<Option<String>, Stri
 impl Draft {
     /// The tool's arguments, checked.
     pub fn from_args(args: &Map<String, Value>) -> Result<Self, String> {
-        let steps = match args.get("steps") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .take(MAX_STEPS)
-                .map(|item| match item {
-                    Value::String(s) => Ok(Step::Note(s.clone())),
-                    Value::Object(o) => {
-                        let tool = o
-                            .get("tool")
-                            .and_then(Value::as_str)
-                            .ok_or("each step object needs tool")?
-                            .to_string();
-                        let arguments = match o.get("arguments") {
-                            None | Some(Value::Null) => Map::new(),
-                            Some(Value::Object(a)) => a.clone(),
-                            Some(_) => return Err("a step's arguments must be an object".into()),
-                        };
-                        let result = o.get("result").and_then(Value::as_str).map(String::from);
-                        Ok(Step::Call {
-                            tool,
-                            arguments,
-                            result,
-                        })
-                    }
-                    _ => Err("each step is a string or {tool, arguments, result}".to_string()),
-                })
-                .collect::<Result<_, String>>()?,
-            Some(_) => return Err("steps must be a list".into()),
+        // `steps` are sentences and `calls` tool calls: plain lists, as
+        // every client's schema converter takes. A call in `steps` works too.
+        let list = |key: &str| match args.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => Ok(items.clone()),
+            Some(_) => Err(format!("{key} must be a list")),
         };
+        let items: Vec<Value> = list("steps")?.into_iter().chain(list("calls")?).collect();
+        let steps = items
+            .iter()
+            .take(MAX_STEPS)
+            .map(|item| match item {
+                Value::String(s) => Ok(Step::Note(s.clone())),
+                Value::Object(o) => {
+                    let tool = o
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .ok_or("each call needs tool")?
+                        .to_string();
+                    let arguments = match o.get("arguments") {
+                        None | Some(Value::Null) => Map::new(),
+                        Some(Value::Object(a)) => a.clone(),
+                        Some(_) => return Err("a call's arguments must be an object".into()),
+                    };
+                    let result = o.get("result").and_then(Value::as_str).map(String::from);
+                    Ok(Step::Call {
+                        tool,
+                        arguments,
+                        result,
+                    })
+                }
+                _ => Err(
+                    "each step is a string, and each call {tool, arguments, result}".to_string(),
+                ),
+            })
+            .collect::<Result<_, String>>()?;
         Ok(Self {
             title: required(args, "title")?,
             steps,
@@ -559,6 +784,24 @@ impl Report {
             .iter()
             .filter(|f| !f.text.is_empty())
             .map(|f| format!("### {}\n\n{}", f.label, f.text))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// The report for the user to review on the card: the title and what
+    /// the agent wrote first, where the user's words could be, then the
+    /// app's facts. The same text as `body`, in another order.
+    pub fn review(&self) -> String {
+        const AGENT: &[&str] = &["steps", "expected", "actual", "logs", "more"];
+        let agent = self.fields.iter().filter(|f| AGENT.contains(&f.id));
+        let facts = self.fields.iter().filter(|f| !AGENT.contains(&f.id));
+        std::iter::once(format!("### Title\n\n{}", self.title))
+            .chain(
+                agent
+                    .chain(facts)
+                    .filter(|f| !f.text.is_empty())
+                    .map(|f| format!("### {}\n\n{}", f.label, f.text)),
+            )
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -834,6 +1077,9 @@ pub enum State {
 pub struct Found {
     pub number: u64,
     pub state: State,
+    /// Why a closed issue closed: "completed" when it was fixed, or
+    /// "not_planned" or "duplicate".
+    pub reason: Option<String>,
     pub title: String,
     pub url: String,
 }
@@ -858,6 +1104,10 @@ pub fn parse_search(reply: &Value) -> Vec<Found> {
                     "open" => State::Open,
                     _ => State::Closed,
                 },
+                reason: item
+                    .get("state_reason")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 title: item.get("title")?.as_str()?.to_string(),
                 url: item.get("html_url")?.as_str()?.to_string(),
             })
@@ -868,12 +1118,13 @@ pub fn parse_search(reply: &Value) -> Vec<Found> {
 /// What to do with a report, given its matches and the latest release.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
-    /// Nothing matches, or a closed match on this release or a newer one,
-    /// which may be a regression.
+    /// Nothing matches, or an issue closed as fixed on this release or a
+    /// newer one, which may be a regression.
     File { regression_of: Option<u64> },
     /// An open issue has the same fingerprint.
     Duplicate { found: Found },
-    /// A closed issue matches and a newer release exists: update first.
+    /// An issue closed as fixed matches and a newer release exists: update
+    /// first.
     Fixed { found: Found, latest: String },
 }
 
@@ -883,7 +1134,13 @@ pub fn judge(version: &str, found: &[Found], latest: Option<&str>) -> Verdict {
             found: open.clone(),
         };
     }
-    let Some(closed) = found.iter().max_by_key(|f| f.number) else {
+    // Only an issue closed as fixed says anything: one closed as not
+    // planned or as a duplicate of another doesn't.
+    let Some(closed) = found
+        .iter()
+        .filter(|f| f.reason.as_deref() == Some("completed"))
+        .max_by_key(|f| f.number)
+    else {
         return Verdict::File {
             regression_of: None,
         };
@@ -929,16 +1186,27 @@ pub struct Filing {
     pub fingerprint: String,
     /// The prefilled form.
     pub url: String,
+    /// The report as it would leave the Mac, for the card to show.
+    pub body: String,
 }
 
-/// A report waiting for the user's first consent.
+/// How a report leaves the Mac.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// The prefilled form, which opens only on the user's click.
+    Form,
+    /// The owner's relay, which files it with no form.
+    Relay,
+}
+
+/// A report waiting on the card for the user's click.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pending {
     pub id: u64,
     pub filing: Filing,
 }
 
-/// A report the app opened on GitHub.
+/// A report the user opened on GitHub, or the relay filed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reported {
     pub title: String,
@@ -950,15 +1218,15 @@ pub struct Reported {
 /// What filing a report did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filed {
-    /// The user turned automatic reporting off: nothing was sent.
+    /// The user turned agent bug reports off: nothing was sent.
     Off,
-    /// The user consented before: open this form now.
-    Open(String),
-    /// The first report: it waits on the card for the user's consent.
+    /// The relay may file it now: the user agreed to that on the card.
+    Send,
+    /// It waits on the card until the user opens it.
     Waiting(u64),
-    /// The same failure was opened on GitHub in the last day.
+    /// The same failure was reported in the last day.
     Again(Reported),
-    /// Three forms opened in the last hour: no more for now.
+    /// Five reports wait, or the relay filed three in the last hour.
     TooMany,
 }
 
@@ -968,12 +1236,17 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const PER_HOUR: usize = 3;
 
-/// Whether agents may report, whether the user consented, the reports
-/// waiting for that consent and the ones already opened.
+/// Whether agents may report, what the user agreed to, the reports waiting
+/// on the card and the ones already reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reports {
     pub automatic: bool,
+    /// The user opened a report from the card once. Only then may a later
+    /// report read GitHub's public issues before it waits on the card.
     pub consent: bool,
+    /// The user opened a report from a card that said later reports go
+    /// through the relay without asking. Only then may the relay file one.
+    pub relay_consent: bool,
     pending: VecDeque<Pending>,
     reported: Vec<Reported>,
     next: u64,
@@ -984,6 +1257,7 @@ impl Default for Reports {
         Self {
             automatic: true,
             consent: false,
+            relay_consent: false,
             pending: VecDeque::new(),
             reported: Vec::new(),
             next: 1,
@@ -1005,7 +1279,9 @@ impl Reports {
         self.reported.iter().rev()
     }
 
-    pub fn file(&mut self, filing: Filing, now_ms: u64) -> Filed {
+    /// An agent's report. A form report always waits on the card; a relay
+    /// report goes out at once only after the user's relay consent.
+    pub fn file(&mut self, filing: Filing, via: Via, now_ms: u64) -> Filed {
         if !self.automatic {
             return Filed::Off;
         }
@@ -1023,7 +1299,7 @@ impl Reports {
             waiting.filing = filing;
             return Filed::Waiting(waiting.id);
         }
-        if self.consent {
+        if via == Via::Relay && self.relay_consent {
             let recent = self
                 .reported
                 .iter()
@@ -1032,21 +1308,16 @@ impl Reports {
             if recent >= PER_HOUR {
                 return Filed::TooMany;
             }
-            let url = filing.url.clone();
             self.record(filing, now_ms);
-            return Filed::Open(url);
+            return Filed::Send;
         }
-        let id = self.next;
-        self.next += 1;
-        self.pending.push_back(Pending { id, filing });
-        while self.pending.len() > MAX_PENDING {
-            self.pending.pop_front();
+        if self.pending.len() >= MAX_PENDING {
+            return Filed::TooMany;
         }
-        Filed::Waiting(id)
+        Filed::Waiting(self.queue(filing))
     }
 
-    /// Put a report on the card whatever the consent, as a script's
-    /// preview does. Its id.
+    /// Put a report on the card, as a script's preview does. Its id.
     pub fn queue(&mut self, filing: Filing) -> u64 {
         let id = self.next;
         self.next += 1;
@@ -1054,22 +1325,17 @@ impl Reports {
         id
     }
 
-    /// The user's consent, on the card for report `id`: it covers every
-    /// report waiting and the ones after. The forms to open, in order.
-    pub fn allow(&mut self, id: u64, now_ms: u64) -> Vec<String> {
-        if !self.pending.iter().any(|p| p.id == id) {
-            return Vec::new();
-        }
+    /// Open on GitHub on the card for report `id`: this report only. The
+    /// form to open. `relay_shown`: the card said later reports go through
+    /// the relay, so the click agrees to that too.
+    pub fn open(&mut self, id: u64, relay_shown: bool, now_ms: u64) -> Option<String> {
+        let at = self.pending.iter().position(|p| p.id == id)?;
+        let pending = self.pending.remove(at)?;
         self.consent = true;
-        let opened: Vec<Pending> = self.pending.drain(..).collect();
-        opened
-            .into_iter()
-            .map(|p| {
-                let url = p.filing.url.clone();
-                self.record(p.filing, now_ms);
-                url
-            })
-            .collect()
+        self.relay_consent |= relay_shown;
+        let url = pending.filing.url.clone();
+        self.record(pending.filing, now_ms);
+        Some(url)
     }
 
     /// Not Now: report `id` is dropped unsent.
@@ -1097,12 +1363,13 @@ impl Reports {
         }
     }
 
-    /// What is kept across launches: the setting, the consent and the
+    /// What is kept across launches: the setting, the consents and the
     /// reports opened. Waiting reports are not.
     pub fn to_json(&self) -> Value {
         json!({
             "automatic": self.automatic,
             "consent": self.consent,
+            "relayConsent": self.relay_consent,
             "reported": self.reported.iter().map(|r| json!({
                 "title": r.title, "fingerprint": r.fingerprint, "url": r.url, "atMs": r.at_ms
             })).collect::<Vec<_>>(),
@@ -1117,6 +1384,10 @@ impl Reports {
                 .unwrap_or(true),
             consent: value
                 .get("consent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            relay_consent: value
+                .get("relayConsent")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             ..Self::default()
@@ -1139,6 +1410,7 @@ impl Reports {
                         title: title.into(),
                         fingerprint: fingerprint.into(),
                         url: url.into(),
+                        body: String::new(),
                     },
                     at,
                 );
@@ -1223,6 +1495,90 @@ mod tests {
         );
     }
 
+    /// Each leak the review of #240 found, unquoted.
+    #[test]
+    fn redaction_drops_keys_of_any_length() {
+        let r = redactor();
+        for (secret, kept) in [
+            ("ghp_abc123", ""),
+            ("gho_16C7e42F292c6912E7710c838347Ae178B4a", ""),
+            ("github_pat_11ABCDEFG0_xyz", ""),
+            ("sk-proj-abc", ""),
+            ("sk-ant-api03-short", ""),
+            ("xoxb-1-2", ""),
+            ("AKIAIOSFODNN7EXAMPLE", ""),
+            ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", ""),
+            ("Bearer abc.def", "Bearer"),
+            ("Authorization: Bearer abc", "Authorization:"),
+            ("password=hunter2", "password="),
+            ("api_key: q1w2e3", "api_key:"),
+            ("token=abc", "token="),
+        ] {
+            let out = r.text(&format!("it failed with {secret} here"));
+            let gone = secret.rsplit([' ', '=']).next().unwrap();
+            assert!(!out.contains(gone), "{secret}: {out}");
+            assert!(out.contains(SECRET), "{secret}: {out}");
+            assert!(
+                out.contains(kept) && out.ends_with(" here"),
+                "{secret}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_drops_hosts_addresses_and_file_names() {
+        let r = redactor().with_private([
+            "Alices-MacBook-Pro".to_string(),
+            "Alice's MacBook Pro".to_string(),
+        ]);
+        for (text, gone, marker) in [
+            ("open acme.internal now", "acme", HOST),
+            ("open bank.ca now", "bank", HOST),
+            ("open x.com.au now", "x.com", HOST),
+            ("open Printer.local now", "Printer", HOST),
+            ("open localhost:3000 now", "localhost", HOST),
+            ("open localhost now", "localhost", HOST),
+            ("open 192.168.1.5 now", "192.168", HOST),
+            ("open 10.0.0.2:8080 now", "10.0", HOST),
+            ("open fe80::1ff:fe23:4567:890a now", "fe80", HOST),
+            ("open Documents/taxes/2025.pdf now", "taxes", PATH),
+            ("open Documents/taxes now", "taxes", PATH),
+            ("open src\\main.rs now", "main", PATH),
+            ("open Q3-salaries.xlsx now", "salaries", FILE),
+            ("open main.c now", "main", FILE),
+            ("open Alices-MacBook-Pro.local now", "Alices", HOST),
+            ("on Alices-MacBook-Pro now", "Alices", PRIVATE),
+            ("on Alice's MacBook Pro now", "MacBook", PRIVATE),
+            ("mail bob.smith+x@corp.example now", "bob", EMAIL),
+        ] {
+            let out = r.text(text);
+            assert!(!out.contains(gone), "{text}: {out}");
+            assert!(out.contains(marker), "{text}: {out}");
+            assert!(
+                out.starts_with(&text[..3]) && out.ends_with(" now"),
+                "{text}: {out}"
+            );
+        }
+        // Versions, times, fractions, ratios and plain English stay.
+        let kept =
+            "Agent Screen 0.1.41 at 12:30:45 took 1/2 of it, e.g. a 16:9 window and/or more.";
+        assert_eq!(r.text(kept), kept);
+    }
+
+    #[test]
+    fn redaction_drops_the_users_name_and_home() {
+        let r = redactor()
+            .with_name("Alice Q. Smith")
+            .with_private(["/Users/alice".to_string()]);
+        let out = r.text("alice's file was in /Users/alice; Alice Q. Smith and SMITH saw it");
+        for gone in ["alice", "Alice", "Smith", "SMITH", "/Users"] {
+            assert!(!out.contains(gone), "{gone} in {out}");
+        }
+        assert!(out.contains(PRIVATE) && out.contains(PATH), "{out}");
+        // A short word of the name, and words that only contain it, stay.
+        assert_eq!(r.text("Q. smithing"), "Q. smithing");
+    }
+
     #[test]
     fn redaction_drops_screenshots_and_other_quotes() {
         let r = redactor();
@@ -1257,8 +1613,8 @@ mod tests {
     fn a_report_carries_the_versions_and_no_user_data() {
         let d = draft(json!({
             "title": "computer left_click on Q3 Budget · Numbers did nothing",
-            "steps": [
-                "Opened /Users/alice/Documents/q3.numbers",
+            "steps": ["Opened /Users/alice/Documents/q3.numbers"],
+            "calls": [
                 { "tool": "computer", "arguments": { "display_id": 5, "action": "type", "text": "hunter2" }, "result": "typed into \"Inbox (1,204) - Mail\"" },
                 { "tool": "some_other_server_tool", "arguments": {} }
             ],
@@ -1291,6 +1647,16 @@ mod tests {
         assert_eq!(report.field("agent"), Some("codex-mcp-client 0.50.0"));
         assert!(report.field("logs").unwrap().contains("created display=5"));
         assert!(report.field("more").unwrap().contains(&report.fingerprint));
+        let review = report.review();
+        assert!(review.starts_with(&format!(
+            "### Title\n\n{}\n\n### Steps to reproduce",
+            report.title
+        )));
+        assert!(review.find("### Actual") < review.find("### App and MCP diagnostics"));
+        assert_eq!(
+            review.len(),
+            report.body().len() + format!("### Title\n\n{}\n\n", report.title).len()
+        );
         assert!(
             report
                 .field("actual")
@@ -1351,6 +1717,7 @@ mod tests {
         Found {
             number,
             state,
+            reason: (state == State::Closed).then(|| "completed".into()),
             title: "t".into(),
             url: format!("https://github.com/{REPO}/issues/{number}"),
         }
@@ -1390,6 +1757,23 @@ mod tests {
     }
 
     #[test]
+    fn only_an_issue_closed_as_fixed_counts() {
+        for reason in [Some("not_planned"), Some("duplicate"), None] {
+            let closed = Found {
+                reason: reason.map(String::from),
+                ..found(9, State::Closed)
+            };
+            assert_eq!(
+                judge("0.1.41", &[closed], Some("0.1.42")),
+                Verdict::File {
+                    regression_of: None
+                },
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
     fn versions_compare_by_number() {
         assert!(older("0.1.9", "0.1.10"));
         assert!(older("v0.1.41", "0.2.0"));
@@ -1420,71 +1804,100 @@ mod tests {
             title: format!("t{n}"),
             fingerprint: format!("agentscreen-{n}"),
             url: format!("u{n}"),
+            body: format!("body {n}"),
         }
     }
 
     #[test]
-    fn the_first_report_waits_for_consent_and_later_ones_open() {
+    fn every_form_report_waits_and_one_click_opens_one() {
         let mut reports = Reports::default();
-        let Filed::Waiting(first) = reports.file(filing(1), 1) else {
-            panic!("first report should wait");
+        let Filed::Waiting(first) = reports.file(filing(1), Via::Form, 1) else {
+            panic!("a report should wait");
         };
-        assert!(matches!(reports.file(filing(2), 2), Filed::Waiting(_)));
+        let Filed::Waiting(second) = reports.file(filing(2), Via::Form, 2) else {
+            panic!("a report should wait");
+        };
         // The same failure again replaces the one waiting.
-        assert!(matches!(reports.file(filing(2), 2), Filed::Waiting(_)));
+        assert_eq!(
+            reports.file(filing(2), Via::Form, 2),
+            Filed::Waiting(second)
+        );
         assert_eq!(reports.pending_count(), 2);
-        assert_eq!(reports.allow(first, 3), ["u1", "u2"]);
-        assert!(reports.consent && reports.pending().is_none());
-        assert_eq!(reports.file(filing(3), 4), Filed::Open("u3".into()));
-        assert_eq!(reports.reported().next().unwrap().title, "t3");
+        assert_eq!(reports.open(first, false, 3), Some("u1".into()));
+        assert!(reports.consent && !reports.relay_consent);
+        assert_eq!(reports.pending().unwrap().id, second);
+        // After the consent a form report still waits for a click.
+        assert!(matches!(
+            reports.file(filing(3), Via::Form, 4),
+            Filed::Waiting(_)
+        ));
+        assert_eq!(reports.open(second, false, 5), Some("u2".into()));
+        assert_eq!(reports.open(second, false, 5), None);
+        assert_eq!(reports.reported().next().unwrap().title, "t2");
         reports.set_automatic(false);
-        assert_eq!(reports.file(filing(4), 5), Filed::Off);
+        assert!(reports.pending().is_none());
+        assert_eq!(reports.file(filing(4), Via::Form, 6), Filed::Off);
         let saved = Reports::from_json(&reports.to_json());
-        assert!(!saved.automatic && saved.consent);
-        assert_eq!(saved.reported().count(), 3);
+        assert!(!saved.automatic && saved.consent && !saved.relay_consent);
+        assert_eq!(saved.reported().count(), 2);
         assert_eq!(
             saved.reported().next().unwrap().fingerprint,
-            "agentscreen-3"
+            "agentscreen-2"
         );
     }
 
     #[test]
-    fn a_failure_opens_once_a_day_and_three_forms_an_hour() {
-        let mut reports = Reports {
-            consent: true,
-            ..Reports::default()
+    fn the_relay_files_only_after_a_card_that_said_so() {
+        let mut reports = Reports::default();
+        // Before any consent, and after a form-only consent, it waits.
+        let Filed::Waiting(id) = reports.file(filing(1), Via::Relay, 0) else {
+            panic!("the relay needs consent");
         };
-        assert_eq!(reports.file(filing(1), 0), Filed::Open("u1".into()));
-        assert!(matches!(reports.file(filing(1), HOUR_MS), Filed::Again(r) if r.url == "u1"));
-        assert_eq!(reports.file(filing(1), DAY_MS), Filed::Open("u1".into()));
+        reports.open(id, false, 1);
+        let Filed::Waiting(id) = reports.file(filing(2), Via::Relay, 2) else {
+            panic!("a form consent is not a relay consent");
+        };
+        reports.open(id, true, 3);
+        assert!(reports.relay_consent);
+        assert!(Reports::from_json(&reports.to_json()).relay_consent);
+        assert_eq!(reports.file(filing(3), Via::Relay, 4), Filed::Send);
+        // Once a day per failure, three an hour.
+        assert!(matches!(
+            reports.file(filing(3), Via::Relay, HOUR_MS),
+            Filed::Again(r) if r.url == "u3"
+        ));
+        assert_eq!(reports.file(filing(4), Via::Relay, 5), Filed::TooMany);
         assert_eq!(
-            reports.file(filing(2), DAY_MS + 1),
-            Filed::Open("u2".into())
+            reports.file(filing(4), Via::Relay, HOUR_MS + 4),
+            Filed::Send
         );
-        assert_eq!(
-            reports.file(filing(3), DAY_MS + 2),
-            Filed::Open("u3".into())
-        );
-        assert_eq!(reports.file(filing(4), DAY_MS + 3), Filed::TooMany);
-        assert_eq!(
-            reports.file(filing(4), DAY_MS + HOUR_MS + 1),
-            Filed::Open("u4".into())
-        );
+    }
+
+    #[test]
+    fn at_most_five_reports_wait() {
+        let mut reports = Reports::default();
+        for n in 0..5 {
+            assert!(matches!(
+                reports.file(filing(n), Via::Form, 0),
+                Filed::Waiting(_)
+            ));
+        }
+        assert_eq!(reports.file(filing(9), Via::Form, 0), Filed::TooMany);
     }
 
     #[test]
     fn not_now_drops_one_report_and_off_drops_all() {
         let mut reports = Reports::default();
-        let Filed::Waiting(a) = reports.file(filing(1), 1) else {
+        let Filed::Waiting(a) = reports.file(filing(1), Via::Form, 1) else {
             panic!();
         };
-        reports.file(filing(2), 1);
+        reports.file(filing(2), Via::Form, 1);
         reports.decline(a);
         assert_eq!(reports.pending().unwrap().filing.title, "t2");
         assert!(!reports.consent);
         reports.set_automatic(false);
         assert!(reports.pending().is_none());
-        assert!(reports.allow(a, 2).is_empty() && !reports.consent);
+        assert!(reports.open(a, false, 2).is_none() && !reports.consent);
     }
 
     #[test]

@@ -655,13 +655,14 @@ impl Setup {
         )
     }
 
-    /// Agents' bug reports: on, after the user's OK on the card, or off.
+    /// Agents' bug reports: on, each waiting on the card for the user, or
+    /// off.
     fn reports_row(&self, theme: &Theme) -> impl IntoElement {
         let on = self.reports_on;
         let detail = if on {
             t(
-                "Agents report Agent Screen bugs on GitHub after your OK, without window titles, typed text, links or paths",
-                "agent 经你确认后在 GitHub 报告 Agent Screen 的问题，不含窗口标题、输入的文字、链接和路径",
+                "Agents' bug reports wait on a card for you to review and open on GitHub",
+                "agent 的问题报告先在卡片上等你检查，再由你在 GitHub 打开",
             )
         } else {
             t(

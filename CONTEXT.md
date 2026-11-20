@@ -57,7 +57,7 @@ The card that drops from the menu bar icon while a Help Request is open: the dis
 _Avoid_: alert, popup, banner
 
 **Bug Report Card** (问题报告卡片):
-The card that drops from the menu bar icon, in the Help Card's family, when an agent's first bug report waits for the user's consent: the agent, the report's title, what Open on GitHub does and what was removed, and Open on GitHub, Not Now and Turn Off. Open on GitHub is the consent for later reports too. It waits while the Help Card shows (ADR 0024).
+The card that drops from the menu bar icon, in the Help Card's family, when an agent's bug report waits: the agent, the report's title, Show Report for the whole report, what Open on GitHub does, and Open on GitHub, Not Now and Turn Off. Every report waits here, and Open on GitHub opens that one report's form and no other. It waits while the Help Card shows (ADR 0024).
 _Avoid_: report dialog, consent popup
 
 **Recording** (录制):

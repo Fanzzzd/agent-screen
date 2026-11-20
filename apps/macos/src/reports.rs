@@ -1,5 +1,5 @@
 //! Bug reports agents file with `report_issue` (ADR 0024): the user's
-//! setting, consent and the reports opened, kept in
+//! setting, consents and the reports opened, kept in
 //! `reports-<instance>.json` in the state folder, and the facts the app
 //! adds to a report.
 
@@ -39,15 +39,57 @@ pub fn macos_version() -> String {
     }
 }
 
-/// Open a prefilled form in the user's browser. In the background unless
-/// the user just asked for it with a click: an agent's report never brings
-/// the browser to the front.
-pub fn open(url: &str, front: bool) {
-    let mut open = std::process::Command::new("/usr/bin/open");
-    if !front {
-        open.arg("-g");
+/// What could name the user in a report, for redaction: their full name,
+/// and the Mac's names and the home folder. Runs `id` and `scutil`, so call
+/// it off the main thread.
+pub fn who() -> (Option<String>, Vec<String>) {
+    fn run(program: &str, args: &[&str]) -> Option<String> {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !text.is_empty()).then_some(text)
     }
-    if let Err(error) = open.arg(url).spawn() {
+    let name = run("/usr/bin/id", &["-F"]);
+    let mut private: Vec<String> = [
+        run("/usr/sbin/scutil", &["--get", "ComputerName"]),
+        run("/usr/sbin/scutil", &["--get", "LocalHostName"]),
+        run("/bin/hostname", &[]),
+        std::env::var("HOME").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // The host name without ".local" too.
+    let short: Vec<String> = private
+        .iter()
+        .filter_map(|n| n.strip_suffix(".local").map(String::from))
+        .collect();
+    private.extend(short);
+    (name, private)
+}
+
+/// Open a report's prefilled form in the user's browser, in front: only
+/// ever on the user's click on the Bug Report Card or the menu. A debug
+/// build on the e2e instance with `AGENTSCREEN_REPORT_OPENS` set writes the
+/// URL to that file instead, so a test opens no browser.
+pub fn open(url: &str) {
+    let test =
+        cfg!(debug_assertions) && agent_screen_mcp::endpoint::instance().as_deref() == Some("e2e");
+    if let Some(file) = std::env::var_os("AGENTSCREEN_REPORT_OPENS").filter(|_| test) {
+        use std::io::Write;
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+            .and_then(|mut f| writeln!(f, "{url}"));
+        if let Err(error) = written {
+            log::warn!("bug reports: test opener: {error}");
+        }
+        return;
+    }
+    if let Err(error) = std::process::Command::new("/usr/bin/open").arg(url).spawn() {
         log::warn!("bug reports: open: {error}");
     }
 }

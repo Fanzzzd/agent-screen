@@ -1,11 +1,11 @@
 //! `report_issue`: an agent reports an Agent Screen bug itself (ADR 0024).
 //!
 //! The host redacts the agent's report with the app's facts added
-//! (`agent_screen_model::report`), checks GitHub's public issues for the same
-//! failure, then hands it to a `Sender`. The form sender asks the app to
-//! open the prefilled bug report form in the user's browser, once the user
-//! has consented in the menu bar. The relay sender, for a service the owner
-//! may run later, is off.
+//! (`agent_screen_model::report`) and hands it to a `Sender`. The form
+//! sender puts it on the menu bar's Bug Report Card, where the user reads it
+//! and opens the prefilled GitHub form with a click. Once the user has opened
+//! a report, later ones first check GitHub's public issues for the same
+//! failure. The relay sender, for a service the owner may run later, is off.
 
 use crate::control::{Control, ControlError, Object};
 use crate::session::Session;
@@ -165,15 +165,13 @@ pub struct Outgoing {
 /// What a sender did with a report.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Sent {
-    /// The user has turned automatic reporting off.
+    /// The user has turned agent bug reports off.
     Off,
-    /// The first report waits on the menu bar's card for the user's consent.
+    /// It waits on the menu bar's card for the user to open it.
     Waiting,
-    /// The form opened in the user's browser, for them to submit.
-    Opened,
-    /// The same failure was opened on GitHub in the last day.
+    /// The same failure was reported in the last day.
     Again { url: String },
-    /// Three forms opened in the last hour.
+    /// Five reports wait, or the relay filed three in the last hour.
     TooMany,
     /// A service filed the issue.
     Filed { number: u64, url: String },
@@ -187,8 +185,48 @@ pub trait Sender: Send + Sync {
     fn send<'a>(&'a self, control: &'a Control, out: &'a Outgoing) -> Sending<'a>;
 }
 
-/// The prefilled GitHub form, opened by the app after the user's one-time
-/// consent in the menu bar. The user submits it under their own account.
+/// Ask the app to take the report: `fileReport`. Its answer, and whether
+/// the relay may file it now.
+async fn file_report(
+    control: &Control,
+    out: &Outgoing,
+    via: &str,
+) -> Result<(Sent, bool), ControlError> {
+    let reply = control
+        .call(
+            "fileReport",
+            json!({
+                "sessionKey": out.session_key,
+                "agent": out.agent,
+                "title": out.report.title,
+                "fingerprint": out.report.fingerprint,
+                "url": out.url,
+                "body": out.report.review(),
+                "via": via,
+            }),
+        )
+        .await?;
+    Ok(match reply.get("status").and_then(Value::as_str) {
+        Some("send") => (Sent::Waiting, true),
+        Some("off") => (Sent::Off, false),
+        Some("again") => (
+            Sent::Again {
+                url: reply
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .into(),
+            },
+            false,
+        ),
+        Some("too_many") => (Sent::TooMany, false),
+        _ => (Sent::Waiting, false),
+    })
+}
+
+/// The prefilled GitHub form. The report waits on the menu bar's card, and
+/// the app opens the form only when the user clicks Open on GitHub there.
+/// The user submits it under their own account.
 pub struct Form;
 
 impl Sender for Form {
@@ -197,40 +235,15 @@ impl Sender for Form {
     }
 
     fn send<'a>(&'a self, control: &'a Control, out: &'a Outgoing) -> Sending<'a> {
-        Box::pin(async move {
-            let reply = control
-                .call(
-                    "fileReport",
-                    json!({
-                        "sessionKey": out.session_key,
-                        "agent": out.agent,
-                        "title": out.report.title,
-                        "fingerprint": out.report.fingerprint,
-                        "url": out.url,
-                    }),
-                )
-                .await?;
-            Ok(match reply.get("status").and_then(Value::as_str) {
-                Some("opened") => Sent::Opened,
-                Some("off") => Sent::Off,
-                Some("again") => Sent::Again {
-                    url: reply
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .into(),
-                },
-                Some("too_many") => Sent::TooMany,
-                _ => Sent::Waiting,
-            })
-        })
+        Box::pin(async move { Ok(file_report(control, out, "form").await?.0) })
     }
 }
 
 /// A service the owner may run that files the issue itself, so the user
 /// needn't submit a form. None is deployed, so `RELAY` is unset and this
-/// sender is never chosen. Turning it on needs the menu bar's consent to
-/// gate it as it gates the form (ADR 0024).
+/// sender is never chosen. It posts only when the app says the user agreed
+/// on a card that said reports go out without asking; otherwise the report
+/// waits on the card like a form report (ADR 0024).
 pub struct Relay {
     pub endpoint: Option<String>,
 }
@@ -243,7 +256,7 @@ impl Sender for Relay {
         "relay"
     }
 
-    fn send<'a>(&'a self, _control: &'a Control, out: &'a Outgoing) -> Sending<'a> {
+    fn send<'a>(&'a self, control: &'a Control, out: &'a Outgoing) -> Sending<'a> {
         Box::pin(async move {
             let Some(endpoint) = &self.endpoint else {
                 return Err(ControlError::new(
@@ -251,6 +264,10 @@ impl Sender for Relay {
                     "the report relay is not enabled in this build",
                 ));
             };
+            let (sent, may_send) = file_report(control, out, "relay").await?;
+            if !may_send {
+                return Ok(sent);
+            }
             let body = json!({
                 "title": out.report.title,
                 "body": out.report.body(),
@@ -291,6 +308,11 @@ pub fn sender() -> Box<dyn Sender> {
     }
 }
 
+/// Whether reports may go through the relay: the card says so only then.
+pub fn relay_on() -> bool {
+    RELAY.is_some()
+}
+
 // MARK: The tool
 
 /// The account name, which paths and logs can carry.
@@ -298,7 +320,10 @@ fn account() -> Option<String> {
     std::env::var("USER").ok()
 }
 
-/// Run `report_issue`: redact, check for duplicates and fixes, send.
+/// Run `report_issue`: redact, check for duplicates and fixes once the user
+/// has agreed to reports, then send. `cancelled` resolves when the client
+/// cancels the call.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     args: &Object,
     session: &Session,
@@ -307,6 +332,7 @@ pub async fn run(
     diagnostics: Value,
     github: &GitHub,
     sender: &dyn Sender,
+    cancelled: crate::tools::Cancelled,
 ) -> Result<Value, ControlError> {
     let draft = Draft::from_args(args).map_err(ControlError::invalid)?;
     let context = control
@@ -329,15 +355,21 @@ pub async fn run(
             .map(String::from)
             .collect()
     };
-    let build = crate::diagnostics::build_identity(env!("CARGO_PKG_VERSION"));
+    let text = |key: &str| context.get(key).and_then(Value::as_str).map(String::from);
+    // The app's build, which is what the user updates. The process the
+    // client started may be older: it keeps the binary it started from.
+    let own = crate::diagnostics::build_identity(env!("CARGO_PKG_VERSION"));
+    let version = text("version").unwrap_or(own.package_version);
+    let pipe = diagnostics
+        .pointer("/pipe/build/package_version")
+        .and_then(Value::as_str)
+        .filter(|pipe| *pipe != version)
+        .map(String::from);
     let facts = Facts {
-        version: build.package_version.clone(),
-        revision: build.git_revision.clone(),
-        dirty: build.dirty,
-        macos: context
-            .get("macos")
-            .and_then(Value::as_str)
-            .map(String::from),
+        version: version.clone(),
+        revision: text("revision").or(own.git_revision),
+        dirty: context.get("dirty").and_then(Value::as_bool).or(own.dirty),
+        macos: text("macos"),
         client: client.name.clone(),
         client_version: client.version.clone(),
         aerospace: context.get("aerospace").and_then(Value::as_bool),
@@ -348,43 +380,75 @@ pub async fn run(
         .iter()
         .filter_map(|t| t["name"].as_str().map(String::from))
         .collect::<Vec<_>>();
-    let redactor = Redactor::new(strings("titles"), words).with_private(
+    let mut redactor = Redactor::new(strings("titles"), words).with_private(
         strings("private")
             .into_iter()
             .chain([session.folder.clone()])
             .chain(account()),
     );
+    if let Some(name) = text("name") {
+        redactor = redactor.with_name(&name);
+    }
     let mut report = model::prepare(&draft, &facts, &redactor);
     let automatic = context
         .get("automatic")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let consent = context
+        .get("consent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Said on every answer when the client runs an older process.
+    let restart = pipe
+        .as_ref()
+        .map(|pipe| {
+            format!(
+                " This client runs AgentScreen mcp {pipe} and the app is {version}: ask the user to restart the client (not to update Agent Screen) so it uses the app's build."
+            )
+        })
+        .unwrap_or_default();
+    let finish = |mut out: Value| {
+        if let Some(pipe) = &pipe {
+            out["note"] = json!(format!("{}{restart}", out["note"].as_str().unwrap_or("")));
+            out["mcp_process_version"] = json!(pipe);
+        }
+        out
+    };
 
     if !automatic {
-        return Ok(outcome(
+        return Ok(finish(outcome(
             "off",
             &report,
             None,
-            "The user turned automatic bug reports off in Agent Screen's menu. Nothing was sent. Show the user this report if they want to file it themselves.",
-        ));
+            "The user turned agent bug reports off in Agent Screen's menu. Nothing was sent. Show the user this report if they want to file it themselves.",
+        )));
     }
 
-    // The duplicate and fix checks read GitHub; without an answer the
-    // report goes out, saying the check couldn't run.
-    let found = github.search(&report.fingerprint).await;
-    let latest = github.latest_release().await;
-    let checked = match (&found, &latest) {
-        (Ok(_), Ok(_)) => "checked".to_string(),
-        (Err(e), _) | (_, Err(e)) => format!("unavailable: {e}"),
+    // The duplicate and fix checks read GitHub, but only once the user has
+    // opened a report from the card: before that nothing leaves the Mac.
+    // Without an answer the report goes on, saying the check couldn't run.
+    let (found, latest, checked) = if consent {
+        let lookups =
+            async { tokio::join!(github.search(&report.fingerprint), github.latest_release()) };
+        let (found, latest) = tokio::select! {
+            both = lookups => both,
+            () = cancelled => return Err(ControlError::new("failed", "the call was cancelled")),
+        };
+        let checked = match (&found, &latest) {
+            (Ok(_), Ok(_)) => "checked".to_string(),
+            (Err(e), _) | (_, Err(e)) => format!("unavailable: {e}"),
+        };
+        (found.unwrap_or_default(), latest.ok().flatten(), checked)
+    } else {
+        (
+            Vec::new(),
+            None,
+            "skipped: nothing is read from GitHub until the user has opened a report from the card once".to_string(),
+        )
     };
-    let verdict = model::judge(
-        &report.version,
-        found.as_deref().unwrap_or_default(),
-        latest.as_ref().ok().and_then(Option::as_deref),
-    );
-    match verdict {
+    match model::judge(&version, &found, latest.as_deref()) {
         Verdict::Duplicate { found } => {
-            return Ok(with_issue(
+            return Ok(finish(with_issue(
                 outcome(
                     "duplicate",
                     &report,
@@ -395,28 +459,28 @@ pub async fn run(
                     ),
                 ),
                 &found,
-            ));
+            )));
         }
         Verdict::Fixed { found, latest } => {
-            return Ok(with_issue(
+            return Ok(finish(with_issue(
                 outcome(
                     "fixed_in_newer_release",
                     &report,
                     Some(&checked),
                     &format!(
-                        "Issue #{} was fixed and closed, and Agent Screen {latest} is out; this Mac runs {}. Nothing was filed. Ask the user to update Agent Screen (menu bar icon, Check for Updates…), then try again.",
-                        found.number, report.version
+                        "Issue #{} was fixed and closed, and Agent Screen {latest} is out; the app on this Mac is {version}. Nothing was filed. Ask the user to update Agent Screen (menu bar icon, Check for Updates…), then try again.",
+                        found.number
                     ),
                 ),
                 &found,
-            ));
+            )));
         }
         Verdict::File {
             regression_of: Some(number),
         } => {
             if let Some(more) = report.fields.iter_mut().find(|f| f.id == "more") {
                 more.text.push_str(&format!(
-                    "\nThe same fingerprint is on closed issue #{number}: this may be a regression."
+                    "\nThe same fingerprint is on issue #{number}, closed as fixed: this may be a regression."
                 ));
             }
         }
@@ -436,15 +500,11 @@ pub async fn run(
     let (status, note) = match &sent {
         Sent::Off => (
             "off",
-            "The user turned automatic bug reports off. Nothing was sent.".to_string(),
+            "The user turned agent bug reports off. Nothing was sent.".to_string(),
         ),
         Sent::Waiting => (
-            "waiting_for_consent",
-            "This is the first report on this Mac: it waits in Agent Screen's menu bar for the user's OK. Once they allow it, the prefilled GitHub form opens in their browser for them to submit. Tell the user. Don't call report_issue again for this failure.".to_string(),
-        ),
-        Sent::Opened => (
-            "opened",
-            "The prefilled GitHub form opened in the background in the user's browser. The issue exists only once the user submits it. Tell the user.".to_string(),
+            "waiting_for_user",
+            "The report waits on the Bug Report Card under Agent Screen's menu bar icon. Nothing has left the Mac. The user reads it there, and Open on GitHub opens the prefilled form for them to review and submit. Tell the user. Don't call report_issue again for this failure.".to_string(),
         ),
         Sent::Again { url } => (
             "already_reported",
@@ -452,7 +512,7 @@ pub async fn run(
         ),
         Sent::TooMany => (
             "too_many",
-            "Three reports opened in the last hour; this one was not sent. Show the user the report instead.".to_string(),
+            "Five reports already wait on the card, or three went out in the last hour; this one was not sent. Show the user the report instead.".to_string(),
         ),
         Sent::Filed { number, url } => (
             "filed",
@@ -465,7 +525,7 @@ pub async fn run(
     if let Sent::Filed { number, url } = &sent {
         result["issue"] = json!({ "number": number, "url": url });
     }
-    Ok(result)
+    Ok(finish(result))
 }
 
 /// The tool's result: what happened, and the report exactly as it would
@@ -610,8 +670,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_relay_posts_the_redacted_report_and_is_off_by_default() {
-        assert!(RELAY.is_none());
+    async fn the_relay_posts_only_after_the_users_relay_consent() {
+        assert!(RELAY.is_none() && !relay_on());
         assert_eq!(sender().name(), "github_form");
         let (api, seen) = mock(vec![(
             "/report",
@@ -619,7 +679,6 @@ mod tests {
             json!({ "number": 300, "url": "u300" }),
         )])
         .await;
-        let control = Control::new(crate::control::AppLink::Socket, Default::default());
         let draft = Draft::from_args(
             json!({ "title": "t", "expected": "e", "actual": "typed \"secret\"" })
                 .as_object()
@@ -633,6 +692,7 @@ mod tests {
             agent: "Codex".into(),
             session_key: "k".into(),
         };
+        let (control, _) = fake_app(context(true, true), "send");
         let off = Relay { endpoint: None }
             .send(&control, &out)
             .await
@@ -641,6 +701,11 @@ mod tests {
         let relay = Relay {
             endpoint: Some(format!("{api}/report")),
         };
+        // Without the consent the app keeps it on the card: no post.
+        let (waiting, asked) = fake_app(context(true, true), "waiting");
+        assert_eq!(relay.send(&waiting, &out).await.unwrap(), Sent::Waiting);
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(asked.lock().unwrap()[0]["params"]["via"], "relay");
         assert_eq!(
             relay.send(&control, &out).await.unwrap(),
             Sent::Filed {
@@ -653,8 +718,6 @@ mod tests {
         assert!(!request.contains("secret") && request.contains("[text]"));
     }
 
-    /// The app's side of report_issue: `reportContext` and `fileReport`
-    /// answered as given, every request kept.
     fn fake_app(
         context: Value,
         filed: &'static str,
@@ -699,13 +762,18 @@ mod tests {
         }
     }
 
-    fn context(automatic: bool) -> Value {
+    fn context(automatic: bool, consent: bool) -> Value {
         json!({
+            "version": "0.1.41",
+            "revision": "e3ac2970127c5bbbaddc99923465df14d3f13e51",
+            "dirty": false,
             "macos": "26.1",
             "automatic": automatic,
+            "consent": consent,
             "aerospace": false,
             "titles": ["Salaries 2026 - Numbers"],
-            "private": ["Payroll run"],
+            "private": ["Payroll run", "Someones-Mac.local"],
+            "name": "Sam Someone",
             "log": ["2026-11-20 10:00:00.000 placed display=7 \"Salaries 2026 - Numbers\" from /Users/someone/acme-payroll/s.numbers"]
         })
     }
@@ -713,7 +781,8 @@ mod tests {
     fn args() -> Object {
         json!({
             "title": "left_click on Salaries 2026 - Numbers does nothing",
-            "steps": [{ "tool": "computer", "arguments": { "display_id": 7, "action": "type", "text": "4321" } }],
+            "steps": ["Sam asked me to fill in the sheet on Someones-Mac.local"],
+            "calls": [{ "tool": "computer", "arguments": { "display_id": 7, "action": "type", "text": "4321" } }],
             "expected": "the cell is selected",
             "actual": "nothing in acme-payroll changed during Payroll run",
             "tool": "computer",
@@ -731,18 +800,34 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_new_report_waits_for_consent_with_versions_and_no_user_data() {
-        let (api, _) = mock(vec![
-            ("/search/issues", 200, json!({ "items": [] })),
+    fn never() -> crate::tools::Cancelled {
+        Box::pin(std::future::pending())
+    }
+
+    fn releases(tag: &str, items: Value) -> Vec<(&'static str, u16, Value)> {
+        vec![
+            ("/search/issues", 200, json!({ "items": items })),
             (
                 "/repos/Fanzzzd/agent-screen/releases/latest",
                 200,
-                json!({ "tag_name": "v0.0.1" }),
+                json!({ "tag_name": tag }),
             ),
-        ])
-        .await;
-        let (control, requests) = fake_app(context(true), "waiting");
+        ]
+    }
+
+    fn filed(requests: &std::sync::Mutex<Vec<Value>>) -> Option<Value> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r["method"] == "fileReport")
+            .cloned()
+    }
+
+    #[tokio::test]
+    async fn before_consent_nothing_is_read_from_github_and_the_report_waits() {
+        let (api, seen) = mock(releases("v0.0.1", json!([]))).await;
+        let (control, requests) = fake_app(context(true, false), "waiting");
         let result = run(
             &args(),
             &session(),
@@ -751,26 +836,34 @@ mod tests {
             json!({ "collector": "mcp" }),
             &GitHub::at(api),
             &Form,
+            never(),
         )
         .await
         .unwrap();
-        assert_eq!(result["status"], "waiting_for_consent");
-        assert_eq!(result["duplicate_check"], "checked");
-        let requests = requests.lock().unwrap();
-        let filed = requests
-            .iter()
-            .find(|r| r["method"] == "fileReport")
-            .expect("the report reached the app");
+        assert_eq!(result["status"], "waiting_for_user");
+        assert!(seen.lock().unwrap().is_empty(), "GitHub was read");
+        assert!(
+            result["duplicate_check"]
+                .as_str()
+                .unwrap()
+                .starts_with("skipped")
+        );
+        let filed = filed(&requests).expect("the report reached the app");
         assert_eq!(filed["params"]["sessionKey"], "pipe:abc");
         assert_eq!(filed["params"]["agent"], "Codex");
+        assert_eq!(filed["params"]["via"], "form");
         let url = filed["params"]["url"].as_str().unwrap();
+        let body = filed["params"]["body"].as_str().unwrap();
+        assert!(body.starts_with("### Title"), "{body}");
         let shown = result["report"].to_string();
-        for sent in [url, shown.as_str()] {
+        for sent in [url, body, shown.as_str()] {
             for gone in [
                 "Salaries",
                 "4321",
                 "acme-payroll",
                 "someone",
+                "Someones-Mac",
+                "Sam",
                 "s.numbers",
                 "Payroll run",
             ] {
@@ -789,7 +882,7 @@ mod tests {
             fields["diagnostics"]
                 .as_str()
                 .unwrap()
-                .starts_with(&format!("Agent Screen {}", env!("CARGO_PKG_VERSION")))
+                .starts_with("Agent Screen 0.1.41 (e3ac2970127c)")
         );
         assert!(
             fields["logs"]
@@ -797,20 +890,13 @@ mod tests {
                 .unwrap()
                 .contains("placed display=7")
         );
+        assert!(result.get("mcp_process_version").is_none());
     }
 
     #[tokio::test]
-    async fn a_bug_fixed_in_a_newer_release_files_nothing() {
-        let (api, _) = mock(vec![
-            (
-                "/search/issues",
-                200,
-                json!({ "items": [{ "number": 41, "state": "closed", "title": "t", "html_url": "u41" }] }),
-            ),
-            ("/repos/Fanzzzd/agent-screen/releases/latest", 200, json!({ "tag_name": "v999.0.0" })),
-        ])
-        .await;
-        let (control, requests) = fake_app(context(true), "waiting");
+    async fn after_consent_a_new_report_is_checked_and_still_waits() {
+        let (api, seen) = mock(releases("v0.0.1", json!([]))).await;
+        let (control, requests) = fake_app(context(true, true), "waiting");
         let result = run(
             &args(),
             &session(),
@@ -819,38 +905,82 @@ mod tests {
             json!({}),
             &GitHub::at(api),
             &Form,
+            never(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "waiting_for_user");
+        assert_eq!(result["duplicate_check"], "checked");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert!(filed(&requests).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_bug_fixed_in_a_newer_release_files_nothing() {
+        let (api, _) = mock(releases(
+            "v0.1.42",
+            json!([{ "number": 41, "state": "closed", "state_reason": "completed", "title": "t", "html_url": "u41" }]),
+        ))
+        .await;
+        let (control, requests) = fake_app(context(true, true), "waiting");
+        let result = run(
+            &args(),
+            &session(),
+            &control,
+            client(),
+            json!({}),
+            &GitHub::at(api),
+            &Form,
+            never(),
         )
         .await
         .unwrap();
         assert_eq!(result["status"], "fixed_in_newer_release");
         assert_eq!(result["issue"]["number"], 41);
-        assert!(
-            result["note"]
-                .as_str()
-                .unwrap()
-                .contains("update Agent Screen")
-        );
-        assert!(
-            !requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r["method"] == "fileReport")
-        );
+        let note = result["note"].as_str().unwrap();
+        assert!(note.contains("update Agent Screen") && note.contains("is 0.1.41"));
+        assert!(filed(&requests).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_older_client_process_is_told_to_restart_not_update() {
+        // The app runs the latest release; the client's process is older.
+        let (api, _) = mock(releases(
+            "v0.1.41",
+            json!([{ "number": 41, "state": "closed", "state_reason": "completed", "title": "t", "html_url": "u41" }]),
+        ))
+        .await;
+        let (control, requests) = fake_app(context(true, true), "waiting");
+        let result = run(
+            &args(),
+            &session(),
+            &control,
+            client(),
+            json!({ "pipe": { "build": { "package_version": "0.1.39" } } }),
+            &GitHub::at(api),
+            &Form,
+            never(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "waiting_for_user");
+        assert_eq!(result["mcp_process_version"], "0.1.39");
+        let note = result["note"].as_str().unwrap();
+        assert!(note.contains("restart the client"), "{note}");
+        assert!(!note.contains("Check for Updates"), "{note}");
+        let more = result["report"]["fields"]["more"].as_str().unwrap();
+        assert!(more.contains("issue #41, closed as fixed"), "{more}");
+        assert!(filed(&requests).is_some());
     }
 
     #[tokio::test]
     async fn an_open_duplicate_returns_its_number() {
-        let (api, _) = mock(vec![
-            (
-                "/search/issues",
-                200,
-                json!({ "items": [{ "number": 52, "state": "open", "title": "t", "html_url": "u52" }] }),
-            ),
-            ("/repos/Fanzzzd/agent-screen/releases/latest", 200, json!({ "tag_name": "v0.0.1" })),
-        ])
+        let (api, _) = mock(releases(
+            "v0.0.1",
+            json!([{ "number": 52, "state": "open", "title": "t", "html_url": "u52" }]),
+        ))
         .await;
-        let (control, requests) = fake_app(context(true), "waiting");
+        let (control, requests) = fake_app(context(true, true), "waiting");
         let result = run(
             &args(),
             &session(),
@@ -859,24 +989,19 @@ mod tests {
             json!({}),
             &GitHub::at(api),
             &Form,
+            never(),
         )
         .await
         .unwrap();
         assert_eq!(result["status"], "duplicate");
         assert_eq!(result["issue"]["number"], 52);
-        assert!(
-            !requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r["method"] == "fileReport")
-        );
+        assert!(filed(&requests).is_none());
     }
 
     #[tokio::test]
     async fn reporting_off_sends_nothing_and_reads_nothing() {
         let (api, seen) = mock(vec![]).await;
-        let (control, requests) = fake_app(context(false), "waiting");
+        let (control, requests) = fake_app(context(false, true), "waiting");
         let result = run(
             &args(),
             &session(),
@@ -885,23 +1010,18 @@ mod tests {
             json!({}),
             &GitHub::at(api),
             &Form,
+            never(),
         )
         .await
         .unwrap();
         assert_eq!(result["status"], "off");
         assert!(seen.lock().unwrap().is_empty());
-        assert!(
-            !requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r["method"] == "fileReport")
-        );
+        assert!(filed(&requests).is_none());
     }
 
     #[tokio::test]
-    async fn without_github_the_report_still_goes_out() {
-        let (control, _) = fake_app(context(true), "opened");
+    async fn without_github_the_report_still_waits() {
+        let (control, _) = fake_app(context(true, true), "waiting");
         let result = run(
             &args(),
             &session(),
@@ -910,15 +1030,46 @@ mod tests {
             json!({}),
             &GitHub::at("http://127.0.0.1:9"),
             &Form,
+            never(),
         )
         .await
         .unwrap();
-        assert_eq!(result["status"], "opened");
+        assert_eq!(result["status"], "waiting_for_user");
         assert!(
             result["duplicate_check"]
                 .as_str()
                 .unwrap()
                 .starts_with("unavailable")
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_call_stops_waiting_for_github() {
+        // A server that takes the connection and never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let (control, requests) = fake_app(context(true, true), "waiting");
+        let started = std::time::Instant::now();
+        let error = run(
+            &args(),
+            &session(),
+            &control,
+            client(),
+            json!({}),
+            &GitHub::at(api),
+            &Form,
+            Box::pin(tokio::time::sleep(Duration::from_millis(200))),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("cancelled"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(filed(&requests).is_none());
     }
 }

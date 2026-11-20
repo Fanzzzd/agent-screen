@@ -1684,12 +1684,16 @@ async fn handle_one(
                 (ids, labels)
             });
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
-            let (automatic, aerospace) = shell
+            let (automatic, consent, aerospace) = shell
                 .update(cx, |shell, _| {
-                    (shell.reports.automatic, shell.aerospace_running())
+                    (
+                        shell.reports.automatic,
+                        shell.reports.consent,
+                        shell.aerospace_running(),
+                    )
                 })
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            let (titles, log) = cx
+            let (titles, log, (name, who)) = cx
                 .background_executor()
                 .spawn(async move {
                     let titles: Vec<String> = ids
@@ -1698,21 +1702,42 @@ async fn handle_one(
                         .map(|w| w.title)
                         .filter(|t| !t.is_empty())
                         .collect();
-                    (titles, crate::lifecycle::lines_about(&ids, 30))
+                    (
+                        titles,
+                        crate::lifecycle::lines_about(&ids, 30),
+                        crate::reports::who(),
+                    )
                 })
                 .await;
+            // The app's own build: what the user updates. The client's
+            // process may be older.
+            let build = agent_screen_mcp::diagnostics::build_identity(env!("CARGO_PKG_VERSION"));
             Ok(json!({
                 "automatic": automatic,
+                "consent": consent,
+                "version": build.package_version,
+                "revision": build.git_revision,
+                "dirty": build.dirty,
                 "macos": crate::reports::macos_version(),
                 "aerospace": aerospace,
                 "titles": titles,
-                "private": labels,
+                "private": labels.into_iter().chain(who).collect::<Vec<_>>(),
+                "name": name,
                 "log": log,
             }))
         }
-        // An agent's redacted bug report, for the menu bar (ADR 0024).
+        // An agent's redacted bug report, for the menu bar (ADR 0024). It
+        // opens nothing: the report waits on the card for the user's click,
+        // and only a relay report may go out at once, after the user agreed
+        // to that on a card that said so.
         "fileReport" => {
-            let filing = agent_screen_model::report::Filing {
+            use agent_screen_model::report::{self as model, Filed, Via};
+            let prefix = format!(
+                "https://github.com/{}/issues/new?template={}&",
+                model::REPO,
+                model::TEMPLATE
+            );
+            let filing = model::Filing {
                 agent: p.string("agent").unwrap_or_else(|| "An agent".into()),
                 title: p
                     .string("title")
@@ -1720,17 +1745,28 @@ async fn handle_one(
                 fingerprint: p.string("fingerprint").unwrap_or_default(),
                 url: p
                     .string("url")
-                    .filter(|u| u.starts_with("https://github.com/"))
-                    .ok_or_else(|| ControlError::invalid("url must be a GitHub form"))?,
+                    .filter(|u| u.starts_with(&prefix) && u.len() <= model::MAX_URL)
+                    .ok_or_else(|| {
+                        ControlError::invalid(format!("url must start with {prefix}"))
+                    })?,
+                body: p
+                    .string("body")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(20_000)
+                    .collect(),
+            };
+            let via = match p.string("via").as_deref() {
+                Some("relay") => Via::Relay,
+                _ => Via::Form,
             };
             let shell = crate::ui::shell::current().ok_or_else(|| ControlError::failed("no UI"))?;
             let filed = shell
-                .update(cx, |shell, cx| shell.file_report(filing, cx))
+                .update(cx, |shell, cx| shell.file_report(filing, via, cx))
                 .map_err(|e| ControlError::failed(e.to_string()))?;
-            use agent_screen_model::report::Filed;
             Ok(match filed {
                 Filed::Off => json!({ "status": "off" }),
-                Filed::Open(_) => json!({ "status": "opened" }),
+                Filed::Send => json!({ "status": "send" }),
                 Filed::Waiting(id) => json!({ "status": "waiting", "report": id }),
                 Filed::Again(earlier) => json!({ "status": "again", "url": earlier.url }),
                 Filed::TooMany => json!({ "status": "too_many" }),
