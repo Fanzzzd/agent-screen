@@ -4,9 +4,11 @@
 //! written to the FIFO `$E2E_PROBE/in` as `<method> <json>`, with `$ID`
 //! replaced by the display id. `shot <name>` captures the display, `quit`
 //! ends it. Meanwhile it prints every window of a Dia process it didn't
-//! find running that shows off the display, and every front app change.
+//! find running that shows off the display, and every front app change,
+//! and the run's watch fails on any frame of the test's on your screen.
+//! `debugAgentsPipeWindows` picks how the next agents' instance starts.
 //!
-//!     E2E_PROBE=/tmp/dia-probe cargo e2e diaprobe
+//!     E2E_PROBE=/tmp/dia-probe E2E_NO_SIGN=1 AGENTSCREEN_INSTANCE=e2e cargo e2e diaprobe
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -15,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use agent_screen_tests::{
-    Control, capture, instance, json, probe, sh_lenient, sleep_ms, start_test_app, stop_test_app,
-    windows_of,
+    Control, capture, instance, json, probe, run, sh_lenient, sleep_ms, start_test_app,
+    stop_test_app, windows_of,
 };
 use anyhow::{Context, Result};
 
@@ -38,14 +40,13 @@ fn main() -> ExitCode {
         eprintln!("run with AGENTSCREEN_INSTANCE=e2e");
         return ExitCode::FAILURE;
     }
-    match serve() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            println!("probe failed: {e:#}");
+    run(|| {
+        let served = serve();
+        if served.is_err() {
             stop_test_app();
-            ExitCode::FAILURE
         }
-    }
+        served
+    })
 }
 
 fn serve() -> Result<()> {
@@ -70,7 +71,10 @@ fn serve() -> Result<()> {
     let [x, y, w, h]: [f64; 4] = v.try_into().map_err(|_| anyhow::anyhow!("bounds {said}"))?;
     let theirs = pids();
     let start = Instant::now();
-    println!("display {id} at {x},{y} {w}x{h}; your Dia {theirs:?}; front {:?}", front_pid());
+    println!(
+        "display {id} at {x},{y} {w}x{h}; your Dia {theirs:?}; front {:?}",
+        front_pid()
+    );
     let stop = Arc::new(AtomicBool::new(false));
     let watch = {
         let stop = stop.clone();
@@ -96,7 +100,10 @@ fn serve() -> Result<()> {
                 }
                 let now = front_pid();
                 if now != front {
-                    println!("{:>7} ms FRONT {front:?} -> {now:?}", start.elapsed().as_millis());
+                    println!(
+                        "{:>7} ms FRONT {front:?} -> {now:?}",
+                        start.elapsed().as_millis()
+                    );
                     front = now;
                 }
                 sleep_ms(30);

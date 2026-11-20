@@ -314,6 +314,64 @@ pub fn idle(age_secs: u64, pages: Option<usize>) -> bool {
     age_secs > START_SECS && pages == Some(0)
 }
 
+/// Where a new window of the agents' instance goes (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowHome {
+    /// It opened on one of this app's Agent Displays.
+    Stay,
+    Move(crate::model::DisplayId),
+    /// No Agent Display is left for it: hide the instance, so nothing of
+    /// it shows on the user's screen.
+    Hide,
+}
+
+/// What is known as the agents' instance makes a new window: whether the
+/// window opened on one of this app's Agent Displays (`on_ours`), the
+/// display whose launch started or reused the instance last with that
+/// launch's age (`launched`), the display driven last (`driven`), and a
+/// display that shows another window of the instance (`showing`), each
+/// still there.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgentsWindow {
+    pub on_ours: bool,
+    pub launched: Option<(crate::model::DisplayId, u64)>,
+    pub driven: Option<crate::model::DisplayId>,
+    pub showing: Option<crate::model::DisplayId>,
+}
+
+/// Every window of the agents' instance is the agents', whoever acted as
+/// it opened: the user signing in through the Viewer makes Dia open its
+/// browser window, which is the agents' too. A window off this app's
+/// displays goes to the display that launched the instance in the last
+/// `START_SECS`, else the display driven last, else one that shows the
+/// instance's other windows, else the display that launched it last.
+pub fn window_home(w: AgentsWindow) -> WindowHome {
+    if w.on_ours {
+        return WindowHome::Stay;
+    }
+    let fresh = w
+        .launched
+        .filter(|(_, age)| *age <= START_SECS)
+        .map(|(d, _)| d);
+    match fresh
+        .or(w.driven)
+        .or(w.showing)
+        .or(w.launched.map(|(d, _)| d))
+    {
+        Some(d) => WindowHome::Move(d),
+        None => WindowHome::Hide,
+    }
+}
+
+/// The switches that open Chromium's startup window at `frame`, in global
+/// points with the origin at the main screen's top left.
+pub fn window_switches(f: crate::model::Rect) -> Vec<String> {
+    vec![
+        format!("--window-position={},{}", f.x.round(), f.y.round()),
+        format!("--window-size={},{}", f.width.round(), f.height.round()),
+    ]
+}
+
 /// The switch that starts Chromium without its startup window.
 pub const NO_STARTUP_WINDOW: &str = "--no-startup-window";
 
@@ -545,6 +603,56 @@ mod tests {
         assert!(!using.hold());
         using.end_quit();
         assert!(using.hold());
+    }
+
+    #[test]
+    fn the_startup_window_opens_at_the_frame_given() {
+        let frame = crate::model::Rect {
+            x: 3848.0,
+            y: -792.0,
+            width: 1264.0,
+            height: 784.0,
+        };
+        assert_eq!(
+            window_switches(frame),
+            s(&["--window-position=3848,-792", "--window-size=1264,784"])
+        );
+    }
+
+    #[test]
+    fn every_window_of_the_agents_instance_goes_to_an_agent_display() {
+        let w = AgentsWindow {
+            on_ours: false,
+            launched: Some((7, 3)),
+            driven: Some(8),
+            showing: Some(9),
+        };
+        assert_eq!(
+            window_home(AgentsWindow { on_ours: true, ..w }),
+            WindowHome::Stay
+        );
+        assert_eq!(window_home(w), WindowHome::Move(7));
+        let old = AgentsWindow {
+            launched: Some((7, START_SECS + 1)),
+            ..w
+        };
+        assert_eq!(window_home(old), WindowHome::Move(8));
+        assert_eq!(
+            window_home(AgentsWindow {
+                driven: None,
+                ..old
+            }),
+            WindowHome::Move(9)
+        );
+        assert_eq!(
+            window_home(AgentsWindow {
+                driven: None,
+                showing: None,
+                ..old
+            }),
+            WindowHome::Move(7)
+        );
+        assert_eq!(window_home(AgentsWindow::default()), WindowHome::Hide);
     }
 
     #[test]

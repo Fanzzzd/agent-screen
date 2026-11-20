@@ -438,6 +438,9 @@ struct Target {
     /// opens on the display without the agent acting, as an app does next
     /// to its main window.
     home: Option<Rect>,
+    /// The agents' browser instance: every new window goes to an Agent
+    /// Display (`agents_window`).
+    agents: bool,
 }
 
 /// Whether to take a new window, and how many are left after it.
@@ -460,13 +463,21 @@ impl Catch {
         screen: Option<String>,
         limit: Option<usize>,
     ) -> Option<Catch> {
-        Self::start_with(pid, display, screen, limit, None, None).await
+        Self::start_with(pid, display, screen, limit, None, None, false).await
+    }
+
+    /// The catch on the agents' browser instance, for as long as it runs:
+    /// no display holds the instance, so no display's catch takes its
+    /// windows, and a window it opens by itself would open on the user's
+    /// screen (ADR 0022).
+    pub async fn agents(pid: i32) -> Option<Catch> {
+        Self::start_with(pid, 0, None, None, None, None, true).await
     }
 
     /// A catch for an app the user took back: it returns to `home` each new
     /// window that opens on the display while the agent isn't acting there.
     pub async fn returning(pid: i32, display: DisplayId, home: Rect) -> Option<Catch> {
-        Self::start_with(pid, display, None, None, None, Some(home)).await
+        Self::start_with(pid, display, None, None, None, Some(home), false).await
     }
 
     /// A catch for the one window that shows `document`, for a running app
@@ -477,7 +488,7 @@ impl Catch {
         screen: Option<String>,
         document: std::path::PathBuf,
     ) -> Option<Catch> {
-        Self::start_with(pid, display, screen, Some(1), Some(document), None).await
+        Self::start_with(pid, display, screen, Some(1), Some(document), None, false).await
     }
 
     async fn start_with(
@@ -487,8 +498,13 @@ impl Catch {
         limit: Option<usize>,
         document: Option<std::path::PathBuf>,
         home: Option<Rect>,
+        agents: bool,
     ) -> Option<Catch> {
-        let bounds = super::cg::display_bounds(display);
+        let bounds = if agents {
+            Rect::default()
+        } else {
+            super::cg::display_bounds(display)
+        };
         from_catch_thread(move || {
             let mut observer: Observer = std::ptr::null_mut();
             if unsafe { AXObserverCreate(pid, created, &mut observer) } != 0 || observer.is_null() {
@@ -507,6 +523,7 @@ impl Catch {
                 skipped: Mutex::new(Vec::new()),
                 undecided: Mutex::new(Vec::new()),
                 home,
+                agents,
             }));
             let app = ax::application(pid);
             let name = CFString::from_static_str("AXWindowCreated");
@@ -607,6 +624,13 @@ extern "C" fn created(
                 ax::window_id(window)
             );
         }
+        if role.is_none() && target.agents {
+            agents_undescribed(target.pid, ax::window_id(window));
+        }
+        return;
+    }
+    if target.agents {
+        agents_window(window, target.pid);
         return;
     }
     // The user's app: send back what opens on the agent's display by itself.
@@ -706,6 +730,124 @@ extern "C" fn created(
         target.display,
         screen,
     );
+}
+
+/// A launch that started or reused the agents' browser instance: its pid,
+/// the display, that display's AeroSpace screen, and when.
+type AgentsLaunch = (i32, DisplayId, Option<String>, std::time::Instant);
+
+static AGENTS_LAUNCHES: Mutex<Vec<AgentsLaunch>> = Mutex::new(Vec::new());
+
+/// Note a launch of the agents' instance `pid` on `display`, whose
+/// AeroSpace screen is `screen`: its windows that open off this app's
+/// displays go there next (`agent_browser::window_home`).
+pub fn agents_launched(pid: i32, display: DisplayId, screen: Option<String>) {
+    let mut launches = lock(&AGENTS_LAUNCHES);
+    launches.retain(|(p, d, _, _)| *p == pid && *d != display);
+    launches.push((pid, display, screen, std::time::Instant::now()));
+}
+
+/// Where the new window of the agents' instance at `frame` goes, with the
+/// destination's AeroSpace screen when known.
+fn agents_home(
+    pid: i32,
+    frame: Option<Rect>,
+    new: Option<u32>,
+) -> (
+    agent_screen_model::agent_browser::WindowHome,
+    Option<String>,
+) {
+    use agent_screen_model::agent_browser::{AgentsWindow, window_home};
+    let online = super::cg::online();
+    let live = |d: &DisplayId| online.contains(d) && super::cg::is_agent_screen(*d);
+    let launches: Vec<(DisplayId, Option<String>, std::time::Instant)> = lock(&AGENTS_LAUNCHES)
+        .iter()
+        .filter(|(p, d, _, _)| *p == pid && live(d))
+        .map(|(_, d, screen, at)| (*d, screen.clone(), *at))
+        .collect();
+    let now = std::time::Instant::now();
+    let mut driven: Vec<(DisplayId, std::time::Instant)> = lock(&ACTED)
+        .iter()
+        .filter(|(d, p, until)| p.is_none_or(|p| p == pid) && now < *until && live(d))
+        .map(|(d, _, until)| (*d, *until))
+        .collect();
+    driven.sort_by_key(|(_, until)| *until);
+    let mut ours: Vec<DisplayId> = launches.iter().map(|(d, _, _)| *d).collect();
+    ours.extend(driven.iter().map(|(d, _)| *d));
+    let on = |r: Rect| {
+        ours.iter()
+            .copied()
+            .find(|d| super::cg::display_bounds(*d).contains(r.mid()))
+    };
+    let showing = windows::all()
+        .iter()
+        .filter(|w| w.target.pid == pid && w.layer == 0 && Some(w.target.window_id) != new)
+        .find_map(|w| on(w.bounds));
+    let launched = launches
+        .iter()
+        .max_by_key(|(_, _, at)| *at)
+        .map(|(d, _, at)| (*d, at.elapsed().as_secs()));
+    let home = window_home(AgentsWindow {
+        on_ours: frame.and_then(on).is_some(),
+        launched,
+        driven: driven.last().map(|(d, _)| *d),
+        showing,
+    });
+    let screen = match home {
+        agent_screen_model::agent_browser::WindowHome::Move(d) => lock(&AGENTS_LAUNCHES)
+            .iter()
+            .rev()
+            .find(|(_, shown, _, _)| *shown == d)
+            .and_then(|(_, _, screen, _)| screen.clone()),
+        _ => None,
+    };
+    (home, screen)
+}
+
+/// A new window of the agents' instance: onto an Agent Display, whoever
+/// acted as it opened (ADR 0022).
+fn agents_window(window: &AXUIElement, pid: i32) {
+    use agent_screen_model::agent_browser::WindowHome;
+    let id = ax::window_id(window);
+    let frame = ax::frame(window);
+    match agents_home(pid, frame, id) {
+        (WindowHome::Stay, _) => {}
+        (WindowHome::Move(display), screen) => {
+            let moved = ax::move_element_into(window, super::cg::display_bounds(display)).is_ok();
+            log::info!(
+                "catch: the agents' instance {pid} opened window {id:?} at {frame:?}, off the Agent Displays; moved onto display {display}: {moved}"
+            );
+            if let (Some(id), Some(screen)) = (id, screen) {
+                follow_aerospace(WindowTarget { pid, window_id: id }, display, screen);
+            }
+        }
+        (WindowHome::Hide, _) => {
+            super::app::hide(pid);
+            log::info!(
+                "catch: the agents' instance {pid} opened window {id:?} with no Agent Display left; hid it"
+            );
+        }
+    }
+}
+
+/// A window of the agents' instance that it was too busy to describe:
+/// look again until it does, for up to 3 s.
+fn agents_undescribed(pid: i32, id: Option<u32>) {
+    let Some(id) = id else { return };
+    std::thread::spawn(move || {
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let Ok(listed) = ax::try_elements_attribute(&ax::application(pid), "AXWindows") else {
+                continue;
+            };
+            if let Some(window) = listed.iter().find(|w| ax::window_id(w) == Some(id)) {
+                if ax::string_attribute(window, "AXRole").as_deref() == Some("AXWindow") {
+                    agents_window(window, pid);
+                }
+                return;
+            }
+        }
+    });
 }
 
 /// Once AeroSpace registers a new window, which it files in the user's

@@ -102,6 +102,9 @@ pub struct Core {
     /// a window such an app opens later, as TextEdit does for a second
     /// `open`, goes to the agent's display instead of the user's screen.
     pub kept_catches: Vec<(DisplayId, crate::mac::catch::Catch)>,
+    /// The catch on the agents' browser instance, which no display holds:
+    /// each window it opens goes to an Agent Display (ADR 0022).
+    pub agents_catch: Option<crate::mac::catch::Catch>,
     /// For apps the user took back: returns their new windows that open on
     /// the display by themselves.
     pub returning: Vec<(DisplayId, crate::mac::catch::Catch)>,
@@ -167,6 +170,7 @@ impl Core {
             remodes: HashMap::new(),
             launching: HashSet::new(),
             kept_catches: Vec::new(),
+            agents_catch: None,
             returning: Vec::new(),
             pending_returns: Default::default(),
             watching: HashSet::new(),

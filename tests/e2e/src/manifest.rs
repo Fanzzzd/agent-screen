@@ -257,6 +257,9 @@ pub const SCRIPTS: &[Script] = &[
     script("diafocused", &[AgentInput, Browser], Full, Agent, 1).manual(
         "it needs your own browser in front: run it with E2E_BROWSER=\"Google Chrome\" E2E_CHROME=1 while a Chrome window of yours has focus; Dia skips until it is verified",
     ),
+    script("diaprobe", &[Browser], Full, Agent, 1).manual(
+        "it is interactive: it runs the control calls written to $E2E_PROBE/in, to verify a browser's agents' instance before it goes on agent_browser::VERIFIED",
+    ),
     script("diashared", &[AgentInput, Browser], Full, Agent, 1).manual(
         "it drives your own Dia: run it with E2E_DIA=1 while you type in another Dia window",
     ),

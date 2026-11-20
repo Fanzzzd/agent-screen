@@ -2316,6 +2316,18 @@ async fn handle_one(
             .map(|result| json!({ "result": result }))
             .map_err(ControlError::failed)
         }
+        // Test hook: whether the agents' instance of the next browser
+        // started gets its windows through the pipe (`on`), as Chrome does,
+        // or opens its own startup window; null for the browser's default.
+        "debugAgentsPipeWindows" if debug_methods() => {
+            let to = match p.0.get("on") {
+                Some(Value::Bool(true)) => 2,
+                Some(Value::Bool(false)) => 1,
+                _ => 0,
+            };
+            PIPE_WINDOWS_FOR_TESTS.store(to, std::sync::atomic::Ordering::Relaxed);
+            Ok(json!({}))
+        }
         // Test hook: a key press of the user's that went to `pid`, as the
         // global key monitor reports one typed into Spotlight.
         "debugUserKey" if debug_methods() => {
@@ -5143,6 +5155,10 @@ fn open_target(text: &str) -> Result<String, ControlError> {
 /// fails there, records nothing and never opens a window in theirs.
 /// Test builds may treat the browser `bundle_id` as verified, to verify it
 /// on a display (ADR 0022).
+/// `debugAgentsPipeWindows`: 0 for the browser's default, 1 for its own
+/// startup window, 2 for windows through the pipe.
+static PIPE_WINDOWS_FOR_TESTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn verifying_for_tests(bundle_id: &str) -> bool {
     cfg!(debug_assertions)
         && std::env::var("AGENTSCREEN_VERIFY_BROWSER").as_deref() == Ok(bundle_id)
@@ -5823,6 +5839,25 @@ async fn launch(
     result
 }
 
+/// Keep the catch on the agents' instance `pid` (`Catch::agents`), unless
+/// one is on it already.
+async fn agents_catch(core: &Entity<Core>, pid: i32, cx: &mut AsyncApp) {
+    let held = core.read_with(cx, |c, _| {
+        c.agents_catch.as_ref().is_some_and(|k| k.pid() == pid)
+    });
+    if held {
+        return;
+    }
+    let catch = crate::mac::catch::Catch::agents(pid).await;
+    log::debug!(
+        "launch: a catch on the agents' instance {pid}: {}",
+        catch.is_some()
+    );
+    if let Some(catch) = catch {
+        core.update(cx, |c, _| c.agents_catch = Some(catch));
+    }
+}
+
 async fn launch_now(
     core: &Entity<Core>,
     id: DisplayId,
@@ -5872,6 +5907,10 @@ async fn launch_now(
     // opens. A starting app's windows are all Agent Screen's.
     let limit = was_running.then_some(1);
     let catch_from = |pid: i32| crate::mac::catch::Catch::start(pid, id, screen.clone(), limit);
+    if let Some(agents) = &agents {
+        crate::mac::catch::agents_launched(agents.pid, id, screen.clone());
+        agents_catch(core, agents.pid, cx).await;
+    }
     let running = off(cx, pids.clone()).await.into_iter().next();
     // The agents' running instance is shared by every session: its window
     // is the one its pipe made for this page, found below, and a catch
@@ -5950,18 +5989,35 @@ async fn launch_now(
         // without activating it (ADR 0022). A browser that keeps its pages
         // in windows of its own, as Dia, opens its startup window without
         // activation and makes none through the pipe.
-        let through_pipe = start.agents_start && {
-            let path = path.clone();
-            off(cx, move || {
-                app::bundle_id_at(&path)
-                    .is_none_or(|id| agent_screen_model::agent_browser::pipe_makes_windows(&id))
-            })
-            .await
-        };
+        let through_pipe = start.agents_start
+            && match PIPE_WINDOWS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+                1 => false,
+                2 => true,
+                _ => {
+                    let path = path.clone();
+                    off(cx, move || {
+                        app::bundle_id_at(&path).is_none_or(|id| {
+                            agent_screen_model::agent_browser::pipe_makes_windows(&id)
+                        })
+                    })
+                    .await
+                }
+            };
         let first_page = if through_pipe {
             arguments.push(agent_screen_model::agent_browser::NO_STARTUP_WINDOW.into());
             Some(first.clone().unwrap_or_else(|| "about:blank".into()))
         } else {
+            // Its startup window opens where Chromium is told, on the
+            // display, where the browser follows it: else it opens on the
+            // main screen until the catch moves it.
+            if start.agents_start {
+                arguments.extend(agent_screen_model::agent_browser::window_switches(
+                    bounds.inset(
+                        agent_screen_model::launch::WINDOW_MARGIN,
+                        agent_screen_model::launch::WINDOW_MARGIN,
+                    ),
+                ));
+            }
             arguments.extend(first);
             None
         };
@@ -5981,6 +6037,7 @@ async fn launch_now(
                         .find(|a| a.starts_with("--user-data-dir="))
                 {
                     devtools::mark_agents(pid, profile);
+                    crate::mac::catch::agents_launched(pid, id, screen.clone());
                 }
                 if let Some(url) = first_page {
                     let margin = agent_screen_model::launch::WINDOW_MARGIN;
@@ -6149,6 +6206,9 @@ async fn launch_now(
                 .timer(Duration::from_millis(20))
                 .await;
         }
+    }
+    if start.agents_start && catch.is_some() {
+        agents_catch(core, pid, cx).await;
     }
     log::debug!(
         "launch: {name} is pid {pid} at {} ms, catching new windows: {}",
