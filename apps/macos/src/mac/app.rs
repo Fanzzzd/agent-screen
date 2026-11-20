@@ -670,6 +670,21 @@ pub fn terminate(pid: i32) -> bool {
         .is_some_and(|app| app.terminate())
 }
 
+/// Let an app Agent Screen started finish its launch before it shows a
+/// window. AppKit runs a launched app's open-application handling, which
+/// restores its windows, only once the app's main thread wakes for an
+/// event; nothing wakes an app started with `posix_spawn` until then, and
+/// that took up to 1.85 s. When the handling runs after a window of
+/// Chromium's shows, Chromium brings its windows forward and takes the
+/// user's front app (#241). An accessibility request wakes the main
+/// thread, and the handling began within 2 ms of it; once it has begun,
+/// a window that shows doesn't come forward. No signal says it ran:
+/// `isFinishedLaunching` turns true before it. So the window waits 300 ms.
+pub fn finish_launch(pid: i32) {
+    let _ = super::ax::string_attribute(&super::ax::application(pid), "AXRole");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
 /// Show a hidden app without activating it. An app that made itself an
 /// accessory after it started hidden, as Electron development builds that
 /// open windows in the background do, ignores `unhide`; it takes the

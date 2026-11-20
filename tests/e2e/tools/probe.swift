@@ -14,7 +14,7 @@
 //   probe focused PID         the window number of PID's focused window, as Accessibility names it, or 0
 //   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
 //   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
-//   probe fronts SECONDS      the front app now and at each change for SECONDS, "epoch-ms pid name" per line
+//   probe fronts SECONDS      the front app now and at each change for SECONDS, notified or polled every 10 ms, "epoch-ms pid name" per line
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 //   probe bounds ID           a display's frame in global points, "x y w h"
@@ -233,14 +233,21 @@ case "openmenus":
     }
   }
 case "fronts":
+  // Each activation as it is notified, and the front app polled every
+  // 10 ms, so a change the notifications miss still shows.
+  var last: pid_t? = nil
   let say = { (app: NSRunningApplication?) in
-    print(Int(Date().timeIntervalSince1970 * 1000), app?.processIdentifier ?? 0, app?.localizedName ?? "")
+    let pid = app?.processIdentifier ?? 0
+    if pid == last { return }
+    last = pid
+    print(Int(Date().timeIntervalSince1970 * 1000), pid, app?.localizedName ?? "")
     fflush(stdout)
   }
   say(NSWorkspace.shared.frontmostApplication)
   NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { note in
     say(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
   }
+  Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in say(NSWorkspace.shared.frontmostApplication) }
   RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
 case "activate":
   // Bring a process forward, as the user clicking it would.

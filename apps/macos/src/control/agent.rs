@@ -5273,8 +5273,9 @@ async fn unclaim_and_already_running(
 }
 
 /// Start a Chromium or Electron app with a private DevTools pipe (ADR 0010,
-/// ADR 0022). Returns the spawned pid and a one-shot outcome channel on
-/// success; `None` falls back to `open_in_background`.
+/// ADR 0022). Returns the spawned pid, whether it starts with no window,
+/// and a one-shot outcome channel on success; `None` falls back to
+/// `open_in_background`.
 async fn spawn_piped_browser(
     core: &Entity<Core>,
     name: &str,
@@ -5283,7 +5284,7 @@ async fn spawn_piped_browser(
     first: Option<&str>,
     start: &Start,
     cx: &mut AsyncApp,
-) -> Option<(i32, std::sync::mpsc::Receiver<bool>)> {
+) -> Option<(i32, bool, std::sync::mpsc::Receiver<bool>)> {
     let path = path.to_path_buf();
     // A browser opens its windows on the display, never on the user's
     // screen first (#123).
@@ -5352,7 +5353,13 @@ async fn spawn_piped_browser(
                     .spawn(async move {
                         let made = devtools::channel(pid, Duration::from_secs(15))
                             .ok_or_else(|| "no pipe within 15 s".to_string())
-                            .and_then(|c| c.new_window(&url, frame));
+                            .and_then(|c| {
+                                // Its launch must be over before its first
+                                // window shows, or Chromium brings that
+                                // window to the front (#241).
+                                app::finish_launch(pid);
+                                c.new_window(&url, frame)
+                            });
                         log::info!(
                             "launch: the agents' instance {pid}'s first window through its pipe: {made:?}"
                         );
@@ -5361,7 +5368,7 @@ async fn spawn_piped_browser(
             }
             let (done, outcome) = std::sync::mpsc::channel();
             let _ = done.send(true);
-            Some((pid, outcome))
+            Some((pid, through_pipe, outcome))
         }
         Err(e) => {
             log::warn!("launch: couldn't start {name} with a pipe ({e}); opening it");
@@ -5762,11 +5769,15 @@ async fn launch_now(
         })
         .await;
     let mut spawned = None;
+    // The agents' instance starts with no window, and its first comes
+    // through its pipe at the display's frame (ADR 0022).
+    let mut windowless = false;
     let opening = if piped {
         spawn_piped_browser(core, name, &path, bounds, first.as_deref(), start, cx)
             .await
-            .map(|(pid, outcome)| {
+            .map(|(pid, through_pipe, outcome)| {
                 spawned = Some(pid);
+                windowless = through_pipe;
                 outcome
             })
     } else {
@@ -5897,7 +5908,7 @@ async fn launch_now(
         // `open -j` starts an app hidden; one Agent Screen started itself
         // is hidden as soon as it can be, so its first window doesn't
         // draw on the user's screen.
-        let hide = spawned.is_some();
+        let hide = spawned.is_some() && !windowless;
         cx.background_executor()
             .spawn(async move {
                 if hide && !app::is_hidden(pid) {
@@ -5927,7 +5938,7 @@ async fn launch_now(
         return unclaim_and_already_running(core, id, pid, name, &instances_before, cx).await;
     }
     // Started hidden: once its windows sit on the display, show them there.
-    if !was_running {
+    if !was_running && !windowless {
         for _ in 0..150 {
             // Browsers show themselves as they start, which draws their
             // first window on the user's screen: hide them again until it
