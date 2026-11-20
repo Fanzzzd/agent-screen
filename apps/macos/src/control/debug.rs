@@ -89,6 +89,18 @@ pub(super) async fn handle(
             shared_app::force_focus_unknown(on);
             Ok(json!({ "on": on }))
         }
+        // Test hook: how long a call waits for an action the user's front
+        // app blocks before it answers input_pending; 0 restores 30 s.
+        "debugFrontWait" => {
+            if agent_screen_mcp::endpoint::instance().as_deref() != Some("e2e") {
+                return Some(Err(ControlError::invalid(
+                    "debugFrontWait requires the isolated e2e instance",
+                )));
+            }
+            let ms = p.int("ms").unwrap_or(0).max(0) as u64;
+            super::front_queue::set_wait_for_tests(ms);
+            Ok(json!({ "ms": ms }))
+        }
         // Test hook: what the last hold of the user's keys during a launch
         // did (#110): how many events and key downs, how long, and why it
         // ended. Counts only, never which keys.
@@ -687,6 +699,24 @@ async fn debug_show(
             ));
         }
         cg::debug_user_stage(id, connection);
+        return Ok(json!({}));
+    }
+    // An action that has waited 30 s for the user to leave an app, as
+    // its display's card and the Viewer header say. It never runs.
+    if surface == "waiting-line" {
+        usable(core, connection, p, id, "debugShow", cx)?;
+        let app = p.string("app").unwrap_or_else(|| "Dia".into());
+        core.update(cx, |c, cx| -> Result<(), ControlError> {
+            let owner = c
+                .input_queue
+                .owner(id, connection)
+                .map_err(ControlError::invalid)?;
+            c.input_queue
+                .preview_waiting(owner, app)
+                .map_err(ControlError::invalid)?;
+            cx.notify();
+            Ok(())
+        })?;
         return Ok(json!({}));
     }
     if matches!(

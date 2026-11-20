@@ -304,14 +304,16 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     }
 }
 
-/// Whether a press that ran leaves its effect unclear: the element listed
-/// no AXPress, so it was pressed only for its role (`press_anyway`), and
-/// nothing was seen to change. Dia lists no AXPress on a page's elements
-/// and ignores the press, but a link waiting on a slow server shows
-/// nothing either, so the answer says it can't tell rather than that the
-/// press failed, which could have the agent click again and submit twice.
-pub fn unlisted_press_unclear(listed: bool, seen: Effect) -> bool {
-    !listed && seen == Effect::NoneSeen
+/// Whether a click beside the user's window goes in as a press on the
+/// element under it: only when the element lists AXPress. An element
+/// found only by its role (`press_anyway`) may ignore the press: Dia lists
+/// no AXPress on a page's elements and ignored every press, 0 of 14
+/// (#219). Pressing it anyway left the agent unable to tell whether it
+/// acted, and a retry could submit twice. Such a click waits in the
+/// Input Queue for the app to leave the front instead, and then goes in
+/// as a posted click.
+pub fn press_goes_in(listed: bool) -> bool {
+    listed
 }
 
 /// Whether Tab stops at an element: one that is enabled and lets a client
@@ -385,6 +387,47 @@ pub fn delete_backward(value: &str, selection: Option<(usize, usize)>) -> (Strin
         1
     };
     insert(value, Some((start - back, back)), "")
+}
+
+/// The window of a shared app to hand key focus back to once the agent's
+/// input is done: the app's focused window as the agent starts, when it is
+/// the user's, not one on an Agent Display. Read before anything is sent,
+/// since a posted click or the wake click makes the agent's window key.
+pub fn user_window_to_remember(focused: Option<u32>, on_agent_display: bool) -> Option<u32> {
+    focused.filter(|_| !on_agent_display)
+}
+
+/// What to do with a remembered user window once the agent's input is
+/// done, by the app's focused window now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandBack {
+    /// The user's window still has focus: keep it for a later hand-back.
+    Keep,
+    /// The app didn't say: try again on the next hand-back.
+    Retry,
+    /// Another window of the user's has focus, as one they picked since.
+    Leave,
+    /// The agent's window took focus: give it back to the user's.
+    Restore,
+}
+
+/// `agent_main`: the agent's window, on its Agent Display, says it is the
+/// app's main window. Chromium apps such as Dia keep naming the user's
+/// window as focused after a click made the agent's window key, so that
+/// counts as the agent's window having focus.
+pub fn hand_back(
+    user: u32,
+    focused: Option<u32>,
+    focused_on_agent_display: bool,
+    agent_main: bool,
+) -> HandBack {
+    match focused {
+        Some(id) if id == user && agent_main => HandBack::Restore,
+        Some(id) if id == user => HandBack::Keep,
+        None => HandBack::Retry,
+        Some(_) if focused_on_agent_display => HandBack::Restore,
+        Some(_) => HandBack::Leave,
+    }
 }
 
 #[cfg(test)]
@@ -719,10 +762,34 @@ mod tests {
     }
 
     #[test]
-    fn an_unlisted_press_that_changed_nothing_is_unclear() {
-        assert!(unlisted_press_unclear(false, Effect::NoneSeen));
-        assert!(!unlisted_press_unclear(false, Effect::Seen));
-        assert!(!unlisted_press_unclear(false, Effect::Unknown));
-        assert!(!unlisted_press_unclear(true, Effect::NoneSeen));
+    fn a_press_goes_in_only_on_an_element_that_lists_it() {
+        assert!(press_goes_in(true));
+        assert!(!press_goes_in(false));
+    }
+
+    #[test]
+    fn the_users_window_is_remembered_before_the_agents_input_never_the_agents() {
+        // The user's window has focus as the replay starts.
+        assert_eq!(user_window_to_remember(Some(7), false), Some(7));
+        // Read after a wake, the agent's window would be focused: never
+        // remembered as the user's.
+        assert_eq!(user_window_to_remember(Some(9), true), None);
+        assert_eq!(user_window_to_remember(None, false), None);
+    }
+
+    #[test]
+    fn focus_goes_back_only_from_the_agents_window() {
+        assert_eq!(hand_back(7, Some(9), true, false), HandBack::Restore);
+        assert_eq!(hand_back(7, Some(7), false, false), HandBack::Keep);
+        assert_eq!(hand_back(7, None, false, false), HandBack::Retry);
+        assert_eq!(hand_back(7, Some(8), false, false), HandBack::Leave);
+    }
+
+    #[test]
+    fn a_chromium_app_naming_the_users_window_while_the_agents_is_main_gets_it_back() {
+        assert_eq!(hand_back(7, Some(7), false, true), HandBack::Restore);
+        // A window the user picked since stays theirs.
+        assert_eq!(hand_back(7, Some(8), false, true), HandBack::Leave);
+        assert_eq!(hand_back(7, None, false, true), HandBack::Retry);
     }
 }

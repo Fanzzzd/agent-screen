@@ -279,7 +279,8 @@ impl Render for Peek {
                 continue;
             };
             let count = self.counts.get(id).copied().unwrap_or(0);
-            let status = Status::of(display, count, &theme);
+            let status = Status::of(display, count, &theme)
+                .waiting_for(display.agent_name(), core.input_queue.waiting_line(*id));
             let pointer = (!display.takeover && !display.is_ended())
                 .then_some(display.pointer)
                 .flatten();

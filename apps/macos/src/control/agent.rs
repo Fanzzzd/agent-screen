@@ -299,6 +299,14 @@ async fn handle_one(
         if method != "launchApp" {
             watch_for_changes(&core, id, cx);
         }
+        // A newer action of the agent replaces its queued front request
+        // (ADR 0013); click, type and key do so as they go in.
+        if matches!(
+            method,
+            "mouseDown" | "mouseUp" | "drag" | "scroll" | "holdKey" | "elementAction"
+        ) {
+            super::front_queue::replaced_by(&core, connection, id, cx);
+        }
     }
     let refresh_acted = || {
         if let Some(id) = acting {
@@ -425,7 +433,9 @@ async fn handle_one(
             Ok(result)
         }
         "click" => {
-            return finish_arm(click_action(&core, connection, &p, cx).await, refresh_acted);
+            let first = finish_arm(click_action(&core, connection, &p, cx).await, refresh_acted);
+            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
+                .await;
         }
         "move" => {
             let (id, point) = target(&core, &p, cx).await?;
@@ -503,8 +513,16 @@ async fn handle_one(
                 .await;
             Ok(json!({}))
         }
-        "type" => return finish_arm(type_action(&core, &p, cx).await, refresh_acted),
-        "key" => return finish_arm(key_action(&core, &p, cx).await, refresh_acted),
+        "type" => {
+            let first = finish_arm(type_action(&core, &p, cx).await, refresh_acted);
+            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
+                .await;
+        }
+        "key" => {
+            let first = finish_arm(key_action(&core, &p, cx).await, refresh_acted);
+            return super::front_queue::queue_if_blocked(&core, connection, method, &p, first, cx)
+                .await;
+        }
         "holdKey" => {
             let id = input_display(&core, &p, cx).await?;
             let keys = p
@@ -947,6 +965,34 @@ enum Arm {
     /// `pipe_drag`, `through_input_method`, `shared_app::...`); `handle_one`
     /// returns directly and skips the trailing `agent_acted` refresh.
     Early(Reply),
+}
+
+/// Run a queued click, key or type call again (`front_queue`).
+pub(super) async fn replay(
+    core: &Entity<Core>,
+    connection: u64,
+    method: &str,
+    p: &Args<'_>,
+    cx: &mut AsyncApp,
+) -> Reply {
+    let acted = p.int("displayId").map(|id| id as DisplayId);
+    let refresh = || {
+        if let Some(id) = acted {
+            crate::mac::catch::agent_acted(id);
+        }
+    };
+    match method {
+        // Boxed: a click with real_input waits in the Input Queue too.
+        "click" => finish_arm(
+            Box::pin(click_action(core, connection, p, cx)).await,
+            refresh,
+        ),
+        "type" => finish_arm(Box::pin(type_action(core, p, cx)).await, refresh),
+        "key" => finish_arm(Box::pin(key_action(core, p, cx)).await, refresh),
+        other => Err(ControlError::invalid(format!(
+            "{other} can't wait in the queue"
+        ))),
+    }
 }
 
 fn finish_arm(arm: Result<Arm, ControlError>, on_finish: impl FnOnce()) -> Reply {
@@ -7096,7 +7142,7 @@ async fn keys_gate(
         (Front::OtherFocused, Some(focused)) => Ok(Gate::Beside(Beside { target, focused })),
         _ => {
             let name = windows::find(target.window_id).map_or_else(|| "that app".into(), |w| w.app);
-            Err(shared_app::unknown_focus(&name))
+            Err(shared_app::unknown_focus(target, &name))
         }
     }
 }
@@ -7490,6 +7536,13 @@ async fn input_queue_action(
     if let Some(request) = wait_for {
         core.read_with(cx, |c, _| c.input_queue.request_for(&owner, request))
             .map_err(ControlError::invalid)?;
+    }
+    // A front request runs once its app leaves the front, while a call
+    // waits for it: this one.
+    if let Action::Wait(request) = action
+        && core.read_with(cx, |c, _| c.input_queue.front(request).is_some())
+    {
+        return super::front_queue::wait(core, connection, id, request, cx).await;
     }
     // A wait on a drag makes it runnable again: its result comes back here.
     if let Action::Wait(request) = action {
@@ -8254,7 +8307,7 @@ fn ended_error(id: DisplayId, by_user: bool) -> ControlError {
     })
 }
 
-async fn target(
+pub(super) async fn target(
     core: &Entity<Core>,
     p: &Args<'_>,
     cx: &mut AsyncApp,

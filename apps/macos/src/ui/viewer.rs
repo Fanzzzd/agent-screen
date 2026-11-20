@@ -190,7 +190,8 @@ impl Render for Viewer {
         let Some(display) = core.displays.get(id) else {
             return div().size_full().into_any_element();
         };
-        let status = Status::of(display, self.count, &theme);
+        let status = Status::of(display, self.count, &theme)
+            .waiting_for(display.agent_name(), core.input_queue.waiting_line(id));
         let label = display.label();
         let agent = display.agent_name().to_string();
         // The Help Request's steps, for the user to follow while in control.

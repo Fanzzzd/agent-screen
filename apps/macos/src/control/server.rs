@@ -53,6 +53,15 @@ impl ControlError {
             message: m.into(),
         }
     }
+    /// Refused only because the user's window of the target app has
+    /// focus, before anything was sent: `front_queue` queues the action.
+    /// Never sent to an agent with this code.
+    pub fn front_blocked(m: impl Into<String>) -> Self {
+        Self {
+            code: "front_blocked",
+            message: m.into(),
+        }
+    }
     pub fn takeover(m: impl Into<String>) -> Self {
         Self {
             code: "takeover",
@@ -502,7 +511,13 @@ async fn serve<R, W>(
             let message = match answer.await {
                 Ok(Ok(result)) => json!({ "id": id, "result": result }),
                 Ok(Err(error)) => {
-                    json!({ "id": id, "error": { "code": error.code, "message": error.message } })
+                    // front_blocked is internal: a click, type or key call
+                    // queues it. Any other call that meets it just failed.
+                    let code = match error.code {
+                        "front_blocked" => "failed",
+                        code => code,
+                    };
+                    json!({ "id": id, "error": { "code": code, "message": error.message } })
                 }
                 Err(_) => {
                     json!({ "id": id, "error": { "code": "failed", "message": "the app dropped the request" } })

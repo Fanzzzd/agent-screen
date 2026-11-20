@@ -7,7 +7,7 @@ use agent_screen_model::model;
 #[path = "../../../apps/macos/src/input_queue.rs"]
 mod app_input_queue;
 
-use app_input_queue::{Click, Drag, InputQueue, MenuItem, Plan};
+use app_input_queue::{Click, Drag, Front, InputQueue, MenuItem, Plan, WAITING_LINE_MS};
 use std::sync::atomic::Ordering;
 
 fn owner(connection: u64) -> model::Owner {
@@ -626,4 +626,123 @@ fn a_click_refused_for_changing_content_counts_its_repeats() {
     assert_eq!(input.content_changed(&a, Some("click:7:9,9:left:1:0")), 1);
     assert_eq!(input.content_changed(&a, None), 0);
     assert_eq!(input.content_changed(&a, Some("click:7:9,9:left:1:0")), 1);
+}
+
+#[test]
+fn a_front_request_runs_when_its_app_leaves_the_front_without_asking() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let front = Front {
+        method: "click".into(),
+        params: serde_json::json!({ "displayId": 1, "x": 10, "y": 20 }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    let id = input
+        .submit_front(
+            a.clone(),
+            "click 10 20".into(),
+            "Click in Dia".into(),
+            front.clone(),
+        )
+        .unwrap();
+    // No card asks and no notification: it needs no approval.
+    assert_eq!(input.approval_count(), 0);
+    assert_eq!(input.front(id), Some(&front));
+    assert_eq!(
+        input.status(&a, Some(id), false)["requests"][0]["state"],
+        "waiting_for_app"
+    );
+    assert!(input.awaits(id, false));
+    // Not yet 30 s: no line on the card.
+    assert_eq!(input.waiting_line(1), None);
+    assert!(!input.waiting_changed());
+    assert!(input.start_front(id));
+    input.requeue_front(id);
+    assert!(input.start_front(id));
+    input.finish_front(id, None);
+    assert_eq!(
+        input.status(&a, Some(id), false)["requests"][0]["state"],
+        "completed"
+    );
+    input.forget(id);
+    assert!(input.front(id).is_none());
+}
+
+#[test]
+fn a_waiting_line_shows_after_30_s_and_goes_with_the_next_action() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    assert_eq!(WAITING_LINE_MS, 30_000);
+    input.preview_waiting(a.clone(), "Dia".into()).unwrap();
+    assert_eq!(input.waiting_line(1).as_deref(), Some("Dia"));
+    assert_eq!(input.waiting_count(), 1);
+    assert!(input.waiting_changed());
+    assert!(!input.waiting_changed());
+    input.replace_fronts(&a);
+    assert_eq!(input.waiting_line(1), None);
+    assert!(input.waiting_changed());
+}
+
+#[test]
+fn a_failed_front_request_says_why() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let front = Front {
+        method: "key".into(),
+        params: serde_json::json!({ "displayId": 1, "keys": "cmd+l" }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    let id = input
+        .submit_front(a.clone(), "key cmd+l".into(), "Keys in Dia".into(), front)
+        .unwrap();
+    assert!(input.start_front(id));
+    input.finish_front(id, Some("the window left the display".into()));
+    let state = input.status(&a, Some(id), false);
+    assert_eq!(state["requests"][0]["state"], "stopped");
+    assert_eq!(
+        state["requests"][0]["failure"],
+        "the window left the display"
+    );
+}
+
+#[test]
+fn a_background_run_keeps_its_outcome_for_the_next_call() {
+    let mut input = InputQueue::default();
+    input.register(1, &owner(1));
+    let a = input.owner(1, 1).unwrap();
+    let front = Front {
+        method: "key".into(),
+        params: serde_json::json!({ "displayId": 1, "keys": "x" }),
+        pid: 42,
+        app: "Dia".into(),
+        look: None,
+    };
+    let id = input
+        .submit_front(a.clone(), "key x".into(), "Keys in Dia".into(), front)
+        .unwrap();
+    assert!(input.age(id).is_some());
+    input.detach(id);
+    // One background run per request.
+    assert!(input.drive(id));
+    assert!(!input.drive(id));
+    assert!(input.start_front(id));
+    input.finish_front(id, None);
+    let mut answer = serde_json::Map::new();
+    answer.insert("requestId".into(), serde_json::json!(id));
+    input.keep_outcome(id, Ok(answer.clone()));
+    // Kept until a call reads it, once.
+    assert_eq!(input.take_outcome(id), Some(Ok(answer)));
+    assert_eq!(input.take_outcome(id), None);
+    // A newer action forgets the finished request and what it kept.
+    input.keep_outcome(id, Err(("failed", "not sent".into())));
+    input.replace_fronts(&a);
+    assert!(input.front(id).is_none());
+    assert_eq!(input.take_outcome(id), None);
 }
