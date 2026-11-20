@@ -833,16 +833,29 @@ fn test(
         .find_map(|l| l.strip_prefix("ready ").map(str::to_string))
         .context("the harness's log names no pid")?;
     let pid = pid.as_str();
-    sh_lenient(
-        "/usr/bin/osascript",
-        &[
-            "-e",
-            &format!(
-                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
-            ),
-        ],
-    );
-    sleep_ms(1000);
+    // Another app may take the front back right away, as Orca has once a
+    // notice arrived: then bring the harness forward once more.
+    for _ in 0..2 {
+        sh_lenient(
+            "/usr/bin/osascript",
+            &[
+                "-e",
+                &format!(
+                    "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+                ),
+            ],
+        );
+        sleep_ms(1500);
+        let key = lines(log, 0)
+            .iter()
+            .rev()
+            .find(|l| l.starts_with("win user") || l.starts_with("win agent"))
+            .is_some_and(|l| l == "win user focus");
+        if key && front_app() == "Electron" {
+            break;
+        }
+        println!("     the harness didn't stay in front with its user window key; once more");
+    }
     if agent_window(control, id)?.is_none() {
         let electron_on_main: Vec<String> = sh_lenient(tool("onscreen")?, &["main"])
             .lines()
@@ -1142,7 +1155,7 @@ fn queued(
 
     // The real wait, so the call outlasts the user's leaving.
     control.call("debugFrontWait", json!({ "ms": 0 }))?;
-    let (repeated, fronts) = fronts_during(4, || {
+    let (repeated, fronts) = fronts_during(6, Some(pid), || {
         let left = leave_after(your_front, 1000);
         let repeated = key(control, id, "x");
         let _ = left.join();
@@ -1150,6 +1163,12 @@ fn queued(
     })?;
     let seen = lines(log, from);
     let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
     check(
         "your app stays in front while the queued key runs",
         taken.is_empty(),
@@ -1197,7 +1216,7 @@ fn queued(
     );
     let Some(n3) = n3 else { return Ok(()) };
     control.call("debugFrontWait", json!({ "ms": 0 }))?;
-    let (waited, fronts) = fronts_during(4, || {
+    let (waited, fronts) = fronts_during(6, Some(pid), || {
         let left = leave_after(your_front, 1000);
         let waited = queue("wait", n3);
         let _ = left.join();
@@ -1206,6 +1225,12 @@ fn queued(
     sleep_ms(300);
     let seen = lines(log, from);
     let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
     check(
         "your app stays in front while the waited key runs",
         taken.is_empty(),
@@ -1283,7 +1308,7 @@ fn queued_clicks(
         cut(&said(&pending), 300),
     );
     control.call("debugFrontWait", json!({ "ms": 0 }))?;
-    let (ran, fronts) = fronts_during(4, || {
+    let (ran, fronts) = fronts_during(6, Some(pid), || {
         let left = leave_after(your_front, 1000);
         let ran = double(press);
         let _ = left.join();
@@ -1291,6 +1316,12 @@ fn queued_clicks(
     })?;
     let seen = lines(log, from);
     let taken = taken_back(&fronts, pid);
+    let rose = raised(&fronts);
+    check(
+        "the user\'s window of the harness never rose above your front app",
+        rose.is_empty(),
+        format!("{rose:?} | {fronts:?}"),
+    );
     check(
         "the same double click again runs in the agent's page once your app is in front, and your app stays in front",
         ran.is_ok()
@@ -1346,24 +1377,70 @@ fn queued_clicks(
 
 /// The front app's changes while `act` runs, from `probe fronts`, polled
 /// every 10 ms: "epoch-ms pid name" per line.
-fn fronts_during<T>(seconds: u64, act: impl FnOnce() -> T) -> Result<(T, Vec<String>)> {
-    let fronts = std::process::Command::new(tool("probe")?)
+///
+/// With `harness`, the window order too: "epoch-ms order:above" when the
+/// harness's top window on the main screen is above the front app's,
+/// "order:below" or "order:apart" otherwise, at each change.
+fn fronts_during<T>(
+    seconds: u64,
+    harness: Option<&str>,
+    act: impl FnOnce() -> T,
+) -> Result<(T, Vec<String>)> {
+    let probe = tool("probe")?;
+    let fronts = std::process::Command::new(&probe)
         .args(["fronts", &seconds.to_string()])
         .stdout(std::process::Stdio::piped())
         .spawn()?;
+    let order = match harness {
+        Some(pid) => Some(
+            std::process::Command::new(&probe)
+                .args(["above", pid, &seconds.to_string()])
+                .stdout(std::process::Stdio::piped())
+                .spawn()?,
+        ),
+        None => None,
+    };
     sleep_ms(200);
     let result = act();
     let output = fronts.wait_with_output()?;
-    let lines = String::from_utf8_lossy(&output.stdout)
+    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(String::from)
         .collect();
+    if let Some(order) = order {
+        let output = order.wait_with_output()?;
+        lines.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .map(|(at, how)| format!("{at} order:{how}")),
+        );
+        lines.sort();
+    }
     Ok((result, lines))
+}
+
+/// The harness's window rose above your front app's after it had been
+/// below it: `order:above` lines after the first `order:below`.
+fn raised(fronts: &[String]) -> Vec<String> {
+    let Some(below) = fronts.iter().position(|l| l.ends_with(" order:below")) else {
+        return Vec::new();
+    };
+    fronts[below..]
+        .iter()
+        .filter(|l| l.ends_with(" order:above"))
+        .cloned()
+        .collect()
 }
 
 /// The harness came back to the front after another app had it: lines of
 /// `fronts` naming pid `harness` after one that doesn't.
 fn taken_back(fronts: &[String], harness: &str) -> Vec<String> {
+    let fronts: Vec<String> = fronts
+        .iter()
+        .filter(|l| !l.contains(" order:"))
+        .cloned()
+        .collect();
     let is_harness = |l: &String| l.split_whitespace().nth(1) == Some(harness);
     let Some(left) = fronts.iter().position(|l| !is_harness(l)) else {
         return Vec::new();

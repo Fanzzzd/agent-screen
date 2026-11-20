@@ -1156,10 +1156,16 @@ impl Forwarder {
     /// the agent's windows key, such as asking a running app for a new one.
     pub async fn remember_user_window(&self, pid: i32) {
         self.run(move |w| {
-            if let Some(id) = super::ax::focused_window_id(pid)
-                && !on_agent_display(id)
-            {
-                w.remember(WindowTarget { pid, window_id: id });
+            let focused = super::ax::focused_window_id(pid);
+            let agents = focused.is_some_and(on_agent_display);
+            match agent_screen_model::shared_app::user_window_to_remember(focused, agents) {
+                Some(id) => {
+                    log::debug!("input: pid {pid}'s user window {id} has focus; handing it back after");
+                    w.remember(WindowTarget { pid, window_id: id });
+                }
+                None => log::debug!(
+                    "input: pid {pid}'s focused window {focused:?} isn't the user's; nothing to hand back"
+                ),
             }
         })
         .await;
@@ -1687,33 +1693,43 @@ impl Worker {
     }
 
     fn restore_focus(&mut self) {
+        use agent_screen_model::shared_app::{HandBack, hand_back};
         for window in std::mem::take(&mut self.restore) {
             // Not in the middle of another display's keys to the app.
             let _held = AppKeys::hold(window.pid);
-            // Only while an agent's window, this one's or another
-            // session's, still has the keys: a window the user picked
-            // since is left alone.
             let now = super::ax::focused_window_id(window.pid);
-            // Still the user's, as when an action that will take it is
-            // still running: keep it for that action's hand-back.
-            if now == Some(window.window_id) {
-                self.restore.push(window);
-                continue;
+            match hand_back(window.window_id, now, now.is_some_and(on_agent_display)) {
+                // Still the user's, as when an action that will take it is
+                // still running: keep it for that action's hand-back. Or
+                // the app didn't answer in time, as under load: try again
+                // on the next hand-back rather than lose the user's window.
+                HandBack::Keep | HandBack::Retry => {
+                    self.restore.push(window);
+                    continue;
+                }
+                // A window the user picked since is left alone.
+                HandBack::Leave => continue,
+                HandBack::Restore => {}
             }
-            // The app didn't answer in time, as under load: try again on
-            // the next hand-back rather than lose the user's window.
-            if now.is_none() {
-                self.restore.push(window);
-                continue;
+            // A focus record, which doesn't bring the app forward. Electron
+            // may take it and still keep the agent's window key, as after
+            // a wake click it asked to be activated by: then make the
+            // user's window main through accessibility, as their click
+            // would, so switching back to the app lands in it.
+            let recorded = unsafe { SSFocusWithoutRaise(window.pid, window.window_id) };
+            if recorded {
+                thread::sleep(Duration::from_millis(50));
             }
-            if !now.is_some_and(on_agent_display) {
-                continue;
-            }
-            // The app came to the front meanwhile: the focus record is
-            // refused there, so make the user's window main through
-            // accessibility, as their click would.
-            if !unsafe { SSFocusWithoutRaise(window.pid, window.window_id) } {
-                super::ax::make_main(window);
+            let after = super::ax::focused_window_id(window.pid);
+            log::debug!(
+                "input: focus back to {window:?} from {now:?}: focus record {recorded}, focused now {after:?}"
+            );
+            if after != Some(window.window_id) {
+                let main = super::ax::make_main(window);
+                log::debug!(
+                    "input: {window:?} made main through accessibility: {main}, focused now {:?}",
+                    super::ax::focused_window_id(window.pid)
+                );
             }
         }
     }

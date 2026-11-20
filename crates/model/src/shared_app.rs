@@ -389,6 +389,37 @@ pub fn delete_backward(value: &str, selection: Option<(usize, usize)>) -> (Strin
     insert(value, Some((start - back, back)), "")
 }
 
+/// The window of a shared app to hand key focus back to once the agent's
+/// input is done: the app's focused window as the agent starts, when it is
+/// the user's, not one on an Agent Display. Read before anything is sent,
+/// since a posted click or the wake click makes the agent's window key.
+pub fn user_window_to_remember(focused: Option<u32>, on_agent_display: bool) -> Option<u32> {
+    focused.filter(|_| !on_agent_display)
+}
+
+/// What to do with a remembered user window once the agent's input is
+/// done, by the app's focused window now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandBack {
+    /// The user's window still has focus: keep it for a later hand-back.
+    Keep,
+    /// The app didn't say: try again on the next hand-back.
+    Retry,
+    /// Another window of the user's has focus, as one they picked since.
+    Leave,
+    /// The agent's window took focus: give it back to the user's.
+    Restore,
+}
+
+pub fn hand_back(user: u32, focused: Option<u32>, focused_on_agent_display: bool) -> HandBack {
+    match focused {
+        Some(id) if id == user => HandBack::Keep,
+        None => HandBack::Retry,
+        Some(_) if focused_on_agent_display => HandBack::Restore,
+        Some(_) => HandBack::Leave,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +755,23 @@ mod tests {
     fn a_press_goes_in_only_on_an_element_that_lists_it() {
         assert!(press_goes_in(true));
         assert!(!press_goes_in(false));
+    }
+
+    #[test]
+    fn the_users_window_is_remembered_before_the_agents_input_never_the_agents() {
+        // The user's window has focus as the replay starts.
+        assert_eq!(user_window_to_remember(Some(7), false), Some(7));
+        // Read after a wake, the agent's window would be focused: never
+        // remembered as the user's.
+        assert_eq!(user_window_to_remember(Some(9), true), None);
+        assert_eq!(user_window_to_remember(None, false), None);
+    }
+
+    #[test]
+    fn focus_goes_back_only_from_the_agents_window() {
+        assert_eq!(hand_back(7, Some(9), true), HandBack::Restore);
+        assert_eq!(hand_back(7, Some(7), false), HandBack::Keep);
+        assert_eq!(hand_back(7, None, false), HandBack::Retry);
+        assert_eq!(hand_back(7, Some(8), false), HandBack::Leave);
     }
 }

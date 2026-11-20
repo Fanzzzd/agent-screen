@@ -18,6 +18,7 @@
 //   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
 //   probe openmenus PID       each title of PID's menu bar whose menu is open, "title x y w h" per line
 //   probe fronts SECONDS      the front app now and at each change for SECONDS, notified or polled every 10 ms, "epoch-ms pid name" per line
+//   probe above PID SECONDS   every 10 ms for SECONDS, whether PID's top window on the main screen is above the front app's there: "epoch-ms above|below|apart" at each change
 //   probe main                the main display's size in points, "w h"
 //   probe tap SECONDS OUT     record scroll events at the HID level, listen only
 //   probe bounds ID           a display's frame in global points, "x y w h"
@@ -280,6 +281,35 @@ case "fronts":
   }
   Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in say(NSWorkspace.shared.frontmostApplication) }
   RunLoop.main.run(until: Date(timeIntervalSinceNow: Double(args[2])!))
+case "above":
+  // Window order on the main screen, front to back: PID's topmost normal
+  // window against the front app's, while another app is in front.
+  let pid = pid_t(args[2])!
+  let end = Date(timeIntervalSinceNow: Double(args[3])!)
+  let main = CGDisplayBounds(CGMainDisplayID())
+  var last = ""
+  while Date() < end {
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    var mine: Int? = nil, theirs: Int? = nil
+    for (i, w) in list.enumerated() {
+      guard (w[kCGWindowLayer as String] as? Int) == 0,
+            let owner = w[kCGWindowOwnerPID as String] as? pid_t,
+            let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+            main.contains(CGPoint(x: (b["X"] ?? 0) + (b["Width"] ?? 0) / 2, y: (b["Y"] ?? 0) + (b["Height"] ?? 0) / 2))
+      else { continue }
+      if owner == pid && mine == nil { mine = i }
+      if owner == front && front != pid && theirs == nil { theirs = i }
+    }
+    var now = "apart"
+    if let m = mine, let t = theirs { now = m < t ? "above" : "below" }
+    if now != last {
+      last = now
+      print(Int(Date().timeIntervalSince1970 * 1000), now)
+      fflush(stdout)
+    }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+  }
 case "activate":
   // Bring a process forward, as the user clicking it would.
   let pid = pid_t(args[2])!
