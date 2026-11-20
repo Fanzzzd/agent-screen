@@ -654,15 +654,19 @@ extern "C" fn created(
             );
             // A launch's catch that would take it: the launch takes it
             // once the app describes it, rather than give up waiting.
-            let launching = agent_screen_model::launch::keeps_undescribed(
-                target.kept.load(Ordering::Relaxed),
-                target.home.is_some(),
-                target.document.is_some(),
-                *lock(&target.left),
-            );
             let mut undescribed = lock(&target.undescribed);
-            if launching && undescribed.is_none() {
-                *undescribed = ax::window_id(window);
+            let mut left = lock(&target.left);
+            if undescribed.is_none() {
+                let (keeps, after) = agent_screen_model::launch::keep_undescribed(
+                    target.kept.load(Ordering::Relaxed),
+                    target.home.is_some(),
+                    target.document.is_some(),
+                    *left,
+                );
+                if keeps && let Some(id) = ax::window_id(window) {
+                    *undescribed = Some(id);
+                    *left = after;
+                }
             }
         }
         return;

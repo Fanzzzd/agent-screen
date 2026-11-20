@@ -9,14 +9,17 @@
 //! window without activating the app, then keeps the main thread busy for
 //! 1.5 s (HARNESS_SLOW_WINDOW). launch_app on it must press that item,
 //! answer with the new window, and place it on the display; afterwards no
-//! window of the harness is left on your screen.
+//! window of the harness is left on your screen. The second press keeps it
+//! busy 7 s, past the launch's 5 s: launch_app then fails saying the app
+//! was too busy, and the window is moved onto the display all the same
+//! once the app answers.
 //!
 //! Needs an Electron.app: `target/e2e/Electron.app`, or E2E_ELECTRON.
 //!
 //!     AGENTSCREEN_INSTANCE=e2e cargo e2e slowwindow
 //!
-//! The new window shows on your screen while the harness is busy, up to
-//! about 2 s, as nothing can move it sooner. Makes 1 display.
+//! The new windows show on your screen while the harness is busy, about
+//! 2 s and 8 s, as nothing can move them sooner. Makes 1 display.
 
 use std::process::ExitCode;
 
@@ -27,8 +30,10 @@ use agent_screen_tests::{
 use anyhow::{Context, Result};
 
 const KEY: &str = "slowwindow";
-/// How long the harness's main thread stays busy after its window shows.
+/// How long the harness's main thread stays busy after its window shows:
+/// within the launch's 5 s wait, then past it.
 const BUSY_MS: u64 = 1500;
+const LONG_BUSY_MS: u64 = 7000;
 
 fn main() -> ExitCode {
     if instance().is_none() {
@@ -44,7 +49,7 @@ fn main() -> ExitCode {
     run(|| {
         allow_on_your_screen(
             "Electron",
-            BUSY_MS + 700,
+            LONG_BUSY_MS + 1500,
             "the harness's new window shows on your screen while its main thread is busy, so nothing can move it until then",
         );
         start_test_app(&[("AGENTSCREEN_LANG", "en")])?;
@@ -88,7 +93,7 @@ fn test(
             "--env",
             &format!("HARNESS_MENU_LOG={}", log.display()),
             "--env",
-            &format!("HARNESS_SLOW_WINDOW={BUSY_MS}"),
+            &format!("HARNESS_SLOW_WINDOW={BUSY_MS},{LONG_BUSY_MS}"),
             "-a",
             electron.to_str().unwrap_or_default(),
             "--args",
@@ -144,6 +149,48 @@ fn test(
         "no window of the harness is left on your screen",
         !shown.is_empty() && shown.iter().all(|w| within(w, &display_bounds)),
         format!("windows {shown:?}, display {}", display_bounds.trim()),
+    );
+
+    // Busy past the launch's wait.
+    let first = window;
+    let late = control.call(
+        "launchApp",
+        json!({ "sessionKey": KEY, "displayId": id, "app": electron.to_str() }),
+    );
+    let said = match &late {
+        Ok(v) => v.to_string(),
+        Err(e) => format!("error: {e}"),
+    };
+    check(
+        "busy past 5 s, launch_app fails saying the app was too busy and the window will be moved",
+        said.contains("too busy") && said.contains("list_windows"),
+        cut(&said, 400),
+    );
+    let mut moved = None;
+    for _ in 0..40 {
+        let listed = control
+            .call("listWindows", json!({ "sessionKey": KEY, "displayId": id }))
+            .unwrap_or_default();
+        moved = listed["windows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w["windowId"].as_u64())
+            .find(|w| Some(*w) != first);
+        if moved.is_some() {
+            break;
+        }
+        sleep_ms(250);
+    }
+    sleep_ms(1000);
+    let shown: Vec<_> = windows_of(pid)
+        .into_iter()
+        .filter(|w| w.layer == 0)
+        .collect();
+    check(
+        "once the app answers, that window is moved onto the display, and none is left on your screen",
+        moved.is_some() && shown.len() == 2 && shown.iter().all(|w| within(w, &display_bounds)),
+        format!("moved {moved:?}, windows {shown:?}"),
     );
     Ok(())
 }

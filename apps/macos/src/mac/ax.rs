@@ -428,6 +428,21 @@ pub fn is_standard_window(target: WindowTarget) -> bool {
         })
 }
 
+/// Whether a window's Accessibility role reads AXWindow now, asking a busy
+/// app for 0.15 s at most, as `is_standard_window` does: a launch asks
+/// every tick while the app builds the window (#270).
+pub fn is_window_quick(target: WindowTarget) -> bool {
+    let app = application(target.pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    elements_attribute(&app, "AXWindows")
+        .into_iter()
+        .find(|w| window_id(w) == Some(target.window_id))
+        .is_some_and(|w| {
+            unsafe { w.set_messaging_timeout(0.15) };
+            string_attribute(&w, "AXRole").as_deref() == Some("AXWindow")
+        })
+}
+
 pub fn window_element(target: WindowTarget) -> Option<Element> {
     elements_attribute(&application(target.pid), "AXWindows")
         .into_iter()

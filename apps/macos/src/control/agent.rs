@@ -4721,6 +4721,57 @@ const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;
 /// How long a running app may take to make the window Agent Screen asked
 /// for. A window it makes later may be the user's.
 const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
+
+/// How long a launch waits, from asking, for a busy running app to say
+/// what the window it just made is (#270).
+const UNDESCRIBED_WAIT: Duration = Duration::from_secs(5);
+
+/// How long after a launch gave up a busy app's window is still moved to
+/// the display once the app describes it, as ADR 0007's watch waits.
+const UNDESCRIBED_ADOPT: Duration = Duration::from_secs(60);
+
+/// Move window `target`, which its busy app couldn't describe before the
+/// launch gave up, onto display `id` once the app says it is a window,
+/// within `UNDESCRIBED_ADOPT`. Not if the user acts in the app first, nor
+/// once it is gone: then it stays where it is (ADR 0007).
+fn adopt_undescribed(core: Entity<Core>, id: DisplayId, target: WindowTarget, cx: &mut AsyncApp) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let started = Instant::now();
+        while started.elapsed() < UNDESCRIBED_ADOPT {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            if crate::mac::catch::user_acted_recently(target.pid) {
+                log::info!(
+                    "launch: the user acted in pid {} before its window {} could be described; left where it is",
+                    target.pid,
+                    target.window_id
+                );
+                return;
+            }
+            if windows::find(target.window_id).is_none() {
+                return;
+            }
+            if off(cx, move || ax::is_window_quick(target)).await {
+                let placed = settle(&core, target, id, cx).await;
+                log::info!(
+                    "launch: window {} of pid {}, described late, moved onto display {id}: {}",
+                    target.window_id,
+                    target.pid,
+                    placed.is_ok()
+                );
+                return;
+            }
+        }
+        log::info!(
+            "launch: window {} of pid {} still undescribed after {} s; left where it is",
+            target.window_id,
+            target.pid,
+            UNDESCRIBED_ADOPT.as_secs()
+        );
+    })
+    .detach();
+}
 /// The same, counted from when `open` returns: it returns once the app has
 /// the file.
 const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
@@ -6072,6 +6123,9 @@ async fn launch_now(
         }
     };
     let mut gave_up = false;
+    // A window the busy app still couldn't describe when the launch gave
+    // up waiting for it (#270): moved to the display once it can.
+    let mut undescribed: Option<WindowTarget> = None;
     // Takes over from `catch` for a file still opening, with no gap between.
     let mut document_catch = None;
     // Every 25 ms for 6 s: the caught window is answered within a tick.
@@ -6085,7 +6139,8 @@ async fn launch_now(
         }
         let mut taken = catch.as_ref().and_then(|c| c.taken());
         // A window the busy app couldn't describe as it showed is the
-        // catch's too, once the app says it is a window (#270).
+        // catch's too, once the app says it is a window (#270), unless the
+        // user has acted in the app since (ADR 0007).
         if taken.is_none()
             && let Some(window) = catch.as_ref().and_then(|c| c.undescribed())
         {
@@ -6093,18 +6148,20 @@ async fn launch_now(
                 pid,
                 window_id: window,
             };
-            let described = off(cx, move || {
-                ax::window_element(target)
-                    .and_then(|w| ax::string_attribute(&w, "AXRole"))
-                    .is_some_and(|role| role == "AXWindow")
-            })
-            .await;
-            if described {
+            let described = off(cx, move || ax::is_window_quick(target)).await;
+            let user_acted = crate::mac::catch::user_acted_recently(pid);
+            if user_acted {
+                log::info!(
+                    "launch: {name} window {window} came while the user acted in the app; left where it is"
+                );
+            } else if described {
                 taken = Some(window);
-            } else if was_running && tick < 200 {
-                // Waiting for it, up to 5 s: the launch doesn't give up
-                // meanwhile.
+            } else if asked_at.elapsed() < UNDESCRIBED_WAIT {
+                // Waiting for the app to describe it: the launch doesn't
+                // give up meanwhile.
                 continue;
+            } else {
+                undescribed = Some(target);
             }
         }
         let open_failed = poll_open(&mut opened);
@@ -6249,6 +6306,14 @@ async fn launch_now(
     }
     keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
+    if let Some(target) = undescribed {
+        finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
+        adopt_undescribed(core.clone(), id, target, cx);
+        return Err(ControlError::failed(format!(
+            "{name} made a new window but was too busy to say what it is within {} s, so the URL was not opened in it. Agent Screen moves that window onto this display once {name} answers, unless the user acts in {name} first: call list_windows in a few seconds, then act in it",
+            UNDESCRIBED_WAIT.as_secs()
+        )));
+    }
     finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen: for an app Agent Screen

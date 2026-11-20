@@ -19,11 +19,13 @@ if (process.env.HARNESS_SINGLE === "1" && !app.requestSingleInstanceLock()) app.
 // for a click on the item, true for a shortcut (#39). File > Open Recent
 // > notes.txt, one submenu down, writes "recent accelerator=…" the same
 // way.
-// HARNESS_SLOW_WINDOW (ms), with HARNESS_MENU_LOG: File > New Window opens
-// a window and then keeps the main thread busy that long, as Dia does
-// building one, so Accessibility can't describe the window as it shows
-// (#270). It writes "new window <pid>" to the log first.
-const slowWindow = Number(process.env.HARNESS_SLOW_WINDOW || 0);
+// HARNESS_SLOW_WINDOW (ms, or a list such as "1500,7000"), with
+// HARNESS_MENU_LOG: File > New Window opens a window and then keeps the
+// main thread busy that long, the next value at each press, the last one
+// after, as Dia does building one, so Accessibility can't describe the
+// window as it shows (#270). It writes "new window <pid>" to the log first.
+const slowWindows = (process.env.HARNESS_SLOW_WINDOW || "0").split(",").map(Number);
+const slowWindow = () => (slowWindows.length > 1 ? slowWindows.shift() : slowWindows[0]);
 const menuLog = process.env.HARNESS_MENU_LOG;
 if (menuLog) {
   const fs = require("fs");
@@ -41,7 +43,7 @@ if (menuLog) {
                 note(`new window ${process.pid}`);
                 const win = new BrowserWindow({ width: 640, height: 480, title: "harness new" });
                 win.loadFile("index.html");
-                const until = Date.now() + slowWindow;
+                const until = Date.now() + slowWindow();
                 while (Date.now() < until) {}
               },
             },

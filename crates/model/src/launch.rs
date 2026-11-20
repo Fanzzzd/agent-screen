@@ -300,16 +300,21 @@ pub fn same_page(asked: &str, shown: &str) -> bool {
 
 /// Whether a catch keeps a window its app couldn't describe as it showed,
 /// as a busy app's (#270), for the launch to take once the app describes
-/// it: only a launch's own catch, one not kept past the launch, not
-/// returning windows to the user, not waiting for a file, and with a
-/// window still to take.
-pub fn keeps_undescribed(
+/// it, and how many windows the catch may take after. Only a launch's own
+/// catch keeps one: not kept past the launch, not returning windows to the
+/// user, not waiting for a file, and with a window still to take. The
+/// window it keeps uses that up, so the next window the app makes, such as
+/// the user's Command-N, stays where it opens.
+pub fn keep_undescribed(
     kept: bool,
     returning: bool,
     for_document: bool,
     left: Option<usize>,
-) -> bool {
-    !kept && !returning && !for_document && left != Some(0)
+) -> (bool, Option<usize>) {
+    if kept || returning || for_document || left == Some(0) {
+        return (false, left);
+    }
+    (true, left.map(|n| n - 1))
 }
 
 #[cfg(test)]
@@ -540,12 +545,37 @@ mod tests {
 
     #[test]
     fn only_a_launchs_catch_keeps_a_window_the_app_cant_describe_yet() {
-        assert!(keeps_undescribed(false, false, false, Some(1)));
-        assert!(keeps_undescribed(false, false, false, None));
-        assert!(!keeps_undescribed(false, false, false, Some(0)));
-        assert!(!keeps_undescribed(true, false, false, Some(1)));
-        assert!(!keeps_undescribed(false, true, false, None));
-        assert!(!keeps_undescribed(false, false, true, Some(1)));
+        assert_eq!(
+            keep_undescribed(false, false, false, Some(1)),
+            (true, Some(0))
+        );
+        assert_eq!(keep_undescribed(false, false, false, None), (true, None));
+        assert_eq!(
+            keep_undescribed(false, false, false, Some(0)),
+            (false, Some(0))
+        );
+        assert_eq!(
+            keep_undescribed(true, false, false, Some(1)),
+            (false, Some(1))
+        );
+        assert_eq!(keep_undescribed(false, true, false, None), (false, None));
+        assert_eq!(
+            keep_undescribed(false, false, true, Some(1)),
+            (false, Some(1))
+        );
+    }
+
+    #[test]
+    fn the_kept_window_uses_up_the_launchs_one_window() {
+        // The busy app's window is kept; the user's Command-N after it
+        // is neither kept nor taken.
+        let (kept, left) = keep_undescribed(false, false, false, Some(1));
+        assert!(kept);
+        assert_eq!(left, Some(0));
+        assert_eq!(
+            keep_undescribed(false, false, false, left),
+            (false, Some(0))
+        );
     }
 
     fn menu_item(title: &str, shortcut: Option<&str>) -> MenuEntry {
