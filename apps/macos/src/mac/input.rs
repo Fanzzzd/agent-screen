@@ -1165,6 +1165,13 @@ impl Forwarder {
         .await;
     }
 
+    /// Note `window` as the user's, to hand key focus back to at the next
+    /// [`Self::keys_done`]: the agent's keys meanwhile used up an earlier
+    /// note of it.
+    pub async fn remember_window(&self, window: WindowTarget) {
+        self.run(move |w| w.remember(window)).await;
+    }
+
     /// Send keys to `target` from now on, as a click on it would.
     /// Make the first window of an app just started in the background
     /// take clicks: see `Worker::wake`.

@@ -4721,6 +4721,156 @@ const LATE_WINDOW_WAIT: Duration = agent_screen_model::new_window::COLD_START;
 /// How long a running app may take to make the window Agent Screen asked
 /// for. A window it makes later may be the user's.
 const ASKED_WINDOW_WAIT: Duration = Duration::from_millis(3000);
+
+/// How long a launch waits, from asking, for a busy running app to say
+/// what the window it just made is (#270).
+const UNDESCRIBED_WAIT: Duration = Duration::from_secs(5);
+
+/// How long after a launch gave up a busy app's window is still moved to
+/// the display once the app describes it, as ADR 0007's watch waits.
+const UNDESCRIBED_ADOPT: Duration = Duration::from_secs(60);
+
+/// What accessibility says, now, of the window busy app `pid` made for a
+/// launch but couldn't describe then (#270): `known` by the number the app
+/// gave, or else its one new window not in `before`, as
+/// `launch::undescribed_window` picks it. Blocking.
+enum Undescribed {
+    /// The app doesn't answer yet.
+    Busy,
+    /// No window is surely the one: gone, held by a display, or one of
+    /// several new.
+    Unsure,
+    Window {
+        id: u32,
+        described: bool,
+    },
+}
+
+fn find_undescribed(
+    pid: i32,
+    known: Option<u32>,
+    before: &std::collections::HashSet<u32>,
+) -> Undescribed {
+    let Some(windows) = ax::windows_quick(pid) else {
+        return Undescribed::Busy;
+    };
+    let listed: Vec<_> = windows
+        .iter()
+        .map(|w| agent_screen_model::launch::Listed {
+            window: w.id,
+            before: before.contains(&w.id),
+            claimed: crate::mac::claims::display_of(w.id).is_some(),
+            on_agent_display: w.frame.is_some_and(crate::mac::input::on_agent_display_at),
+        })
+        .collect();
+    match agent_screen_model::launch::undescribed_window(known, &listed) {
+        Some(id) => Undescribed::Window {
+            id,
+            described: windows.iter().any(|w| w.id == id && w.described),
+        },
+        None => Undescribed::Unsure,
+    }
+}
+
+/// Whether the user pressed something in app `pid` since the launch asked
+/// at `asked_at`, or acted towards it just now (ADR 0007): then a window
+/// it made is left where it is, as it may be theirs.
+fn user_acted_in(pid: i32, asked_at: Instant) -> bool {
+    crate::mac::catch::user_acted_since(pid, asked_at)
+        || crate::mac::catch::user_acted_recently(pid)
+}
+
+/// Move the window app `pid` made that it couldn't describe before the
+/// launch gave up onto display `id` once the app says it is a window,
+/// within `UNDESCRIBED_ADOPT`. `window` by its number, or else found on the
+/// first tick the app answers while no launch of it runs, as the one new
+/// window not in `before`, which holds all the app had when the launch
+/// asked at `asked_at`, on screen or not. Not if the user has acted in the
+/// app since, nor once it is gone or isn't surely the one: then it stays
+/// where it is (ADR 0007). Once it is placed, `user_window` gets its key
+/// focus back.
+#[allow(clippy::too_many_arguments)]
+fn adopt_undescribed(
+    core: Entity<Core>,
+    id: DisplayId,
+    pid: i32,
+    path: std::path::PathBuf,
+    window: Option<u32>,
+    before: std::collections::HashSet<u32>,
+    asked_at: Instant,
+    user_window: Option<WindowTarget>,
+    cx: &mut AsyncApp,
+) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let started = Instant::now();
+        let mut window = window;
+        while started.elapsed() < UNDESCRIBED_ADOPT {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            if user_acted_in(pid, asked_at) {
+                log::info!(
+                    "launch: the user acted in pid {pid} before its window {window:?} could be described; left where it is"
+                );
+                return;
+            }
+            // Another launch's window could pass for the new one.
+            if window.is_none() && core.update(cx, |c, _| c.launching.contains(&path)) {
+                continue;
+            }
+            let before = before.clone();
+            let known = window;
+            match off(cx, move || find_undescribed(pid, known, &before)).await {
+                Undescribed::Busy => continue,
+                Undescribed::Unsure => {
+                    log::info!(
+                        "launch: no window of pid {pid} is surely the one it made, {window:?}; left where it is"
+                    );
+                    return;
+                }
+                Undescribed::Window { id: found, described } => {
+                    window = Some(found);
+                    if !described {
+                        continue;
+                    }
+                    // The look may have waited on the app.
+                    if user_acted_in(pid, asked_at) {
+                        log::info!(
+                            "launch: the user acted in pid {pid} as its window {found} was described; left where it is"
+                        );
+                        return;
+                    }
+                    let target = WindowTarget {
+                        pid,
+                        window_id: found,
+                    };
+                    let placed = settle(&core, target, id, cx).await;
+                    if placed.is_ok() {
+                        // Placing it made it key; the user's window gets
+                        // its key focus back.
+                        // The agent's keys since the launch used up the
+                        // note of it.
+                        let forwarder = core.update(cx, |c, _| c.forwarder(id));
+                        if let Some(user) = user_window {
+                            forwarder.remember_window(user).await;
+                        }
+                        forwarder.keys_done().await;
+                    }
+                    log::info!(
+                        "launch: window {found} of pid {pid}, described late, moved onto display {id}: {}",
+                        placed.is_ok()
+                    );
+                    return;
+                }
+            }
+        }
+        log::info!(
+            "launch: window {window:?} of pid {pid} still undescribed after {} s; left where it is",
+            UNDESCRIBED_ADOPT.as_secs()
+        );
+    })
+    .detach();
+}
 /// The same, counted from when `open` returns: it returns once the app has
 /// the file.
 const OPENED_WINDOW_WAIT: Duration = Duration::from_millis(2000);
@@ -5696,6 +5846,11 @@ async fn launch_now(
             .flat_map(|d| d.records.keys().copied())
             .collect::<Vec<_>>()
     }));
+    // Every window then, minimized, hidden and on other Spaces too, as the
+    // app's own list names them: a busy app's undescribed window is a new
+    // one (#270), never the user's minimized one.
+    let mut all_before = off(cx, cg::all_ids).await;
+    all_before.extend(before.iter().copied());
     // A new instance is a starting app, whatever else runs from the bundle.
     let fresh = start.new_instance();
     // The agents' instance of a browser the user runs is the only one this
@@ -6072,6 +6227,12 @@ async fn launch_now(
         }
     };
     let mut gave_up = false;
+    // A window the busy app still couldn't describe when the launch gave
+    // up waiting for it (#270), by its number once known: moved to the
+    // display once the app describes it.
+    let mut undescribed: Option<Option<u32>> = None;
+    // Done with that window: taken, or left where it is.
+    let mut passed_undescribed = false;
     // Takes over from `catch` for a file still opening, with no gap between.
     let mut document_catch = None;
     // Every 25 ms for 6 s: the caught window is answered within a tick.
@@ -6083,7 +6244,47 @@ async fn launch_now(
             drop(catch);
             return unclaim_and_already_running(core, id, pid, name, &instances_before, cx).await;
         }
-        let taken = catch.as_ref().and_then(|c| c.taken());
+        let mut taken = catch.as_ref().and_then(|c| c.taken());
+        // A window the busy app couldn't describe as it showed is the
+        // catch's too, once the app says it is a window (#270), unless the
+        // user has acted in the app since (ADR 0007).
+        if taken.is_none()
+            && !passed_undescribed
+            && let Some(kept) = catch.as_ref().and_then(|c| c.undescribed())
+        {
+            let before = all_before.clone();
+            match off(cx, move || find_undescribed(pid, kept, &before)).await {
+                Undescribed::Busy if asked_at.elapsed() < UNDESCRIBED_WAIT => continue,
+                // A busy app lists the window only once it answers.
+                Undescribed::Busy => {
+                    undescribed = Some(kept);
+                    break;
+                }
+                Undescribed::Unsure => {
+                    log::info!(
+                        "launch: {name} answered, but no window is surely the one it made; left where it is"
+                    );
+                    passed_undescribed = true;
+                }
+                Undescribed::Window { id: window, .. } if user_acted_in(pid, asked_at) => {
+                    log::info!(
+                        "launch: {name} window {window} came while the user acted in the app; left where it is"
+                    );
+                    passed_undescribed = true;
+                }
+                Undescribed::Window {
+                    id: window,
+                    described: true,
+                } => taken = Some(window),
+                // Waiting for the app to describe it: the launch doesn't
+                // give up meanwhile.
+                Undescribed::Window { .. } if asked_at.elapsed() < UNDESCRIBED_WAIT => continue,
+                Undescribed::Window { id: window, .. } => {
+                    undescribed = Some(Some(window));
+                    break;
+                }
+            }
+        }
         let open_failed = poll_open(&mut opened);
         // A window already caught is the app's answer; keep it even if
         // `open` reports a failure, so it isn't left unclaimed.
@@ -6226,6 +6427,29 @@ async fn launch_now(
     }
     keep_catch(core, id, catch, cx);
     log::debug!("launch: {name} made no window of Agent Screen's (gave up early: {gave_up})");
+    if let Some(window) = undescribed {
+        finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
+        adopt_undescribed(
+            core.clone(),
+            id,
+            pid,
+            path.clone(),
+            window,
+            all_before.clone(),
+            asked_at,
+            user_window,
+            cx,
+        );
+        return Err(ControlError::failed(format!(
+            "{name} made a new window but was too busy to say what it is within {} s{}. Agent Screen moves that window onto this display once {name} answers, unless the user acts in {name} first: call list_windows in a few seconds, then act in it",
+            UNDESCRIBED_WAIT.as_secs(),
+            if target.is_some() && is_url {
+                ", so the URL was not opened in it"
+            } else {
+                ""
+            }
+        )));
+    }
     finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
     // A slow launch can open its window after we stop waiting. Keep watching
     // so it does not stay on the user's screen: for an app Agent Screen

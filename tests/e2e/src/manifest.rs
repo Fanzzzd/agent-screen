@@ -343,6 +343,7 @@ pub const SCRIPTS: &[Script] = &[
     script("shared", &[AgentInput], Full, Hook, 1).hands_off(),
     script("sharedbrowser", &[AgentInput, Browser, Elements], Full, Hook, 1).hands_off(),
     script("signupcontrols", &[Elements, Browser], Full, Agent, 1),
+    script("slowwindow", &[Windows, Browser], Full, Agent, 1),
     script("smoke", &[AgentInput, Screenshots], Full, Agent, 1).no_app().manual(NEEDS_APP),
     script("sound", &[Recording], Full, Agent, 1).hands_off(),
     script("spares", &[Displays], Core, Agent, 2),

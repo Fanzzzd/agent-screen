@@ -428,6 +428,36 @@ pub fn is_standard_window(target: WindowTarget) -> bool {
         })
 }
 
+/// A window as [`windows_quick`] lists it.
+pub struct QuickWindow {
+    pub id: u32,
+    pub frame: Option<Rect>,
+    /// Its role reads AXWindow.
+    pub described: bool,
+}
+
+/// App `pid`'s windows with their numbers, or None while the app doesn't
+/// answer within 0.15 s, as one whose main thread is busy. A window whose
+/// number it doesn't give is left out.
+pub fn windows_quick(pid: i32) -> Option<Vec<QuickWindow>> {
+    let app = application(pid);
+    unsafe { app.set_messaging_timeout(0.15) };
+    let windows = try_elements_attribute(&app, "AXWindows").ok()?;
+    Some(
+        windows
+            .into_iter()
+            .filter_map(|w| {
+                unsafe { w.set_messaging_timeout(0.15) };
+                Some(QuickWindow {
+                    id: window_id(&w)?,
+                    frame: frame(&w),
+                    described: string_attribute(&w, "AXRole").as_deref() == Some("AXWindow"),
+                })
+            })
+            .collect(),
+    )
+}
+
 pub fn window_element(target: WindowTarget) -> Option<Element> {
     elements_attribute(&application(target.pid), "AXWindows")
         .into_iter()
