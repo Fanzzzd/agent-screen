@@ -1683,8 +1683,6 @@ impl Worker {
         self.focused_at = activations();
     }
 
-    /// Hand key focus back to the user's window the agent's keys took it
-    /// from. The agent's window is focused again on its next keys.
     /// The user's window of an app to hand key focus back to: the latest,
     /// one per app.
     fn remember(&mut self, window: WindowTarget) {
@@ -1692,6 +1690,8 @@ impl Worker {
         self.restore.push(window);
     }
 
+    /// Hand key focus back to the user's window the agent's keys took it
+    /// from. The agent's window is focused again on its next keys.
     fn restore_focus(&mut self) {
         use agent_screen_model::shared_app::{HandBack, hand_back};
         for window in std::mem::take(&mut self.restore) {
@@ -1737,10 +1737,13 @@ impl Worker {
                 thread::sleep(Duration::from_millis(50));
             }
             let after = super::ax::focused_window_id(window.pid);
+            // A Chromium app names the user's window as focused either way:
+            // there the agent's window must also have stopped being main.
+            let agent_still_main = agent_main && agent.and_then(super::ax::is_main).unwrap_or(true);
             log::debug!(
-                "input: focus back to {window:?} from {now:?}: focus record {recorded}, focused now {after:?}"
+                "input: focus back to {window:?} from {now:?}: focus record {recorded}, focused now {after:?}, agent's window still main {agent_still_main}"
             );
-            if after != Some(window.window_id) {
+            if after != Some(window.window_id) || agent_still_main {
                 let main = super::ax::make_main(window);
                 log::debug!(
                     "input: {window:?} made main through accessibility: {main}, focused now {:?}",
