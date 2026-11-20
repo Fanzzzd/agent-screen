@@ -1835,6 +1835,15 @@ pub fn menu_items(item: &AXUIElement, first: usize) -> Option<Snapshot> {
     Some(snapshot)
 }
 
+const MENU_NAMES: [&str; 6] = [
+    "AXTitle",
+    "AXChildren",
+    "AXMenuItemCmdChar",
+    "AXMenuItemCmdModifiers",
+    "AXEnabled",
+    "AXMenuItemMarkChar",
+];
+
 fn list_menu(
     menu: &AXUIElement,
     depth: usize,
@@ -1844,10 +1853,18 @@ fn list_menu(
 ) {
     let indent = "  ".repeat(depth);
     for element in elements_attribute(menu, "AXChildren") {
-        let Some(title) = string_attribute(&element, "AXTitle").filter(|t| !t.is_empty()) else {
+        let Some(values) = multiple_values_with(&element, &MENU_NAMES, &MENU_NAMES_ARRAY) else {
+            continue;
+        };
+        let Some(title) = values[0]
+            .downcast_ref::<CFString>()
+            .map(|s| s.to_string())
+            .filter(|t| !t.is_empty())
+        else {
             continue; // a separator
         };
-        if let Some(sub) = elements_attribute(&element, "AXChildren").first() {
+        let children = super::ax::elements(&values[1]);
+        if let Some(sub) = children.first() {
             if depth < 2 {
                 lines.push(format!("{indent}\"{title}\" submenu:"));
                 list_menu(sub, depth + 1, first, lines, elements);
@@ -1855,17 +1872,26 @@ fn list_menu(
             continue;
         }
         let mut line = format!("{indent}[{}] menuitem \"{title}\"", first + elements.len());
-        if let Some(key) = shortcut(&element) {
+        if let Some(key) = values[2]
+            .downcast_ref::<CFString>()
+            .map(|s| s.to_string())
+            .and_then(|key| {
+                let mods = values[3]
+                    .downcast_ref::<CFNumber>()
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(0);
+                format_shortcut(&key, mods)
+            })
+        {
             line += &format!(" key=\"{key}\"");
         }
-        let flag = |name: &str| {
-            attribute(&element, name)
-                .and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()))
-        };
-        if flag("AXEnabled") == Some(false) {
+        if values[4].downcast_ref::<CFBoolean>().map(|b| b.as_bool()) == Some(false) {
             line += " disabled";
         }
-        if string_attribute(&element, "AXMenuItemMarkChar").is_some_and(|m| !m.is_empty()) {
+        if values[5]
+            .downcast_ref::<CFString>()
+            .is_some_and(|m| !m.to_string().is_empty())
+        {
             line += " checked";
         }
         lines.push(line);
@@ -2342,13 +2368,17 @@ pub fn press_new_window(pid: i32) -> NewWindow {
 /// add Shift, Option and Control.
 fn shortcut(element: &AXUIElement) -> Option<String> {
     let key = string_attribute(element, "AXMenuItemCmdChar")?;
+    let mods = attribute(element, "AXMenuItemCmdModifiers")
+        .and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()))
+        .unwrap_or(0);
+    format_shortcut(&key, mods)
+}
+
+fn format_shortcut(key: &str, mods: i64) -> Option<String> {
     let key = key.trim();
     if key.chars().count() != 1 || !key.chars().all(|c| c.is_ascii_graphic()) {
         return None;
     }
-    let mods = attribute(element, "AXMenuItemCmdModifiers")
-        .and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()))
-        .unwrap_or(0);
     // Higher bits, such as Fn for Enter Full Screen, have no key name here.
     if mods & !0xF != 0 {
         return None;
@@ -2484,18 +2514,36 @@ fn short(name: &str) -> String {
     name.strip_prefix("AX").unwrap_or(name).to_lowercase()
 }
 
+thread_local! {
+    static NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
+    static MENU_NAMES_ARRAY: CFRetained<CFArray<CFString>> = {
+        let names: Vec<CFRetained<CFString>> =
+            MENU_NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
+        CFArray::from_retained_objects(&names)
+    };
+}
+
 fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
-    let names: Vec<CFRetained<CFString>> =
-        NAMES.iter().map(|n| CFString::from_static_str(n)).collect();
-    let names: CFRetained<CFArray<CFString>> = CFArray::from_retained_objects(&names);
+    multiple_values_with(element, &NAMES, &NAMES_ARRAY)
+}
+
+fn multiple_values_with(
+    element: &AXUIElement,
+    expected: &[&str],
+    cache: &'static std::thread::LocalKey<CFRetained<CFArray<CFString>>>,
+) -> Option<Vec<CFRetained<CFType>>> {
     let mut raw: *const CFArray = std::ptr::null();
-    let error = unsafe {
+    let error = cache.with(|names| unsafe {
         element.copy_multiple_attribute_values(
             names.as_opaque(),
             objc2_application_services::AXCopyMultipleAttributeOptions(0),
             NonNull::from(&mut raw),
         )
-    };
+    });
     if error != AXError::Success || raw.is_null() {
         return None;
     }
@@ -2504,7 +2552,7 @@ fn multiple_values(element: &AXUIElement) -> Option<Vec<CFRetained<CFType>>> {
     let array: &CFArray<CFType> =
         unsafe { &*(&*array as *const CFArray as *const CFArray<CFType>) };
     let values = array.to_vec();
-    (values.len() == NAMES.len()).then_some(values)
+    (values.len() == expected.len()).then_some(values)
 }
 
 /// A digest of what a page shows: each element's role, subrole, title,

@@ -409,10 +409,13 @@ async fn handle_one(
             };
             let shot = cx
                 .background_executor()
-                .spawn(async move { screenshot::display(id, pixels, format, region) })
+                .spawn(async move {
+                    let shot = screenshot::display(id, pixels, format, region)?;
+                    Ok::<_, String>(encode_shot(shot))
+                })
                 .await
                 .map_err(ControlError::failed)?;
-            let mut result = shot_json(&shot);
+            let mut result = shot.into_json();
             result["scale"] = json!(scale);
             add_strayed(&core, id, &mut result, cx);
             Ok(result)
@@ -1362,6 +1365,7 @@ async fn handle_one(
         }
         "windowState" => {
             let scope = read_scope(&p)?;
+            let want_image = p.0.get("image") != Some(&Value::Bool(false));
             let id = display(&core, &p, false, cx)?;
             let window = window_on(id, &p, cx).await?;
             let target = window.target;
@@ -1369,24 +1373,38 @@ async fn handle_one(
             let area = cg::display_bounds(id);
             let origin = (area.x, area.y);
             let scale = display_scale(&core, id, cx);
-            // Walking a tree takes a round trip per element.
+            let size = (window.bounds.width, window.bounds.height);
+            // Walk the accessibility tree and capture the window picture in
+            // parallel: both are read-only and run on background threads.
             let started = Instant::now();
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { ax::snapshot(target, origin, scale, root.map(|r| r.0), scope.max_depth) })
-                .await
-                // The window is there, so this isn't `not_found`, which
-                // reads as closed: the app is busy, or AX is off.
-                .map_err(|error| match error {
-                    ax::SnapshotError::WindowUnavailable => ControlError::failed(
-                        "the app didn't answer accessibility in time, or Accessibility isn't granted; call get_window_state again",
-                    ),
-                    ax::SnapshotError::RootUnavailable => ControlError::invalid(
-                        "the root element no longer belongs to this window; call get_window_state without root to find it again",
-                    ),
-                })?;
+            let walk_task = cx.background_executor().spawn(async move {
+                let res = ax::snapshot(target, origin, scale, root.map(|r| r.0), scope.max_depth);
+                (res, started.elapsed())
+            });
+            let shot_task = want_image.then(|| {
+                cx.background_executor().spawn(async move {
+                    let shot = screenshot::window(target, size)?;
+                    Ok::<_, String>(encode_shot(shot))
+                })
+            });
+            let ((snapshot, walked), shot) = match shot_task {
+                Some(shot_task) => {
+                    let (walk, shot) = futures::future::join(walk_task, shot_task).await;
+                    (walk, Some(shot))
+                }
+                None => (walk_task.await, None),
+            };
+            // The window is there, so this isn't `not_found`, which
+            // reads as closed: the app is busy, or AX is off.
+            let snapshot = snapshot.map_err(|error| match error {
+                ax::SnapshotError::WindowUnavailable => ControlError::failed(
+                    "the app didn't answer accessibility in time, or Accessibility isn't granted; call get_window_state again",
+                ),
+                ax::SnapshotError::RootUnavailable => ControlError::invalid(
+                    "the root element no longer belongs to this window; call get_window_state without root to find it again",
+                ),
+            })?;
             let count = snapshot.elements.len();
-            let walked = started.elapsed();
             let complete = scope.root.is_none() && !snapshot.truncated && !snapshot.depth_limited;
             let tree = core.update(cx, |c, _| {
                 let numbers = c.elements.entry((id, window.target.window_id)).or_default();
@@ -1395,19 +1413,16 @@ async fn handle_one(
                     &numbers.refresh(snapshot.elements, complete),
                 )
             });
-            let size = (window.bounds.width, window.bounds.height);
-            let shot = cx
-                .background_executor()
-                .spawn(async move { screenshot::window(target, size) })
-                .await
-                .map_err(ControlError::failed)?;
+            let mut result = match shot {
+                Some(shot) => shot.map_err(ControlError::failed)?.into_json(),
+                None => json!({}),
+            };
             log::debug!(
                 "windowState {}: {count} elements in {} ms, picture by {} ms",
                 target.window_id,
                 walked.as_millis(),
                 started.elapsed().as_millis()
             );
-            let mut result = shot_json(&shot);
             result["window"] = in_shot(window.json(), scale);
             result["tree"] = json!(tree);
             result["elements"] = json!(count);
@@ -3277,13 +3292,31 @@ fn describe<H>(d: &crate::model::Display<H>, reused: bool) -> Value {
     out
 }
 
-fn shot_json(shot: &screenshot::Shot) -> Value {
-    json!({
-        "data": base64::engine::general_purpose::STANDARD.encode(&shot.data),
-        "mimeType": shot.mime_type,
-        "width": shot.width,
-        "height": shot.height
-    })
+struct EncodedShot {
+    data: String,
+    mime_type: &'static str,
+    width: usize,
+    height: usize,
+}
+
+impl EncodedShot {
+    fn into_json(self) -> Value {
+        json!({
+            "data": self.data,
+            "mimeType": self.mime_type,
+            "width": self.width,
+            "height": self.height,
+        })
+    }
+}
+
+fn encode_shot(shot: screenshot::Shot) -> EncodedShot {
+    EncodedShot {
+        data: base64::engine::general_purpose::STANDARD.encode(&shot.data),
+        mime_type: shot.mime_type,
+        width: shot.width,
+        height: shot.height,
+    }
 }
 
 /// Note the windows the user made in the display's apps, which the kept

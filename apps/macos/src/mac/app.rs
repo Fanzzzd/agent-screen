@@ -26,16 +26,47 @@ pub fn running_pids(bundle: &Path) -> Vec<i32> {
 /// Every process running the bundle's main executable, also one that
 /// hasn't registered as an app yet, as in its first moments.
 pub fn processes_of(bundle: &Path) -> Vec<i32> {
-    // Safari's /Applications entry is a link into a cryptex; the running
-    // app reports where it really is.
-    let bundle = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
-    let Some(executable) = main_executable(&bundle) else {
+    let Some(executable) = cached_main_executable(bundle) else {
         return Vec::new();
     };
+    let wanted = executable.as_os_str().as_encoded_bytes();
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     process_ids()
         .into_iter()
-        .filter(|&pid| process_path(pid).as_deref() == Some(executable.as_path()))
+        .filter(|&pid| {
+            let length =
+                unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+            length > 0 && &buffer[..length as usize] == wanted
+        })
         .collect()
+}
+
+fn cached_main_executable(bundle: &Path) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+    type Entry = (Option<SystemTime>, Option<PathBuf>);
+    static CACHE: LazyLock<Mutex<HashMap<PathBuf, Entry>>> = LazyLock::new(Default::default);
+
+    let plist_path = bundle.join("Contents/Info.plist");
+    let mtime = std::fs::metadata(&plist_path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    if let Some((cached_mtime, exe)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(bundle)
+        && *cached_mtime == mtime
+    {
+        return exe.clone();
+    }
+    // Safari's /Applications entry is a link into a cryptex; the running
+    // app reports where it really is.
+    let canonical = std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf());
+    let exe = main_executable(&canonical);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    cache.insert(bundle.to_path_buf(), (mtime, exe.clone()));
+    exe
 }
 
 pub fn running_pid(bundle: &Path) -> Option<i32> {
@@ -420,16 +451,61 @@ pub fn handles_web(bundle: &Path) -> bool {
 }
 
 fn read_handles_web(bundle: &Path) -> bool {
-    std::process::Command::new("/usr/bin/plutil")
-        .args(["-extract", "CFBundleURLTypes", "json", "-o", "-"])
-        .arg(bundle.join("Contents/Info.plist"))
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some_and(|o| {
-            let text = String::from_utf8_lossy(&o.stdout);
-            text.contains("\"http\"") || text.contains("\"https\"")
-        })
+    let Ok(plist) = std::fs::read(bundle.join("Contents/Info.plist")) else {
+        return false;
+    };
+    plist_handles_web(&plist)
+}
+
+fn plist_handles_web(plist: &[u8]) -> bool {
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::propertylist::{CFPropertyList, create_with_data};
+    use core_foundation::string::CFString;
+    let Ok((list, _)) = create_with_data(CFData::from_buffer(plist), 0) else {
+        return false;
+    };
+    let Some(dict) =
+        (unsafe { CFPropertyList::wrap_under_create_rule(list) }).downcast_into::<CFDictionary>()
+    else {
+        return false;
+    };
+    let dict: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_get_rule(dict.as_concrete_TypeRef()) };
+    let Some(types) = dict
+        .find(CFString::new("CFBundleURLTypes"))
+        .and_then(|v| v.downcast::<CFArray>())
+    else {
+        return false;
+    };
+    let types: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_get_rule(types.as_concrete_TypeRef()) };
+    let schemes_key = CFString::new("CFBundleURLSchemes");
+    for entry in types.iter() {
+        let Some(entry) = entry.downcast::<CFDictionary>() else {
+            continue;
+        };
+        let entry: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(entry.as_concrete_TypeRef()) };
+        let Some(schemes) = entry
+            .find(&schemes_key)
+            .and_then(|v| v.downcast::<CFArray>())
+        else {
+            continue;
+        };
+        let schemes: CFArray<CFType> =
+            unsafe { CFArray::wrap_under_get_rule(schemes.as_concrete_TypeRef()) };
+        for scheme in schemes.iter() {
+            if let Some(s) = scheme.downcast::<CFString>()
+                && matches!(s.to_string().as_str(), "http" | "https")
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Show a hidden app's windows, where they are now.
@@ -716,5 +792,16 @@ mod tests {
             ))
         );
         assert_eq!(bundle_from_executable_path("/usr/bin/true"), None);
+    }
+
+    #[test]
+    fn handles_web_parses_info_plist_in_process() {
+        let safari = Path::new("/Applications/Safari.app");
+        if safari.join("Contents/Info.plist").exists() {
+            assert!(read_handles_web(safari));
+        }
+        assert!(!read_handles_web(Path::new(
+            "/System/Applications/Calculator.app"
+        )));
     }
 }
