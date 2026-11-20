@@ -4954,7 +4954,8 @@ impl Shell {
                         crate::mac::ime::return_front(previous);
                     }
                     if decided == AgentsActivated::GiveBackAndStartUsers {
-                        crate::mac::devtools::start_users_browser(pid);
+                        // It waits for the instance's pages to be decided.
+                        std::thread::spawn(move || crate::mac::devtools::start_users_browser(pid));
                     }
                     return;
                 }

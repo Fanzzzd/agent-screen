@@ -167,6 +167,42 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
+/// Whether the user clicked or pressed a key outside Agent Screen within
+/// `span`, as the global monitors record: Agent Screen's posted events
+/// never reach them.
+pub fn user_acted_within(span: std::time::Duration) -> bool {
+    USER_INPUT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(at, _)| at.elapsed() < span)
+}
+
+/// Whether an agent drove `pid` just now: its input, or an element action,
+/// to a display that shows a window of it, in the last `ACTION_WINDOW`. A
+/// launch's cold start doesn't count: links that reach the agents'
+/// instance in its first 30 s are the user's too.
+pub fn agent_drove(pid: i32) -> bool {
+    let now = std::time::Instant::now();
+    let driven: Vec<DisplayId> = ACTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, p, until)| p.is_none() && now < *until)
+        .map(|(d, _, _)| *d)
+        .collect();
+    if driven.is_empty() {
+        return false;
+    }
+    let shown = windows::all();
+    driven.iter().any(|d| {
+        let area = super::cg::display_bounds(*d);
+        shown
+            .iter()
+            .any(|w| w.target.pid == pid && area.contains(w.bounds.mid()))
+    })
+}
+
 /// Whether another Agent Display that shows a window of `pid` was driven
 /// just now: that session may have made the new window as well.
 fn others_acted_recently(display: DisplayId, pid: i32) -> bool {
