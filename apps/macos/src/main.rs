@@ -10,6 +10,7 @@ mod core;
 mod dismissal;
 mod input_queue;
 mod lifecycle;
+mod loan;
 #[cfg(target_os = "macos")]
 mod mac;
 mod reports;

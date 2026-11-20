@@ -20,6 +20,7 @@ pub const PATHS: &[(&str, &[Area])] = &[
     ("apps/macos/src/dismissal.rs", &[Displays, Windows]),
     ("apps/macos/src/i18n.rs", &[]),
     ("apps/macos/src/input_queue.rs", &[InputQueue]),
+    ("apps/macos/src/loan.rs", &[InputQueue]),
     ("apps/macos/src/reports.rs", &[Settings]),
     ("apps/macos/src/control/agent.rs", &[]),
     ("apps/macos/src/control/debug.rs", &[]),
