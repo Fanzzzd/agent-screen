@@ -234,6 +234,7 @@ const NEEDS_APP: &str = "it needs a debug build already running, and starts none
 #[rustfmt::skip]
 pub const SCRIPTS: &[Script] = &[
     script("agentbrowser", &[Browser, AgentInput], Full, Agent, 1),
+    script("agentfront", &[Browser, Windows], Full, Agent, 1),
     script("agentshots", &[Screenshots], Core, Agent, 1),
     script("alerts", &[Windows], Full, Hook, 1).hands_off(),
     script("appwhere", &[Peek, WindowAccess], Full, Hook, 1).hands_off(),
