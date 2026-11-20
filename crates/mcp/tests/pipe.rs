@@ -136,13 +136,28 @@ fn killing_the_parent_ends_the_pipe_while_stdin_stays_open() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let _stdin = shell.stdin.take().unwrap();
+    let mut stdin = shell.stdin.take().unwrap();
     let mut first = String::new();
     std::io::BufReader::new(shell.stdout.take().unwrap())
         .read_line(&mut first)
         .unwrap();
     let pipe: i32 = first.trim().parse().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+
+    // The pipe starts watching its parent on the first line of its main.
+    // Killed before that, the shell leaves a pipe launchd adopted before it
+    // saw a parent, which then waits on stdin alone. A fixed 500 ms wait
+    // lost that race right after a rebuild. A pipe that has connected to
+    // the app is past that line.
+    let listener = std::os::unix::net::UnixListener::bind(fixture.socket("pipe-parent")).unwrap();
+    let (accepted, connection) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = accepted.send(listener.accept().map(|(stream, _)| stream));
+    });
+    writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})).unwrap();
+    let _app = connection
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the pipe never connected to the app")
+        .unwrap();
     assert!(alive(pipe), "the pipe ended while its parent ran");
 
     shell.kill().unwrap();

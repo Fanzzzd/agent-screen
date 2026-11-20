@@ -21,12 +21,17 @@ impl Fixture {
     }
 
     pub fn listener(&self, instance: &str) -> tokio::net::UnixListener {
+        tokio::net::UnixListener::bind(self.socket(instance)).unwrap()
+    }
+
+    /// Where a pipe started by `command` looks for the app's socket.
+    pub fn socket(&self, instance: &str) -> PathBuf {
         #[cfg(target_os = "macos")]
         let base = self.0.join("Library/Application Support/Agent Screen");
         #[cfg(not(target_os = "macos"))]
         let base = self.0.join("agent-screen");
         std::fs::create_dir_all(&base).unwrap();
-        tokio::net::UnixListener::bind(base.join(format!("control-{instance}.sock"))).unwrap()
+        base.join(format!("control-{instance}.sock"))
     }
 
     pub fn command(&self, program: &str, instance: &str) -> Command {

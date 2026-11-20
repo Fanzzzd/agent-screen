@@ -16,15 +16,17 @@ concurrency: prepare-release
 
 jobs:
   prepare-release:
-    # A merged release pull request has nothing left to prepare. Squash
-    # merging makes its title the commit's subject.
+    # A merged release pull request has nothing left to prepare. Squashed,
+    # its title is the commit's subject and this skips; merged with a merge
+    # commit, the job runs and finds no changesets.
     if: "${{ !startsWith(github.event.head_commit.message, 'chore(release): Agent Screen ') }}"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Pushed with a deploy key, the release branch runs CI like any push,
       # and its checks show on the pull request; a push with GITHUB_TOKEN
       # starts no workflows.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
@@ -41,7 +43,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-      - uses: knope-dev/action@v2.1.2
+      - uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         if: steps.changes.outputs.pending
         with:
           version: 0.23.0
