@@ -53,6 +53,15 @@ impl ControlError {
             message: m.into(),
         }
     }
+    /// Refused only because the user's window of the target app has
+    /// focus, before anything was sent: `front_queue` queues the action.
+    /// Never sent to an agent with this code.
+    pub fn front_blocked(m: impl Into<String>) -> Self {
+        Self {
+            code: "front_blocked",
+            message: m.into(),
+        }
+    }
     pub fn takeover(m: impl Into<String>) -> Self {
         Self {
             code: "takeover",

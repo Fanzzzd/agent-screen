@@ -304,14 +304,16 @@ pub fn effect(before: Watch, after: Watch) -> Effect {
     }
 }
 
-/// Whether a press that ran leaves its effect unclear: the element listed
-/// no AXPress, so it was pressed only for its role (`press_anyway`), and
-/// nothing was seen to change. Dia lists no AXPress on a page's elements
-/// and ignores the press, but a link waiting on a slow server shows
-/// nothing either, so the answer says it can't tell rather than that the
-/// press failed, which could have the agent click again and submit twice.
-pub fn unlisted_press_unclear(listed: bool, seen: Effect) -> bool {
-    !listed && seen == Effect::NoneSeen
+/// Whether a click beside the user's window goes in as a press on the
+/// element under it: only when the element lists AXPress. An element
+/// found only by its role (`press_anyway`) may ignore the press: Dia lists
+/// no AXPress on a page's elements and ignored every press, 0 of 14
+/// (#219). Pressing it anyway left the agent unable to tell whether it
+/// acted, and a retry could submit twice. Such a click waits in the
+/// Input Queue for the app to leave the front instead, and then goes in
+/// as a posted click.
+pub fn press_goes_in(listed: bool) -> bool {
+    listed
 }
 
 /// Whether Tab stops at an element: one that is enabled and lets a client
@@ -719,10 +721,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unlisted_press_that_changed_nothing_is_unclear() {
-        assert!(unlisted_press_unclear(false, Effect::NoneSeen));
-        assert!(!unlisted_press_unclear(false, Effect::Seen));
-        assert!(!unlisted_press_unclear(false, Effect::Unknown));
-        assert!(!unlisted_press_unclear(true, Effect::NoneSeen));
+    fn a_press_goes_in_only_on_an_element_that_lists_it() {
+        assert!(press_goes_in(true));
+        assert!(!press_goes_in(false));
     }
 }

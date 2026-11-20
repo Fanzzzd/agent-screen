@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 pub const EXECUTOR_AVAILABLE: bool = true;
+/// How long a front request waits before the display's card says so.
+pub const WAITING_LINE_MS: u64 = 30_000;
 const REASON_CHARS: usize = 300;
 const OPERATION_CHARS: usize = 2048;
 const LAPSED_NEXT: &str = "The user allowed this request, but the approval ended before it ran and they will not be asked about it again. Waiting or retrying the same operation returns at once. Make a new request to ask again, use a background alternative or request_help, then withdraw this one.";
@@ -44,6 +46,8 @@ pub struct InputQueue {
     /// What each runnable request does. A request without one, made with
     /// input_queue's request action, only asks for approval.
     plans: BTreeMap<RequestId, Plan>,
+    /// What each front request does (`Queue::enqueue_front`).
+    fronts: BTreeMap<RequestId, Front>,
     /// Why the executor could not carry a loan out.
     failures: BTreeMap<RequestId, String>,
     /// Per session's display, the last click refused because what was
@@ -58,6 +62,39 @@ pub struct InputQueue {
     ran: Vec<(RequestId, DisplayId, Plan)>,
     /// The grant `ran` belongs to.
     ran_grant: Option<u64>,
+    /// How many displays' cards said a front request waits, when last
+    /// asked (`waiting_changed`).
+    waiting_shown: usize,
+    /// Front requests `preview_waiting` made, shown as waiting at once.
+    previews: BTreeSet<RequestId>,
+}
+
+/// An action refused only because the user's window of the target app has
+/// focus, to run through the background route once that app is no longer
+/// in front: the control method and its parameters, as the agent sent
+/// them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Front {
+    pub method: String,
+    pub params: Value,
+    /// The app whose front state holds it, and its name.
+    pub pid: i32,
+    pub app: String,
+    /// For a click, what was under its point as it was queued.
+    pub look: Option<Look>,
+}
+
+/// What was under a queued click's point: the window there, and the
+/// pixels of the region around the point, display-local, to compare
+/// before the click runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Look {
+    pub display: DisplayId,
+    /// The point, global.
+    pub at: (f64, f64),
+    pub window: WindowTarget,
+    pub region: Rect,
+    pub samples: Vec<u8>,
 }
 
 /// What one loan does.
@@ -157,11 +194,14 @@ impl Default for InputQueue {
             walls: BTreeMap::new(),
             approved: BTreeSet::new(),
             plans: BTreeMap::new(),
+            fronts: BTreeMap::new(),
             failures: BTreeMap::new(),
             changed: BTreeMap::new(),
             loan_ok: Arc::default(),
             ran: Vec::new(),
             ran_grant: None,
+            waiting_shown: 0,
+            previews: BTreeSet::new(),
         }
     }
 }
@@ -227,6 +267,147 @@ impl InputQueue {
         Ok(id)
     }
 
+    /// Queue `front`, an action only the user's front app blocks. The
+    /// caller runs it with `start_front` and `finish_front`.
+    pub fn submit_front(
+        &mut self,
+        owner: Owner,
+        operation: String,
+        reason: String,
+        front: Front,
+    ) -> Result<RequestId, String> {
+        let reason: String = reason.trim().chars().take(REASON_CHARS).collect();
+        let operation: String = operation.chars().take(OPERATION_CHARS).collect();
+        let now = self.now();
+        let id = self
+            .queue
+            .enqueue_front(owner, operation, reason, now)
+            .map_err(|why| {
+                match why {
+                    EnqueueError::Full => "the input queue is full; use input_queue done when your session no longer needs its requests",
+                    EnqueueError::SessionFull => "this connection holds 64 input requests across its displays, including finished ones it has not cleared; use input_queue done on each display once it has read their results",
+                    EnqueueError::Invalid => "operation and reason are required",
+                    EnqueueError::Closed => "the queue's display lifetime has ended",
+                }
+                .to_string()
+            })?;
+        self.fronts.entry(id).or_insert(front);
+        self.tick();
+        Ok(id)
+    }
+
+    /// What front request `id` does.
+    pub fn front(&self, id: RequestId) -> Option<&Front> {
+        self.fronts.get(&id)
+    }
+
+    /// Front request `id` runs now.
+    pub fn start_front(&mut self, id: RequestId) -> bool {
+        let now = self.now();
+        let started = self.queue.start_front(id, now);
+        self.tick();
+        started
+    }
+
+    /// Front request `id` started, but its app came back to the front
+    /// first: it waits again.
+    pub fn requeue_front(&mut self, id: RequestId) {
+        self.queue.requeue_front(id);
+        self.tick();
+    }
+
+    /// A finished request whose call read its result.
+    pub fn forget(&mut self, id: RequestId) {
+        self.queue.forget(id);
+        self.tick();
+    }
+
+    /// Front request `id` ran, or `failure` says why it could not.
+    pub fn finish_front(&mut self, id: RequestId, failure: Option<String>) {
+        let now = self.now();
+        let sent = failure.is_none();
+        if let Some(why) = failure {
+            self.failures.insert(id, why);
+        }
+        self.queue.finish_front(id, sent, now);
+        self.tick();
+    }
+
+    /// The app a front request of `display` has waited on for at least
+    /// `WAITING_LINE_MS`, for the display's card: a quiet line, with no
+    /// notification. The agent's next action replaces the request, and the
+    /// line goes with it.
+    pub fn waiting_line(&self, display: DisplayId) -> Option<String> {
+        let now = self.now();
+        self.queue
+            .fronts()
+            .filter(|r| {
+                r.owner.display == display
+                    && (self.previews.contains(&r.id)
+                        || now.saturating_sub(r.times.asked) >= WAITING_LINE_MS)
+            })
+            .find_map(|r| Some(self.fronts.get(&r.id)?.app.clone()))
+    }
+
+    /// `debugShow waiting-line`: a front request of `owner` that has
+    /// waited `WAITING_LINE_MS` on `app`, with no call waiting for it, so
+    /// it never runs.
+    pub fn preview_waiting(&mut self, owner: Owner, app: String) -> Result<RequestId, String> {
+        let now = self.now();
+        let id = self
+            .queue
+            .enqueue_front(
+                owner,
+                "preview-waiting".into(),
+                "Preview the waiting line".into(),
+                now,
+            )
+            .map_err(|why| format!("{why:?}"))?;
+        self.previews.insert(id);
+        self.fronts.insert(
+            id,
+            Front {
+                method: "click".into(),
+                params: json!({}),
+                pid: 0,
+                app,
+                look: None,
+            },
+        );
+        let now = self.now();
+        self.queue.detach(id, now);
+        self.tick();
+        Ok(id)
+    }
+
+    /// How many displays show a waiting line now.
+    pub fn waiting_count(&self) -> usize {
+        let displays: BTreeSet<DisplayId> = self.queue.fronts().map(|r| r.owner.display).collect();
+        displays
+            .into_iter()
+            .filter(|d| self.waiting_line(*d).is_some())
+            .count()
+    }
+
+    /// Whether the waiting lines changed since the last call: the cards
+    /// redraw then.
+    pub fn waiting_changed(&mut self) -> bool {
+        let now = self.waiting_count();
+        let changed = now != self.waiting_shown;
+        self.waiting_shown = now;
+        changed
+    }
+
+    /// `owner`'s action went in another way: its waiting front requests no
+    /// longer apply.
+    pub fn replace_fronts(&mut self, owner: &Owner) {
+        if self.queue.fronts().any(|r| &r.owner == owner) {
+            let now = self.now();
+            self.queue.replace_fronts(owner, now);
+            self.tick();
+        }
+    }
+
     /// A real click `operation` of `owner` was refused because what was
     /// under its point changed: how many times in a row that click has
     /// been. Another click starts over; `None`, for a click that ended any
@@ -279,7 +460,7 @@ impl InputQueue {
 
     /// The agent's call waits for `id` again, if it can run.
     pub fn attach(&mut self, id: RequestId) {
-        if self.plans.contains_key(&id) {
+        if self.plans.contains_key(&id) || self.fronts.contains_key(&id) {
             let now = self.now();
             self.queue.attach(id, now);
             self.tick();
@@ -473,6 +654,12 @@ impl InputQueue {
         });
         let requests = &self.queue;
         self.plans.retain(|id, _| requests.request(*id).is_some());
+        self.fronts.retain(|id, _| requests.request(*id).is_some());
+        self.previews.retain(|id| {
+            requests
+                .request(*id)
+                .is_some_and(|r| r.status == Status::Queued)
+        });
         self.failures
             .retain(|id, _| requests.request(*id).is_some());
         self.changed
@@ -538,6 +725,7 @@ impl InputQueue {
         };
         match r.status {
             Status::Queued if paused => false,
+            Status::Queued if r.front => r.attached,
             Status::Queued if self.queue.grant().is_some() => self.plans.contains_key(&id),
             Status::Queued => self.asks(id),
             Status::Running | Status::Stopping(_) => true,
@@ -622,6 +810,7 @@ impl InputQueue {
                     .map(|p| p + 1);
                 let state = match request.status {
                     Status::Queued if paused => "takeover",
+                    Status::Queued if request.front => "waiting_for_app",
                     Status::Queued
                         if self.queue.grant().is_some_and(|g| g.admits(&request.owner)) =>
                     {
@@ -648,7 +837,8 @@ impl InputQueue {
                         _ => None,
                     },
                     "failure": self.failures.get(&request.id),
-                    "runnable": self.plans.contains_key(&request.id),
+                    "runnable": self.plans.contains_key(&request.id)
+                        || self.fronts.contains_key(&request.id),
                     "elapsedSeconds": seconds(request.times.elapsed_ms(self.now())),
                     "timing": self.timing(request.id, &request.times),
                 })
@@ -660,7 +850,7 @@ impl InputQueue {
             "elapsedSeconds": self.elapsed_seconds(),
             "waiting": self.queue.waiting().count(),
             "requests": requests,
-            "note": "Only completed means the action ran, with the user's pointer. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts. elapsedSeconds at the top is how long the current approval has lasted, null with none; a request's elapsedSeconds runs from your ask to its end, or to now. timing gives when it was asked, allowed, started and ended, in milliseconds since 1970: approvalMs is the user's time, turnMs the wait for its turn, runMs the run with the user's pointer.",
+            "note": "Only completed means the action ran: with the user's pointer, or for waiting_for_app through the background route once the user's window of that app no longer had focus. waiting_for_app waits for that, while a call waits. approved means allowed and waiting its turn; a request made with input_queue's request action is then answered: retry the drag or click with real_input while the approval lasts. elapsedSeconds at the top is how long the current approval has lasted, null with none; a request's elapsedSeconds runs from your ask to its end, or to now. timing gives when it was asked, allowed, started and ended, in milliseconds since 1970: approvalMs is the user's time, turnMs the wait for its turn, runMs the run with the user's pointer.",
         })
     }
 }

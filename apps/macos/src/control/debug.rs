@@ -689,6 +689,24 @@ async fn debug_show(
         cg::debug_user_stage(id, connection);
         return Ok(json!({}));
     }
+    // An action that has waited 30 s for the user to leave an app, as
+    // its display's card and the Viewer header say. It never runs.
+    if surface == "waiting-line" {
+        usable(core, connection, p, id, "debugShow", cx)?;
+        let app = p.string("app").unwrap_or_else(|| "Dia".into());
+        core.update(cx, |c, cx| -> Result<(), ControlError> {
+            let owner = c
+                .input_queue
+                .owner(id, connection)
+                .map_err(ControlError::invalid)?;
+            c.input_queue
+                .preview_waiting(owner, app)
+                .map_err(ControlError::invalid)?;
+            cx.notify();
+            Ok(())
+        })?;
+        return Ok(json!({}));
+    }
     if matches!(
         surface.as_str(),
         "input-queue"

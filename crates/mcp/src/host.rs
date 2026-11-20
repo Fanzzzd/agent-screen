@@ -27,7 +27,7 @@ const INSTRUCTIONS: &[&str] = &[
     "Operate the whole display with computer, or one window at a time with get_window_state and act_on_element.",
     "To wait for a window to update after an action, call wait_for_change instead of sleeping and taking another screenshot.",
     "Mark each window with set_disposition so the user knows what to keep.",
-    "If an action returns input_pending, use input_queue to inspect, wait or withdraw. Queue approval is not completion. Complete drags may use the user's pointer after they allow it; only completed means the drag ran.",
+    "If an action returns input_pending, use input_queue to inspect, wait or withdraw. Queue approval is not completion. Complete drags may use the user's pointer after they allow it; only completed means the drag ran. An action that waits for the user to leave their app's window runs by itself once they do, while you wait; meanwhile keep reading, or work elsewhere.",
     "If the user takes over, tools fail with a takeover error: call wait_for_control, or request_control",
     "to ask them to hand the display back when you need it. For a login or",
     "two-factor code, call request_help. For a captcha, ask the user to confirm the current challenge",

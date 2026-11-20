@@ -1,5 +1,6 @@
 pub mod agent;
 mod debug;
+mod front_queue;
 pub mod server;
 pub mod shared_app;
 mod values;

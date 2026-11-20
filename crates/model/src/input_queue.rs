@@ -77,6 +77,11 @@ pub struct Request {
     /// came to cover it, its loan started, and its loan ended, so the agent
     /// can tell the user's time from the executor's.
     pub times: Times,
+    /// An action refused only because the user's window of the target app
+    /// has focus (`enqueue_front`). It needs no grant and never takes the
+    /// user's pointer: it runs through the background route once that app
+    /// is no longer in front, while the agent's call waits.
+    pub front: bool,
 }
 
 /// Milliseconds on the clock the queue is given as `now`.
@@ -275,6 +280,9 @@ impl Queue {
             Status::Queued => {
                 r.status = Status::Stopped(Stop::Withdrawn);
                 r.times.ended = Some(now);
+                if r.front {
+                    return true;
+                }
                 self.waiting.retain(|queued| *queued != id);
                 if self.grant.is_none() {
                     self.approval = self.approval.saturating_add(1);
@@ -303,6 +311,32 @@ impl Queue {
         reason: String,
         now: u64,
     ) -> Result<RequestId, EnqueueError> {
+        self.insert(owner, operation, reason, now, false)
+    }
+
+    /// Queue an action that only the user's front app blocks: their window
+    /// of the target's app has focus, so posting it would reach their
+    /// window or take its focus. It waits outside the grant's FIFO, and
+    /// `start_front` runs it once the app is no longer in front. A newer
+    /// action of the same owner replaces it, as for loans.
+    pub fn enqueue_front(
+        &mut self,
+        owner: Owner,
+        operation: String,
+        reason: String,
+        now: u64,
+    ) -> Result<RequestId, EnqueueError> {
+        self.insert(owner, operation, reason, now, true)
+    }
+
+    fn insert(
+        &mut self,
+        owner: Owner,
+        operation: String,
+        reason: String,
+        now: u64,
+        front: bool,
+    ) -> Result<RequestId, EnqueueError> {
         if self.owners.get(&owner.display) != Some(&owner) {
             return Err(EnqueueError::Closed);
         }
@@ -310,7 +344,7 @@ impl Queue {
             .requests
             .values()
             .rev()
-            .find(|r| r.owner == owner && r.operation == operation)
+            .find(|r| r.owner == owner && r.operation == operation && r.front == front)
             .filter(|r| !matches!(r.status, Status::Stopped(Stop::Replaced | Stop::Withdrawn)))
         {
             let id = r.id;
@@ -358,6 +392,31 @@ impl Queue {
                 true
             }
         });
+        for r in self.requests.values_mut() {
+            if r.front && r.owner == owner && r.status == Status::Queued {
+                r.status = Status::Stopped(Stop::Replaced);
+                r.times.ended = Some(now);
+            }
+        }
+        if front {
+            self.requests.insert(
+                id,
+                Request {
+                    id,
+                    owner,
+                    operation,
+                    reason,
+                    status: Status::Queued,
+                    attached: true,
+                    times: Times {
+                        asked: now,
+                        ..Times::default()
+                    },
+                    front: true,
+                },
+            );
+            return Ok(id);
+        }
         let mut allowed = None;
         if !self.takeovers.contains(&owner.display)
             && let Some(grant) = self.grant.as_mut()
@@ -380,6 +439,7 @@ impl Queue {
                     allowed,
                     ..Times::default()
                 },
+                front: false,
             },
         );
         self.waiting.push_back(id);
@@ -443,6 +503,74 @@ impl Queue {
         grant.idle_since_ms = None;
         self.active = Some(id);
         Some(id)
+    }
+
+    /// The front request `id` runs now: its app is no longer in front and
+    /// a call waits for it. False when it can't: it isn't queued, or its
+    /// display is in a Takeover.
+    pub fn start_front(&mut self, id: RequestId, now: u64) -> bool {
+        let paused = self
+            .requests
+            .get(&id)
+            .is_some_and(|r| self.takeovers.contains(&r.owner.display));
+        let Some(r) = self.requests.get_mut(&id) else {
+            return false;
+        };
+        if !r.front || r.status != Status::Queued || !r.attached || paused {
+            return false;
+        }
+        r.status = Status::Running;
+        r.times.started = Some(now);
+        true
+    }
+
+    /// The front request `id` ran (`sent`) or could not.
+    pub fn finish_front(&mut self, id: RequestId, sent: bool, now: u64) -> bool {
+        let Some(r) = self.requests.get_mut(&id) else {
+            return false;
+        };
+        if !r.front || r.status != Status::Running {
+            return false;
+        }
+        r.status = if sent {
+            Status::Completed
+        } else {
+            Status::Stopped(Stop::Failed)
+        };
+        r.times.ended = Some(now);
+        true
+    }
+
+    /// The front request `id` started, but its app came back to the front
+    /// before it sent anything: it waits again.
+    pub fn requeue_front(&mut self, id: RequestId) -> bool {
+        let Some(r) = self.requests.get_mut(&id) else {
+            return false;
+        };
+        if !r.front || r.status != Status::Running {
+            return false;
+        }
+        r.status = Status::Queued;
+        r.times.started = None;
+        true
+    }
+
+    /// `owner` acted on its display another way: what it queued earlier no
+    /// longer applies, as when a newer action replaces it.
+    pub fn replace_fronts(&mut self, owner: &Owner, now: u64) {
+        for r in self.requests.values_mut() {
+            if r.front && r.owner == *owner && r.status == Status::Queued {
+                r.status = Status::Stopped(Stop::Replaced);
+                r.times.ended = Some(now);
+            }
+        }
+    }
+
+    /// Front requests still waiting for their app to leave the front.
+    pub fn fronts(&self) -> impl Iterator<Item = &Request> {
+        self.requests
+            .values()
+            .filter(|r| r.front && r.status == Status::Queued)
     }
 
     /// Whether `start` would hand out a loan now.
@@ -672,6 +800,13 @@ impl Queue {
         if self.grant.is_none() && self.waiting.len() != waiting {
             self.approval = self.approval.saturating_add(1);
         }
+        for r in self.requests.values_mut() {
+            if r.front && matches(&r.owner) && matches!(r.status, Status::Queued | Status::Running)
+            {
+                r.status = Status::Stopped(why);
+                r.times.ended = Some(now);
+            }
+        }
         if let Some(grant) = self.grant.as_mut() {
             grant.participants.retain(|owner| !matches(owner));
             grant.done.retain(|owner| !matches(owner));
@@ -707,6 +842,108 @@ mod tests {
     fn restored(q: &mut Queue) {
         let end = q.pending_end().unwrap();
         assert!(q.acknowledge_end(end.id));
+    }
+
+    #[test]
+    fn a_front_request_runs_without_a_grant_and_never_asks() {
+        let mut q = queue();
+        let id = q
+            .enqueue_front(owner("a", 1), "click".into(), "Click in Dia".into(), 0)
+            .unwrap();
+        // Not a loan: no card asks, and no grant starts it.
+        assert_eq!(q.waiting().count(), 0);
+        assert!(!q.ready());
+        assert_eq!(q.start(1), None);
+        assert_eq!(q.fronts().map(|r| r.id).collect::<Vec<_>>(), vec![id]);
+        assert!(q.start_front(id, 2));
+        assert!(!q.start_front(id, 2));
+        // Its app came back to the front before it sent anything.
+        assert!(q.requeue_front(id));
+        assert_eq!(q.fronts().count(), 1);
+        assert!(q.start_front(id, 2));
+        assert!(q.finish_front(id, true, 3));
+        assert_eq!(q.request(id).unwrap().status, Status::Completed);
+        assert!(q.fronts().next().is_none());
+    }
+
+    #[test]
+    fn a_front_request_waits_out_a_takeover_and_a_detached_call() {
+        let mut q = queue();
+        let id = q
+            .enqueue_front(owner("a", 1), "key".into(), "Return in Dia".into(), 0)
+            .unwrap();
+        q.takeover(1, true, 1);
+        assert!(!q.start_front(id, 2));
+        q.takeover(1, false, 3);
+        q.detach(id, 4);
+        assert!(!q.start_front(id, 5));
+        // The same action again attaches it.
+        let again = q
+            .enqueue_front(owner("a", 1), "key".into(), "Return in Dia".into(), 6)
+            .unwrap();
+        assert_eq!(again, id);
+        assert!(q.start_front(id, 7));
+        assert!(q.finish_front(id, false, 8));
+        assert_eq!(q.request(id).unwrap().status, Status::Stopped(Stop::Failed));
+    }
+
+    #[test]
+    fn a_newer_action_replaces_a_waiting_front_request() {
+        let mut q = queue();
+        let first = q
+            .enqueue_front(owner("a", 1), "click 1".into(), "Click".into(), 0)
+            .unwrap();
+        let second = q
+            .enqueue_front(owner("a", 1), "click 2".into(), "Click".into(), 1)
+            .unwrap();
+        assert_eq!(
+            q.request(first).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        // The same owner's action that went in another way replaces it too.
+        q.replace_fronts(&owner("a", 1), 2);
+        assert_eq!(
+            q.request(second).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        let second = q
+            .enqueue_front(owner("a", 1), "click 3".into(), "Click".into(), 2)
+            .unwrap();
+        // Another session's request stays.
+        let other = q
+            .enqueue_front(owner("b", 2), "click 1".into(), "Click".into(), 2)
+            .unwrap();
+        let drag = add(&mut q, "a", 1, "drag", 3);
+        assert_eq!(
+            q.request(second).unwrap().status,
+            Status::Stopped(Stop::Replaced)
+        );
+        assert_eq!(q.request(other).unwrap().status, Status::Queued);
+        assert_eq!(q.request(drag).unwrap().status, Status::Queued);
+    }
+
+    #[test]
+    fn a_front_request_stops_with_its_display_and_can_be_withdrawn() {
+        let mut q = queue();
+        let a = q
+            .enqueue_front(owner("a", 1), "click".into(), "Click".into(), 0)
+            .unwrap();
+        let b = q
+            .enqueue_front(owner("b", 2), "click".into(), "Click".into(), 0)
+            .unwrap();
+        let approval = q.approval();
+        assert!(q.withdraw(a, &owner("a", 1), 1));
+        assert_eq!(
+            q.request(a).unwrap().status,
+            Status::Stopped(Stop::Withdrawn)
+        );
+        // No approval card was showing, so none is invalidated.
+        assert_eq!(q.approval(), approval);
+        q.end_display(2, 2);
+        assert_eq!(
+            q.request(b).unwrap().status,
+            Status::Stopped(Stop::DisplayEnded)
+        );
     }
 
     fn add(q: &mut Queue, session: &str, display: DisplayId, op: &str, now: u64) -> RequestId {

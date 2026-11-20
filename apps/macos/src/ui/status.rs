@@ -150,6 +150,25 @@ pub struct AccessLine {
     pub paused: bool,
 }
 
+impl Status {
+    /// An action of `agent`'s on this display has waited a while in the
+    /// Input Queue for the user to leave `app`, whose window of theirs has
+    /// focus: the card says so, quietly. Only while the agent works there.
+    pub fn waiting_for(self, agent: &str, app: Option<String>) -> Status {
+        match app {
+            Some(app) if self.kind == Kind::Agent => Status {
+                short: tf!("Waits for you to leave {app}", "等你离开 {app}"),
+                long: tf!(
+                    "{agent} waits for you to leave {app}, then continues in its window there.",
+                    "{agent} 等你离开 {app} 后，在它的窗口里继续"
+                ),
+                ..self
+            },
+            _ => self,
+        }
+    }
+}
+
 impl AccessLine {
     /// `access` is the session's, which covers all its displays.
     pub fn of<H>(display: &Display<H>, access: Option<&Access>) -> Option<AccessLine> {
