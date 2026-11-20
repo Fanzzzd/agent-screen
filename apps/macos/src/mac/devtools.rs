@@ -216,6 +216,7 @@ pub fn spawn(
         creating: AtomicUsize::new(0),
         created_until: Mutex::new(None),
         addressless: Mutex::new(HashMap::new()),
+        settled: std::sync::Condvar::new(),
     });
     channels().insert(pid, channel.clone());
     let reader = unsafe { std::fs::File::from_raw_fd(from_app.0) };
@@ -300,6 +301,8 @@ pub struct Channel {
     created_until: Mutex<Option<Instant>>,
     /// Pages from outside with no address yet, since when (#235).
     addressless: Mutex<HashMap<String, Instant>>,
+    /// Signaled as each new page is decided, for a wait on `addressless`.
+    settled: std::sync::Condvar,
 }
 
 fn channels() -> std::sync::MutexGuard<'static, HashMap<i32, Arc<Channel>>> {
@@ -376,10 +379,11 @@ fn quitting<T>(force: bool, quit: impl FnOnce() -> T) -> Option<T> {
 /// its pipe counts no page.
 pub fn mark_agents(pid: i32, profile_argument: &str) {
     agents().insert(pid, (Instant::now(), profile_argument.to_string()));
-    std::thread::spawn(move || {
-        if let Some(c) = channel(pid, Duration::from_secs(15)) {
-            c.discover();
-        }
+    std::thread::spawn(move || match channel(pid, Duration::from_secs(15)) {
+        Some(c) => c.discover(),
+        None => log::warn!(
+            "devtools: the agents' instance {pid} gave no pipe within 15 s; links that reach it stay there"
+        ),
     });
     static WATCH: std::sync::Once = std::sync::Once::new();
     WATCH.call_once(|| {
@@ -490,18 +494,21 @@ pub fn start_users_browser(pid: i32) -> bool {
         return false;
     };
     // A link that brought the instance forward opens the user's browser
-    // with its page: a second start would add an empty window.
-    std::thread::sleep(Duration::from_millis(500));
+    // with its page: a second start would add an empty window. Wait until
+    // the instance's pages so far are decided.
+    if let Some(c) = channel(pid, Duration::from_millis(500)) {
+        c.settle();
+    }
     if forwarded_recently() {
         log::info!("devtools: a link already opened the user's browser");
         return false;
     }
-    super::app::open_new_instance(&bundle, None, &users_browser_arguments());
+    let opened = super::app::open_new_instance(&bundle, None, &users_browser_arguments());
     log::info!(
-        "devtools: the user launched their browser and the agents' instance {pid} got it; opening theirs: {}",
+        "devtools: the user launched their browser and the agents' instance {pid} got it; opening theirs, {}: {opened:?}",
         bundle.display()
     );
-    true
+    opened.is_ok()
 }
 
 /// When Agent Screen last forwarded a link to the user's browser.
@@ -527,19 +534,22 @@ fn users_browser_arguments() -> Vec<String> {
 }
 
 /// Move the page `target`, which a link from outside opened in the agents'
-/// instance `pid`, to the user's own browser: close it there and open
-/// `url` through LaunchServices in a new instance on the user's profile.
+/// instance `pid`, to the user's own browser: open `url` through
+/// LaunchServices in a new instance on the user's profile, then close the
+/// page there.
 /// When the user's browser runs, that new instance hands the page to it
 /// and quits, as Chromium does with a second start on one profile (#235).
 fn forward_link(pid: i32, target: &str, url: &str) {
     let Some(bundle) = super::app::bundle_of(pid) else {
         return;
     };
-    *FORWARDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-    let closed = channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_target(target));
-    super::app::open_new_instance(&bundle, Some(url), &users_browser_arguments());
+    // The page closes only once the user's browser took it: a link it
+    // can't open stays in the agents' instance.
+    let opened = super::app::open_new_instance(&bundle, Some(url), &users_browser_arguments());
+    let closed = opened.is_ok()
+        && channel(pid, Duration::from_secs(1)).is_some_and(|c| c.close_target(target));
     log::info!(
-        "devtools: a link reached the agents' instance {pid}; closed its page {closed} and opened it in the user's browser"
+        "devtools: a link reached the agents' instance {pid}; opened it in the user's browser: {opened:?}, closed its page: {closed}"
     );
 }
 
@@ -826,6 +836,21 @@ impl Channel {
         self.call(method, params, session.as_deref())
     }
 
+    /// Wait until every page the browser reported so far is decided: one
+    /// round trip takes in its earlier events, which come first on the
+    /// pipe, then a page still without an address waits up to `LINK_SECS`.
+    fn settle(&self) {
+        use agent_screen_model::agent_browser::LINK_SECS;
+        let _ = self.call("Target.getTargets", json!({}), None);
+        let waiting = self.addressless.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .settled
+            .wait_timeout_while(waiting, Duration::from_secs(LINK_SECS), |w| {
+                w.retain(|_, at| at.elapsed() < Duration::from_secs(LINK_SECS));
+                !w.is_empty()
+            });
+    }
+
     /// Report the browser's new pages, for links that reach the agents'
     /// instance (#235).
     fn discover(&self) {
@@ -851,7 +876,7 @@ impl Channel {
     /// for its address. Runs on the reader thread, so it never waits on the
     /// pipe.
     fn page_seen(&self, info: &Value, created: bool) {
-        use agent_screen_model::agent_browser::{LINK_SECS, NewPage, new_page};
+        use agent_screen_model::agent_browser::{LINK_SECS, NewPage, PageOrigin, new_page};
         if info["type"] != "page" || !is_agents(self.pid) {
             return;
         }
@@ -861,29 +886,29 @@ impl Channel {
         let url = info["url"].as_str().unwrap_or_default();
         let mut addressless = self.addressless.lock().unwrap_or_else(|e| e.into_inner());
         addressless.retain(|_, at| at.elapsed() < Duration::from_secs(LINK_SECS));
-        let opener = info.get("openerId").is_some();
-        let (through_pipe, driven) = if created {
-            (
-                self.creating.load(Ordering::SeqCst) > 0
+        let origin = if created {
+            PageOrigin {
+                opener: info.get("openerId").is_some(),
+                through_pipe: self.creating.load(Ordering::SeqCst) > 0
                     || self
                         .created_until
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .is_some_and(|until| Instant::now() < until),
-                super::catch::agent_drove(self.pid),
-            )
-        } else {
-            (false, false)
-        };
-        let decided = if created {
-            new_page(opener, through_pipe, driven, url)
+                agent_acted: super::catch::agent_drove(self.pid),
+                user_acted: super::catch::user_acted_within(Duration::from_secs(LINK_SECS)),
+            }
         } else if addressless.contains_key(target) {
-            // It was a page from outside with no address: only the address
-            // is new.
-            new_page(false, false, false, url)
+            // A page from outside that the user's input explained, with no
+            // address then: only the address is new.
+            PageOrigin {
+                user_acted: true,
+                ..PageOrigin::default()
+            }
         } else {
             return;
         };
+        let decided = new_page(origin, url);
         match decided {
             NewPage::Wait => {
                 log::debug!(
@@ -896,17 +921,22 @@ impl Channel {
             }
             NewPage::Keep => {
                 log::debug!(
-                    "devtools: pid {} keeps its new page {target}: opener {opener}, through the pipe {through_pipe}, agent drove it {driven}",
+                    "devtools: pid {} keeps its new page {target}: {origin:?}",
                     self.pid
                 );
                 addressless.remove(target);
             }
             NewPage::Forward => {
                 addressless.remove(target);
+                // Set before the page moves, so the user's browser isn't
+                // started a second time meanwhile (`start_users_browser`).
+                *FORWARDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                 let (pid, target, url) = (self.pid, target.to_string(), url.to_string());
                 std::thread::spawn(move || forward_link(pid, &target, &url));
             }
         }
+        drop(addressless);
+        self.settled.notify_all();
     }
 
     /// How many page targets the browser has: its tabs, across its windows.

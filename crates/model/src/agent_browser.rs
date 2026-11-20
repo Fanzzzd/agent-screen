@@ -264,14 +264,37 @@ pub enum NewPage {
     Forward,
 }
 
-/// `opener`: a page opened it, as a link with a target or `window.open`.
-/// `through_pipe`: Agent Screen was opening a page through its pipe.
-/// `agent_acted`: the agent posted input to the instance just now, as
-/// Command-T or a Command-click. A page with none of those came from
-/// outside, through LaunchServices: a link, a file opened in Finder or
-/// `open <url>`.
-pub fn new_page(opener: bool, through_pipe: bool, agent_acted: bool, url: &str) -> NewPage {
-    if opener || through_pipe || agent_acted {
+/// What is known as a page appears in the agents' instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageOrigin {
+    /// A page opened it, as a link with a target or `window.open`.
+    pub opener: bool,
+    /// Agent Screen was opening a page through its pipe.
+    pub through_pipe: bool,
+    /// An agent drove the instance in the last `LINK_SECS`: input or an
+    /// element action on a display that shows its window, as Command-T or
+    /// a Command-click.
+    pub agent_acted: bool,
+    /// The user clicked or pressed a key outside Agent Screen in the last
+    /// `LINK_SECS`, as the global monitors record. Agent Screen's posted
+    /// events never reach them.
+    pub user_acted: bool,
+}
+
+/// A page goes to the user's own browser only as a link the user just
+/// followed: the user clicked or pressed a key, no agent drove the
+/// instance, and nothing in the instance opened it. Anything else stays:
+/// an agent's `open <url>` from its shell, a native app on an agent's
+/// display opening a sign-in page, or a tab Chrome or an extension opens
+/// by itself has no user input behind it.
+pub fn new_page(origin: PageOrigin, url: &str) -> NewPage {
+    let PageOrigin {
+        opener,
+        through_pipe,
+        agent_acted,
+        user_acted,
+    } = origin;
+    if opener || through_pipe || agent_acted || !user_acted {
         return NewPage::Keep;
     }
     let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
@@ -582,29 +605,63 @@ mod tests {
     }
 
     #[test]
-    fn only_a_page_from_outside_with_a_web_address_is_forwarded() {
+    fn only_a_link_the_user_just_followed_is_forwarded() {
         use NewPage::*;
-        assert_eq!(
-            new_page(false, false, false, "https://example.com/a"),
-            Forward
-        );
-        assert_eq!(
-            new_page(false, false, false, "file:///Users/x/a.html"),
-            Forward
-        );
-        assert_eq!(new_page(false, false, false, ""), Wait);
-        assert_eq!(new_page(false, false, false, "about:blank"), Wait);
+        let user = PageOrigin {
+            user_acted: true,
+            ..PageOrigin::default()
+        };
+        assert_eq!(new_page(user, "https://example.com/a"), Forward);
+        assert_eq!(new_page(user, "file:///Users/x/a.html"), Forward);
+        assert_eq!(new_page(user, ""), Wait);
+        assert_eq!(new_page(user, "about:blank"), Wait);
         // The agent's own pages: a target link, a page Agent Screen opens,
-        // and Command-T or a Command-click.
-        assert_eq!(new_page(true, false, false, "https://example.com"), Keep);
-        assert_eq!(new_page(false, true, false, "https://example.com"), Keep);
-        assert_eq!(new_page(false, false, true, "https://example.com"), Keep);
+        // and Command-T or a Command-click, even as the user types too.
+        for agents in [
+            PageOrigin {
+                opener: true,
+                ..user
+            },
+            PageOrigin {
+                through_pipe: true,
+                ..user
+            },
+            PageOrigin {
+                agent_acted: true,
+                ..user
+            },
+        ] {
+            assert_eq!(new_page(agents, "https://example.com"), Keep);
+        }
         // A new tab page, settings or an extension's page isn't a link.
-        assert_eq!(new_page(false, false, false, "chrome://newtab/"), Keep);
+        assert_eq!(new_page(user, "chrome://newtab/"), Keep);
+        assert_eq!(new_page(user, "chrome-extension://abc/x.html"), Keep);
+    }
+
+    #[test]
+    fn a_page_no_user_input_explains_stays_in_the_agents_instance() {
+        // An agent runs `open https://...` from its shell: no input at all.
         assert_eq!(
-            new_page(false, false, false, "chrome-extension://abc/x.html"),
-            Keep
+            new_page(PageOrigin::default(), "https://example.com/a"),
+            NewPage::Keep
         );
+        // A native app on an agent's display opens its sign-in page: the
+        // agent clicked that app, not the browser, and the user did nothing.
+        assert_eq!(
+            new_page(PageOrigin::default(), "https://slack.com/signin"),
+            NewPage::Keep
+        );
+        // Chrome or an extension opens a tab by itself, as after an update
+        // or an install, with no page as its opener.
+        assert_eq!(
+            new_page(
+                PageOrigin::default(),
+                "https://www.google.com/chrome/whats-new/"
+            ),
+            NewPage::Keep
+        );
+        // A page with no address yet and no user input isn't waited on.
+        assert_eq!(new_page(PageOrigin::default(), ""), NewPage::Keep);
     }
 
     #[test]

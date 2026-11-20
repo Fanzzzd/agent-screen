@@ -654,13 +654,28 @@ pub fn screen_name(display: DisplayId, mtm: MainThreadMarker) -> Option<String> 
 /// a Dock click would, on its default profile, opening `url` when given,
 /// with `arguments`. LaunchServices starts it, so it is its own
 /// responsible process and inherits none of Agent Screen's privacy grants.
-pub fn open_new_instance(bundle: &Path, url: Option<&str>, arguments: &[String]) {
+/// Waits up to 10 s for LaunchServices to say it opened; an address
+/// NSURL can't read opens nothing. Blocks: call it off the main thread.
+pub fn open_new_instance(
+    bundle: &Path,
+    url: Option<&str>,
+    arguments: &[String],
+) -> Result<(), String> {
     let app =
         objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
     let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
     configuration.setCreatesNewApplicationInstance(true);
     configuration.setAddsToRecentItems(false);
     let workspace = NSWorkspace::sharedWorkspace();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let done = block2::RcBlock::new(
+        move |_: *mut NSRunningApplication, error: *mut objc2_foundation::NSError| {
+            let _ = tx.send(match unsafe { error.as_ref() } {
+                Some(e) => Err(e.localizedDescription().to_string()),
+                None => Ok(()),
+            });
+        },
+    );
     if !arguments.is_empty() {
         // A test's headless stand-in: it takes the URL as an argument, as
         // it may not answer the open event, and never takes the front.
@@ -672,27 +687,31 @@ pub fn open_new_instance(bundle: &Path, url: Option<&str>, arguments: &[String])
             .collect();
         configuration.setArguments(&objc2_foundation::NSArray::from_retained_slice(&arguments));
         configuration.setActivates(false);
-        workspace.openApplicationAtURL_configuration_completionHandler(&app, &configuration, None);
-        return;
+        workspace.openApplicationAtURL_configuration_completionHandler(
+            &app,
+            &configuration,
+            Some(&done),
+        );
+    } else if let Some(url) = url {
+        let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) else {
+            return Err(format!("not an address NSURL reads: {url}"));
+        };
+        let urls = objc2_foundation::NSArray::from_retained_slice(&[url]);
+        workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+            &urls,
+            &app,
+            &configuration,
+            Some(&done),
+        );
+    } else {
+        workspace.openApplicationAtURL_configuration_completionHandler(
+            &app,
+            &configuration,
+            Some(&done),
+        );
     }
-    match url.and_then(|u| objc2_foundation::NSURL::URLWithString(&NSString::from_str(u))) {
-        Some(url) => {
-            let urls = objc2_foundation::NSArray::from_retained_slice(&[url]);
-            workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
-                &urls,
-                &app,
-                &configuration,
-                None,
-            );
-        }
-        None => {
-            workspace.openApplicationAtURL_configuration_completionHandler(
-                &app,
-                &configuration,
-                None,
-            );
-        }
-    }
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|_| Err("LaunchServices didn't answer in 10 s".into()))
 }
 
 /// The Dock's pid.

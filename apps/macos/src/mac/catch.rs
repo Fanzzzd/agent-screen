@@ -167,6 +167,17 @@ fn acted_recently(display: DisplayId, pid: i32) -> bool {
         .any(|(d, p, until)| *d == display && p.is_none_or(|p| p == pid) && now < *until)
 }
 
+/// Whether the user clicked or pressed a key outside Agent Screen within
+/// `span`, as the global monitors record: Agent Screen's posted events
+/// never reach them.
+pub fn user_acted_within(span: std::time::Duration) -> bool {
+    USER_INPUT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(at, _)| at.elapsed() < span)
+}
+
 /// Whether an agent drove `pid` just now: its input, or an element action,
 /// to a display that shows a window of it, in the last `ACTION_WINDOW`. A
 /// launch's cold start doesn't count: links that reach the agents'
