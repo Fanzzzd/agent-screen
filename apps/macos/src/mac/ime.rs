@@ -194,7 +194,7 @@ pub fn type_keys(
         ));
     }
     // A password field has the keyboard, and keys would land in it.
-    if unsafe { IsSecureEventInputEnabled() } {
+    if secure_input() {
         return Err(
             "a password field on the user's screen has the keyboard (secure input is on), so keys can't go through the input method now".into(),
         );
@@ -267,7 +267,7 @@ pub fn type_keys(
         if user_idle() < started.elapsed().as_secs_f64()
             || started.elapsed() > LONGEST
             || ax::focused_app_pid() != Some(target.pid)
-            || unsafe { IsSecureEventInputEnabled() }
+            || secure_input()
         {
             stopped = true;
             break;
