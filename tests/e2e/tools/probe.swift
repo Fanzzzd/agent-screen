@@ -1,6 +1,8 @@
 // Read-only lookups for the end-to-end tests.
 //
 //   probe windows PID         on-screen windows of PID as JSON lines
+//   probe allwindows PID      as windows, with windows not on screen too
+//   probe hideloop PID S      hide PID whenever it shows, every 20 ms for S seconds
 //   probe displays            how many Agent Screen virtual displays are active
 //   probe bounds ID           display ID's global bounds in points
 //   probe idle                seconds since the user last touched a key or the pointer
@@ -10,8 +12,6 @@
 //   probe strip PNG ROWS      pixels in the top ROWS rows farther than 40 from the top-left one
 //   probe cancelmenu X Y      close the menu at global point X Y through accessibility
 //   probe front               the front app's name
-//   probe allwindows PID      as windows, with windows not on screen too
-//   probe hideloop PID S      hide PID whenever it shows, every 20 ms for S seconds
 //   probe frontpid            the front app's pid
 //   probe focused PID         the window number of PID's focused window, as Accessibility names it, or 0
 //   probe close PID ID        press the close button of PID's window ID through accessibility: "closed", "refused" or "no window"
