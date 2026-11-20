@@ -278,6 +278,7 @@ AGENTSCREEN_INSTANCE=e2e cargo e2e asksave     # closing a display whose app ask
 
 # windows: Placement, launch_app, and whose a new window is
 AGENTSCREEN_INSTANCE=e2e cargo e2e launchhere # an app opened from a launcher while the user works in a Viewer opens on that display (needs Field.app from `ime`)
+AGENTSCREEN_INSTANCE=e2e cargo e2e slowwindow # launch_app into a running Electron app the user started (HARNESS_IDLE) whose File > New Window keeps its main thread busy 1.5 s after the window shows, so Accessibility can't describe it then (#270): the call answers with that window, it is on the display, and no window of the app is left on your screen; needs target/e2e/Electron.app; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e latewindow # an app launch_app started opens its main window on your main screen 4 s after the loading window it answered with, once idle, once with its main thread busy for 1.5 s, as WeCom's is, and once busy for 1.5 s after the window shows: the main window lands on the display and in the claim file, not on your screen; then the app, hidden after its window showed, stays hidden; 1 display
 AGENTSCREEN_INSTANCE=e2e cargo e2e reopened   # a window an app the agent started opens by itself, long after the agent's last action, while its other windows are on the display: it opens there too; 40 s (needs Field.app from `ime`)
 AGENTSCREEN_INSTANCE=e2e cargo e2e placesize  # place_window sets a window's frame on the display and returns the one the app kept, below its minimum and past the display's edge
