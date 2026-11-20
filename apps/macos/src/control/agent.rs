@@ -6360,8 +6360,13 @@ async fn launch_now(
         finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
         adopt_undescribed(core.clone(), id, pid, window, before.clone(), cx);
         return Err(ControlError::failed(format!(
-            "{name} made a new window but was too busy to say what it is within {} s, so the URL was not opened in it. Agent Screen moves that window onto this display once {name} answers, unless the user acts in {name} first: call list_windows in a few seconds, then act in it",
-            UNDESCRIBED_WAIT.as_secs()
+            "{name} made a new window but was too busy to say what it is within {} s{}. Agent Screen moves that window onto this display once {name} answers, unless the user acts in {name} first: call list_windows in a few seconds, then act in it",
+            UNDESCRIBED_WAIT.as_secs(),
+            if target.is_some() && is_url {
+                ", so the URL was not opened in it"
+            } else {
+                ""
+            }
         )));
     }
     finish_key_hold(&mut hold, agent_screen_model::key_hold::End::NoWindow, cx).await;
