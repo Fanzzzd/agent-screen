@@ -80,6 +80,26 @@ pub fn label(titles: &[String]) -> String {
     titles.join(" > ")
 }
 
+/// What to do at one accessibility role while walking up from a hit-tested
+/// element inside an open pop-up menu (#205, #207).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuWalkStep {
+    Press,
+    Stop,
+    Up,
+}
+
+/// Decide how the ancestor walk treats `role`. Stops at the enclosing menu
+/// container so a click on a submenu's padding never walks into the parent
+/// menu item.
+pub fn menu_item_walk_step(role: Option<&str>) -> MenuWalkStep {
+    match role {
+        Some("AXMenuItem") => MenuWalkStep::Press,
+        Some("AXMenu" | "AXMenuBar") => MenuWalkStep::Stop,
+        _ => MenuWalkStep::Up,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +180,14 @@ mod tests {
         // main screen's bottom left (#39).
         let display = Rect::new(8288.0, -700.0, 1100.0, 700.0);
         assert!(!on_display(Rect::new(0.0, 1117.0, 10.0, 10.0), display));
+    }
+
+    #[test]
+    fn menu_item_walk_stops_at_menu_container_and_presses_menu_item() {
+        assert_eq!(menu_item_walk_step(Some("AXMenuItem")), MenuWalkStep::Press);
+        assert_eq!(menu_item_walk_step(Some("AXStaticText")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXImage")), MenuWalkStep::Up);
+        assert_eq!(menu_item_walk_step(Some("AXMenu")), MenuWalkStep::Stop);
+        assert_eq!(menu_item_walk_step(Some("AXMenuBar")), MenuWalkStep::Stop);
     }
 }

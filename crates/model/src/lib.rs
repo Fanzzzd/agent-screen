@@ -33,6 +33,7 @@ pub mod report;
 pub mod request;
 pub mod returns;
 pub mod screen_edge;
+pub mod scroll;
 pub mod selection;
 pub mod session;
 pub mod shared_app;

@@ -154,6 +154,130 @@ pub fn file_url(path: &str) -> String {
     url
 }
 
+/// The path of a file URL, with its percent escapes decoded.
+pub fn file_url_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = rest
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    Some(PathBuf::from(path.trim_end_matches('/')))
+}
+
+/// A menu item as `pick_new_window` sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuEntry {
+    pub title: String,
+    pub shortcut: Option<String>,
+    /// The title of the submenu's item this one sits under, if any.
+    pub parent: Option<String>,
+    pub has_submenu: bool,
+}
+
+/// New Window as macOS titles it: Terminal's MainMenu.loctable in macOS
+/// 26 for 21 languages, and Finder's New Finder Window in English and
+/// Simplified Chinese. Chrome titles it its own way in Chinese, in its
+/// zh_CN and zh_TW locale.pak (the string English calls New Window).
+const WINDOW_TITLES: &[&str] = &[
+    "new window",
+    "neues fenster",
+    "nouvelle fenêtre",
+    "nueva ventana",
+    "nuova finestra",
+    "nova janela",
+    "nieuw venster",
+    "nytt fönster",
+    "nyt vindue",
+    "nytt vindu",
+    "uusi ikkuna",
+    "nowe okno",
+    "новое окно",
+    "нове вікно",
+    "yeni pencere",
+    "新規ウインドウ",
+    "새로운 윈도우",
+    "新建窗口",
+    "新增視窗",
+    "打开新的窗口",
+    "開新視窗",
+    "new finder window",
+    "新建访达窗口",
+];
+
+/// A document app's New: TextEdit's Edit.loctable in macOS 26, plus the
+/// English New Document.
+const DOCUMENT_TITLES: &[&str] = &[
+    "new",
+    "new document",
+    "neu",
+    "nouveau",
+    "nuevo",
+    "nuovo",
+    "novo",
+    "nieuw",
+    "nytt",
+    "ny",
+    "uusi",
+    "nowy",
+    "новый",
+    "новий",
+    "yeni",
+    "新規",
+    "신규",
+    "新建",
+    "新增",
+];
+
+fn is_one_of(title: &str, titles: &[&str]) -> bool {
+    let title = title.trim().to_lowercase();
+    titles.contains(&title.as_str())
+}
+
+/// Which item opens a plain new window: one titled New Window, or the
+/// Command-N item of a New Window submenu, as in Terminal, or a document
+/// app's Command-N New. Command-N alone isn't enough: in Notes, Music or
+/// Calendar it makes a note, playlist or event in the user's data.
+pub fn pick_new_window(items: &[MenuEntry]) -> Option<usize> {
+    let is_cmd_n = |e: &MenuEntry| e.shortcut.as_deref() == Some("cmd+n");
+    let rank = |e: &MenuEntry| {
+        if e.has_submenu {
+            None
+        } else if e.parent.is_none() && is_one_of(&e.title, WINDOW_TITLES) {
+            Some(0)
+        } else if e
+            .parent
+            .as_deref()
+            .is_some_and(|p| is_one_of(p, WINDOW_TITLES))
+            && is_cmd_n(e)
+        {
+            Some(1)
+        } else if e.parent.is_none() && is_one_of(&e.title, DOCUMENT_TITLES) && is_cmd_n(e) {
+            Some(2)
+        } else {
+            None
+        }
+    };
+    (0..items.len())
+        .filter_map(|i| rank(&items[i]).map(|r| (r, i)))
+        .min()
+        .map(|(_, i)| i)
+}
+
 /// Whether a page's address `shown` is the URL `asked` for: the same
 /// scheme, host and path, letter case aside for the scheme and host, a
 /// trailing slash, the query and the fragment aside. A browser adds a
@@ -398,5 +522,127 @@ mod tests {
         assert!(!same_page(asked, "http://127.0.0.1:5001/agent"));
         assert!(!same_page(asked, "about:blank"));
         assert!(!same_page(asked, ""));
+    }
+
+    fn menu_item(title: &str, shortcut: Option<&str>) -> MenuEntry {
+        MenuEntry {
+            title: title.into(),
+            shortcut: shortcut.map(String::from),
+            parent: None,
+            has_submenu: false,
+        }
+    }
+
+    #[test]
+    fn picks_the_item_that_opens_a_window() {
+        // Safari and VS Code: New Window, whatever else Command-N does.
+        let vscode = [
+            menu_item("New Text File", Some("cmd+n")),
+            menu_item("New Window", Some("cmd+shift+n")),
+        ];
+        assert_eq!(pick_new_window(&vscode), Some(1));
+        // TextEdit: a document app's New.
+        assert_eq!(
+            pick_new_window(&[
+                menu_item("New", Some("cmd+n")),
+                menu_item("Open…", Some("cmd+o")),
+            ]),
+            Some(0)
+        );
+        // Terminal: New Window is a submenu; its Command-N item.
+        let mut basic = menu_item("Basic", Some("cmd+n"));
+        basic.parent = Some("New Window".into());
+        let mut submenu = menu_item("New Window", None);
+        submenu.has_submenu = true;
+        assert_eq!(pick_new_window(&[submenu, basic]), Some(1));
+        // Notes, Calendar, Music: Command-N makes the user's data.
+        assert_eq!(
+            pick_new_window(&[menu_item("New Note", Some("cmd+n"))]),
+            None
+        );
+        assert_eq!(
+            pick_new_window(&[menu_item("New Event", Some("cmd+n"))]),
+            None
+        );
+        let mut playlist = menu_item("Playlist", Some("cmd+n"));
+        playlist.parent = Some("New".into());
+        assert_eq!(pick_new_window(&[playlist]), None);
+        // Other languages, as macOS ships them: Terminal's New Window,
+        // TextEdit's New, and Notes' New Note, which must pick nothing.
+        for title in [
+            "Neues Fenster",
+            "Nouvelle fenêtre",
+            "Nueva ventana",
+            "Nova Janela",
+            "Nowe okno",
+            "Новое окно",
+            "Yeni Pencere",
+            "新規ウインドウ",
+            "새로운 윈도우",
+            "新增視窗",
+        ] {
+            assert_eq!(
+                pick_new_window(&[menu_item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neu",
+            "Nouveau",
+            "Nuovo",
+            "Nytt",
+            "Новый",
+            "新規",
+            "신규",
+            "新增",
+        ] {
+            assert_eq!(
+                pick_new_window(&[menu_item(title, Some("cmd+n"))]),
+                Some(0),
+                "{title}"
+            );
+        }
+        for title in [
+            "Neue Notiz",
+            "Nouvelle note",
+            "Nueva nota",
+            "新規メモ",
+            "새로운 메모",
+            "新建备忘录",
+            "新增備忘錄",
+            "Новая заметка",
+            "Yeni Not",
+            "Nowa notatka",
+        ] {
+            assert_eq!(
+                pick_new_window(&[menu_item(title, Some("cmd+n"))]),
+                None,
+                "{title}"
+            );
+        }
+        // Calculator: nothing.
+        assert_eq!(pick_new_window(&[menu_item("Close", Some("cmd+w"))]), None);
+    }
+
+    #[test]
+    fn file_url_path_decodes_escapes_and_strips_query_and_fragment() {
+        assert_eq!(
+            file_url_path("file:///Users/me/My%20Notes/a%C3%A9.txt"),
+            Some(PathBuf::from("/Users/me/My Notes/aé.txt"))
+        );
+        assert_eq!(
+            file_url_path("file://localhost/tmp/x/"),
+            Some(PathBuf::from("/tmp/x"))
+        );
+        assert_eq!(file_url_path("https://example.com"), None);
+        assert_eq!(
+            file_url_path("file:///tmp/a.html#sec"),
+            Some(PathBuf::from("/tmp/a.html"))
+        );
+        assert_eq!(
+            file_url_path("file:///tmp/a%2Fb.html?q=1"),
+            Some(PathBuf::from("/tmp/a/b.html"))
+        );
     }
 }

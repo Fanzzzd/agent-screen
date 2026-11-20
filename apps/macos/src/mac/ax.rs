@@ -1307,22 +1307,7 @@ pub fn set_selected_range(element: &AXUIElement, (start, length): (usize, usize)
         .is_some_and(|value| set_attribute(element, "AXSelectedTextRange", &value))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuWalkStep {
-    Press,
-    Stop,
-    Up,
-}
-
-fn menu_item_walk_step(role: Option<&str>) -> MenuWalkStep {
-    match role {
-        Some("AXMenuItem") => MenuWalkStep::Press,
-        // Stop at the enclosing menu container so a click on a submenu's
-        // padding never walks into the parent menu item.
-        Some("AXMenu" | "AXMenuBar") => MenuWalkStep::Stop,
-        _ => MenuWalkStep::Up,
-    }
-}
+use agent_screen_model::menu_press::{MenuWalkStep, menu_item_walk_step};
 
 /// Press the menu item at a global point of an open pop-up menu, as a
 /// web page's select or an AppKit / ExtensionKit pop-up button shows (#205,
@@ -2128,30 +2113,7 @@ fn first_text(element: &AXUIElement, depth: usize, visited: &mut usize) -> Optio
     None
 }
 
-/// The path of a file URL, with its percent escapes decoded.
-pub fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    let bytes = rest.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let Some(byte) = rest
-                .get(i + 1..i + 3)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            out.push(byte);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    let path = String::from_utf8(out).ok()?;
-    Some(std::path::PathBuf::from(path.trim_end_matches('/')))
-}
+pub use agent_screen_model::launch::{MenuEntry, file_url_path, pick_new_window};
 
 /// The file a window shows, from its AXDocument URL, with symlinks resolved.
 pub fn document_path(window: &AXUIElement) -> Option<std::path::PathBuf> {
@@ -2170,104 +2132,6 @@ pub enum NewWindow {
     Missing,
     /// The menus can't be read or the press failed, as just after launch.
     NotReady,
-}
-
-/// A menu item as `pick_new_window` sees it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MenuEntry {
-    pub title: String,
-    pub shortcut: Option<String>,
-    /// The title of the submenu's item this one sits under, if any.
-    pub parent: Option<String>,
-    pub has_submenu: bool,
-}
-
-/// New Window as macOS titles it: Terminal's MainMenu.loctable in macOS
-/// 26 for 21 languages, and Finder's New Finder Window in English and
-/// Simplified Chinese. Chrome titles it its own way in Chinese, in its
-/// zh_CN and zh_TW locale.pak (the string English calls New Window).
-const WINDOW_TITLES: &[&str] = &[
-    "new window",
-    "neues fenster",
-    "nouvelle fenêtre",
-    "nueva ventana",
-    "nuova finestra",
-    "nova janela",
-    "nieuw venster",
-    "nytt fönster",
-    "nyt vindue",
-    "nytt vindu",
-    "uusi ikkuna",
-    "nowe okno",
-    "новое окно",
-    "нове вікно",
-    "yeni pencere",
-    "新規ウインドウ",
-    "새로운 윈도우",
-    "新建窗口",
-    "新增視窗",
-    "打开新的窗口",
-    "開新視窗",
-    "new finder window",
-    "新建访达窗口",
-];
-/// A document app's New: TextEdit's Edit.loctable in macOS 26, plus the
-/// English New Document.
-const DOCUMENT_TITLES: &[&str] = &[
-    "new",
-    "new document",
-    "neu",
-    "nouveau",
-    "nuevo",
-    "nuovo",
-    "novo",
-    "nieuw",
-    "nytt",
-    "ny",
-    "uusi",
-    "nowy",
-    "новый",
-    "новий",
-    "yeni",
-    "新規",
-    "신규",
-    "新建",
-    "新增",
-];
-
-fn is_one_of(title: &str, titles: &[&str]) -> bool {
-    let title = title.trim().to_lowercase();
-    titles.contains(&title.as_str())
-}
-
-/// Which item opens a plain new window: one titled New Window, or the
-/// Command-N item of a New Window submenu, as in Terminal, or a document
-/// app's Command-N New. Command-N alone isn't enough: in Notes, Music or
-/// Calendar it makes a note, playlist or event in the user's data.
-pub fn pick_new_window(items: &[MenuEntry]) -> Option<usize> {
-    let is_cmd_n = |e: &MenuEntry| e.shortcut.as_deref() == Some("cmd+n");
-    let rank = |e: &MenuEntry| {
-        if e.has_submenu {
-            None
-        } else if e.parent.is_none() && is_one_of(&e.title, WINDOW_TITLES) {
-            Some(0)
-        } else if e
-            .parent
-            .as_deref()
-            .is_some_and(|p| is_one_of(p, WINDOW_TITLES))
-            && is_cmd_n(e)
-        {
-            Some(1)
-        } else if e.parent.is_none() && is_one_of(&e.title, DOCUMENT_TITLES) && is_cmd_n(e) {
-            Some(2)
-        } else {
-            None
-        }
-    };
-    (0..items.len())
-        .filter_map(|i| rank(&items[i]).map(|r| (r, i)))
-        .min()
-        .map(|(_, i)| i)
 }
 
 /// Presses the item `pick_new_window` chooses in a running app's menus.
@@ -2573,110 +2437,4 @@ pub fn dock_app_at(dock: i32, at: (f64, f64)) -> Option<String> {
         element = element_attribute(&element, "AXParent")?;
     }
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(title: &str, shortcut: Option<&str>) -> MenuEntry {
-        MenuEntry {
-            title: title.into(),
-            shortcut: shortcut.map(String::from),
-            parent: None,
-            has_submenu: false,
-        }
-    }
-
-    #[test]
-    fn picks_the_item_that_opens_a_window() {
-        // Safari and VS Code: New Window, whatever else Command-N does.
-        let vscode = [
-            item("New Text File", Some("cmd+n")),
-            item("New Window", Some("cmd+shift+n")),
-        ];
-        assert_eq!(pick_new_window(&vscode), Some(1));
-        // TextEdit: a document app's New.
-        assert_eq!(
-            pick_new_window(&[item("New", Some("cmd+n")), item("Open…", Some("cmd+o"))]),
-            Some(0)
-        );
-        // Terminal: New Window is a submenu; its Command-N item.
-        let mut basic = item("Basic", Some("cmd+n"));
-        basic.parent = Some("New Window".into());
-        let mut submenu = item("New Window", None);
-        submenu.has_submenu = true;
-        assert_eq!(pick_new_window(&[submenu, basic]), Some(1));
-        // Notes, Calendar, Music: Command-N makes the user's data.
-        assert_eq!(pick_new_window(&[item("New Note", Some("cmd+n"))]), None);
-        assert_eq!(pick_new_window(&[item("New Event", Some("cmd+n"))]), None);
-        let mut playlist = item("Playlist", Some("cmd+n"));
-        playlist.parent = Some("New".into());
-        assert_eq!(pick_new_window(&[playlist]), None);
-        // Other languages, as macOS ships them: Terminal's New Window,
-        // TextEdit's New, and Notes' New Note, which must pick nothing.
-        for title in [
-            "Neues Fenster",
-            "Nouvelle fenêtre",
-            "Nueva ventana",
-            "Nova Janela",
-            "Nowe okno",
-            "Новое окно",
-            "Yeni Pencere",
-            "新規ウインドウ",
-            "새로운 윈도우",
-            "新增視窗",
-        ] {
-            assert_eq!(
-                pick_new_window(&[item(title, Some("cmd+n"))]),
-                Some(0),
-                "{title}"
-            );
-        }
-        for title in [
-            "Neu",
-            "Nouveau",
-            "Nuovo",
-            "Nytt",
-            "Новый",
-            "新規",
-            "신규",
-            "新增",
-        ] {
-            assert_eq!(
-                pick_new_window(&[item(title, Some("cmd+n"))]),
-                Some(0),
-                "{title}"
-            );
-        }
-        for title in [
-            "Neue Notiz",
-            "Nouvelle note",
-            "Nueva nota",
-            "新規メモ",
-            "새로운 메모",
-            "新建备忘录",
-            "新增備忘錄",
-            "Новая заметка",
-            "Yeni Not",
-            "Nowa notatka",
-        ] {
-            assert_eq!(
-                pick_new_window(&[item(title, Some("cmd+n"))]),
-                None,
-                "{title}"
-            );
-        }
-        // Calculator: nothing.
-        assert_eq!(pick_new_window(&[item("Close", Some("cmd+w"))]), None);
-    }
-
-    #[test]
-    fn menu_item_walk_stops_at_menu_container_and_presses_menu_item() {
-        assert_eq!(menu_item_walk_step(Some("AXMenuItem")), MenuWalkStep::Press);
-        assert_eq!(menu_item_walk_step(Some("AXStaticText")), MenuWalkStep::Up);
-        assert_eq!(menu_item_walk_step(Some("AXImage")), MenuWalkStep::Up);
-        assert_eq!(menu_item_walk_step(Some("AXMenu")), MenuWalkStep::Stop);
-        assert_eq!(menu_item_walk_step(Some("AXMenuBar")), MenuWalkStep::Stop);
-    }
 }
