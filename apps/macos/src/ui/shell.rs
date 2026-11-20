@@ -431,79 +431,7 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let shell = cx.new(|cx| {
         cx.observe(&core, |shell: &mut Shell, _, cx| shell.sync(cx))
             .detach();
-        Shell {
-            core: core.clone(),
-            streams: streams.clone(),
-            icon,
-            peek: None,
-            viewer: None,
-            card: None,
-            card_shown: None,
-            reply_draft: None,
-            card_input: false,
-            card_frame: None,
-            bar: None,
-            bar_shown: false,
-            reminded: HashMap::new(),
-            watching_updates: false,
-            peek_shown: false,
-            working: false,
-            creating: 0,
-            slide_card: None,
-            peek_slides: 0,
-            peek_intent: peek_intent::Intent::default(),
-            peek_clock: Instant::now(),
-            peek_timer: None,
-            peek_native_generation: Rc::new(Cell::new(0)),
-            over_icon: false,
-            over_card: false,
-            peek_generation: 0,
-            remind_seq: 0,
-            watch_generation: 0,
-            settle_until: None,
-            viewer_display: None,
-            launch_here: None,
-            viewer_settled_at: Instant::now(),
-            ended: HashSet::new(),
-            viewer_open: false,
-            viewer_generation: 0,
-            resting: None,
-            known: HashSet::new(),
-            icon_home: Cell::new(None),
-            stage: None,
-            drag: None,
-            drag_from: None,
-            drop_hover: false,
-            conflicts: Vec::new(),
-            aerospace: None,
-            guard_generation: 0,
-            asking_count: 0,
-            permissions: permissions::status(),
-            notifications: notify::Auth::Unknown,
-            real_saved: None,
-            loan_running: false,
-            quiet_check: false,
-            restoring: false,
-            colorsync: None,
-            colorsync_busy: false,
-            colorsync_error: None,
-            setup_preview: false,
-            setup: None,
-            recordings: None,
-            agent_ready: Vec::new(),
-            report_card: None,
-            report_shown: None,
-            report_expanded: false,
-            reports: crate::reports::load(),
-            report_previews: HashSet::new(),
-            waiting: None,
-            restart: false,
-            debug_menu_at: None,
-            setup_shown_for: None,
-            connecting: false,
-            rechecking: false,
-            registered: Vec::new(),
-        }
+        Shell::new(core.clone(), streams.clone(), icon)
     });
     // The Dock icon goes with the setup window.
     cx.on_window_closed({
@@ -516,6 +444,45 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
     let weak = shell.downgrade();
     CURRENT.with(|c| *c.borrow_mut() = Some(shell.clone()));
 
+    open_panels(&shell, &weak, &core, &streams, cx)?;
+
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Some(event) = native_events.next().await {
+            if weak
+                .update(cx, |shell, cx| shell.native(event, cx))
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+    .detach();
+    install_quit_handlers(&core, mtm, cx);
+    cursor_guard(core, cx);
+    // Permissions: the icon shows what's missing, and the setup window
+    // opens by itself at launch. Checked often while the user is granting,
+    // rarely after, to notice one being turned off.
+    shell.update(cx, |shell, cx| {
+        let status = shell.permissions;
+        shell.icon.set_needs_setup(!status.complete());
+        // Reopened from the setup window: finish setup with the agents.
+        let reopened = std::env::args().any(|a| a == "--setup");
+        if !status.complete() || reopened {
+            shell.open_setup(cx);
+        }
+    });
+    spawn_permission_watcher(shell.downgrade(), cx);
+    spawn_housekeeping_loop(shell.downgrade(), cx);
+    Ok(shell)
+}
+
+fn open_panels(
+    shell: &Entity<Shell>,
+    weak: &WeakEntity<Shell>,
+    core: &Entity<Core>,
+    streams: &Entity<Streams>,
+    cx: &mut App,
+) -> anyhow::Result<()> {
     let peek = {
         let (weak, core, streams) = (weak.clone(), core.clone(), streams.clone());
         cx.open_window(panel_options(), move |window, cx| {
@@ -587,21 +554,13 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         shell.bar = Some((bar, bar_ns));
         shell.check_aerospace(cx);
     });
+    Ok(())
+}
 
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        while let Some(event) = native_events.next().await {
-            if weak
-                .update(cx, |shell, cx| shell.native(event, cx))
-                .is_err()
-            {
-                break;
-            }
-        }
-    })
-    .detach();
-    // A normal quit, the menu's or a logout's, tidies up as Dismissal
-    // would, without asking: each window follows its Disposition. A crash
-    // leaves the windows to macOS.
+/// A normal quit, the menu's or a logout's, tidies up as Dismissal would,
+/// without asking: each window follows its Disposition. A crash leaves the
+/// windows to macOS.
+fn install_quit_handlers(core: &Entity<Core>, mtm: MainThreadMarker, cx: &mut App) {
     {
         // Before the app exits, every display's windows go where Dismissal
         // sends them, as if each display were closed. It runs on its own
@@ -668,20 +627,9 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         })
         .detach();
     }
-    cursor_guard(core, cx);
-    // Permissions: the icon shows what's missing, and the setup window
-    // opens by itself at launch. Checked often while the user is granting,
-    // rarely after, to notice one being turned off.
-    shell.update(cx, |shell, cx| {
-        let status = shell.permissions;
-        shell.icon.set_needs_setup(!status.complete());
-        // Reopened from the setup window: finish setup with the agents.
-        let reopened = std::env::args().any(|a| a == "--setup");
-        if !status.complete() || reopened {
-            shell.open_setup(cx);
-        }
-    });
-    let checked = shell.downgrade();
+}
+
+fn spawn_permission_watcher(checked: WeakEntity<Shell>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
             let (fast, complete) = checked
@@ -715,11 +663,13 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         }
     })
     .detach();
-    // Windows come and go without telling us; recount once a second while
-    // Peek or the Viewer shows the counts. When completely idle (no displays,
-    // no visible panels, no active Input Queue work), back off to 5 s so the
-    // idle app wakes rarely; Core notifications still wake sync immediately.
-    let counted = shell.downgrade();
+}
+
+/// Windows come and go without telling us; recount once a second while Peek
+/// or the Viewer shows the counts. When completely idle (no displays, no
+/// visible panels, no active Input Queue work), back off to 5 s so the idle
+/// app wakes rarely; Core notifications still wake sync immediately.
+fn spawn_housekeeping_loop(counted: WeakEntity<Shell>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         loop {
             let active = counted
@@ -776,10 +726,84 @@ pub fn start(core: Entity<Core>, cx: &mut App) -> anyhow::Result<Entity<Shell>> 
         }
     })
     .detach();
-    Ok(shell)
 }
 
 impl Shell {
+    fn new(core: Entity<Core>, streams: Entity<Streams>, icon: StatusIcon) -> Self {
+        Self {
+            core,
+            streams,
+            icon,
+            peek: None,
+            viewer: None,
+            card: None,
+            card_shown: None,
+            reply_draft: None,
+            card_input: false,
+            card_frame: None,
+            bar: None,
+            bar_shown: false,
+            reminded: HashMap::new(),
+            watching_updates: false,
+            peek_shown: false,
+            working: false,
+            creating: 0,
+            slide_card: None,
+            peek_slides: 0,
+            peek_intent: peek_intent::Intent::default(),
+            peek_clock: Instant::now(),
+            peek_timer: None,
+            peek_native_generation: Rc::new(Cell::new(0)),
+            over_icon: false,
+            over_card: false,
+            peek_generation: 0,
+            remind_seq: 0,
+            watch_generation: 0,
+            settle_until: None,
+            viewer_display: None,
+            launch_here: None,
+            viewer_settled_at: Instant::now(),
+            ended: HashSet::new(),
+            viewer_open: false,
+            viewer_generation: 0,
+            resting: None,
+            known: HashSet::new(),
+            icon_home: Cell::new(None),
+            stage: None,
+            drag: None,
+            drag_from: None,
+            drop_hover: false,
+            conflicts: Vec::new(),
+            aerospace: None,
+            guard_generation: 0,
+            asking_count: 0,
+            permissions: permissions::status(),
+            notifications: notify::Auth::Unknown,
+            real_saved: None,
+            loan_running: false,
+            quiet_check: false,
+            restoring: false,
+            colorsync: None,
+            colorsync_busy: false,
+            colorsync_error: None,
+            setup_preview: false,
+            setup: None,
+            recordings: None,
+            agent_ready: Vec::new(),
+            report_card: None,
+            report_shown: None,
+            report_expanded: false,
+            reports: crate::reports::load(),
+            report_previews: HashSet::new(),
+            waiting: None,
+            restart: false,
+            debug_menu_at: None,
+            setup_shown_for: None,
+            connecting: false,
+            rechecking: false,
+            registered: Vec::new(),
+        }
+    }
     fn native(&mut self, event: Native, cx: &mut Context<Self>) {
         if TIDIED.with(Cell::get) {
             self.peek_intent.stop();
